@@ -10,9 +10,18 @@ use std::{
 };
 
 enum FakeEntry {
-    File { content: Vec<u8>, mtime: SystemTime },
-    Dir { mtime: SystemTime },
-    Symlink { target: PathBuf, mtime: SystemTime },
+    File {
+        content: Vec<u8>,
+        mtime: SystemTime,
+        read_only: bool,
+    },
+    Dir {
+        mtime: SystemTime,
+    },
+    Symlink {
+        target: PathBuf,
+        mtime: SystemTime,
+    },
 }
 
 /// Recorded against the input path, before symlink resolution and
@@ -186,8 +195,28 @@ impl FakeFs {
             FakeEntry::File {
                 content: content.as_ref().to_vec(),
                 mtime,
+                read_only: false,
             },
         );
+    }
+
+    /// Mark the file at `path` read-only, or writable again.
+    ///
+    /// Metadata reports the flag, and a write to the file fails with
+    /// [`io::ErrorKind::PermissionDenied`]. A real atomic replace in a writable
+    /// directory succeeds over a read-only file, but the fake refuses it too,
+    /// so a test sees a save that skips the read-only guard.
+    ///
+    /// Panics when `path` holds no file.
+    pub fn set_read_only(&self, path: impl AsRef<Path>, read_only: bool) {
+        let mut state = self.state.lock().expect("FakeFs lock poisoned");
+        let path = path.as_ref();
+        match state.entries.get_mut(path) {
+            Some(FakeEntry::File {
+                read_only: flag, ..
+            }) => *flag = read_only,
+            _ => panic!("{}: no file to mark read-only", path.display()),
+        }
     }
 
     /// Bulk variant of [`Self::insert_file`]. Iteration order is preserved
@@ -373,6 +402,15 @@ impl FakeFs {
             ));
         }
         let resolved = resolve_symlink(&state, path)?;
+        if let Some(FakeEntry::File {
+            read_only: true, ..
+        }) = state.entries.get(&resolved)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{}: read-only", path.display()),
+            ));
+        }
         state.ensure_ancestors(&resolved);
         let mtime = state.tick();
         state.entries.insert(
@@ -380,6 +418,7 @@ impl FakeFs {
             FakeEntry::File {
                 content: data.to_vec(),
                 mtime,
+                read_only: false,
             },
         );
         drop(state);
@@ -487,23 +526,30 @@ impl FsHost for FakeFs {
             ));
         }
         Ok(state.entries.get(path).map(|entry| match entry {
-            FakeEntry::File { content, mtime } => FsMetadata {
+            FakeEntry::File {
+                content,
+                mtime,
+                read_only,
+            } => FsMetadata {
                 len: content.len() as u64,
                 modified: *mtime,
                 is_dir: false,
                 is_symlink: false,
+                read_only: *read_only,
             },
             FakeEntry::Dir { mtime } => FsMetadata {
                 len: 0,
                 modified: *mtime,
                 is_dir: true,
                 is_symlink: false,
+                read_only: false,
             },
             FakeEntry::Symlink { target, mtime } => FsMetadata {
                 len: target.as_os_str().len() as u64,
                 modified: *mtime,
                 is_dir: false,
                 is_symlink: true,
+                read_only: false,
             },
         }))
     }
@@ -688,9 +734,12 @@ impl FsHost for FakeFs {
         state.ensure_ancestors(to);
         let new_mtime = state.tick();
         let entry = match entry {
-            FakeEntry::File { content, .. } => FakeEntry::File {
+            FakeEntry::File {
+                content, read_only, ..
+            } => FakeEntry::File {
                 content,
                 mtime: new_mtime,
+                read_only,
             },
             FakeEntry::Dir { .. } => FakeEntry::Dir { mtime: new_mtime },
             FakeEntry::Symlink { target, .. } => FakeEntry::Symlink {
@@ -769,6 +818,34 @@ mod tests {
     }
 
     #[test]
+    fn set_read_only_shows_in_metadata_and_refuses_writes() {
+        let fs = FakeFs::new();
+        let path = Path::new("/x.txt");
+        fs.insert_file(path, "abc");
+        fs.set_read_only(path, true);
+
+        let read_only = fs.metadata(path).unwrap().unwrap().read_only;
+        let writes = (
+            fs.write(path, b"new").map_err(|e| e.kind()),
+            fs.write_atomic(path, b"new").map_err(|e| e.kind()),
+        );
+        let mut content = Vec::new();
+        fs.read(path, &mut content).unwrap();
+
+        assert_eq!(
+            (read_only, writes, content),
+            (
+                true,
+                (
+                    Err(io::ErrorKind::PermissionDenied),
+                    Err(io::ErrorKind::PermissionDenied)
+                ),
+                b"abc".to_vec()
+            )
+        );
+    }
+
+    #[test]
     fn metadata_nonexistent() {
         let fs = FakeFs::new();
         assert!(fs.metadata(Path::new("/nope")).unwrap().is_none());
@@ -784,6 +861,25 @@ mod tests {
         let mut buf = Vec::new();
         fs.read(Path::new("/to.txt"), &mut buf).unwrap();
         assert_eq!(buf, b"payload");
+    }
+
+    /// A rename moves the file and its mode, so a read-only file stays
+    /// read-only under its new name.
+    #[test]
+    fn rename_keeps_a_file_read_only() {
+        let fs = FakeFs::new();
+        fs.insert_file("/from.txt", "payload");
+        fs.set_read_only("/from.txt", true);
+
+        fs.rename(Path::new("/from.txt"), Path::new("/to.txt"))
+            .unwrap();
+
+        assert!(
+            fs.metadata(Path::new("/to.txt"))
+                .unwrap()
+                .unwrap()
+                .read_only
+        );
     }
 
     #[test]

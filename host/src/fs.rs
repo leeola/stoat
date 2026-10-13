@@ -36,6 +36,11 @@ pub struct FsMetadata {
     pub modified: SystemTime,
     pub is_dir: bool,
     pub is_symlink: bool,
+    /// Whether the process lacks write access to the file. Always false for a
+    /// directory.
+    ///
+    /// An open reads this to tag a buffer read-only before a save finds out.
+    pub read_only: bool,
 }
 
 #[derive(Debug)]
@@ -633,6 +638,7 @@ impl FsHost for LocalFs {
                 modified: m.modified()?,
                 is_dir: m.is_dir(),
                 is_symlink: m.file_type().is_symlink(),
+                read_only: !m.is_dir() && !writable(path),
             })),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -898,6 +904,27 @@ fn copy_ownership(meta: &std::fs::Metadata, tmp: &Path) {
 #[cfg(not(unix))]
 fn copy_ownership(_meta: &std::fs::Metadata, _tmp: &Path) {}
 
+/// Whether the process holds write access to `path`, following a symlink as a
+/// save writes through it.
+///
+/// A path with an interior NUL names no file for the kernel to check, so it
+/// reads as writable and the save reports the real failure.
+#[cfg(unix)]
+fn writable(path: &Path) -> bool {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+
+    let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    // SAFETY: access reads the NUL-terminated path and writes no memory.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+fn writable(path: &Path) -> bool {
+    !std::fs::metadata(path).is_ok_and(|m| m.permissions().readonly())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::{process_umask, FsHost, LocalFs};
@@ -1003,6 +1030,29 @@ mod tests {
         LocalFs.write_atomic(&path, b"new").expect("write");
 
         assert_eq!(fs::metadata(&path).expect("meta").mode() & 0o777, 0o640);
+    }
+
+    #[test]
+    fn metadata_reports_a_file_the_process_cannot_write() {
+        // Root passes `access` whatever the mode, so the probe has nothing to
+        // report under it.
+        // SAFETY: geteuid reads the effective user id and writes no memory.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        fs::write(&path, b"text").expect("seed");
+        let read_only = |mode| {
+            fs::set_permissions(&path, PermissionsExt::from_mode(mode)).expect("chmod");
+            LocalFs
+                .metadata(&path)
+                .expect("metadata")
+                .expect("exists")
+                .read_only
+        };
+
+        assert_eq!((read_only(0o444), read_only(0o644)), (true, false));
     }
 
     #[test]
