@@ -22,14 +22,6 @@ const DOC_ROWS: u16 = 6;
 /// separator under it, the doc separator, and the doc region itself.
 const CHROME_ROWS: u16 = 5 + DOC_ROWS;
 
-/// Widest the box may be, and the width it holds at on any terminal with room.
-///
-/// Hard cap, not a preference. The minimap band is left visible while the
-/// palette is open precisely because this keeps the box's right edge at
-/// `area.width / 2 + 40`, disjoint from the band at every width where a band
-/// exists. See the note on `modal_overlay_open` in [`crate::render`].
-const MAX_WIDTH: u16 = 80;
-
 /// The on-screen rectangles of the command-palette filter modal, derived from a
 /// terminal `area` by [`palette_filter_layout`].
 ///
@@ -57,8 +49,9 @@ pub(crate) struct PaletteFilterLayout {
 /// so the palette never swallows the screen. `zoom` steps it further, in tenths
 /// of the area.
 ///
-/// Only the height responds to either. The width stays at [`MAX_WIDTH`], since
-/// the minimap band beside the palette depends on that cap.
+/// The width follows the area rather than the candidates, at
+/// [`list_modal_width`](crate::render::chrome::list_modal_width), and `zoom`
+/// steps it as it steps the height.
 ///
 /// A box too short for everything shrinks the doc region first and the list
 /// last, since the list is the primary content.
@@ -71,27 +64,17 @@ pub(crate) fn palette_filter_layout(
         return None;
     }
 
-    let box_width = MAX_WIDTH.min(area.width.saturating_sub(4));
-    if box_width < 20 {
-        return None;
-    }
-
+    let width = crate::render::chrome::list_modal_width(area);
     let content_height = content_rows
         .saturating_add(CHROME_ROWS)
         .min(area.height / 2);
-    let sized = crate::render::chrome::modal_box(
+    let modal = crate::render::chrome::modal_box(
         area,
-        (box_width, content_height),
-        (box_width, LIST_ROWS + CHROME_ROWS),
+        (width, content_height),
+        (width, LIST_ROWS + CHROME_ROWS),
         (20, 6),
         zoom,
     )?;
-
-    // modal_box zooms both dimensions, but a wider palette would paint over the
-    // minimap band left visible beside it, so the width is put back afterwards
-    // and the box re-centered around it.
-    let x = area.x + (area.width.saturating_sub(box_width)) / 2;
-    let modal = Rect::new(x, sized.y, box_width, sized.height);
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
     let body = inner.height.saturating_sub(3);
@@ -135,8 +118,7 @@ pub(crate) fn palette_arg_body(
 /// optional preview rect. `None` when the body has no rows.
 ///
 /// The split stays at [`DEFAULT_LIST_PERCENT`], because the palette's separator
-/// is not draggable. Its width is capped at 80 columns to keep the minimap band
-/// beside it visible, which leaves little room to redistribute.
+/// is not draggable.
 fn arg_body_split(inner: Rect) -> Option<(Rect, Option<Rect>)> {
     let body_top = inner.y + 2;
     let body_height = (inner.y + inner.height).saturating_sub(body_top);
@@ -568,7 +550,7 @@ pub(crate) fn paint_palette_rows(
 
 #[cfg(test)]
 mod tests {
-    use super::{paint_palette_rows, palette_filter_layout, DOC_ROWS, LIST_ROWS, MAX_WIDTH};
+    use super::{paint_palette_rows, palette_filter_layout, DOC_ROWS, LIST_ROWS};
     use crate::theme::Theme;
     use ratatui::{buffer::Buffer, layout::Rect};
     use stoat_action::registry;
@@ -641,7 +623,7 @@ mod tests {
         let laid = layout(Rect::new(0, 0, 200, 60), 4, 0);
         assert_eq!(
             (laid.modal.width, laid.modal.height),
-            (MAX_WIDTH, 21),
+            (160, 21),
             "a list under LIST_ROWS leaves the box at its recommended size"
         );
         assert_eq!(
@@ -676,20 +658,16 @@ mod tests {
     }
 
     #[test]
-    fn zoom_moves_the_height_alone() {
-        let area = Rect::new(0, 0, 200, 60);
-        let grown = layout(area, 4, 2);
-        let shrunk = layout(area, 4, -1);
+    fn zoom_moves_both_dimensions() {
+        let size = |zoom| {
+            let modal = layout(Rect::new(0, 0, 200, 60), 4, zoom).modal;
+            (modal.width, modal.height)
+        };
 
         assert_eq!(
-            (grown.modal.height, shrunk.modal.height),
-            (33, 15),
-            "each step moves the height by a tenth of the area"
-        );
-        assert_eq!(
-            (grown.modal.width, shrunk.modal.width),
-            (MAX_WIDTH, MAX_WIDTH),
-            "but the width holds at the cap the minimap band depends on"
+            (size(2), size(-1)),
+            ((198, 33), (140, 15)),
+            "each step moves both by a tenth of the area, and growth stops at the thin margin"
         );
     }
 

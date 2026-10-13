@@ -459,21 +459,14 @@ impl ActiveModal {
     /// Whether this modal's box covers the minimap band, so the strip is not
     /// worth drawing beneath it.
     ///
-    /// False for the palette. Its box is capped at 80 columns and centered, so its
-    /// right edge never passes `width / 2 + 40`, while the 8-column band exists
-    /// only from `MINIMAP_MIN_PANE_COLS` up. The two rects are disjoint at every
-    /// width where a band exists at all, so hiding the strip for the palette would
-    /// cost the user their minimap for no overlap.
-    ///
-    /// Also false for the transient text inputs, which never claim the editor
+    /// False only for the transient text inputs, which never claim the editor
     /// area as a box. Search draws in the focused pane's status bar, Rename
     /// draws a popup beside the cursor, and SplitSelection, FilterSelections
     /// and ShellInput do not paint yet.
     pub(crate) fn hides_minimap(self) -> bool {
         !matches!(
             self,
-            Self::Palette
-                | Self::Rename
+            Self::Rename
                 | Self::Search
                 | Self::SplitSelection
                 | Self::FilterSelections
@@ -484,16 +477,12 @@ impl ActiveModal {
     /// Whether a zoom step belongs to this modal rather than to the panes behind
     /// it.
     ///
-    /// Wider than [`Self::hides_minimap`] by the palette, which is left out there
-    /// to keep the minimap visible beside it. That has nothing to do with input,
-    /// and the palette takes zoom steps like any other modal.
-    ///
     /// A modal with no [`ModalKind`] still holds here. Those size entirely to
     /// their content and have nothing to zoom, so a step over them does nothing.
-    /// Resizing a pane hidden behind a modal would be a change the user cannot
-    /// see or connect to what they pressed.
+    /// The alternative, a resize of a pane hidden behind the modal, is a change
+    /// the user does not see and does not connect to what they pressed.
     pub(crate) fn owns_zoom(self) -> bool {
-        self.hides_minimap() || self == Self::Palette
+        self.hides_minimap()
     }
 
     /// Whether the frame paints this modal as its own centered box.
@@ -1245,41 +1234,30 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_keeps_the_minimap_but_still_takes_zoom_steps() {
+    fn every_boxed_modal_hides_the_minimap_and_owns_zoom() {
+        let boxed = [
+            "run",
+            "quit_confirm",
+            "workspace_picker",
+            "jumplist",
+            "diagnostics",
+            "commit_picker",
+            "location",
+            "finder",
+            "symbols",
+            "code_search",
+            "palette",
+            "help",
+        ];
         assert_eq!(
             context_strs(ALL_MODALS.into_iter().filter(|m| m.hides_minimap())),
-            [
-                "run",
-                "quit_confirm",
-                "workspace_picker",
-                "jumplist",
-                "diagnostics",
-                "commit_picker",
-                "location",
-                "finder",
-                "symbols",
-                "code_search",
-                "help",
-            ],
-            "the palette and the transient inputs leave the strip alone"
+            boxed,
+            "the transient inputs alone leave the strip"
         );
         assert_eq!(
             context_strs(ALL_MODALS.into_iter().filter(|m| m.owns_zoom())),
-            [
-                "run",
-                "quit_confirm",
-                "workspace_picker",
-                "jumplist",
-                "diagnostics",
-                "commit_picker",
-                "location",
-                "finder",
-                "symbols",
-                "code_search",
-                "palette",
-                "help",
-            ],
-            "zoom adds the palette and nothing else"
+            boxed,
+            "and zoom belongs to the same modals"
         );
     }
 

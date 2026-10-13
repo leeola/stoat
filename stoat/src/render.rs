@@ -616,8 +616,7 @@ pub(crate) fn hints_overlay_area(size: Rect) -> Rect {
 /// where one is open, and the modal lays out on the full window rather than
 /// yielding the band.
 ///
-/// Which modals cover the band is [`ActiveModal::hides_minimap`], which explains
-/// why the command palette is left out.
+/// Which modals cover the band is [`ActiveModal::hides_minimap`].
 fn modal_overlay_open(stoat: &Stoat) -> bool {
     active_modal(stoat).is_some_and(ActiveModal::hides_minimap)
 }
