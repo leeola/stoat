@@ -13223,10 +13223,11 @@ fn escape_closes_the_location_picker_and_disposes_it() {
     assert_eq!(
         (
             h.stoat.location_picker.is_some(),
-            h.stoat.active_workspace().editors.len()
+            h.stoat.active_workspace().editors.len(),
+            h.stoat.focused_mode().to_string()
         ),
-        (false, before),
-        "closing gives back every editor the picker took"
+        (false, before, "normal".to_string()),
+        "closing gives back every editor the picker took and returns to normal mode"
     );
 }
 
@@ -13515,10 +13516,11 @@ fn escape_closes_the_diagnostics_picker_and_disposes_it() {
     assert_eq!(
         (
             h.stoat.diagnostics_picker.is_some(),
-            h.stoat.active_workspace().editors.len()
+            h.stoat.active_workspace().editors.len(),
+            h.stoat.focused_mode().to_string()
         ),
-        (false, before),
-        "closing gives back every editor the picker took"
+        (false, before, "normal".to_string()),
+        "closing gives back every editor the picker took and returns to normal mode"
     );
 }
 
@@ -13782,10 +13784,11 @@ fn escape_closes_the_jumplist_picker_and_disposes_it() {
     assert_eq!(
         (
             h.stoat.jumplist_picker.is_some(),
-            h.stoat.active_workspace().editors.len()
+            h.stoat.active_workspace().editors.len(),
+            h.stoat.focused_mode().to_string()
         ),
-        (false, before - 2),
-        "closing gives back the prompt and preview editors"
+        (false, before - 2, "normal".to_string()),
+        "closing gives back the prompt and preview editors and returns to normal mode"
     );
 }
 

@@ -2258,6 +2258,10 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
 ///
 /// The input opens in insert mode so the reader narrows the candidates by
 /// typing, the way every other target list works.
+///
+/// The editor under the picker resets to normal mode, as the file finder's
+/// does. The picker opens from the `space l` leader, and the editor keeps the
+/// mode it held when focus returns to it on close.
 pub(crate) fn open_location_picker(
     stoat: &mut Stoat,
     entries: Vec<LocationEntry>,
@@ -2265,7 +2269,7 @@ pub(crate) fn open_location_picker(
     let haystacks = entries.iter().map(location_haystack).collect();
     let executor = stoat.executor.clone();
     let redraw = stoat.redraw_notify.clone();
-    stoat.set_focused_mode("insert".into());
+    stoat.set_focused_mode("normal".into());
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(
         ws,

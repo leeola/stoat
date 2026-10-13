@@ -908,6 +908,44 @@ fn goto_definition_multiple_targets_opens_picker() {
     assert_eq!(cursor_offset(&mut h), 15);
 }
 
+/// The goto leader keys share one jump path, and the fake server seeds several
+/// targets for a definition only, so `space l j` stands in for `space l k`.
+#[test]
+fn escaping_the_goto_picker_returns_to_normal_mode() {
+    let mut h = TestHarness::with_size(80, 24);
+    enable_goto_definition(&h);
+    let root = seed(
+        &mut h,
+        &[
+            ("main.rs", "abc\n"),
+            ("lib.rs", "fn one() {}\nfn two() {}\nfn three() {}\n"),
+        ],
+    );
+    let (main_path, lib_path) = (root.join("main.rs"), root.join("lib.rs"));
+    open_buffer(&mut h, main_path.clone());
+    let lib = lib_path.to_str().unwrap();
+    h.fake_lsp().set_definitions(
+        main_path.to_str().unwrap(),
+        0,
+        0,
+        &[(lib, 0, 3), (lib, 1, 3), (lib, 2, 3)],
+    );
+    h.type_keys("space l j");
+    h.settle();
+    assert!(
+        h.stoat.location_picker.is_some(),
+        "three targets open the picker"
+    );
+
+    h.type_keys("escape");
+
+    assert_eq!(
+        (h.stoat.location_picker.is_none(), h.stoat.focused_mode()),
+        (true, "normal"),
+        "Escape closes the picker and leaves the editor in normal mode",
+    );
+}
+
 #[test]
 fn a_location_select_takes_the_row_its_query_names() {
     let mut h = TestHarness::with_size(80, 24);

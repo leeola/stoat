@@ -391,6 +391,10 @@ pub(crate) fn location_picker_select(stoat: &mut Stoat) -> UpdateEffect {
 /// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the focused
 /// pane's jumplist and stores it in [`Stoat::jumplist_picker`]. No-op when the
 /// jumplist is empty or focus is on a dock.
+///
+/// The editor under the picker resets to normal mode, as the file finder's
+/// does. Focus returns to that editor on close, and the editor keeps the mode
+/// it held.
 pub(super) fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
     let Some(jumplist) = focused_pane_jumplist(stoat) else {
         return UpdateEffect::None;
@@ -406,7 +410,7 @@ pub(super) fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
 
     let executor = stoat.executor.clone();
     let redraw = stoat.redraw_notify.clone();
-    stoat.set_focused_mode("insert".into());
+    stoat.set_focused_mode("normal".into());
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
         ws,
@@ -499,6 +503,10 @@ pub(super) fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffe
 ///
 /// The input opens in insert mode so the reader narrows the list by typing,
 /// the way every other target list works.
+///
+/// The editor under the picker resets to normal mode, as the file finder's
+/// does. The picker opens from the `space l` leader, and the editor keeps the
+/// mode it held when focus returns to it on close.
 fn build_diagnostics_picker(
     stoat: &mut Stoat,
     entries: Vec<crate::diagnostics_picker::DiagnosticsEntry>,
@@ -506,7 +514,7 @@ fn build_diagnostics_picker(
 ) -> crate::diagnostics_picker::DiagnosticsPicker {
     let executor = stoat.executor.clone();
     let redraw = stoat.redraw_notify.clone();
-    stoat.set_focused_mode("insert".into());
+    stoat.set_focused_mode("normal".into());
     let ws = stoat.active_workspace_mut();
     let input = crate::input_view::InputView::create(
         ws,
