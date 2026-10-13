@@ -19,6 +19,7 @@ pub(crate) mod stamp;
 pub mod stcfg;
 pub(crate) mod sync;
 pub mod util;
+pub(crate) mod watched_files;
 
 /// The kind of symbol an LSP semantic token names, retained past highlight
 /// decoding so cursor-aware features can tell a trait from a function.

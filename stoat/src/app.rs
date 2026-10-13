@@ -27,7 +27,10 @@ use crate::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
         resolve_action, ActiveModal, StoatKeymapState,
     },
-    lsp::pending::{Pending, StampedPending},
+    lsp::{
+        pending::{Pending, StampedPending},
+        watched_files::WatchedFilesRegistration,
+    },
     minimap::emit::{self},
     mouse::{self, mouse_event_kind},
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
@@ -1538,6 +1541,15 @@ pub struct Stoat {
     /// is parked, so only its capacity carries over.
     pub(crate) lsp_drain_hosts: Vec<Arc<dyn LspHost>>,
     pub(crate) lsp_drain_buffers: Vec<BufferId>,
+    /// The file watchers each language server registered, keyed by the name
+    /// that [`named_hosts_iter`](crate::lsp::registry::LspRegistry::named_hosts_iter)
+    /// gives the server.
+    ///
+    /// A server that registers watchers turns its own watcher off, so
+    /// [`debounce::drain_fs_watch_events`] sends it each change they name. A
+    /// server holds an entry only while it watches something, so an empty map
+    /// lets the drain skip the glob tests.
+    pub(crate) lsp_file_watchers: std::collections::HashMap<String, Vec<WatchedFilesRegistration>>,
     /// Last buffer version a `did_change` debounce has been
     /// scheduled for. Bumped synchronously on the edit-detection
     /// tick so a buffer is never enqueued twice for the same
@@ -2588,6 +2600,7 @@ impl Stoat {
             lsp_opened: std::collections::HashSet::new(),
             lsp_drain_hosts: Vec::new(),
             lsp_drain_buffers: Vec::new(),
+            lsp_file_watchers: std::collections::HashMap::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
             auto_reload_poll: None,

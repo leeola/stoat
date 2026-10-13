@@ -17,6 +17,7 @@ use crate::{
     auto_reload,
     host::{FsEventKind, FsMetadata, GitRepo},
 };
+use lsp_types::{DidChangeWatchedFilesParams, FileChangeType, FileEvent};
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
@@ -140,6 +141,11 @@ impl PathEdit {
 /// [`auto_reload::note_live_reload`]. None of them does the work here. Each
 /// arms a timer whose drain lands on the main loop later.
 ///
+/// A file that a language server's registered watchers name also goes to that
+/// server, in one `workspace/didChangeWatchedFiles` notification at the end of
+/// the turn. The server turned its own watcher off when it registered them, so
+/// these notifications are its only view of the disk.
+///
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
 /// again when it stops there, so a checkout's worth of paths drains over
 /// several turns instead of stalling one.
@@ -186,10 +192,12 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         let repo_root = ws.repo_root.clone().unwrap_or_else(|| ws.git_root.clone());
         (ws.git_root.clone(), repo_root)
     };
+    let lsp_root = stoat.workspaces[stoat.lsp_workspace].git_root.clone();
     let git_dir = repo_root.join(".git");
     // Opened at most once for the batch, and only where a verdict is needed.
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
     let mut finder_changes = Vec::new();
+    let mut lsp_changes: HashMap<String, Vec<FileEvent>> = HashMap::new();
     for (path, kind) in events {
         let in_git_dir = path.starts_with(&git_dir);
         let is_ignore_file = path
@@ -215,6 +223,10 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         // that a rebuild drops.
         if !in_git_dir && parent_dir_ignored(stoat, &path, &repo_root, &mut repo) {
             continue;
+        }
+
+        if !in_git_dir && !stoat.lsp_file_watchers.is_empty() && path.starts_with(&lsp_root) {
+            note_watched_file_change(stoat, &path, kind, &mut lsp_changes);
         }
 
         // A save that writes a temp file and renames it over its target reaches
@@ -309,6 +321,10 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     }
 
     apply_finder_changes(stoat, &git_root, finder_changes);
+
+    for (server, changes) in lsp_changes {
+        notify_watched_files(stoat, &server, changes);
+    }
 
     // The entries queued this turn raise no watch event, so nothing else wakes
     // the loop for them.
@@ -542,6 +558,88 @@ fn dir_ignored(
     }
     stoat.ignored_dir_cache.insert(dir.to_path_buf(), ignored);
     ignored
+}
+
+/// Record a change to `path` for each language server whose file watchers name
+/// it, in the turn's batch of watched-files notifications.
+///
+/// A directory is left out. The servers watch files, and the entries of a
+/// directory raise events of their own. A rename names one path and no
+/// direction, so the stat tells a file that arrived at the path from one that
+/// left it.
+fn note_watched_file_change(
+    stoat: &Stoat,
+    path: &Path,
+    kind: FsEventKind,
+    changes: &mut HashMap<String, Vec<FileEvent>>,
+) {
+    let arrived = match kind {
+        FsEventKind::Removed => None,
+        _ => stoat.fs_host.metadata(path).ok().flatten(),
+    };
+    if arrived.as_ref().is_some_and(|meta| meta.is_dir) {
+        return;
+    }
+
+    let change = match kind {
+        FsEventKind::Created => FileChangeType::CREATED,
+        FsEventKind::Modified => FileChangeType::CHANGED,
+        FsEventKind::Removed => FileChangeType::DELETED,
+        FsEventKind::Renamed if arrived.is_some() => FileChangeType::CREATED,
+        FsEventKind::Renamed => FileChangeType::DELETED,
+    };
+
+    let mut watching = stoat
+        .lsp_file_watchers
+        .iter()
+        .filter(|(_, registrations)| {
+            registrations
+                .iter()
+                .any(|registration| registration.matches(path, change))
+        })
+        .map(|(server, _)| server)
+        .peekable();
+    if watching.peek().is_none() {
+        return;
+    }
+    let Some(uri) = action_handlers::lsp::path_to_uri(path) else {
+        return;
+    };
+    for server in watching {
+        changes.entry(server.clone()).or_default().push(FileEvent {
+            uri: uri.clone(),
+            typ: change,
+        });
+    }
+}
+
+/// Send `server` the watched-files changes that one drain turn collected for it.
+///
+/// The changes go out at once, with no debounce. The watcher already merged
+/// each path's queued events into one, and a burst too large for one turn
+/// reaches the server as one notification per turn.
+///
+/// The injected sole client has no client entry, so its `default` name
+/// resolves through [`sole_or_noop`](crate::lsp::registry::LspRegistry::sole_or_noop).
+fn notify_watched_files(stoat: &Stoat, server: &str, changes: Vec<FileEvent>) {
+    let host = match stoat.lsp_registry.client(server) {
+        Some(host) => host,
+        None if server == "default" => stoat.lsp_registry.sole_or_noop(),
+        None => return,
+    };
+    stoat
+        .executor
+        .spawn(async move {
+            let params = DidChangeWatchedFilesParams { changes };
+            if let Err(err) = host.did_change_watched_files(params).await {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    ?err,
+                    "didChangeWatchedFiles notification failed"
+                );
+            }
+        })
+        .detach();
 }
 
 /// Point the code-search scan at `query`, debounced.
@@ -832,8 +930,9 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{file_finder::FinderPathCache, host::FakeFsOp};
+    use crate::{file_finder::FinderPathCache, host::FakeFsOp, test_fixture};
     use futures::FutureExt;
+    use lsp_types::GlobPattern;
     use std::time::Duration;
     // TEST IMPORTS
 
@@ -965,6 +1064,103 @@ mod tests {
             1,
             "and that one event arms one debounce",
         );
+    }
+
+    /// One source file created and one removed, beside two paths that no
+    /// watcher hears about.
+    ///
+    /// No `**/*.rs` glob names the `.md` file, and the source file under
+    /// `target/debug` sits in an ignored build directory.
+    const WATCHED_FILE_EVENTS: [(&str, FsEventKind); 4] = [
+        ("/repo/src/new.rs", FsEventKind::Created),
+        ("/repo/src/old.rs", FsEventKind::Removed),
+        ("/repo/README.md", FsEventKind::Created),
+        ("/repo/target/debug/gen.rs", FsEventKind::Created),
+    ];
+
+    /// A server that watches `**/*.rs` hears about the source files that came
+    /// and went, in event order. The `.md` file misses the glob, and the build
+    /// output stops at the ignored-directory filter.
+    #[test]
+    fn watched_file_changes_reach_the_server_that_watches_them() {
+        let mut h = ignored_dir_harness();
+        watch_rust_files(&mut h);
+
+        assert_eq!(
+            watched_file_changes(&mut h, &WATCHED_FILE_EVENTS),
+            [[
+                (
+                    "file:///repo/src/new.rs".to_string(),
+                    FileChangeType::CREATED
+                ),
+                (
+                    "file:///repo/src/old.rs".to_string(),
+                    FileChangeType::DELETED
+                ),
+            ]],
+        );
+    }
+
+    /// A server that registered no file watchers hears nothing about the disk.
+    #[test]
+    fn a_server_without_watchers_hears_no_file_changes() {
+        let mut h = ignored_dir_harness();
+
+        assert_eq!(
+            watched_file_changes(&mut h, &WATCHED_FILE_EVENTS),
+            Vec::<Vec<(String, FileChangeType)>>::new(),
+        );
+    }
+
+    /// A rename names one path and no direction. A path that the disk no
+    /// longer holds is the name the file left.
+    #[test]
+    fn a_rename_away_reaches_the_server_as_a_deletion() {
+        let mut h = ignored_dir_harness();
+        watch_rust_files(&mut h);
+
+        assert_eq!(
+            watched_file_changes(&mut h, &[("/repo/src/gone.rs", FsEventKind::Renamed)]),
+            [[(
+                "file:///repo/src/gone.rs".to_string(),
+                FileChangeType::DELETED
+            )]],
+        );
+    }
+
+    /// Register a `**/*.rs` file watcher from the harness's server.
+    fn watch_rust_files(h: &mut crate::test_harness::TestHarness) {
+        let rust_files = test_fixture::watched_files_registration(
+            "w1",
+            GlobPattern::String("**/*.rs".into()),
+            None,
+        );
+        test_fixture::register_capability(h, rust_files);
+    }
+
+    /// Inject `events`, drain them, and return the changes of each
+    /// watched-files notification that the harness's server received.
+    fn watched_file_changes(
+        h: &mut crate::test_harness::TestHarness,
+        events: &[(&str, FsEventKind)],
+    ) -> Vec<Vec<(String, FileChangeType)>> {
+        for (path, kind) in events {
+            h.fake_fs_watcher().inject(path, *kind);
+        }
+        drain_fs_watch_events(&mut h.stoat);
+        h.settle();
+
+        h.fake_lsp()
+            .observed_watched_file_changes()
+            .into_iter()
+            .map(|params| {
+                params
+                    .changes
+                    .into_iter()
+                    .map(|event| (event.uri.as_str().to_string(), event.typ))
+                    .collect()
+            })
+            .collect()
     }
 
     /// A path's last event in a turn decides it, whatever came before.

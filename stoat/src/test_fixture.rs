@@ -14,13 +14,17 @@ use crate::{
     action_handlers,
     app::{modal_split_percent, modal_zoom_steps, ModalKind},
     editor_state::EditorId,
+    host::lsp::IncomingRequest,
+    lsp::drain,
     pane::FocusTarget,
     test_harness::TestHarness,
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
 use lsp_types::{
-    Diagnostic, DiagnosticSeverity, Position, Range, ServerCapabilities, SymbolInformation,
-    SymbolKind,
+    notification::{DidChangeWatchedFiles, Notification},
+    Diagnostic, DiagnosticSeverity, DidChangeWatchedFilesRegistrationOptions, FileSystemWatcher,
+    GlobPattern, NumberOrString, Position, Range, Registration, RegistrationParams,
+    ServerCapabilities, SymbolInformation, SymbolKind, WatchKind,
 };
 use ratatui::layout::Rect;
 use std::{path::PathBuf, sync::Arc};
@@ -282,4 +286,34 @@ pub(crate) fn install_two_servers(
         ],
     );
     (primary, secondary)
+}
+
+/// A `workspace/didChangeWatchedFiles` registration of one watcher, in the
+/// shape a server sends it.
+pub(crate) fn watched_files_registration(
+    id: &str,
+    glob_pattern: GlobPattern,
+    kind: Option<WatchKind>,
+) -> Registration {
+    let options = DidChangeWatchedFilesRegistrationOptions {
+        watchers: vec![FileSystemWatcher { glob_pattern, kind }],
+    };
+    Registration {
+        id: id.to_string(),
+        method: DidChangeWatchedFiles::METHOD.to_string(),
+        register_options: Some(serde_json::to_value(options).expect("watcher options serialize")),
+    }
+}
+
+/// Deliver `registration` from the harness's server, as its
+/// `client/registerCapability` request lands after startup.
+pub(crate) fn register_capability(h: &mut TestHarness, registration: Registration) {
+    h.fake_lsp()
+        .push_incoming_request(IncomingRequest::RegisterCapability {
+            id: NumberOrString::Number(1),
+            params: RegistrationParams {
+                registrations: vec![registration],
+            },
+        });
+    drain::drain_lsp_incoming_requests(&mut h.stoat);
 }

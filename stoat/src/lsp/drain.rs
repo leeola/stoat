@@ -19,9 +19,10 @@ use crate::{
     buffer::BufferId,
     buffer_registry::ReadOnly,
     host::LspHost,
-    lsp::util,
+    lsp::{util, watched_files},
     render::sanitize,
 };
+use lsp_types::{Registration, Unregistration};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -135,10 +136,12 @@ fn drain_incoming_requests_from(stoat: &mut Stoat, host: &Arc<dyn LspHost>) {
             },
             IncomingRequest::RegisterCapability { params, .. } => {
                 tracing::debug!(target: "stoat::lsp", ?params, "client/registerCapability");
+                register_file_watchers(stoat, host, &params.registrations);
                 Ok(Value::Null)
             },
             IncomingRequest::UnregisterCapability { params, .. } => {
                 tracing::debug!(target: "stoat::lsp", ?params, "client/unregisterCapability");
+                unregister_file_watchers(stoat, host, &params.unregisterations);
                 Ok(Value::Null)
             },
             IncomingRequest::WorkspaceConfiguration { params, .. } => {
@@ -194,6 +197,69 @@ fn drain_incoming_requests_from(stoat: &mut Stoat, host: &Arc<dyn LspHost>) {
     }
 }
 
+/// Hold the file watchers among `registrations` for the server of `host`.
+///
+/// A registration replaces any that the server holds under the same id. A
+/// server that reloads its project registers again under the old id, and the
+/// replacement keeps one copy. A request that registers no file watchers
+/// leaves [`Stoat::lsp_file_watchers`] as it was.
+fn register_file_watchers(
+    stoat: &mut Stoat,
+    host: &Arc<dyn LspHost>,
+    registrations: &[Registration],
+) {
+    let compiled: Vec<_> = registrations
+        .iter()
+        .filter_map(watched_files::compile)
+        .collect();
+    if compiled.is_empty() {
+        return;
+    }
+    let Some(server) = server_name(stoat, host) else {
+        return;
+    };
+
+    let held = stoat.lsp_file_watchers.entry(server).or_default();
+    for registration in compiled {
+        held.retain(|watching| watching.id != registration.id);
+        held.push(registration);
+    }
+}
+
+/// Drop each file watcher of the server of `host` that `unregistrations` names
+/// by id.
+fn unregister_file_watchers(
+    stoat: &mut Stoat,
+    host: &Arc<dyn LspHost>,
+    unregistrations: &[Unregistration],
+) {
+    let Some(server) = server_name(stoat, host) else {
+        return;
+    };
+    let Some(held) = stoat.lsp_file_watchers.get_mut(&server) else {
+        return;
+    };
+
+    held.retain(|watching| unregistrations.iter().all(|gone| gone.id != watching.id));
+    if held.is_empty() {
+        stoat.lsp_file_watchers.remove(&server);
+    }
+}
+
+/// The name the registry holds `host` under, which keys the server's file
+/// watchers.
+///
+/// The drain runs on every event, and a name carried for each server costs a
+/// string clone on each one. The lookup happens here instead, where only the
+/// rare registration requests pay for it.
+fn server_name(stoat: &Stoat, host: &Arc<dyn LspHost>) -> Option<String> {
+    stoat
+        .lsp_registry
+        .named_hosts_iter()
+        .find(|(_, held)| Arc::ptr_eq(held, host))
+        .map(|(name, _)| name.to_string())
+}
+
 /// Install every language server that finished spawning since the last
 /// tick.
 ///
@@ -237,6 +303,9 @@ fn install_ready_server(
     scope: SpawnScope,
     host: Arc<dyn LspHost>,
 ) {
+    // Watchers belong to the process that registered them. A server that
+    // comes up again registers its own.
+    stoat.lsp_file_watchers.remove(&server);
     stoat.lsp_registry.insert(server.clone(), Arc::clone(&host));
     let language = match &scope {
         SpawnScope::Language(language) => {
@@ -472,10 +541,14 @@ mod tests {
     use super::*;
     use crate::{
         app::PendingSpawn,
-        host::{FakeLsp, LspNotification},
+        host::{lsp::IncomingRequest, FakeLsp, LspNotification},
+        test_fixture,
         test_harness::TestHarness,
     };
-    use lsp_types::MessageType;
+    use lsp_types::{
+        notification::{DidChangeWatchedFiles, Notification},
+        GlobPattern, MessageType, NumberOrString, UnregistrationParams,
+    };
     use stoat_config::Settings;
 
     /// The text of `a.rs` as [`edited_with_only_a_up`] opens it.
@@ -804,6 +877,53 @@ mod tests {
         })
         .unwrap();
         assert_eq!(h.fake_lsp().observed_replies(), vec![(id, Ok(applied))]);
+    }
+
+    /// A server's file watchers are held from its registration until its
+    /// unregistration. A second registration under one id replaces the first.
+    #[test]
+    fn file_watchers_are_held_until_unregistered() {
+        let mut h = Stoat::test();
+        let rust_files = || {
+            test_fixture::watched_files_registration(
+                "w1",
+                GlobPattern::String("**/*.rs".into()),
+                None,
+            )
+        };
+        test_fixture::register_capability(&mut h, rust_files());
+        test_fixture::register_capability(&mut h, rust_files());
+
+        let held: Vec<(&str, Vec<&str>)> = h
+            .stoat
+            .lsp_file_watchers
+            .iter()
+            .map(|(server, registrations)| {
+                let ids = registrations
+                    .iter()
+                    .map(|registration| registration.id.as_str())
+                    .collect();
+                (server.as_str(), ids)
+            })
+            .collect();
+        assert_eq!(held, [("default", vec!["w1"])]);
+
+        h.fake_lsp()
+            .push_incoming_request(IncomingRequest::UnregisterCapability {
+                id: NumberOrString::Number(2),
+                params: UnregistrationParams {
+                    unregisterations: vec![Unregistration {
+                        id: "w1".into(),
+                        method: DidChangeWatchedFiles::METHOD.into(),
+                    }],
+                },
+            });
+        drain_lsp_incoming_requests(&mut h.stoat);
+
+        assert!(
+            h.stoat.lsp_file_watchers.is_empty(),
+            "the last unregistration drops the server's entry"
+        );
     }
 
     #[test]
