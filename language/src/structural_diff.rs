@@ -50,7 +50,7 @@ use std::{ops::Range, path::PathBuf, sync::Arc};
 pub use tree_diff::{
     diff_changeset, diff_changeset_from_slots, diff_with_language, diff_with_language_cancellable,
     finalize_single, parse_memoized, prepare_diff, ChangesetSlot, PreparedDiff, TreeCache,
-    TreeMemo,
+    TreeMemo, DEFAULT_BYTE_LIMIT,
 };
 pub use unchanged::{
     mark_unchanged, ChangeKind as PreprocessChangeKind, ChangeMap, PreprocessResult,
@@ -218,10 +218,10 @@ pub fn diff(lhs: &str, rhs: &str) -> DiffResult {
 /// Best-quality diff for callers that have a [`Language`].
 ///
 /// Tries the structural path first ([`diff_with_language`]), falling
-/// through to [`diff_lines`] when either side fails to parse. The
-/// `fell_back_to_line_diff` flag on the returned [`DiffResult`]
-/// distinguishes the two paths so the host can surface "diff is
-/// approximate" badging when the parse failed.
+/// through to [`diff_lines`] when either side is over
+/// [`DEFAULT_BYTE_LIMIT`] or fails to parse. The `fell_back_to_line_diff`
+/// flag on the returned [`DiffResult`] tells the two paths apart, for a
+/// host that badges a line diff as approximate.
 pub fn diff_with_language_or_lines(
     language: &Arc<crate::Language>,
     lhs: &str,

@@ -41,6 +41,15 @@ use std::{
 };
 use tree_sitter::Tree;
 
+/// The size in bytes above which a side skips the tree pass and diffs by lines.
+///
+/// Parsing, lowering, and searching cost time and memory in proportion to the
+/// file. A data file of a few megabytes costs a second or more and hundreds of
+/// megabytes per diff. The editor repeats that diff after each settled edit.
+/// At this size a diff costs about 0.2 s and 100 MB, and the value matches
+/// difftastic's default.
+pub const DEFAULT_BYTE_LIMIT: usize = 1_000_000;
+
 /// Run the full structural-diff pipeline against two source strings.
 ///
 /// Two-stage algorithm:
@@ -56,8 +65,9 @@ use tree_sitter::Tree;
 ///
 /// On `ExceededGraphLimit` a section falls back to preprocessing-only
 /// output for that region (still a valid diff, just missing the
-/// per-edit cost-optimal pairing). On parse failure the function
-/// returns `None` and the caller falls through to [`super::diff_lines`].
+/// per-edit cost-optimal pairing). On a parse failure, or when either
+/// side is over [`DEFAULT_BYTE_LIMIT`], the function returns `None` and
+/// the caller falls through to [`super::diff_lines`].
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
     diff_with_language_cancellable(language, lhs, rhs, None, None, None)
 }
@@ -132,12 +142,28 @@ impl TreeMemo {
 ///
 /// Two diffs missing at once both parse, which is the price. Identical text and
 /// language give identical trees, so whichever lands first is kept.
+///
+/// A text over [`DEFAULT_BYTE_LIMIT`] parses but stays out of the memo. A tree
+/// takes many times the memory of its text, so one large file kept here holds
+/// hundreds of megabytes after its diff ends.
 pub fn parse_memoized(
     language: &Arc<Language>,
     text: &str,
     memo: Option<&TreeCache>,
 ) -> Option<Tree> {
-    let Some(memo) = memo else {
+    parse_memoized_within(language, text, memo, DEFAULT_BYTE_LIMIT)
+}
+
+/// [`parse_memoized`] with `retain_limit` as the size above which a tree stays
+/// out of `memo`.
+fn parse_memoized_within(
+    language: &Arc<Language>,
+    text: &str,
+    memo: Option<&TreeCache>,
+    retain_limit: usize,
+) -> Option<Tree> {
+    // A text over the limit is never stored, so its lookup always misses.
+    let Some(memo) = memo.filter(|_| text.len() <= retain_limit) else {
         return parse(language, text, None);
     };
 
@@ -160,6 +186,9 @@ pub fn parse_memoized(
 /// through to the preprocessing-only diff. Intended for
 /// cancel-on-edit scheduling: the caller sets the flag when a newer
 /// edit supersedes the in-flight job.
+///
+/// Either side over [`DEFAULT_BYTE_LIMIT`] answers `None` before any parse,
+/// as a parse failure does.
 ///
 /// `memo` retains the parsed `lhs` tree, so a caller diffing the same base
 /// repeatedly parses it once. Pass [`None`] to parse both sides every call.
@@ -194,8 +223,9 @@ pub struct PreparedDiff<'a> {
 }
 
 /// Run the parse / lower / preprocess / Dijkstra / slider stages for one
-/// file and retain the result. Returns `None` if either side fails to
-/// parse, mirroring the [`diff_with_language`] fallback contract.
+/// file and retain the result. Returns `None` if either side is over
+/// [`DEFAULT_BYTE_LIMIT`] or fails to parse, mirroring the
+/// [`diff_with_language`] fallback contract.
 ///
 /// The retained value can be finalized once per pass it participates in,
 /// so a file that is both streamed on its own and folded into a changeset
@@ -208,7 +238,16 @@ pub fn prepare_diff<'a>(
     memo: Option<&TreeCache>,
     rhs_tree: Option<&Tree>,
 ) -> Option<PreparedDiff<'a>> {
-    prepare_per_file(language, lhs, rhs, cancel, memo, rhs_tree).map(|prepared| PreparedDiff {
+    prepare_per_file(
+        language,
+        lhs,
+        rhs,
+        cancel,
+        memo,
+        rhs_tree,
+        DEFAULT_BYTE_LIMIT,
+    )
+    .map(|prepared| PreparedDiff {
         prepared,
         _marker: PhantomData,
     })
@@ -261,9 +300,9 @@ pub fn finalize_single(prepared: &PreparedDiff<'_>) -> DiffResult {
 /// of surfacing as a deletion in `i` plus an addition in `j`.
 ///
 /// Returns one [`DiffResult`] per input in input order. Inputs whose
-/// `language` is `None` (or whose parse fails) fall back to
-/// [`super::diff_lines`] for that file and do not participate in
-/// cross-file move detection.
+/// `language` is `None`, whose side is over [`DEFAULT_BYTE_LIMIT`], or
+/// whose parse fails fall back to [`super::diff_lines`] for that file and
+/// do not participate in cross-file move detection.
 ///
 /// `memo` retains each input's parsed `lhs_text`, so re-running a changeset
 /// whose bases have not moved parses none of them again. Pass [`None`] to
@@ -435,9 +474,9 @@ struct PreparedFileView<'a> {
 }
 
 /// Run the parse / lower / preprocess / Dijkstra / slider stages for
-/// one file. Returns `None` if either side fails to parse, mirroring
-/// the existing [`diff_with_language`] fallback contract -- the caller
-/// then routes that file through [`super::diff_lines`].
+/// one file. Returns `None` if either side is over `byte_limit` bytes or
+/// fails to parse, mirroring the [`diff_with_language`] fallback contract.
+/// The caller then routes that file through [`super::diff_lines`].
 fn prepare_per_file<'a>(
     language: &Arc<Language>,
     lhs: &'a str,
@@ -445,7 +484,12 @@ fn prepare_per_file<'a>(
     cancel: Option<&AtomicBool>,
     memo: Option<&TreeCache>,
     rhs_tree: Option<&Tree>,
+    byte_limit: usize,
 ) -> Option<PreparedFile<'a>> {
+    if lhs.len() > byte_limit || rhs.len() > byte_limit {
+        return None;
+    }
+
     // Only `lhs` is memoized. It is the base in every caller, where `rhs` is
     // the buffer being edited, so retaining `rhs` would never be read back and
     // would evict live base entries.
@@ -1027,7 +1071,7 @@ impl LineIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LanguageRegistry;
+    use crate::{structural_diff, LanguageRegistry};
 
     fn rust_lang() -> Arc<Language> {
         LanguageRegistry::standard()
@@ -1892,6 +1936,57 @@ mod tests {
         assert!(
             !guard.entries.iter().any(|(key, _)| key.0 == oldest),
             "the first base is the one evicted",
+        );
+    }
+
+    /// A side over the limit diffs by lines before anything parses it, so a
+    /// large data file costs the line pass alone.
+    #[test]
+    fn a_side_over_the_byte_limit_falls_back_to_the_line_diff() {
+        let big = "x".repeat(DEFAULT_BYTE_LIMIT + 1);
+
+        assert_eq!(
+            structural_diff::diff_with_language_or_lines(&rust_lang(), "", &big),
+            line_diff::diff_lines("", &big),
+            "the oversized side gets the line diff whole, its fallback flag included",
+        );
+    }
+
+    #[test]
+    fn the_byte_limit_is_inclusive() {
+        let lang = rust_lang();
+        let (ten, eleven) = ("fn a() {}\n", "fn ab() {}\n");
+        let prepares = |lhs: &str, rhs: &str| {
+            prepare_per_file(&lang, lhs, rhs, None, None, None, 10).is_some()
+        };
+
+        assert_eq!(
+            [
+                prepares(ten, ten),
+                prepares(eleven, ten),
+                prepares(ten, eleven)
+            ],
+            [true, false, false],
+            "ten-byte sides take the tree pass at a limit of ten, and an eleven-byte side does not",
+        );
+    }
+
+    #[test]
+    fn parse_memoized_within_keeps_no_tree_over_the_limit() {
+        let lang = rust_lang();
+        let memo = TreeCache::default();
+        let parse_and_count = |text: &str| {
+            let parsed = parse_memoized_within(&lang, text, Some(&memo), 10).is_some();
+            (parsed, memo.lock().expect("memo poisoned").len())
+        };
+
+        assert_eq!(
+            [
+                parse_and_count("fn ab() {}\n"),
+                parse_and_count("fn a() {}\n")
+            ],
+            [(true, 0), (true, 1)],
+            "the eleven-byte text parses but stays out, and the ten-byte text stays in",
         );
     }
 

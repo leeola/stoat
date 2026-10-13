@@ -1516,8 +1516,9 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// gutter and staging read line boundaries. With a `language` and a
 /// `tree_memo`, a tree-sitter pass then owns the token detail, so a reindented
 /// block washes what it actually changed rather than every line's prefix.
-/// Without either, or when the tree pass falls back to lines, the line pass's
-/// char-refined spans stand.
+/// Without either, when either text is over
+/// [`structural_diff::DEFAULT_BYTE_LIMIT`], or when the tree pass falls back to
+/// lines, the line pass's char-refined spans stand.
 ///
 /// `buffer_tree` is a tree already parsed from `buffer_text`, which the tree
 /// pass takes in place of parsing the buffer a second time. It must describe
@@ -1615,8 +1616,9 @@ pub(super) fn compute_diff_map(
         diff_map.set_staged_marks(staged_marks(from, base_text));
     }
     if let Some(language) = language {
-        // The structural pass above parsed this exact base into `tree_memo`,
-        // so the highlight parse is already paid for.
+        // When both texts are within the byte limit, the structural pass above
+        // parsed this exact base into `tree_memo`, so the highlight parse is
+        // already paid for.
         diff_map.set_base_highlights(compute_base_highlights(
             base_text,
             language,
