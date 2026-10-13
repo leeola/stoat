@@ -16,9 +16,11 @@ use time::OffsetDateTime;
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
+    let parent = Some(stoat.active_workspace().family_root());
     stoat.save_workspace(stoat.active_workspace);
 
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
+    ws.parent = parent;
     ws.layout(stoat.size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
@@ -35,6 +37,7 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     state.rebase = None;
     state.rebase_active = None;
     state.uid = WorkspaceUid::now(&stoat.executor);
+    state.parent = Some(stoat.active_workspace().family_root());
 
     stoat.save_workspace(stoat.active_workspace);
 
@@ -465,7 +468,8 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
                 let git_root = entry.git_root.clone();
                 let uid = entry.uid;
                 let name = entry.basename.clone();
-                activate_inactive_workspace(stoat, git_root, uid, name, state_path);
+                let parent = entry.parent;
+                activate_inactive_workspace(stoat, git_root, uid, name, parent, state_path);
             },
             (None, None) => return UpdateEffect::Redraw,
         },
@@ -489,16 +493,17 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
 /// Bring a persisted-but-closed workspace back into the running instance and
 /// switch to it, returning the id of the newly inserted workspace.
 ///
-/// The fresh workspace carries the on-disk `uid` and `name` from the start, so a
-/// save triggered before the restore lands (a quit mid-restore) rewrites the
-/// same state file rather than forking a new one. The outgoing workspace is
-/// saved, focus switches, and a restore spawns to replace the fresh panes with
-/// the persisted session.
+/// The fresh workspace carries the on-disk `uid`, `name`, and `parent` from the
+/// start, so a save triggered before the restore lands (a quit mid-restore)
+/// rewrites the same state file rather than forking a new one. The outgoing
+/// workspace is saved, focus switches, and a restore spawns to replace the fresh
+/// panes with the persisted session.
 fn activate_inactive_workspace(
     stoat: &mut Stoat,
     git_root: PathBuf,
     uid: WorkspaceUid,
     name: String,
+    parent: Option<WorkspaceUid>,
     state_path: PathBuf,
 ) -> WorkspaceId {
     stoat.save_workspace(stoat.active_workspace);
@@ -506,6 +511,7 @@ fn activate_inactive_workspace(
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
     ws.uid = uid;
     ws.name = name;
+    ws.parent = parent;
     ws.layout(stoat.size());
 
     let id = stoat.workspaces.insert(ws);
@@ -750,6 +756,7 @@ mod tests {
                 git_root: PathBuf::from("/proj"),
                 buffer_count: 1,
                 remote_host: None,
+                parent: None,
             },
             state_path: PathBuf::from("/state/hash/1.ron"),
             mtime: UNIX_EPOCH,
@@ -769,6 +776,7 @@ mod tests {
                 git_root: PathBuf::from("/proj"),
                 buffer_count: 1,
                 remote_host: None,
+                parent: Some(WorkspaceUid(7)),
             },
             state_path: PathBuf::from("/state/hash/1.ron"),
             mtime: UNIX_EPOCH,
@@ -799,8 +807,13 @@ mod tests {
         );
         let active = stoat.active_workspace();
         assert_eq!(
-            (active.uid, active.git_root.as_path(), active.name.as_str()),
-            (uid, Path::new("/proj"), "proj"),
+            (
+                active.uid,
+                active.parent,
+                active.git_root.as_path(),
+                active.name.as_str()
+            ),
+            (uid, Some(WorkspaceUid(7)), Path::new("/proj"), "proj"),
             "the new active workspace carries the meta's identity"
         );
         assert!(
@@ -956,6 +969,7 @@ mod tests {
                 git_root: PathBuf::from("/proj"),
                 buffer_count: 1,
                 remote_host: None,
+                parent: None,
             },
             state_path: state_path.clone(),
             mtime: UNIX_EPOCH,
@@ -1116,7 +1130,7 @@ mod tests {
     }
 
     /// A restore takes the name from the state file, so the sidecar alone is
-    /// not enough.
+    /// not enough. The rewrite keeps the session in its family.
     #[test]
     fn renaming_a_saved_row_rewrites_its_state_and_meta() {
         let mut harness = Stoat::test();
@@ -1129,6 +1143,7 @@ mod tests {
                 stoat.redraw_notify.clone(),
             );
             ws.name = "proj".to_string();
+            ws.parent = Some(WorkspaceUid(7));
             ws.save_state(&state_path, &*stoat.fs_host)
                 .expect("the saved session is seeded");
         }
@@ -1162,11 +1177,13 @@ mod tests {
             (
                 state.name.as_str(),
                 meta.name.as_str(),
+                meta.parent,
                 harness.stoat.pending_message.as_deref(),
             ),
             (
                 "renamed",
                 "renamed",
+                Some(WorkspaceUid(7)),
                 Some("renamed session proj to renamed")
             ),
         );
@@ -1388,6 +1405,27 @@ mod tests {
             Some(first),
             "the session left last is the one the picker opens on"
         );
+    }
+
+    /// Every create inside a session joins the active family, so a session
+    /// created from a sub-session ties to the root and a family never nests.
+    /// The copy goes first, from the root, because a copy of a sub-session
+    /// inherits the parent of its source either way. The test clock moves only
+    /// when told, so it advances before each create to give each workspace its
+    /// own uid.
+    #[test]
+    fn a_workspace_created_in_a_session_joins_its_family() {
+        let mut harness = Stoat::test();
+        let root = harness.stoat.active_workspace().uid;
+
+        let mut parents = Vec::new();
+        for action in ["CopyWorkspace()", "NewWorkspace()", "NewWorkspace()"] {
+            harness.advance_clock(Duration::from_secs(1));
+            harness.type_action(action);
+            parents.push(harness.stoat.active_workspace().parent);
+        }
+
+        assert_eq!(parents, [Some(root); 3], "each create ties to the root");
     }
 
     #[test]

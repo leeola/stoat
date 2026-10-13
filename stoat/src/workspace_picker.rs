@@ -89,6 +89,9 @@ pub struct PickerEntry {
     pub basename: String,
     pub git_root: PathBuf,
     pub uid: WorkspaceUid,
+    /// The family root the session was created from, `None` for a session a
+    /// launch opened.
+    pub parent: Option<WorkspaceUid>,
     pub status: WorkspaceStatus,
     pub buffer_count: usize,
     pub run_count: usize,
@@ -131,6 +134,7 @@ impl WorkspacePicker {
                 basename: display_name(&ws.name, &ws.git_root),
                 git_root: ws.git_root.clone(),
                 uid: ws.uid,
+                parent: ws.parent,
                 status: if id == active {
                     WorkspaceStatus::Active
                 } else {
@@ -155,6 +159,7 @@ impl WorkspacePicker {
                 basename: display_name(&reg.meta.name, &reg.meta.git_root),
                 git_root: reg.meta.git_root,
                 uid: reg.meta.uid,
+                parent: reg.meta.parent,
                 status: WorkspaceStatus::Inactive,
                 buffer_count: reg.meta.buffer_count,
                 run_count: 0,
@@ -886,6 +891,7 @@ mod tests {
                 git_root: PathBuf::from(root),
                 buffer_count: 3,
                 remote_host: None,
+                parent: None,
             },
             state_path: PathBuf::from(root).join("s.ron"),
             mtime: focused_at(secs),

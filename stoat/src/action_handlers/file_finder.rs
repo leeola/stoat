@@ -800,6 +800,7 @@ mod tests {
                 git_root: PathBuf::from("/proj"),
                 buffer_count: 1,
                 remote_host: None,
+                parent: None,
             },
             state_path: PathBuf::from("/state/hash/1.ron"),
             mtime: UNIX_EPOCH,

@@ -32,6 +32,11 @@ pub(crate) struct WorkspaceMeta {
     /// without opening the workspace's whole state file.
     #[serde(default)]
     pub remote_host: Option<String>,
+    /// The family root the session was created from, `None` for a session a
+    /// launch opened. Defaults on a sidecar written before the field, so the
+    /// listing reads it without a backfill from the state file.
+    #[serde(default)]
+    pub parent: Option<WorkspaceUid>,
 }
 
 /// A persisted workspace discovered by [`list_all`], pairing its metadata with
@@ -150,6 +155,7 @@ pub(crate) fn meta_of(state: &WorkspaceStateV1) -> WorkspaceMeta {
         git_root: state.git_root.clone(),
         buffer_count: state.buffers.entries.len(),
         remote_host: state.remote.as_ref().map(|target| target.host.clone()),
+        parent: state.parent,
     }
 }
 
@@ -251,6 +257,44 @@ mod tests {
         assert_eq!(
             (roots, fake.exists(&meta_path_for(&path))),
             (vec![PathBuf::from("/proj")], true),
+        );
+    }
+
+    /// A sidecar written before sessions recorded their family still parses, so
+    /// the listing reads it as a top-level session. The state file keeps the
+    /// parent, so a backfill from the state file reports the parent instead.
+    #[test]
+    fn list_all_reads_a_sidecar_without_a_parent_as_top_level() {
+        let fake = FakeFs::new();
+        let exec = Arc::new(TestScheduler::new()).executor();
+        let path = PathBuf::from("/state/hash/3.ron");
+        let mut ws = Workspace::new(PathBuf::from("/proj"), &exec, crate::test_notify());
+        ws.parent = Some(WorkspaceUid(7));
+        ws.save_state(&path, &fake).unwrap();
+
+        let meta_path = meta_path_for(&path);
+        let mut buf = Vec::new();
+        fake.read(&meta_path, &mut buf).unwrap();
+        let body = String::from_utf8(buf).unwrap();
+        assert!(
+            body.contains("parent: Some("),
+            "the saved sidecar records the parent"
+        );
+        let kept: Vec<&str> = body
+            .lines()
+            .filter(|line| !line.contains("parent"))
+            .collect();
+        fake.write(&meta_path, kept.join("\n").as_bytes()).unwrap();
+
+        let parents: Vec<Option<WorkspaceUid>> = list_all_in(Path::new("/state"), &fake)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.meta.parent)
+            .collect();
+        assert_eq!(
+            parents,
+            [None],
+            "the stripped sidecar parses without a backfill"
         );
     }
 }

@@ -161,6 +161,13 @@ pub struct Workspace {
     /// [`crate::workspace::name::default_workspace_name`]). Empty string opts
     /// the renderer into the `git_root.file_name()` fallback used by tests.
     pub(crate) name: String,
+    /// The family root this session was created from, `None` for a session
+    /// that a launch opened.
+    ///
+    /// A family is one level deep, so a session created from a sub-session
+    /// takes that sub-session's root, never the sub-session itself. The picker's
+    /// family scope and its delete cascade read it.
+    pub(crate) parent: Option<WorkspaceUid>,
     pub git_root: PathBuf,
     /// The instant the workspace was last focused.
     ///
@@ -450,6 +457,7 @@ impl Workspace {
             id: WorkspaceId::default(),
             uid,
             name,
+            parent: None,
             git_root,
             last_active: executor.system_now(),
             repo_root: None,
@@ -802,6 +810,11 @@ impl Workspace {
     /// [`Self::git_root`], else `(unnamed)`.
     pub(crate) fn display_name(&self) -> &str {
         display_name_of(&self.name, &self.git_root)
+    }
+
+    /// The uid that names this workspace's family, its parent's or its own.
+    pub(crate) fn family_root(&self) -> WorkspaceUid {
+        self.parent.unwrap_or(self.uid)
     }
 
     /// Give this workspace a new uid and the default name that goes with it.

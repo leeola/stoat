@@ -82,6 +82,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// the field; restore regenerates a default from `uid` in that case.
     #[serde(default)]
     pub name: String,
+    /// The family root the session was created from. `None` for a session a
+    /// launch opened, and on legacy files that predate the field.
+    #[serde(default)]
+    pub parent: Option<WorkspaceUid>,
     /// Finder scope this workspace last closed in, so `space p` reopens there.
     /// `None` on legacy files that predate the field and whenever no finder has
     /// closed here yet.
@@ -365,6 +369,7 @@ impl Workspace {
             rebase: self.rebase.clone(),
             rebase_active,
             name: self.name.clone(),
+            parent: self.parent,
             last_finder_scope: self.last_finder_scope.clone(),
             palette_history: self.palette_history.entries().to_vec(),
             search_history: self.search_history.entries().to_vec(),
@@ -407,6 +412,7 @@ impl Workspace {
             git_root: self.git_root.clone(),
             buffer_count: self.buffers.len(),
             remote_host: self.remote.as_ref().map(|target| target.host.clone()),
+            parent: self.parent,
         }
     }
 
@@ -543,6 +549,7 @@ impl Workspace {
         } else {
             state.name
         };
+        self.parent = state.parent;
         self.last_finder_scope = state.last_finder_scope;
         self.remote = state.remote;
         self.palette_history = InputHistory::from_entries(state.palette_history);
@@ -2417,6 +2424,22 @@ mod tests {
         let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
         assert_eq!(fresh.name, "my workspace");
+    }
+
+    #[test]
+    fn parent_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.parent = Some(WorkspaceUid(7));
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(fresh.parent, Some(WorkspaceUid(7)));
     }
 
     #[test]
