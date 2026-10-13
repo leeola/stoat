@@ -37,7 +37,8 @@ pub enum WorkspaceStatus {
 /// reports the row to switch to.
 ///
 /// The picker opens on the row after the active one, the session focused
-/// before it, so Enter at once returns there.
+/// before it, so Enter at once returns there. Enter on a query with no row
+/// creates a session of that name.
 pub struct WorkspacePicker {
     pub(crate) input: InputView,
     entries: Vec<PickerEntry>,

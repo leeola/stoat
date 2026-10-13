@@ -315,35 +315,49 @@ pub(crate) fn sync_workspace_picker(stoat: &mut Stoat) {
 ///
 /// An open row switches focus directly. An inactive on-disk row is brought back
 /// into the instance via [`activate_inactive_workspace`]. A selection on the
-/// already-active workspace or an empty picker just closes the picker.
+/// already-active workspace, or an empty query with no row, just closes the
+/// picker.
+///
+/// A query with no row names a new session, rooted where the active one is,
+/// and the picker enters it.
 ///
 /// An untouched active workspace whose row the picker omitted leaves the
-/// instance with the switch, since no row shows it and no save keeps it.
+/// instance with the switch or the create, since no row shows it and no save
+/// keeps it.
 pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.workspace_picker.take() else {
         return UpdateEffect::None;
     };
+    let query = picker
+        .input
+        .text(stoat.active_workspace())
+        .trim()
+        .to_owned();
     picker.dispose(stoat.active_workspace_mut());
 
-    let Some(entry) = picker.selected_entry() else {
-        return UpdateEffect::Redraw;
-    };
-
-    match (entry.id, entry.state_path.clone()) {
-        (Some(id), _) => {
-            if id == stoat.active_workspace {
-                return UpdateEffect::Redraw;
-            }
-            stoat.save_workspace(stoat.active_workspace);
-            switch_active_workspace(stoat, id);
+    match picker.selected_entry() {
+        None if query.is_empty() => return UpdateEffect::Redraw,
+        None => {
+            new_workspace(stoat);
+            stoat.active_workspace_mut().name = query.clone();
+            stoat.set_status(format!("created session {query}"));
         },
-        (None, Some(state_path)) => {
-            let git_root = entry.git_root.clone();
-            let uid = entry.uid;
-            let name = entry.basename.clone();
-            activate_inactive_workspace(stoat, git_root, uid, name, state_path);
+        Some(entry) => match (entry.id, entry.state_path.clone()) {
+            (Some(id), _) => {
+                if id == stoat.active_workspace {
+                    return UpdateEffect::Redraw;
+                }
+                stoat.save_workspace(stoat.active_workspace);
+                switch_active_workspace(stoat, id);
+            },
+            (None, Some(state_path)) => {
+                let git_root = entry.git_root.clone();
+                let uid = entry.uid;
+                let name = entry.basename.clone();
+                activate_inactive_workspace(stoat, git_root, uid, name, state_path);
+            },
+            (None, None) => return UpdateEffect::Redraw,
         },
-        (None, None) => return UpdateEffect::Redraw,
     }
 
     // The omit rule judged the workspace active when the picker opened, so the
@@ -1256,6 +1270,97 @@ mod tests {
             (stoat.workspaces.len(), stoat.active_workspace),
             (1, other),
             "the switch leaves only the workspace it entered"
+        );
+    }
+
+    #[test]
+    fn enter_on_a_query_with_no_row_creates_a_session_named_by_it() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        harness.stoat.active_workspace_mut().git_root = PathBuf::from("/proj");
+        let before = harness.stoat.workspaces.len();
+
+        harness.type_action("SwitchWorkspace()");
+        harness.type_text("notes");
+        harness.type_keys("enter");
+
+        let active = harness.stoat.active_workspace();
+        assert_eq!(
+            (
+                harness.stoat.workspaces.len(),
+                active.name.as_str(),
+                active.git_root.as_path(),
+                harness.stoat.pending_message.as_deref(),
+                harness.stoat.workspace_picker.is_none(),
+            ),
+            (
+                before + 1,
+                "notes",
+                Path::new("/proj"),
+                Some("created session notes"),
+                true,
+            ),
+            "the query names a new session rooted where the active one is"
+        );
+    }
+
+    /// The other workspace's row is deleted first, so the picker holds no row
+    /// and the bare Enter has nothing to create from.
+    #[test]
+    fn enter_on_an_empty_query_with_no_row_only_closes() {
+        let mut harness = Stoat::test();
+        harness.type_action("NewWorkspace()");
+        harness.type_action("SwitchWorkspace()");
+        harness.type_keys("delete");
+        assert_eq!(
+            harness
+                .stoat
+                .workspace_picker
+                .as_ref()
+                .map(|picker| picker.entries().len()),
+            Some(0),
+            "the picker holds no row"
+        );
+        let before = (
+            harness.stoat.workspaces.len(),
+            harness.stoat.active_workspace,
+        );
+
+        harness.type_keys("enter");
+
+        assert_eq!(
+            (
+                (
+                    harness.stoat.workspaces.len(),
+                    harness.stoat.active_workspace
+                ),
+                harness.stoat.workspace_picker.is_none()
+            ),
+            (before, true),
+            "the picker closes on the workspace it opened over"
+        );
+    }
+
+    #[test]
+    fn creating_a_session_from_a_fresh_launch_drops_the_launch_workspace() {
+        let mut harness = Stoat::test();
+        let launch = harness.stoat.active_workspace;
+        open_workspace_picker_over(
+            &mut harness.stoat,
+            vec![saved_session(WorkspaceUid(424242), "proj")],
+        );
+        harness.type_text("notes");
+        harness.type_keys("enter");
+
+        let stoat = &harness.stoat;
+        assert_eq!(
+            (
+                stoat.workspaces.len(),
+                stoat.workspaces.contains_key(launch),
+                stoat.active_workspace().name.as_str(),
+            ),
+            (1, false, "notes"),
+            "the created session replaces the launch workspace rather than joining it"
         );
     }
 
