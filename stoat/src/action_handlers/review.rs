@@ -14,7 +14,7 @@ use crate::{
     host::GitRepo,
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
-    pane::{FocusTarget, View},
+    pane::{FocusTarget, PaneId, View},
     review::{ReviewFileInput, ReviewHunk},
     review_apply::{
         base_line_ranges, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
@@ -398,12 +398,16 @@ pub(super) fn reopen_diff_view(stoat: &mut Stoat) {
 /// the cursor. A walkthrough stop over a file its commit did not touch must stay
 /// on that file, so a buffer with no hunks shows plain under the armed latch,
 /// the way a latched pane shows any clean file it navigates to.
+///
+/// A diff in any other split pane of the tab turns off, so the tab holds one
+/// diff.
 pub(super) fn latch_diff_view(stoat: &mut Stoat) {
     {
-        let panes = &mut stoat.active_workspace_mut().panes;
-        let focus = panes.focus();
-        panes.pane_mut(focus).diff_mode = true;
-        panes.widen(focus);
+        let ws = stoat.active_workspace_mut();
+        let focus = ws.panes.focus();
+        drop_other_diff_views(ws, focus);
+        ws.panes.pane_mut(focus).diff_mode = true;
+        ws.panes.widen(focus);
     }
 
     let Some((editor, buffer_id)) = stoat.focused_editor_ids() else {
@@ -421,13 +425,17 @@ pub(super) fn latch_diff_view(stoat: &mut Stoat) {
 /// caller that places the cursor itself calls this rather than the toggle.
 ///
 /// The widen makes the view a full-window screen. A layout action pressed on it
-/// closes the view rather than leaving it narrow beside a split.
+/// closes the view rather than leaving it narrow beside a split. A diff in any
+/// other split pane of the tab turns off, so the tab holds one diff.
 ///
 /// See also:
 /// - [`exit_diff_view`], the exit half, which undoes every piece of this.
 /// - [`close_full_window_screen`](super::pane::close_full_window_screen), which closes the view on
 ///   a layout action.
 pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
+    let focus = stoat.active_workspace().panes.focus();
+    drop_other_diff_views(stoat.active_workspace_mut(), focus);
+
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
     };
@@ -436,7 +444,6 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
     // Give the diff its own full width. An unwidenable layout stays put and
     // rides the unified fallback.
     let panes = &mut stoat.active_workspace_mut().panes;
-    let focus = panes.focus();
     panes.pane_mut(focus).diff_mode = true;
     panes.widen(focus);
 
@@ -486,6 +493,31 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
         panes.unwiden();
     }
     true
+}
+
+/// Turn the diff off in every split pane of the tab except `keep`.
+///
+/// A tab holds at most one diff, because the diff view is a full-window screen.
+/// A layout action on a diff closes it, but other paths still put the focus
+/// beside a diff. Examples are a click into a layout that refused the widen,
+/// and an agent or `stoat <paths>` open.
+///
+/// The pane's latch and its editor's flag both clear, because
+/// [`exit_diff_view`] counts either one as on. A latch left armed also opens
+/// the next changed file that the pane shows as a diff.
+fn drop_other_diff_views(ws: &mut Workspace, keep: PaneId) {
+    for id in ws.panes.split_pane_ids() {
+        if id == keep {
+            continue;
+        }
+        let pane = ws.panes.pane_mut(id);
+        pane.diff_mode = false;
+        if let View::Editor(editor_id) = pane.view
+            && let Some(editor) = ws.editors.get_mut(editor_id)
+        {
+            editor.set_diff_view(false);
+        }
+    }
 }
 
 /// Toggle the live per-file diff view on the focused editor, driven by
@@ -2387,6 +2419,43 @@ mod tests {
                 Some("diff closed"),
             ),
         );
+    }
+
+    /// Opening a diff turns off a diff that another pane of the tab still
+    /// shows, whether the open toggles or latches, so the tab holds one diff.
+    #[test]
+    fn opening_a_diff_turns_off_the_diff_beside_it() {
+        let toggle: fn(&mut TestHarness) = |h| run(h, &stoat_action::Diff { rev: None });
+        let latch: fn(&mut TestHarness) = |h| {
+            super::latch_diff_view(&mut h.stoat);
+            h.settle();
+        };
+        for (name, open) in [("toggle", toggle), ("latch", latch)] {
+            let mut h = half_staged_harness();
+            let left = h.stoat.active_workspace().panes.focus();
+            let (left_editor, _) = h.stoat.focused_editor_ids().expect("editor");
+            run(&mut h, &stoat_action::SplitRight);
+            let (right_editor, _) = h.stoat.focused_editor_ids().expect("editor");
+
+            {
+                let ws = h.stoat.active_workspace_mut();
+                ws.panes.pane_mut(left).diff_mode = true;
+                ws.editors[left_editor].set_diff_view(true);
+            }
+
+            open(&mut h);
+
+            let ws = h.stoat.active_workspace();
+            assert_eq!(
+                (
+                    ws.panes.pane(left).diff_mode,
+                    ws.editors[left_editor].diff_view,
+                    ws.editors[right_editor].diff_view,
+                ),
+                (false, false, true),
+                "after the {name}, only the right pane shows a diff",
+            );
+        }
     }
 
     /// The pane count, the screen in front, whether a pane is widened, and the
