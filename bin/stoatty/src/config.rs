@@ -64,6 +64,12 @@ pub struct Config {
     #[serde(default)]
     pub theme: String,
 
+    /// Level of the stoatty log for the stoat crates, a bare level (`error`,
+    /// `warn`, `info`, `debug`, `trace`) or a full tracing directive string.
+    /// `STOAT_LOG` or `RUST_LOG` in the environment overrides it.
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+
     /// Whether the renderer shapes contiguous same-style cell runs together so
     /// the font's ligatures form across cells. When off, each cell is shaped on
     /// its own, so no ligatures appear.
@@ -228,6 +234,12 @@ pub enum CursorAnimation {
 /// `serde(default)` on [`Config::cursor_animation`].
 fn default_cursor_animation() -> CursorAnimation {
     CursorAnimation::Block
+}
+
+/// The log level used when the config omits the key, for the `serde(default)`
+/// on [`Config::log_level`].
+fn default_log_level() -> String {
+    "debug".to_string()
 }
 
 /// A program to launch over the PTY instead of the default shell, with its
@@ -507,12 +519,19 @@ mod tests {
         assert_eq!(config.font_size, 14);
         assert_eq!(config.font_family, ["JetBrains Mono", "monospace"]);
         assert_eq!(config.theme, "one-dark");
+        assert_eq!(config.log_level, "debug");
     }
 
     #[test]
     fn user_file_overrides_set_fields() {
         let config = settle("font_size = 30", Some("font_size = 18")).unwrap();
         assert_eq!(config.font_size, 18);
+    }
+
+    #[test]
+    fn user_file_sets_the_log_level() {
+        let config = settle("font_size = 30", Some("log_level = \"trace\"")).unwrap();
+        assert_eq!(config.log_level, "trace");
     }
 
     #[test]

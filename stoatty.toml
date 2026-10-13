@@ -41,6 +41,13 @@ ligatures = true
 # the cursor stays on the text as it is typed.
 cursor_animation = "block"
 
+# The level of the stoatty log for stoatty's own crates, which is error, warn,
+# info, debug, or trace. Debug is the default, and it carries the diagnostic
+# lines a bug report needs. A full tracing directive string such as
+# "stoatty=trace,stoatty_render=info" works too. STOAT_LOG or RUST_LOG in the
+# environment overrides this setting.
+log_level = "debug"
+
 # Program to launch over the PTY instead of your default shell. Uncomment and
 # set `program` to override; `args` is optional and defaults to none. Left out,
 # stoatty runs your default shell.

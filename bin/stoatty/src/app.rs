@@ -156,6 +156,7 @@ pub fn run(
     // Ahead of the config read, so the system-font scan overlaps that too.
     let font_load = FontLoad::spawn();
     let mut config = load_config();
+    apply_log_level(&config);
     let (program, args, stoat_dir) = if let Some((program, args)) = command {
         (program, args, None)
     } else if terminal {
@@ -209,16 +210,10 @@ pub fn run(
 pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
     let start = Instant::now();
     let font_load = FontLoad::spawn();
+    let config = load_config();
+    apply_log_level(&config);
     run_with_config(
-        start,
-        font_load,
-        load_config(),
-        program,
-        args,
-        size,
-        None,
-        None,
-        false,
+        start, font_load, config, program, args, size, None, None, false,
     );
 }
 
@@ -297,6 +292,18 @@ fn load_config() -> Config {
         eprintln!("stoatty: could not load config, using built-in defaults: {error}");
         config::embedded_default()
     })
+}
+
+/// Point the stoatty log at the level the config names.
+///
+/// A level that does not parse keeps the running level and logs a warning, so
+/// a typo in a reloaded config never turns the log off. `STOAT_LOG` or
+/// `RUST_LOG` at launch keeps its own filter, as [`stoat_log::set_level`]
+/// documents.
+fn apply_log_level(config: &Config) {
+    if let Err(error) = stoat_log::set_level(&config.log_level) {
+        tracing::warn!(%error, "log_level did not parse, so the running level stays");
+    }
 }
 
 /// Shell activity delivered from the reader thread to the event loop.
@@ -2273,6 +2280,7 @@ fn apply_config_reload(
             return;
         },
     };
+    apply_log_level(&config);
 
     *theme = config.resolve_theme();
     theme_name.clone_from(&config.theme);
