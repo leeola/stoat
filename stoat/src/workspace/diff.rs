@@ -1518,7 +1518,8 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// block washes what it actually changed rather than every line's prefix.
 /// Without either, when either text is over
 /// [`structural_diff::DEFAULT_BYTE_LIMIT`], or when the tree pass falls back to
-/// lines, the line pass's char-refined spans stand.
+/// lines, the line pass's char-refined spans stand. A file with no hunk skips
+/// the tree pass, because the pass only details the line pass's hunks.
 ///
 /// `buffer_tree` is a tree already parsed from `buffer_text`, which the tree
 /// pass takes in place of parsing the buffer a second time. It must describe
@@ -1594,10 +1595,12 @@ pub(super) fn compute_diff_map(
         let mut hunks = changes_to_hunks(&result.changes, base_text, buffer_text);
         mark_staged(&mut hunks, &staged_changed);
 
-        // The tree pass answers only what the washes should mark. A parse
+        // The tree pass answers only what the washes mark. It details only the
+        // hunks the line pass found, so a file with no hunk skips it. A parse
         // failure or a fall back to lines leaves the line pass's char-refined
         // spans in place, which is what the view showed before this ran.
-        if let Some(language) = language
+        if !hunks.is_empty()
+            && let Some(language) = language
             && let Some(tree) = structural_diff::diff_with_language_cancellable(
                 language,
                 base_text,
@@ -1616,9 +1619,10 @@ pub(super) fn compute_diff_map(
         diff_map.set_staged_marks(staged_marks(from, base_text));
     }
     if let Some(language) = language {
-        // When both texts are within the byte limit, the structural pass above
-        // parsed this exact base into `tree_memo`, so the highlight parse is
-        // already paid for.
+        // The left column paints the base's context lines with these colors, so
+        // a file with no hunk still needs them. When the tree pass above ran,
+        // it parsed this exact base into `tree_memo`, and this call reads that
+        // tree. Otherwise this call parses the base itself.
         diff_map.set_base_highlights(compute_base_highlights(
             base_text,
             language,
@@ -2068,7 +2072,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use stoat_action::{DiffAgainstIndex, StageHunk};
-    use stoat_language::{parse, structural_diff::TreeCache, LanguageRegistry};
+    use stoat_language::{parse, structural_diff::TreeCache, Language, LanguageRegistry};
 
     /// The bar reads the totals and a file list reads the per-file counts, so
     /// both come off one stored tally rather than two walks that could disagree.
@@ -2500,6 +2504,41 @@ mod tests {
         );
     }
 
+    /// A file equal to its base skips the tree pass, which has no hunk to
+    /// detail. The left column still paints the base's colors, so the base
+    /// highlights must not ride on that pass.
+    #[test]
+    fn an_unchanged_file_still_gets_its_base_highlights() {
+        let (styles, language) = themed_language(
+            "a.rs",
+            r##"theme t {
+                syntax.keyword.fg = "#050505";
+            }"##,
+        );
+        let text = "fn main() {}\n";
+
+        let diff_map = compute_diff_map(
+            text,
+            Some(&language),
+            &styles,
+            &Arc::new(Mutex::new(BaseHighlightMemo::default())),
+            &diff_base(text, text, None),
+            Some(&TreeCache::default()),
+            None,
+        )
+        .expect("a tracked file has a diff map");
+
+        let first_token = diff_map
+            .base_highlights_for_line(0)
+            .and_then(|spans| spans.iter().find(|(range, _)| range.contains(&0)))
+            .map(|(range, style)| (range.clone(), style.foreground));
+        assert_eq!(
+            (diff_map.hunks().count(), first_token),
+            (0, Some((0..2, Some(Color::Rgb(5, 5, 5))))),
+            "the file has no hunk, and its base `fn` still paints as a keyword",
+        );
+    }
+
     /// The map the line pass alone builds for `buffer` against `base`.
     fn plain_diff(buffer: &str, base: &DiffBaseText) -> DiffMap {
         compute_diff_map(
@@ -2661,6 +2700,15 @@ mod tests {
     /// theme parsed from `theme_src`, with every standard language's highlight
     /// map pointed at that theme.
     fn themed_base_highlights(path: &str, theme_src: &str, text: &str) -> Arc<BaseHighlights> {
+        let (styles, language) = themed_language(path, theme_src);
+        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
+        compute_base_highlights(text, &language, &styles, &cache, None)
+    }
+
+    /// The syntax styles of a theme parsed from `theme_src`, and the language
+    /// `path` selects, with every standard language's highlight map pointed at
+    /// those styles.
+    fn themed_language(path: &str, theme_src: &str) -> (SyntaxStyles, Arc<Language>) {
         let (config, errors) = stoat_config::parse(theme_src);
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         let theme = Theme::from_config(&config.expect("a theme config"), "t").expect("a theme");
@@ -2670,8 +2718,7 @@ mod tests {
         let language = registry
             .for_path(Path::new(path))
             .expect("a bundled language");
-        let cache: BaseHighlightCache = Arc::new(Mutex::new(BaseHighlightMemo::default()));
-        compute_base_highlights(text, &language, &styles, &cache, None)
+        (styles, language)
     }
 
     fn input(base: &str, buffer: &str) -> ReviewFileInput {
