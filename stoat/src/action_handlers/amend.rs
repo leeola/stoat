@@ -59,16 +59,22 @@ pub(super) const PAIR_REFUSED: &str = "no staging while the diff compares two fi
 /// or a walk standing on the tip it started from, where nothing follows at
 /// all. An amend anywhere else orphans the commits sitting on top, which is
 /// work the user never asked to lose.
-pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo) -> AmendRoute {
+///
+/// A press on `path` refuses while `path` measures against another file,
+/// whatever the workspace's base.
+pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo, path: &Path) -> AmendRoute {
     let ws = stoat.active_workspace();
+    // The hunks measure one file against another, which no index or commit
+    // holds.
+    if ws.pair_for(path).is_some() {
+        return AmendRoute::Refused(PAIR_REFUSED);
+    }
     let base_sha = match ws.diff_base() {
         None | Some(DiffBase::Head) => return AmendRoute::Index,
         Some(DiffBase::Rev { sha, .. }) => sha.clone(),
         // An agent's proposal sits under no commit, so there is nothing to
         // amend it into.
         Some(DiffBase::Memory { .. }) => return AmendRoute::Refused(REFUSED_BADGE),
-        // The hunks measure one file against another, which no index or
-        // commit holds.
         Some(DiffBase::Pair { .. }) => return AmendRoute::Refused(PAIR_REFUSED),
     };
     let Some(head_sha) = repo.resolve_rev("HEAD") else {
@@ -402,7 +408,7 @@ mod tests {
         git_jobs,
         rebase::{ActiveRebase, RebasePause},
         test_harness::{CommitSpec, TestHarness},
-        workspace::diff,
+        workspace::diff::{self, PairBase},
     };
     use std::{
         collections::{HashMap, VecDeque},
@@ -864,14 +870,14 @@ mod tests {
     #[test]
     fn a_pair_base_refuses_to_stage() {
         let mut h = walking_the_tip();
-        h.stoat
-            .active_workspace_mut()
-            .set_diff_base(Some(DiffBase::Pair {
-                path: "/repo/a.rs".into(),
+        h.stoat.active_workspace_mut().set_pair(
+            "/repo/a.rs".into(),
+            PairBase {
                 base_path: "/repo/other.rs".into(),
                 text: Arc::new("a\nb\nc\n".to_string()),
                 base_version: 0,
-            }));
+            },
+        );
         cursor_to(&mut h, 2);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);

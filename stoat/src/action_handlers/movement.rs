@@ -4184,10 +4184,10 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     if landings.is_empty() {
         // The repository's changed files are no part of a comparison of two
         // files, so the walk ends where the file's differences end.
-        if matches!(
-            stoat.active_workspace().diff_base(),
-            Some(DiffBase::Pair { .. })
-        ) {
+        if current_path
+            .as_deref()
+            .is_some_and(|path| stoat.active_workspace().pair_for(path).is_some())
+        {
             stoat.set_status("no more changes");
             return UpdateEffect::Redraw;
         }

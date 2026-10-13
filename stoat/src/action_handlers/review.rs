@@ -23,8 +23,8 @@ use crate::{
     review_session::DiffDocument,
     workspace::{
         diff::{
-            self, compute_base_highlights, BaseHighlightCache, DiffBase, DiffLanding, RevOrigin,
-            WorktreeBase,
+            self, compute_base_highlights, BaseHighlightCache, DiffBase, DiffLanding, PairBase,
+            RevOrigin, WorktreeBase,
         },
         Workspace,
     },
@@ -156,6 +156,9 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 /// a revision land somewhere worth reading: with a base further back, the file
 /// the reader wants is rarely the one on screen.
 ///
+/// The focused file's pair gives way to the revision, and a pair over any other
+/// file holds.
+///
 /// A revision the repository cannot resolve changes nothing at all: it badges
 /// and leaves the view, the latch, and the base where they were. A command that
 /// half-applies leaves the reader worse off than one that refuses.
@@ -192,6 +195,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
 
+    drop_focused_pair(stoat);
     stoat
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::named(rev, sha)));
@@ -205,12 +209,14 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
 /// Pick `base` as the working tree's own base and show the diff view over it.
 ///
 /// The pick holds after the view closes, so the gutter of a plain pane keeps
-/// marking against it. A revision, a review, or a proposal base gives way to
-/// the pick, but the checkout a review made stays where it is.
+/// marking against it. A revision, a review, a proposal base, or the focused
+/// file's pair gives way to the pick, but the checkout a review made stays
+/// where it is.
 ///
 /// The base already installed with the view open costs nothing, not even a
 /// re-diff. With the view closed, the view opens over that base.
 pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffect {
+    let paired = drop_focused_pair(stoat);
     let ws = stoat.active_workspace();
     let same = ws.worktree_base() == base
         && matches!(
@@ -218,7 +224,7 @@ pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffec
             (None, WorktreeBase::Index) | (Some(DiffBase::Head), WorktreeBase::Head)
         );
     let view_on = super::focused_editor_mut(stoat).is_some_and(|editor| editor.diff_view);
-    if same && view_on {
+    if same && view_on && !paired {
         return UpdateEffect::Redraw;
     }
 
@@ -233,17 +239,19 @@ pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffec
 /// Flip the working tree's own base between the index and HEAD, and name both
 /// sides of the diff in the status line.
 ///
-/// A revision, a review, a proposal, or a pair base gives way to the pick on
-/// the first press, with no flip, so one press always lands back on the
-/// working tree. The next press flips.
+/// A revision, a review, a proposal, or the focused file's pair gives way to
+/// the pick on the first press, with no flip, so one press always lands back
+/// on the working tree. The next press flips.
 ///
 /// The diff view stays open or closed, and the cursor stays where it is.
 pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
+    let paired = drop_focused_pair(stoat);
     let ws = stoat.active_workspace();
-    let displaced = matches!(
-        ws.diff_base(),
-        Some(DiffBase::Rev { .. } | DiffBase::Memory { .. } | DiffBase::Pair { .. })
-    );
+    let displaced = paired
+        || matches!(
+            ws.diff_base(),
+            Some(DiffBase::Rev { .. } | DiffBase::Memory { .. } | DiffBase::Pair { .. })
+        );
     let next = match (displaced, ws.worktree_base()) {
         (true, pick) => pick,
         (false, WorktreeBase::Index) => WorktreeBase::Head,
@@ -263,9 +271,10 @@ pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
 /// points the diff at it, and Escape changes nothing. A revision the reader
 /// named seeds as typed, and a review seeds its parent's short sha. A base with
 /// no revision name to retype, the empty parent of a root commit, an agent
-/// proposal, or a pair of files, seeds a bare `diff `.
+/// proposal, or the focused file's pair, seeds a bare `diff `.
 pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     let seed = match stoat.active_workspace().diff_base() {
+        _ if focused_file_pair(stoat).is_some() => "diff ".to_string(),
         Some(DiffBase::Rev {
             origin: RevOrigin::Named(name),
             ..
@@ -287,8 +296,10 @@ pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
 /// first file's buffer text, unsaved edits included, and the diff drive keeps
 /// it in step with that buffer.
 ///
-/// The pair base displaces a revision, a review, or a proposal base, and the
-/// checkout a review made stays. Closing returns to the working tree's base.
+/// The pair holds for the measured file alone. Every other file keeps the
+/// workspace's base, and a pair in another tab stays as it is. A second pair
+/// for the same file replaces the first, and closing returns the file to the
+/// workspace's base.
 ///
 /// Two equal files open the view with equal columns and a status that says
 /// so. With no pair it badges and changes nothing.
@@ -311,11 +322,9 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
         ) else {
             return UpdateEffect::None;
         };
-        let installed = matches!(
-            ws.diff_base(),
-            Some(DiffBase::Pair { path: p, base_path: b, .. })
-                if p.as_path() == path && b.as_path() == base_path
-        );
+        let installed = ws
+            .pair_for(path)
+            .is_some_and(|pair| pair.base_path == base_path);
         let view_on = match ws.panes.pane(target_pane).view {
             View::Editor(id) => ws.editors.get(id).is_some_and(|editor| editor.diff_view),
             _ => false,
@@ -335,7 +344,7 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
 
     if showing {
         exit_diff_view(stoat);
-        stoat.active_workspace_mut().set_diff_base(None);
+        stoat.active_workspace_mut().remove_pair(&path);
         return UpdateEffect::Redraw;
     }
 
@@ -354,14 +363,14 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
     else {
         return UpdateEffect::None;
     };
-    stoat
-        .active_workspace_mut()
-        .set_diff_base(Some(DiffBase::Pair {
-            path,
+    stoat.active_workspace_mut().set_pair(
+        path,
+        PairBase {
             base_path,
             text,
             base_version,
-        }));
+        },
+    );
     reopen_diff_view(stoat);
 
     if let Some((editor_id, _)) = stoat.focused_editor_ids()
@@ -499,7 +508,8 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
     }
 
     if exit_diff_view(stoat) {
-        stoat.active_workspace_mut().set_diff_base(None);
+        drop_focused_pair(stoat);
+        stoat.active_workspace_mut().drop_diff_base();
         return;
     }
 
@@ -872,7 +882,7 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         // Decided before the hunk is resolved, so a refusal says why the
         // transport is unavailable rather than reporting whatever sits under
         // the cursor.
-        let target = match amend::amend_route(stoat, &*repo) {
+        let target = match amend::amend_route(stoat, &*repo, &path) {
             AmendRoute::Index => None,
             AmendRoute::Commit(target) => Some(target),
             AmendRoute::Refused(why) => {
@@ -968,6 +978,26 @@ fn review_rev(ws: &Workspace) -> Option<Option<String>> {
         | Some(DiffBase::Memory { .. })
         | Some(DiffBase::Pair { .. }) => None,
     }
+}
+
+/// The focused editor's file, when it measures against another file.
+fn focused_file_pair(stoat: &Stoat) -> Option<std::path::PathBuf> {
+    let (_, buffer_id) = stoat.focused_editor_ids()?;
+    let ws = stoat.active_workspace();
+    let path = ws.buffers.path_for(buffer_id)?;
+    ws.pair_for(path).map(|_| path.to_path_buf())
+}
+
+/// Return the focused file to the workspace's base, and answer whether it had
+/// a pair.
+///
+/// Every command that points the focused file at a base of its own drops the
+/// pair first, since a pair wins over the workspace's base for its file.
+fn drop_focused_pair(stoat: &mut Stoat) -> bool {
+    let Some(path) = focused_file_pair(stoat) else {
+        return false;
+    };
+    stoat.active_workspace_mut().remove_pair(&path)
 }
 
 /// Report a landed staging press, and stale the gutter's map when git moved.
@@ -1488,8 +1518,8 @@ pub(crate) fn populate_diff_cache_from(
 #[cfg(test)]
 mod tests {
     use super::{
-        attach_preview_highlights, build_document_from_changes, stage_rows_patch,
-        unstage_rows_patch,
+        attach_preview_highlights, build_document_from_changes, editor_shows_changes,
+        stage_rows_patch, unstage_rows_patch,
     };
     use crate::{
         badge::BadgeSource,
@@ -2140,13 +2170,13 @@ mod tests {
         let mut h = pair_harness();
         run(&mut h, &stoat_action::DiffPair);
         assert_eq!(
-            (pair_base(&h), pair_view(&mut h), review_cursor_row(&mut h)),
             (
-                Some((
-                    "/pair/a.txt".into(),
-                    "/pair/b.txt".into(),
-                    "one\ntwo\nthree\n".into()
-                )),
+                pair_base(&h, "/pair/b.txt"),
+                pair_view(&mut h),
+                review_cursor_row(&mut h)
+            ),
+            (
+                Some(("/pair/a.txt".into(), "one\ntwo\nthree\n".into())),
                 (true, true, Some(PathBuf::from("/pair/b.txt"))),
                 1,
             ),
@@ -2161,7 +2191,7 @@ mod tests {
         run(&mut h, &stoat_action::DiffPair);
         run(&mut h, &stoat_action::DiffPair);
         assert_eq!(
-            (pair_base(&h), pair_view(&mut h)),
+            (pair_base(&h, "/pair/b.txt"), pair_view(&mut h)),
             (None, (false, false, Some(PathBuf::from("/pair/b.txt")))),
         );
     }
@@ -2191,10 +2221,7 @@ mod tests {
 
     #[test]
     fn the_change_walk_ends_inside_a_pair() {
-        let mut h = TestHarness::with_size(120, 20);
-        h.stage_review_scenario("/repo", &[("c.txt", "1\n", "2\n")]);
-        h.open_side_by_side(("/repo/a.txt", "one\ntwo\n"), ("/repo/b.txt", "one\nTWO\n"));
-        run(&mut h, &stoat_action::DiffPair);
+        let mut h = repo_pair_harness();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
 
         let path = pair_view(&mut h).2;
@@ -2210,6 +2237,128 @@ mod tests {
                 Some(PathBuf::from("/repo/b.txt"))
             ),
         );
+    }
+
+    /// A git diff in another tab is no part of the pair, so closing it leaves
+    /// the pair and its view as they were.
+    #[test]
+    fn a_git_diff_closed_in_another_tab_leaves_the_pair() {
+        let mut h = repo_pair_harness();
+        run(&mut h, &stoat_action::NewTab);
+        h.open_file(Path::new("/repo/c.txt"));
+        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::PrevTab);
+
+        assert_eq!(
+            (pair_base(&h, "/repo/b.txt"), pair_view(&mut h)),
+            (
+                Some(("/repo/a.txt".into(), "one\ntwo\n".into())),
+                (true, true, Some(PathBuf::from("/repo/b.txt"))),
+            ),
+        );
+    }
+
+    #[test]
+    fn two_pairs_in_two_tabs_coexist() {
+        let h = two_tab_pairs();
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                pair_base(&h, "/repo/b.txt"),
+                pair_base(&h, "/repo/d.txt"),
+                [ws.tab_title(0), ws.tab_title(1)],
+            ),
+            (
+                Some(("/repo/a.txt".into(), "one\ntwo\n".into())),
+                Some(("/repo/c2.txt".into(), "x\ny\n".into())),
+                ["a.txt → b.txt".to_string(), "c2.txt → d.txt".to_string()],
+            ),
+            "each tab measures and names its own pair",
+        );
+    }
+
+    #[test]
+    fn closing_a_pair_view_drops_only_its_own_pair() {
+        let mut h = two_tab_pairs();
+        h.stoat.set_diff_warm_auto(true);
+        run(&mut h, &stoat_action::DiffPair);
+        h.settle_diff_jobs();
+
+        let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
+        assert_eq!(
+            (
+                pair_base(&h, "/repo/b.txt"),
+                pair_base(&h, "/repo/d.txt"),
+                editor_shows_changes(&mut h.stoat, editor),
+            ),
+            (
+                Some(("/repo/a.txt".into(), "one\ntwo\n".into())),
+                None,
+                false
+            ),
+            "d.txt diffs against the repo again, which does not track it",
+        );
+    }
+
+    /// Every diff command over a paired file returns the file to the base the
+    /// command names, or to the workspace's base for the bare close. The base
+    /// edit seeds a bare `diff `, since a pair has no revision to retype.
+    #[test]
+    fn diff_commands_over_a_paired_file_drop_its_pair() {
+        let paired = || {
+            let (mut h, _) = diff_rev_harness();
+            h.open_side_by_side(("/repo/a.txt", "one\n"), ("/repo/b.txt", "one\ntwo\n"));
+            run(&mut h, &stoat_action::DiffPair);
+            h
+        };
+        let after = |action: &dyn Action| {
+            let mut h = paired();
+            run(&mut h, action);
+            pair_base(&h, "/repo/b.txt")
+        };
+        let named = |rev: &str| stoat_action::Diff {
+            rev: Some(rev.to_string()),
+        };
+
+        assert_eq!(
+            (
+                pair_base(&paired(), "/repo/b.txt"),
+                base_edit_seed(&mut paired()),
+                [
+                    after(&stoat_action::Diff { rev: None }),
+                    after(&named("HEAD")),
+                    after(&named("index")),
+                    after(&named("base0")),
+                    after(&stoat_action::DiffBaseToggle),
+                ],
+            ),
+            (
+                Some(("/repo/a.txt".into(), "one\n".into())),
+                Some("diff ".to_string()),
+                [None, None, None, None, None],
+            ),
+        );
+    }
+
+    /// `/repo/b.txt` diffed against `/repo/a.txt`, in a repo whose own change
+    /// is `c.txt`.
+    fn repo_pair_harness() -> TestHarness {
+        let mut h = TestHarness::with_size(120, 20);
+        h.stage_review_scenario("/repo", &[("c.txt", "1\n", "2\n")]);
+        h.open_side_by_side(("/repo/a.txt", "one\ntwo\n"), ("/repo/b.txt", "one\nTWO\n"));
+        run(&mut h, &stoat_action::DiffPair);
+        h
+    }
+
+    /// [`repo_pair_harness`] with a second tab, active, that diffs
+    /// `/repo/d.txt` against `/repo/c2.txt`.
+    fn two_tab_pairs() -> TestHarness {
+        let mut h = repo_pair_harness();
+        run(&mut h, &stoat_action::NewTab);
+        h.open_side_by_side(("/repo/c2.txt", "x\ny\n"), ("/repo/d.txt", "x\nY\n"));
+        run(&mut h, &stoat_action::DiffPair);
+        h
     }
 
     #[test]
@@ -2244,22 +2393,10 @@ mod tests {
         h
     }
 
-    /// The `(base_path, path, text)` a [`DiffBase::Pair`] override carries.
-    fn pair_base(h: &TestHarness) -> Option<(String, String, String)> {
-        let Some(DiffBase::Pair {
-            path,
-            base_path,
-            text,
-            ..
-        }) = h.stoat.active_workspace().diff_base()
-        else {
-            return None;
-        };
-        Some((
-            base_path.display().to_string(),
-            path.display().to_string(),
-            text.to_string(),
-        ))
+    /// The `(base_path, text)` of the pair `path` measures against.
+    fn pair_base(h: &TestHarness, path: &str) -> Option<(String, String)> {
+        let pair = h.stoat.active_workspace().pair_for(Path::new(path))?;
+        Some((pair.base_path.display().to_string(), pair.text.to_string()))
     }
 
     /// The focused editor's diff flag, whether the focused pane is widened, and

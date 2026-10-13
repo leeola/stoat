@@ -111,16 +111,13 @@ pub(crate) enum DiffBase {
     /// One open file measured against another, for two files git does not
     /// relate.
     ///
-    /// `path`'s buffer diffs against `text`, the content of `base_path`. Every
-    /// other path diffs against the index, as with no override. `text` follows
-    /// the base file's buffer while that buffer is open.
+    /// A diff job builds it for one path from [`DiffState::pairs`], and
+    /// [`DiffState::base_override`] never holds it. `path`'s buffer diffs
+    /// against `text`, the content of `base_path`.
     Pair {
         path: PathBuf,
         base_path: PathBuf,
         text: Arc<String>,
-        /// The version of the base file's buffer that `text` was read at,
-        /// which is how the diff drive knows the base moved.
-        base_version: u64,
     },
 }
 
@@ -157,6 +154,22 @@ pub(crate) enum RevOrigin {
     ParentOf(String),
 }
 
+/// The other open file that one file measures against, for two files git does
+/// not relate.
+///
+/// [`DiffState::pairs`] keys it by the measured file, which diffs against
+/// `text` while every other file keeps the workspace's base.
+#[derive(Clone)]
+pub(crate) struct PairBase {
+    pub(crate) base_path: PathBuf,
+    /// The content of `base_path`, which follows the base file's buffer while
+    /// that buffer is open.
+    pub(crate) text: Arc<String>,
+    /// The version of the base file's buffer that `text` was read at, which is
+    /// how the diff drive knows the base moved.
+    pub(crate) base_version: u64,
+}
+
 /// Which of its two own bases the working tree diffs against, picked by the
 /// reader.
 ///
@@ -185,9 +198,9 @@ static HEAD_BASE: DiffBase = DiffBase::Head;
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
 /// last one read.
 ///
-/// Every entry is keyed by buffer except the blob cache, which is keyed by
-/// path, because a blob belongs to a file rather than to whichever buffer
-/// happens to hold it open.
+/// Every entry is keyed by buffer except the blob cache and the pairs, which
+/// are keyed by path, because a blob or a pair belongs to a file rather than
+/// to whichever buffer happens to hold it open.
 #[derive(Default)]
 pub(crate) struct DiffState {
     /// In-flight diff-map population jobs, one per buffer. Held so the spawned
@@ -241,11 +254,21 @@ pub(crate) struct DiffState {
     /// does.
     ///
     /// Set through [`super::Workspace::set_diff_base`], which invalidates
-    /// every buffer, since a base change moves every diff in the workspace.
+    /// every buffer, since a base change moves every diff in the workspace. It
+    /// never holds a [`DiffBase::Pair`], since a pair belongs to one file.
     ///
     /// See also:
     /// - [`Self::effective_base`] for the base the buffers diff against.
+    /// - [`Self::pairs`] for the files that measure against another file.
     pub(super) base_override: Option<DiffBase>,
+    /// The files measured against another open file, keyed by the measured
+    /// path.
+    ///
+    /// A buffer holds one diff map, so a file measures against one base at a
+    /// time, and a second pair for a file replaces the first. A pair holds for
+    /// its own file alone, so pairs in other tabs and a git diff beside them
+    /// stay as they are.
+    pub(super) pairs: HashMap<PathBuf, PairBase>,
     /// The base the working tree diffs against when nothing displaces it.
     ///
     /// Every caller that drops a revision, a review, or a proposal lands on
@@ -287,22 +310,22 @@ pub(crate) struct DiffState {
     /// The redraw timers [`Self::settled`] arms, held so they are not cancelled
     /// on drop. Replaced per buffer, so a burst keeps one.
     settle_timers: HashMap<BufferId, Task<()>>,
-    /// The base buffer version that a pair base waits to settle, and when that
-    /// version was first seen.
+    /// The base buffer version that each pair waits to settle, and when that
+    /// version was first seen, keyed by the measured path.
     ///
-    /// A slot of its own rather than an entry in [`Self::settle`], which the
+    /// A map of its own rather than entries in [`Self::settle`], which the
     /// base buffer's own diff keys by the same buffer and version. That map
     /// drops its entry when it answers, so a shared entry opens a second window
     /// for whichever caller asks second.
-    pair_settle: Option<(u64, Instant)>,
-    /// The redraw timer for the [`Self::pair_settle`] window, held so it is not
-    /// cancelled on drop.
-    pair_settle_timer: Option<Task<()>>,
+    pair_settle: HashMap<PathBuf, (u64, Instant)>,
+    /// The redraw timers for the [`Self::pair_settle`] windows, held so they
+    /// are not cancelled on drop.
+    pair_settle_timers: HashMap<PathBuf, Task<()>>,
 }
 
 impl DiffState {
-    /// The base buffers diff against, `None` while the pick is the index and
-    /// nothing displaces it.
+    /// The base every file without a pair diffs against, `None` while the pick
+    /// is the index and nothing displaces it.
     ///
     /// A displacing base wins over the pick, and HEAD, the default pick,
     /// answers [`DiffBase::Head`].
@@ -311,6 +334,19 @@ impl DiffState {
             WorktreeBase::Head => Some(&HEAD_BASE),
             WorktreeBase::Index => None,
         })
+    }
+
+    /// The base a diff job measures `path` against, its pair when it has one
+    /// and [`Self::effective_base`] otherwise.
+    fn base_for(&self, path: &Path) -> Option<DiffBase> {
+        match self.pairs.get(path) {
+            Some(pair) => Some(DiffBase::Pair {
+                path: path.to_path_buf(),
+                base_path: pair.base_path.clone(),
+                text: pair.text.clone(),
+            }),
+            None => self.effective_base().cloned(),
+        }
     }
 
     /// Force the next drive to recompute `id`'s diff map against fresh blobs,
@@ -334,6 +370,39 @@ impl DiffState {
         self.tally_current = false;
         if let Some(path) = path {
             self.base_text.remove(path);
+        }
+    }
+
+    /// Measure `path` against `pair`, in place of any pair it had, where `id`
+    /// is the measured file's open buffer.
+    ///
+    /// Only `path` re-diffs, and with no settle window, since its own text did
+    /// not move.
+    pub(super) fn set_pair(&mut self, path: PathBuf, pair: PairBase, id: Option<BufferId>) {
+        self.stale_measured(&path, id);
+        self.pairs.insert(path, pair);
+    }
+
+    /// Return `path` to the workspace's base, and answer whether it had a pair.
+    ///
+    /// Only `path` re-diffs, as after [`Self::set_pair`].
+    pub(super) fn remove_pair(&mut self, path: &Path, id: Option<BufferId>) -> bool {
+        if self.pairs.remove(path).is_none() {
+            return false;
+        }
+        self.stale_measured(path, id);
+        true
+    }
+
+    /// Drop `path`'s pair settle window, and stale its map and its cached base.
+    fn stale_measured(&mut self, path: &Path, id: Option<BufferId>) {
+        self.pair_settle.remove(path);
+        self.pair_settle_timers.remove(path);
+        match id {
+            Some(id) => self.invalidate(id, Some(path)),
+            None => {
+                self.base_text.remove(path);
+            },
         }
     }
 
@@ -561,7 +630,7 @@ impl DiffState {
             let redraw = redraw_notify.clone();
             let syntax_styles = syntax_styles.clone();
             let base_cache = base_cache.clone();
-            let diff_base = self.effective_base().cloned();
+            let diff_base = self.base_for(&path);
             let cached_base = self.base_text.get(&path).cloned();
             let tree_cache = whole.then(|| self.tree_cache.clone());
             move || {
@@ -695,70 +764,56 @@ impl DiffState {
         self.versions.insert(id, version);
     }
 
-    /// Re-read a pair base's text once the base file's buffer has held a new
-    /// version for [`DIFF_SETTLE`].
+    /// Re-read each pair base's text once its base file's buffer has held a
+    /// new version for [`DIFF_SETTLE`].
     ///
-    /// The measured file's map goes stale with it, so the drive that follows
-    /// re-diffs it with no second window, because its own text did not move. A
-    /// base file with no open buffer keeps the text last read.
-    fn refresh_pair_base(
+    /// Each pair waits out its own window. The measured file's map goes stale
+    /// with its base, so the drive that follows re-diffs it with no second
+    /// window, because its own text did not move. A base file with no open
+    /// buffer keeps the text last read.
+    fn refresh_pair_bases(
         &mut self,
         buffers: &BufferRegistry,
         executor: &Executor,
         redraw_notify: &Arc<Notify>,
     ) {
-        let Some(DiffBase::Pair {
-            path,
-            base_path,
-            base_version,
-            ..
-        }) = &self.base_override
-        else {
-            return;
-        };
-        let (path, base_path, base_version) = (path.clone(), base_path.clone(), *base_version);
-        let Some(shared) = buffers
-            .id_for_path(&base_path)
-            .and_then(|id| buffers.get(id))
-        else {
-            return;
-        };
-        let version = shared.read().expect("buffer poisoned").snapshot.version;
-        if version == base_version {
-            return;
-        }
-
         let now = executor.now();
-        match self.pair_settle {
-            Some((settling, since)) if settling == version => {
-                if now.duration_since(since) < DIFF_SETTLE {
-                    return;
-                }
-            },
-            _ => {
-                self.pair_settle = Some((version, now));
-                self.pair_settle_timer = Some(settle_timer(executor, redraw_notify));
-                return;
-            },
-        }
+        for (path, pair) in &mut self.pairs {
+            let Some(shared) = buffers
+                .id_for_path(&pair.base_path)
+                .and_then(|id| buffers.get(id))
+            else {
+                continue;
+            };
+            let version = shared.read().expect("buffer poisoned").snapshot.version;
+            if version == pair.base_version {
+                continue;
+            }
 
-        self.pair_settle = None;
-        let (read_version, read_text) = {
-            let guard = shared.read().expect("buffer poisoned");
-            (
-                guard.snapshot.version,
-                Arc::new(guard.snapshot.visible_text.to_string()),
-            )
-        };
-        if let Some(DiffBase::Pair {
-            text, base_version, ..
-        }) = &mut self.base_override
-        {
-            *text = read_text;
-            *base_version = read_version;
-        }
-        self.base_text.remove(&path);
-        if let Some(id) = buffers.id_for_path(&path) {
+            match self.pair_settle.get(path) {
+                Some(&(settling, since)) if settling == version => {
+                    if now.duration_since(since) < DIFF_SETTLE {
+                        continue;
+                    }
+                },
+                _ => {
+                    self.pair_settle.insert(path.clone(), (version, now));
+                    self.pair_settle_timers
+                        .insert(path.clone(), settle_timer(executor, redraw_notify));
+                    continue;
+                },
+            }
+
+            self.pair_settle.remove(path);
+            {
+                let guard = shared.read().expect("buffer poisoned");
+                pair.base_version = guard.snapshot.version;
+                pair.text = Arc::new(guard.snapshot.visible_text.to_string());
+            }
+            self.base_text.remove(path);
+            let Some(id) = buffers.id_for_path(path) else {
+                continue;
+            };
             self.jobs.remove(&id);
             self.versions.remove(&id);
             self.hunks_only.remove(&id);
@@ -771,7 +826,7 @@ impl DiffState {
     /// Populate visible git-tracked buffers' diff maps on a background thread.
     ///
     /// Polls in-flight jobs and installs their diff maps, then spawns a job for
-    /// each visible git-tracked buffer whose diff is stale. A pair base is
+    /// each visible git-tracked buffer whose diff is stale. Each pair base is
     /// refreshed from its buffer first, so the jobs below read the current base.
     ///
     /// Mirrors [`Self::drive_parse_jobs`] with at most one job per buffer,
@@ -791,7 +846,7 @@ impl DiffState {
         base_cache: &BaseHighlightCache,
         redraw_notify: &Arc<Notify>,
     ) {
-        self.refresh_pair_base(buffers, executor, redraw_notify);
+        self.refresh_pair_bases(buffers, executor, redraw_notify);
 
         let waker = futures::task::noop_waker();
         let mut completed: Vec<(DiffJobOutput, bool, bool, Instant)> = Vec::new();
@@ -916,7 +971,7 @@ impl DiffState {
                 let syntax_styles = syntax_styles.clone();
                 let base_cache = base_cache.clone();
                 let path = path.clone();
-                let diff_base = self.effective_base().cloned();
+                let diff_base = self.base_for(&path);
                 let tree_cache = self.tree_cache.clone();
                 move || {
                     let out = run_diff_job(
@@ -1187,7 +1242,7 @@ pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, String) {
 ///
 /// Each file takes its file name alone. Two files with one name take their
 /// paths below the directory they share, so the two sides never read the same.
-fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
+pub(super) fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
     let file_name = |path: &Path| {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -2073,7 +2128,6 @@ mod tests {
             path: "/pair/b.txt".into(),
             base_path: "/pair/a.txt".into(),
             text: Arc::new("one\n".to_string()),
-            base_version: 0,
         };
         let resolved = |root: &str, path: &str| {
             resolve_base(
@@ -3116,12 +3170,77 @@ mod tests {
         rewrite_base(&h, "one\nTWO\n");
         h.settle_diff_jobs();
         assert_eq!(
-            (pair_text(&h), focused_diff_statuses(&h, 2)),
+            (pair_text(&h, "/pair/b.txt"), focused_diff_statuses(&h, 2)),
             (
                 Some("one\nTWO\n".to_string()),
                 vec![DiffStatus::Unchanged, DiffStatus::Unchanged]
             ),
             "the base took the edit and the hunk is gone",
+        );
+    }
+
+    /// A file whose git diff is current when the pair opens re-diffs against
+    /// the pair, rather than keep the map the git diff left.
+    #[test]
+    fn a_pair_replaces_the_git_diff_its_file_had() {
+        let mut h = TestHarness::with_size(120, 20);
+        h.stage_review_scenario("/repo", &[("b.txt", "zero\n", "one\nTWO\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_side_by_side(("/repo/a.txt", "one\ntwo\n"), ("/repo/b.txt", "one\nTWO\n"));
+        h.settle_diff_jobs();
+        let git = focused_diff_statuses(&h, 2);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        h.settle_diff_jobs();
+        assert_eq!(
+            (git, focused_diff_statuses(&h, 2)),
+            (
+                vec![DiffStatus::Modified, DiffStatus::Modified],
+                vec![DiffStatus::Unchanged, DiffStatus::Modified],
+            ),
+        );
+    }
+
+    /// Closing a diff view with no base installed stales no other file, so a
+    /// pair in another tab keeps its current map.
+    #[test]
+    fn closing_a_git_diff_re_diffs_no_other_file() {
+        let mut h = pair_harness();
+        let (id, version) = {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .buffers
+                .id_for_path(Path::new("/pair/b.txt"))
+                .expect("the measured file is open");
+            let buffer = ws.buffers.get(id).expect("buffer");
+            let version = buffer.read().expect("poisoned").snapshot.version;
+            (id, version)
+        };
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.open_file(Path::new("/pair/a.txt"));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        assert!(
+            h.stoat.active_workspace().diff.current(id, version),
+            "the pair's map stays current"
+        );
+    }
+
+    #[test]
+    fn each_pair_follows_its_own_base() {
+        let mut h = pair_harness();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.open_side_by_side(("/pair/c.txt", "x\ny\n"), ("/pair/d.txt", "x\nY\n"));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        h.settle_diff_jobs();
+
+        rewrite_base(&h, "one\nTWO\n");
+        h.settle_diff_jobs();
+        assert_eq!(
+            (pair_text(&h, "/pair/b.txt"), pair_text(&h, "/pair/d.txt")),
+            (Some("one\nTWO\n".to_string()), Some("x\ny\n".to_string())),
+            "the edit of a.txt moved b.txt's base alone",
         );
     }
 
@@ -3131,7 +3250,7 @@ mod tests {
         rewrite_base(&h, "one\nTWO\n");
         h.stoat.drive_background();
         assert_eq!(
-            pair_text(&h),
+            pair_text(&h, "/pair/b.txt"),
             Some("one\ntwo\n".to_string()),
             "a moved base waits for the window like any edit",
         );
@@ -3147,12 +3266,10 @@ mod tests {
         h
     }
 
-    /// The text a [`DiffBase::Pair`] override measures against.
-    fn pair_text(h: &TestHarness) -> Option<String> {
-        match h.stoat.active_workspace().diff_base() {
-            Some(DiffBase::Pair { text, .. }) => Some(text.to_string()),
-            _ => None,
-        }
+    /// The text of the pair `path` measures against.
+    fn pair_text(h: &TestHarness, path: &str) -> Option<String> {
+        let pair = h.stoat.active_workspace().pair_for(Path::new(path))?;
+        Some(pair.text.to_string())
     }
 
     /// Replace the whole text of the `/pair/a.txt` buffer, as an edit in its
@@ -4219,7 +4336,6 @@ mod tests {
             path: path.into(),
             base_path: base_path.into(),
             text: Arc::new(String::new()),
-            base_version: 0,
         };
         let sides = [
             diff_sides(None),

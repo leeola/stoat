@@ -31,7 +31,7 @@ use crate::{
     term_session::{TermId, TermLocation, TermSession},
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffLanding, DiffState,
-        RevOrigin, WorktreeBase,
+        PairBase, RevOrigin, WorktreeBase,
     },
 };
 use codegraph::{CodeGraph, FileId};
@@ -612,7 +612,8 @@ impl Workspace {
     /// pane's view.
     ///
     /// A pane in the diff view names the diff by its two sides, as the sides
-    /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. A pane that shows a commits
+    /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. A file measured against
+    /// another file names the two files there. A pane that shows a commits
     /// list reads `commits`, in a parked tab too, and so does a rebase screen
     /// opened over that list. An editor otherwise names its file, or reads as
     /// scratch when it has none. A terminal or an agent names itself
@@ -640,9 +641,16 @@ impl Workspace {
         };
 
         if let View::Editor(id) = &tree.pane(tree.focus()).view
-            && self.editors.get(*id).is_some_and(|editor| editor.diff_view)
+            && let Some(editor) = self.editors.get(*id).filter(|editor| editor.diff_view)
         {
-            let (left, right) = diff::diff_sides(self.diff_base());
+            let pair = self
+                .buffers
+                .path_for(editor.buffer_id)
+                .and_then(|path| Some((path, self.pair_for(path)?)));
+            let (left, right) = match pair {
+                Some((path, pair)) => diff::pair_names(&pair.base_path, path),
+                None => diff::diff_sides(self.diff_base()),
+            };
             return text::truncate_to_cols(&format!("{left} → {right}"), TAB_TITLE_MAX_COLS);
         }
 
@@ -1054,7 +1062,8 @@ impl Workspace {
     /// with `None`.
     ///
     /// The working tree's pick is the one the reader made through
-    /// [`Self::set_worktree_base`], HEAD until they pick the index.
+    /// [`Self::set_worktree_base`], HEAD until they pick the index. A file
+    /// measured against another file keeps its pair.
     ///
     /// Re-diffs the whole workspace. Every cached blob, and every diff still
     /// running, was read against the base being replaced, so none of them
@@ -1089,10 +1098,49 @@ impl Workspace {
         }
     }
 
-    /// What buffers diff against, `None` while the pick is the index and
-    /// nothing displaces it.
+    /// What every file without a pair diffs against, `None` while the pick is
+    /// the index and nothing displaces it.
+    ///
+    /// See also:
+    /// - [`Self::pair_for`] for a file measured against another file.
     pub(crate) fn diff_base(&self) -> Option<&DiffBase> {
         self.diff.effective_base()
+    }
+
+    /// The other file that `path` measures against, `None` while it diffs
+    /// against [`Self::diff_base`].
+    pub(crate) fn pair_for(&self, path: &Path) -> Option<&PairBase> {
+        self.diff.pairs.get(path)
+    }
+
+    /// Measure `path` against `pair`, in place of any pair it had.
+    ///
+    /// Only `path` re-diffs. Every other file keeps its base, so the diffs in
+    /// other tabs stay as they are.
+    pub(crate) fn set_pair(&mut self, path: PathBuf, pair: PairBase) {
+        let id = self.buffers.id_for_path(&path);
+        self.diff.set_pair(path, pair, id);
+    }
+
+    /// Return `path` to [`Self::diff_base`], and answer whether it had a pair.
+    ///
+    /// Only `path` re-diffs.
+    pub(crate) fn remove_pair(&mut self, path: &Path) -> bool {
+        let id = self.buffers.id_for_path(path);
+        self.diff.remove_pair(path, id)
+    }
+
+    /// Drop the base that displaces the working tree's pick, and answer
+    /// whether one was installed.
+    ///
+    /// Closing one tab's diff view must not re-diff every other tab, so with
+    /// nothing installed this resets nothing.
+    pub(crate) fn drop_diff_base(&mut self) -> bool {
+        if self.diff.base_override.is_none() {
+            return false;
+        }
+        self.set_diff_base(None);
+        true
     }
 
     /// The working tree's own base that [`Self::set_worktree_base`] picked.
