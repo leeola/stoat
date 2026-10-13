@@ -34,6 +34,17 @@ define_action!(
 );
 
 define_action!(
+    WorkspacePickerScopeToggleDef,
+    WorkspacePickerScopeToggle,
+    "WorkspacePickerScopeToggle",
+    ActionKind::WorkspacePickerScopeToggle,
+    "toggle the workspace picker scope",
+    "Toggle the workspace picker between every session and the active session's family: the session it was created from and the sessions created from it.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     CloseWorkspaceDef,
     CloseWorkspace,
     "CloseWorkspace",
@@ -228,6 +239,14 @@ mod tests {
         assert_eq!(CopyWorkspace.def().name(), "CopyWorkspace");
         assert_eq!(SwitchWorkspace.kind(), ActionKind::SwitchWorkspace);
         assert_eq!(SwitchWorkspace.def().name(), "SwitchWorkspace");
+        assert_eq!(
+            WorkspacePickerScopeToggle.kind(),
+            ActionKind::WorkspacePickerScopeToggle
+        );
+        assert_eq!(
+            WorkspacePickerScopeToggle.def().name(),
+            "WorkspacePickerScopeToggle"
+        );
         assert_eq!(CloseWorkspace.kind(), ActionKind::CloseWorkspace);
         assert_eq!(CloseWorkspace.def().name(), "CloseWorkspace");
         let rename = RenameWorkspace {
@@ -267,6 +286,7 @@ mod tests {
         assert!(NewWorkspace.def().params().is_empty());
         assert!(CopyWorkspace.def().params().is_empty());
         assert!(SwitchWorkspace.def().params().is_empty());
+        assert!(WorkspacePickerScopeToggle.def().params().is_empty());
         assert!(CloseWorkspace.def().params().is_empty());
         assert!(ShowCwd.def().params().is_empty());
         assert!(ReloadEnv.def().params().is_empty());

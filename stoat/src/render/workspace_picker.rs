@@ -44,12 +44,16 @@ pub(crate) fn render_workspace_picker(
         return;
     };
 
+    let title = match picker.family_title() {
+        None => " workspaces ".to_owned(),
+        Some(family) => format!(" workspaces: {family} "),
+    };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     crate::render::clear_themed(picker_area, buf, theme);
     crate::render::chrome::modal_frame(
         buf,
         picker_area,
-        Some(" workspaces "),
+        Some(&title),
         modal_style,
         theme,
         &mut *scene,
@@ -403,6 +407,23 @@ mod tests {
     /// The input starts one column past the prompt, so the seeded name paints
     /// nothing over the longer rename prompt. The input is a real one, since
     /// the null editor of `picker_for` paints no text to overlap.
+    #[test]
+    fn the_family_scope_names_its_root_in_the_title() {
+        let (mut picker, mut workspaces, active) = picker_over(2);
+        picker.toggle_scope();
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+
+        let painted: Vec<String> = (0..area.height).map(|y| row_text(&buf, y)).collect();
+        assert!(
+            painted.iter().any(|row| row.contains(" workspaces: ws00 ")),
+            "the title names the family by its root:\n{}",
+            painted.join("\n")
+        );
+    }
+
     #[test]
     fn a_rename_names_itself_in_the_prompt() {
         let (mut workspaces, active) =

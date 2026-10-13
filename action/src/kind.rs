@@ -456,5 +456,6 @@ action_kinds! {
     RunHistoryPrev,
     RunHistoryNext,
     HelpScopeToggle,
+    WorkspacePickerScopeToggle,
     CloseHelp,
 }

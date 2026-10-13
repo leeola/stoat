@@ -113,6 +113,15 @@ pub(super) fn workspace_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect
     UpdateEffect::Redraw
 }
 
+/// Toggle the workspace picker between every session and the active session's
+/// family.
+pub(super) fn workspace_picker_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat.workspace_picker.as_mut() {
+        picker.toggle_scope();
+    }
+    UpdateEffect::Redraw
+}
+
 pub(super) fn workspace_picker_complete(stoat: &mut Stoat) -> UpdateEffect {
     let active_idx = stoat.active_workspace;
 
@@ -1426,6 +1435,46 @@ mod tests {
         }
 
         assert_eq!(parents, [Some(root); 3], "each create ties to the root");
+    }
+
+    /// Every create inside a session joins the active family, so the session
+    /// outside it is a saved one.
+    #[test]
+    fn shift_tab_in_the_picker_narrows_to_the_family() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "root".to_string();
+        harness.advance_clock(Duration::from_secs(1));
+        harness.type_action("NewWorkspace()");
+        harness.stoat.active_workspace_mut().name = "sub".to_string();
+        harness.edit_focused(0..0, "x");
+        open_workspace_picker_over(
+            &mut harness.stoat,
+            vec![saved_session(WorkspaceUid(424242), "proj")],
+        );
+        let shown = |stoat: &Stoat| {
+            let picker = stoat.workspace_picker.as_ref().expect("picker open");
+            picker
+                .filtered()
+                .iter()
+                .map(|&idx| picker.entries()[idx].basename.clone())
+                .collect::<Vec<_>>()
+        };
+
+        let mut rows = vec![shown(&harness.stoat)];
+        for _ in 0..2 {
+            harness.type_keys("backtab");
+            rows.push(shown(&harness.stoat));
+        }
+
+        assert_eq!(
+            rows,
+            [
+                vec!["sub", "root", "proj"],
+                vec!["sub", "root"],
+                vec!["sub", "root", "proj"],
+            ],
+            "Shift-Tab narrows to the family, and a second press lists every session"
+        );
     }
 
     #[test]

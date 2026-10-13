@@ -26,6 +26,19 @@ pub enum WorkspaceStatus {
     Inactive,
 }
 
+/// The rows the workspace picker lists.
+///
+/// A family is a session that a launch opened, its family root, together with
+/// every session created inside it. The family scope keys on that tie and not
+/// on the root path, so two unrelated sessions in one project stay apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerScope {
+    /// Every open workspace and saved session.
+    All,
+    /// The active workspace's family alone.
+    Family,
+}
+
 /// Finder-style modal listing open and inactive workspaces, rendered as a
 /// centered overlay when the `SwitchWorkspace` action fires.
 ///
@@ -39,6 +52,9 @@ pub enum WorkspaceStatus {
 /// The picker opens on the row after the active one, the session focused
 /// before it, so Enter at once returns there. Enter on a query with no row
 /// creates a session of that name.
+///
+/// [`Self::toggle_scope`] narrows the list to the active workspace's family and
+/// back.
 pub struct WorkspacePicker {
     pub(crate) input: InputView,
     entries: Vec<PickerEntry>,
@@ -49,7 +65,7 @@ pub struct WorkspacePicker {
     /// them per call would allocate a string per workspace a frame.
     haystacks: Vec<String>,
     /// Indices into `entries` in display order after fuzzy filtering. An empty
-    /// query lists every entry in the status-grouped order.
+    /// query lists every entry in scope in the status-grouped order.
     filtered: Vec<usize>,
     /// Matched character offsets in each filtered row's haystack, parallel to
     /// [`Self::filtered`], driving name-column highlights.
@@ -78,6 +94,13 @@ pub struct WorkspacePicker {
     /// The filter query that a rename replaced, which goes back into the input
     /// when the rename ends.
     pub(crate) filter_query: String,
+    /// Whether the list holds every session or the active workspace's family
+    /// alone.
+    scope: PickerScope,
+    /// The family that [`PickerScope::Family`] lists, the active workspace's
+    /// family root. The picker's input lives in the active workspace, so the
+    /// active workspace stays the same while the picker is open.
+    family_root: WorkspaceUid,
 }
 
 /// One row in the picker. Built up-front from the workspace slotmap so the
@@ -106,6 +129,13 @@ pub struct PickerEntry {
     /// local. Picking such a row hands the window straight back to that host,
     /// which the path column says by reading `host:path`.
     pub remote_host: Option<String>,
+}
+
+impl PickerEntry {
+    /// The uid that names this row's family, its parent's or its own.
+    fn family_root(&self) -> WorkspaceUid {
+        self.parent.unwrap_or(self.uid)
+    }
 }
 
 impl WorkspacePicker {
@@ -197,6 +227,8 @@ impl WorkspacePicker {
             omitted_workspace: None,
             renaming: None,
             filter_query: String::new(),
+            scope: PickerScope::All,
+            family_root: workspaces[active].family_root(),
         };
         picker.refilter("");
         picker
@@ -241,7 +273,7 @@ impl WorkspacePicker {
 
     /// Re-rank the entries for `query`, matches first by score descending then
     /// by status-grouped order. An empty or unusable query lists every entry in
-    /// the status-grouped order with no highlights.
+    /// scope in the status-grouped order with no highlights.
     ///
     /// The haystack per row is `"{basename} {git_root}"`, so a query narrows on
     /// either the workspace name or any part of its root path. Match highlights
@@ -257,15 +289,23 @@ impl WorkspacePicker {
         self.rank(query);
     }
 
-    /// Rank the entries for `query`, whatever the cached query or a rename
-    /// says, for a caller whose entry list changed under the ranking.
+    /// Rank the entries in scope for `query`, whatever the cached query or a
+    /// rename says, for a caller whose entry list or scope changed under the
+    /// ranking.
     fn rank(&mut self, query: &str) {
         self.last_filter_query = Some(query.to_owned());
 
+        let family = match self.scope {
+            PickerScope::All => None,
+            PickerScope::Family => Some(self.family_root),
+        };
+        let entries = &self.entries;
+        let in_scope = |idx: &usize| family.is_none_or(|root| entries[*idx].family_root() == root);
         let items = self
             .haystacks
             .iter()
             .enumerate()
+            .filter(|(idx, _)| in_scope(idx))
             .map(|(idx, haystack)| (idx, haystack.as_str()));
 
         self.last_pattern = picker::rank_into(
@@ -275,6 +315,13 @@ impl WorkspacePicker {
             &mut self.filtered,
             &mut self.match_indices,
         );
+        // An unusable query lists every entry without walking `items`, so the
+        // scope narrows that list here. Its rows hold no offsets, so the offset
+        // list only shrinks to stay parallel.
+        if self.last_pattern.is_none() {
+            self.filtered.retain(in_scope);
+            self.match_indices.truncate(self.filtered.len());
+        }
 
         self.clamp_selected();
     }
@@ -391,6 +438,46 @@ impl WorkspacePicker {
     /// End the rename and leave the row's name as it was.
     pub(crate) fn rename_cancel(&mut self) {
         self.renaming = None;
+    }
+
+    /// Flip the list between every session and the active workspace's family,
+    /// and select the first row past the active one, as the picker opens.
+    ///
+    /// A no-op during a rename, which holds the ranking.
+    pub(crate) fn toggle_scope(&mut self) {
+        if self.renaming.is_some() {
+            return;
+        }
+        self.scope = match self.scope {
+            PickerScope::All => PickerScope::Family,
+            PickerScope::Family => PickerScope::All,
+        };
+
+        let query = self.last_filter_query.take().unwrap_or_default();
+        self.rank(&query);
+        self.selected = self
+            .filtered
+            .iter()
+            .position(|&idx| self.entries[idx].status != WorkspaceStatus::Active)
+            .unwrap_or(0);
+    }
+
+    /// The name of the family the list narrows to, or `None` while it lists
+    /// every session.
+    ///
+    /// The name comes from the family root's row. A root without a row reads
+    /// as `family`, because an untouched root leaves no saved session, and the
+    /// picker omits the row of an untouched active workspace.
+    pub(crate) fn family_title(&self) -> Option<&str> {
+        match self.scope {
+            PickerScope::All => None,
+            PickerScope::Family => Some(
+                self.entries
+                    .iter()
+                    .find(|entry| entry.uid == self.family_root)
+                    .map_or("family", |entry| entry.basename.as_str()),
+            ),
+        }
     }
 
     /// Whether any row leads somewhere other than the active workspace.
@@ -1080,5 +1167,97 @@ mod tests {
             "the haystack carries the host, so a host names its workspace"
         );
         assert_eq!(picker.filtered.len(), 1, "the local row does not match");
+    }
+
+    /// A picker over `root`, its active sub-session `sub`, and an unrelated
+    /// `other`, which the rows list as `sub`, `other`, `root`. The roots match
+    /// no query letter, so a query narrows on names alone.
+    fn family_picker() -> WorkspacePicker {
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut insert = |name: &str, uid: u64, parent: Option<u64>, focused: u64| {
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from("/w"),
+                &exec,
+                crate::test_notify(),
+            ));
+            let ws = &mut workspaces[id];
+            ws.id = id;
+            ws.name = name.to_string();
+            ws.uid = WorkspaceUid(uid);
+            ws.parent = parent.map(WorkspaceUid);
+            ws.last_active = focused_at(focused);
+            id
+        };
+        insert("root", 1, None, 1);
+        let sub = insert("sub", 2, Some(1), 3);
+        insert("other", 3, None, 2);
+        WorkspacePicker::new(&workspaces, sub, Vec::new(), dummy_input())
+    }
+
+    /// The listed rows by name, the selected row's name, and the family title.
+    fn listing(picker: &WorkspacePicker) -> (Vec<&str>, Option<&str>, Option<&str>) {
+        let rows = picker
+            .filtered
+            .iter()
+            .map(|&idx| picker.entries[idx].basename.as_str())
+            .collect();
+        let selected = picker.selected_entry().map(|e| e.basename.as_str());
+        (rows, selected, picker.family_title())
+    }
+
+    /// The test moves the selection to the active row first, so a toggle that
+    /// leaves the selection there fails the second step.
+    #[test]
+    fn toggle_scope_lists_only_the_active_family_and_back() {
+        let mut picker = family_picker();
+        picker.select_prev();
+        assert_eq!(
+            listing(&picker),
+            (vec!["sub", "other", "root"], Some("sub"), None),
+            "the picker opens on every session"
+        );
+
+        picker.toggle_scope();
+        assert_eq!(
+            listing(&picker),
+            (vec!["sub", "root"], Some("root"), Some("root")),
+            "the family of a sub-session is its root's"
+        );
+
+        picker.refilter("he");
+        assert_eq!(
+            listing(&picker),
+            (vec![], None, Some("root")),
+            "a query matching only `other` lists nothing in the family"
+        );
+
+        picker.toggle_scope();
+        assert_eq!(
+            listing(&picker),
+            (vec!["other"], Some("other"), None),
+            "the toggle back keeps the query"
+        );
+    }
+
+    #[test]
+    fn a_family_without_its_root_row_reads_as_family() {
+        let mut picker = family_picker();
+        picker.toggle_scope();
+        picker.remove_selected();
+
+        assert_eq!(listing(&picker), (vec!["sub"], Some("sub"), Some("family")));
+    }
+
+    #[test]
+    fn a_rename_holds_the_scope() {
+        let mut picker = family_picker();
+        picker.rename_start();
+        picker.toggle_scope();
+
+        assert_eq!(
+            listing(&picker),
+            (vec!["sub", "other", "root"], Some("other"), None)
+        );
     }
 }

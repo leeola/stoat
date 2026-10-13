@@ -126,7 +126,7 @@ use crate::{
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, Mosh, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
-            ShowCwd, Ssh, SwitchWorkspace,
+            ShowCwd, Ssh, SwitchWorkspace, WorkspacePickerScopeToggle,
         },
     },
     param::{MissingSnafu, ParseFailureSnafu, WrongKindSnafu},
@@ -923,6 +923,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
     add(RunHistoryNext::DEF, |_| Ok(Box::new(RunHistoryNext)));
     add(HelpScopeToggle::DEF, |_| Ok(Box::new(HelpScopeToggle)));
+    add(WorkspacePickerScopeToggle::DEF, |_| {
+        Ok(Box::new(WorkspacePickerScopeToggle))
+    });
     add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
@@ -1352,6 +1355,7 @@ mod tests {
         "ShowCwd",
         "ReloadEnv",
         "HelpScopeToggle",
+        "WorkspacePickerScopeToggle",
         "SubmitPromptInput",
         "CancelPromptInput",
         "PromptInsertNewline",
@@ -1879,6 +1883,7 @@ mod tests {
         // + 4 the long-word extends.
         // + 1 PickerDelete.
         // + 1 PickerRename.
+        // + 1 WorkspacePickerScopeToggle.
         // + 1 PinMode.
         // + 1 Ssh.
         // + 1 Mosh.
@@ -1892,7 +1897,7 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        assert_eq!(all().count(), 438);
+        assert_eq!(all().count(), 439);
     }
 
     #[test]

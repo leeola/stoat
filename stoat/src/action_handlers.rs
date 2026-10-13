@@ -959,6 +959,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunHistoryPrev => run::run_history_prev(stoat),
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
+        ActionKind::WorkspacePickerScopeToggle => workspace::workspace_picker_scope_toggle(stoat),
         ActionKind::CloseHelp => help::help_cancel(stoat),
         ActionKind::Run => {
             let cmd = action
@@ -3277,6 +3278,7 @@ mod tests {
             "complete from the picker",
             "page the picker down",
             "rename the picker row's session",
+            "toggle the workspace picker scope",
             "cancel prompt input",
         ] {
             assert!(

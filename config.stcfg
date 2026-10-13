@@ -400,6 +400,7 @@ on key {
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
         Tab -> PickerComplete();
+        BackTab -> WorkspacePickerScopeToggle();
         # Shadows the input's forward-delete. Backspace still edits the query.
         Delete -> PickerDelete();
         # Shadows the input's register insert. The rename edits the row's name
