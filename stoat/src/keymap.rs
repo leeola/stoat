@@ -3050,6 +3050,16 @@ mod tests {
         assert_eq!(toggle[0].args[0].value, Value::Ident("normal".into()));
         assert_eq!(toggle[1].name, "ToggleTab");
 
+        let picker = keymap
+            .lookup(
+                &prefix,
+                &key_event(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-f is bound in prefix mode");
+        assert_eq!(picker[0].name, "SetMode");
+        assert_eq!(picker[0].args[0].value, Value::Ident("normal".into()));
+        assert_eq!(picker[1].name, "SwitchWorkspace");
+
         assert_eq!(
             keymap
                 .lookup(&prefix, &key_event(KeyCode::Char('c'), KeyModifiers::NONE))

@@ -1447,6 +1447,9 @@ on key {
         Up -> [SetMode(normal), FocusUp()];
         l -> [SetMode(normal), FocusRight()];
         Right -> [SetMode(normal), FocusRight()];
+        # The workspace picker, as the zellij session manager sits behind the
+        # same chord.
+        Ctrl-f -> [SetMode(normal), SwitchWorkspace()];
         c -> [SetMode(normal), NewTab()];
         x -> [SetMode(normal), CloseTab()];
         num -> [SetMode(normal), GotoTab($num)];
