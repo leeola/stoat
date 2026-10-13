@@ -480,6 +480,22 @@ impl WorkspacePicker {
         }
     }
 
+    /// The name column's text for the entry at `idx`, `parent/name` for a
+    /// sub-session whose root has a row, and the row's own name otherwise.
+    ///
+    /// Recency order separates a family in the full list, so the row spells
+    /// the tie itself. A root without a row leaves no prefix.
+    pub(crate) fn display_label(&self, idx: usize) -> String {
+        let entry = &self.entries[idx];
+        let parent = entry
+            .parent
+            .and_then(|uid| self.entries.iter().find(|e| e.uid == uid));
+        match parent {
+            Some(parent) => format!("{}/{}", parent.basename, entry.basename),
+            None => entry.basename.clone(),
+        }
+    }
+
     /// Whether any row leads somewhere other than the active workspace.
     ///
     /// Without one, the bare launch keeps the finder closed.
@@ -1259,5 +1275,27 @@ mod tests {
             listing(&picker),
             (vec!["sub", "other", "root"], Some("other"), None)
         );
+    }
+
+    /// Every entry's name-column label, in entry order.
+    fn labels(picker: &WorkspacePicker) -> Vec<String> {
+        (0..picker.entries.len())
+            .map(|idx| picker.display_label(idx))
+            .collect()
+    }
+
+    #[test]
+    fn display_label_prefixes_a_sub_session_with_its_parent() {
+        assert_eq!(labels(&family_picker()), ["root/sub", "other", "root"]);
+    }
+
+    /// The selection starts on `other`, and one step down reaches `root`.
+    #[test]
+    fn display_label_drops_a_missing_parent() {
+        let mut picker = family_picker();
+        picker.select_next();
+        picker.remove_selected();
+
+        assert_eq!(labels(&picker), ["sub", "other"]);
     }
 }

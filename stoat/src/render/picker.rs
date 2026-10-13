@@ -171,6 +171,15 @@ pub(crate) mod test_support {
         Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
+    /// The foreground [`match_theme`] gives a fuzzy-match character.
+    pub(crate) const MATCH_FG: Color = Color::Rgb(255, 0, 0);
+
+    pub(crate) fn match_theme() -> Theme {
+        let src = r##"theme t { ui.search.match.fg = "#ff0000"; }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
     /// Rows of `buf` carrying [`SELECTION_BG`], in ascending order.
     pub(crate) fn selected_rows(buf: &Buffer) -> Vec<u16> {
         let area = buf.area;
@@ -362,7 +371,7 @@ pub(crate) fn split_list_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{test_support::match_theme, *};
     use crate::picker::INDEXED_ROWS;
     use ratatui::style::Color;
     use std::path::PathBuf;
@@ -429,12 +438,6 @@ mod tests {
             selected: usize::MAX,
             ..PickList::default()
         }
-    }
-
-    fn match_theme() -> Theme {
-        let src = r##"theme t { ui.search.match.fg = "#ff0000"; }"##;
-        let (config, _) = stoat_config::parse(src);
-        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
     #[test]

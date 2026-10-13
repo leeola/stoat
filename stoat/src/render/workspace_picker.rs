@@ -74,7 +74,7 @@ pub(crate) fn render_workspace_picker(
         scene,
     );
 
-    const NAME_W: u16 = 12;
+    const NAME_W: u16 = 24;
     const BUF_W: u16 = 5;
     const RUN_W: u16 = 5;
     const EDIT_W: u16 = 6;
@@ -158,10 +158,14 @@ pub(crate) fn render_workspace_picker(
         };
         write_str(buf, marker_x, row, marker, base_style);
 
-        let name: String = entry.basename.chars().take(NAME_W as usize).collect();
+        let label = picker.display_label(idx);
+        // The label ends with the row's own name, where the haystack's match
+        // offsets start, so the offsets shift past any parent prefix.
+        let prefix = label.chars().count() - entry.basename.chars().count();
+        let name: String = label.chars().take(NAME_W as usize).collect();
         write_str(buf, name_x, row, &name, base_style);
-        for (j, _) in name.chars().enumerate() {
-            if indices.binary_search(&(j as u32)).is_ok() {
+        for j in prefix..name.chars().count() {
+            if indices.binary_search(&((j - prefix) as u32)).is_ok() {
                 buf[(name_x + j as u16, row)].set_style(match_style);
             }
         }
@@ -240,8 +244,11 @@ mod tests {
         buffer::BufferId,
         editor_state::EditorId,
         input_view::{InputView, SubmitTarget},
-        render::picker::test_support::{row_text, selected_rows, selection_theme},
-        workspace::{Workspace, WorkspaceId},
+        render::picker::test_support::{
+            match_theme, row_text, selected_rows, selection_theme, MATCH_FG,
+        },
+        theme::Theme,
+        workspace::{Workspace, WorkspaceId, WorkspaceUid},
         workspace_picker::WorkspacePicker,
     };
     use ratatui::{buffer::Buffer, layout::Rect};
@@ -306,12 +313,22 @@ mod tests {
         buf: &mut Buffer,
         area: Rect,
     ) {
-        let theme = selection_theme();
+        render_with(&selection_theme(), picker, workspaces, active, buf, area);
+    }
+
+    fn render_with(
+        theme: &Theme,
+        picker: &mut WorkspacePicker,
+        workspaces: &mut SlotMap<WorkspaceId, Workspace>,
+        active: WorkspaceId,
+        buf: &mut Buffer,
+        area: Rect,
+    ) {
         render_workspace_picker(
             picker,
             &mut workspaces[active],
-            &theme,
-            &crate::render::editor::ResolvedChrome::resolve(&theme),
+            theme,
+            &crate::render::editor::ResolvedChrome::resolve(theme),
             area,
             buf,
             &mut stoat_widgets::ApcScene::new(),
@@ -407,6 +424,49 @@ mod tests {
     /// The input starts one column past the prompt, so the seeded name paints
     /// nothing over the longer rename prompt. The input is a real one, since
     /// the null editor of `picker_for` paints no text to overlap.
+    /// A query on a sub-session's own name lights that name and not the parent
+    /// prefix in front of it.
+    #[test]
+    fn a_sub_session_lights_its_own_name_past_the_parent_prefix() {
+        let (mut workspaces, active) =
+            workspaces_over(2, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        for (id, ws) in workspaces.iter_mut() {
+            let sub = id != active;
+            ws.uid = WorkspaceUid(if sub { 2 } else { 1 });
+            ws.parent = sub.then_some(WorkspaceUid(1));
+        }
+        let mut picker = picker_for(&workspaces, active);
+        picker.refilter("ws01");
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render_with(
+            &match_theme(),
+            &mut picker,
+            &mut workspaces,
+            active,
+            &mut buf,
+            area,
+        );
+
+        let label: Vec<char> = "ws00/ws01".chars().collect();
+        let (row, col) = (0..area.height)
+            .find_map(|y| {
+                let text: Vec<char> = row_text(&buf, y).chars().collect();
+                let x = text.windows(label.len()).position(|w| w == label)?;
+                Some((y, x as u16))
+            })
+            .expect("the sub-session row reads parent/name");
+        let lit: Vec<u16> = (0..area.width)
+            .filter(|&x| buf[(x, row)].fg == MATCH_FG)
+            .collect();
+        assert_eq!(
+            lit,
+            (col + 5..col + 9).collect::<Vec<_>>(),
+            "the match lights `ws01` past the `ws00/` prefix"
+        );
+    }
+
     #[test]
     fn the_family_scope_names_its_root_in_the_title() {
         let (mut picker, mut workspaces, active) = picker_over(2);
