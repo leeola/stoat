@@ -2711,6 +2711,15 @@ mod tests {
                 .set("modal", StateValue::String(modal.into()))
                 .set("mode", StateValue::String(mode.into()));
             for (code, mods, action) in expected {
+                // The workspace picker's Ctrl-f enters the selected row, so the
+                // doubled `Ctrl-a Ctrl-f` chord toggles sessions. PageDown keeps
+                // the page step there.
+                let action = match (modal, code, mods) {
+                    ("workspace_picker", KeyCode::Char('f'), KeyModifiers::CONTROL) => {
+                        "SubmitPromptInput"
+                    },
+                    _ => action,
+                };
                 let bound = keymap
                     .lookup(&state, &KeyEvent::new(code, mods))
                     .unwrap_or_else(|| panic!("{modal} leaves {code:?} unbound"))[0]
@@ -3111,6 +3120,28 @@ mod tests {
             .expect("Escape is bound in prefix mode");
         assert_eq!(esc[0].name, "SetMode");
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+    }
+
+    /// The second Ctrl-f of `Ctrl-a Ctrl-f Ctrl-f` lands in the picker's input,
+    /// where it enters the selected row rather than paging.
+    #[test]
+    fn ctrl_f_in_the_workspace_picker_submits_the_selection() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let picker = TestState::new()
+            .set("modal", StateValue::String("workspace_picker".into()))
+            .set("mode", StateValue::String("insert".into()));
+
+        let actions = keymap
+            .lookup(
+                &picker,
+                &key_event(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-f is bound in the workspace picker");
+        assert_eq!(
+            actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["SubmitPromptInput"]
+        );
     }
 
     #[test]

@@ -392,7 +392,10 @@ on key {
         Down -> PickerNext();
         Ctrl-p -> PickerPrev();
         Ctrl-n -> PickerNext();
-        Ctrl-f -> PickerPageDown();
+        # A second Ctrl-f after the `Ctrl-a Ctrl-f` chord enters the selected
+        # row, which opens on the previous session, so the doubled chord
+        # toggles sessions. PageDown keeps the page step.
+        Ctrl-f -> SubmitPromptInput();
         Ctrl-b -> PickerPageUp();
         PageDown -> PickerPageDown();
         PageUp -> PickerPageUp();
