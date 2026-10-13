@@ -38,7 +38,7 @@ use std::{
     },
 };
 use stoat_language::{Language, LanguageRegistry};
-use stoat_text::{Point, SelectionGoal};
+use stoat_text::SelectionGoal;
 
 /// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back
 /// the hunks a prior install stored for an unchanged file.
@@ -535,18 +535,17 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
             buffer_snapshot.rope().offset_to_point(cursor).row
         };
         // The stops rather than the hunks, so opening over a refined block
-        // lands on the row that changed instead of the block's top.
+        // lands on the stop nearest the cursor instead of the block's top.
         let hunk_stops = display_snapshot
             .diff_map()?
             .live_hunks(buffer_snapshot)
             .hunk_stops();
-        let (rows, holds) = super::movement::nearest_hunk_rows(&hunk_stops, cursor_row)?;
+        let (rows, holds) =
+            super::movement::nearest_hunk_rows(buffer_snapshot.rope(), &hunk_stops, cursor_row)?;
         if holds {
             return Some(false);
         }
-        let target_offset = buffer_snapshot
-            .rope()
-            .point_to_offset(Point::new(rows.start, 0));
+        let target_offset = super::movement::stop_landing_cell(buffer_snapshot.rope(), rows).start;
         editor.selections.transform(buffer_snapshot, |sel| {
             crate::selection::land_block_cursor(
                 sel.id,
@@ -826,7 +825,7 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         let cursor_row = buffer_snapshot.rope().offset_to_point(cursor).row;
 
         let unit = match unit {
-            AmendUnit::Hunk => marked_run_at(&snapshot, buffer_snapshot, cursor_row)
+            AmendUnit::Hunk => change_stop_at(&snapshot, buffer_snapshot, cursor_row)
                 .map_or(AmendUnit::Hunk, AmendUnit::Rows),
             unit => unit,
         };
@@ -930,13 +929,14 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
     UpdateEffect::Redraw
 }
 
-/// The marked run under `cursor_row`, as live buffer rows, when the hunk there
-/// is one the tree pass narrowed.
+/// The change stop under `cursor_row`, as live buffer rows, when the hunk
+/// there is one the tree pass narrowed.
 ///
-/// `None` when no hunk covers the row, when its hunk was never narrowed, or
-/// when the row sits between two of the hunk's runs. Each of those moves the
-/// whole hunk. A deletion or a move covers no buffer row, so it never answers.
-fn marked_run_at(
+/// The stops tile the hunk, so every row of a narrowed hunk answers its stop.
+/// `None` when no hunk covers the row or when its hunk was never narrowed.
+/// Each of those moves the whole hunk. A deletion or a move covers no buffer
+/// row, so it never answers.
+fn change_stop_at(
     snapshot: &DisplaySnapshot,
     buffer_snapshot: &MultiBufferSnapshot,
     cursor_row: u32,
@@ -948,7 +948,9 @@ fn marked_run_at(
     if !hunk.refined() {
         return None;
     }
-    live.change_stops()
+    // Staged marks hold no anchor. Until the next diff lands, an edit above
+    // one leaves it on a hunk row, where it sorts ahead of the wider stop.
+    live.hunk_stops()
         .into_iter()
         .find(|stop| stop.contains(&cursor_row))
 }
@@ -1745,6 +1747,23 @@ mod tests {
         );
     }
 
+    /// The hunk opens on a blank row, so the toggle lands on the row below it
+    /// that holds text, where a walk lands on the same stop.
+    #[test]
+    fn a_diff_toggle_lands_past_a_stop_s_blank_row() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\n", "a\n\nc\n")]);
+        h.open_file(Path::new("/repo/a.rs"));
+
+        h.stoat.toggle_diff_view();
+        h.settle();
+
+        assert_eq!(
+            crate::test_harness::editor::focused_cursor_point(&mut h.stoat),
+            Point::new(2, 0)
+        );
+    }
+
     /// Each proposal is one edit, so one undo backs one file out. That is the
     /// fine-grained reject, and it costs no verb of its own.
     #[test]
@@ -2518,6 +2537,11 @@ mod tests {
     /// above the index's unchanged `let a = 1;`.
     const REINDENT_IF_STAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,5 +1,6 @@\n fn f() {\n+    if x {\n     let a = 1;\n     let b = 2;\n     let c = 3;\n }\n";
 
+    /// The stop that the `if x {` of [`REINDENT_BUFFER`] opens, rows 1 to 3,
+    /// staged on its own. The stop reaches the second run, so the reindented
+    /// `let` rows move with the `if x {`.
+    const REINDENT_IF_STOP_STAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,5 +1,6 @@\n fn f() {\n+    if x {\n-    let a = 1;\n+        let a = 1;\n-    let b = 2;\n+        let b = 2;\n     let c = 3;\n }\n";
+
     /// The second run of [`REINDENT_BUFFER`], rows 4 and 5, staged on its own.
     /// Each row carries its new indent, since a staged row is the whole buffer
     /// line.
@@ -2559,11 +2583,11 @@ mod tests {
         assert_eq!(h.fake_git().applied_patches(&workdir), [REINDENT_IF_STAGE]);
     }
 
-    /// The gutter marks only the runs that hold an edit of their own, so `s`
-    /// on the first moves that run alone and leaves the reindented lines and
-    /// the second run unstaged.
+    /// The gutter marks only the runs that hold an edit of their own, but a
+    /// stop reaches from its run to the next. So `s` on the first run moves
+    /// the reindented lines below it too, and leaves the second run unstaged.
     #[test]
-    fn staging_a_narrowed_hunk_moves_only_the_run_under_the_cursor() {
+    fn staging_a_narrowed_hunk_moves_the_stop_under_the_cursor() {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_reindent_at(&mut h, 1);
 
@@ -2575,8 +2599,11 @@ mod tests {
                 h.fake_git().applied_patches(&workdir),
                 h.stoat.pending_message.as_deref(),
             ),
-            (vec![REINDENT_IF_STAGE.to_string()], Some("staged hunk")),
-            "the run moves alone, and the status names the hunk keys pressed",
+            (
+                vec![REINDENT_IF_STOP_STAGE.to_string()],
+                Some("staged hunk")
+            ),
+            "the stop moves alone, and the status names the hunk keys pressed",
         );
     }
 
@@ -2640,14 +2667,15 @@ mod tests {
         );
     }
 
-    /// The `if x {` of a staged [`REINDENT_BUFFER`] taken back out of the
-    /// index, which leaves the reindented lines and the second run staged.
-    const REINDENT_IF_UNSTAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,7 +1,6 @@\n fn f() {\n-    if x {\n         let a = 1;\n         let b = 2;\n         let c = 4;\n     }\n }\n";
+    /// The stop that the `if x {` of a staged [`REINDENT_BUFFER`] opens, taken
+    /// back out of the index. The reindented `let` rows go back to their old
+    /// indent with it, which leaves the second run staged.
+    const REINDENT_IF_STOP_UNSTAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,7 +1,6 @@\n fn f() {\n-    if x {\n-        let a = 1;\n+    let a = 1;\n-        let b = 2;\n+    let b = 2;\n         let c = 4;\n     }\n }\n";
 
     /// Under the HEAD base a staged reindent shows as a narrowed hunk, so
-    /// `UnstageHunk` on its first run unstages that run alone.
+    /// `UnstageHunk` on its first run unstages that run's stop alone.
     #[test]
-    fn unstaging_a_narrowed_hunk_moves_only_the_run_under_the_cursor() {
+    fn unstaging_a_narrowed_hunk_moves_the_stop_under_the_cursor() {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = PathBuf::from("/work");
         h.stage_index_scenario(
@@ -2671,7 +2699,47 @@ mod tests {
                 h.fake_git().applied_patches(&workdir),
                 h.stoat.pending_message.as_deref(),
             ),
-            (vec![REINDENT_IF_UNSTAGE.to_string()], Some("unstaged hunk")),
+            (
+                vec![REINDENT_IF_STOP_UNSTAGE.to_string()],
+                Some("unstaged hunk")
+            ),
+        );
+    }
+
+    /// Under the index base, the index's rename of `f` to `g` is a staged mark
+    /// on the row above the hunk. Deleting the first line moves the anchored
+    /// hunk up onto the mark's row before the next diff lands. A press there
+    /// still stages the hunk's first stop, not the one row the mark covers.
+    #[test]
+    fn a_stale_staged_mark_leaves_a_press_the_stop_under_it() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        let renamed = |text: &str| format!("// top\n{}", text.replace("fn f", "fn g"));
+        h.stage_index_scenario(
+            &workdir,
+            &[(
+                "a.rs",
+                &format!("// top\n{REINDENT_BASE}"),
+                &renamed(REINDENT_BASE),
+                &renamed(REINDENT_BUFFER),
+            )],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.rs"));
+        run(&mut h, &stoat_action::DiffAgainstIndex);
+        h.settle_diff_jobs();
+        h.edit_focused(0.."// top\n".len(), "");
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+        }
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        h.settle();
+
+        assert_eq!(
+            h.fake_git().applied_patches(&workdir),
+            ["diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -2,5 +2,6 @@\n fn g() {\n+    if x {\n-    let a = 1;\n+        let a = 1;\n-    let b = 2;\n+        let b = 2;\n     let c = 3;\n }\n"],
         );
     }
 
@@ -2937,6 +3005,28 @@ mod tests {
         );
         assert!(patch.contains("-c\n"), "removes the base line: {patch}");
         assert!(patch.contains("+X\n"), "adds the buffer line: {patch}");
+    }
+
+    /// The tree pass marks the changed call alone, so the blank row added below
+    /// it lies in no run. The stop the press stages covers it, so staging each
+    /// stop leaves nothing unstaged.
+    #[test]
+    fn stage_hunk_takes_the_blank_row_its_stop_covers() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_settled_at(
+            &mut h,
+            "a.rs",
+            "fn a() {\n    x();\n}\n",
+            "fn a() {\n    y();\n\n}\n",
+            1,
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+
+        assert_eq!(
+            h.fake_git().applied_patches(&workdir),
+            ["diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,4 @@\n fn a() {\n-    x();\n+    y();\n+\n }\n"],
+        );
     }
 
     /// A press hands the diff and the index write to the git queue. The test

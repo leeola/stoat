@@ -1098,11 +1098,12 @@ mod tests {
         );
     }
 
-    /// Inside a hunk the tree pass narrowed, `s` amends only the marked run
-    /// under the cursor. The buffer's `c = 4` sits in a second run, so it stays
-    /// out of the commit with the reindent.
+    /// Inside a hunk the tree pass narrowed, `s` amends the change stop under
+    /// the cursor, which runs from its marked run to the next one. The
+    /// reindented `let` rows follow `if x {` into the commit, and the buffer's
+    /// `c = 4` opens the second stop, so it stays out.
     #[test]
-    fn stage_hunk_amends_only_the_run_under_the_cursor() {
+    fn stage_hunk_amends_the_stop_under_the_cursor() {
         let mut h = walking_the_tip_of(
             "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nfn g() {}\n",
             "fn f() {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nfn g() { 1 }\n",
@@ -1119,7 +1120,7 @@ mod tests {
 
         assert_eq!(
             committed(&h).as_deref(),
-            Some("fn f() {\n    if x {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n}\nfn g() { 1 }\n"),
+            Some("fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n    let c = 3;\n}\nfn g() { 1 }\n"),
         );
     }
 
@@ -1203,9 +1204,9 @@ mod tests {
     }
 
     /// Inside a hunk the tree pass narrowed, an unstage below a typed line
-    /// amends out the run under the cursor, read in the commit's rows.
+    /// amends out the stop under the cursor, read in the commit's rows.
     #[test]
-    fn unstage_hunk_below_a_typed_line_amends_out_only_the_run_under_the_cursor() {
+    fn unstage_hunk_below_a_typed_line_amends_out_the_stop_under_the_cursor() {
         const TIP: &str =
             "fn f() {\n    if x {\n        let a = 1;\n        let b = 2;\n        let c = 4;\n    }\n}\n";
         let mut h = walking_the_tip_of(
@@ -1222,9 +1223,7 @@ mod tests {
 
         assert_eq!(
             committed(&h).as_deref(),
-            Some(
-                "fn f() {\n        let a = 1;\n        let b = 2;\n        let c = 4;\n    }\n}\n"
-            ),
+            Some("fn f() {\n    let a = 1;\n    let b = 2;\n        let c = 4;\n    }\n}\n"),
         );
     }
 }

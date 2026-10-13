@@ -160,6 +160,9 @@ pub struct DiffHunk {
     /// lines it already called changed, so every row of such a hunk is marked
     /// either way and narrowing costs a walk to reach the same answer.
     ///
+    /// The runs are sorted, and no two touch, as [`marked_row_runs`] returns
+    /// them. [`LiveHunks::hunk_stops`] tiles the hunk in that order.
+    ///
     /// Stored rather than resolved per frame because the spans are byte offsets
     /// into the text the diff ran against. Mapping them through the current
     /// rope drifts from the anchor-tracked live rows after any edit above the
@@ -286,10 +289,16 @@ impl<'a> LiveHunks<'a> {
     /// The row ranges the hunks offer change navigation, in document order.
     ///
     /// A refined hunk contributes one range per marked run, so `n` inside a
-    /// hundred-line reindent walks the handful of rows that actually changed
-    /// rather than stepping over the whole block in one press. A hunk the tree
-    /// pass never narrowed contributes its full live rows, which is the stop it
-    /// has always been.
+    /// hundred-line reindent stops once per change rather than stepping over
+    /// the whole block in one press. A hunk the tree pass never narrowed
+    /// contributes its full live rows.
+    ///
+    /// A refined hunk's ranges tile its live rows. Each starts at its run's
+    /// first row and reaches the next run, and the first starts at the hunk's
+    /// first row. A blank row or a paired brace lies in no run, and staging a
+    /// stop stages its rows, so a row outside every stop stays unstaged after
+    /// every stop the walk offers is staged. A gap joins the run above it,
+    /// since a reindented or blank aftermath belongs to the change above.
     ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
     /// what a caller turns into a single-cell landing at the seam row.
@@ -301,11 +310,18 @@ impl<'a> LiveHunks<'a> {
                 // it the same way its live rows did.
                 true => {
                     let shift = live.rows.start as i64 - live.hunk.buffer_line_range.start as i64;
-                    stops.extend(live.hunk.marked_rows.iter().map(|run| {
-                        let start = (run.start as i64 + shift).max(0) as u32;
-                        let end = (run.end as i64 + shift).max(0) as u32;
-                        start..end
-                    }));
+                    let mut stop_start = live.rows.start;
+                    for run in live.hunk.marked_rows.iter().skip(1) {
+                        let run_start = (run.start as i64 + shift).max(0) as u32;
+                        // An edit inside the hunk leaves the stored runs stale.
+                        // A run that starts at or past the live end opens no
+                        // stop, so every stop keeps at least one row.
+                        if run_start > stop_start && run_start < live.rows.end {
+                            stops.push(stop_start..run_start);
+                            stop_start = run_start;
+                        }
+                    }
+                    stops.push(stop_start..live.rows.end);
                 },
                 false => stops.push(live.rows.clone()),
             }
@@ -3771,13 +3787,34 @@ mod tests {
     /// Navigation stops on what changed. One refined hunk over a block offers a
     /// stop per run, so a walk crosses the changed rows rather than stepping
     /// over the whole block in one press.
+    ///
+    /// The stops tile the hunk. A row between two runs joins the run above it,
+    /// and a row above the first run joins that run.
     #[test]
     fn a_refined_hunk_offers_a_stop_per_marked_run() {
         let text = "0\n1\n2\n3\n4\n5\n";
         assert_eq!(
             stops_of(vec![refined_hunk(0..6, vec![1..2, 4..5])], text),
-            [1..2, 4..5],
-            "each run is its own stop"
+            [0..4, 4..6],
+            "each run's stop reaches the next run"
+        );
+    }
+
+    /// Deleting the rows under a refined hunk's second run leaves that run
+    /// past the hunk's live end. That run opens no stop, since the walk lands
+    /// an empty stop as a removal, on the row below the hunk.
+    #[test]
+    fn a_run_past_a_shrunk_hunk_opens_no_stop() {
+        let multi = buffer_holding("0\n1\n2\n3\n4\n5\n6\n");
+        let shared = multi.as_singleton().expect("singleton").clone();
+        let mut dm = DiffMap::from_hunks([refined_hunk(0..6, vec![1..2, 4..5])], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+
+        shared.write().expect("poisoned").edit(6..12, "");
+
+        assert_eq!(
+            dm.live_hunks(&multi.snapshot()).hunk_stops(),
+            std::iter::once(0..3).collect::<Vec<_>>(),
         );
     }
 
@@ -3793,19 +3830,19 @@ mod tests {
         );
     }
 
-    /// Stops come back in document order however the hunks and runs arrive, so
-    /// a walk never doubles back.
+    /// Stops come back in document order across hunks and their runs, so a
+    /// walk never doubles back. A hunk with one run is one stop over all of it.
     #[test]
     fn stops_arrive_in_document_order() {
         let text = "0\n1\n2\n3\n4\n5\n6\n7\n";
         let hunks = vec![
-            refined_hunk(0..3, vec![2..3, 0..1]),
+            refined_hunk(0..3, vec![0..1, 2..3]),
             refined_hunk(4..7, std::iter::once(5..6).collect()),
         ];
         assert_eq!(
             stops_of(hunks, text),
-            [0..1, 2..3, 5..6],
-            "runs from both hunks interleave in row order"
+            [0..2, 2..3, 4..7],
+            "stops from both hunks follow row order"
         );
     }
     /// The whole point: a hunk whose real change is two tokens marks two rows,

@@ -20,6 +20,11 @@ use stoat_action::{
 };
 use stoat_config::{Settings, Value};
 
+/// A rope whose rows all hold text, so every stop lands on its first row.
+fn text_rows() -> Rope {
+    Rope::from("x\n".repeat(32).as_str())
+}
+
 /// Seed a repo with two changed files, each carrying one hunk at line 1.
 /// `changed_files` sorts by path, so a.rs is index 0 and b.rs is index 1.
 fn stage_two_changed_files(h: &mut TestHarness) -> PathBuf {
@@ -83,8 +88,9 @@ fn shrink_containment_refuses_interleaved_ranges() {
 #[test]
 fn a_change_step_lands_the_stop_the_count_reaches() {
     let stops = [2..5, 7..7, 9..12, 15..16, 20..24];
-    let next = |row, count| nth_hunk_rows(&stops, row, ChangeDir::Next, count);
-    let prev = |row, count| nth_hunk_rows(&stops, row, ChangeDir::Prev, count);
+    let rope = text_rows();
+    let next = |row, count| nth_hunk_rows(&rope, &stops, row, ChangeDir::Next, count);
+    let prev = |row, count| nth_hunk_rows(&rope, &stops, row, ChangeDir::Prev, count);
 
     assert_eq!(next(0, 1), Some(2..5), "a step from above lands the first");
     assert_eq!(
@@ -122,7 +128,13 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
 
     let top_deletion = 0..0;
     assert_eq!(
-        nth_hunk_rows(std::slice::from_ref(&top_deletion), 0, ChangeDir::Prev, 1),
+        nth_hunk_rows(
+            &rope,
+            std::slice::from_ref(&top_deletion),
+            0,
+            ChangeDir::Prev,
+            1
+        ),
         None,
         "a deletion at the top is not behind a cursor on its own row",
     );
@@ -133,7 +145,8 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
 #[test]
 fn nearest_hunk_rows_picks_by_row_distance() {
     let stops = [2..3, 10..12, 20..20];
-    let nearest = |row| nearest_hunk_rows(&stops, row);
+    let rope = text_rows();
+    let nearest = |row| nearest_hunk_rows(&rope, &stops, row);
 
     assert_eq!(
         [0, 2, 5, 6, 7, 11, 16, 20, 40].map(nearest),
@@ -149,7 +162,25 @@ fn nearest_hunk_rows_picks_by_row_distance() {
             Some((20..20, false)),
         ],
     );
-    assert_eq!(nearest_hunk_rows(&[], 4), None, "no stop, no landing");
+    assert_eq!(
+        nearest_hunk_rows(&rope, &[], 4),
+        None,
+        "no stop, no landing"
+    );
+}
+
+/// Rows 1 and 2 are blank, so the stop lands on row 3. A cursor on either
+/// blank row still sits on the stop, which keeps a diff toggle in place.
+#[test]
+fn nearest_hunk_rows_holds_a_cursor_on_a_blank_leading_row() {
+    let rope = Rope::from("x\n\n\nx\n");
+    let stop = 1..4;
+    let nearest = |row| nearest_hunk_rows(&rope, std::slice::from_ref(&stop), row);
+
+    assert_eq!(
+        [0, 1, 2].map(nearest),
+        [Some((1..4, false)), Some((1..4, true)), Some((1..4, true))],
+    );
 }
 
 /// The changed list groups staged files before unstaged ones, so a staged file
@@ -972,19 +1003,20 @@ fn a_hop_landing_takes_the_live_map_s_last_run() {
     );
 }
 
-/// The scan's row is the top of the hunk, and the live map's first run starts
-/// below it.
+/// The live map's one stop opens at the top of the hunk, above its run. A Next
+/// hop lands there and passes over the scan's row, which is only the fallback
+/// for a map that offers no stop.
 #[test]
-fn a_next_hop_landing_takes_the_live_map_s_first_run() {
+fn a_next_hop_landing_takes_the_live_map_s_first_stop() {
     let mut h = TestHarness::with_size(40, 20);
     let workdir = stage_two_changed_files(&mut h);
     h.open_file(&workdir.join("a.rs"));
     let run = 1..2;
     install_refined_hunk(&mut h, 0..3, std::slice::from_ref(&run));
 
-    land_file_hop(&mut h.stoat, ChangeDir::Next, None, false, (0, 0..3));
+    land_file_hop(&mut h.stoat, ChangeDir::Next, None, false, (2, 2..3));
 
-    assert_eq!(focused_head_row(&mut h.stoat), 1);
+    assert_eq!(focused_head_row(&mut h.stoat), 0);
 }
 
 /// The scan diffs a file it has not opened with the line pass alone, so its
@@ -6397,7 +6429,7 @@ fn goto_change_walks_the_marked_runs_inside_one_hunk() {
     let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
     let path = h.write_file("s.txt", &text);
     h.open_file(&path);
-    install_refined_hunk(&mut h, 0..20, &[2..3, 18..19]);
+    install_refined_hunk(&mut h, 2..20, &[2..3, 18..19]);
 
     let row_of = |h: &mut TestHarness| h.selection_spans().first().map(|(start, _, _)| *start);
 
@@ -6418,6 +6450,24 @@ fn goto_change_walks_the_marked_runs_inside_one_hunk() {
     );
 }
 
+/// A stop tiles its hunk, so a blank row the tree pass left out of every run
+/// opens the stop. The walk lands on the stop's first row that holds text.
+///
+/// The cursor starts on the blank row, above the row the stop lands on, so a
+/// step forward still takes that stop.
+#[test]
+fn a_stop_that_opens_on_a_blank_row_lands_on_its_text() {
+    let mut h = TestHarness::with_size(20, 24);
+    let path = h.write_file("s.txt", "\nfoo\nbar\n");
+    h.open_file(&path);
+    let run = 1..3;
+    install_refined_hunk(&mut h, 0..3, std::slice::from_ref(&run));
+
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+
+    assert_eq!(focused_cursor_point(&mut h.stoat), Point::new(1, 0));
+}
+
 /// A count skips runs the way it skips hunks, so `2n` reaches the second one
 /// directly.
 #[test]
@@ -6426,7 +6476,7 @@ fn a_count_skips_to_the_later_marked_run() {
     let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
     let path = h.write_file("s.txt", &text);
     h.open_file(&path);
-    install_refined_hunk(&mut h, 0..20, &[2..3, 18..19]);
+    install_refined_hunk(&mut h, 2..20, &[2..3, 18..19]);
 
     let once = {
         dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
@@ -6444,7 +6494,7 @@ fn a_count_skips_to_the_later_marked_run() {
     let mut counted = TestHarness::with_size(20, 24);
     let path = counted.write_file("s.txt", &text);
     counted.open_file(&path);
-    install_refined_hunk(&mut counted, 0..20, &[2..3, 18..19]);
+    install_refined_hunk(&mut counted, 2..20, &[2..3, 18..19]);
     counted.type_keys("2 space g n");
 
     assert_eq!(
@@ -6454,14 +6504,15 @@ fn a_count_skips_to_the_later_marked_run() {
     );
 }
 
-/// The ends of the walk are the first and last run, not the block's edges.
+/// The ends of the walk are the first and last run. The last stop reaches the
+/// block's end, but its landing stays on the run.
 #[test]
 fn goto_edge_change_lands_on_the_outer_marked_runs() {
     let mut h = TestHarness::with_size(20, 24);
     let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
     let path = h.write_file("s.txt", &text);
     h.open_file(&path);
-    install_refined_hunk(&mut h, 0..20, &[2..3, 18..19]);
+    install_refined_hunk(&mut h, 2..20, &[2..3, 18..19]);
 
     dispatch(&mut h.stoat, &stoat_action::GotoLastChange);
     let last = h.selection_spans();

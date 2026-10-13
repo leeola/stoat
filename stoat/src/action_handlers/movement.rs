@@ -4171,7 +4171,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             let cursor_row = rope
                 .offset_to_point(cursor_offset(rope, tail_off, head_off))
                 .row;
-            let rows = nth_hunk_rows(&hunk_rows, cursor_row, dir, count)?;
+            let rows = nth_hunk_rows(rope, &hunk_rows, cursor_row, dir, count)?;
             Some((sel.id, stop_landing_cell(rope, rows.clone()), rows))
         })
         .collect();
@@ -4287,12 +4287,13 @@ pub(super) fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -
 /// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when the
 /// walk runs out of hunks before its first step.
 fn nth_hunk_rows(
+    rope: &Rope,
     hunk_rows: &[Range<u32>],
     cursor_row: u32,
     dir: ChangeDir,
     count: usize,
 ) -> Option<Range<u32>> {
-    let split = walk_split(hunk_rows, cursor_row, dir);
+    let split = walk_split(rope, hunk_rows, cursor_row, dir);
     match dir {
         ChangeDir::Next => {
             let last = hunk_rows.len().checked_sub(1)?;
@@ -4308,21 +4309,29 @@ fn nth_hunk_rows(
 /// Distance is the count of rows from `cursor_row` to the stop's nearest row,
 /// where a removal's seam counts as its start row. A tie goes to the stop
 /// below, the one `n` reaches next. `None` when there is no stop.
+///
+/// A cursor on any row of a stop sits on it, a blank row above the stop's
+/// landing row included.
 pub(super) fn nearest_hunk_rows(
+    rope: &Rope,
     hunk_rows: &[Range<u32>],
     cursor_row: u32,
 ) -> Option<(Range<u32>, bool)> {
-    let split = walk_split(hunk_rows, cursor_row, ChangeDir::Next);
+    let split = walk_split(rope, hunk_rows, cursor_row, ChangeDir::Next);
     let above = split.checked_sub(1).map(|i| &hunk_rows[i]);
     let below = hunk_rows.get(split);
 
-    if let Some(above) = above
-        && match above.is_empty() {
-            true => above.start == cursor_row,
-            false => above.contains(&cursor_row),
-        }
-    {
-        return Some((above.clone(), true));
+    // A cursor on a stop's blank leading row stands above the row the stop
+    // lands on, so the split puts the stop that holds the cursor below it.
+    let holding = [above, below]
+        .into_iter()
+        .flatten()
+        .find(|rows| match rows.is_empty() {
+            true => rows.start == cursor_row,
+            false => rows.contains(&cursor_row),
+        });
+    if let Some(rows) = holding {
+        return Some((rows.clone(), true));
     }
 
     let above = above.map(|rows| {
@@ -4360,16 +4369,16 @@ pub(super) fn nearest_hunk_rows(
 /// direction keeps are a run at one end, because the landing row rises across
 /// the list and so does the end row, which is what makes the split answer what
 /// a scan of every stop did.
-fn walk_split(hunk_rows: &[Range<u32>], cursor_row: u32, dir: ChangeDir) -> usize {
+fn walk_split(rope: &Rope, hunk_rows: &[Range<u32>], cursor_row: u32, dir: ChangeDir) -> usize {
     debug_assert!(
         hunk_rows
             .windows(2)
-            .all(|w| landing_row(&w[0]) <= landing_row(&w[1])),
+            .all(|w| landing_row(rope, &w[0]) <= landing_row(rope, &w[1])),
         "the hunk stops rise by landing row",
     );
 
     match dir {
-        ChangeDir::Next => hunk_rows.partition_point(|r| landing_row(r) <= cursor_row),
+        ChangeDir::Next => hunk_rows.partition_point(|r| landing_row(rope, r) <= cursor_row),
         ChangeDir::Prev => hunk_rows.partition_point(|r| match r.is_empty() {
             true => r.start < cursor_row,
             false => r.end <= cursor_row,
@@ -4379,10 +4388,25 @@ fn walk_split(hunk_rows: &[Range<u32>], cursor_row: u32, dir: ChangeDir) -> usiz
 
 /// Row a stop puts the cursor on.
 ///
+/// The stop's first row that holds a non-whitespace char, or its first row
+/// when none does. A hunk's first stop starts at the hunk's first row, so a
+/// blank line the change added there opens the stop. The landing passes over
+/// such a row to the change.
+///
 /// A deletion holds no rows of its own and lands on its seam row, the first row
 /// after the removed lines, where the gutter paints its mark.
-fn landing_row(rows: &Range<u32>) -> u32 {
-    rows.start
+fn landing_row(rope: &Rope, rows: &Range<u32>) -> u32 {
+    (rows.start..rows.end)
+        .find(|&row| row_holds_text(rope, row))
+        .unwrap_or(rows.start)
+}
+
+/// Whether buffer `row` holds a non-whitespace char.
+fn row_holds_text(rope: &Rope, row: u32) -> bool {
+    let start = rope.point_to_offset(Point::new(row, 0));
+    rope.chars_at(start)
+        .take_while(|&ch| ch != '\n')
+        .any(|ch| !ch.is_whitespace())
 }
 
 /// Row ranges change navigation stops on, in document order.
@@ -4486,16 +4510,17 @@ pub(crate) fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// The one cell a walk lands on, the first grapheme of the stop's first row.
+/// The one cell a walk lands on, the first grapheme of the stop's
+/// [`landing_row`].
 ///
 /// A removal has no rows of its own, so it lands on the row after the removed
 /// lines, where the diff view splices the deleted block. A removal of a file's
 /// last lines with no trailing newline has no row after them, so the cell
 /// clamps to the last row.
-fn stop_landing_cell(rope: &Rope, rows: Range<u32>) -> Range<usize> {
+pub(super) fn stop_landing_cell(rope: &Rope, rows: Range<u32>) -> Range<usize> {
     let first_row = match rows.is_empty() {
         true => rows.start.min(rope.max_point().row),
-        false => rows.start,
+        false => landing_row(rope, &rows),
     };
     let start = rope.point_to_offset(Point::new(first_row, 0));
     start..rope.next_grapheme_boundary(start)
