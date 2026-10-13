@@ -5,6 +5,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     pane::View,
     workspace::{
+        persist,
         registry::{self, RegistryEntry},
         state_path_for, Workspace, WorkspaceId, WorkspaceUid,
     },
@@ -127,6 +128,94 @@ pub(super) fn workspace_picker_complete(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Turn the workspace picker's filter into a rename of the selected session.
+///
+/// The input takes the row's name, and the filter query waits in the picker
+/// until Enter applies the name or Escape cancels. An empty list does nothing.
+pub(super) fn workspace_picker_rename_start(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+
+    let Some(name) = stoat
+        .workspace_picker
+        .as_mut()
+        .and_then(WorkspacePicker::rename_start)
+    else {
+        return UpdateEffect::None;
+    };
+
+    let ws = &mut stoat.workspaces[active_idx];
+    if let Some(picker) = stoat.workspace_picker.as_ref() {
+        picker.input.replace_text(ws, &name);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Apply the rename field's name to the session under rename, and return the
+/// picker to its filter.
+///
+/// An open row's workspace takes the name at once and saves. A saved row
+/// rewrites its state file and meta sidecar on the blocking pool, and logs a
+/// failed write. An empty name cancels the rename. The picker stays open.
+fn workspace_picker_rename_finish(stoat: &mut Stoat) -> UpdateEffect {
+    let active_idx = stoat.active_workspace;
+    let Some(picker) = stoat.workspace_picker.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let name = picker
+        .input
+        .text(&stoat.workspaces[active_idx])
+        .trim()
+        .to_owned();
+    let renamed = match name.is_empty() {
+        true => {
+            picker.rename_cancel();
+            None
+        },
+        false => picker.rename_finish(&name),
+    };
+    restore_picker_filter(stoat);
+
+    let Some((id, state_path, old)) = renamed else {
+        return UpdateEffect::Redraw;
+    };
+    match (id, state_path) {
+        (Some(id), _) => {
+            stoat.workspaces[id].name = name.clone();
+            stoat.save_workspace(id);
+        },
+        (None, Some(state_path)) => {
+            let fs = stoat.fs_host.clone();
+            let name = name.clone();
+            stoat
+                .executor
+                .spawn_blocking(move || {
+                    if let Err(err) = persist::rename_saved_session(&state_path, &name, fs.as_ref())
+                    {
+                        tracing::error!(?state_path, ?err, "failed to rename saved session");
+                    }
+                })
+                .detach();
+        },
+        (None, None) => {},
+    }
+    stoat.set_status(format!("renamed session {old} to {name}"));
+    UpdateEffect::Redraw
+}
+
+/// Put the filter query that a rename replaced back into the workspace picker's
+/// input, and rank the list against it.
+fn restore_picker_filter(stoat: &mut Stoat) {
+    let active_idx = stoat.active_workspace;
+    let Some(picker) = stoat.workspace_picker.as_mut() else {
+        return;
+    };
+    let query = picker.filter_query.clone();
+    picker
+        .input
+        .replace_text(&mut stoat.workspaces[active_idx], &query);
+    picker.refilter(&query);
+}
+
 /// Delete the session under the workspace picker's selection.
 ///
 /// An inactive row loses the state file and meta sidecar it would restore
@@ -235,7 +324,20 @@ fn release_workspace(stoat: &mut Stoat, id: WorkspaceId) {
     stoat.agent_servers.remove(&uid);
 }
 
+/// Close the workspace picker, or end a rename in it and keep it open.
+///
+/// Escape during a rename returns the input to the filter query and leaves the
+/// row's name as it was.
 pub(super) fn workspace_picker_close(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat
+        .workspace_picker
+        .as_mut()
+        .filter(|picker| picker.renaming())
+    {
+        picker.rename_cancel();
+        restore_picker_filter(stoat);
+        return UpdateEffect::Redraw;
+    }
     if let Some(picker) = stoat.workspace_picker.take() {
         picker.dispose(stoat.active_workspace_mut());
     }
@@ -324,7 +426,16 @@ pub(crate) fn sync_workspace_picker(stoat: &mut Stoat) {
 /// An untouched active workspace whose row the picker omitted leaves the
 /// instance with the switch or the create, since no row shows it and no save
 /// keeps it.
+///
+/// During a rename, Enter applies the name instead, and the picker stays open.
 pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat
+        .workspace_picker
+        .as_ref()
+        .is_some_and(WorkspacePicker::renaming)
+    {
+        return workspace_picker_rename_finish(stoat);
+    }
     let Some(picker) = stoat.workspace_picker.take() else {
         return UpdateEffect::None;
     };
@@ -614,6 +725,21 @@ mod tests {
             .iter()
             .map(|entry| entry.basename.clone())
             .collect()
+    }
+
+    /// The text in the open picker's input.
+    fn picker_text(stoat: &Stoat) -> String {
+        let picker = stoat.workspace_picker.as_ref().expect("picker open");
+        picker.input.text(stoat.active_workspace())
+    }
+
+    /// Replace the text in the open picker's input, as typing it does.
+    fn replace_picker_text(stoat: &mut Stoat, text: &str) {
+        let active = stoat.active_workspace;
+        let picker = stoat.workspace_picker.as_ref().expect("picker open");
+        picker
+            .input
+            .replace_text(&mut stoat.workspaces[active], text);
     }
 
     fn saved_session(uid: WorkspaceUid, name: &str) -> RegistryEntry {
@@ -938,6 +1064,167 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("deleted session beta"),
             "the status names the deleted session"
+        );
+    }
+
+    #[test]
+    fn renaming_an_open_background_row_sets_its_name() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+        let second = {
+            let ws = Workspace::new(
+                PathBuf::from("/tmp/beta"),
+                &stoat.executor,
+                stoat.redraw_notify.clone(),
+            );
+            let id = stoat.workspaces.insert(ws);
+            stoat.workspaces[id].id = id;
+            stoat.workspaces[id].name = "beta".to_string();
+            id
+        };
+        let input = picker_input(stoat);
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            Vec::new(),
+            input,
+        ));
+
+        workspace_picker_rename_start(stoat);
+        let seeded = picker_text(stoat);
+        replace_picker_text(stoat, "gamma");
+        workspace_picker_select(stoat);
+
+        assert_eq!(
+            (
+                seeded.as_str(),
+                stoat.workspaces[second].name.as_str(),
+                picker_rows(stoat),
+                picker_text(stoat),
+                stoat.pending_message.as_deref(),
+            ),
+            (
+                "beta",
+                "gamma",
+                vec!["alpha".to_string(), "gamma".to_string()],
+                String::new(),
+                Some("renamed session beta to gamma"),
+            ),
+            "the open workspace takes the name, and the picker returns to its filter"
+        );
+    }
+
+    /// A restore takes the name from the state file, so the sidecar alone is
+    /// not enough.
+    #[test]
+    fn renaming_a_saved_row_rewrites_its_state_and_meta() {
+        let mut harness = Stoat::test();
+        let state_path = PathBuf::from("/state/hash/1.ron");
+        {
+            let stoat = &harness.stoat;
+            let mut ws = Workspace::new(
+                PathBuf::from("/proj"),
+                &stoat.executor,
+                stoat.redraw_notify.clone(),
+            );
+            ws.name = "proj".to_string();
+            ws.save_state(&state_path, &*stoat.fs_host)
+                .expect("the saved session is seeded");
+        }
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        let mut saved = saved_session(WorkspaceUid(424242), "proj");
+        saved.state_path = state_path.clone();
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![saved],
+            input,
+        ));
+
+        workspace_picker_rename_start(stoat);
+        replace_picker_text(stoat, "renamed");
+        workspace_picker_select(stoat);
+        harness.run_until_parked();
+
+        let fs = &*harness.stoat.fs_host;
+        let read = |path: &Path| {
+            let mut buf = Vec::new();
+            fs.read(path, &mut buf).expect("the file exists");
+            String::from_utf8(buf).expect("the file is UTF-8")
+        };
+        let state: persist::WorkspaceStateV1 =
+            ron::from_str(&read(&state_path)).expect("the state parses");
+        let meta: WorkspaceMeta =
+            ron::from_str(&read(&registry::meta_path_for(&state_path))).expect("the meta parses");
+        assert_eq!(
+            (
+                state.name.as_str(),
+                meta.name.as_str(),
+                harness.stoat.pending_message.as_deref(),
+            ),
+            (
+                "renamed",
+                "renamed",
+                Some("renamed session proj to renamed")
+            ),
+        );
+    }
+
+    #[test]
+    fn enter_on_an_empty_rename_keeps_the_name() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![saved_session(WorkspaceUid(7), "proj")],
+            input,
+        ));
+
+        workspace_picker_rename_start(stoat);
+        replace_picker_text(stoat, "  ");
+        workspace_picker_select(stoat);
+
+        let picker = stoat.workspace_picker.as_ref();
+        assert_eq!(
+            (
+                picker.map(WorkspacePicker::renaming),
+                picker.and_then(|p| p.selected_entry().map(|e| e.basename.clone())),
+                stoat.pending_message.as_deref(),
+            ),
+            (Some(false), Some("proj".to_string()), None),
+            "the rename ends and the row keeps its name"
+        );
+    }
+
+    #[test]
+    fn escape_during_a_rename_restores_the_query() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![saved_session(WorkspaceUid(7), "proj")],
+            input,
+        ));
+        replace_picker_text(stoat, "pr");
+        sync_workspace_picker(stoat);
+
+        workspace_picker_rename_start(stoat);
+        workspace_picker_close(stoat);
+
+        let renaming = stoat
+            .workspace_picker
+            .as_ref()
+            .map(WorkspacePicker::renaming);
+        assert_eq!(
+            (picker_text(stoat), renaming),
+            ("pr".to_string(), Some(false)),
+            "the picker stays open with the query back in its input"
         );
     }
 

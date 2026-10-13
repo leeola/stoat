@@ -111,6 +111,17 @@ define_action!(
 );
 
 define_action!(
+    PickerRenameDef,
+    PickerRename,
+    "PickerRename",
+    ActionKind::PickerRename,
+    "rename the picker row's session",
+    "In the workspace picker, turn the filter input into a rename field for the selected session; Enter applies the name, Escape returns to the filter. Other list modals do nothing.",
+    ActionPriority::Common,
+    palette_visible = false
+);
+
+define_action!(
     CommitPickerNextBranchDef,
     CommitPickerNextBranch,
     "CommitPickerNextBranch",

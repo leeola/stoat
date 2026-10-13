@@ -160,6 +160,7 @@ action_kinds! {
     PickerDetailDown,
     PickerDetailUp,
     PickerDelete,
+    PickerRename,
     CommitPickerNextBranch,
     CommitPickerPrevBranch,
     CommitPickerColumnCycle,

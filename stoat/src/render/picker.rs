@@ -23,12 +23,16 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use std::{collections::BTreeMap, path::Path};
+use unicode_width::UnicodeWidthStr;
 
 /// Paint a filter modal's header, which is the prompt glyph, the live input
 /// beside it, and the separator ruling both off from the body.
 ///
 /// `inner` is the modal's rect inside its border. The header claims its first
 /// two rows, so a caller's body begins at `inner.y + 2`.
+///
+/// The input starts one column past `prompt`, so a longer prompt such as a
+/// rename field's pushes the input right.
 ///
 /// Every filter modal opens this way, and each lays its body rects out from
 /// that same two-row assumption. One painter is what keeps the assumption true
@@ -46,7 +50,13 @@ pub(crate) fn filter_header(
 ) {
     write_str(buf, inner.x, inner.y, prompt, theme.get(scope::UI_PROMPT));
 
-    let input_area = Rect::new(inner.x + 2, inner.y, inner.width.saturating_sub(2), 1);
+    let offset = prompt.width() as u16 + 1;
+    let input_area = Rect::new(
+        inner.x + offset,
+        inner.y,
+        inner.width.saturating_sub(offset),
+        1,
+    );
     input.render(
         &mut ws.editors,
         input_area,

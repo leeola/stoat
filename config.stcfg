@@ -402,6 +402,9 @@ on key {
         Tab -> PickerComplete();
         # Shadows the input's forward-delete. Backspace still edits the query.
         Delete -> PickerDelete();
+        # Shadows the input's register insert. The rename edits the row's name
+        # in the same input, and Enter applies it.
+        Ctrl-r -> PickerRename();
         Enter -> SubmitPromptInput();
         Escape -> CancelPromptInput();
     }

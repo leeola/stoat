@@ -91,6 +91,7 @@ use crate::{
             CommitPickerColumnCycle, CommitPickerDrillIn, CommitPickerNextBranch,
             CommitPickerPrevBranch, PickerComplete, PickerDelete, PickerDetailDown, PickerDetailUp,
             PickerFirst, PickerLast, PickerNext, PickerPageDown, PickerPageUp, PickerPrev,
+            PickerRename,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PromptHistoryNext, PromptHistoryPrev,
@@ -497,6 +498,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PickerDetailDown::DEF, |_| Ok(Box::new(PickerDetailDown)));
     add(PickerDetailUp::DEF, |_| Ok(Box::new(PickerDetailUp)));
     add(PickerDelete::DEF, |_| Ok(Box::new(PickerDelete)));
+    add(PickerRename::DEF, |_| Ok(Box::new(PickerRename)));
     add(CommitPickerNextBranch::DEF, |_| {
         Ok(Box::new(CommitPickerNextBranch))
     });
@@ -1336,6 +1338,7 @@ mod tests {
         "PickerDetailDown",
         "PickerDetailUp",
         "PickerDelete",
+        "PickerRename",
         "CommitPickerNextBranch",
         "CommitPickerPrevBranch",
         "CommitPickerColumnCycle",
@@ -1875,6 +1878,7 @@ mod tests {
         // + 2 ToggleLineComments/ToggleBlockComments.
         // + 4 the long-word extends.
         // + 1 PickerDelete.
+        // + 1 PickerRename.
         // + 1 PinMode.
         // + 1 Ssh.
         // + 1 Mosh.
@@ -1888,7 +1892,7 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        assert_eq!(all().count(), 437);
+        assert_eq!(all().count(), 438);
     }
 
     #[test]

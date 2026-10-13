@@ -743,6 +743,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PickerDetailDown => picker::picker_detail(stoat, 1),
         ActionKind::PickerDetailUp => picker::picker_detail(stoat, -1),
         ActionKind::PickerDelete => picker::picker_delete(stoat),
+        ActionKind::PickerRename => picker::picker_rename(stoat),
         ActionKind::GitReview => {
             let action = action
                 .as_any()
@@ -3275,6 +3276,7 @@ mod tests {
         for expected in [
             "complete from the picker",
             "page the picker down",
+            "rename the picker row's session",
             "cancel prompt input",
         ] {
             assert!(

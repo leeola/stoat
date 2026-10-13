@@ -72,6 +72,12 @@ pub struct WorkspacePicker {
     /// saved session restores into. A switch away from such a workspace leaves
     /// it with no row, no save, and no way back.
     pub(crate) omitted_workspace: Option<WorkspaceId>,
+    /// The entry under rename, an index into `entries`, while the input holds a
+    /// new name instead of the filter query.
+    renaming: Option<usize>,
+    /// The filter query that a rename replaced, which goes back into the input
+    /// when the rename ends.
+    pub(crate) filter_query: String,
 }
 
 /// One row in the picker. Built up-front from the workspace slotmap so the
@@ -171,13 +177,7 @@ impl WorkspacePicker {
             .position(|e| e.status != WorkspaceStatus::Active)
             .unwrap_or(0);
 
-        let haystacks = entries
-            .iter()
-            .map(|e| {
-                let host = e.remote_host.as_deref().unwrap_or_default();
-                format!("{} {} {}", e.basename, host, e.git_root.display())
-            })
-            .collect();
+        let haystacks = entries.iter().map(haystack).collect();
 
         let mut picker = Self {
             input,
@@ -190,6 +190,8 @@ impl WorkspacePicker {
             last_filter_query: None,
             viewport_rows: None,
             omitted_workspace: None,
+            renaming: None,
+            filter_query: String::new(),
         };
         picker.refilter("");
         picker
@@ -241,11 +243,18 @@ impl WorkspacePicker {
     /// land only on name-column indices when painted.
     ///
     /// Re-ranking for an unchanged query is skipped, so the idle tick this runs
-    /// from costs nothing while the picker sits open.
+    /// from costs nothing while the picker sits open. A rename skips it too,
+    /// because the input then holds a new name, not a query.
     pub(crate) fn refilter(&mut self, query: &str) {
-        if self.last_filter_query.as_deref() == Some(query) {
+        if self.renaming.is_some() || self.last_filter_query.as_deref() == Some(query) {
             return;
         }
+        self.rank(query);
+    }
+
+    /// Rank the entries for `query`, whatever the cached query or a rename
+    /// says, for a caller whose entry list changed under the ranking.
+    fn rank(&mut self, query: &str) {
         self.last_filter_query = Some(query.to_owned());
 
         let items = self
@@ -292,9 +301,9 @@ impl WorkspacePicker {
     /// last.
     ///
     /// [`Self::filtered`] holds indices into `entries`, so removing an entry
-    /// invalidates every index past it. The cached query is replayed through
-    /// [`Self::refilter`] to rebuild the ranking against the shrunk lists,
-    /// which re-clamps the selection as a side effect.
+    /// invalidates every index past it. The cached query ranks the shrunk lists
+    /// afresh, even during a rename, which re-clamps the selection as a side
+    /// effect.
     pub(crate) fn remove_selected(&mut self) {
         let Some(&entry_idx) = self.filtered.get(self.selected) else {
             return;
@@ -326,9 +335,57 @@ impl WorkspacePicker {
     fn remove_entry(&mut self, entry_idx: usize) {
         self.entries.remove(entry_idx);
         self.haystacks.remove(entry_idx);
+        self.renaming = match self.renaming {
+            Some(idx) if idx == entry_idx => None,
+            Some(idx) if idx > entry_idx => Some(idx - 1),
+            other => other,
+        };
 
         let query = self.last_filter_query.take().unwrap_or_default();
-        self.refilter(&query);
+        self.rank(&query);
+    }
+
+    /// Whether the input holds a new name for a row instead of the filter
+    /// query.
+    pub(crate) fn renaming(&self) -> bool {
+        self.renaming.is_some()
+    }
+
+    /// Start renaming the selected row, and return its name to seed the rename
+    /// field.
+    ///
+    /// The filter query waits in [`Self::filter_query`], and the ranking holds
+    /// until the rename ends. `None` on an empty list.
+    pub(crate) fn rename_start(&mut self) -> Option<String> {
+        let entry_idx = *self.filtered.get(self.selected)?;
+        let name = self.entries.get(entry_idx)?.basename.clone();
+        self.renaming = Some(entry_idx);
+        self.filter_query = self.last_filter_query.clone().unwrap_or_default();
+        Some(name)
+    }
+
+    /// Give the row under rename the name `name`, and end the rename.
+    ///
+    /// Returns the row's open workspace, its state file, and its old name, so
+    /// the caller carries the name to what the row stands for. `None` while no
+    /// rename runs.
+    pub(crate) fn rename_finish(
+        &mut self,
+        name: &str,
+    ) -> Option<(Option<WorkspaceId>, Option<PathBuf>, String)> {
+        let idx = self.renaming.take()?;
+        let entry = self.entries.get_mut(idx)?;
+        let old = std::mem::replace(&mut entry.basename, name.to_owned());
+        self.haystacks[idx] = haystack(entry);
+        // The row now matches other queries, so the filter the caller restores
+        // ranks afresh.
+        self.last_filter_query = None;
+        Some((entry.id, entry.state_path.clone(), old))
+    }
+
+    /// End the rename and leave the row's name as it was.
+    pub(crate) fn rename_cancel(&mut self) {
+        self.renaming = None;
     }
 
     /// Whether any row leads somewhere other than the active workspace.
@@ -382,6 +439,13 @@ impl WorkspacePicker {
     fn clamp_selected(&mut self) {
         picker::nav_clamp(self.filtered.len(), &mut self.selected);
     }
+}
+
+/// The text a query matches `entry` against, which holds the row's name, its
+/// remote host, and its root path.
+fn haystack(entry: &PickerEntry) -> String {
+    let host = entry.remote_host.as_deref().unwrap_or_default();
+    format!("{} {} {}", entry.basename, host, entry.git_root.display())
 }
 
 /// A workspace's display name, its explicit name or its git root's basename
@@ -665,6 +729,119 @@ mod tests {
         assert!(
             !picker.has_switch_target(),
             "the lone row is the active workspace"
+        );
+    }
+
+    #[test]
+    fn rename_start_returns_the_selected_name_and_freezes_the_ranking() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
+        let seeded = picker.rename_start();
+        picker.refilter("gamma");
+        assert_eq!(
+            (seeded.as_deref(), picker.renaming(), picker.filtered()),
+            (Some("beta"), true, [0, 1, 2].as_slice()),
+            "the rename seeds the row's name, and the name typed over it ranks nothing"
+        );
+    }
+
+    #[test]
+    fn rename_finish_rewrites_the_row_and_its_haystack() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta"]);
+        let beta = picker.selected_id();
+        picker.rename_start();
+        let renamed = picker.rename_finish("delta");
+        picker.refilter("delta");
+        assert_eq!(
+            (
+                renamed,
+                picker.renaming(),
+                picker
+                    .entries()
+                    .iter()
+                    .map(|e| e.basename.as_str())
+                    .collect::<Vec<_>>(),
+                picker.filtered(),
+            ),
+            (
+                Some((beta, None, "beta".to_string())),
+                false,
+                vec!["alpha", "delta"],
+                [1].as_slice(),
+            ),
+            "the row takes the name, and a query for the name finds the row"
+        );
+    }
+
+    /// The roots hold neither name, so only the name decides the match.
+    #[test]
+    fn a_renamed_row_drops_out_of_a_filter_it_no_longer_matches() {
+        let exec = executor();
+        let mut workspaces: SlotMap<WorkspaceId, Workspace> = SlotMap::with_key();
+        let mut insert = |root: &str, name: &str, focused: u64| {
+            let id = workspaces.insert(Workspace::new(
+                PathBuf::from(root),
+                &exec,
+                crate::test_notify(),
+            ));
+            workspaces[id].id = id;
+            workspaces[id].name = name.into();
+            workspaces[id].last_active = focused_at(focused);
+            id
+        };
+        let active = insert("/tmp/w1", "alpha", 2);
+        insert("/tmp/w2", "beta", 1);
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), dummy_input());
+        picker.refilter("beta");
+
+        picker.rename_start();
+        picker.rename_finish("zeta");
+        let query = picker.filter_query.clone();
+        picker.refilter(&query);
+        assert!(
+            picker.filtered().is_empty(),
+            "the filter ranks again, and the renamed row matches it no more"
+        );
+    }
+
+    /// The delete removes the row ahead of the one under rename, so the rename
+    /// follows its row to the new index.
+    #[test]
+    fn a_delete_during_a_rename_keeps_the_rename_on_its_row() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
+        picker.select_next();
+        picker.rename_start();
+        picker.select_prev();
+        picker.remove_selected();
+
+        picker.rename_finish("delta");
+        assert_eq!(
+            picker
+                .entries()
+                .iter()
+                .map(|e| e.basename.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "delta"],
+        );
+    }
+
+    #[test]
+    fn rename_cancel_keeps_the_name_and_the_filter_query() {
+        let mut picker = picker_with_roots(&["/tmp/alpha", "/tmp/beta", "/tmp/gamma"]);
+        picker.refilter("a");
+        picker.rename_start();
+        picker.rename_cancel();
+        assert_eq!(
+            (
+                picker.renaming(),
+                picker.filter_query.as_str(),
+                picker
+                    .entries()
+                    .iter()
+                    .map(|e| e.basename.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (false, "a", vec!["alpha", "beta", "gamma"]),
+            "every name stays, and the filter query waits to go back into the input"
         );
     }
 

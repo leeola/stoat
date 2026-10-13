@@ -55,7 +55,20 @@ pub(crate) fn render_workspace_picker(
         &mut *scene,
     );
 
-    crate::render::picker::filter_header(buf, inner, ">", &picker.input, ws, theme, chrome, scene);
+    let prompt = match picker.renaming() {
+        true => "rename>",
+        false => ">",
+    };
+    crate::render::picker::filter_header(
+        buf,
+        inner,
+        prompt,
+        &picker.input,
+        ws,
+        theme,
+        chrome,
+        scene,
+    );
 
     const NAME_W: u16 = 12;
     const BUF_W: u16 = 5;
@@ -384,6 +397,37 @@ mod tests {
         assert!(
             text.contains(&last),
             "and it is the selected entry ({last}) that paints there: {text:?}"
+        );
+    }
+
+    /// The input starts one column past the prompt, so the seeded name paints
+    /// nothing over the longer rename prompt. The input is a real one, since
+    /// the null editor of `picker_for` paints no text to overlap.
+    #[test]
+    fn a_rename_names_itself_in_the_prompt() {
+        let (mut workspaces, active) =
+            workspaces_over(3, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        let executor: Executor = Arc::new(TestScheduler::new()).executor();
+        let input = InputView::create(
+            &mut workspaces[active],
+            executor,
+            SubmitTarget::WorkspacePicker,
+            "ws01",
+            "insert",
+            1,
+        );
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
+        picker.rename_start();
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+
+        let painted: Vec<String> = (0..area.height).map(|y| row_text(&buf, y)).collect();
+        assert!(
+            painted.iter().any(|row| row.contains("rename> ws01")),
+            "the prompt reads rename>, and the name starts past it:\n{}",
+            painted.join("\n")
         );
     }
 

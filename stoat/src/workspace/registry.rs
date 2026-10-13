@@ -139,13 +139,18 @@ fn meta_from_state(state_path: &Path, fs: &dyn FsHost) -> Option<WorkspaceMeta> 
     fs.read(state_path, &mut buf).ok()?;
     let body = String::from_utf8(buf).ok()?;
     let state: WorkspaceStateV1 = ron::from_str(&body).ok()?;
-    Some(WorkspaceMeta {
+    Some(meta_of(&state))
+}
+
+/// The registry entry that a saved workspace state describes.
+pub(crate) fn meta_of(state: &WorkspaceStateV1) -> WorkspaceMeta {
+    WorkspaceMeta {
         uid: state.uid,
-        name: state.name,
-        git_root: state.git_root,
+        name: state.name.clone(),
+        git_root: state.git_root.clone(),
         buffer_count: state.buffers.entries.len(),
-        remote_host: state.remote.map(|target| target.host),
-    })
+        remote_host: state.remote.as_ref().map(|target| target.host.clone()),
+    }
 }
 
 #[cfg(test)]

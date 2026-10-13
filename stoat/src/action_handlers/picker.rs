@@ -92,6 +92,20 @@ pub(super) fn picker_delete(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
+/// Turn the open list modal's filter into a rename of its selected row.
+///
+/// Only the workspace picker's rows carry a name of their own. The rest list
+/// files, symbols, and actions whose names the picker does not own, so they do
+/// nothing rather than reporting an error.
+pub(super) fn picker_rename(stoat: &mut Stoat) -> UpdateEffect {
+    match active_modal(stoat) {
+        Some(ActiveModal::WorkspacePicker) => {
+            super::workspace::workspace_picker_rename_start(stoat)
+        },
+        _ => UpdateEffect::None,
+    }
+}
+
 /// Scroll the open list modal's preview pane half a pane in `dir`.
 ///
 /// Each modal holds its preview differently. Help and the commit picker keep

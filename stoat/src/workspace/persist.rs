@@ -627,6 +627,28 @@ fn write_state(
     super::registry::write_meta(meta, path, fs)
 }
 
+/// Rename the saved session whose state file is `state_path` to `name`.
+///
+/// The name lives in the state file and in its meta sidecar. A restore takes
+/// the name from the state file, so a sidecar-only rename comes undone at the
+/// next restore, and both are rewritten. The read and the write block, so a
+/// caller on the run loop runs this on the blocking pool.
+pub(crate) fn rename_saved_session(
+    state_path: &Path,
+    name: &str,
+    fs: &dyn FsHost,
+) -> io::Result<()> {
+    let mut buf = Vec::new();
+    fs.read(state_path, &mut buf)?;
+    let body = String::from_utf8(buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    let mut state: WorkspaceStateV1 = ron::from_str(&body)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    state.name = name.to_owned();
+    let meta = super::registry::meta_of(&state);
+    write_state(&state, &meta, state_path, fs)
+}
+
 /// The order of one workspace's session writes, and whether any of them still
 /// lands.
 ///
