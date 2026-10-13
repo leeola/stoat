@@ -1100,11 +1100,9 @@ fn status_segments(
         && prompt.is_none()
     {
         let left_pad = if cursor == area.x { " " } else { "" };
-        let text = if status.dirty {
-            format!("{left_pad}{name} [+] ")
-        } else {
-            format!("{left_pad}{name} ")
-        };
+        let read_only = if status.read_only { " [readonly]" } else { "" };
+        let modified = if status.dirty { " [+]" } else { "" };
+        let text = format!("{left_pad}{name}{read_only}{modified} ");
         push_left(&mut left, &mut cursor, end_x, text, base_style);
     }
     if let Some((_, label)) = status
@@ -1671,6 +1669,7 @@ fn pane_status_info(
             PaneStatusInfo {
                 filename: Some(filename),
                 buffer_id: Some(buffer_id),
+                read_only: buffers.read_only(buffer_id).is_some(),
                 dirty,
                 cursor_pos: editor_cursor_position(editor),
                 staged_counts,
@@ -1702,6 +1701,9 @@ struct PaneStatusInfo {
     /// The buffer an editor view shows, which the bar looks up in
     /// [`FrameCtx::held_buffers`].
     buffer_id: Option<BufferId>,
+    /// Whether the buffer must not write back to its file, which the bar tags
+    /// `[readonly]` between the name and the modified tag.
+    read_only: bool,
     dirty: bool,
     cursor_pos: Option<(u32, u32)>,
     /// `(staged, unstaged)` hunk counts, `None` when the buffer has no diff.
@@ -2818,6 +2820,33 @@ mod tests {
                 "stoatty {stoatty}",
             );
         }
+    }
+
+    /// A read-only buffer's status row reads `name [readonly] [+]`, the
+    /// read-only tag between the name and the modified tag.
+    #[test]
+    fn the_status_row_tags_a_read_only_buffer() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let root = PathBuf::from("/ro");
+        let path = root.join("file.txt");
+        h.fake_fs().insert_file(&path, b"text\n");
+        h.fake_fs().set_read_only(&path, true);
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.edit_focused(4..4, "!");
+
+        let buf = h.render_composited();
+
+        let row = buf.area.height - 1;
+        let bar = (0..buf.area.width)
+            .map(|x| buf[(x, row)].symbol())
+            .collect::<String>()
+            .replace('─', " ");
+        assert_eq!(
+            bar,
+            format!("{:<56}1:1 ", " NOR  ro file.txt [readonly] [+]")
+        );
     }
 
     #[test]
