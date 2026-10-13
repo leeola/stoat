@@ -213,6 +213,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     } else {
         begin_action_group(stoat)
     };
+    if pane::is_layout_action(action.kind()) && pane::close_full_window_screen(stoat) {
+        end_action_group(stoat, group_buffer);
+        return UpdateEffect::Redraw;
+    }
     let effect = match action.kind() {
         ActionKind::Quit => {
             let focused = stoat.active_workspace().panes.focus();

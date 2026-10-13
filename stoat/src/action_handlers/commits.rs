@@ -34,6 +34,9 @@ pub(crate) enum CommitStep {
 ///
 /// Each pane opens a list of its own, so a list in another pane or another tab
 /// keeps its place. Outside a git repository nothing changes.
+///
+/// The list widens its pane into a full-window screen. A layout action pressed
+/// on it closes the list rather than leaving it narrow beside a split.
 pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().focused_commits_id().is_some() {
         return close_commits(stoat);
@@ -1068,7 +1071,7 @@ mod tests {
         seed_two_commits_on_main(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
         walk_from_the_list(&mut h);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
+        h.stoat.active_workspace_mut().panes.unwiden();
         let dropped = h.stoat.active_workspace().panes.widened().is_none();
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
@@ -1082,6 +1085,53 @@ mod tests {
             ),
             (true, Some("commits"), true),
             "the list takes the full width again when it comes back"
+        );
+    }
+
+    /// A split pressed on the list closes the list and splits nothing, so the
+    /// pane shows the editor the list covered.
+    #[test]
+    fn a_split_on_the_list_closes_it_and_splits_nothing() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        h.open_commits("/repo");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitDown);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.panes.split_pane_ids().len(),
+                ws.commit_lists.len(),
+                h.stoat.current_view(),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (2, 0, Some("file"), Some("commits closed")),
+        );
+    }
+
+    /// A layout action on a diff opened from the list returns to the list, and
+    /// the next one closes the list. One layer closes per press.
+    #[test]
+    fn layout_actions_on_a_walk_peel_one_layer_per_press() {
+        let mut h = Stoat::test();
+        seed_two_commits_on_main(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        walk_from_the_list(&mut h);
+
+        let mut views = Vec::new();
+        for _ in 0..2 {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+            views.push(h.stoat.current_view());
+        }
+
+        assert_eq!(
+            (
+                views,
+                h.stoat.active_workspace().panes.split_pane_ids().len()
+            ),
+            (vec![Some("commits"), Some("file")], 2),
         );
     }
 
@@ -1203,16 +1253,14 @@ mod tests {
         );
     }
 
+    /// The split chord on a list closes the list, as a layout action on any
+    /// full-window screen does. The editor it uncovers rests in normal mode, not
+    /// in the leader mode the chord passed through.
     #[test]
-    fn splitting_a_list_pane_gives_the_new_pane_an_editor() {
+    fn the_split_chord_on_a_list_closes_it_into_normal_mode() {
         let mut h = Stoat::test();
         seed_two_commits_on_main(&mut h);
         h.open_commits("/repo");
-        let list = h
-            .stoat
-            .active_workspace()
-            .focused_commits_id()
-            .expect("the list pane");
 
         h.type_keys("space a s");
 
@@ -1221,10 +1269,10 @@ mod tests {
             (
                 h.stoat.current_view(),
                 ws.commit_lists.len(),
-                ws.commit_lists[list].mode.as_str()
+                ws.panes.split_pane_ids().len(),
+                h.stoat.focused_mode(),
             ),
-            (Some("file"), 1, "normal"),
-            "the split opens an editor beside the list, and the list leaves the leader mode"
+            (Some("file"), 0, 1, "normal"),
         );
     }
 
@@ -1235,9 +1283,18 @@ mod tests {
         seed_two_commits_on_main(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
         h.open_commits("/repo");
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
-        let list_pane = h.stoat.active_workspace().panes.focus();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let list_pane = {
+            let panes = &mut h.stoat.active_workspace_mut().panes;
+            let list_pane = panes.focus();
+            let left = panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&id| id != list_pane)
+                .expect("the pane left of the list");
+            panes.unwiden();
+            panes.set_focus(left);
+            list_pane
+        };
 
         let mut first_rows = Vec::new();
         for dim in [0.0, 0.6] {

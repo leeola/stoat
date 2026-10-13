@@ -8349,7 +8349,7 @@ fn the_status_message_shows_only_on_the_focused_pane_bar() {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
     let left = h.stoat.active_workspace().panes.focus();
     h.open_commits("/repo");
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusRight);
+    h.stoat.active_workspace_mut().panes.set_focus(right);
     h.stoat.set_status("saved");
     h.snapshot();
 
@@ -8407,10 +8407,10 @@ fn commits_in_the_right_half() -> (crate::test_harness::TestHarness, PaneId, Pan
     action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
     let right = h.stoat.active_workspace().panes.focus();
     h.open_commits("/repo");
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
+    h.stoat.active_workspace_mut().panes.unwiden();
     assert_eq!(
-        h.stoat.active_workspace().panes.widened(),
-        None,
+        h.stoat.current_view(),
+        Some("commits"),
         "the commits list sits in its own half"
     );
     (h, left, right)

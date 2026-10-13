@@ -6,6 +6,7 @@ use crate::{
     workspace::Workspace,
 };
 use ratatui::layout::Rect;
+use stoat_action::ActionKind;
 use stoat_scheduler::Executor;
 
 /// Closes the focused pane and disposes its backing view state. Returns
@@ -92,6 +93,115 @@ pub(super) fn toggle_pane_widen(stoat: &mut Stoat) {
         }
     };
     stoat.set_status(status);
+}
+
+/// Whether `kind` rearranges the panes of the tab or moves focus between them.
+///
+/// On a full-window screen, [`close_full_window_screen`] answers these actions
+/// instead of running them.
+pub(super) fn is_layout_action(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::SplitRight
+            | ActionKind::SplitDown
+            | ActionKind::SplitNewRight
+            | ActionKind::SplitNewDown
+            | ActionKind::FocusLeft
+            | ActionKind::FocusRight
+            | ActionKind::FocusUp
+            | ActionKind::FocusDown
+            | ActionKind::FocusNext
+            | ActionKind::FocusPrev
+            | ActionKind::FocusPane
+            | ActionKind::MovePaneLeft
+            | ActionKind::MovePaneRight
+            | ActionKind::MovePaneUp
+            | ActionKind::MovePaneDown
+            | ActionKind::MovePaneNext
+            | ActionKind::MovePanePrev
+            | ActionKind::TogglePaneWiden
+            | ActionKind::OpenFileFinderHSplit
+            | ActionKind::OpenFileFinderVSplit
+    )
+}
+
+/// A screen that covers the whole tab through a widen of its pane.
+#[derive(Clone, Copy)]
+enum FullWindowScreen {
+    Commits,
+    Conflict,
+    Diff,
+}
+
+/// Close the full-window screen in the focused pane, and report whether one was
+/// there.
+///
+/// The diff view, the commits list, and the conflict view each widen their pane
+/// over the tab, and the diff view includes a latched review pane and a pair
+/// diff. A split beside such a screen or a focus move off it leaves the screen
+/// narrow in a layout it was not drawn for. So a layout action on a screen
+/// closes the screen, reports it in the status row, and does nothing else.
+///
+/// One layer closes per press. A diff opened from a commits list returns to the
+/// list, as the commits command peels it, and the next press closes the list.
+pub(super) fn close_full_window_screen(stoat: &mut Stoat) -> bool {
+    let Some(screen) = focused_screen(stoat.active_workspace()) else {
+        return false;
+    };
+    let status = match screen {
+        FullWindowScreen::Commits => {
+            super::commits::close_commits(stoat);
+            "commits closed"
+        },
+        FullWindowScreen::Conflict => {
+            super::conflict_view::close_conflict(stoat);
+            "conflict view closed"
+        },
+        FullWindowScreen::Diff => {
+            close_diff_screen(stoat);
+            "diff closed"
+        },
+    };
+    stoat.set_status(status);
+    true
+}
+
+/// The full-window screen in the focused pane, ranked as the `view` predicate
+/// ranks screens, so a conflict view wins over the diff flags of its editor.
+fn focused_screen(ws: &Workspace) -> Option<FullWindowScreen> {
+    if ws.focus != FocusTarget::SplitPane {
+        return None;
+    }
+    let pane = ws.panes.pane(ws.panes.focus());
+    match pane.view {
+        View::Commits(_) => Some(FullWindowScreen::Commits),
+        View::Editor(id) => {
+            let editor = ws.editors.get(id)?;
+            if editor.conflict_view.is_some() {
+                Some(FullWindowScreen::Conflict)
+            } else if pane.diff_mode || editor.diff_view {
+                Some(FullWindowScreen::Diff)
+            } else {
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+/// Close the diff view in the focused pane.
+///
+/// A diff opened from a commits list peels back to the list. Any other diff
+/// closes as the bare `:diff` closes it, which also drops the pair of the
+/// focused file and a revision base.
+fn close_diff_screen(stoat: &mut Stoat) {
+    let focus = stoat.active_workspace().panes.focus();
+    if super::commits::covered_commits(stoat.active_workspace(), focus).is_some() {
+        super::review::exit_diff_view(stoat);
+        super::commits::restore_covered_commits(stoat, focus);
+        return;
+    }
+    super::review::toggle_diff_view(stoat);
 }
 
 /// Closes a specific pane by id and disposes its backing view state. Returns

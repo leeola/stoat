@@ -420,8 +420,13 @@ pub(super) fn latch_diff_view(stoat: &mut Stoat) {
 /// jump to the first change is what [`toggle_diff_view`] adds on top of this. A
 /// caller that places the cursor itself calls this rather than the toggle.
 ///
+/// The widen makes the view a full-window screen. A layout action pressed on it
+/// closes the view rather than leaving it narrow beside a split.
+///
 /// See also:
 /// - [`exit_diff_view`], the exit half, which undoes every piece of this.
+/// - [`close_full_window_screen`](super::pane::close_full_window_screen), which closes the view on
+///   a layout action.
 pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
@@ -2319,6 +2324,83 @@ mod tests {
         );
     }
 
+    /// A split pressed on the diff closes the diff and splits nothing, so the
+    /// view never ends up narrow beside a new pane.
+    #[test]
+    fn a_split_on_the_diff_closes_it_and_splits_nothing() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::Diff { rev: None });
+
+        run(&mut h, &stoat_action::SplitRight);
+
+        assert_eq!(layout(&h), (1, Some("file"), false, Some("diff closed")));
+    }
+
+    /// A focus move on a diff widened over a split closes the diff where it
+    /// stands, and the split it covered comes back.
+    #[test]
+    fn a_focus_move_on_the_diff_closes_it_in_place() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::SplitRight);
+        run(&mut h, &stoat_action::Diff { rev: None });
+        let focus = h.stoat.active_workspace().panes.focus();
+
+        run(&mut h, &stoat_action::FocusLeft);
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().panes.focus() == focus,
+                layout(&h)
+            ),
+            (true, (2, Some("file"), false, Some("diff closed"))),
+        );
+    }
+
+    #[test]
+    fn a_widen_toggle_on_the_diff_closes_it() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::Diff { rev: None });
+
+        run(&mut h, &stoat_action::TogglePaneWiden);
+
+        assert_eq!(layout(&h), (1, Some("file"), false, Some("diff closed")));
+    }
+
+    /// A focus move on a pair diff closes the view and drops the pair, as the
+    /// bare `:diff` does.
+    #[test]
+    fn a_focus_move_on_a_pair_diff_drops_the_pair() {
+        let mut h = pair_harness();
+        run(&mut h, &stoat_action::DiffPair);
+
+        run(&mut h, &stoat_action::FocusLeft);
+
+        assert_eq!(
+            (
+                pair_base(&h, "/pair/b.txt"),
+                pair_view(&mut h),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                None,
+                (false, false, Some(PathBuf::from("/pair/b.txt"))),
+                Some("diff closed"),
+            ),
+        );
+    }
+
+    /// The pane count, the screen in front, whether a pane is widened, and the
+    /// status message, which together show what a layout action did.
+    fn layout(h: &TestHarness) -> (usize, Option<&'static str>, bool, Option<&str>) {
+        let panes = &h.stoat.active_workspace().panes;
+        (
+            panes.split_pane_ids().len(),
+            h.stoat.current_view(),
+            panes.widened().is_some(),
+            h.stoat.pending_message.as_deref(),
+        )
+    }
+
     #[test]
     fn diff_pair_over_equal_files_says_so_and_stays_put() {
         let mut h = TestHarness::with_size(120, 20);
@@ -2344,12 +2426,24 @@ mod tests {
 
     /// A reader who leaves the measured file before its hunks land gets no
     /// verdict about the file they left.
+    ///
+    /// The focus moves as a click into the other pane moves it, because a focus
+    /// key on the diff closes the diff instead.
     #[test]
     fn the_verdict_drops_once_the_focus_moves_on() {
         let mut h = TestHarness::with_size(120, 20);
         h.open_side_by_side(("/pair/a.txt", "same\n"), ("/pair/b.txt", "same\n"));
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        {
+            let panes = &mut h.stoat.active_workspace_mut().panes;
+            let measured = panes.focus();
+            let left = panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&id| id != measured)
+                .expect("the left pane");
+            panes.set_focus(left);
+        }
         h.settle();
 
         assert_eq!(h.stoat.pending_message.as_deref(), None);

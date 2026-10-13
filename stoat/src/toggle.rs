@@ -278,10 +278,10 @@ mod tests {
     #[test]
     fn toggle_states_read_the_view_flags() {
         let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &TogglePaneWiden);
         focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .set_diff_view(true);
-        dispatch(&mut h.stoat, &TogglePaneWiden);
         dispatch(&mut h.stoat, &ToggleWrap);
         dispatch(&mut h.stoat, &ToggleMinimap);
         dispatch(&mut h.stoat, &ToggleTabBar);

@@ -245,7 +245,7 @@ mod tests {
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
         ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
         ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk, FocusLeft,
-        GotoNextChange, GotoPrevChange, NewWorkspace, SplitRight,
+        FocusNext, GotoNextChange, GotoPrevChange, NewWorkspace, SplitRight,
     };
 
     const MARKER: &str = "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n";
@@ -435,6 +435,24 @@ mod tests {
                 Some("conflict view not opened: focus moved")
             ),
             "the open gives way, and the left pane keeps its editor"
+        );
+    }
+
+    /// A focus move on the conflict view closes the view and moves nothing.
+    #[test]
+    fn a_focus_move_on_the_conflict_view_closes_it() {
+        let mut h = Stoat::test();
+        open(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &FocusNext);
+
+        assert_eq!(
+            (
+                h.stoat.active_workspace().conflict.is_none(),
+                h.stoat.current_view(),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (true, Some("file"), Some("conflict view closed")),
         );
     }
 
