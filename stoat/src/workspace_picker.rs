@@ -346,21 +346,42 @@ impl WorkspacePicker {
         Some(basename)
     }
 
-    /// Drop the selected row's entry from the list and re-rank what remains.
+    /// Drop the entries at `indices` and re-rank what remains.
     ///
-    /// A no-op on an empty list. The selection lands on the row that took the
-    /// deleted one's place, or on the new last row when the deleted one was
-    /// last.
+    /// A delete takes a session's row with the rows of its sub-sessions, so one
+    /// call drops them all. Each index names a distinct entry, in any order.
+    /// The selection keeps its row index, clamped into the shorter list, so it
+    /// lands on the row that took a deleted row's place or on the new last row.
     ///
     /// [`Self::filtered`] holds indices into `entries`, so removing an entry
-    /// invalidates every index past it. The cached query ranks the shrunk lists
-    /// afresh, even during a rename, which re-clamps the selection as a side
-    /// effect.
+    /// invalidates every index past it. The removal runs from the highest index
+    /// down, and the cached query then ranks the shrunk lists once, even during
+    /// a rename.
+    pub(crate) fn remove_entries(&mut self, indices: &[usize]) {
+        let mut indices = indices.to_vec();
+        indices.sort_unstable_by(|a, b| b.cmp(a));
+        for entry_idx in indices {
+            self.entries.remove(entry_idx);
+            self.haystacks.remove(entry_idx);
+            self.renaming = match self.renaming {
+                Some(idx) if idx == entry_idx => None,
+                Some(idx) if idx > entry_idx => Some(idx - 1),
+                other => other,
+            };
+        }
+
+        let query = self.last_filter_query.take().unwrap_or_default();
+        self.rank(&query);
+    }
+
+    /// Drop the selected row's entry, as the delete of a session without
+    /// sub-sessions does. A no-op on an empty list.
+    #[cfg(test)]
     pub(crate) fn remove_selected(&mut self) {
         let Some(&entry_idx) = self.filtered.get(self.selected) else {
             return;
         };
-        self.remove_entry(entry_idx);
+        self.remove_entries(&[entry_idx]);
     }
 
     /// Drop the active workspace's row and select the first row that remains.
@@ -381,20 +402,7 @@ impl WorkspacePicker {
 
         self.selected = 0;
         self.omitted_workspace = self.entries[idx].id;
-        self.remove_entry(idx);
-    }
-
-    fn remove_entry(&mut self, entry_idx: usize) {
-        self.entries.remove(entry_idx);
-        self.haystacks.remove(entry_idx);
-        self.renaming = match self.renaming {
-            Some(idx) if idx == entry_idx => None,
-            Some(idx) if idx > entry_idx => Some(idx - 1),
-            other => other,
-        };
-
-        let query = self.last_filter_query.take().unwrap_or_default();
-        self.rank(&query);
+        self.remove_entries(&[idx]);
     }
 
     /// Whether the input holds a new name for a row instead of the filter
@@ -494,6 +502,21 @@ impl WorkspacePicker {
             Some(parent) => format!("{}/{}", parent.basename, entry.basename),
             None => entry.basename.clone(),
         }
+    }
+
+    /// The entry indices of the sessions created inside the session at entry
+    /// `idx`.
+    ///
+    /// A row never counts as its own sub-session, even when a uid collision
+    /// makes its parent its own uid, so a delete never takes one row twice.
+    pub(crate) fn sub_sessions_of(&self, idx: usize) -> Vec<usize> {
+        let uid = self.entries[idx].uid;
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|&(other, entry)| other != idx && entry.parent == Some(uid))
+            .map(|(other, _)| other)
+            .collect()
     }
 
     /// Whether any row leads somewhere other than the active workspace.
@@ -1297,5 +1320,15 @@ mod tests {
         picker.remove_selected();
 
         assert_eq!(labels(&picker), ["sub", "other"]);
+    }
+
+    /// The indices come in ascending order, which a removal from the lowest
+    /// index up gets wrong.
+    #[test]
+    fn remove_entries_drops_every_index_and_reranks() {
+        let mut picker = family_picker();
+        picker.remove_entries(&[0, 2]);
+
+        assert_eq!(listing(&picker), (vec!["other"], Some("other"), None));
     }
 }

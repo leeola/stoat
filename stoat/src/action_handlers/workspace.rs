@@ -228,7 +228,8 @@ fn restore_picker_filter(stoat: &mut Stoat) {
     picker.refilter(&query);
 }
 
-/// Delete the session under the workspace picker's selection.
+/// Delete the session under the workspace picker's selection, with its
+/// sub-sessions.
 ///
 /// An inactive row loses the state file and meta sidecar it would restore
 /// from. An open background row loses those files and leaves the running
@@ -237,41 +238,70 @@ fn restore_picker_filter(stoat: &mut Stoat) {
 /// own input lives in it and `close_workspace` refuses the last workspace for
 /// the same reason.
 ///
+/// Sub-sessions are ephemeral, so a family dies together. The rows of the
+/// sessions created inside the selected one go with it, and a family whose
+/// rows hold the active workspace is refused whole. An untouched active
+/// sub-session has no row and nothing saved, so it stays open.
+///
 /// An open row's files resolve against the real state directory, so their
 /// deletion sits behind [`Stoat::persistence_disabled`], which the test
 /// harness sets to keep `$XDG_STATE_HOME` pristine. An inactive row carries
 /// its own state path, so that deletion is unconditional.
 pub(super) fn workspace_picker_delete(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((id, state_path, basename)) = stoat
-        .workspace_picker
-        .as_ref()
-        .and_then(WorkspacePicker::selected_entry)
-        .map(|entry| (entry.id, entry.state_path.clone(), entry.basename.clone()))
-    else {
+    let Some((basename, family, rows)) = stoat.workspace_picker.as_ref().and_then(|picker| {
+        let selected = *picker.filtered().get(picker.selected())?;
+        let entries = picker.entries();
+
+        let mut family = vec![selected];
+        family.extend(picker.sub_sessions_of(selected));
+        let rows: Vec<(Option<WorkspaceId>, Option<PathBuf>)> = family
+            .iter()
+            .map(|&idx| (entries[idx].id, entries[idx].state_path.clone()))
+            .collect();
+        Some((entries[selected].basename.clone(), family, rows))
+    }) else {
         return UpdateEffect::None;
     };
 
-    if id == Some(stoat.active_workspace) {
+    // The family starts with the selected row, so that row's id leads `rows`.
+    let active = Some(stoat.active_workspace);
+    if rows[0].0 == active {
         stoat.set_status("cannot delete the active workspace");
         return UpdateEffect::Redraw;
     }
+    if rows.iter().any(|&(id, _)| id == active) {
+        stoat.set_status("cannot delete: the active workspace is in this family");
+        return UpdateEffect::Redraw;
+    }
 
-    match (id, state_path) {
-        (Some(id), _) => {
-            stoat.pending_workspace_saves.remove(&id);
-            remove_open_session(stoat, id);
-            release_workspace(stoat, id);
-            stoat.workspaces.remove(id);
-        },
-        (None, Some(state_path)) => remove_session_files(&*stoat.fs_host, &state_path),
-        (None, None) => return UpdateEffect::None,
+    for (id, state_path) in rows {
+        match (id, state_path) {
+            (Some(id), _) => {
+                stoat.pending_workspace_saves.remove(&id);
+                remove_open_session(stoat, id);
+                release_workspace(stoat, id);
+                stoat.workspaces.remove(id);
+            },
+            (None, Some(state_path)) => remove_session_files(&*stoat.fs_host, &state_path),
+            (None, None) => {},
+        }
     }
 
     if let Some(picker) = stoat.workspace_picker.as_mut() {
-        picker.remove_selected();
+        picker.remove_entries(&family);
     }
-    stoat.set_status(format!("deleted session {basename}"));
+    stoat.set_status(deleted_status(&basename, family.len() - 1));
     UpdateEffect::Redraw
+}
+
+/// The status a picker delete reports, which names the session and counts
+/// the sub-sessions that went with it.
+fn deleted_status(basename: &str, subs: usize) -> String {
+    match subs {
+        0 => format!("deleted session {basename}"),
+        1 => format!("deleted session {basename} and 1 sub-session"),
+        subs => format!("deleted session {basename} and {subs} sub-sessions"),
+    }
 }
 
 /// Remove the session files of the open workspace `id`, after stopping every
@@ -1013,6 +1043,103 @@ mod tests {
             stoat.pending_message.as_deref(),
             Some("deleted session proj"),
             "the status names the deleted session"
+        );
+    }
+
+    /// `other` is a sub-session of another family, so its files and its row
+    /// stay.
+    #[test]
+    fn deleting_a_parent_deletes_its_saved_sub_sessions() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let sessions: Vec<RegistryEntry> = [
+            (1, "proj", None),
+            (2, "notes", Some(1)),
+            (3, "logs", Some(1)),
+            (4, "other", Some(9)),
+        ]
+        .into_iter()
+        .map(|(uid, name, parent)| {
+            let mut entry = saved_session(WorkspaceUid(uid), name);
+            entry.meta.parent = parent.map(WorkspaceUid);
+            entry.state_path = PathBuf::from(format!("/state/hash/{uid}.ron"));
+            entry
+        })
+        .collect();
+        let files: Vec<PathBuf> = sessions
+            .iter()
+            .flat_map(|s| [s.state_path.clone(), registry::meta_path_for(&s.state_path)])
+            .collect();
+        for file in &files {
+            harness.seed_fixture(file, b"()");
+        }
+
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            sessions,
+            input,
+        ));
+
+        assert_eq!(workspace_picker_delete(stoat), UpdateEffect::Redraw);
+
+        let kept: Vec<bool> = files.iter().map(|f| stoat.fs_host.exists(f)).collect();
+        assert_eq!(
+            (kept, picker_rows(stoat), stoat.pending_message.as_deref()),
+            (
+                vec![false, false, false, false, false, false, true, true],
+                vec!["alpha".to_string(), "other".to_string()],
+                Some("deleted session proj and 2 sub-sessions"),
+            ),
+            "the parent goes with both sub-sessions, and only their files and rows"
+        );
+    }
+
+    #[test]
+    fn the_delete_status_counts_sub_sessions() {
+        assert_eq!(
+            [0, 1, 2].map(|subs| deleted_status("proj", subs)),
+            [
+                "deleted session proj",
+                "deleted session proj and 1 sub-session",
+                "deleted session proj and 2 sub-sessions",
+            ]
+        );
+    }
+
+    #[test]
+    fn deleting_a_parent_whose_sub_session_is_active_is_refused() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        harness.stoat.active_workspace_mut().parent = Some(WorkspaceUid(424242));
+        let state_path = PathBuf::from("/state/hash/1.ron");
+        harness.seed_fixture(&state_path, b"()");
+
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![saved_session(WorkspaceUid(424242), "proj")],
+            input,
+        ));
+
+        assert_eq!(workspace_picker_delete(stoat), UpdateEffect::Redraw);
+
+        assert_eq!(
+            (
+                stoat.fs_host.exists(&state_path),
+                picker_rows(stoat),
+                stoat.pending_message.as_deref()
+            ),
+            (
+                true,
+                vec!["alpha".to_string(), "proj".to_string()],
+                Some("cannot delete: the active workspace is in this family"),
+            ),
+            "the whole family stays"
         );
     }
 
