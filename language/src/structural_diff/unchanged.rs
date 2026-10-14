@@ -18,21 +18,37 @@
 //!
 //! 3. **Emit sections.** The unmatched run between two consecutive anchors is a changed section. A
 //!    lone same-kind list on each side recurses into its children instead, so a small edit inside a
-//!    container drills down to its changed statement. Every other non-empty run is a section.
+//!    container drills down to its changed statement. A longer run first peels each pair at its
+//!    ends that shares at least four subtrees unique on their own side, and each peeled pair
+//!    recurses the same way. Every other non-empty run is a section.
 //!
 //! After this pass, every node carries a [`ChangeKind`] in a side [`ChangeMap`], and the changed
 //! sections are collected in [`PreprocessResult::sections`]. The Dijkstra search then runs over one
 //! section at a time rather than the whole file.
 //!
-//! Reference: `references/difftastic/src/diff/unchanged.rs` (`split_unchanged`). The algorithm is
-//! the same, but sibling matching runs imara-diff's histogram over child [`ContentId`]s rather
-//! than `wu_diff`.
+//! The pass follows `split_unchanged` in `references/difftastic/src/diff/unchanged.rs`, but
+//! sibling matching runs imara-diff's histogram over child [`ContentId`]s rather than `wu_diff`.
+//! The peel is `split_mostly_unchanged_toplevel`, which difftastic applies to the top level alone
+//! and this pass applies to every run.
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
+    fx::FxBuildHasher,
 };
 use imara_diff::{Algorithm, Diff, InternedInput, Interner};
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, HashSet},
+};
+
+/// The count of subtrees, each unique on its own side, that two unmatched
+/// sibling lists must share to recurse as a pair before the search.
+///
+/// The value is difftastic's. A unique subtree that both lists hold is a
+/// landmark that pins them together, and four of them separate a list that
+/// kept most of its body from two lists that share only boilerplate.
+const MOSTLY_UNCHANGED_MIN_COMMON_CHILDREN: usize = 4;
 
 /// What the preprocessing pass concluded about a node. The diff search
 /// only walks `Pending` nodes; `Unchanged` and `Moved` are terminal tags
@@ -111,6 +127,33 @@ pub struct PreprocessResult {
     pub pairs: Vec<(SyntaxId, SyntaxId)>,
 }
 
+/// How many times each content id occurs in one arena.
+type IdCounts = HashMap<ContentId, u32, FxBuildHasher>;
+
+/// The content id counts of both arenas, which tell [`is_mostly_unchanged_pair`]
+/// which subtrees are unique on their own side.
+///
+/// The counts form on the first read, once per [`mark_unchanged`]. Only a run
+/// with members on both sides and two or more on one side reads them, so a
+/// diff whose runs all pair one to one never pays for the pass over both
+/// arenas.
+#[derive(Default)]
+struct Uniqueness {
+    counts: OnceCell<(IdCounts, IdCounts)>,
+}
+
+impl Uniqueness {
+    /// The lhs and rhs counts, built from the two arenas on the first call.
+    fn counts(
+        &self,
+        lhs_arena: &SyntaxArena<'_>,
+        rhs_arena: &SyntaxArena<'_>,
+    ) -> &(IdCounts, IdCounts) {
+        self.counts
+            .get_or_init(|| (count_ids(lhs_arena), count_ids(rhs_arena)))
+    }
+}
+
 /// Run the three-phase preprocessing pass on `(lhs_root, rhs_root)`,
 /// returning a [`PreprocessResult`] that tags every node either
 /// [`ChangeKind::Unchanged`] or [`ChangeKind::Pending`].
@@ -143,6 +186,7 @@ pub fn mark_unchanged(
         rhs_arena,
         &lhs_children,
         &rhs_children,
+        &Uniqueness::default(),
         &mut result,
     );
 
@@ -156,14 +200,16 @@ pub fn mark_unchanged(
 /// The unmatched run between two consecutive anchors is a changed section. A
 /// run of exactly one same-kind [`Syntax::List`] on each side recurses into
 /// its children instead, so a small edit inside a container drills down to the
-/// changed statement rather than emitting the whole container. Every other
-/// non-empty run is pushed to `out.sections` for the per-section Dijkstra
-/// search.
+/// changed statement rather than emitting the whole container. A longer run
+/// first peels the mostly unchanged pairs at its ends, as [`emit_run`]
+/// describes. Every other non-empty run goes to `out.sections` for the
+/// per-section Dijkstra search.
 fn pair_children(
     lhs_arena: &SyntaxArena<'_>,
     rhs_arena: &SyntaxArena<'_>,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
+    uniqueness: &Uniqueness,
     out: &mut PreprocessResult,
 ) {
     // Phase 1a: shrink common prefix.
@@ -209,9 +255,9 @@ fn pair_children(
         );
     }
 
-    // Phase 3: the unmatched run between each consecutive pair of anchors
-    // (and before the first / after the last) is a changed section. A
-    // sentinel anchor past the end of both middles closes the final run.
+    // Phase 3: each unmatched run between consecutive anchors (and before the
+    // first / after the last) goes to emit_run. A sentinel anchor past the end
+    // of both middles closes the final run.
     let mut lhs_cursor = 0usize;
     let mut rhs_cursor = 0usize;
     let boundaries = anchors
@@ -221,17 +267,148 @@ fn pair_children(
     for (lhs_anchor, rhs_anchor) in boundaries {
         let lhs_run = &lhs_mid[lhs_cursor..lhs_anchor];
         let rhs_run = &rhs_mid[rhs_cursor..rhs_anchor];
-        if !lhs_run.is_empty() || !rhs_run.is_empty() {
-            let recursed = lhs_run.len() == 1
-                && rhs_run.len() == 1
-                && recurse_singleton_lists(lhs_arena, rhs_arena, lhs_run[0], rhs_run[0], out);
-            if !recursed {
-                out.sections.push((lhs_run.to_vec(), rhs_run.to_vec()));
-            }
-        }
+        emit_run(lhs_arena, rhs_arena, lhs_run, rhs_run, uniqueness, out);
         lhs_cursor = lhs_anchor + 1;
         rhs_cursor = rhs_anchor + 1;
     }
+}
+
+/// Recurse into one unmatched run between two anchors, or emit it as
+/// sections.
+///
+/// A run of one member per side goes to [`emit_pair`]. A longer run first
+/// peels, from its front and then from its back, each pair that
+/// [`is_mostly_unchanged_pair`] accepts, and sends each peeled pair to
+/// [`emit_pair`]. A middle of one member per side goes to [`emit_pair`] too,
+/// and any other non-empty middle is one section.
+///
+/// The peel keeps two edited neighbors apart, so the search runs inside each
+/// of them and never over the pair as one section.
+fn emit_run(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_run: &[SyntaxId],
+    rhs_run: &[SyntaxId],
+    uniqueness: &Uniqueness,
+    out: &mut PreprocessResult,
+) {
+    if lhs_run.len() == 1 && rhs_run.len() == 1 {
+        emit_pair(
+            lhs_arena, rhs_arena, lhs_run[0], rhs_run[0], uniqueness, out,
+        );
+        return;
+    }
+
+    let peels = |lhs, rhs| is_mostly_unchanged_pair(lhs_arena, rhs_arena, lhs, rhs, uniqueness);
+    let shorter = lhs_run.len().min(rhs_run.len());
+    let lead = (0..shorter)
+        .take_while(|&k| peels(lhs_run[k], rhs_run[k]))
+        .count();
+    let lhs_last = |k: usize| lhs_run[lhs_run.len() - 1 - k];
+    let rhs_last = |k: usize| rhs_run[rhs_run.len() - 1 - k];
+    let trail = (0..shorter - lead)
+        .take_while(|&k| peels(lhs_last(k), rhs_last(k)))
+        .count();
+
+    for k in 0..lead {
+        emit_pair(
+            lhs_arena, rhs_arena, lhs_run[k], rhs_run[k], uniqueness, out,
+        );
+    }
+
+    let lhs_middle = &lhs_run[lead..lhs_run.len() - trail];
+    let rhs_middle = &rhs_run[lead..rhs_run.len() - trail];
+    if lhs_middle.len() == 1 && rhs_middle.len() == 1 {
+        emit_pair(
+            lhs_arena,
+            rhs_arena,
+            lhs_middle[0],
+            rhs_middle[0],
+            uniqueness,
+            out,
+        );
+    } else if !lhs_middle.is_empty() || !rhs_middle.is_empty() {
+        out.sections
+            .push((lhs_middle.to_vec(), rhs_middle.to_vec()));
+    }
+
+    for k in (0..trail).rev() {
+        emit_pair(
+            lhs_arena,
+            rhs_arena,
+            lhs_last(k),
+            rhs_last(k),
+            uniqueness,
+            out,
+        );
+    }
+}
+
+/// Recurse into `lhs_id` and `rhs_id` when they are two lists of one kind, or
+/// emit the pair as a one-member section.
+fn emit_pair(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_id: SyntaxId,
+    rhs_id: SyntaxId,
+    uniqueness: &Uniqueness,
+    out: &mut PreprocessResult,
+) {
+    if !recurse_singleton_lists(lhs_arena, rhs_arena, lhs_id, rhs_id, uniqueness, out) {
+        out.sections.push((vec![lhs_id], vec![rhs_id]));
+    }
+}
+
+/// Whether `lhs` and `rhs` are lists that share at least
+/// [`MOSTLY_UNCHANGED_MIN_COMMON_CHILDREN`] subtrees, each unique on its own
+/// side.
+///
+/// A shared subtree counts once, and the walk skips the nodes under it, so a
+/// matched parent does not count again through its children. The counts span
+/// each whole arena, so a subtree repeated anywhere in its file pins nothing.
+fn is_mostly_unchanged_pair(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs: SyntaxId,
+    rhs: SyntaxId,
+    uniqueness: &Uniqueness,
+) -> bool {
+    if !matches!(
+        (lhs_arena.get(lhs), rhs_arena.get(rhs)),
+        (Syntax::List(_), Syntax::List(_))
+    ) {
+        return false;
+    }
+    let (lhs_counts, rhs_counts) = uniqueness.counts(lhs_arena, rhs_arena);
+    let unique = |counts: &IdCounts, id: ContentId| counts.get(&id) == Some(&1);
+
+    let mut rhs_unique: HashSet<ContentId, FxBuildHasher> = HashSet::default();
+    let mut stack = vec![rhs];
+    while let Some(id) = stack.pop() {
+        let node = rhs_arena.get(id);
+        if unique(rhs_counts, node.content_id()) {
+            rhs_unique.insert(node.content_id());
+        }
+        if let Syntax::List(list) = node {
+            stack.extend(list.children.iter().copied());
+        }
+    }
+
+    let mut shared = 0;
+    let mut stack = vec![lhs];
+    while let Some(id) = stack.pop() {
+        let node = lhs_arena.get(id);
+        let content = node.content_id();
+        if unique(lhs_counts, content) && rhs_unique.contains(&content) {
+            shared += 1;
+            if shared >= MOSTLY_UNCHANGED_MIN_COMMON_CHILDREN {
+                return true;
+            }
+        } else if let Syntax::List(list) = node {
+            stack.extend(list.children.iter().copied());
+        }
+    }
+    false
 }
 
 /// Recurse into a one-node-each run when both nodes are lists of the same
@@ -246,6 +423,7 @@ fn recurse_singleton_lists(
     rhs_arena: &SyntaxArena<'_>,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
+    uniqueness: &Uniqueness,
     out: &mut PreprocessResult,
 ) -> bool {
     if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
@@ -254,11 +432,23 @@ fn recurse_singleton_lists(
     {
         let lhs_grand = lhs_list.children.clone();
         let rhs_grand = rhs_list.children.clone();
-        pair_children(lhs_arena, rhs_arena, &lhs_grand, &rhs_grand, out);
+        pair_children(
+            lhs_arena, rhs_arena, &lhs_grand, &rhs_grand, uniqueness, out,
+        );
         true
     } else {
         false
     }
+}
+
+fn count_ids(arena: &SyntaxArena<'_>) -> IdCounts {
+    let mut counts = IdCounts::default();
+    for i in 0..arena.len() {
+        *counts
+            .entry(arena.get(SyntaxId(i)).content_id())
+            .or_default() += 1;
+    }
+    counts
 }
 
 /// Mark the subtrees `lhs_id` and `rhs_id` [`ChangeKind::Unchanged`] and record
@@ -382,6 +572,7 @@ impl LcsPairSink {
 mod tests {
     use super::*;
     use crate::{parse, structural_diff::lower_tree, LanguageRegistry};
+    use std::ops::Range;
 
     fn rust_lang() -> std::sync::Arc<crate::Language> {
         LanguageRegistry::standard()
@@ -465,6 +656,86 @@ mod tests {
             rhs_unchanged >= lhs_unchanged - 1,
             "rhs unchanged count {rhs_unchanged} should match the lhs's preserved subtree"
         );
+    }
+
+    #[test]
+    fn adjacent_changed_siblings_sharing_unique_subtrees_recurse_separately() {
+        let lhs = "fn a() { a1(); a2(); a3(); a4(); old_a(); }\n\
+                   fn b() { b1(); b2(); b3(); b4(); old_b(); }";
+        let rhs = "fn a() { a1(); a2(); a3(); a4(); new_a(); }\n\
+                   fn b() { b1(); b2(); b3(); b4(); new_b(); }";
+
+        assert_eq!(
+            section_texts(lhs, rhs),
+            [
+                (vec!["old_a"], vec!["new_a"]),
+                (vec!["old_b"], vec!["new_b"])
+            ],
+            "each function recurses on its own down to its changed call",
+        );
+    }
+
+    #[test]
+    fn adjacent_changed_siblings_sharing_nothing_stay_one_section() {
+        let lhs = "fn a() { x(); }\nfn b() { y(); }";
+        let rhs = "fn c() { z(); }\nfn d() { w(); }";
+
+        assert_eq!(
+            section_texts(lhs, rhs),
+            [(
+                vec!["fn a() { x(); }", "fn b() { y(); }"],
+                vec!["fn c() { z(); }", "fn d() { w(); }"],
+            )],
+            "with no unique subtree in common, the run stays one section",
+        );
+    }
+
+    #[test]
+    fn a_pair_peels_from_four_shared_unique_subtrees() {
+        let three = "fn a() { a1(); a2(); old_a(); }\nfn b() { b1(); b2(); old_b(); }";
+        let four = "fn a() { a1(); a2(); a3(); old_a(); }\nfn b() { b1(); b2(); b3(); old_b(); }";
+
+        let shapes = [three, four].map(|lhs| {
+            let rhs = lhs.replace("old_", "new_");
+            section_texts(lhs, &rhs)
+                .iter()
+                .map(|(lhs_members, rhs_members)| (lhs_members.len(), rhs_members.len()))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            shapes,
+            [vec![(2, 2)], vec![(1, 1), (1, 1)]],
+            "a name and two calls stay one section, and a name and three calls peel",
+        );
+    }
+
+    /// The sections that [`mark_unchanged`] leaves for `lhs` against `rhs`, as
+    /// the texts of their members.
+    fn section_texts<'a>(lhs: &'a str, rhs: &'a str) -> Vec<(Vec<&'a str>, Vec<&'a str>)> {
+        let (lhs_arena, lhs_root) = lower(lhs);
+        let (rhs_arena, rhs_root) = lower(rhs);
+        let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
+
+        let texts = |arena: &SyntaxArena<'_>, source: &'a str, ids: &[SyntaxId]| -> Vec<&'a str> {
+            ids.iter().map(|id| &source[span(arena, *id)]).collect()
+        };
+        result
+            .sections
+            .iter()
+            .map(|(l, r)| (texts(&lhs_arena, lhs, l), texts(&rhs_arena, rhs, r)))
+            .collect()
+    }
+
+    /// The byte span from the first atom under `id` to the last.
+    fn span(arena: &SyntaxArena<'_>, id: SyntaxId) -> Range<usize> {
+        match arena.get(id) {
+            Syntax::Atom(atom) => atom.byte_range.clone(),
+            Syntax::List(list) => {
+                let first = list.children.first().expect("a lowered list has children");
+                let last = list.children.last().expect("a lowered list has children");
+                span(arena, *first).start..span(arena, *last).end
+            },
+        }
     }
 
     #[test]
