@@ -1884,15 +1884,28 @@ pub(crate) fn merge_structural_detail(
 
     let buffer_starts = line_starts(buffer_text);
     let base_starts = line_starts(base_text);
-    // Read once per change, since the loop below tests every change against
-    // every hunk and the read scans the change's text.
-    let prose: Vec<ProseChange> = tree_changes
+    // Read once per change up front. A change across several lines reaches
+    // each hunk on them, and the read scans the change's text.
+    let prose_by_change: Vec<ProseChange> = tree_changes
         .iter()
         .map(|change| match change.side {
             Side::Rhs => prose_change(change, buffer_text),
             Side::Lhs => prose_change(change, base_text),
         })
         .collect();
+    // On one side the tree changes are disjoint atom runs sorted by start, so
+    // their starts and their ends both ascend. Each hunk then searches for the
+    // run of changes that reaches it, rather than testing every change.
+    let (lhs, rhs): (Vec<usize>, Vec<usize>) =
+        (0..tree_changes.len()).partition(|&i| tree_changes[i].side == Side::Lhs);
+    debug_assert!(
+        [&lhs, &rhs]
+            .into_iter()
+            .all(|side| side.windows(2).all(|pair| {
+                tree_changes[pair[0]].byte_range.end <= tree_changes[pair[1]].byte_range.end
+            })),
+        "each side's tree changes end in ascending order",
+    );
     for hunk in hunks.iter_mut() {
         let refining = hunk.status == DiffHunkStatus::Modified;
         if !refining && !matches!(hunk.status, DiffHunkStatus::Added | DiffHunkStatus::Deleted) {
@@ -1903,7 +1916,12 @@ pub(crate) fn merge_structural_detail(
         let mut buffer_spans = Vec::new();
         let mut base_spans = Vec::new();
         let mut moved_ranges = Vec::new();
-        for (change, &prose) in tree_changes.iter().zip(&prose) {
+        let reaching = [
+            changes_reaching(&rhs, tree_changes, &buffer_bytes),
+            changes_reaching(&lhs, tree_changes, &hunk.base_byte_range),
+        ];
+        for &i in reaching.into_iter().flatten() {
+            let (change, prose) = (&tree_changes[i], prose_by_change[i]);
             let moved = change.kind == LangChangeKind::Moved;
             // A relocation is not a content change, and inside a Modified hunk
             // it is noise: the tree differ reports every token of a reindented
@@ -1965,6 +1983,22 @@ pub(crate) fn merge_structural_detail(
             base_spans,
         }));
     }
+}
+
+/// The indices in `side` whose change's byte range reaches `bounds`.
+///
+/// `side` lists one side's changes with their starts and their ends in
+/// ascending order. So the changes that reach `bounds` form one run, from the
+/// first that ends past `bounds.start` to the last that starts before
+/// `bounds.end`. A change that strictly holds an empty `bounds` reaches it.
+fn changes_reaching<'a>(
+    side: &'a [usize],
+    changes: &[stoat_language::structural_diff::DiffChange],
+    bounds: &Range<usize>,
+) -> &'a [usize] {
+    let first = side.partition_point(|&i| changes[i].byte_range.end <= bounds.start);
+    let len = side[first..].partition_point(|&i| changes[i].byte_range.start < bounds.end);
+    &side[first..first + len]
 }
 
 /// Whether every line of `lines` carrying content is touched by one of
@@ -4316,5 +4350,70 @@ mod tests {
                 || statuses.contains(&DiffHunkStatus::Modified),
             "must have a non-Moved hunk too; got {statuses:?}"
         );
+    }
+
+    /// Each hunk takes the tree spans on its own lines and none of its
+    /// neighbors', as the line pass found three hunks between unchanged lines.
+    #[test]
+    fn each_hunk_takes_only_the_tree_spans_inside_it() {
+        let span = |at: usize| ChangeSpan {
+            byte_range: at..at + 1,
+            kind: ChangeKind::Novel,
+            move_metadata: None,
+            prose: ProseChange::None,
+        };
+        let detail = |at| {
+            Some(Arc::new(TokenDetail {
+                buffer_spans: vec![span(at)],
+                base_spans: vec![span(at)],
+            }))
+        };
+
+        assert_eq!(
+            rust_detail("a\nb\nc\nx\ny", "A\nb\nC\nx\nY"),
+            [detail(0), detail(4), detail(8)],
+            "each line's changed token lands in that line's hunk alone",
+        );
+    }
+
+    /// One string change reaches the two hunks its first and third lines
+    /// make, and each hunk takes the part of it on its own lines.
+    #[test]
+    fn one_tree_change_details_every_hunk_it_reaches() {
+        let span = |at: usize| ChangeSpan {
+            byte_range: at..at + 1,
+            kind: ChangeKind::Replaced,
+            move_metadata: None,
+            prose: ProseChange::Part,
+        };
+        let detail = |at| {
+            Some(Arc::new(TokenDetail {
+                buffer_spans: vec![span(at)],
+                base_spans: vec![span(at)],
+            }))
+        };
+
+        assert_eq!(
+            rust_detail("let s = \"a\nb\nc\";\n", "let s = \"A\nb\nC\";\n"),
+            [detail(9), detail(13)],
+            "the string's first and third lines each detail their own hunk",
+        );
+    }
+
+    /// Each line hunk's token detail once the Rust tree pass of `buffer`
+    /// against `base` merges into it.
+    fn rust_detail(base: &str, buffer: &str) -> Vec<Option<Arc<TokenDetail>>> {
+        let language = stoat_language::LanguageRegistry::standard()
+            .for_path(std::path::Path::new("a.rs"))
+            .expect("rust language");
+        let tree = stoat_language::structural_diff::diff_with_language(&language, base, buffer)
+            .expect("both sides parse");
+        let mut hunks = super::changes_to_hunks(
+            &stoat_language::structural_diff::diff(base, buffer).changes,
+            base,
+            buffer,
+        );
+        super::merge_structural_detail(&mut hunks, &tree.changes, base, buffer);
+        hunks.into_iter().map(|hunk| hunk.token_detail).collect()
     }
 }
