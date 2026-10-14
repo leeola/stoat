@@ -22,6 +22,14 @@ use super::{
 };
 use std::cmp::min;
 
+/// The byte length above which a comment or a string pair skips the similarity
+/// test and stays two `Novel` runs.
+///
+/// [`levenshtein_pct`] fills a table of one cell per char pair, so the cap keeps
+/// one vertex expansion under about 16 million cells. YAML block scalars and
+/// markdown paragraphs run long enough to need it.
+const MAX_SIMILARITY_BYTES: usize = 4096;
+
 /// One delimiter pair we have descended into. `PopBoth` means both
 /// sides entered the same matching list together (the ideal case);
 /// `PopEither` means LHS and RHS entered separate, mismatched lists
@@ -155,13 +163,41 @@ pub fn is_comment_atom(node: &Syntax<'_>) -> bool {
     }
 }
 
-/// Detect a string-literal atom. Tree-sitter grammars conventionally
-/// name string nodes with `string` in the kind.
+/// Detect a string-literal atom.
+///
+/// Tree-sitter grammars conventionally name string nodes with `string` or
+/// `char` in the kind. tree-sitter-yaml names its quoted and block scalars
+/// `double_quote_scalar`, `single_quote_scalar`, and `block_scalar`, and the
+/// block grammar of tree-sitter-markdown holds the text of a paragraph or a
+/// heading in one `inline` leaf, so those kinds count too.
 pub fn is_string_atom(node: &Syntax<'_>) -> bool {
     match node {
-        Syntax::Atom(atom) => atom.kind.contains("string") || atom.kind.contains("char"),
+        Syntax::Atom(atom) => {
+            atom.kind.contains("string")
+                || atom.kind.contains("char")
+                || matches!(
+                    atom.kind,
+                    "double_quote_scalar" | "single_quote_scalar" | "block_scalar" | "inline"
+                )
+        },
         Syntax::List(_) => false,
     }
+}
+
+/// Whether a comment or a string pair goes on to [`levenshtein_pct`].
+///
+/// The similarity never passes min(chars) / max(chars). A pair at or under 20
+/// percent by char count, which a replacement edge rejects anyway, therefore
+/// skips the test. A floor over byte lengths is not exact, because a multibyte
+/// char counts once in the similarity and several times in the length. A pair
+/// whose longer side passes [`MAX_SIMILARITY_BYTES`] skips the test for cost.
+pub fn similarity_possible(a: &str, b: &str) -> bool {
+    if a.len().max(b.len()) > MAX_SIMILARITY_BYTES {
+        return false;
+    }
+    let (a_chars, b_chars) = (a.chars().count(), b.chars().count());
+    let (shorter, longer) = (a_chars.min(b_chars), a_chars.max(b_chars));
+    longer == 0 || shorter * 100 > 20 * longer
 }
 
 /// Compute a Levenshtein-distance-based similarity percentage
@@ -435,6 +471,51 @@ mod tests {
         // similarity = (7 - 3) / 7 = ~57%.
         let pct = levenshtein_pct("kitten", "sitting");
         assert!((50..=70).contains(&pct), "got {pct}");
+    }
+
+    #[test]
+    fn yaml_scalar_and_markdown_inline_kinds_are_string_atoms() {
+        let mut arena = SyntaxArena::new();
+        let kinds = [
+            "double_quote_scalar",
+            "single_quote_scalar",
+            "block_scalar",
+            "inline",
+            "plain_scalar",
+        ];
+
+        let strings = kinds.map(|kind| {
+            let id = mk_atom(&mut arena, kind, "text");
+            is_string_atom(arena.get(id))
+        });
+        assert_eq!(
+            strings,
+            [true, true, true, true, false],
+            "the quoted and block scalars and markdown's inline are strings, a plain scalar is not",
+        );
+    }
+
+    #[test]
+    fn similarity_is_impossible_under_the_length_floor_and_over_the_cap() {
+        let long = "x".repeat(MAX_SIMILARITY_BYTES + 1);
+        let multibyte = "ab\u{e9}\u{e9}\u{e9}\u{e9}";
+
+        assert_eq!(
+            [
+                similarity_possible("abcde", "a"),
+                similarity_possible("abcd", "a"),
+                similarity_possible(multibyte, "ab"),
+                similarity_possible(&long, &long),
+                similarity_possible("", ""),
+            ],
+            [false, true, true, false, true],
+            "one char in five sits on the floor, one in four passes it, two in six chars pass \
+             it though two in ten bytes do not, a side past the cap is out, two empty sides stay",
+        );
+        assert!(
+            levenshtein_pct(multibyte, "ab") > 20,
+            "the search takes the multibyte pair, so the floor must count chars",
+        );
     }
 
     #[test]

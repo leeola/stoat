@@ -1160,6 +1160,12 @@ mod tests {
             .unwrap()
     }
 
+    fn markdown_lang() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(std::path::Path::new("a.md"))
+            .unwrap()
+    }
+
     #[test]
     fn identical_sources_emit_no_changes() {
         let lang = rust_lang();
@@ -1860,6 +1866,78 @@ mod tests {
             })
             .collect();
         assert_eq!(covered, ["2", "3"], "the scalar is the whole change");
+    }
+
+    /// A quoted YAML scalar is a string, so a changed one pairs as prose and the
+    /// refine narrows each side to the chars that differ.
+    #[test]
+    fn a_changed_yaml_quoted_scalar_is_a_refined_prose_pair() {
+        let lhs = "remote_file: \"{{ remote_tmp_dir }}/foo.txt\"\n";
+        let rhs = "remote_file: \"/tmp/foo.txt\"\n";
+        let result = diff_with_language(&yaml_lang(), lhs, rhs).unwrap();
+
+        let shapes = |side| -> Vec<(DiffChangeKind, bool, bool)> {
+            result
+                .changes
+                .iter()
+                .filter(|c| c.side == side)
+                .map(|c| (c.kind, c.prose, c.refined_spans.is_some()))
+                .collect()
+        };
+        assert_eq!(
+            (shapes(Side::Lhs), shapes(Side::Rhs)),
+            (
+                vec![(DiffChangeKind::Replaced, true, true)],
+                vec![(DiffChangeKind::Replaced, true, true)],
+            ),
+            "the two scalars pair as prose, each refined",
+        );
+    }
+
+    /// A block scalar is one string, so a word changed inside it pairs as prose
+    /// and refines to that word on each side.
+    #[test]
+    fn a_changed_block_scalar_pairs_as_prose() {
+        let lhs = "run: |\n  echo one\n  echo two\n  echo three\n  echo four\n";
+        let rhs = "run: |\n  echo one\n  echo two\n  echo six\n  echo four\n";
+        let result = diff_with_language(&yaml_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            (
+                result.changes.len(),
+                refined(&result, Side::Lhs, lhs),
+                refined(&result, Side::Rhs, rhs),
+            ),
+            (
+                2,
+                (DiffChangeKind::Replaced, true, vec!["three"]),
+                (DiffChangeKind::Replaced, true, vec!["six"]),
+            ),
+            "one prose pair, refined to the changed word on each side",
+        );
+    }
+
+    /// The text of a markdown paragraph is one string, so an inserted word marks
+    /// that word alone.
+    #[test]
+    fn a_changed_word_in_a_paragraph_marks_the_word() {
+        let lhs = "The quick brown fox jumps over the dog.\n";
+        let rhs = "The quick brown fox jumps over the lazy dog.\n";
+        let result = diff_with_language(&markdown_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            (
+                result.changes.len(),
+                refined(&result, Side::Lhs, lhs),
+                refined(&result, Side::Rhs, rhs),
+            ),
+            (
+                2,
+                (DiffChangeKind::Replaced, true, vec![]),
+                (DiffChangeKind::Replaced, true, vec!["lazy "]),
+            ),
+            "one prose pair, and only the inserted word marks",
+        );
     }
 
     #[test]

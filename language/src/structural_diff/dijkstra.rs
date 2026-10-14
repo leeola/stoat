@@ -16,7 +16,7 @@ use super::{
     fx::FxBuildHasher,
     graph::{
         is_comment_atom, is_string_atom, levenshtein_pct, pop_all_parents, probably_punctuation,
-        push_lhs_delimiter, push_rhs_delimiter, Edge, EnteredDelimiter,
+        push_lhs_delimiter, push_rhs_delimiter, similarity_possible, Edge, EnteredDelimiter,
     },
     stack::Stack,
     unchanged::{mark_subtree, ChangeKind, ChangeMap},
@@ -310,7 +310,9 @@ fn expand(
                     // cost -- code atoms, the common case, never match here.
                     let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
                     let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
-                    if kind_match_comment || kind_match_string {
+                    if (kind_match_comment || kind_match_string)
+                        && similarity_possible(lhs_atom.content, rhs_atom.content)
+                    {
                         let levenshtein = levenshtein_pct(lhs_atom.content, rhs_atom.content);
                         if levenshtein > 20 {
                             let edge = if kind_match_comment {
@@ -623,6 +625,25 @@ mod tests {
         assert!(edges
             .iter()
             .any(|e| matches!(e, Edge::ReplacedComment { .. })));
+    }
+
+    #[test]
+    fn expand_long_similar_strings_over_the_cap_yields_novel() {
+        let mut arena = SyntaxArena::new();
+        let lhs = mk_atom(&mut arena, "string_literal", "x".repeat(5000).leak());
+        let rhs = mk_atom(
+            &mut arena,
+            "string_literal",
+            format!("{}y", "x".repeat(4999)).leak(),
+        );
+
+        let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
+        assert!(
+            !edges
+                .iter()
+                .any(|e| matches!(e, Edge::ReplacedString { .. })),
+            "a pair past the cap takes no replacement edge",
+        );
     }
 
     #[test]
