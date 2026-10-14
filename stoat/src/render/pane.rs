@@ -229,10 +229,7 @@ pub(crate) fn render_pane(
         && editor.diff_view
         && !(is_focused && view::cursor_display_row(editor) == editor.scroll_row)
     {
-        let sides = buffers
-            .path_for(editor.buffer_id)
-            .and_then(|path| frame.pair_sides.get(path))
-            .map_or(frame.diff_sides, |(from, to)| (from.as_str(), to.as_str()));
+        let sides = diff_sides_for(buffers.path_for(editor.buffer_id), frame);
         paint_diff_sides_bar(content_area, is_focused, sides, frame, buf, scene);
     }
 
@@ -350,6 +347,16 @@ fn dim_unfocused_pane(area: Rect, is_focused: bool, frame: FrameCtx<'_>, buf: &m
     {
         dim_pane_content(buf, area, bg, frame.inactive_dim);
     }
+}
+
+/// The names a diff view's sides bar shows for the file at `path`.
+///
+/// A pair names the sides of its own file, and the workspace base names those
+/// of every other file. Shared with the replay cache, whose key hashes the
+/// names so that a renamed side repaints an unfocused pane.
+pub(crate) fn diff_sides_for<'a>(path: Option<&Path>, frame: FrameCtx<'a>) -> (&'a str, &'a str) {
+    path.and_then(|path| frame.pair_sides.get(path))
+        .map_or(frame.diff_sides, |(from, to)| (from.as_str(), to.as_str()))
 }
 
 /// Paint the diff view's sides bar over the top row of `content_area`.

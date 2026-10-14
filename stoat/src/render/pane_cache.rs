@@ -15,6 +15,10 @@
 //! the primary cursor and the buffer's dirty flag, which is why both are here.
 //! The row also names what waits on a held buffer, which no key part tracks, so
 //! a held buffer never replays.
+//!
+//! The diff view's branch returns before its selection pass as well. Past what
+//! a plain pane reads, it reads the diff dials and the names on its sides bar.
+//! No version moves with either, so the key holds both.
 
 use crate::{
     buffer::BufferId,
@@ -24,7 +28,8 @@ use crate::{
     pane::{Pane, View},
     render::{
         editor::editor_cursor_position,
-        pane::{pane_areas, status_segments_area},
+        pane::{diff_sides_for, pane_areas, status_segments_area},
+        review::DiffDials,
         undercurl::UndercurlBatch,
         FrameCtx,
     },
@@ -34,6 +39,7 @@ use ratatui::{
     layout::Rect,
 };
 use slotmap::SlotMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::ApcScene;
 
@@ -94,8 +100,25 @@ pub(crate) struct PaneCacheKey {
     pub(crate) line_numbers: LineNumbers,
     /// The diagnostics the gutter and the underlines are drawn from.
     pub(crate) diagnostics_version: u64,
-    /// The diff the gutter indicators are drawn from.
+    /// The diff the gutter indicators are drawn from, and in the diff view both
+    /// of its columns.
     pub(crate) diff_version: usize,
+    /// Whether the editor shows the diff view, which paints the base beside the
+    /// buffer and a sides bar over both.
+    pub(crate) diff_view: bool,
+    /// The diff view's dials, as the soften scale and the tint amount in bits,
+    /// then the bold and the underline flags.
+    ///
+    /// A dial turn moves no generation, so the key holds the dials themselves.
+    /// Outside the diff view nothing reads them, and they hold zeros there so a
+    /// turn repaints no plain pane.
+    pub(crate) diff_dials: (u32, u32, bool, bool),
+    /// A hash of the two names the diff view's sides bar shows, zero outside the
+    /// diff view.
+    ///
+    /// A switch of the diff base renames the sides with no generation of its
+    /// own.
+    pub(crate) diff_sides: u64,
     /// The minimap content published for this pane's buffer, which the strip
     /// paints from and which no display version covers.
     pub(crate) minimap_content_id: u32,
@@ -230,9 +253,9 @@ impl PaneCacheEntry {
 
 /// The key for `pane`, or `None` when the pane is not one this cache covers.
 ///
-/// Only an editor pane showing an ordinary document qualifies. The review,
-/// diff, and conflict views take their own branches out of the editor render
-/// and read state this never audited, so they always paint.
+/// An editor pane qualifies, whether it shows a document or the diff view. The
+/// conflict view takes its own branch out of the editor render and reads state
+/// the key does not cover, so it always paints.
 ///
 /// A buffer a command waits on always paints too. Its status row names what
 /// waits, and that name changes when the first waiter goes while no part of
@@ -249,7 +272,7 @@ pub(crate) fn pane_cache_key(
         return None;
     };
     let editor = editors.get_mut(*editor_id)?;
-    if editor.diff_view || editor.conflict_view.is_some() {
+    if editor.conflict_view.is_some() {
         return None;
     }
 
@@ -265,6 +288,31 @@ pub(crate) fn pane_cache_key(
             guard.dirty,
             guard.diff_map.as_ref().map_or(0, |dm| dm.version()),
         )
+    };
+
+    // The dials destructure whole, so a further dial fails to compile here
+    // until the key holds it.
+    let (diff_dials, diff_sides) = match editor.diff_view {
+        true => {
+            let DiffDials {
+                soften_scale,
+                tint_amount,
+                bold,
+                underline,
+            } = frame.diff_dials;
+            let mut sides = DefaultHasher::new();
+            diff_sides_for(buffers.path_for(buffer), frame).hash(&mut sides);
+            (
+                (
+                    soften_scale.to_bits(),
+                    tint_amount.to_bits(),
+                    bold,
+                    underline,
+                ),
+                sides.finish(),
+            )
+        },
+        false => ((0, 0, false, false), 0),
     };
 
     let (_, status) = pane_areas(pane.area, frame.minimap_band);
@@ -291,6 +339,9 @@ pub(crate) fn pane_cache_key(
             .path_for(buffer)
             .map_or(0, |path| frame.diagnostics.version_for(path)),
         diff_version,
+        diff_view: editor.diff_view,
+        diff_dials,
+        diff_sides,
         minimap_content_id,
         minimap_enabled: frame.minimap_enabled,
         cursor_pos: editor_cursor_position(editor),
@@ -337,6 +388,9 @@ mod tests {
             line_numbers: LineNumbers::Off,
             diagnostics_version: 0,
             diff_version: 0,
+            diff_view: false,
+            diff_dials: (0, 0, false, false),
+            diff_sides: 0,
             minimap_content_id: 0,
             minimap_enabled: false,
             cursor_pos: Some((1, 1)),
@@ -353,7 +407,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 17] = [
+        let moved: [(&str, PaneCacheKey); 20] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -442,6 +496,27 @@ mod tests {
                 "diff_version",
                 PaneCacheKey {
                     diff_version: 1,
+                    ..base
+                },
+            ),
+            (
+                "diff_view",
+                PaneCacheKey {
+                    diff_view: true,
+                    ..base
+                },
+            ),
+            (
+                "diff_dials",
+                PaneCacheKey {
+                    diff_dials: (0, 0, false, true),
+                    ..base
+                },
+            ),
+            (
+                "diff_sides",
+                PaneCacheKey {
+                    diff_sides: 1,
                     ..base
                 },
             ),

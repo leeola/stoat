@@ -20,6 +20,7 @@ use crate::{
         finder_layout, focused_editor_pane_area, mouse_event, open_indent_buffer,
         open_scratch_file, open_with_minimap_strip, palette_sizing,
     },
+    workspace::diff::DiffBase,
 };
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::style::Modifier;
@@ -6111,6 +6112,146 @@ fn a_badge_over_an_unfocused_status_row_repaints_it() {
     let repainted = frame_output(&mut h);
     assert_eq!(raised.0, repainted.0, "the cells match");
     assert_eq!(raised.1, repainted.1, "the scene bytes match");
+}
+
+/// A diff view of a changed file in the left pane, unfocused beside a plain
+/// file in the right pane. At width 240 each pane takes the two-column diff
+/// layout.
+fn diff_pair(h: &mut crate::test_harness::TestHarness) {
+    h.stoat.stoatty = true;
+    h.resize(240, 16);
+    h.stage_review_scenario(
+        "/repo",
+        &[(
+            "a.rs",
+            "fn keep() {}\nfn old() {}\n",
+            "fn keep() {}\nfn new() {}\n",
+        )],
+    );
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(std::path::Path::new("/repo/a.rs"));
+    let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
+    h.type_action("SplitRight()");
+    h.open_file(&b);
+    h.settle_diff_jobs();
+
+    // A layout action closes a diff view, so no focus key leaves one beside
+    // the focus. The left pane enters the view in place, as a click into a
+    // layout that refused the widen leaves it.
+    let ws = h.stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let left = ws
+        .panes
+        .split_panes()
+        .find_map(|(id, pane)| match &pane.view {
+            View::Editor(editor) if id != focused => Some(*editor),
+            _ => None,
+        })
+        .expect("an unfocused editor pane");
+    ws.editors[left].set_diff_view(true);
+    h.settle();
+    // The diff view's first paint installs its own wrap width and pairing,
+    // which moves the paint version past the key that paint captured. The
+    // second frame captures the settled key.
+    let _ = h.stoat.render();
+    let _ = h.stoat.render();
+}
+
+/// An unfocused diff pane replays as a plain pane does, and the replay paints
+/// the same frame as a repaint.
+#[test]
+fn a_replayed_diff_pane_paints_what_repainting_it_would() {
+    let mut h = Stoat::test();
+    diff_pair(&mut h);
+
+    h.type_keys("i");
+    h.type_text("X");
+    h.settle();
+
+    let painted_before = h.stoat.pane_paints;
+    let replayed = frame_output(&mut h);
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        1,
+        "the edited pane painted and the diff pane replayed",
+    );
+
+    h.stoat.pane_cache.clear();
+    let painted_before = h.stoat.pane_paints;
+    let repainted = frame_output(&mut h);
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        2,
+        "and with the cache emptied both panes paint",
+    );
+
+    assert_eq!(replayed.0, repainted.0, "the cells match");
+    assert_eq!(replayed.1, repainted.1, "the scene bytes match");
+    assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+}
+
+/// A dial turn moves no generation, so only the dials in the key repaint
+/// the unfocused diff pane for it. The pane replays while the dials hold.
+#[test]
+fn a_dial_turn_repaints_an_unfocused_diff_pane() {
+    let mut h = Stoat::test();
+    diff_pair(&mut h);
+
+    let turns: [fn(&mut Stoat); 4] = [
+        |stoat| stoat.diff_soften = 1,
+        |stoat| stoat.diff_tint = 1,
+        |stoat| stoat.diff_bold = true,
+        |stoat| stoat.diff_underline = true,
+    ];
+    let paints: Vec<(u64, u64)> = turns
+        .into_iter()
+        .map(|turn| {
+            let held = frame_paints(&mut h);
+            turn(&mut h.stoat);
+            (held, frame_paints(&mut h))
+        })
+        .collect();
+    assert_eq!(
+        paints,
+        [(1, 2); 4],
+        "each turn repaints the diff pane, which replays between turns",
+    );
+
+    let replayed = frame_output(&mut h);
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(replayed.0, repainted.0, "the cells match");
+    assert_eq!(replayed.1, repainted.1, "the scene bytes match");
+}
+
+/// A base switch renames the sides before the new diff lands. Every version
+/// the key reads stands still until then, so only the names in the key
+/// repaint the unfocused diff pane.
+#[test]
+fn a_renamed_side_repaints_an_unfocused_diff_pane() {
+    let mut h = Stoat::test();
+    diff_pair(&mut h);
+    assert_eq!(
+        frame_paints(&mut h),
+        1,
+        "with nothing moved, the diff pane replays",
+    );
+
+    h.stoat
+        .active_workspace_mut()
+        .set_diff_base(Some(DiffBase::named("main", "0123456789abcdef".into())));
+    assert_eq!(
+        frame_paints(&mut h),
+        2,
+        "the renamed side repaints the diff pane",
+    );
+}
+
+/// How many panes the next frame paints rather than replays.
+fn frame_paints(h: &mut crate::test_harness::TestHarness) -> u64 {
+    let before = h.stoat.pane_paints;
+    let _ = h.stoat.render();
+    h.stoat.pane_paints - before
 }
 
 /// A frame driven by background activity alone paints only the focused
