@@ -702,6 +702,9 @@ impl DiffMap {
     /// index and the buffer, from a `structural_diff(index, buffer)` pass. A
     /// hunk is staged when no such range overlaps its `buffer_line_range`,
     /// because the index and buffer already agree over the hunk's extent.
+    ///
+    /// `index_changed` must be sorted by start with non-decreasing ends, as the
+    /// hunk list of that pass is.
     pub fn from_structural_changes_staged(
         result: stoat_language::structural_diff::DiffResult,
         lhs: Arc<String>,
@@ -1480,18 +1483,36 @@ fn ranges_overlap(a: &Range<u32>, b: &Range<u32>) -> bool {
 /// row absent from it is already applied to the index. A zero-width hunk is a
 /// deletion seam or a move anchor and has no rows to intersect, so it stores
 /// its anchor point when an index change touches it and nothing when not.
+///
+/// `index_changed` must be sorted by start with non-decreasing ends, as the
+/// hunk list of a diff is. Each hunk then searches for the ranges that reach
+/// it, rather than testing every range.
 pub(crate) fn mark_staged(hunks: &mut [DiffHunk], index_changed: &[Range<u32>]) {
+    debug_assert!(
+        index_changed
+            .windows(2)
+            .all(|w| w[0].start <= w[1].start && w[0].end <= w[1].end),
+        "index ranges are sorted by start with non-decreasing ends",
+    );
     for hunk in hunks.iter_mut() {
         let range = hunk.buffer_line_range.clone();
+        // A range that overlaps the hunk ends at or after its start and starts
+        // at or before its end, a zero-width range at either edge included. So
+        // with both bounds sorted, every overlap sits in this one window. Each
+        // hunk searches on its own, because a range that spans two hunks
+        // reaches both.
+        let from = index_changed.partition_point(|c| c.end < range.start);
+        let mut reaching = index_changed[from..]
+            .iter()
+            .take_while(|c| c.start <= range.end);
         if range.start == range.end {
-            let unstaged = index_changed.iter().any(|c| ranges_overlap(c, &range));
+            let unstaged = reaching.any(|c| ranges_overlap(c, &range));
             hunk.unstaged_lines = match unstaged {
                 true => vec![range],
                 false => Vec::new(),
             };
         } else {
-            hunk.unstaged_lines = index_changed
-                .iter()
+            hunk.unstaged_lines = reaching
                 .filter(|c| ranges_overlap(c, &range))
                 .map(|c| c.start.max(range.start)..c.end.min(range.end))
                 .collect();
@@ -4147,6 +4168,57 @@ mod tests {
             dm.staged_for_line(2),
             Some(false),
             "line 2 still differs from the index, so it reads unstaged"
+        );
+    }
+
+    /// The search marks what a test of every range against every hunk marks.
+    ///
+    /// The cases cover a zero-width hunk at a range's end, zero-width ranges at
+    /// a hunk's start and end, one range across two hunks, and ranges and a
+    /// hunk that reach nothing.
+    #[test]
+    fn mark_staged_finds_every_overlap_a_full_scan_finds() {
+        let index_changed = [0..1, 3..5, 8..8, 12..20, 25..25, 30..31];
+        let lines = [5..5, 8..10, 12..14, 16..18, 22..25, 27..29];
+        let mut hunks: Vec<DiffHunk> = lines.iter().cloned().map(added_hunk).collect();
+
+        super::mark_staged(&mut hunks, &index_changed);
+
+        let marked: Vec<Vec<std::ops::Range<u32>>> =
+            hunks.into_iter().map(|hunk| hunk.unstaged_lines).collect();
+        let full_scan: Vec<Vec<std::ops::Range<u32>>> = lines
+            .iter()
+            .map(|range| {
+                if range.start == range.end {
+                    match index_changed
+                        .iter()
+                        .any(|c| super::ranges_overlap(c, range))
+                    {
+                        true => vec![range.clone()],
+                        false => Vec::new(),
+                    }
+                } else {
+                    index_changed
+                        .iter()
+                        .filter(|c| super::ranges_overlap(c, range))
+                        .map(|c| c.start.max(range.start)..c.end.min(range.end))
+                        .collect()
+                }
+            })
+            .collect();
+        let one = |range: std::ops::Range<u32>| vec![range];
+        let expected = vec![
+            one(5..5),
+            one(8..8),
+            one(12..14),
+            one(16..18),
+            one(25..25),
+            Vec::new(),
+        ];
+        assert_eq!(
+            (marked, full_scan),
+            (expected.clone(), expected),
+            "the search marks what the full scan marks, and both read as written",
         );
     }
 
