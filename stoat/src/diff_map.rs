@@ -10,6 +10,7 @@ use std::{
     cmp::Ordering,
     collections::BTreeMap,
     ops::Range,
+    str::Lines,
     sync::{
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
         Arc, Mutex,
@@ -947,7 +948,7 @@ impl DiffMap {
         cursor.seek(&HunkKeyRef(Some(&after)), Bias::Left);
         if let Some(hunk) = cursor.item()
             && hunk.buffer_start_line == after
-            && !hunk.base_byte_range.is_empty()
+            && self.base_line_count(hunk) > 0
             && match hunk.status {
                 DiffHunkStatus::Deleted => true,
                 DiffHunkStatus::Modified => self.paired_rows(hunk, pair_modified) == 0,
@@ -964,7 +965,6 @@ impl DiffMap {
         cursor.prev();
         cursor.item().is_some_and(|hunk| {
             hunk.status == DiffHunkStatus::Modified
-                && !hunk.base_byte_range.is_empty()
                 && hunk.buffer_line_range.end == after
                 && self.paired_rows(hunk, pair_modified) > 0
                 && self.base_line_count(hunk) > self.paired_rows(hunk, pair_modified)
@@ -1055,21 +1055,15 @@ impl DiffMap {
     /// Zero without base text, since no row pairs against text the map does not
     /// hold.
     ///
-    /// The count comes from the base line-start table in two binary searches, so
-    /// a paint that asks it for each row costs nothing that grows with the
-    /// hunk's base text. It counts lines as `str::lines` does, one per `\n` plus
-    /// one for a non-empty tail with no `\n`.
+    /// The count is that of [`hunk_base_lines`], read from the base line-start
+    /// table in two binary searches, so a paint that asks it for each row costs
+    /// nothing that grows with the hunk's base text. A removed lone blank line
+    /// counts one, and so does the blank line that a removed run ends in.
     pub(crate) fn base_line_count(&self, hunk: &DiffHunk) -> u32 {
         let Some(text) = self.base_text.as_ref() else {
             return 0;
         };
-        let range = &hunk.base_byte_range;
-        if range.is_empty() {
-            return 0;
-        }
-        let newlines = line_of(&self.base_line_starts, range.end)
-            - line_of(&self.base_line_starts, range.start);
-        newlines + u32::from(text.as_bytes()[range.end - 1] != b'\n')
+        hunk_base_lines(hunk, &self.base_line_starts, text).len() as u32
     }
 
     /// The output of [`Self::deleted_blocks`], reduced to what tells one
@@ -1136,8 +1130,7 @@ impl DiffMap {
             matches!(
                 hunk.status,
                 DiffHunkStatus::Deleted | DiffHunkStatus::Modified
-            ) && !hunk.base_byte_range.is_empty()
-                && (self.base_line_count(hunk) > paired || (wrap.is_some() && paired > 0))
+            ) && (self.base_line_count(hunk) > paired || (wrap.is_some() && paired > 0))
         })
     }
 
@@ -1206,7 +1199,7 @@ impl DiffMap {
                     DiffHunkStatus::Modified if paired > 0 => hunk.buffer_line_range.end - 1,
                     _ => hunk.buffer_start_line.saturating_sub(1),
                 };
-                let mut lines = base_text[hunk.base_byte_range.clone()].lines();
+                let mut lines = self.removed_base_lines(hunk, base_text);
                 let mut blocks = Vec::new();
                 for (row, line) in
                     (hunk.buffer_start_line..).zip(lines.by_ref().take(paired as usize))
@@ -1236,6 +1229,21 @@ impl DiffMap {
                 blocks
             })
             .collect()
+    }
+
+    /// The text of each base line `hunk` removed, without its line ending.
+    ///
+    /// The lines are the ones [`hunk_base_lines`] names, so a removed blank
+    /// line yields an empty string rather than nothing.
+    fn removed_base_lines<'a>(&self, hunk: &DiffHunk, base_text: &'a str) -> Lines<'a> {
+        let lines = hunk_base_lines(hunk, &self.base_line_starts, base_text);
+        let start_of = |line: u32| {
+            self.base_line_starts
+                .get(line as usize)
+                .copied()
+                .unwrap_or(base_text.len())
+        };
+        base_text[start_of(lines.start)..start_of(lines.end)].lines()
     }
 
     /// How many hunks the map holds.
@@ -1370,20 +1378,10 @@ impl DiffMap {
     }
 
     pub fn total_deleted_lines(&self) -> u32 {
-        let base_text = match &self.base_text {
-            Some(t) => t,
-            None => return 0,
-        };
         self.hunks
             .iter()
-            .filter(|h| {
-                matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified)
-                    && !h.base_byte_range.is_empty()
-            })
-            .map(|h| {
-                let content = &base_text[h.base_byte_range.clone()];
-                content.lines().count() as u32
-            })
+            .filter(|h| matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified))
+            .map(|h| self.base_line_count(h))
             .sum()
     }
 
@@ -3634,7 +3632,7 @@ mod tests {
     fn seam_base_lines_in_counts_moved_away_lines() {
         let seam = DiffHunk {
             status: DiffHunkStatus::Moved,
-            base_byte_range: 2..4,
+            base_byte_range: 2..3,
             ..added_hunk(1..1)
         };
         let dm = DiffMap::from_hunks([seam], Some(Arc::new("a\nb\nc\nd\n".to_string())));
@@ -3646,26 +3644,27 @@ mod tests {
         );
     }
 
-    /// The count read from the line-start table agrees with a walk of the
-    /// range's lines, for an empty range, a blank line, a CRLF ending, and a
-    /// tail with no newline.
+    /// The count covers each line in the ranges the line differ makes, which
+    /// end before their last line's newline: one line, two lines, a lone blank
+    /// line as an empty range, a run that ends in a blank line, a CRLF line, a
+    /// tail with no newline, and the whole text.
     #[test]
-    fn base_line_count_matches_the_line_walk() {
+    fn base_line_count_counts_each_line_the_line_differ_names() {
         let base = "a\nbb\n\nccc\r\nd";
         let dm = DiffMap::from_hunks(
-            [modified_hunk(0..1, 0..2)],
+            [modified_hunk(0..1, 0..1)],
             Some(Arc::new(base.to_string())),
         );
-        let counts: Vec<u32> = [0..0, 0..2, 0..5, 5..6, 6..11, 2..11, 11..12, 0..12]
+        let counts: Vec<u32> = [0..1, 0..4, 5..5, 2..5, 6..10, 11..12, 0..12]
             .into_iter()
             .map(|range| dm.base_line_count(&modified_hunk(0..1, range)))
             .collect();
-        assert_eq!(counts, [0, 1, 2, 1, 1, 3, 1, 5]);
+        assert_eq!(counts, [1, 2, 1, 2, 1, 1, 5]);
 
-        let mut set = DiffMap::from_hunks([modified_hunk(0..1, 0..2)], None);
+        let mut set = DiffMap::from_hunks([modified_hunk(0..1, 0..1)], None);
         set.set_base_text(Arc::new(base.to_string()));
         assert_eq!(
-            set.base_line_count(&modified_hunk(0..1, 0..5)),
+            set.base_line_count(&modified_hunk(0..1, 0..4)),
             2,
             "a base set after construction carries its line table",
         );
@@ -4155,6 +4154,63 @@ mod tests {
             base_lines("a\nb\n\nc\n", "a\nc\n"),
             [(DiffHunkStatus::Deleted, 1..3)],
             "a run that ends in a blank line"
+        );
+    }
+
+    /// The line differ ends a removed run before its last line's newline, so a
+    /// lone blank line is an empty range and a run that ends in one stops where
+    /// that line starts. Each removed line still blocks a row of its own.
+    #[test]
+    fn a_removed_blank_line_at_a_runs_edge_blocks_a_row() {
+        let removed = |base: &str, buffer: &str| {
+            let dm = DiffMap::from_structural_changes(
+                stoat_language::structural_diff::diff(base, buffer),
+                Arc::new(base.to_string()),
+                buffer,
+            );
+            let rows: Vec<Vec<String>> = dm
+                .deleted_blocks(true, None, &|_| 1)
+                .concat()
+                .iter()
+                .map(block_rows)
+                .collect();
+            (
+                rows,
+                dm.total_deleted_lines(),
+                dm.has_deletion_after(0, true),
+            )
+        };
+
+        assert_eq!(
+            removed("a\n\nb\n", "a\nb\n"),
+            (vec![vec![String::new()]], 1, true),
+            "a lone blank line"
+        );
+        assert_eq!(
+            removed("a\nb\n\nc\n", "a\nc\n"),
+            (vec![vec!["b".to_string()], vec![String::new()]], 2, true),
+            "a run that ends in a blank line"
+        );
+    }
+
+    /// A replaced run that ends in a blank line pairs that line with a live row
+    /// too, so one fewer live row has no base line beside it.
+    #[test]
+    fn a_replaced_run_that_ends_in_a_blank_line_pairs_it() {
+        let (base, buffer) = ("a\nb\n\nc\n", "a\nX\nY\nZ\nc\n");
+        let dm = DiffMap::from_structural_changes(
+            stoat_language::structural_diff::diff(base, buffer),
+            Arc::new(base.to_string()),
+            buffer,
+        );
+        let hunks: Vec<(DiffHunkStatus, u32)> = dm
+            .hunks()
+            .map(|hunk| (hunk.status, dm.base_line_count(hunk)))
+            .collect();
+
+        assert_eq!(
+            (hunks, dm.rows_without_base_before(5, true)),
+            (vec![(DiffHunkStatus::Modified, 2)], 1),
         );
     }
 

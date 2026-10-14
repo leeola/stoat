@@ -2742,7 +2742,7 @@ mod tests {
             status: DiffHunkStatus::Moved,
             buffer_start_line: start,
             buffer_line_range: start..end,
-            base_byte_range: 2..4,
+            base_byte_range: 2..3,
             anchor_range: None,
             token_detail: None,
             unstaged_lines: Vec::new(),
@@ -4077,6 +4077,41 @@ mod tests {
                 ["3".to_string(), "tail".to_string()],
             ],
             "the line keeps one row, cut at the column edge",
+        );
+    }
+
+    /// A removed lone blank line takes a numbered row of its own on the left,
+    /// and so does the blank line that ends a removed run.
+    #[test]
+    fn a_removed_blank_line_at_a_runs_edge_takes_a_row() {
+        let rows = |base: &str, count: u16| {
+            let h = diff_harness(base, "keep\ntail\n");
+            let buf = h.rendered_buffer();
+            let y = row_holding(buf, 68..120, "keep");
+            (y..y + count)
+                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .collect::<Vec<_>>()
+        };
+        let row = |cells: [&str; 4]| cells.map(String::from);
+
+        assert_eq!(
+            rows("keep\n\ntail\n", 3),
+            [
+                row(["1", "keep", "1", "keep"]),
+                row(["2", "", "", ""]),
+                row(["3", "tail", "2", "tail"]),
+            ],
+            "a lone blank line",
+        );
+        assert_eq!(
+            rows("keep\ngone\n\ntail\n", 4),
+            [
+                row(["1", "keep", "1", "keep"]),
+                row(["2", "gone", "", ""]),
+                row(["3", "", "", ""]),
+                row(["4", "tail", "2", "tail"]),
+            ],
+            "a run that ends in a blank line",
         );
     }
 
