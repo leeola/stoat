@@ -1,7 +1,9 @@
 use super::pane::EditorDisposal;
 use crate::{
     app::{Stoat, UpdateEffect},
-    commit_list::{CommitListId, CommitListSnap, CommitListState},
+    commit_list::{
+        CommitListId, CommitListSnap, CommitListState, PageLoad, SavedSelection, SelectionSearch,
+    },
     display_map::syntax_theme::SyntaxStyles,
     pane::{PaneId, View},
     review_session::DiffDocument,
@@ -49,7 +51,7 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let covered = stoat.active_workspace().panes.pane(focus).view.clone();
-    let Some(id) = spawn_commit_list(stoat, Some(covered)) else {
+    let Some(id) = spawn_commit_list(stoat, Some(covered), None) else {
         return UpdateEffect::None;
     };
 
@@ -77,10 +79,10 @@ pub(super) fn open_commits(stoat: &mut Stoat) -> UpdateEffect {
 ///
 /// A commits pane rides `PaneTree` serde as [`View::Commits`], but the list is
 /// live state the session file does not hold, so the id is dead after a restore
-/// or a workspace copy. Each dead pane gets a list of its own with its first
-/// page loading, at the place the session saved for that id. The selection
-/// returns to its commit and row once a page holds it, and the view the list
-/// covered stays for a close to return to.
+/// or a workspace copy. Each dead pane gets a list of its own at the place the
+/// session saved for that id. One pool task searches the history for the saved
+/// commit, and the selection returns to its commit and row when that search
+/// lands. The view the list covered stays for a close to return to.
 pub(crate) fn respawn_commits_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
@@ -129,21 +131,24 @@ pub(crate) fn respawn_commits_panes(stoat: &mut Stoat) {
 /// live here.
 fn respawned_list_view(stoat: &mut Stoat, place: CommitListSnap) -> View {
     let covered = place.covered.clone();
-    let Some(id) = spawn_commit_list(stoat, place.covered) else {
+    let Some(id) = spawn_commit_list(stoat, place.covered, place.selection) else {
         return covered.unwrap_or_else(|| View::Label("Commits (closed)".into()));
     };
-    if let Some(list) = stoat.active_workspace_mut().commit_lists.get_mut(id) {
-        list.pending_selection = place.selection;
-    }
     View::Commits(id)
 }
 
 /// Start a commits list over the active workspace's repository, with its first
-/// page loading, and add it to the workspace's lists.
+/// load in flight, and add it to the workspace's lists.
 ///
 /// `covered` is the view the list replaces in its pane, which closing the list
-/// puts back. Returns `None` and adds nothing outside a git repository.
-fn spawn_commit_list(stoat: &mut Stoat, covered: Option<View>) -> Option<CommitListId> {
+/// puts back. `selection` is a restored list's saved place, which the first
+/// load searches the history for in place of reading one page. Returns `None`
+/// and adds nothing outside a git repository.
+fn spawn_commit_list(
+    stoat: &mut Stoat,
+    covered: Option<View>,
+    selection: Option<SavedSelection>,
+) -> Option<CommitListId> {
     let git_root = stoat.active_workspace().git_root.clone();
     let Some(repo) = stoat.git_host.discover(&git_root) else {
         tracing::warn!("spawn_commit_list: not inside a git repository");
@@ -156,13 +161,8 @@ fn spawn_commit_list(stoat: &mut Stoat, covered: Option<View>) -> Option<CommitL
 
     let mut state = CommitListState::new(workdir, repo.clone());
     state.covered = covered;
-    state.pending_load = Some(spawn_commit_log_load(
-        &stoat.executor,
-        repo,
-        None,
-        COMMITS_INITIAL_PAGE,
-        stoat.redraw_notify.clone(),
-    ));
+    state.pending_load = Some(spawn_first_load(stoat, repo, selection.as_ref()));
+    state.pending_selection = selection;
     Some(stoat.active_workspace_mut().commit_lists.insert(state))
 }
 
@@ -317,21 +317,15 @@ pub(super) fn reload_every_list(stoat: &mut Stoat) {
 ///
 /// Returns `false` when the active workspace holds no list `id`.
 fn reload_list(stoat: &mut Stoat, id: CommitListId) -> bool {
-    let Some(repo) = stoat
+    let Some((repo, selection)) = stoat
         .active_workspace()
         .commit_lists
         .get(id)
-        .map(|s| s.repo.clone())
+        .map(|s| (s.repo.clone(), s.pending_selection.clone()))
     else {
         return false;
     };
-    let task = spawn_commit_log_load(
-        &stoat.executor,
-        repo,
-        None,
-        COMMITS_INITIAL_PAGE,
-        stoat.redraw_notify.clone(),
-    );
+    let task = spawn_first_load(stoat, repo, selection.as_ref());
     let ws = stoat.active_workspace_mut();
     if let Some(state) = ws.commit_lists.get_mut(id) {
         state.commits.clear();
@@ -352,8 +346,7 @@ fn reload_list(stoat: &mut Stoat, id: CommitListId) -> bool {
 }
 
 /// Start the next page load for list `id` when its selection comes near the
-/// tail of the loaded window, or while a restored selection waits for the page
-/// that holds its commit.
+/// tail of the loaded window.
 ///
 /// Does nothing while a load is in flight or after the walk reached a root
 /// commit.
@@ -365,12 +358,7 @@ fn maybe_spawn_next_page(stoat: &mut Stoat, id: CommitListId) {
         return;
     }
     let loaded = state.commits.len();
-    if loaded == 0 {
-        return;
-    }
-    // A restored selection keeps the pages coming until one holds its commit.
-    let within_prefetch = state.selected + COMMITS_PREFETCH_GAP >= loaded;
-    if !within_prefetch && state.pending_selection.is_none() {
+    if loaded == 0 || state.selected + COMMITS_PREFETCH_GAP < loaded {
         return;
     }
     let last_sha = state.commits[loaded - 1].sha.clone();
@@ -498,12 +486,76 @@ fn spawn_commit_log_load(
     after: Option<String>,
     limit: usize,
     redraw: Arc<tokio::sync::Notify>,
-) -> stoat_scheduler::Task<Vec<crate::host::CommitInfo>> {
+) -> stoat_scheduler::Task<PageLoad> {
     executor.spawn_blocking(move || {
-        let loaded = repo.log_commits(after.as_deref(), limit);
+        let commits = repo.log_commits(after.as_deref(), limit);
         redraw.notify_one();
-        loaded
+        PageLoad {
+            reached_end: commits.is_empty(),
+            commits,
+            selection: SelectionSearch::NotAsked,
+        }
     })
+}
+
+/// The load that starts a list over `repo` from the top of its history.
+///
+/// A list that waits on a restored `selection` searches the history for its
+/// commit. Any other list reads its first page.
+fn spawn_first_load(
+    stoat: &Stoat,
+    repo: Arc<dyn crate::host::GitRepo>,
+    selection: Option<&SavedSelection>,
+) -> stoat_scheduler::Task<PageLoad> {
+    let redraw = stoat.redraw_notify.clone();
+    match selection {
+        Some(selection) => {
+            let sha = selection.sha.clone();
+            stoat.executor.spawn_blocking(move || {
+                let load = search_history(&*repo, &sha);
+                redraw.notify_one();
+                load
+            })
+        },
+        None => spawn_commit_log_load(&stoat.executor, repo, None, COMMITS_INITIAL_PAGE, redraw),
+    }
+}
+
+/// The pages from the top of `repo`'s first-parent history through the one
+/// that holds `sha`, or the first page alone when no page does.
+///
+/// One pool task in place of a page per pump, so a commit deep in the history
+/// costs the run loop one landing. A miss keeps one page, as a fresh list
+/// does, although the walk reads the whole history to learn the commit is
+/// gone.
+fn search_history(repo: &dyn crate::host::GitRepo, sha: &str) -> PageLoad {
+    let mut commits: Vec<crate::host::CommitInfo> = Vec::new();
+    loop {
+        let after = commits.last().map(|commit| commit.sha.as_str());
+        let page = repo.log_commits(after, COMMITS_INITIAL_PAGE);
+        if page.is_empty() {
+            let reached_end = commits.len() <= COMMITS_INITIAL_PAGE;
+            commits.truncate(COMMITS_INITIAL_PAGE);
+            return PageLoad {
+                commits,
+                reached_end,
+                selection: SelectionSearch::Gone,
+            };
+        }
+
+        let page_start = commits.len();
+        commits.extend(page);
+        if let Some(offset) = commits[page_start..]
+            .iter()
+            .position(|commit| commit.sha == sha)
+        {
+            return PageLoad {
+                commits,
+                reached_end: false,
+                selection: SelectionSearch::Found(page_start + offset),
+            };
+        }
+    }
 }
 
 /// What a preview build needs to bake syntax colors into its session.

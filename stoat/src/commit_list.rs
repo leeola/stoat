@@ -62,7 +62,7 @@ pub(crate) struct CommitListState {
     /// Updated by `render_commits`; read by navigation handlers that
     /// need to keep the selection in view. Zero until first paint.
     pub viewport_rows: usize,
-    pub pending_load: Option<Task<Vec<CommitInfo>>>,
+    pub pending_load: Option<Task<PageLoad>>,
     pub summaries: HashMap<String, Vec<CommitFileChange>>,
     pub preview_sessions: PreviewCache,
     pub pending_preview: Option<PendingPreview>,
@@ -86,11 +86,12 @@ pub(crate) struct CommitListState {
     /// The view the list replaced in its pane, which closing the list puts
     /// back.
     pub covered: Option<View>,
-    /// The saved selection a restored list moves onto once a loaded page
-    /// holds its commit.
+    /// The saved selection a restored list moves onto once its first load
+    /// lands.
     ///
-    /// The next page keeps loading while it waits, and the walk's end drops it
-    /// when the commit is gone from the history.
+    /// That load searches the history for the commit in one pool task, so the
+    /// selection lands in one step, or drops when the commit is gone from the
+    /// history.
     pub pending_selection: Option<SavedSelection>,
 }
 
@@ -137,6 +138,26 @@ pub(crate) struct PreviewLoad {
     /// `None` when the commit yields no diff to show, which is a final answer
     /// rather than a failure to retry.
     pub document: Option<DiffDocument>,
+}
+
+/// What one background load of a list's history produces.
+pub(crate) struct PageLoad {
+    /// The commits to append to the list, newest first.
+    pub commits: Vec<CommitInfo>,
+    /// Whether the walk ended inside this load, so no later page exists.
+    pub reached_end: bool,
+    /// What the load learned of the pending selection's commit.
+    pub selection: SelectionSearch,
+}
+
+/// What a load learned of a restored selection's commit.
+pub(crate) enum SelectionSearch {
+    /// The load read one page and did not look for the commit.
+    NotAsked,
+    /// The commit sits at this index of the load's own commits.
+    Found(usize),
+    /// The walk ended without the commit, which is gone from the history.
+    Gone,
 }
 
 /// Built diff previews for the commits a surface's selection has rested on,
@@ -348,8 +369,9 @@ impl CommitListState {
     /// to `commits` and updates `reached_end`. Returns true when a
     /// result landed, which tells the caller to redraw.
     ///
-    /// A landed page that holds the pending selection's commit moves the
-    /// selection onto it.
+    /// A load that found the pending selection's commit selects it on the row
+    /// it stood on. One that found the commit gone ends the wait and leaves the
+    /// selection where it is.
     pub(crate) fn poll_pending_load(&mut self) -> bool {
         let Some(mut task) = self.pending_load.take() else {
             return false;
@@ -357,13 +379,20 @@ impl CommitListState {
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);
         match Pin::new(&mut task).poll(&mut cx) {
-            Poll::Ready(page) => {
-                if page.is_empty() {
-                    self.reached_end = true;
-                } else {
-                    self.commits.extend(page);
+            Poll::Ready(load) => {
+                let loaded_before = self.commits.len();
+                self.commits.extend(load.commits);
+                self.reached_end = load.reached_end;
+                match load.selection {
+                    SelectionSearch::NotAsked => {},
+                    SelectionSearch::Found(index) => {
+                        if let Some(pending) = self.pending_selection.take() {
+                            self.selected = loaded_before + index;
+                            self.scroll_top = self.selected.saturating_sub(pending.row);
+                        }
+                    },
+                    SelectionSearch::Gone => self.pending_selection = None,
                 }
-                self.resolve_pending_selection();
                 true
             },
             Poll::Pending => {
@@ -371,24 +400,6 @@ impl CommitListState {
                 false
             },
         }
-    }
-
-    /// Select the pending selection's commit on the row it stood on, once the
-    /// loaded pages hold it.
-    ///
-    /// The wait ends without a move when the walk reached its end, so a commit
-    /// gone from the history leaves the selection where it is.
-    fn resolve_pending_selection(&mut self) {
-        let Some(pending) = &self.pending_selection else {
-            return;
-        };
-        if let Some(index) = self.commits.iter().position(|c| c.sha == pending.sha) {
-            self.selected = index;
-            self.scroll_top = index.saturating_sub(pending.row);
-        } else if !self.reached_end {
-            return;
-        }
-        self.pending_selection = None;
     }
 
     /// Poll the in-flight preview task. On completion, caches the
@@ -422,7 +433,9 @@ impl CommitListState {
 
 #[cfg(test)]
 mod tests {
-    use super::{Preview, PreviewCache, SavedSelection, PREVIEW_CACHE_CAP};
+    use super::{
+        CommitListId, CommitListSnap, Preview, PreviewCache, SavedSelection, PREVIEW_CACHE_CAP,
+    };
     use crate::{
         app::Stoat,
         pane::View,
@@ -430,7 +443,7 @@ mod tests {
         term_session::TermId,
         test_harness::{CommitSpec, TestHarness},
     };
-    use std::sync::Arc;
+    use std::{path::PathBuf, sync::Arc};
 
     impl PreviewCache {
         fn cache_session(&mut self, sha: &str) {
@@ -582,8 +595,9 @@ mod tests {
         );
     }
 
-    /// A saved commit the history no longer holds loads every page once and
-    /// then stops waiting, so a later reload does not walk the history again.
+    /// A refresh while a saved selection waits searches the history for its
+    /// commit. A commit the history no longer holds ends the wait, so a later
+    /// reload does not walk the history again.
     #[test]
     fn a_saved_selection_gone_from_the_history_stops_waiting_at_the_end() {
         let mut h = Stoat::test();
@@ -616,6 +630,90 @@ mod tests {
             (None, 0, true),
             "the walk reaches its end without the commit and drops the wait"
         );
+    }
+
+    /// The saved commit sits on the third page, which a page per pump reaches
+    /// on the third landing. The search lands it on the first.
+    #[test]
+    fn a_restored_selection_three_pages_deep_lands_in_one_pump() {
+        let h = restored_list(SavedSelection {
+            sha: "c0000049".into(),
+            row: 3,
+        });
+        let state = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("commits state");
+        assert_eq!(
+            (
+                state.selected,
+                state.scroll_top,
+                state.pending_selection.is_none(),
+                state.pending_load.is_none(),
+            ),
+            (150, 147, true, true),
+            "the selection lands on its commit and row, and no page load follows",
+        );
+    }
+
+    /// A commit gone from the history costs one landing, and the list keeps the
+    /// first page alone, as a fresh list does.
+    #[test]
+    fn a_restored_selection_gone_from_the_history_keeps_one_page() {
+        let h = restored_list(SavedSelection {
+            sha: "c9999999".into(),
+            row: 0,
+        });
+        let state = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("commits state");
+        assert_eq!(
+            (
+                state.commits.len(),
+                state.pending_selection.is_none(),
+                state.reached_end,
+                state.selected,
+            ),
+            (64, true, false, 0),
+            "the wait ends with one page loaded and the rest of the history unread",
+        );
+    }
+
+    /// A harness whose focused pane shows a list as a restart brings it back,
+    /// after one pump of its first load.
+    ///
+    /// The pane names a list that died with the last run, and the session
+    /// saved `selection` for it. The history holds 200 commits, so
+    /// `c{199 - i:07}` sits at index `i`.
+    fn restored_list(selection: SavedSelection) -> TestHarness {
+        let mut h = Stoat::test();
+        let shas: Vec<String> = (0..200).map(|i| format!("c{i:07}")).collect();
+        let specs: Vec<CommitSpec<'_>> = shas
+            .iter()
+            .map(|sha| (sha.as_str(), "commit", &[("a.rs", "1\n")][..]))
+            .collect();
+        h.seed_linear_history("/repo", &specs);
+
+        let dead = CommitListId::default();
+        let ws = h.stoat.active_workspace_mut();
+        ws.git_root = PathBuf::from("/repo");
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).view = View::Commits(dead);
+        ws.restored_commit_lists.insert(
+            dead,
+            CommitListSnap {
+                selection: Some(selection),
+                covered: None,
+            },
+        );
+
+        crate::action_handlers::respawn_commits_panes(&mut h.stoat);
+        h.run_until_parked();
+        crate::action_handlers::pump_commits(&mut h.stoat);
+        h
     }
 
     #[test]

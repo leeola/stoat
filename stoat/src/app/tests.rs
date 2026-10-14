@@ -3502,8 +3502,8 @@ fn a_session_restored_in_the_background_respawns_its_commits_list_on_the_switch(
 }
 
 /// The selection sits past the first page and above the viewport's last row,
-/// so the restore has to load a second page to find it and has to keep its row
-/// rather than scroll it into view from the bottom.
+/// so the restore's search has to read a second page to find it, and the list
+/// has to keep its row rather than scroll it into view from the bottom.
 ///
 /// A file opened before the covered one leaves the covered editor in a reused
 /// slot, so its saved id differs from the id the restore gives it.
