@@ -9,7 +9,7 @@ use crate::{diff_map::DiffHunkStatus, multi_buffer::MultiBufferSnapshot};
 use ratatui::text::Line;
 use std::{
     cmp::Ordering,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ops::{Deref, Range},
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
@@ -17,8 +17,8 @@ use std::{
     },
 };
 use stoat_text::{
-    patch::Patch, tree_map::TreeMap, Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item,
-    Point, SeekTarget, SumTree,
+    patch::Patch, Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item, Point, SeekTarget,
+    SumTree,
 };
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -548,8 +548,18 @@ pub struct BlockMap {
     /// the block went in at rather than the row it now occupies. The sync
     /// resolves against [`Self::custom_blocks_by_id`] wherever it needs the
     /// current one.
-    pub(super) custom_blocks: Vec<Arc<CustomBlock>>,
-    custom_blocks_by_id: TreeMap<CustomBlockId, Arc<CustomBlock>>,
+    ///
+    /// Kept as [`Block`]s, the shape the transform build reads, so a sync
+    /// hands the list over as it stands.
+    pub(super) custom_blocks: Vec<Block>,
+    /// Every custom block by id, at its carried placement.
+    ///
+    /// A hash map, since the map is private, never read in order, and never
+    /// snapshotted, so a persistent map's path copy on every insert buys
+    /// nothing. The carry writes one entry per moved block, and a diff view
+    /// holds a block per removed line. A path copy per entry takes most of a
+    /// row-shifting edit's time at that count.
+    custom_blocks_by_id: HashMap<CustomBlockId, Arc<CustomBlock>>,
     transforms: Option<SumTree<Transform>>,
     total_rows: u32,
     blocks_dirty: bool,
@@ -573,12 +583,6 @@ pub struct BlockMap {
     version: u64,
     deferred_edits: Patch<u32>,
     carry_scratch: CarryScratch,
-    /// Holds the block list [`BlockMap::sync`] hands to the transform build.
-    ///
-    /// Kept between syncs for its allocation alone. The list is rebuilt from
-    /// scratch every time, since a sync that gets this far has already found a
-    /// reason the transforms need rebuilding.
-    blocks_scratch: Vec<Block>,
 }
 
 /// Working vectors [`BlockMap::carry_block_placements`] refills per call.
@@ -611,7 +615,7 @@ impl BlockMap {
         Self {
             next_block_id: AtomicUsize::new(0),
             custom_blocks: Vec::new(),
-            custom_blocks_by_id: TreeMap::default(),
+            custom_blocks_by_id: HashMap::new(),
             transforms: None,
             total_rows: 0,
             blocks_dirty: true,
@@ -619,7 +623,6 @@ impl BlockMap {
             version: 0,
             deferred_edits: Patch::empty(),
             carry_scratch: CarryScratch::default(),
-            blocks_scratch: Vec::new(),
         }
     }
 
@@ -638,20 +641,13 @@ impl BlockMap {
         self.carry_scratch.rows.capacity()
     }
 
-    /// Room the sync's block list is holding, in blocks. See
-    /// [`Self::carry_row_capacity`] for why capacity is the observable.
-    #[cfg(test)]
-    pub(super) fn block_list_capacity(&self) -> usize {
-        self.blocks_scratch.capacity()
-    }
-
     pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
         if blocks.is_empty() {
             return Vec::new();
         }
 
         let mut ids = Vec::with_capacity(blocks.len());
-        let mut added: Vec<Arc<CustomBlock>> = Vec::with_capacity(blocks.len());
+        let mut added: Vec<Block> = Vec::with_capacity(blocks.len());
         for props in blocks {
             let id = CustomBlockId(self.next_block_id.fetch_add(1, SeqCst));
             let block = Arc::new(CustomBlock {
@@ -667,14 +663,14 @@ impl BlockMap {
             });
             self.touched_placements.push(block.placement);
             self.custom_blocks_by_id.insert(id, block.clone());
-            added.push(block);
+            added.push(Block(block));
             ids.push(id);
         }
 
         // Merged in one pass. Placing each block with its own `Vec::insert`
         // reshuffles the tail once per block, which a diff view splicing every
         // hunk at once pays quadratically.
-        added.sort_by_key(|b| b.placement.start_row());
+        added.sort_by_key(|b| b.0.placement.start_row());
         let merged = merge_by_start_row(std::mem::take(&mut self.custom_blocks), added);
         self.custom_blocks = merged;
 
@@ -685,10 +681,10 @@ impl BlockMap {
         if ids.is_empty() {
             return;
         }
-        for block in self.custom_blocks.iter().filter(|b| ids.contains(&b.id)) {
-            self.touched_placements.push(block.placement);
+        for block in self.custom_blocks.iter().filter(|b| ids.contains(&b.0.id)) {
+            self.touched_placements.push(block.0.placement);
         }
-        self.custom_blocks.retain(|b| !ids.contains(&b.id));
+        self.custom_blocks.retain(|b| !ids.contains(&b.0.id));
         for id in ids {
             self.custom_blocks_by_id.remove(id);
         }
@@ -706,6 +702,16 @@ impl BlockMap {
     /// so it collapses to the start of the replacement.
     fn carry_block_placements(&mut self, buffer_row_edits: &Patch<u32>) {
         if buffer_row_edits.is_empty() || self.custom_blocks.is_empty() {
+            return;
+        }
+        // Typing inside a line rewrites one row in place. `carry_rows` maps a
+        // row inside such an edit onto the edit's start, which is the row
+        // itself, so no placement moves and the sort below has nothing to do.
+        if buffer_row_edits
+            .edits()
+            .iter()
+            .all(|edit| edit.old == edit.new && edit.old.len() == 1)
+        {
             return;
         }
 
@@ -727,7 +733,7 @@ impl BlockMap {
         rows.extend(
             self.custom_blocks
                 .iter()
-                .flat_map(|b| [b.placement.start(), b.placement.end()]),
+                .flat_map(|b| [b.0.placement.start(), b.0.placement.end()]),
         );
         order.clear();
         order.extend(0..rows.len());
@@ -746,7 +752,7 @@ impl BlockMap {
             needs_touch[i] = ascending_touch[slot];
         }
 
-        for (i, block) in self.custom_blocks.iter_mut().enumerate() {
+        for (i, Block(block)) in self.custom_blocks.iter_mut().enumerate() {
             let (start, end) = (rows[i * 2], rows[i * 2 + 1].max(rows[i * 2]));
             let placement = match block.placement {
                 BlockPlacement::Above(_) => BlockPlacement::Above(start),
@@ -787,7 +793,7 @@ impl BlockMap {
         debug_assert!(
             self.custom_blocks
                 .windows(2)
-                .all(|pair| pair[0].placement.start_row() <= pair[1].placement.start_row()),
+                .all(|pair| pair[0].0.placement.start_row() <= pair[1].0.placement.start_row()),
             "carrying rows is monotone, so the stored order must survive it",
         );
     }
@@ -857,9 +863,6 @@ impl BlockMap {
 
         let wrap_line_count = wrap_snapshot.line_count();
 
-        let mut blocks = std::mem::take(&mut self.blocks_scratch);
-        blocks.extend(self.custom_blocks.iter().map(|b| Block(b.clone())));
-
         let can_incremental = !self.blocks_dirty && !edits.is_empty() && self.transforms.is_some();
 
         let transforms = if can_incremental {
@@ -868,21 +871,16 @@ impl BlockMap {
                     .as_ref()
                     .expect("guarded by can_incremental"),
                 wrap_line_count,
-                &blocks,
+                &self.custom_blocks,
                 &wrap_snapshot,
                 &edits,
                 &self.custom_blocks_by_id,
             )
         } else {
-            build_transforms(wrap_line_count, &blocks, &wrap_snapshot)
+            build_transforms(wrap_line_count, &self.custom_blocks, &wrap_snapshot)
         };
 
         let total_rows: OutputRow = transforms.extent(());
-
-        // Emptied now rather than on the next sync, so a block removed in the
-        // meantime is not held alive by the list that last mentioned it.
-        blocks.clear();
-        self.blocks_scratch = blocks;
 
         self.transforms = Some(transforms.clone());
         self.total_rows = total_rows.0;
@@ -1672,17 +1670,14 @@ fn placement_wrap_rows(placement: &BlockPlacement, wrap_snapshot: &WrapSnapshot)
 ///
 /// Ties keep `existing` ahead of `added`, matching where the old per-block
 /// `partition_point` placed a new block among equal start rows.
-fn merge_by_start_row(
-    existing: Vec<Arc<CustomBlock>>,
-    added: Vec<Arc<CustomBlock>>,
-) -> Vec<Arc<CustomBlock>> {
+fn merge_by_start_row(existing: Vec<Block>, added: Vec<Block>) -> Vec<Block> {
     let mut merged = Vec::with_capacity(existing.len() + added.len());
     let mut existing = existing.into_iter().peekable();
     let mut added = added.into_iter().peekable();
 
     loop {
         let take_added = match (existing.peek(), added.peek()) {
-            (Some(a), Some(b)) => b.placement.start_row() < a.placement.start_row(),
+            (Some(a), Some(b)) => b.0.placement.start_row() < a.0.placement.start_row(),
             (None, Some(_)) => true,
             (_, None) => false,
         };
@@ -1744,7 +1739,7 @@ fn sync_incremental(
     blocks: &[Block],
     wrap_snapshot: &WrapSnapshot,
     wrap_edits: &Patch<u32>,
-    custom_blocks_by_id: &TreeMap<CustomBlockId, Arc<CustomBlock>>,
+    custom_blocks_by_id: &HashMap<CustomBlockId, Arc<CustomBlock>>,
 ) -> SumTree<Transform> {
     debug_assert!(
         blocks
@@ -2811,7 +2806,7 @@ mod tests {
         let props = text_block(BlockPlacement::Below(0), "short\nlonger line\nx");
         let mut block_map = BlockMap::new();
         block_map.insert(vec![props]);
-        let block = super::Block(block_map.custom_blocks[0].clone());
+        let block = block_map.custom_blocks[0].clone();
         for i in 0..block.height() {
             assert_eq!(
                 block.line_len(i),

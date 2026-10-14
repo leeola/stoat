@@ -478,9 +478,9 @@ fn padding_blocks(map: &mut DisplayMap, count: u32) {
     );
 }
 
-/// The carry and the block list run once per sync over a set that does not
-/// change size from one keystroke to the next, so they hold their working
-/// room rather than asking for it again each time.
+/// The carry runs once per sync over a set that does not change size from one
+/// keystroke to the next, so it holds its working room rather than asking for
+/// it again each time.
 ///
 /// Shrinking the block set is what makes the reuse visible. Room sized for
 /// the wide set outliving the narrow one can only have come from the wide
@@ -502,14 +502,9 @@ fn a_sync_reuses_the_room_the_previous_sync_asked_for() {
     display_map.snapshot();
 
     let carry_room = display_map.block_map.carry_row_capacity();
-    let block_room = display_map.block_map.block_list_capacity();
     assert!(
         carry_room >= 80,
         "40 blocks carry a start and an end each, so the carry read 80 rows, not {carry_room}",
-    );
-    assert!(
-        block_room >= 40,
-        "the sync listed 40 blocks, not {block_room}",
     );
 
     padding_blocks(&mut display_map, 2);
@@ -520,11 +515,6 @@ fn a_sync_reuses_the_room_the_previous_sync_asked_for() {
         display_map.block_map.carry_row_capacity(),
         carry_room,
         "a carry over 2 blocks keeps the room the 40-block carry took",
-    );
-    assert_eq!(
-        display_map.block_map.block_list_capacity(),
-        block_room,
-        "a sync listing 2 blocks keeps the room the 40-block sync took",
     );
 }
 
@@ -612,6 +602,94 @@ fn many_blocks_shifted_by_an_edit_match_a_fresh_build() {
         fresh(&text, 0),
         "and removed again, back to the original",
     );
+}
+
+/// Typing inside a line rewrites one row in place, so no block moves and the
+/// carry never runs.
+#[test]
+fn typing_inside_a_line_moves_no_block() {
+    assert_typing_moves_no_block(&[3]);
+}
+
+/// Two cursors typing on two rows hand one sync two one-row edits, and neither
+/// moves a block.
+#[test]
+fn typing_inside_two_lines_moves_no_block() {
+    assert_typing_moves_no_block(&[3, 20]);
+}
+
+/// Type one char at the start of each of `rows` before one snapshot, over a
+/// buffer with 40 blocks below rows 5 to 44.
+///
+/// Every block keeps its id and placement, and the rows match a fresh build
+/// over the edited text. The carry's row buffer stays unallocated, which is
+/// what shows that no carry ran, since the placements come out the same
+/// either way.
+fn assert_typing_moves_no_block(rows: &[u32]) {
+    let text: String = (0..60).map(|i| format!("line{i}\n")).collect();
+    let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+    let mut display_map = DisplayMap::new(
+        MultiBuffer::singleton(shared.clone()),
+        test_executor(),
+        crate::test_notify(),
+    );
+    padding_blocks(&mut display_map, 40);
+    display_map.snapshot();
+
+    let placements = |map: &DisplayMap| {
+        map.block_map
+            .custom_blocks
+            .iter()
+            .map(|block| (block.0.id, block.0.placement))
+            .collect::<Vec<_>>()
+    };
+    let before = placements(&display_map);
+
+    // From the last row up, so each earlier offset still names its row.
+    for &row in rows.iter().rev() {
+        let offset: usize = text
+            .lines()
+            .take(row as usize)
+            .map(|line| line.len() + 1)
+            .sum();
+        shared.write().expect("poisoned").edit(offset..offset, "x");
+    }
+    display_map.snapshot();
+
+    let edited = shared.read().expect("poisoned").rope().to_string();
+    let fresh_rows = {
+        let fresh_buffer = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            &edited,
+        )));
+        let mut fresh = DisplayMap::new(
+            MultiBuffer::singleton(fresh_buffer),
+            test_executor(),
+            crate::test_notify(),
+        );
+        padding_blocks(&mut fresh, 40);
+        block_rows(&mut fresh)
+    };
+    assert_eq!(
+        (
+            placements(&display_map),
+            display_map.block_map.carry_row_capacity(),
+            block_rows(&mut display_map),
+        ),
+        (before, 0, fresh_rows),
+        "every block keeps its id and placement, no carry ran, and the rows match a fresh build",
+    );
+}
+
+/// Each display row as `buf<row>` for a buffer row or a block row's text.
+fn block_rows(map: &mut DisplayMap) -> Vec<String> {
+    let snapshot = map.snapshot();
+    (0..snapshot.line_count())
+        .map(|row| match snapshot.classify_row(row) {
+            BlockRowKind::BufferRow { buffer_row } => format!("buf{buffer_row}"),
+            BlockRowKind::Block { block, line_index } => block.get_line(line_index),
+        })
+        .collect()
 }
 
 /// An edit appending a row at the very end leaves the map the same length
@@ -979,6 +1057,40 @@ fn a_block_inside_a_replaced_range_lands_at_the_replacement() {
     assert_eq!(
         block_row, 9,
         "the block sits just below row 8, where its rows were replaced",
+    );
+}
+
+/// A rewrite that keeps the row count still replaces the rows inside it, so a
+/// block attached to one of them collapses to the rewrite's start, as it does
+/// when the count changes.
+#[test]
+fn a_block_inside_a_same_height_rewrite_lands_at_its_start() {
+    let text: String = (0..20).map(|i| format!("line{i}\n")).collect();
+    let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), &text)));
+    let mut display_map = DisplayMap::new(
+        MultiBuffer::singleton(shared.clone()),
+        test_executor(),
+        crate::test_notify(),
+    );
+    display_map.insert_blocks(vec![BlockProperties::from_text(
+        BlockPlacement::Below(10),
+        vec!["marker".to_string()],
+        BlockStyle::Fixed,
+    )]);
+    display_map.snapshot();
+
+    // Rows 8 through 12 rewritten as five other lines.
+    let offset = |row: usize| -> usize { text.lines().take(row).map(|line| line.len() + 1).sum() };
+    shared
+        .write()
+        .expect("poisoned")
+        .edit(offset(8)..offset(13), "a\nb\nc\nd\ne\n");
+
+    let rows = block_rows(&mut display_map);
+    assert_eq!(
+        rows.iter().position(|row| row == "marker"),
+        Some(9),
+        "the block sits just below row 8, where its rows were rewritten",
     );
 }
 
@@ -2739,7 +2851,7 @@ fn installing_tokens_indexes_them_like_a_per_anchor_build() {
 /// re-applies it to the wrong row once an edit has moved it.
 #[test]
 fn incremental_sync_matches_a_fresh_build_over_random_edits() {
-    use super::{Block, CustomBlock};
+    use super::Block;
     use stoat_text::{Anchor, Bias};
 
     // The same generator and seed derivation the fold-carrying test uses,
@@ -2911,19 +3023,18 @@ fn incremental_sync_matches_a_fresh_build_over_random_edits() {
             // fresh map only renders them the same way round if it mints
             // its ids in the same order.
             let carried_blocks: Vec<BlockProperties> = {
-                let mut blocks: Vec<&Arc<CustomBlock>> =
-                    map.block_map.custom_blocks.iter().collect();
-                blocks.sort_by_key(|block| block.id);
+                let mut blocks: Vec<&Block> = map.block_map.custom_blocks.iter().collect();
+                blocks.sort_by_key(|block| block.0.id);
                 blocks
                     .into_iter()
                     .map(|block| {
-                        let label = Block(Arc::clone(block)).get_line(0);
+                        let label = block.get_line(0);
                         let mut props = BlockProperties::from_text(
-                            block.placement,
+                            block.0.placement,
                             vec![label],
                             BlockStyle::Fixed,
                         );
-                        props.priority = block.priority;
+                        props.priority = block.0.priority;
                         props
                     })
                     .collect()
