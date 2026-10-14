@@ -939,10 +939,10 @@ impl BufferRegistry {
     /// captured, so a restored buffer undoes in the steps the saved one took.
     /// Only a file written before the groups persisted returns it edit by edit.
     ///
-    /// The on-disk file is not read. Were it to have drifted, something would
-    /// have to choose between it and the saved edits, and the saved edits win
-    /// unconditionally because persistence stands for the user's explicit
-    /// last-known state.
+    /// An entry saved by reference to its file arrives with that reference
+    /// already resolved to the file's text, so this reads no file. For every
+    /// other entry the saved edits win over the file on disk, because
+    /// persistence stands for the user's explicit last-known state.
     pub(crate) fn restore_from(&mut self, snap: BufferRegistrySnapshot) {
         self.buffers.clear();
         self.path_to_id.clear();

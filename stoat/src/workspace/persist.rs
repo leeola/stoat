@@ -18,7 +18,7 @@
 
 use crate::{
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
-    buffer::{BufferId, TextBuffer},
+    buffer::{BufferId, BufferOp, TextBuffer},
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
     commit_list::{CommitListId, CommitListSnap},
     dump::snapshot::ActiveRebaseSnap,
@@ -40,7 +40,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
-use stoat_text::{Anchor, Bias};
+use stoat_text::{Anchor, Bias, LineEnding, Point};
 
 /// On-disk shape of [`FocusTarget`], preserving the pre-unit-variant wire format
 /// so older and newer state.ron files stay mutually readable.
@@ -138,6 +138,14 @@ pub(crate) struct WorkspaceStateV1 {
     /// these first, so nothing outside this module sees the list non-empty.
     #[serde(skip)]
     pub(crate) pending_reanchors: Vec<PendingReanchor>,
+    /// The buffers saved by reference to a file that changed or went missing
+    /// while stoat was closed.
+    ///
+    /// Their saved anchors name offsets in text the file no longer holds, so
+    /// the install resets their editors to one cursor and drops their jumps.
+    /// Never on the wire, since only a read of a state file fills it.
+    #[serde(skip)]
+    pub(crate) drifted_buffers: Vec<BufferId>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -389,6 +397,7 @@ impl Workspace {
                 .map(|(id, list)| (id, list.snapshot()))
                 .collect(),
             pending_reanchors,
+            drifted_buffers: Vec::new(),
         }
     }
 
@@ -434,8 +443,9 @@ impl Workspace {
         fs.read(path, &mut buf)?;
         let body = String::from_utf8(buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-        let state: WorkspaceStateV1 = ron::from_str(&body)
+        let mut state: WorkspaceStateV1 = ron::from_str(&body)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        resolve_disk_seeds(&mut state, fs);
         self.apply_state(state, executor);
         Ok(())
     }
@@ -471,6 +481,7 @@ impl Workspace {
         let redraw = self.redraw_notify.clone();
         let mut editors: SlotMap<EditorId, EditorState> = SlotMap::with_key();
         let mut editor_id_map: HashMap<EditorId, EditorId> = HashMap::new();
+        let drifted = state.drifted_buffers;
         for (old_id, snap) in state.editors {
             let Some(buffer) = self.buffers.get(snap.buffer_id) else {
                 tracing::warn!(
@@ -479,12 +490,11 @@ impl Workspace {
                 );
                 continue;
             };
-            let new_id = editors.insert(EditorState::restore(
-                snap,
-                buffer,
-                executor.clone(),
-                redraw.clone(),
-            ));
+            let mut editor = EditorState::restore(snap, buffer, executor.clone(), redraw.clone());
+            if drifted.contains(&editor.buffer_id) {
+                reset_drifted_editor(&mut editor);
+            }
+            let new_id = editors.insert(editor);
             editor_id_map.insert(old_id, new_id);
         }
 
@@ -502,11 +512,13 @@ impl Workspace {
         // A save keeps only the buffers a pane holds or the user dirtied, so a
         // jump into any other buffer names one this restore did not bring back.
         // A history entry for one rides into every later save unless it goes
-        // here, since no id is ever issued again.
+        // here, since no id is ever issued again. A jump into a drifted buffer
+        // names an offset in text that is gone.
         for tree in std::iter::once(&mut panes).chain(parked.iter_mut().flatten()) {
             for (_, pane) in tree.all_panes_mut() {
-                pane.jumplist
-                    .retain_buffers(|buffer_id| self.buffers.get(buffer_id).is_some());
+                pane.jumplist.retain_buffers(|buffer_id| {
+                    self.buffers.get(buffer_id).is_some() && !drifted.contains(&buffer_id)
+                });
                 pane.buffer_history
                     .retain(|&buffer_id| self.buffers.get(buffer_id).is_some());
             }
@@ -871,9 +883,56 @@ pub(crate) fn read_restore_parts(
     fs.read(path, &mut buf)?;
     let body = String::from_utf8(buf)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let state: WorkspaceStateV1 = ron::from_str(&body)
+    let mut state: WorkspaceStateV1 = ron::from_str(&body)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    resolve_disk_seeds(&mut state, fs);
     Ok(restore_parts(state))
+}
+
+/// Load the file of each entry that names its seed as the file on disk, so the
+/// replay that follows reads that text.
+///
+/// The file is trusted while its mtime and its normalized length match what
+/// the entry saved. Otherwise its current text loads, with its own ending and
+/// mtime, and the entry joins [`WorkspaceStateV1::drifted_buffers`]. An mtime
+/// that does not read never matches, so such a file counts as drifted too. A
+/// file that is gone or unreadable loads as `"\n"`, as an open of a missing
+/// path does, and counts as drifted.
+///
+/// The read decompresses a gzip stream, because the open did, so the seed it
+/// replaces holds the decompressed text.
+fn resolve_disk_seeds(state: &mut WorkspaceStateV1, fs: &dyn FsHost) {
+    for entry in &mut state.buffers.entries {
+        let Some(&BufferOp::DiskSeed { len }) = entry.history.ops.first() else {
+            continue;
+        };
+        let read = entry.path.as_deref().and_then(|path| {
+            // The stat comes first, as an open's does. A write between the two
+            // calls then leaves an mtime older than the text. The next save then
+            // finds the file changed on disk and does not write over it.
+            let modified = fs.metadata(path).ok().flatten().map(|meta| meta.modified);
+            let raw = crate::action_handlers::read_text_via_host(fs, path).ok()?;
+            Some((raw, modified))
+        });
+
+        let (text, drifted) = match read {
+            Some((raw, modified)) => {
+                let text = LineEnding::normalize(&raw).into_owned();
+                let unchanged =
+                    modified.is_some() && modified == entry.disk_mtime && text.len() as u64 == len;
+                if !unchanged {
+                    entry.line_ending = LineEnding::detect(&raw);
+                    entry.disk_mtime = modified;
+                }
+                (text, !unchanged)
+            },
+            None => ("\n".to_string(), true),
+        };
+        entry.history.ops[0] = BufferOp::Edit { old: 0..0, text };
+        if drifted {
+            state.drifted_buffers.push(entry.id);
+        }
+    }
 }
 
 /// The buffer registry `state` restores, and the rest of the state to install
@@ -887,6 +946,20 @@ pub(crate) fn restore_parts(mut state: WorkspaceStateV1) -> (BufferRegistry, Wor
     let mut registry = BufferRegistry::new();
     registry.restore_from(std::mem::take(&mut state.buffers));
     (registry, state)
+}
+
+/// Put `editor` on one block cursor at the start of its saved scroll row, for a
+/// buffer whose file changed while stoat was closed.
+///
+/// The saved selections name offsets in the text the file held before, so none
+/// of them still means anything. The row clamps to the buffer's last row.
+fn reset_drifted_editor(editor: &mut EditorState) {
+    let snapshot = editor.display_map.buffer_snapshot();
+    let rope = snapshot.rope();
+    editor.scroll_row = editor.scroll_row.min(rope.max_point().row);
+    let offset = rope.point_to_offset(Point::new(editor.scroll_row, 0));
+    editor.selections.set_block_cursor(offset, &snapshot);
+    editor.move_source_cursor = None;
 }
 
 fn remap_editor_views_in_panes(panes: &mut PaneTree, remap: &HashMap<EditorId, EditorId>) {
@@ -1304,6 +1377,252 @@ mod tests {
             [held],
             "the held buffer is the history's only entry after three restarts",
         );
+    }
+
+    /// The `--continue` reader and the synchronous one the persistence tests use
+    /// both resolve the seed.
+    #[test]
+    fn a_disk_seed_entry_restores_the_file_text() {
+        let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+        fake.insert_file(&path, "alpha\nbeta\n");
+        let (id, state_path) = save_by_reference(&fake, &exec, &path, 0);
+
+        let (fresh, drifted) = restore_by_reference(&fake, &exec, &state_path);
+        let mut synchronous =
+            Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+        synchronous
+            .restore_state(&state_path, &fake, &exec)
+            .expect("the state restores");
+        assert_eq!(
+            (
+                buffer_text(&fresh, id),
+                buffer_text(&synchronous, id),
+                drifted
+            ),
+            (
+                "alpha\nbeta\n".to_string(),
+                "alpha\nbeta\n".to_string(),
+                Vec::new()
+            ),
+        );
+    }
+
+    /// The saved row is 3. A new text that reaches it puts the cursor at that
+    /// row's start, and a shorter one clamps it to the last row. A rewrite of
+    /// the same length drifts too, because its mtime moved.
+    #[test]
+    fn a_file_changed_while_closed_restores_its_new_text_and_a_cursor_on_its_scroll_row() {
+        for (new_text, row, row_start) in [
+            ("one\ntwo\nthree\nfour\nfive\n", 3, 14),
+            ("one\ntwo", 1, 4),
+            ("gamma\nzeta\n", 2, 11),
+        ] {
+            let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+            fake.insert_file(&path, "alpha\nbeta\n");
+            let (id, state_path) = save_by_reference(&fake, &exec, &path, 3);
+            fake.insert_file(&path, new_text);
+
+            let (fresh, drifted) = restore_by_reference(&fake, &exec, &state_path);
+            let editor = fresh
+                .editors
+                .values()
+                .find(|editor| editor.buffer_id == id)
+                .expect("the editor restores");
+            let cursor = {
+                let buffer = fresh.buffers.get(id).expect("buffer restores");
+                let guard = buffer.read().expect("buffer poisoned");
+                guard.resolve_anchor(&editor.selections.newest_anchor().start)
+            };
+            let jumps_into = fresh
+                .panes
+                .pane(fresh.panes.focus())
+                .jumplist
+                .entries()
+                .iter()
+                .filter(|jump| jump.buffer_id == id)
+                .count();
+            assert_eq!(
+                (
+                    buffer_text(&fresh, id),
+                    cursor,
+                    editor.scroll_row,
+                    editor.move_source_cursor,
+                    jumps_into,
+                    drifted
+                ),
+                (new_text.to_string(), row_start, row, None, 0, vec![id]),
+                "{new_text:?} loads on row {row} with no move source or jump into it",
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_file_restores_as_an_empty_buffer_at_its_path() {
+        let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+        fake.insert_file(&path, "alpha\nbeta\n");
+        let (id, state_path) = save_by_reference(&fake, &exec, &path, 0);
+        fake.remove_file(&path).expect("the file removes");
+
+        let (fresh, drifted) = restore_by_reference(&fake, &exec, &state_path);
+        assert_eq!(
+            (
+                buffer_text(&fresh, id),
+                fresh.buffers.path_for(id).map(Path::to_path_buf),
+                drifted,
+            ),
+            ("\n".to_string(), Some(path), vec![id]),
+        );
+    }
+
+    #[test]
+    fn a_crlf_file_restores_lf_with_its_ending() {
+        let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+        fake.insert_file(&path, "alpha\r\nbeta\r\n");
+        let (id, state_path) = save_by_reference(&fake, &exec, &path, 0);
+
+        let (fresh, drifted) = restore_by_reference(&fake, &exec, &state_path);
+        assert_eq!(
+            (
+                buffer_text(&fresh, id),
+                fresh.buffers.line_ending(id),
+                drifted
+            ),
+            ("alpha\nbeta\n".to_string(), LineEnding::Crlf, Vec::new()),
+        );
+    }
+
+    /// A drifted entry takes the ending and the mtime the file holds, so a later
+    /// save writes CRLF and looks for an external edit against the new mtime.
+    #[test]
+    fn a_file_rewritten_while_closed_takes_its_new_ending_and_mtime() {
+        let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+        fake.insert_file(&path, "alpha\nbeta\n");
+        let (id, state_path) = save_by_reference(&fake, &exec, &path, 0);
+        fake.insert_file(&path, "alpha\r\nbeta\r\n");
+        let mtime = fake
+            .metadata(&path)
+            .expect("the file stats")
+            .expect("the file exists")
+            .modified;
+
+        let (fresh, _) = restore_by_reference(&fake, &exec, &state_path);
+        assert_eq!(
+            (fresh.buffers.line_ending(id), fresh.buffers.disk_mtime(id)),
+            (LineEnding::Crlf, Some(mtime)),
+        );
+    }
+
+    /// A rewrite inside one mtime tick leaves the mtime the entry saved, so only
+    /// the length shows the change. Here the entry claims one byte more than the
+    /// file holds.
+    #[test]
+    fn a_rewrite_that_keeps_the_mtime_counts_as_drifted() {
+        let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+        fake.insert_file(&path, "alpha\nbeta\n");
+        let (id, state_path) = save_by_reference(&fake, &exec, &path, 0);
+        let mut state: WorkspaceStateV1 = {
+            let body = crate::action_handlers::read_string_via_host(&fake, &state_path)
+                .expect("the state reads");
+            ron::from_str(&body).expect("the state parses")
+        };
+        let entry = state
+            .buffers
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .expect("the held buffer saves");
+        entry.history.ops[0] = BufferOp::DiskSeed { len: 12 };
+        let body = ron::to_string(&state).expect("the state serializes");
+        fake.write(&state_path, body.as_bytes())
+            .expect("the state writes");
+
+        let (_, drifted) = restore_by_reference(&fake, &exec, &state_path);
+        assert_eq!(drifted, [id]);
+    }
+
+    /// An mtime that reads at neither the save nor the restore proves nothing,
+    /// so the file counts as drifted though its length matches.
+    #[test]
+    fn an_mtime_that_never_reads_counts_as_drifted() {
+        let (fake, exec, path) = (FakeFs::new(), executor(), notes_path());
+        fake.insert_file(&path, "alpha\nbeta\n");
+        fake.fail_next_metadata(&path, io::ErrorKind::PermissionDenied);
+        let (id, state_path) = save_by_reference(&fake, &exec, &path, 0);
+        fake.fail_next_metadata(&path, io::ErrorKind::PermissionDenied);
+
+        let (_, drifted) = restore_by_reference(&fake, &exec, &state_path);
+        assert_eq!(drifted, [id]);
+    }
+
+    fn notes_path() -> PathBuf {
+        PathBuf::from("/by-reference/notes.txt")
+    }
+
+    /// The state file of a workspace whose one held buffer opened `path` from
+    /// `fake`, saved with that buffer's entry naming the file as its seed.
+    ///
+    /// The buffer's editor sits at `scroll_row` on a picked move source, and the
+    /// focused pane holds one jump into the buffer, so a restore shows whether
+    /// any of them survives. A failed metadata read saves the entry without an
+    /// mtime.
+    fn save_by_reference(
+        fake: &FakeFs,
+        exec: &Executor,
+        path: &Path,
+        scroll_row: u32,
+    ) -> (BufferId, PathBuf) {
+        let raw = crate::action_handlers::read_string_via_host(fake, path).expect("the file reads");
+        let text = LineEnding::normalize(&raw).into_owned();
+
+        let ws_dir = PathBuf::from("/by-reference");
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), exec);
+        let id = open_held(&mut ws, path, &text, exec);
+        ws.buffers.set_line_ending(id, LineEnding::detect(&raw));
+        for editor in ws
+            .editors
+            .values_mut()
+            .filter(|editor| editor.buffer_id == id)
+        {
+            editor.scroll_row = scroll_row;
+            editor.move_source_cursor = Some((0, 1));
+        }
+        let jump = jump_at(&ws.buffers, id, 0);
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).jumplist.push(jump, &ws.buffers);
+
+        let mut state = ws.to_state();
+        let entry = state
+            .buffers
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .expect("the held buffer saves");
+        entry.history.seed = None;
+        entry.history.ops[0] = BufferOp::DiskSeed {
+            len: text.len() as u64,
+        };
+        entry.disk_mtime = fake.metadata(path).ok().flatten().map(|meta| meta.modified);
+
+        let state_path = ws_dir.join("state.ron");
+        let body = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
+            .expect("the state serializes");
+        fake.write(&state_path, body.as_bytes())
+            .expect("the state writes");
+        (id, state_path)
+    }
+
+    /// The restore of `state_path` into a fresh workspace, and the buffers the
+    /// read counted as drifted.
+    fn restore_by_reference(
+        fake: &FakeFs,
+        exec: &Executor,
+        state_path: &Path,
+    ) -> (Workspace, Vec<BufferId>) {
+        let (registry, state) = read_restore_parts(state_path, fake).expect("the state reads");
+        let drifted = state.drifted_buffers.clone();
+        let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), exec, crate::test_notify());
+        fresh.install_restored(registry, state, exec);
+        (fresh, drifted)
     }
 
     /// A state file holds each buffer's history and undo tree on one line, so a

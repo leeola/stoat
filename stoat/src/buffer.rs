@@ -156,10 +156,24 @@ pub struct TextBuffer {
 /// group at a time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BufferOp {
-    Edit { old: Range<usize>, text: String },
-    UndoGroup { edits: Vec<u64> },
+    Edit {
+        old: Range<usize>,
+        text: String,
+    },
+    UndoGroup {
+        edits: Vec<u64>,
+    },
     Undo,
     Redo,
+    /// The entry's file stands in for the seed, as `len` bytes of LF-normalized
+    /// text read at the entry's disk mtime.
+    ///
+    /// Only a state file holds one, as an entry's first op. Every restore
+    /// replaces it with an `Edit { old: 0..0, text }` that holds the file's
+    /// text before any replay.
+    DiskSeed {
+        len: u64,
+    },
 }
 
 /// A single logical undo step covering the edits made by one dispatched action
@@ -1804,6 +1818,14 @@ impl TextBuffer {
                 },
                 BufferOp::Redo => {
                     buf.redo();
+                },
+                BufferOp::DiskSeed { len } => {
+                    tracing::warn!(
+                        target: "stoat::buffer",
+                        ?buffer_id,
+                        len,
+                        "an unresolved disk seed reached replay; replaying nothing for it",
+                    );
                 },
             }
         }
