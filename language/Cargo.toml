@@ -22,8 +22,13 @@ cc = "1"
 
 [dev-dependencies]
 divan = "0.1"
+serde_json = { workspace = true }
 stoat_scheduler = { path = "../scheduler", features = ["test-support"] }
 
 [[bench]]
 name = "structural_diff"
 harness = false
+
+[[example]]
+name = "diff_corpus"
+test = true
