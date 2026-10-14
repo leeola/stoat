@@ -631,7 +631,11 @@ fn write_state(
         fs.create_dir_all(parent)?;
     }
 
-    let body = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default())
+    // The limit keeps the top-level and per-buffer fields one per line, and
+    // puts each history and each deeper tree on one line. One field per line
+    // at every depth spends about four times the bytes on each undo group.
+    let config = ron::ser::PrettyConfig::default().depth_limit(4);
+    let body = ron::ser::to_string_pretty(state, config)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
     fs.write_atomic(path, body.as_bytes())?;
 
@@ -1287,6 +1291,49 @@ mod tests {
             ws.panes.pane(ws.panes.focus()).buffer_history,
             [held],
             "the held buffer is the history's only entry after three restarts",
+        );
+    }
+
+    /// A state file holds each buffer's history and undo tree on one line, so a
+    /// one-cursor undo group costs a few hundred bytes. One field per line at
+    /// every depth spends about 2,700 on the same group.
+    #[test]
+    fn a_state_file_spends_under_800_bytes_per_single_edit_group() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/groups");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let id = open_held(&mut ws, &ws_dir.join("a.txt"), "", &exec);
+        {
+            let buffer = ws.buffers.get(id).expect("buffer open");
+            let mut buffer = buffer.write().expect("buffer poisoned");
+            let one_cursor = |at: Anchor| -> Arc<[Selection<Anchor>]> {
+                Arc::from([Selection {
+                    id: 0,
+                    start: at,
+                    end: at,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }])
+            };
+            for offset in 0..500 {
+                let before = one_cursor(buffer.anchor_at(offset, Bias::Right));
+                buffer.begin_group(before);
+                buffer.edit(offset..offset, "x");
+                let after = one_cursor(buffer.anchor_at(offset + 1, Bias::Right));
+                buffer.seal_group(after);
+            }
+        }
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+        let mut body = Vec::new();
+        fake.read(&state_path, &mut body).unwrap();
+        assert!(
+            body.len() / 500 < 800,
+            "{} bytes per group",
+            body.len() / 500,
         );
     }
 
