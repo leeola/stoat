@@ -3571,11 +3571,6 @@ fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
     }
 }
 
-/// Send a window-lifecycle event to the child over the window-event socket.
-///
-/// A no-op when the socket did not bind. The line is only queued on the channel,
-/// so this never blocks on socket IO. The serving thread forwards it to the
-/// connected child.
 /// Whether the child asked for mouse reports in the SGR encoding, which is what
 /// says the wheel belongs to it rather than to stoatty's own scrollback.
 ///
@@ -3586,6 +3581,11 @@ fn mouse_reporting(state: &State) -> bool {
     terminal.mouse_mode() && terminal.sgr_mouse()
 }
 
+/// Send a window-lifecycle event to the child over the window-event socket.
+///
+/// A no-op when the socket did not bind. The line is only queued on the channel,
+/// so this never blocks on socket IO. The serving thread forwards it to the
+/// connected child.
 fn send_window_event(state: &State, event: WindowIpcEvent) {
     if let Some(tx) = &state.window_event_tx {
         let _ = tx.send(event.encode_line());
