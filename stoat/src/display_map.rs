@@ -108,6 +108,30 @@ fn live_line_rows(wrap_snapshot: &WrapSnapshot, row: u32, buffer_rows: u32) -> u
     end.saturating_sub(first_wrap_row(row)).max(1)
 }
 
+/// Whether one sync's edits move the row count of some buffer line, which
+/// decides where a paired base line overflows.
+///
+/// Typing inside a line rewrites one row in place, and the line keeps its row
+/// count unless the typed text wraps it onto another row. A sync whose
+/// buffer-row edits are all one-row identities, and whose wrap edits each keep
+/// their length, therefore moved no row count. Wrap edits with no buffer-row
+/// edit come from an inlay or fold change or a settled background rewrap.
+/// Those patches do not tell one line's rows from the next, so they count as
+/// moved.
+fn wrap_rows_moved(wrap_edits: &Patch<u32>, buffer_row_edits: &Patch<u32>) -> bool {
+    if buffer_row_edits.is_empty() {
+        return !wrap_edits.is_empty();
+    }
+    buffer_row_edits
+        .edits()
+        .iter()
+        .any(|edit| edit.old != edit.new || edit.old.len() != 1)
+        || wrap_edits
+            .edits()
+            .iter()
+            .any(|edit| edit.old.len() != edit.new.len())
+}
+
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DisplayPoint {
     pub row: u32,
@@ -253,9 +277,6 @@ pub struct DisplayMap {
     /// The wrap geometry the standing blocks broke their base lines under, so a
     /// width change re-splices them even when the diff version is unchanged.
     last_wrap_geometry: Option<WrapGeometry>,
-    /// The wrap snapshot version at the last block refresh, so a rewrap that
-    /// moves a paired live line's row count re-checks the blocks.
-    last_wrap_version: u64,
     cached_snapshot: Option<DisplaySnapshot>,
     /// Set when any highlight collection is mutated. Checked inside
     /// [`DisplayMap::snapshot`] so a single rebuild
@@ -323,7 +344,6 @@ impl DisplayMap {
             last_pair_modified_hunks: false,
             last_show_deleted_blocks: false,
             last_wrap_geometry: None,
-            last_wrap_version: 0,
             cached_snapshot: None,
             highlights_dirty: false,
             settings_generation: 0,
@@ -877,12 +897,11 @@ impl DisplayMap {
         let wrap = WrapGeometry::of(&wrap_snapshot);
         // A rewrap changes how many rows a paired live line takes, and with it
         // where the base line beside it overflows, while no hunk moves.
-        let wrap_version = wrap_snapshot.version();
         if diff_version != self.last_diff_version
             || self.show_deleted_blocks != self.last_show_deleted_blocks
             || self.pair_modified_hunks != self.last_pair_modified_hunks
             || wrap != self.last_wrap_geometry
-            || wrap_version != self.last_wrap_version
+            || wrap_rows_moved(&wrap_edits, &buffer_row_edits)
         {
             let buffer_rows = buffer_snapshot.line_count();
             let live_rows = |row| live_line_rows(&wrap_snapshot, row, buffer_rows);
@@ -908,7 +927,6 @@ impl DisplayMap {
             self.last_show_deleted_blocks = self.show_deleted_blocks;
             self.last_pair_modified_hunks = self.pair_modified_hunks;
             self.last_wrap_geometry = wrap;
-            self.last_wrap_version = wrap_version;
         }
         let block_snapshot = self
             .block_map

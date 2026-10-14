@@ -269,6 +269,164 @@ fn a_refresh_finding_a_new_hunk_keeps_the_other_blocks() {
     );
 }
 
+/// A buffer whose text from row 3 on is `from_row_3`, then "five", with row 3
+/// paired as a Modified hunk against the base line "alpha beta gamma delta",
+/// and deleted blocks shown at wrap width 12.
+///
+/// At that width the base line breaks into "alpha beta " and "gamma delta".
+/// So the second segment overflows below a live line that takes one row, and
+/// sits beside the second row of one that takes two.
+fn paired_view(from_row_3: &str) -> (Arc<RwLock<TextBuffer>>, DisplayMap) {
+    let base = "alpha beta gamma delta\n";
+    let text = format!("one\ntwo\nthree\n{from_row_3}\nfive\n");
+    let mut buffer = TextBuffer::with_text(BufferId::new(0), &text);
+    buffer.diff_map = Some(DiffMap::from_hunks(
+        [DiffHunk {
+            status: DiffHunkStatus::Modified,
+            unstaged_lines: std::iter::once(3..4).collect(),
+            marked_rows: Vec::new(),
+            buffer_start_line: 3,
+            buffer_line_range: 3..4,
+            base_byte_range: 0..base.len(),
+            anchor_range: None,
+            token_detail: None,
+        }],
+        Some(Arc::new(base.to_string())),
+    ));
+    let shared = Arc::new(RwLock::new(buffer));
+    let mut map = DisplayMap::new(
+        MultiBuffer::singleton(shared.clone()),
+        test_executor(),
+        crate::test_notify(),
+    );
+    map.set_show_deleted_blocks(true);
+    map.set_pair_modified_hunks(true);
+    map.set_wrap_width(Some(12));
+    (shared, map)
+}
+
+/// A typed character that wraps a paired live line onto a second row gives its
+/// base line a row beside that one, so the overflow block below it goes.
+#[test]
+fn typing_a_paired_line_onto_a_second_row_moves_its_overflow() {
+    let (shared, mut map) = paired_view("alpha beta x");
+    assert_eq!(
+        block_rows(&mut map),
+        [
+            "buf0",
+            "buf1",
+            "buf2",
+            "buf3",
+            "gamma delta",
+            "buf4",
+            "buf5"
+        ],
+        "the live line takes one row, so the base line's second segment overflows below it",
+    );
+
+    let end = "one\ntwo\nthree\nalpha beta x".len();
+    shared.write().expect("poisoned").edit(end..end, "y");
+
+    assert_eq!(
+        block_rows(&mut map),
+        ["buf0", "buf1", "buf2", "buf3", "buf3", "buf4", "buf5"],
+        "the live line wraps onto a second row, which holds the base line's second segment",
+    );
+}
+
+/// A typed character that wraps nothing moves no row count, so every diff block
+/// keeps its id and the overflow stays below its line.
+#[test]
+fn typing_inside_a_paired_line_keeps_its_blocks() {
+    let (shared, mut map) = paired_view("alpha beta");
+    let rows = block_rows(&mut map);
+    let ids = map.inserted_diff_block_ids.clone();
+
+    let start = "one\ntwo\nthree\n".len();
+    shared.write().expect("poisoned").edit(start..start, "y");
+
+    assert_eq!(
+        (block_rows(&mut map), map.inserted_diff_block_ids.clone()),
+        (rows, ids),
+        "the rows and the block ids stand as they were",
+    );
+}
+
+/// One edit that rewrites two rows keeps their wrap rows' total while the
+/// paired line among them gains a row, so the multi-row buffer edit is what
+/// makes the blocks check again.
+#[test]
+fn rewriting_a_paired_line_and_its_neighbor_moves_its_overflow() {
+    let rows = "alpha beta x\naaaa bbbb cccc";
+    let (shared, mut map) = paired_view(rows);
+    assert_eq!(
+        block_rows(&mut map),
+        [
+            "buf0",
+            "buf1",
+            "buf2",
+            "buf3",
+            "gamma delta",
+            "buf4",
+            "buf4",
+            "buf5",
+            "buf6"
+        ],
+        "the live line takes one row and its neighbor two",
+    );
+
+    let start = "one\ntwo\nthree\n".len();
+    shared
+        .write()
+        .expect("poisoned")
+        .edit(start..start + rows.len(), "alpha beta xy\naaaa");
+
+    assert_eq!(
+        block_rows(&mut map),
+        ["buf0", "buf1", "buf2", "buf3", "buf3", "buf4", "buf5", "buf6"],
+        "the live line takes two rows and its neighbor one, so nothing overflows",
+    );
+}
+
+/// An inlay hint that wraps a paired live line onto a second row moves no
+/// buffer row, and the blocks still check again.
+#[test]
+fn an_inlay_wrapping_a_paired_line_moves_its_overflow() {
+    let (_shared, mut map) = paired_view("alpha beta");
+    assert_eq!(
+        block_rows(&mut map),
+        [
+            "buf0",
+            "buf1",
+            "buf2",
+            "buf3",
+            "gamma delta",
+            "buf4",
+            "buf5"
+        ],
+        "the live line takes one row before the hint",
+    );
+
+    let hint_at = {
+        let snapshot = map.multi_buffer.snapshot();
+        snapshot.anchor_at(
+            snapshot.rope().point_to_offset(Point::new(3, 10)),
+            stoat_text::Bias::Right,
+        )
+    };
+    map.splice_inlays(
+        Vec::new(),
+        vec![(hint_at, ": u32".to_string(), InlayKind::Hint)],
+    );
+
+    assert_eq!(
+        block_rows(&mut map),
+        ["buf0", "buf1", "buf2", "buf3", "buf3", "buf4", "buf5"],
+        "the hint wraps the live line onto a second row, which holds the base line's second \
+         segment",
+    );
+}
+
 #[test]
 fn display_snapshot_version() {
     let mut dm = create_display_map("hello");
