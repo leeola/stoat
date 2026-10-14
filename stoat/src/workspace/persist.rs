@@ -1038,6 +1038,9 @@ mod tests {
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, Selection, SelectionGoal};
 
+    /// Text a state file holds only where a save spells out a buffer's text.
+    const SENTINEL: &str = "sentinel-5e2b";
+
     fn executor() -> Executor {
         Arc::new(TestScheduler::new()).executor()
     }
@@ -1554,8 +1557,115 @@ mod tests {
         assert_eq!(drifted, [id]);
     }
 
+    #[test]
+    fn an_unedited_buffer_persists_no_text() {
+        let (fake, exec) = (FakeFs::new(), executor());
+        let mut ws = new_laid_out_workspace(PathBuf::from("/by-reference"), &exec);
+        open_on_disk(&mut ws, &fake, &format!("{SENTINEL}\n"), &exec);
+
+        let body = saved_body(&ws, &fake);
+        assert_eq!(
+            (body.contains(SENTINEL), body.contains("DiskSeed")),
+            (false, true),
+        );
+    }
+
+    /// The edit is saved, so the buffer is clean. Undo across a restart replays
+    /// from the seed, so the seed stays in the state file.
+    #[test]
+    fn an_edited_buffer_persists_its_seed_inline() {
+        let (fake, exec) = (FakeFs::new(), executor());
+        let mut ws = new_laid_out_workspace(PathBuf::from("/by-reference"), &exec);
+        let id = open_on_disk(&mut ws, &fake, &format!("{SENTINEL}\n"), &exec);
+        {
+            let buffer = ws.buffers.get(id).expect("the buffer opens");
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(0..0, "> ");
+            guard.mark_clean();
+        }
+
+        let body = saved_body(&ws, &fake);
+        assert_eq!(
+            (body.contains(SENTINEL), body.contains("DiskSeed")),
+            (true, false),
+        );
+    }
+
+    /// A long enough log compacts to one seed edit that holds the current text,
+    /// which is the shape of an unedited log. Only the unsaved edits keep that
+    /// text in the state file.
+    #[test]
+    fn a_dirty_buffer_persists_its_text_once_its_log_compacts() {
+        let (fake, exec) = (FakeFs::new(), executor());
+        let mut ws = new_laid_out_workspace(PathBuf::from("/by-reference"), &exec);
+        let id = open_on_disk(&mut ws, &fake, "\n", &exec);
+        {
+            let buffer = ws.buffers.get(id).expect("the buffer opens");
+            let mut guard = buffer.write().expect("buffer poisoned");
+            guard.edit(0..0, SENTINEL);
+            for _ in 0..crate::buffer::OPS_COMPACT_THRESHOLD {
+                guard.edit(0..0, "x");
+            }
+        }
+
+        let body = saved_body(&ws, &fake);
+        assert_eq!(
+            (body.contains(SENTINEL), body.contains("DiskSeed")),
+            (true, false),
+        );
+    }
+
+    /// The second save is of the buffer the first restore replayed, whose log
+    /// spells its seed out, and it names the file too.
+    #[test]
+    fn an_unedited_buffer_round_trips_through_a_save_and_a_restore() {
+        let (fake, exec) = (FakeFs::new(), executor());
+        let text = format!("alpha\n{SENTINEL}\n");
+        let mut ws = new_laid_out_workspace(PathBuf::from("/by-reference"), &exec);
+        let id = open_on_disk(&mut ws, &fake, &text, &exec);
+        for editor in ws
+            .editors
+            .values_mut()
+            .filter(|editor| editor.buffer_id == id)
+        {
+            let snapshot = editor.display_map.buffer_snapshot();
+            editor.selections.set_block_cursor(8, &snapshot);
+        }
+
+        for restart in 1..=2 {
+            let body = saved_body(&ws, &fake);
+            let (fresh, drifted) = restore_by_reference(&fake, &exec, &notes_state_path());
+            let cursor = {
+                let editor = fresh
+                    .editors
+                    .values()
+                    .find(|editor| editor.buffer_id == id)
+                    .expect("the editor restores");
+                let primary = &editor.selections.all_anchors()[editor.selections.primary_index()];
+                let buffer = fresh.buffers.get(id).expect("the buffer restores");
+                let guard = buffer.read().expect("buffer poisoned");
+                guard.resolve_anchor(&primary.start)
+            };
+            assert_eq!(
+                (
+                    body.contains(SENTINEL),
+                    buffer_text(&fresh, id),
+                    cursor,
+                    drifted
+                ),
+                (false, text.clone(), 8, Vec::new()),
+                "restart {restart} writes no text and loads the file under the cursor",
+            );
+            ws = fresh;
+        }
+    }
+
     fn notes_path() -> PathBuf {
         PathBuf::from("/by-reference/notes.txt")
+    }
+
+    fn notes_state_path() -> PathBuf {
+        PathBuf::from("/by-reference/state.ron")
     }
 
     /// The state file of a workspace whose one held buffer opened `path` from
@@ -1623,6 +1733,28 @@ mod tests {
         let mut fresh = Workspace::new(PathBuf::from("/elsewhere"), exec, crate::test_notify());
         fresh.install_restored(registry, state, exec);
         (fresh, drifted)
+    }
+
+    /// Open `text` as a held buffer of the file at [`notes_path`], which `fake`
+    /// holds first, with the mtime that an open of the file records.
+    fn open_on_disk(ws: &mut Workspace, fake: &FakeFs, text: &str, exec: &Executor) -> BufferId {
+        let path = notes_path();
+        fake.insert_file(&path, text);
+        let id = open_held(ws, &path, text, exec);
+        let mtime = fake
+            .metadata(&path)
+            .expect("the file stats")
+            .expect("the file exists")
+            .modified;
+        ws.buffers.set_disk_mtime(id, mtime);
+        id
+    }
+
+    /// The body that a save of `ws` writes to [`notes_state_path`].
+    fn saved_body(ws: &Workspace, fake: &FakeFs) -> String {
+        let state_path = notes_state_path();
+        ws.save_state(&state_path, fake).expect("the state saves");
+        crate::action_handlers::read_string_via_host(fake, &state_path).expect("the state reads")
     }
 
     /// A state file holds each buffer's history and undo tree on one line, so a
@@ -2695,6 +2827,9 @@ mod tests {
     /// leaves both alone. So a session that drops them leaves the buffer
     /// rewriting a CRLF file whole on its first save, with the guard that
     /// refuses to overwrite an externally changed file permanently disarmed.
+    ///
+    /// The buffer holds an edit, so its entry carries its text inline rather
+    /// than naming the file.
     #[test]
     fn a_restored_buffer_keeps_its_line_ending_and_disk_baseline() {
         use std::time::{Duration, UNIX_EPOCH};
@@ -2708,6 +2843,12 @@ mod tests {
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let id = open_held(&mut ws, &file, "one\ntwo\n", &exec);
+        ws.buffers
+            .get(id)
+            .expect("the buffer opens")
+            .write()
+            .expect("buffer poisoned")
+            .edit(0..0, "zero\n");
         ws.buffers.set_line_ending(id, LineEnding::Crlf);
         ws.buffers.set_disk_mtime(id, mtime);
 

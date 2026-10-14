@@ -902,6 +902,11 @@ impl BufferRegistry {
     /// An entry whose history came back compacted has no anchors to restore.
     /// See [`TextBuffer::history`] for what compaction gives up and who is
     /// responsible for the anchors it invalidates.
+    ///
+    /// An unedited buffer's history names its file in place of the text. That
+    /// is a clean buffer whose log is its seed alone and whose file has a known
+    /// mtime, and a restore loads the file where the seed was. See
+    /// [`BufferHistory::seed_on_disk`] for how a save writes it.
     pub(crate) fn snapshot_retaining(
         &self,
         keep: impl Fn(BufferId, &TextBuffer) -> bool,
@@ -915,7 +920,12 @@ impl BufferRegistry {
                 path: entry.path.clone(),
                 history: {
                     let guard = entry.buffer.read().expect("buffer poisoned");
-                    guard.history()
+                    let mut history = guard.history();
+                    history.seed_on_disk = history.is_seed_alone()
+                        && !guard.dirty
+                        && entry.path.is_some()
+                        && entry.disk_mtime.is_some();
+                    history
                 },
                 line_ending: entry.line_ending,
                 disk_mtime: entry.disk_mtime,

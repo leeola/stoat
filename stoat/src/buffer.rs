@@ -249,16 +249,43 @@ pub struct BufferHistory {
     /// these bytes standing in for it. A snapshot then clones a rope handle
     /// instead of copying the whole file, which is what keeps an autosave off
     /// the UI thread's byte budget. Serialization folds it back into `ops[0]`,
-    /// so the on-disk form is the log it always was.
+    /// so the on-disk form is the log it always was. Under
+    /// [`Self::seed_on_disk`], a save writes the seed as a reference to its
+    /// file instead.
     ///
     /// Not part of that form, so a history read back from disk carries `None`
     /// and is simply a log to replay.
     #[serde(skip)]
     pub seed: Option<Rope>,
+    /// Whether a save writes this log as one [`BufferOp::DiskSeed`] that names
+    /// the buffer's file, in place of the seed's text.
+    ///
+    /// [`snapshot_retaining`](crate::buffer_registry::BufferRegistry::snapshot_retaining)
+    /// sets it on a clean buffer whose log is its seed alone and whose file has
+    /// a known mtime, because that file then holds exactly the text. A save of
+    /// an unedited file then costs a few bytes rather than the whole file.
+    ///
+    /// Like [`Self::compacted`], it describes how the value goes out rather
+    /// than what it holds, so a history read back from disk reads `false`.
+    #[serde(skip)]
+    pub(crate) seed_on_disk: bool,
+}
+
+impl BufferHistory {
+    /// Whether the log is one insert into the empty buffer, as a load, a
+    /// compaction, and a replay of either leave it.
+    ///
+    /// The text is then that insert's alone, so a clean buffer with such a log
+    /// holds what its file held at the last open or save. A history of a
+    /// loaded buffer carries the insert's text as [`Self::seed`], and one of a
+    /// replayed buffer spells it out in the edit.
+    pub(crate) fn is_seed_alone(&self) -> bool {
+        matches!(self.ops.as_slice(), [BufferOp::Edit { old, .. }] if *old == (0..0))
+    }
 }
 
 /// [`BufferHistory`] as it goes on the wire, with the seed folded back into
-/// `ops[0]`.
+/// `ops[0]` or written as a reference to its file.
 ///
 /// The field names and their order match what [`BufferHistory`]'s derived
 /// `Deserialize` reads, so the two describe one format. The ops are borrowed
@@ -274,8 +301,15 @@ struct BufferHistoryRecord<'a> {
 
 impl Serialize for BufferHistory {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let ops = match &self.seed {
-            Some(seed) => {
+        let ops = match (&self.seed, self.seed_on_disk) {
+            (seed, true) => {
+                let [BufferOp::Edit { text, .. }] = self.ops.as_slice() else {
+                    unreachable!("a seed saved by reference is the whole log")
+                };
+                let len = seed.as_ref().map_or(text.len(), Rope::len);
+                Cow::Owned(vec![BufferOp::DiskSeed { len: len as u64 }])
+            },
+            (Some(seed), false) => {
                 let mut ops = self.ops.clone();
                 let Some(BufferOp::Edit { text, .. }) = ops.first_mut() else {
                     unreachable!("a seeded log opens with the edit that loaded it")
@@ -283,7 +317,7 @@ impl Serialize for BufferHistory {
                 *text = seed.to_string();
                 Cow::Owned(ops)
             },
-            None => Cow::Borrowed(self.ops.as_slice()),
+            (None, false) => Cow::Borrowed(self.ops.as_slice()),
         };
         BufferHistoryRecord {
             ops,
@@ -1767,6 +1801,7 @@ impl TextBuffer {
             current: self.current,
             compacted: false,
             seed: self.seed_text.clone(),
+            seed_on_disk: false,
         }
     }
 
@@ -1789,6 +1824,7 @@ impl TextBuffer {
             current: 0,
             compacted: true,
             seed: Some(self.snapshot.visible_text.clone()),
+            seed_on_disk: false,
         }
     }
 
