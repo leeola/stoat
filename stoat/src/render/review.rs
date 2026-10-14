@@ -7,8 +7,9 @@ use crate::{
     app::Stoat,
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, ProseChange},
     display_map::{
-        display_width, highlights::HighlightStyle, syntax_theme::DiffTheme, Block, BlockRowKind,
-        CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot, RowHighlightCursor, WrapPoint,
+        highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
+        BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot, RowHighlightCursor,
+        WrapPoint,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -746,6 +747,9 @@ pub(crate) fn paint_diff_rows(
     // Reused across rows. No row keeps its hunks past itself, so the buffer
     // only ever grows to the widest row rather than being rebuilt for each one.
     let mut hunk_scratch: Vec<&DiffHunk> = Vec::new();
+    // The rows of a wrapped base line paint one after another, so one entry
+    // breaks each line once per paint rather than once per row.
+    let mut base_layout: Option<(u32, BaseLineLayout)> = None;
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -785,7 +789,7 @@ pub(crate) fn paint_diff_rows(
                     (left_num_x, status_left_x, left_text_x, left_content_w),
                     y,
                     line_base,
-                    BaseRow::segment(snapshot, text, segment),
+                    BaseRow::segment(snapshot, text, line_base, segment, &mut base_layout),
                     &base_changes,
                     tints.as_ref(),
                     (del_style, dim_style, fallback_style),
@@ -970,6 +974,13 @@ pub(crate) fn paint_diff_rows(
                             );
                         }
                     }
+                    // An unchanged line reads the same on both sides, so the
+                    // live line's column at the window's start is the one the
+                    // base line's tabs in the window expand from.
+                    let column = match text[window.clone()].contains('\t') {
+                        true => snapshot.visual_column(Point::new(buffer_row, window.start as u32)),
+                        false => 0,
+                    };
                     let token_spans = base_token_spans(snapshot, line_base);
                     paint_base_segment(
                         buf,
@@ -977,8 +988,10 @@ pub(crate) fn paint_diff_rows(
                         y,
                         text,
                         window,
+                        column,
                         left_content_w.saturating_sub(indent),
                         snapshot.tab_snapshot().tab_size(),
+                        snapshot.tab_snapshot().max_expansion_column(),
                         token_spans,
                         dim_style,
                         dim_style,
@@ -1016,7 +1029,7 @@ pub(crate) fn paint_diff_rows(
                         (left_num_x, status_left_x, left_text_x, left_content_w),
                         y,
                         line_base,
-                        BaseRow::segment(snapshot, text, line_row),
+                        BaseRow::segment(snapshot, text, line_base, line_row, &mut base_layout),
                         &base_changes,
                         tints.as_ref(),
                         (del_style, dim_style, fallback_style),
@@ -1319,14 +1332,18 @@ pub(crate) fn paint_base_row(
     dials: DiffDials,
     tint_row: Option<Color>,
 ) {
+    // The commits preview paints both of its columns here with no tab map to
+    // cap a tab, so an uncapped stop keeps the two agreeing.
     paint_base_segment(
         buf,
         start_x,
         y,
         text,
         0..text.len(),
+        0,
         max_cols,
         tab_size,
+        u32::MAX,
         token_spans,
         fallback,
         fallback,
@@ -1342,10 +1359,11 @@ pub(crate) fn paint_base_row(
 /// Paint the bytes `window` of base line `text` into a column row, styled as
 /// [`paint_base_row`] styles a whole line.
 ///
-/// A soft-wrapped line shows one segment per row. Tabs expand to stops counted
-/// from the line's start rather than the window's, so a segment keeps the
-/// columns the whole line gives its tabs, as the right column's segments do.
-/// `token_spans` and `change_spans` index the whole line.
+/// A soft-wrapped line shows one segment per row. The window's tabs expand from
+/// `start_column`, the tab column the window starts at, so a segment keeps the
+/// stops the whole line gives its tabs, as the right column's segments do. A
+/// tab at or past `max_expansion_column` takes one column, as the tab map caps
+/// it. `token_spans` and `change_spans` index the whole line.
 ///
 /// `gap_fallback` takes the place of `fallback` for a byte outside every token
 /// span and every change span. A refined line passes the text style there, so
@@ -1358,8 +1376,10 @@ fn paint_base_segment(
     y: u16,
     text: &str,
     window: std::ops::Range<usize>,
+    start_column: u32,
     max_cols: usize,
     tab_size: u32,
+    max_expansion_column: u32,
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
     gap_fallback: Style,
@@ -1384,8 +1404,21 @@ fn paint_base_segment(
     // Only a changed char lifts, and only against a receding surround: with
     // softening off nothing recedes, so nothing has to stand off it.
     let lift_bg = tints.map(|t| t.bg).filter(|_| dials.soften_scale > 0.0);
-    let mut token_cursor = 0;
-    let mut span_cursor = 0;
+    // Each cursor starts past the spans that end before the window, where a
+    // walk from the line's first byte stands at the window's first. A line's
+    // spans do not overlap, so their ends ascend with their starts and the
+    // search splits them exactly.
+    let mut token_cursor = token_spans.partition_point(|(range, _)| range.end < window.start);
+    let mut span_cursor = change_spans.partition_point(|(range, ..)| range.end < window.start);
+    debug_assert!(
+        token_spans[..token_cursor]
+            .iter()
+            .all(|(range, _)| range.end < window.start)
+            && change_spans[..span_cursor]
+                .iter()
+                .all(|(range, ..)| range.end < window.start),
+        "the cursors skip only spans that end before the window"
+    );
     let mut style_at = |byte_idx: usize| {
         while change_spans
             .get(span_cursor)
@@ -1452,42 +1485,48 @@ fn paint_base_segment(
         style
     };
 
-    if !text.contains('\t') {
-        let start = window.start;
-        paint_style_runs(buf, start_x, y, &text[window], max_cols, |byte_idx| {
+    let start = window.start;
+    let segment = &text[window];
+    if !segment.contains('\t') {
+        paint_style_runs(buf, start_x, y, segment, max_cols, |byte_idx| {
             style_at(start + byte_idx)
         });
         return;
     }
-    let (expanded, source) = expand_tabs(text, tab_size);
-    let from = source.partition_point(|&byte| byte < window.start);
-    let to = source.partition_point(|&byte| byte < window.end);
-    paint_style_runs(buf, start_x, y, &expanded[from..to], max_cols, |byte_idx| {
-        style_at(source[from + byte_idx])
+    let (expanded, source) = expand_tabs(segment, start_column, tab_size, max_expansion_column);
+    paint_style_runs(buf, start_x, y, &expanded, max_cols, |byte_idx| {
+        style_at(start + source[byte_idx])
     });
 }
 
 /// `text` with each tab expanded to its next stop, and the byte of `text` each
 /// expanded byte came from.
 ///
-/// The stop rule is the display map's own, a tab running to the next multiple
-/// of `tab_size` columns, without the cap past which the display map expands a
-/// tab to one column. Every space a tab becomes maps to the tab's byte, so the
-/// mapped offsets never decrease and a monotonic span cursor still walks them.
-fn expand_tabs(text: &str, tab_size: u32) -> (String, Vec<usize>) {
+/// `column` is the tab column `text` starts at, so a window of a wrapped line
+/// expands its tabs to the stops the whole line gives them. The stop rule is the
+/// display map's own, per [`tab_map::advance_column_for_char`], so a tab at or
+/// past `max_expansion_column` takes one column, as it does in the right column.
+///
+/// Every space a tab becomes maps to the tab's byte, so the mapped offsets never
+/// decrease and a monotonic span cursor still walks them.
+fn expand_tabs(
+    text: &str,
+    mut column: u32,
+    tab_size: u32,
+    max_expansion_column: u32,
+) -> (String, Vec<usize>) {
     let mut expanded = String::with_capacity(text.len());
     let mut source = Vec::with_capacity(text.len());
-    let mut column = 0u32;
     for (byte_idx, ch) in text.char_indices() {
-        if ch == '\t' {
-            let width = tab_size - column % tab_size;
-            for _ in 0..width {
-                expanded.push(' ');
-            }
-            column += width;
-        } else {
-            expanded.push(ch);
-            column += display_width(ch);
+        let tab_start = column;
+        tab_map::advance_column_for_char(&mut column, ch, tab_size, max_expansion_column);
+        match ch {
+            '\t' => {
+                for _ in tab_start..column {
+                    expanded.push(' ');
+                }
+            },
+            _ => expanded.push(ch),
         }
         source.resize(expanded.len(), byte_idx);
     }
@@ -1553,6 +1592,8 @@ struct BaseRow<'a> {
     text: &'a str,
     /// The bytes of `text` this row shows.
     window: std::ops::Range<usize>,
+    /// The tab column `window` starts at, which the row's tabs expand from.
+    column: u32,
     /// Columns the row's text starts past, nonzero on a wrapped continuation.
     indent: usize,
     /// Whether this is the line's first row, the one that takes its number and
@@ -1566,31 +1607,49 @@ impl<'a> BaseRow<'a> {
         Self {
             text,
             window: 0..text.len(),
+            column: 0,
             indent: 0,
             first: true,
         }
     }
 
-    /// Row `segment` of `text`, broken by the geometry `snapshot` wraps by,
-    /// which is the geometry the block rows of a base line broke by.
+    /// Row `segment` of base line `line`, whose text is `text`, broken by the
+    /// geometry `snapshot` wraps by, which is the geometry the block rows of a
+    /// base line broke by.
+    ///
+    /// `memo` holds the last line broken, under its number. The rows of a base
+    /// line paint one after another, so they break their line once between
+    /// them.
     ///
     /// A segment past the last one the geometry gives shows nothing, which
     /// happens only if the blocks and the snapshot disagree on the geometry.
     /// Without a geometry a base line is one row.
-    fn segment(snapshot: &DisplaySnapshot, text: &'a str, segment: u32) -> Self {
+    fn segment(
+        snapshot: &DisplaySnapshot,
+        text: &'a str,
+        line: u32,
+        segment: u32,
+        memo: &mut Option<(u32, BaseLineLayout)>,
+    ) -> Self {
         let Some(wrap) = snapshot.wrap_geometry() else {
             return Self::whole(text);
         };
-        let (windows, indent) = wrap.windows(text);
+        let layout = match memo {
+            Some((broken, layout)) if *broken == line => layout,
+            _ => &mut memo.insert((line, wrap.layout(text))).1,
+        };
+        let (window, column) = layout
+            .rows
+            .get(segment as usize)
+            .cloned()
+            .unwrap_or((text.len()..text.len(), 0));
         Self {
             text,
-            window: windows
-                .get(segment as usize)
-                .cloned()
-                .unwrap_or(text.len()..text.len()),
+            window,
+            column,
             indent: match segment {
                 0 => 0,
-                _ => indent as usize,
+                _ => layout.indent as usize,
             },
             first: segment == 0,
         }
@@ -1678,8 +1737,10 @@ fn paint_base_side(
         y,
         row.text,
         row.window,
+        row.column,
         content_w.saturating_sub(row.indent),
         snapshot.tab_snapshot().tab_size(),
+        snapshot.tab_snapshot().max_expansion_column(),
         token_spans,
         del_style,
         gap_fallback,
@@ -4060,6 +4121,29 @@ mod tests {
         );
     }
 
+    /// Two removed lines paint their rows one after the other, and the second
+    /// breaks into its own segments rather than the first line's.
+    #[test]
+    fn each_removed_line_breaks_into_its_own_segments() {
+        let h = diff_harness(
+            &format!("keep\nshort\n{}\ntail\n", long_line(45, 44)),
+            "keep\ntail\n",
+        );
+        let buf = h.rendered_buffer();
+        let y = row_holding(buf, 8..59, "short");
+        assert_eq!(
+            (y..y + 4)
+                .map(|y| cells(buf, y, [0..5, 8..59]))
+                .collect::<Vec<_>>(),
+            [
+                ["2".to_string(), "short".to_string()],
+                ["3".to_string(), "a".repeat(45)],
+                [String::new(), "b".repeat(44)],
+                ["4".to_string(), "tail".to_string()],
+            ],
+        );
+    }
+
     /// At 120 columns the base text wraps at 51 and the line fits. At 110 it
     /// wraps at 46, and both widths keep the two columns, so the wrap width
     /// alone is what moves.
@@ -4210,6 +4294,48 @@ mod tests {
         assert_eq!(
             [0, 1].map(|y| line_text(&buf, y, 8..59).trim().to_string()),
             ["\u{e9}".repeat(50), "\u{e9}".repeat(10)],
+        );
+    }
+
+    /// An unchanged copy of a line and a removed one both break where the live
+    /// line does, and each segment expands its tabs from the column it starts
+    /// at. The second row starts off a stop, and the last row runs past column
+    /// 256, where a tab takes one column.
+    #[test]
+    fn a_wrapped_tabbed_base_line_keeps_its_tab_stops_on_every_segment() {
+        let line = "ab cd\t".repeat(40);
+        let mut editor = diff_editor(
+            &format!("{line}\nkeep\n{line}\n"),
+            &format!("{line}\nkeep\n"),
+        );
+        editor.display_map.set_wrap_width(Some(51));
+        let area = Rect::new(0, 0, 120, 14);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            true,
+            None,
+            None,
+            false,
+            None,
+            DiffDials::shipped(),
+        );
+
+        let column = |cols: std::ops::Range<u16>| {
+            (0..area.height)
+                .map(|y| line_text(&buf, y, cols.clone()).trim_end().to_string())
+                .collect::<Vec<_>>()
+        };
+        let (left, right) = (column(8..59), column(68..120));
+        assert_eq!(right[6], "keep", "the live line takes six rows");
+        assert_eq!(
+            [&left[..6], &left[7..13]],
+            [&right[..6], &right[..6]],
+            "the unchanged copy and the removed one read as the live rows",
         );
     }
 
@@ -5092,6 +5218,60 @@ mod tests {
             line_text(&inner, 0, 0..5),
             "ab  c",
             "a tab after two columns runs only to the stop at column four"
+        );
+    }
+
+    /// With no tints a change span underlines, so the underline shows how far
+    /// the span reaches into the segment.
+    #[test]
+    fn spans_that_open_on_an_earlier_segment_still_mark_this_one() {
+        let token = Color::Rgb(1, 2, 3);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+        paint_base_segment(
+            &mut buf,
+            0,
+            0,
+            "abcdefgh",
+            4..8,
+            4,
+            4,
+            4,
+            u32::MAX,
+            &[(
+                2..6,
+                HighlightStyle {
+                    foreground: Some(token),
+                    ..HighlightStyle::default()
+                },
+            )],
+            Style::default(),
+            Style::default(),
+            &[(3..7, ChangeKind::Replaced, ProseChange::None)],
+            None,
+            None,
+            None,
+            DiffDials::shipped(),
+            None,
+        );
+
+        assert_eq!(
+            (0..4)
+                .map(|x| {
+                    let cell = &buf[(x, 0)];
+                    (
+                        cell.symbol(),
+                        cell.fg,
+                        cell.modifier.contains(Modifier::UNDERLINED),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("e", token, true),
+                ("f", token, true),
+                ("g", Color::Reset, true),
+                ("h", Color::Reset, false),
+            ],
+            "the token covers e and f, and the change span runs through g",
         );
     }
 

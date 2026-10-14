@@ -1000,8 +1000,21 @@ impl WrapGeometry {
     /// A line that fits answers one span over all of it and no indent.
     ///
     /// See also:
-    /// - [`compute_wrap_columns`] for the rule itself, in tab columns.
+    /// - [`Self::layout`] for the tab column each row starts at as well.
     pub(crate) fn windows(&self, line: &str) -> (Vec<Range<usize>>, u32) {
+        let layout = self.layout(line);
+        let windows = layout.rows.into_iter().map(|(window, _)| window).collect();
+        (windows, layout.indent)
+    }
+
+    /// The rows `line` breaks into, each with the tab column it starts at, and
+    /// the columns a continuation row is indented by.
+    ///
+    /// A line that fits answers one row over all of it and no indent.
+    ///
+    /// See also:
+    /// - [`compute_wrap_columns`] for the rule itself, in tab columns.
+    pub(crate) fn layout(&self, line: &str) -> BaseLineLayout {
         let char_width = |ch: char, column: u32| match ch {
             '\t' if column >= self.max_expansion_column => 1,
             '\t' => self.tab_size - column % self.tab_size,
@@ -1020,23 +1033,39 @@ impl WrapGeometry {
         // The first break is the line's own start. Every other break falls
         // between two chars, so the walk meets each one at the boundary it
         // names.
-        let mut windows = Vec::with_capacity(breaks.len().max(1));
+        let mut rows = Vec::with_capacity(breaks.len().max(1));
         let mut next_break = breaks.iter().skip(1).peekable();
-        let mut start = 0;
+        let (mut start, mut start_column) = (0, 0);
         let mut column = 0;
         for (byte, ch) in line.char_indices() {
             if next_break.next_if(|&&at| column >= at).is_some() {
-                windows.push(start..byte);
-                start = byte;
+                rows.push((start..byte, start_column));
+                (start, start_column) = (byte, column);
             }
             column += char_width(ch, column);
         }
-        windows.push(start..line.len());
-        match windows.len() {
-            1 => (windows, 0),
-            _ => (windows, indent),
-        }
+        rows.push((start..line.len(), start_column));
+
+        let indent = match rows.len() {
+            1 => 0,
+            _ => indent,
+        };
+        BaseLineLayout { rows, indent }
     }
+}
+
+/// The rows a line breaks into under a [`WrapGeometry`], for text the wrap map
+/// does not hold.
+///
+/// Each row carries the tab column it starts at. A painter that shows one row
+/// at a time expands the row's tabs from that column, so it gets the stops the
+/// whole line gives them without a walk over the bytes before the row.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct BaseLineLayout {
+    /// Each row's byte span of the line, with the tab column the span starts at.
+    pub(crate) rows: Vec<(Range<usize>, u32)>,
+    /// Columns a continuation row is indented by, zero for a line of one row.
+    pub(crate) indent: u32,
 }
 
 impl WrapSnapshot {
@@ -1784,14 +1813,14 @@ fn transform_sub_row_len(transform: &Transform, sub_idx: usize) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{WrapGeometry, WrapMap, WrapPoint, WrapRowKind};
+    use super::{BaseLineLayout, WrapGeometry, WrapMap, WrapPoint, WrapRowKind};
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder},
             inlay_map::InlayMap,
             sampler,
-            tab_map::{TabMap, TabPoint},
+            tab_map::{self, TabMap, TabPoint},
         },
         multi_buffer::MultiBuffer,
     };
@@ -2172,6 +2201,38 @@ mod tests {
             geometry(4).windows("abcdefghij"),
             (vec![0..4, 4..8, 8..10], 0)
         );
+    }
+
+    /// The tabbed line crosses the cap at column 20, so its later rows start
+    /// where one-column tabs leave them.
+    #[test]
+    fn layout_rows_agree_with_windows() {
+        let geometry = WrapGeometry {
+            width: 12,
+            tab_size: 4,
+            max_expansion_column: 20,
+        };
+        let lines = [
+            "the quick brown fox jumps over the lazy dog",
+            "function(a,b){return a.map(c=>c*b).join()}",
+            "ab\tcd\tef\tgh\tij\tkl\tmn\top\tqr",
+            "\u{6c49}\u{5b57}\u{6c49} \u{5b57}\u{6c49}\u{5b57}\u{6c49}\u{5b57}\u{6c49}x",
+        ];
+        for line in lines {
+            let (windows, indent) = geometry.windows(line);
+            let rows = windows
+                .into_iter()
+                .map(|window| {
+                    let column = tab_map::expand_column(line.chars(), window.start as u32, 4, 20);
+                    (window, column)
+                })
+                .collect();
+            assert_eq!(
+                geometry.layout(line),
+                BaseLineLayout { rows, indent },
+                "each row of {line:?} starts at its first byte's tab column",
+            );
+        }
     }
 
     #[test]
