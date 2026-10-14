@@ -196,7 +196,7 @@ impl SyntaxSnapshot {
     /// consumers can resolve per-grammar style tables. Mirrors Zed's
     /// [`SyntaxMapCaptures`](references/zed/crates/language/src/syntax_map.rs:64-1209)
     /// in shape but materializes eagerly because tree-sitter's
-    /// [`QueryCaptures`] borrows from a [`tree_sitter::QueryCursor`]
+    /// [`tree_sitter::QueryCaptures`] borrows from a [`tree_sitter::QueryCursor`]
     /// whose lifetime is awkward to thread through a self-referential
     /// iterator. The eager Vec is fine for highlight extraction (a
     /// few hundred captures per render); a streaming variant can

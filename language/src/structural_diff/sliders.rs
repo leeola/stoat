@@ -60,6 +60,7 @@ pub fn fix_all_sliders(
     pairs: &mut [(SyntaxId, SyntaxId)],
     side: Side,
 ) {
+    // FIXME: Nested sliders take no per-language inner-versus-outer delimiter preference
     let mut slides = Vec::new();
     for _ in 0..2 {
         fix_sliders_recursive(arena, root, changes, &mut slides);

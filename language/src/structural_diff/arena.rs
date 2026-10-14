@@ -8,9 +8,6 @@
 //! [`SyntaxArena::nodes`] and children are [`SyntaxId`]s into that
 //! vector, so lookup is `O(1)` and the arena hands out shared `&Syntax`
 //! borrows without interior mutation.
-//!
-//! See `references/difftastic/src/parse/syntax.rs` for the Difftastic
-//! reference that this scaffolding will eventually feed.
 
 use super::content_id::ContentId;
 use std::ops::Range;
@@ -51,9 +48,10 @@ pub struct List<'a> {
     /// [`SyntaxArena::link_siblings`] after the tree is fully
     /// constructed; until then it stays `None`.
     pub next_sibling: Option<SyntaxId>,
-    /// Reserved for borrow-aware structural-diff variants that want to
-    /// store source-text slices on the node. Unused at the scaffolding
-    /// stage; the `'a` parameter on `Syntax` keeps the public type stable.
+    /// Gives `List` the source lifetime that [`Syntax`] carries.
+    ///
+    /// An atom borrows its text from the source, and a list borrows nothing of
+    /// its own, so the marker is what uses the lifetime parameter.
     pub _marker: std::marker::PhantomData<&'a ()>,
 }
 

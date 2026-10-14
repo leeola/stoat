@@ -60,8 +60,8 @@ pub fn drop_syntax_in_background(state: Option<SyntaxState>, map: Option<SyntaxM
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub byte_range: Range<usize>,
-    /// Theme-resolved [`HighlightId`] from the language's
-    /// [`crate::Language::highlight_map`]. [`HighlightId::DEFAULT`]
+    /// Theme-resolved [`crate::HighlightId`] from the language's
+    /// [`crate::Language::highlight_map`]. [`crate::HighlightId::DEFAULT`]
     /// means the capture has no entry in the active theme; the
     /// host's renderer should treat such spans as unstyled.
     pub id: crate::highlight_map::HighlightId,

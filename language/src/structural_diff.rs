@@ -1,28 +1,29 @@
-//! Tree-aware structural diff over [`stoat_text::Rope`] inputs.
+//! Tree-aware structural diff of two source texts.
 //!
-//! This module is the foundation for a Difftastic-style diff that operates
-//! on tree-sitter parse trees. The full algorithm (Dijkstra over an edit
-//! graph of `(lhs_pos, rhs_pos, parents_stack)` vertices, with content-id
-//! preprocessing and slider correction) is a multi-PR project; the present
-//! scaffolding establishes the public surface and the line-diff fallback
-//! that the structural path will defer to on input that exceeds the graph
-//! cap.
+//! The diff follows difftastic's design. A shortest-path search runs over an
+//! edit graph whose vertices pair an lhs position, an rhs position, and the
+//! stack of lists entered on the way. [`diff_with_language`] diffs one file,
+//! and [`diff_changeset`] diffs several files and finds moves across them.
 //!
-//! Pipeline (target):
+//! Pipeline:
 //!
 //! ```text
-//!   parse (tree-sitter)
-//!     -> Syntax<List | Atom> arena    (mod arena, mod content_id)
-//!         -> unchanged preprocessing  (mod unchanged)
-//!         -> Dijkstra over edit graph (mod graph, mod dijkstra)
-//!              -> slider correction   (mod sliders)
-//!                  -> DiffChange list (mod output)
-//!                       -> DiffMap population
+//!   parse both sides (tree-sitter)
+//!     -> lower each tree into a Syntax arena       (lower, arena, content_id)
+//!         -> tag unchanged subtrees by content id   (unchanged)
+//!             -> search each changed section        (dijkstra, graph)
+//!                 -> correct sliders                (sliders)
+//!                     -> detect moves               (moves)
+//!                         -> collect DiffChanges    (tree_diff)
+//!                             -> refine prose pairs (refine)
 //! ```
 //!
-//! Pipeline (current): line diff via Myers, returning [`DiffChange`]s at
-//! line granularity. The structural path will replace
-//! [`diff_lines`]'s implementation, not its signature.
+//! A side that fails to parse, or that is over [`DEFAULT_BYTE_LIMIT`], takes
+//! the line diff, [`diff_lines`], instead. It runs imara-diff's histogram over
+//! the lines, and the same refine narrows its replaced pairs.
+//! [`diff_with_language_or_lines`] picks the path. A section whose search
+//! passes its vertex cap keeps the preprocessing's answer, and
+//! [`DiffResult::unsearched`] lists it.
 //!
 //! Reference: `references/difftastic/src/diff/`. Algorithm and cost values
 //! are taken from there; see in-code citations on each ported piece.
@@ -84,8 +85,8 @@ pub enum ChangeKind {
 }
 
 /// One contiguous changed region of one side of the diff. Byte offsets are
-/// relative to that side's input rope. [`move_metadata`] is `Some` iff
-/// [`kind`] is [`ChangeKind::Moved`].
+/// relative to that side's input rope. [`Self::move_metadata`] is `Some` iff
+/// [`Self::kind`] is [`ChangeKind::Moved`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiffChange {
     pub side: Side,
@@ -256,7 +257,7 @@ pub fn diff(lhs: &str, rhs: &str) -> DiffResult {
     diff_lines(lhs, rhs)
 }
 
-/// Best-quality diff for callers that have a [`Language`].
+/// Best-quality diff for callers that have a [`crate::Language`].
 ///
 /// Tries the structural path first ([`diff_with_language`]), falling
 /// through to [`diff_lines`] when either side is over

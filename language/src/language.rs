@@ -13,10 +13,10 @@ pub struct Language {
     /// The query every paint reads, compiled on first use through
     /// [`Self::highlight_query`].
     highlight: HighlightQuery,
-    /// Theme-resolved capture index -> [`HighlightId`] table. Mutable
+    /// Theme-resolved capture index -> [`crate::HighlightId`] table. Mutable
     /// so the host can rebuild it when the active theme changes via
     /// [`Language::set_highlight_map`]. Defaults to an empty map
-    /// (every lookup returns [`HighlightId::DEFAULT`]) until the host
+    /// (every lookup returns [`crate::HighlightId::DEFAULT`]) until the host
     /// installs one. The host's `parse_buffer_step` calls
     /// `id_for_highlight(span.id)` to look up the rendered style;
     /// spans whose id is `DEFAULT` are rendered without a foreground.

@@ -1,24 +1,20 @@
-//! Tree-aware structural diff entry point.
+//! Tree-aware structural diff entry points.
 //!
-//! Composes the [`super::lower`] arena lowering with the
-//! [`super::unchanged`] preprocessing pass and converts the resulting
-//! [`super::ChangeMap`]s into [`super::DiffChange`]s. The output is
-//! semantically equivalent to the line-diff fallback but operates at
-//! syntax-node granularity, so a one-line edit inside a function only
-//! marks that line's atom rather than the entire function.
+//! [`prepare_per_file`] runs the stages that one file needs. It parses both
+//! sides, lowers each tree into a [`SyntaxArena`], and tags the trivially
+//! unchanged subtrees with [`mark_unchanged`], which leaves the rest as changed
+//! sections. Each section gets a search of its own, [`shortest_path`], under a
+//! vertex cap and a cancel flag. Then [`fix_all_sliders`] moves each ambiguous
+//! boundary next to a structural cue.
 //!
-//! This sits *between* the line-diff fallback and the (forthcoming)
-//! Difftastic-style Dijkstra search:
+//! [`finalize_per_file`] turns one prepared file and its move records into a
+//! [`DiffResult`]. It collects each side's change map into [`DiffChange`]s,
+//! pairs the replaced atoms, and refines the prose pairs. The move records come
+//! from [`finalize_single`] for one file, and from [`diff_changeset_from_slots`]
+//! across every file of a changeset.
 //!
-//! - The line-diff fallback (in `line_diff.rs`) is the safety net for inputs without a working
-//!   parse, or when the structural search would exceed the graph cap.
-//!
-//! - This module is the cheap structural pass: lowering + LCS preprocessing + a sequential walk
-//!   that emits per-Pending-atom changes. Quality is much better than line diff for most edits.
-//!
-//! - The Dijkstra search (forthcoming) handles the cases this pass misses: detecting when a *moved*
-//!   subtree is "the same" rather than "deleted+added". Until that lands the sequential walk is the
-//!   structural path.
+//! A side that fails to parse, or that is over [`DEFAULT_BYTE_LIMIT`], gets no
+//! prepared file, so the caller takes the line diff.
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
@@ -50,24 +46,18 @@ use tree_sitter::Tree;
 /// difftastic's default.
 pub const DEFAULT_BYTE_LIMIT: usize = 1_000_000;
 
-/// Run the full structural-diff pipeline against two source strings.
+/// Run the structural diff of two source strings, with moves found within the
+/// one file and the matched token pairs collected.
 ///
-/// Two-stage algorithm:
+/// Returns `None` when either side fails to parse or is over
+/// [`DEFAULT_BYTE_LIMIT`], so the caller falls back to [`super::diff_lines`].
+/// A section whose search passes the vertex cap keeps the preprocessing's
+/// answer, and [`DiffResult::unsearched`] lists its bytes.
 ///
-/// 1. **Unchanged preprocessing** ([`mark_unchanged`]) tags every trivially-unchanged node via
-///    shrink-from-endpoints + LCS over sibling content_ids, and carves the residual into changed
-///    sections -- runs of unmatched siblings between unchanged anchors.
-///
-/// 2. **Per-section Dijkstra search** ([`shortest_path`]) runs over each changed section rather
-///    than the whole file, so a small edit only explores its own region and only that section can
-///    hit the graph cap. Each `UnchangedNode` / `EnterUnchangedDelimiter` edge marks its node
-///    Unchanged, and the remaining `Pending` nodes become the diff's novel/replaced byte ranges.
-///
-/// On `ExceededGraphLimit` a section falls back to preprocessing-only
-/// output for that region (still a valid diff, just missing the
-/// per-edit cost-optimal pairing). On a parse failure, or when either
-/// side is over [`DEFAULT_BYTE_LIMIT`], the function returns `None` and
-/// the caller falls through to [`super::diff_lines`].
+/// See also:
+/// - [`super::diff_with_language_or_lines`] for the diff and its fallback in one call.
+/// - [`diff_with_language_cancellable`] to cancel the search, reuse a parsed tree, or skip the
+///   token pairs.
 pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Option<DiffResult> {
     diff_with_language_cancellable(language, lhs, rhs, None, None, None, MatchedPairs::Collect)
 }
@@ -105,7 +95,7 @@ type TreeKey = ([u8; 32], &'static str);
 const MEMO_CAPACITY: usize = 8;
 
 impl TreeMemo {
-    /// How many trees the memo holds, at most [`MEMO_CAPACITY`].
+    /// How many trees the memo holds, at most `MEMO_CAPACITY`.
     pub fn len(&self) -> usize {
         self.entries.len()
     }

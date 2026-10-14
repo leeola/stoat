@@ -120,18 +120,19 @@ pub struct MoveRecord {
     pub lhs_sources: Vec<SyntaxId>,
 }
 
-/// Cross-file analogue of [`MoveRecord`]. `(file_idx, SyntaxId)`
-/// tuples index into the slice passed to [`find_moves_changeset`]; the
-/// caller maps `file_idx` back to the corresponding
-/// [`super::BufferRef`] / arena / line index when materialising
-/// [`super::MoveSource`]s.
+/// Cross-file analogue of [`MoveRecord`].
+///
+/// Each `(file_idx, SyntaxId)` tuple indexes into the slice passed to
+/// `find_moves_changeset`. The caller maps `file_idx` back to the matching
+/// [`super::BufferRef`], arena, and line index when it builds each
+/// [`super::MoveSource`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangesetMoveRecord {
     pub rhs_target: (usize, SyntaxId),
     pub lhs_sources: Vec<(usize, SyntaxId)>,
 }
 
-/// One file's contribution to [`find_moves_changeset`]. `lhs_arena` and
+/// One file's contribution to `find_moves_changeset`. `lhs_arena` and
 /// `rhs_arena` are the parsed-and-lowered arenas for the file's two
 /// sides; `lhs_changes` and `rhs_changes` are the post-preprocessing
 /// change maps the move pass mutates in place (residual `Pending`
@@ -143,11 +144,11 @@ pub struct FileMoveInput<'a> {
     pub rhs_changes: &'a mut ChangeMap,
 }
 
-/// Run the move pass against a single file. Convenience wrapper around
-/// [`find_moves_changeset`] for callers (chiefly
-/// [`super::diff_with_language`] and the single-file tier-1 tests) that
-/// only diff one file at a time. Mutates the two change maps in place,
-/// rewriting paired nodes from [`ChangeKind::Pending`] to
+/// Run the move pass against a single file.
+///
+/// This is the one-file form of the changeset move pass, for a caller that
+/// diffs one file at a time. It mutates the two change maps in place, and
+/// rewrites each paired node from [`ChangeKind::Pending`] to
 /// [`ChangeKind::Moved`].
 pub fn find_moves(
     lhs_arena: &SyntaxArena<'_>,
