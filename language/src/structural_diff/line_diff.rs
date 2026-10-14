@@ -39,12 +39,13 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
         sink.push_change(hunk.before, hunk.after);
     }
     let mut changes = sink.changes;
-    super::refine::refine_replaced_pairs(&mut changes, lhs, rhs);
+    let unchanged_lines = super::refine::refine_replaced_pairs(&mut changes, lhs, rhs);
 
     DiffResult {
         changes,
         fell_back_to_line_diff: true,
         matched: Vec::new(),
+        unchanged_lines,
         unsearched: Vec::new(),
     }
 }

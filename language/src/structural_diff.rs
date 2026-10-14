@@ -108,12 +108,13 @@ pub struct DiffChange {
     /// counterpart, so a one-word edit marks only that word.
     ///
     /// `Some` with ranges holds the sub-ranges of [`byte_range`](Self::byte_range)
-    /// whose chars differ from the counterpart. `Some` and empty is a pair the
-    /// refine compared line by line and found no differing char in, which is a
-    /// pair whose lines differ only in their terminators, so nothing inside it
-    /// marks. `None` is a change the refine never narrowed, such as a
-    /// non-`Replaced` change, a code atom, or a pair over the height cap, and it
-    /// marks its whole `byte_range`.
+    /// whose chars differ from the counterpart. A line with no counterpart
+    /// marks whole, with its newline when the change holds it. `Some` and empty
+    /// is a side in which the refine found no differing char, such as the old
+    /// side of an insertion, or a pair whose lines differ only in their
+    /// terminators. Nothing inside it marks. `None` is a change the refine never
+    /// narrowed, such as a non-`Replaced` change or a code atom, and it marks its
+    /// whole `byte_range`.
     ///
     /// Always `None` when [`prose`](Self::prose) is false. A code atom has a
     /// token boundary of its own, so a mark inside one claims an edit the
@@ -137,6 +138,9 @@ pub struct DiffChange {
 /// A line diff pairs lines by their text, so a call reformatted across lines
 /// pairs nothing, though every token in it survived. A pair names one surviving
 /// token on both sides, so a consumer aligns lines by the tokens they share.
+///
+/// [`DiffResult::unchanged_lines`] holds the same shape for the lines that a
+/// prose pair's refine found equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchedPair {
     pub lhs: Range<usize>,
@@ -220,6 +224,21 @@ pub struct DiffResult {
     /// tokens, so its result leaves this empty, and so does a diff run under
     /// [`MatchedPairs::Skip`].
     pub matched: Vec<MatchedPair>,
+    /// Every line pair that the refine of a prose `Replaced` pair found equal,
+    /// in lhs order.
+    ///
+    /// The refine aligns a pair's lines before it compares their chars. So
+    /// lines inserted in the middle of a long string, comment, or YAML block
+    /// scalar leave the lines around them equal on both sides. Those lines sit
+    /// inside the pair's byte range, but they did not change. A consumer shows
+    /// them as context and aligns its rows by them. A blank line pairs as two
+    /// empty ranges at its start.
+    ///
+    /// A line counts only when nothing about it changed. So a file's last line
+    /// that gained or lost its newline stays out. So does every line of a pair
+    /// whose lines all match, since what changed there lies outside the text
+    /// the refine compares.
+    pub unchanged_lines: Vec<MatchedPair>,
     /// The byte spans, lhs then rhs, of the changed sections whose search
     /// passed the vertex cap or was cancelled.
     ///

@@ -5,9 +5,13 @@
 //! token keeps its identity when it moves to another line, so pairing lines by
 //! the tokens they share keeps the rows aligned. The steps follow the
 //! side-by-side display of difftastic.
+//!
+//! A changed string or comment holds no token of its own. The lines that a
+//! prose refine found equal inside one pin rows as tokens do, so a line
+//! inserted in the middle of a long string shifts no row after it.
 
 use super::{line_byte_offsets, RowPlan, WalkSide};
-use std::{cmp::Ordering, collections::VecDeque, ops::Range};
+use std::{cmp::Ordering, collections::VecDeque, iter, ops::Range};
 use stoat_language::structural_diff::MatchedPair;
 
 /// One row's line index on each side, `None` where the row leaves that side
@@ -17,15 +21,18 @@ type LinePair = (Option<usize>, Option<usize>);
 /// Plan the rows of a diff whose tree diff matched tokens, one row per aligned
 /// line pair.
 ///
+/// The lines of `unchanged_lines` pin rows as the matched tokens do.
+///
 /// Every line of each side appears in exactly one row, in order. The merge view
 /// pairs two walks over one ancestor by their base lines, and relies on that.
 pub(super) fn token_aligned_plans(
     lhs: &WalkSide<'_>,
     rhs: &WalkSide<'_>,
     matched: &[MatchedPair],
+    unchanged_lines: &[MatchedPair],
 ) -> Vec<RowPlan> {
     let anchors = anchor_lines(
-        matched,
+        in_lhs_order(matched, unchanged_lines),
         &line_byte_offsets(lhs.lines),
         &line_byte_offsets(rhs.lines),
     );
@@ -60,19 +67,39 @@ pub(super) fn token_aligned_plans(
         .collect()
 }
 
-/// The line pairs the matched tokens pin, walked in lhs order.
+/// The pairs of `matched` and `unchanged_lines`, merged into one lhs order.
+///
+/// The empty pair of a blank line is left out. It names no line to pin, and the
+/// blank-line steps of [`token_aligned_plans`] place it.
+fn in_lhs_order<'a>(
+    matched: &'a [MatchedPair],
+    unchanged_lines: &'a [MatchedPair],
+) -> impl Iterator<Item = &'a MatchedPair> {
+    let mut tokens = matched.iter().peekable();
+    let mut lines = unchanged_lines
+        .iter()
+        .filter(|pair| !pair.lhs.is_empty())
+        .peekable();
+    iter::from_fn(move || match (tokens.peek(), lines.peek()) {
+        (Some(token), Some(line)) if line.lhs.start < token.lhs.start => lines.next(),
+        (Some(_), _) => tokens.next(),
+        (None, _) => lines.next(),
+    })
+}
+
+/// The line pairs that the `pinned` tokens and lines pin, walked in lhs order.
 ///
 /// A pair is kept only when it lies past the last kept pair on both sides, so
 /// the anchors never cross. A token that spans several lines anchors each of
 /// its lines, against the first line of its counterpart past the last anchor.
-fn anchor_lines(
-    matched: &[MatchedPair],
+fn anchor_lines<'a>(
+    pinned: impl Iterator<Item = &'a MatchedPair>,
     lhs_offsets: &[(usize, usize)],
     rhs_offsets: &[(usize, usize)],
 ) -> Vec<LinePair> {
     let mut anchors = Vec::new();
     let mut last: Option<(usize, usize)> = None;
-    for pair in matched {
+    for pair in pinned {
         let rhs_lines = lines_of(rhs_offsets, &pair.rhs);
         for lhs_line in lines_of(lhs_offsets, &pair.lhs) {
             if last.is_some_and(|(lhs_last, _)| lhs_line <= lhs_last) {
@@ -323,5 +350,30 @@ fn classify(pair: LinePair, lhs: &WalkSide<'_>, rhs: &WalkSide<'_>) -> RowPlan {
         },
         _ if marks(lhs, pair.0) || marks(rhs, pair.1) => RowPlan::Changed { left, right },
         _ => RowPlan::Mismatch { left, right },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_lhs_order;
+    use std::ops::Range;
+    use stoat_language::structural_diff::MatchedPair;
+
+    /// The tokens and the lines interleave by their lhs start, and the empty
+    /// pair of a blank line pins nothing.
+    #[test]
+    fn pins_merge_in_lhs_order_without_blank_lines() {
+        let pair = |lhs: Range<usize>| MatchedPair {
+            lhs: lhs.clone(),
+            rhs: lhs,
+        };
+        let tokens = [pair(0..2), pair(10..12)];
+        let lines = [pair(4..8), pair(9..9), pair(14..20)];
+        assert_eq!(
+            in_lhs_order(&tokens, &lines)
+                .map(|pair| pair.lhs.clone())
+                .collect::<Vec<_>>(),
+            [0..2, 4..8, 10..12, 14..20],
+        );
     }
 }

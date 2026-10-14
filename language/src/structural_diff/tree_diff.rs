@@ -672,12 +672,14 @@ fn finalize_per_file(
         &prepared.lhs_arena,
         &prepared.rhs_arena,
     );
-    super::refine::refine_replaced_pairs(&mut changes, prepared.lhs_text, prepared.rhs_text);
+    let unchanged_lines =
+        super::refine::refine_replaced_pairs(&mut changes, prepared.lhs_text, prepared.rhs_text);
 
     DiffResult {
         changes,
         fell_back_to_line_diff: false,
         matched: Vec::new(),
+        unchanged_lines,
         unsearched: prepared.unsearched.clone(),
     }
 }
@@ -1914,6 +1916,48 @@ mod tests {
                 (DiffChangeKind::Replaced, true, vec!["six"]),
             ),
             "one prose pair, refined to the changed word on each side",
+        );
+    }
+
+    /// Lines inserted inside a block scalar mark alone. The scalar's other
+    /// lines pair as unchanged, though the scalar is one prose pair.
+    #[test]
+    fn an_insertion_inside_a_block_scalar_marks_only_the_new_lines() {
+        let lhs = "filters: |\n  ci: all\n  unit: some\n  db: none\nnext: 1\n";
+        let rhs = concat!(
+            "filters: |\n  ci: all\n  perf: new\n  bench: new\n",
+            "  unit: some\n  db: none\nnext: 1\n",
+        );
+        let result = diff_with_language(&yaml_lang(), lhs, rhs).unwrap();
+
+        let unchanged: Vec<(&str, &str)> = result
+            .unchanged_lines
+            .iter()
+            .map(|pair| (&lhs[pair.lhs.clone()], &rhs[pair.rhs.clone()]))
+            .collect();
+        assert_eq!(
+            (
+                result.changes.len(),
+                refined(&result, Side::Lhs, lhs),
+                refined(&result, Side::Rhs, rhs),
+                unchanged,
+            ),
+            (
+                2,
+                (DiffChangeKind::Replaced, true, vec![]),
+                (
+                    DiffChangeKind::Replaced,
+                    true,
+                    vec!["  perf: new\n  bench: new\n"]
+                ),
+                vec![
+                    ("|", "|"),
+                    ("  ci: all", "  ci: all"),
+                    ("  unit: some", "  unit: some"),
+                    ("  db: none", "  db: none"),
+                ],
+            ),
+            "one prose pair, with the new lines its only marks",
         );
     }
 

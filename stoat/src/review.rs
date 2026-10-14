@@ -8,7 +8,7 @@ use std::{
 use stoat_language::{
     structural_diff::{
         self, BufferRef, ChangeKind as LangChangeKind, DiffChange, DiffResult, FileDiffInput,
-        MatchedPairs, Side, TreeCache,
+        MatchedPair, MatchedPairs, Side, TreeCache,
     },
     Language,
 };
@@ -237,8 +237,18 @@ fn walk_plans_with<T>(
     let lhs_lines = split_lines(base_text);
     let rhs_lines = split_lines(buffer_text);
 
-    let lhs_changed = mark_changed_lines(&lhs_lines, &diff_result.changes, Side::Lhs);
-    let rhs_changed = mark_changed_lines(&rhs_lines, &diff_result.changes, Side::Rhs);
+    let lhs_changed = mark_changed_lines(
+        &lhs_lines,
+        &diff_result.changes,
+        &diff_result.unchanged_lines,
+        Side::Lhs,
+    );
+    let rhs_changed = mark_changed_lines(
+        &rhs_lines,
+        &diff_result.changes,
+        &diff_result.unchanged_lines,
+        Side::Rhs,
+    );
 
     let lhs_spans = collect_line_spans(&lhs_lines, &diff_result.changes, Side::Lhs);
     let rhs_spans = collect_line_spans(&rhs_lines, &diff_result.changes, Side::Rhs);
@@ -268,7 +278,12 @@ fn walk_plans_with<T>(
     // diff found nothing equal in, so those align by line text.
     let plans = match diff_result.matched.is_empty() {
         true => structural_walk(&lhs, &rhs),
-        false => token_align::token_aligned_plans(&lhs, &rhs, &diff_result.matched),
+        false => token_align::token_aligned_plans(
+            &lhs,
+            &rhs,
+            &diff_result.matched,
+            &diff_result.unchanged_lines,
+        ),
     };
     consume(&plans, &lhs, &rhs)
 }
@@ -296,13 +311,39 @@ pub(crate) fn line_count(text: &str) -> u32 {
     }
 }
 
-fn mark_changed_lines(lines: &[&str], changes: &[DiffChange], side: Side) -> Vec<bool> {
+/// Flag each line of `side` that a change touches.
+///
+/// A line that a refined prose pair holds equal, as `unchanged` lists it, stays
+/// unflagged, though its pair's byte range covers it. So a line inserted inside
+/// a long string flags alone, and the string's other lines read as context.
+fn mark_changed_lines(
+    lines: &[&str],
+    changes: &[DiffChange],
+    unchanged: &[MatchedPair],
+    side: Side,
+) -> Vec<bool> {
     let mut changed = vec![false; lines.len()];
     if lines.is_empty() {
         return changed;
     }
 
     let offsets = line_byte_offsets(lines);
+    let unchanged = {
+        let mut ranges: Vec<&Range<usize>> = unchanged
+            .iter()
+            .map(|pair| match side {
+                Side::Lhs => &pair.lhs,
+                Side::Rhs => &pair.rhs,
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|range| range.start);
+        ranges
+    };
+    let is_unchanged = |held: Range<usize>| {
+        unchanged
+            .binary_search_by_key(&held.start, |range| range.start)
+            .is_ok_and(|i| unchanged[i].end == held.end)
+    };
 
     for change in changes {
         if change.side != side || change.byte_range.start >= change.byte_range.end {
@@ -314,7 +355,10 @@ fn mark_changed_lines(lines: &[&str], changes: &[DiffChange], side: Side) -> Vec
             if start >= cr.end {
                 break;
             }
-            if cr.start < end + 1 && cr.end > start {
+            // The refine lists a line by the part of it that its change holds,
+            // so the lookup clips the line to the change.
+            let held = cr.start.max(start)..cr.end.min(end);
+            if cr.start < end + 1 && cr.end > start && !is_unchanged(held) {
                 changed[first + i] = true;
             }
         }
@@ -768,11 +812,17 @@ mod tests {
     /// Like [`hunks`] but drives the structural (tree-sitter) diff by tagging the
     /// input as Rust, so a one-sided in-line change is marked on one side only.
     fn hunks_rust(base: &str, buffer: &str, ctx: u32) -> Vec<ReviewHunk> {
+        hunks_in("x.rs", base, buffer, ctx)
+    }
+
+    /// Like [`hunks`] but drives the structural diff of the language that
+    /// `path` names.
+    fn hunks_in(path: &str, base: &str, buffer: &str, ctx: u32) -> Vec<ReviewHunk> {
         use stoat_language::LanguageRegistry;
         let inputs = vec![ReviewFileInput {
-            path: PathBuf::from("x.rs"),
-            rel_path: "x.rs".to_string(),
-            language: LanguageRegistry::standard().for_path(Path::new("x.rs")),
+            path: PathBuf::from(path),
+            rel_path: path.to_string(),
+            language: LanguageRegistry::standard().for_path(Path::new(path)),
             base_text: Arc::new(base.to_string()),
             buffer_text: Arc::new(buffer.to_string()),
         }];
@@ -1112,8 +1162,93 @@ mod tests {
             prose: false,
         }];
         assert_eq!(
-            mark_changed_lines(&lines, &changes, Side::Lhs),
+            mark_changed_lines(&lines, &changes, &[], Side::Lhs),
             vec![false, true, false]
+        );
+    }
+
+    /// A refined pair flags every line it covers except the lines its refine
+    /// found equal. A blank line found equal stays unflagged through its empty
+    /// pair, and a blank line with no counterpart flags.
+    #[test]
+    fn a_refined_pair_marks_all_but_its_unchanged_lines() {
+        let text = "keep\n\nedit\n\nend\n";
+        let lines = split_lines(text);
+        let changes = vec![DiffChange {
+            side: Side::Rhs,
+            byte_range: 0..15,
+            kind: structural_diff::ChangeKind::Replaced,
+            move_metadata: None,
+            pair_id: Some(0),
+            deletion_rhs_anchor: None,
+            refined_spans: Some(vec![6..10, 11..12]),
+            prose: true,
+        }];
+        let unchanged = |rhs: Range<usize>| MatchedPair {
+            lhs: rhs.clone(),
+            rhs,
+        };
+        assert_eq!(
+            mark_changed_lines(
+                &lines,
+                &changes,
+                &[unchanged(0..4), unchanged(5..5), unchanged(12..15)],
+                Side::Rhs,
+            ),
+            vec![false, false, true, true, false],
+            "the equal lines read as context, the edited line and the new blank line as changed",
+        );
+    }
+
+    /// Lines inserted inside a block scalar are its hunk's only changed rows.
+    /// The scalar's other lines align with their old selves as context, though
+    /// the scalar is one changed string.
+    #[test]
+    fn an_insertion_inside_a_block_scalar_leaves_the_rest_as_context() {
+        let base = "filters: |\n  ci: all\n  unit: some\n  db: none\nnext: 1\n";
+        let buffer = concat!(
+            "filters: |\n  ci: all\n  perf: new\n  bench: new\n",
+            "  unit: some\n  db: none\nnext: 1\n",
+        );
+
+        let side = |text, span: Option<Range<usize>>| Some((text, span.into_iter().collect()));
+        assert_eq!(
+            shapes(&hunks_in("x.yaml", base, buffer, 1)),
+            [[
+                (side("  ci: all", None), side("  ci: all", None), false),
+                (None, side("  perf: new", Some(0..11)), true),
+                (None, side("  bench: new", Some(0..12)), true),
+                (
+                    side("  unit: some", None),
+                    side("  unit: some", None),
+                    false
+                ),
+            ]],
+            "the two new lines are the only changed rows",
+        );
+    }
+
+    /// A file's last line that gains its newline stays a changed row, though its
+    /// text matches, both beside an edit to the line above it and alone.
+    #[test]
+    fn a_last_line_that_gains_a_newline_stays_changed() {
+        let side = |text, span: Option<Range<usize>>| Some((text, span.into_iter().collect()));
+        assert_eq!(
+            (
+                shapes(&hunks("a\nx", "b\nx\n", 1)),
+                shapes(&hunks("a\nx", "a\nx\n", 1)),
+            ),
+            (
+                vec![vec![
+                    (side("a", Some(0..1)), side("b", Some(0..1)), true),
+                    (side("x", None), side("x", None), true),
+                ]],
+                vec![vec![
+                    (side("a", None), side("a", None), false),
+                    (side("x", None), side("x", None), true),
+                ]],
+            ),
+            "the newline is the change, so the line it ends reads as changed",
         );
     }
 
