@@ -349,19 +349,21 @@ impl DiffState {
         }
     }
 
-    /// Force the next drive to recompute `id`'s diff map against fresh blobs,
-    /// by dropping its recorded version, any in-flight job, and `path`'s cached
-    /// blobs.
+    /// Force a recompute of `id`'s diff map against fresh blobs, by dropping its
+    /// recorded version and `path`'s cached blobs.
     ///
     /// A stage or an amend moves one of the two blobs, and the cached pair
     /// marks the hunks staged as they were before the write. The text did not
     /// move, so the recompute skips the settle window. `path` is `None` for a
     /// buffer with no file.
     ///
-    /// A want in flight is marked superseded and kept, so its landings still
-    /// run.
+    /// A job or a want in flight is marked superseded and kept. A want's
+    /// landings still run. A job's map still paints, and the recompute starts
+    /// once it lands, so the buffer never has two jobs at once.
     pub(super) fn invalidate(&mut self, id: BufferId, path: Option<&Path>) {
-        self.jobs.remove(&id);
+        if let Some(job) = self.jobs.get_mut(&id) {
+            job.superseded = true;
+        }
         self.versions.remove(&id);
         self.hunks_only.remove(&id);
         if let Some(want) = self.wants.get_mut(&id) {
@@ -530,6 +532,10 @@ impl DiffState {
     /// A version seen for the first time opens the window and arms a redraw
     /// timer, so the frame that closes the window is drawn even when nothing
     /// else asks for one.
+    ///
+    /// A closed window stays closed for that version. A buffer whose diff job
+    /// is still in flight asks again on later drives, and its next job starts
+    /// as soon as the job in flight lands.
     pub(super) fn settled(
         &mut self,
         executor: &Executor,
@@ -540,11 +546,7 @@ impl DiffState {
         let now = executor.now();
         match self.settle.get(&buffer_id) {
             Some((settling, since)) if *settling == version => {
-                if now.duration_since(*since) < DIFF_SETTLE {
-                    return false;
-                }
-                self.settle.remove(&buffer_id);
-                true
+                now.duration_since(*since) >= DIFF_SETTLE
             },
             _ => {
                 self.settle.insert(buffer_id, (version, now));
@@ -768,9 +770,9 @@ impl DiffState {
     /// new version for [`DIFF_SETTLE`].
     ///
     /// Each pair waits out its own window. The measured file's map goes stale
-    /// with its base, so the drive that follows re-diffs it with no second
-    /// window, because its own text did not move. A base file with no open
-    /// buffer keeps the text last read.
+    /// with its base, and its next diff skips a second window, because its own
+    /// text did not move. A base file with no open buffer keeps the text last
+    /// read.
     fn refresh_pair_bases(
         &mut self,
         buffers: &BufferRegistry,
@@ -814,7 +816,9 @@ impl DiffState {
             let Some(id) = buffers.id_for_path(path) else {
                 continue;
             };
-            self.jobs.remove(&id);
+            if let Some(job) = self.jobs.get_mut(&id) {
+                job.superseded = true;
+            }
             self.versions.remove(&id);
             self.hunks_only.remove(&id);
             if let Some(want) = self.wants.get_mut(&id) {
@@ -919,13 +923,6 @@ impl DiffState {
                 continue;
             }
             if self
-                .jobs
-                .get(&buffer_id)
-                .is_some_and(|job| job.target_version == cur_version)
-            {
-                continue;
-            }
-            if self
                 .wants
                 .get(&buffer_id)
                 .is_some_and(|want| want.target_version == cur_version)
@@ -942,6 +939,13 @@ impl DiffState {
                 && !opened
                 && !self.settled(executor, redraw_notify, buffer_id, cur_version)
             {
+                continue;
+            }
+            // A newer version waits for the job in flight rather than running
+            // beside it. The check sits after the settle window, so the window
+            // runs meanwhile and the next job starts on the drive that lands
+            // this one.
+            if self.jobs.contains_key(&buffer_id) {
                 continue;
             }
 
@@ -997,7 +1001,6 @@ impl DiffState {
             self.jobs.insert(
                 buffer_id,
                 DiffJob {
-                    target_version: cur_version,
                     task,
                     superseded: false,
                     base_moved,
@@ -1008,7 +1011,7 @@ impl DiffState {
     }
 
     /// Install `out`'s map on its buffer, and file the blobs it read unless a
-    /// `.git` write superseded the job that read them.
+    /// later write superseded the job that read them.
     ///
     /// A superseded map still paints, since it read its blobs no earlier than
     /// the map on screen.
@@ -1039,10 +1042,10 @@ impl DiffState {
 }
 
 pub(super) struct DiffJob {
-    pub(super) target_version: u64,
     pub(super) task: Task<DiffJobOutput>,
-    /// A `.git` write landed after the job read its blobs, so its map still
-    /// paints and its version and blobs do not count.
+    /// A `.git` write, a stage, or a pair base refresh landed after the job
+    /// read its blobs, so its map still paints and its version and blobs do not
+    /// count.
     pub(super) superseded: bool,
     /// The buffer held the text its last diff read, so only the base moved,
     /// through a git write or a switch of base. Such a job skips the settle
@@ -2049,8 +2052,8 @@ mod tests {
     use super::{
         changed_byte_ranges, compute_base_highlights, compute_diff_map, diff_sides,
         repo_hunk_position, resolve_base, scan_changed_ranges, BaseHighlightCache,
-        BaseHighlightMemo, DiffBase, DiffBaseText, DiffLanding, HunkPosition, WorktreeBase,
-        DIFF_SETTLE,
+        BaseHighlightMemo, DiffBase, DiffBaseText, DiffJob, DiffLanding, DiffState, HunkPosition,
+        WorktreeBase, DIFF_SETTLE,
     };
     use crate::{
         action_handlers::{self, movement},
@@ -2065,12 +2068,14 @@ mod tests {
         theme::Theme,
         workspace::Workspace,
     };
+    use futures::future;
     use ratatui::style::Color;
     use std::{
         collections::HashMap,
         ops::Range,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
+        time::Instant,
     };
     use stoat_action::{DiffAgainstIndex, StageHunk};
     use stoat_language::{parse, structural_diff::TreeCache, Language, LanguageRegistry};
@@ -3471,6 +3476,75 @@ mod tests {
             "a\nc\n",
             "the index base stands, and the HEAD job never lands",
         );
+    }
+
+    /// A stage stales the diff of a buffer whose job still runs. The job keeps
+    /// its slot and loses only its standing, so no second job starts beside it.
+    #[test]
+    fn invalidate_marks_the_job_in_flight_superseded() {
+        let h = TestHarness::with_size(80, 24);
+        let id = BufferId::new(1);
+        let mut state = DiffState::default();
+        state.jobs.insert(id, pending_job(&h));
+
+        state.invalidate(id, None);
+
+        assert_eq!(
+            state.jobs.get(&id).map(|job| job.superseded),
+            Some(true),
+            "the job stays in its slot, marked superseded",
+        );
+    }
+
+    /// A buffer edited while its diff job runs waits for that job rather than
+    /// starting a second one beside it. Its settle window runs meanwhile, so
+    /// the next diff lands with no further wait once the job in flight is gone.
+    #[test]
+    fn a_newer_version_waits_for_the_job_in_flight() {
+        let (mut h, buffer_id) = open_unstaged_change();
+        let job = pending_job(&h);
+        h.stoat
+            .active_workspace_mut()
+            .diff
+            .jobs
+            .insert(buffer_id, job);
+
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .edit(0..0, "x");
+        h.settle_diff_jobs();
+        let current_while_busy = h.stoat.active_workspace().diff_map_current(buffer_id);
+
+        // The clock does not advance from here, so the diff lands only on a
+        // settle window that ran while the job was in flight.
+        h.stoat.active_workspace_mut().diff.jobs.remove(&buffer_id);
+        h.stoat.drive_background();
+        h.settle();
+        h.stoat.drive_background();
+
+        assert_eq!(
+            (
+                current_while_busy,
+                h.stoat.active_workspace().diff_map_current(buffer_id)
+            ),
+            (false, true),
+            "the settled edit waits for the job in flight, then diffs at once",
+        );
+    }
+
+    /// A diff job that never lands, so a drive finds it in flight.
+    fn pending_job(h: &TestHarness) -> DiffJob {
+        DiffJob {
+            task: h.stoat.executor.spawn(future::pending()),
+            superseded: false,
+            base_moved: false,
+            started: Instant::now(),
+        }
     }
 
     /// A stage moves the index blob and leaves the buffer where it was, so the
