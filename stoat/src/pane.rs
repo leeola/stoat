@@ -122,7 +122,7 @@ pub enum DockVisibility {
     Hidden,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DockPanel {
     pub view: View,
     pub side: DockSide,
@@ -154,7 +154,7 @@ pub enum FocusTarget {
     Dock(DockId),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pane {
     pub view: View,
     /// View this pane showed before a terminal replaced it, restored when
@@ -247,7 +247,7 @@ impl Pane {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Split {
     axis: Axis,
     children: Vec<NodeId>,
@@ -261,13 +261,13 @@ struct Split {
     area: Rect,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 enum NodeContent {
     Leaf(PaneId),
     Split(Split),
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Node {
     parent: NodeId,
     content: NodeContent,
@@ -334,6 +334,75 @@ impl PaneTree {
             next_index: 1,
             stack: Vec::new(),
             last_split_focus: pane_id,
+            widened: None,
+            natural: HashMap::new(),
+        }
+    }
+
+    /// A copy of the tree as a save writes it and a restore reads it back.
+    ///
+    /// The fields a save skips come back at their defaults. The copy has no
+    /// geometry or widen until the next layout, no view a terminal replaced, no
+    /// change landing, and no diff latch, so a copied workspace takes none of
+    /// the source's session state.
+    pub(crate) fn persisted_copy(&self) -> PaneTree {
+        // Each type destructures whole, so a field added to the tree, a pane, a
+        // node, or a split fails to compile here until it is kept or reset.
+        let PaneTree {
+            root,
+            focus,
+            area: _,
+            panes,
+            nodes,
+            next_index,
+            stack: _,
+            last_split_focus: _,
+            widened: _,
+            natural: _,
+        } = self;
+
+        let mut panes = panes.clone();
+        for pane in panes.values_mut() {
+            let Pane {
+                view: _,
+                prev_view,
+                placement: _,
+                area,
+                index: _,
+                jumplist: _,
+                change_landing,
+                diff_mode,
+                buffer_history: _,
+            } = pane;
+            *prev_view = None;
+            *area = Rect::default();
+            *change_landing = None;
+            *diff_mode = false;
+        }
+
+        let mut nodes = nodes.clone();
+        for node in nodes.values_mut() {
+            let Node { parent: _, content } = node;
+            if let NodeContent::Split(Split {
+                axis: _,
+                children: _,
+                weights: _,
+                area,
+            }) = content
+            {
+                *area = Rect::default();
+            }
+        }
+
+        PaneTree {
+            root: *root,
+            focus: *focus,
+            area: Rect::default(),
+            panes,
+            nodes,
+            next_index: *next_index,
+            stack: Vec::new(),
+            last_split_focus: PaneId::default(),
             widened: None,
             natural: HashMap::new(),
         }
@@ -1272,6 +1341,25 @@ impl PaneTree {
     }
 }
 
+/// `docks` as a save writes them and a restore reads them back, with no area
+/// until the next layout.
+pub(crate) fn persisted_docks(docks: &SlotMap<DockId, DockPanel>) -> SlotMap<DockId, DockPanel> {
+    let mut docks = docks.clone();
+    for dock in docks.values_mut() {
+        // Destructured whole, so a field added to a dock fails to compile here
+        // until it is kept or reset.
+        let DockPanel {
+            view: _,
+            side: _,
+            visibility: _,
+            default_width: _,
+            area,
+        } = dock;
+        *area = Rect::default();
+    }
+    docks
+}
+
 /// Per-child extents (summing to `usable`) for a split of `len` children.
 ///
 /// Uses `weights` as fractions when it has one finite, positive entry per
@@ -1388,9 +1476,67 @@ impl DoubleEndedIterator for Traverse<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{buffer_registry::BufferRegistry, jumplist::JumpEntry};
+    use serde::de::DeserializeOwned;
+    use stoat_text::{Anchor, Selection, SelectionGoal};
 
     fn area() -> Rect {
         Rect::new(0, 0, 120, 40)
+    }
+
+    /// The copy agrees with a save and a restore on every field, the skipped
+    /// ones included, for the tree and the docks alike.
+    #[test]
+    fn a_persisted_copy_matches_a_serde_round_trip() {
+        let mut tree = PaneTree::new(area());
+        let pane = tree.split(Axis::Vertical);
+        assert!(tree.widen(pane), "the split pane widens");
+
+        let buffer = BufferId::new(7);
+        let entry = || JumpEntry {
+            buffer_id: buffer,
+            selections: vec![Selection {
+                id: 0,
+                start: Anchor::min_for_buffer(buffer),
+                end: Anchor::min_for_buffer(buffer),
+                reversed: false,
+                goal: SelectionGoal::None,
+            }],
+        };
+        let shown = tree.pane_mut(pane);
+        shown.prev_view = Some(View::Label("shell".into()));
+        shown.change_landing = Some(ChangeLanding {
+            entry: entry(),
+            generation: 1,
+        });
+        shown.diff_mode = true;
+        shown.jumplist.push(entry(), &BufferRegistry::new());
+        shown.record_shown(buffer);
+
+        let mut docks = SlotMap::with_key();
+        docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Open { width: 30 },
+            default_width: 30,
+            area: Rect::new(90, 0, 30, 40),
+        });
+
+        assert_eq!(
+            [
+                format!("{:?}", tree.persisted_copy()),
+                format!("{:?}", persisted_docks(&docks)),
+            ],
+            [
+                format!("{:?}", round_trip(&tree)),
+                format!("{:?}", round_trip(&docks)),
+            ],
+        );
+    }
+
+    /// `value` written to RON and read back, as a save and a restore do.
+    fn round_trip<T: Serialize + DeserializeOwned>(value: &T) -> T {
+        ron::from_str(&ron::ser::to_string(value).expect("serializes")).expect("parses")
     }
 
     #[test]

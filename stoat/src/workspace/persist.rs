@@ -25,7 +25,7 @@ use crate::{
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
     host::FsHost,
     input_history::InputHistory,
-    pane::{DockId, DockPanel, FocusTarget, PaneId, PaneTree, View},
+    pane::{self, DockId, DockPanel, FocusTarget, PaneId, PaneTree, View},
     rebase::RebaseState,
     ssh::RemoteTarget,
     workspace::{Tab, Workspace, WorkspaceUid},
@@ -358,8 +358,8 @@ impl Workspace {
         WorkspaceStateV1 {
             uid: self.uid,
             git_root: self.git_root.clone(),
-            panes: clone_pane_tree(&self.panes),
-            docks: clone_docks(&self.docks),
+            panes: self.panes.persisted_copy(),
+            docks: pane::persisted_docks(&self.docks),
             focus: match self.focus {
                 FocusTarget::SplitPane => FocusTargetSnap::SplitPane(self.panes.focus()),
                 FocusTarget::Dock(id) => FocusTargetSnap::Dock(id),
@@ -377,7 +377,7 @@ impl Workspace {
             tabs: self
                 .tabs
                 .iter()
-                .map(|tab| tab.parked.as_ref().map(clone_pane_tree))
+                .map(|tab| tab.parked.as_ref().map(PaneTree::persisted_copy))
                 .collect(),
             active_tab: self.active_tab,
             last_tab: self.last_tab,
@@ -924,19 +924,6 @@ fn stale_replacement(view: &View) -> Option<View> {
         | View::Editor(_)
         | View::Image { .. } => None,
     }
-}
-
-/// Workaround for `PaneTree` not being `Clone`: deserialize a freshly
-/// serialized copy. Only used on the save path where cloning is cheap and
-/// avoids leaking layout internals out of `pane.rs`.
-fn clone_pane_tree(tree: &PaneTree) -> PaneTree {
-    let body = ron::ser::to_string(tree).expect("pane tree is always serializable");
-    ron::from_str(&body).expect("pane tree round-trips through its own serde impl")
-}
-
-fn clone_docks(docks: &SlotMap<DockId, DockPanel>) -> SlotMap<DockId, DockPanel> {
-    let body = ron::ser::to_string(docks).expect("dock slotmap is always serializable");
-    ron::from_str(&body).expect("dock slotmap round-trips through serde")
 }
 
 #[cfg(test)]
