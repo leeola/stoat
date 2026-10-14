@@ -19,8 +19,9 @@
 //! 3. **Emit sections.** The unmatched run between two consecutive anchors is a changed section. A
 //!    lone same-kind list on each side recurses into its children instead, so a small edit inside a
 //!    container drills down to its changed statement. A longer run first peels each pair at its
-//!    ends that shares at least four subtrees unique on their own side, and each peeled pair
-//!    recurses the same way. Every other non-empty run is a section.
+//!    ends that shares at least four subtrees unique on their own side. A middle too large to
+//!    search whole then pairs its members by the equal subtrees they share. Each peeled or shared
+//!    pair recurses the same way, and every other non-empty run is a section.
 //!
 //! After this pass, every node carries a [`ChangeKind`] in a side [`ChangeMap`], and the changed
 //! sections are collected in [`PreprocessResult::sections`]. The Dijkstra search then runs over one
@@ -29,14 +30,17 @@
 //! The pass follows `split_unchanged` in `references/difftastic/src/diff/unchanged.rs`, but
 //! sibling matching runs imara-diff's histogram over child [`ContentId`]s rather than `wu_diff`.
 //! The peel is `split_mostly_unchanged_toplevel`, which difftastic applies to the top level alone
-//! and this pass applies to every run.
+//! and this pass applies to every run. The pairing is the bottom-up phase of
+//! `references/omnidiff/src/diff/solve_bottom_up_propagation.rs`, applied to one sibling run.
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
     fx::FxBuildHasher,
+    moves::MAX_AMBIGUITY,
 };
 use imara_diff::{Algorithm, Diff, InternedInput, Interner};
+use smallvec::SmallVec;
 use std::{
     cell::OnceCell,
     collections::{HashMap, HashSet},
@@ -49,6 +53,22 @@ use std::{
 /// landmark that pins them together, and four of them separate a list that
 /// kept most of its body from two lists that share only boilerplate.
 const MOSTLY_UNCHANGED_MIN_COMMON_CHILDREN: usize = 4;
+
+/// The product of a run's node counts, lhs times rhs, above which the run pairs
+/// its members by shared content before the search.
+///
+/// The search costs about two vertices per node of the product and about one
+/// microsecond per vertex. Over the fixture corpus, a product of 15,000 took
+/// 29,000 vertices and 10 ms, 60,000 took 82,000 and 34 ms, and 151,000 took
+/// 334,000 and 190 ms. A run under the threshold therefore searches whole near
+/// 100 ms and keeps the optimal alignment. A larger run grows toward
+/// [`super::dijkstra::DEFAULT_GRAPH_LIMIT`], where the search gives up on the
+/// whole section.
+const PAIRING_THRESHOLD: u64 = 50_000;
+
+/// The atom leaves a subtree needs to weigh in [`pair_by_shared_content`], so a
+/// `;` or a `)` that every member holds weighs nothing.
+const PAIRING_MIN_LEAVES: u32 = 3;
 
 /// What the preprocessing pass concluded about a node. The diff search
 /// only walks `Pending` nodes; `Unchanged` and `Moved` are terminal tags
@@ -130,27 +150,45 @@ pub struct PreprocessResult {
 /// How many times each content id occurs in one arena.
 type IdCounts = HashMap<ContentId, u32, FxBuildHasher>;
 
-/// The content id counts of both arenas, which tell [`is_mostly_unchanged_pair`]
-/// which subtrees are unique on their own side.
+/// The [`SideFacts`] of both arenas, which the run handling reads.
 ///
-/// The counts form on the first read, once per [`mark_unchanged`]. Only a run
+/// The facts form on the first read, once per [`mark_unchanged`]. Only a run
 /// with members on both sides and two or more on one side reads them, so a
-/// diff whose runs all pair one to one never pays for the pass over both
+/// diff whose runs all pair one to one never pays for the passes over both
 /// arenas.
 #[derive(Default)]
-struct Uniqueness {
-    counts: OnceCell<(IdCounts, IdCounts)>,
+struct ArenaFacts {
+    sides: OnceCell<(SideFacts, SideFacts)>,
 }
 
-impl Uniqueness {
-    /// The lhs and rhs counts, built from the two arenas on the first call.
-    fn counts(
+/// The facts about one arena that [`ArenaFacts`] holds.
+struct SideFacts {
+    /// The occurrences of each content id, which tell
+    /// [`is_mostly_unchanged_pair`] which subtrees are unique on their side.
+    ids: IdCounts,
+    /// The node and atom leaf counts of each subtree, which size a run for
+    /// [`PAIRING_THRESHOLD`] and weigh what [`pair_by_shared_content`] finds.
+    sizes: Vec<(u32, u32)>,
+}
+
+impl ArenaFacts {
+    /// The lhs and rhs facts, built from the two arenas on the first call.
+    fn sides(
         &self,
         lhs_arena: &SyntaxArena<'_>,
         rhs_arena: &SyntaxArena<'_>,
-    ) -> &(IdCounts, IdCounts) {
-        self.counts
-            .get_or_init(|| (count_ids(lhs_arena), count_ids(rhs_arena)))
+    ) -> &(SideFacts, SideFacts) {
+        self.sides
+            .get_or_init(|| (SideFacts::of(lhs_arena), SideFacts::of(rhs_arena)))
+    }
+}
+
+impl SideFacts {
+    fn of(arena: &SyntaxArena<'_>) -> Self {
+        Self {
+            ids: count_ids(arena),
+            sizes: arena.subtree_counts(),
+        }
     }
 }
 
@@ -186,7 +224,7 @@ pub fn mark_unchanged(
         rhs_arena,
         &lhs_children,
         &rhs_children,
-        &Uniqueness::default(),
+        &ArenaFacts::default(),
         &mut result,
     );
 
@@ -201,15 +239,15 @@ pub fn mark_unchanged(
 /// run of exactly one same-kind [`Syntax::List`] on each side recurses into
 /// its children instead, so a small edit inside a container drills down to the
 /// changed statement rather than emitting the whole container. A longer run
-/// first peels the mostly unchanged pairs at its ends, as [`emit_run`]
-/// describes. Every other non-empty run goes to `out.sections` for the
-/// per-section Dijkstra search.
+/// first peels the mostly unchanged pairs at its ends, and a large middle pairs
+/// its members by shared content, as [`emit_run`] describes. Every other
+/// non-empty run goes to `out.sections` for the per-section Dijkstra search.
 fn pair_children(
     lhs_arena: &SyntaxArena<'_>,
     rhs_arena: &SyntaxArena<'_>,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
-    uniqueness: &Uniqueness,
+    facts: &ArenaFacts,
     out: &mut PreprocessResult,
 ) {
     // Phase 1a: shrink common prefix.
@@ -267,7 +305,7 @@ fn pair_children(
     for (lhs_anchor, rhs_anchor) in boundaries {
         let lhs_run = &lhs_mid[lhs_cursor..lhs_anchor];
         let rhs_run = &rhs_mid[rhs_cursor..rhs_anchor];
-        emit_run(lhs_arena, rhs_arena, lhs_run, rhs_run, uniqueness, out);
+        emit_run(lhs_arena, rhs_arena, lhs_run, rhs_run, facts, out);
         lhs_cursor = lhs_anchor + 1;
         rhs_cursor = rhs_anchor + 1;
     }
@@ -279,27 +317,26 @@ fn pair_children(
 /// A run of one member per side goes to [`emit_pair`]. A longer run first
 /// peels, from its front and then from its back, each pair that
 /// [`is_mostly_unchanged_pair`] accepts, and sends each peeled pair to
-/// [`emit_pair`]. A middle of one member per side goes to [`emit_pair`] too,
-/// and any other non-empty middle is one section.
+/// [`emit_pair`]. A middle of one member per side goes to [`emit_pair`] too.
+/// A middle that [`pairs_by_content`] accepts goes to [`emit_paired`], and any
+/// other non-empty middle is one section.
 ///
-/// The peel keeps two edited neighbors apart, so the search runs inside each
-/// of them and never over the pair as one section.
+/// The peel and the pairing keep edited members apart, so the search runs
+/// inside each member and never over the whole run as one section.
 fn emit_run(
     lhs_arena: &SyntaxArena<'_>,
     rhs_arena: &SyntaxArena<'_>,
     lhs_run: &[SyntaxId],
     rhs_run: &[SyntaxId],
-    uniqueness: &Uniqueness,
+    facts: &ArenaFacts,
     out: &mut PreprocessResult,
 ) {
     if lhs_run.len() == 1 && rhs_run.len() == 1 {
-        emit_pair(
-            lhs_arena, rhs_arena, lhs_run[0], rhs_run[0], uniqueness, out,
-        );
+        emit_pair(lhs_arena, rhs_arena, lhs_run[0], rhs_run[0], facts, out);
         return;
     }
 
-    let peels = |lhs, rhs| is_mostly_unchanged_pair(lhs_arena, rhs_arena, lhs, rhs, uniqueness);
+    let peels = |lhs, rhs| is_mostly_unchanged_pair(lhs_arena, rhs_arena, lhs, rhs, facts);
     let shorter = lhs_run.len().min(rhs_run.len());
     let lead = (0..shorter)
         .take_while(|&k| peels(lhs_run[k], rhs_run[k]))
@@ -311,9 +348,7 @@ fn emit_run(
         .count();
 
     for k in 0..lead {
-        emit_pair(
-            lhs_arena, rhs_arena, lhs_run[k], rhs_run[k], uniqueness, out,
-        );
+        emit_pair(lhs_arena, rhs_arena, lhs_run[k], rhs_run[k], facts, out);
     }
 
     let lhs_middle = &lhs_run[lead..lhs_run.len() - trail];
@@ -324,23 +359,18 @@ fn emit_run(
             rhs_arena,
             lhs_middle[0],
             rhs_middle[0],
-            uniqueness,
+            facts,
             out,
         );
+    } else if pairs_by_content(lhs_arena, rhs_arena, lhs_middle, rhs_middle, facts) {
+        emit_paired(lhs_arena, rhs_arena, lhs_middle, rhs_middle, facts, out);
     } else if !lhs_middle.is_empty() || !rhs_middle.is_empty() {
         out.sections
             .push((lhs_middle.to_vec(), rhs_middle.to_vec()));
     }
 
     for k in (0..trail).rev() {
-        emit_pair(
-            lhs_arena,
-            rhs_arena,
-            lhs_last(k),
-            rhs_last(k),
-            uniqueness,
-            out,
-        );
+        emit_pair(lhs_arena, rhs_arena, lhs_last(k), rhs_last(k), facts, out);
     }
 }
 
@@ -351,10 +381,10 @@ fn emit_pair(
     rhs_arena: &SyntaxArena<'_>,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
-    uniqueness: &Uniqueness,
+    facts: &ArenaFacts,
     out: &mut PreprocessResult,
 ) {
-    if !recurse_singleton_lists(lhs_arena, rhs_arena, lhs_id, rhs_id, uniqueness, out) {
+    if !recurse_singleton_lists(lhs_arena, rhs_arena, lhs_id, rhs_id, facts, out) {
         out.sections.push((vec![lhs_id], vec![rhs_id]));
     }
 }
@@ -371,7 +401,7 @@ fn is_mostly_unchanged_pair(
     rhs_arena: &SyntaxArena<'_>,
     lhs: SyntaxId,
     rhs: SyntaxId,
-    uniqueness: &Uniqueness,
+    facts: &ArenaFacts,
 ) -> bool {
     if !matches!(
         (lhs_arena.get(lhs), rhs_arena.get(rhs)),
@@ -379,7 +409,8 @@ fn is_mostly_unchanged_pair(
     ) {
         return false;
     }
-    let (lhs_counts, rhs_counts) = uniqueness.counts(lhs_arena, rhs_arena);
+    let (lhs_facts, rhs_facts) = facts.sides(lhs_arena, rhs_arena);
+    let (lhs_counts, rhs_counts) = (&lhs_facts.ids, &rhs_facts.ids);
     let unique = |counts: &IdCounts, id: ContentId| counts.get(&id) == Some(&1);
 
     let mut rhs_unique: HashSet<ContentId, FxBuildHasher> = HashSet::default();
@@ -411,6 +442,195 @@ fn is_mostly_unchanged_pair(
     false
 }
 
+/// Whether a run pairs its members by shared content before the search.
+///
+/// The run needs two members or more on each side, and node counts that
+/// multiply past [`PAIRING_THRESHOLD`]. A lone member on one side sometimes
+/// wraps or unwraps several members of the other side, as when nested `if let`
+/// statements become one let chain. Pairing it with one of them strands the
+/// rest as additions, while the search descends into the wrapper and aligns
+/// them all. A run that fails the member count reads no facts.
+fn pairs_by_content(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_run: &[SyntaxId],
+    rhs_run: &[SyntaxId],
+    facts: &ArenaFacts,
+) -> bool {
+    if lhs_run.len() < 2 || rhs_run.len() < 2 {
+        return false;
+    }
+    let (lhs_facts, rhs_facts) = facts.sides(lhs_arena, rhs_arena);
+    let nodes = |sizes: &[(u32, u32)], run: &[SyntaxId]| {
+        run.iter().map(|id| u64::from(sizes[id.0].0)).sum::<u64>()
+    };
+    nodes(&lhs_facts.sizes, lhs_run) * nodes(&rhs_facts.sizes, rhs_run) > PAIRING_THRESHOLD
+}
+
+/// Emit `lhs_run` against `rhs_run` split at the pairs that
+/// [`pair_by_shared_content`] finds, or as one section when it finds none.
+///
+/// Each pair goes to [`emit_pair`], and each stretch between two pairs goes
+/// through [`emit_run`] again.
+fn emit_paired(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_run: &[SyntaxId],
+    rhs_run: &[SyntaxId],
+    facts: &ArenaFacts,
+    out: &mut PreprocessResult,
+) {
+    let pairs = pair_by_shared_content(lhs_arena, rhs_arena, lhs_run, rhs_run, facts);
+    if pairs.is_empty() {
+        out.sections.push((lhs_run.to_vec(), rhs_run.to_vec()));
+        return;
+    }
+
+    let (mut lhs_from, mut rhs_from) = (0, 0);
+    for (i, j) in pairs {
+        let (lhs_stretch, rhs_stretch) = (&lhs_run[lhs_from..i], &rhs_run[rhs_from..j]);
+        emit_run(lhs_arena, rhs_arena, lhs_stretch, rhs_stretch, facts, out);
+        emit_pair(lhs_arena, rhs_arena, lhs_run[i], rhs_run[j], facts, out);
+        (lhs_from, rhs_from) = (i + 1, j + 1);
+    }
+    let (lhs_stretch, rhs_stretch) = (&lhs_run[lhs_from..], &rhs_run[rhs_from..]);
+    emit_run(lhs_arena, rhs_arena, lhs_stretch, rhs_stretch, facts, out);
+}
+
+/// The pairs of an lhs and an rhs member of a run that share the most content,
+/// in order, as `(lhs index, rhs index)`.
+///
+/// A pair weighs the atom leaves of the equal subtrees that its two members
+/// share. Only a subtree of at least [`PAIRING_MIN_LEAVES`] leaves counts,
+/// and only when at most [`MAX_AMBIGUITY`] members hold it on each side, so
+/// punctuation and boilerplate repeated across the run weigh nothing. A shared
+/// subtree counts once, and the walk skips the nodes under it.
+///
+/// The heaviest pairs of two lists of one kind win in turn, each member at
+/// most once. The result is their heaviest chain whose rhs indices rise with
+/// the lhs indices, so the run splits into stretches in order.
+fn pair_by_shared_content(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_run: &[SyntaxId],
+    rhs_run: &[SyntaxId],
+    facts: &ArenaFacts,
+) -> Vec<(usize, usize)> {
+    let (lhs_facts, rhs_facts) = facts.sides(lhs_arena, rhs_arena);
+    let lhs_holders = holders(lhs_arena, lhs_run, &lhs_facts.sizes);
+    let rhs_holders = holders(rhs_arena, rhs_run, &rhs_facts.sizes);
+    let held_by = |id: ContentId| {
+        let lhs_count = lhs_holders.get(&id).map_or(0, SmallVec::len);
+        rhs_holders
+            .get(&id)
+            .filter(|rhs| lhs_count <= MAX_AMBIGUITY && rhs.len() <= MAX_AMBIGUITY)
+    };
+
+    let mut weights: HashMap<(usize, usize), u64, FxBuildHasher> = HashMap::default();
+    for (i, &member) in lhs_run.iter().enumerate() {
+        let mut stack = vec![member];
+        while let Some(id) = stack.pop() {
+            let leaves = lhs_facts.sizes[id.0].1;
+            if leaves < PAIRING_MIN_LEAVES {
+                continue;
+            }
+            let node = lhs_arena.get(id);
+            if let Some(rhs_members) = held_by(node.content_id()) {
+                for &j in rhs_members {
+                    *weights.entry((i, j as usize)).or_default() += u64::from(leaves);
+                }
+            } else if let Syntax::List(list) = node {
+                stack.extend(list.children.iter().copied());
+            }
+        }
+    }
+
+    let mut candidates: Vec<(u64, usize, usize)> = weights
+        .into_iter()
+        .map(|((i, j), weight)| (weight, i, j))
+        .collect();
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+
+    let (mut lhs_free, mut rhs_free) = (vec![true; lhs_run.len()], vec![true; rhs_run.len()]);
+    let mut taken: Vec<(usize, usize, u64)> = Vec::new();
+    for (weight, i, j) in candidates {
+        if lhs_free[i]
+            && rhs_free[j]
+            && same_kind_lists(lhs_arena.get(lhs_run[i]), rhs_arena.get(rhs_run[j]))
+        {
+            lhs_free[i] = false;
+            rhs_free[j] = false;
+            taken.push((i, j, weight));
+        }
+    }
+    taken.sort_unstable();
+    heaviest_rising_chain(&taken)
+}
+
+/// Each content id under the members of `run` whose subtree holds at least
+/// [`PAIRING_MIN_LEAVES`] leaves, with the indices of the members that hold
+/// it, each once and in order.
+///
+/// A node under the minimum is skipped with all of its descendants, because
+/// no subtree inside it reaches the minimum either.
+fn holders(
+    arena: &SyntaxArena<'_>,
+    run: &[SyntaxId],
+    sizes: &[(u32, u32)],
+) -> HashMap<ContentId, SmallVec<[u32; 4]>, FxBuildHasher> {
+    let mut holders: HashMap<ContentId, SmallVec<[u32; 4]>, FxBuildHasher> = HashMap::default();
+    for (index, &member) in run.iter().enumerate() {
+        let index = index as u32;
+        let mut stack = vec![member];
+        while let Some(id) = stack.pop() {
+            if sizes[id.0].1 < PAIRING_MIN_LEAVES {
+                continue;
+            }
+            let node = arena.get(id);
+            let members = holders.entry(node.content_id()).or_default();
+            if members.last() != Some(&index) {
+                members.push(index);
+            }
+            if let Syntax::List(list) = node {
+                stack.extend(list.children.iter().copied());
+            }
+        }
+    }
+    holders
+}
+
+fn same_kind_lists(lhs: &Syntax<'_>, rhs: &Syntax<'_>) -> bool {
+    matches!((lhs, rhs), (Syntax::List(lhs), Syntax::List(rhs)) if lhs.kind == rhs.kind)
+}
+
+/// The heaviest chain of `pairs`, given as `(lhs index, rhs index, weight)`
+/// sorted by lhs index, whose rhs indices strictly rise, as
+/// `(lhs index, rhs index)`.
+///
+/// Each pair looks back over every earlier pair, quadratic in the pair count,
+/// which stays small because a run holds at most a few thousand members.
+fn heaviest_rising_chain(pairs: &[(usize, usize, u64)]) -> Vec<(usize, usize)> {
+    let mut best: Vec<(u64, Option<usize>)> = Vec::with_capacity(pairs.len());
+    for (k, &(_, j, weight)) in pairs.iter().enumerate() {
+        let before = (0..k)
+            .filter(|&p| pairs[p].1 < j)
+            .max_by_key(|&p| best[p].0);
+        best.push(match before {
+            Some(p) => (best[p].0 + weight, Some(p)),
+            None => (weight, None),
+        });
+    }
+
+    let mut chain = Vec::new();
+    let mut at = (0..pairs.len()).max_by_key(|&k| best[k].0);
+    while let Some(k) = at {
+        chain.push((pairs[k].0, pairs[k].1));
+        at = best[k].1;
+    }
+    chain.reverse();
+    chain
+}
+
 /// Recurse into a one-node-each run when both nodes are lists of the same
 /// kind, splitting their children into sub-sections. Returns `true` when it
 /// recursed, `false` when the caller should emit the pair as one section.
@@ -423,7 +643,7 @@ fn recurse_singleton_lists(
     rhs_arena: &SyntaxArena<'_>,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
-    uniqueness: &Uniqueness,
+    facts: &ArenaFacts,
     out: &mut PreprocessResult,
 ) -> bool {
     if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
@@ -432,9 +652,7 @@ fn recurse_singleton_lists(
     {
         let lhs_grand = lhs_list.children.clone();
         let rhs_grand = rhs_list.children.clone();
-        pair_children(
-            lhs_arena, rhs_arena, &lhs_grand, &rhs_grand, uniqueness, out,
-        );
+        pair_children(lhs_arena, rhs_arena, &lhs_grand, &rhs_grand, facts, out);
         true
     } else {
         false
@@ -707,6 +925,161 @@ mod tests {
             [vec![(2, 2)], vec![(1, 1), (1, 1)]],
             "a name and two calls stay one section, and a name and three calls peel",
         );
+    }
+
+    #[test]
+    fn a_large_run_pairs_its_members_by_shared_content() {
+        let (lhs, rhs) = method_beside_new_module();
+        let (lhs_arena, lhs_root) = lower(&lhs);
+        let (rhs_arena, rhs_root) = lower(&rhs);
+        let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
+
+        let keep = |arena: &SyntaxArena<'_>, source: &str, changes: &ChangeMap| {
+            let id = (0..arena.len())
+                .map(SyntaxId)
+                .find(|id| {
+                    arena.get(*id).kind() == "function_item"
+                        && source[span(arena, *id)].starts_with("fn keep")
+                })
+                .expect("keep is a function");
+            (count_unchanged(arena, id, changes), count_total(arena, id))
+        };
+        let (lhs_keep, rhs_keep) = (
+            keep(&lhs_arena, &lhs, &result.lhs_changes),
+            keep(&rhs_arena, &rhs, &result.rhs_changes),
+        );
+        assert_eq!(
+            (lhs_keep.0, rhs_keep.0),
+            (lhs_keep.1, rhs_keep.1),
+            "every node of keep is unchanged on both sides",
+        );
+
+        let kinds = |arena: &SyntaxArena<'_>, ids: &[SyntaxId]| -> Vec<&str> {
+            ids.iter().map(|id| arena.get(*id).kind()).collect()
+        };
+        let sections: Vec<_> = result
+            .sections
+            .iter()
+            .map(|(l, r)| (kinds(&lhs_arena, l), kinds(&rhs_arena, r)))
+            .collect();
+        assert_eq!(
+            sections,
+            [
+                (
+                    vec!["use_declaration"],
+                    vec!["use_declaration", "use_declaration"]
+                ),
+                (vec!["identifier"], vec!["identifier"]),
+                (vec![], vec!["mod_item"]),
+            ],
+            "the two impls pair, so no section holds either",
+        );
+    }
+
+    #[test]
+    fn the_heaviest_rising_chain_drops_a_crossing_pair() {
+        assert_eq!(
+            heaviest_rising_chain(&[(0, 1, 5), (1, 0, 10), (2, 2, 3)]),
+            [(1, 0), (2, 2)],
+            "the heavier of two crossing pairs stays, with the pair after both",
+        );
+    }
+
+    #[test]
+    fn boilerplate_held_by_many_members_pairs_nothing() {
+        let members = |tail: &str| -> String {
+            (0..9)
+                .map(|k| format!("fn f{k}() {{ common(1, 2); {tail}{k}(); }}\n"))
+                .collect()
+        };
+
+        assert_eq!(
+            content_pairs(&members("u"), &members("w")),
+            Vec::<(usize, usize)>::new(),
+            "a call that all nine members hold weighs nothing",
+        );
+    }
+
+    #[test]
+    fn a_shared_subtree_weighs_once_however_deep() {
+        let lhs = "fn a() { outer(inner(x, y)); p1(); p2(); p3(); p4(); }\n";
+        let rhs = "fn b() { outer(inner(x, y)); }\nfn c() { p1(); p2(); p3(); p4(); }\n";
+
+        assert_eq!(
+            content_pairs(lhs, rhs),
+            [(0, 1)],
+            "four calls of 3 leaves outweigh one statement of 10, nested calls and all",
+        );
+    }
+
+    #[test]
+    fn a_lone_member_against_several_skips_the_pairing() {
+        let (lhs, rhs) = method_beside_new_module();
+        let (lhs_arena, lhs_root) = lower(&lhs);
+        let (rhs_arena, rhs_root) = lower(&rhs);
+        let lhs_run = list_children(&lhs_arena, lhs_root);
+        let rhs_run = list_children(&rhs_arena, rhs_root);
+        let facts = ArenaFacts::default();
+
+        assert_eq!(
+            [&lhs_run[1..], &lhs_run[..]].map(|lhs_members| pairs_by_content(
+                &lhs_arena,
+                &rhs_arena,
+                lhs_members,
+                &rhs_run,
+                &facts
+            )),
+            [false, true],
+            "the impl alone against four members searches whole, and two members against four pair",
+        );
+    }
+
+    #[test]
+    fn a_use_never_pairs_with_an_impl() {
+        assert_eq!(
+            content_pairs("use a::b::c;\n", "impl X { fn f() { a::b::c(); } }\n"),
+            Vec::<(usize, usize)>::new(),
+            "the shared path weighs, but the two members are lists of different kinds",
+        );
+    }
+
+    /// The pairs that [`pair_by_shared_content`] finds between the top-level
+    /// items of `lhs` and `rhs`.
+    fn content_pairs(lhs: &str, rhs: &str) -> Vec<(usize, usize)> {
+        let (lhs_arena, lhs_root) = lower(lhs);
+        let (rhs_arena, rhs_root) = lower(rhs);
+        let lhs_run = list_children(&lhs_arena, lhs_root);
+        let rhs_run = list_children(&rhs_arena, rhs_root);
+        pair_by_shared_content(
+            &lhs_arena,
+            &rhs_arena,
+            &lhs_run,
+            &rhs_run,
+            &ArenaFacts::default(),
+        )
+    }
+
+    /// An `impl` with an unchanged 300-statement method and a changed one,
+    /// against the same beside changed `use` lines and a new 300-statement
+    /// module, as `(lhs, rhs)`.
+    fn method_beside_new_module() -> (String, String) {
+        let lets = |name: &str| -> String {
+            (0..300)
+                .map(|i| format!("let {name}{i} = {i};\n"))
+                .collect()
+        };
+        let lhs = format!(
+            "use crate::{{A, B}};\nimpl W {{ fn keep() {{ {} }} fn change() {{ old(); }} }}\n",
+            lets("v"),
+        );
+        let rhs = format!(
+            "use util::T;\nuse crate::{{S, A, B}};\n\
+             impl W {{ fn keep() {{ {} }} fn change() {{ new(); }} }}\n\
+             mod tests {{ fn t() {{ {} }} }}\n",
+            lets("v"),
+            lets("t"),
+        );
+        (lhs, rhs)
     }
 
     /// The sections that [`mark_unchanged`] leaves for `lhs` against `rhs`, as

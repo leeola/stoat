@@ -116,6 +116,27 @@ impl<'a> SyntaxArena<'a> {
         self.nodes.is_empty()
     }
 
+    /// The node count and the atom leaf count of each node's subtree, indexed
+    /// by [`SyntaxId`], each count taking in the node itself.
+    ///
+    /// Every child must sit at a lower index than its parent, as
+    /// [`super::lower_tree`] allocates them, because one forward pass fills the
+    /// table.
+    pub fn subtree_counts(&self) -> Vec<(u32, u32)> {
+        let mut counts = vec![(0, 0); self.nodes.len()];
+        for (i, node) in self.nodes.iter().enumerate() {
+            counts[i] = match node {
+                Syntax::Atom(_) => (1, 1),
+                Syntax::List(list) => {
+                    list.children.iter().fold((1, 0), |(nodes, leaves), child| {
+                        (nodes + counts[child.0].0, leaves + counts[child.0].1)
+                    })
+                },
+            };
+        }
+        counts
+    }
+
     /// Walk every [`Syntax::List`] in the arena and set the
     /// `next_sibling` pointer of each child to its successor in the
     /// parent's `children` Vec. The last child's `next_sibling` is

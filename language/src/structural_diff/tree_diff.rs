@@ -1388,6 +1388,58 @@ mod tests {
         );
     }
 
+    /// A changed method beside a new module splits from the module before the
+    /// search, so the unchanged method marks nothing and the left side keeps
+    /// almost all of its text.
+    #[test]
+    fn a_changed_method_beside_a_new_module_diffs_its_own_lines() {
+        let lets = |name: &str| -> String {
+            (0..300)
+                .map(|i| format!("let {name}{i} = {i};\n"))
+                .collect()
+        };
+        let lhs = format!(
+            "use crate::{{A, B}};\nimpl W {{ fn keep() {{ {} }} fn change() {{ old(); }} }}\n",
+            lets("v"),
+        );
+        let rhs = format!(
+            "use util::T;\nuse crate::{{S, A, B}};\n\
+             impl W {{ fn keep() {{ {} }} fn change() {{ new(); }} }}\n\
+             mod tests {{ fn t() {{ {} }} }}\n",
+            lets("v"),
+            lets("t"),
+        );
+        let result = diff_with_language(&rust_lang(), &lhs, &rhs).unwrap();
+
+        let keep =
+            |source: &str| source.find("fn keep()").unwrap()..source.find(" fn change()").unwrap();
+        let (lhs_keep, rhs_keep) = (keep(&lhs), keep(&rhs));
+        let in_keep: Vec<&DiffChange> = result
+            .changes
+            .iter()
+            .filter(|c| {
+                let keep = match c.side {
+                    Side::Lhs => &lhs_keep,
+                    Side::Rhs => &rhs_keep,
+                };
+                c.byte_range.start < keep.end && c.byte_range.end > keep.start
+            })
+            .collect();
+        assert!(in_keep.is_empty(), "keep marks nothing: {in_keep:?}");
+
+        let lhs_marked: usize = result
+            .changes
+            .iter()
+            .filter(|c| c.side == Side::Lhs)
+            .map(|c| c.byte_range.len())
+            .sum();
+        assert!(
+            lhs_marked * 10 < lhs.len(),
+            "the lhs changes cover {lhs_marked} of {} bytes",
+            lhs.len(),
+        );
+    }
+
     /// Each change as `(side, text, line)`, in the order the diff emits them.
     fn change_rows<'a>(
         result: &DiffResult,

@@ -50,16 +50,11 @@ use super::{
 use std::collections::{HashMap, HashSet};
 
 fn precompute_leaf_counts(arena: &SyntaxArena<'_>) -> Vec<usize> {
-    let mut counts = vec![0usize; arena.len()];
-    for i in 0..arena.len() {
-        match arena.get(SyntaxId(i)) {
-            Syntax::Atom(_) => counts[i] = 1,
-            Syntax::List(list) => {
-                counts[i] = list.children.iter().map(|c| counts[c.0]).sum();
-            },
-        }
-    }
-    counts
+    arena
+        .subtree_counts()
+        .into_iter()
+        .map(|(_, leaves)| leaves as usize)
+        .collect()
 }
 
 /// Whether each node's subtree holds an atom that `changes` leaves
