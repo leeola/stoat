@@ -224,10 +224,11 @@ pub struct Pane {
     ///
     /// The history persists with the layout, so a restored session switches
     /// back among the buffers each pane showed before the save. The save keeps
-    /// the buffers an editor holds and the buffers with unsaved edits, so a
-    /// restored switch reaches those and passes over the rest, as it passes
-    /// over a closed buffer. A file written before the field reads as an empty
-    /// history.
+    /// the buffers an editor holds and the buffers with unsaved edits, and the
+    /// restore keeps only the entries for buffers it brought back. A buffer
+    /// that one session dropped therefore leaves the history rather than ride
+    /// into every later save. A file written before the field reads as an
+    /// empty history.
     #[serde(default)]
     pub(crate) buffer_history: Vec<BufferId>,
 }

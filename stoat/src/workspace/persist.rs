@@ -500,10 +500,14 @@ impl Workspace {
 
         // A save keeps only the buffers a pane holds or the user dirtied, so a
         // jump into any other buffer names one this restore did not bring back.
+        // A history entry for one rides into every later save unless it goes
+        // here, since no id is ever issued again.
         for tree in std::iter::once(&mut panes).chain(parked.iter_mut().flatten()) {
             for (_, pane) in tree.all_panes_mut() {
                 pane.jumplist
                     .retain_buffers(|buffer_id| self.buffers.get(buffer_id).is_some());
+                pane.buffer_history
+                    .retain(|&buffer_id| self.buffers.get(buffer_id).is_some());
             }
         }
 
@@ -1227,9 +1231,9 @@ mod tests {
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let (id_a, _) = ws.buffers.open(&ws_dir.join("a.txt"), "alpha\n");
-        let (id_b, _) = ws.buffers.open(&ws_dir.join("b.txt"), "beta\n");
-        let (id_c, _) = ws.buffers.open(&ws_dir.join("c.txt"), "gamma\n");
+        let id_a = open_held(&mut ws, &ws_dir.join("a.txt"), "alpha\n", &exec);
+        let id_b = open_held(&mut ws, &ws_dir.join("b.txt"), "beta\n", &exec);
+        let id_c = open_held(&mut ws, &ws_dir.join("c.txt"), "gamma\n", &exec);
 
         let first = ws.panes.focus();
         ws.panes.pane_mut(first).record_shown(id_a);
@@ -1251,6 +1255,38 @@ mod tests {
             ),
             (vec![id_a, id_b], vec![id_c]),
             "each tab's focused pane keeps the buffers it showed",
+        );
+    }
+
+    /// A clean buffer that no editor holds leaves with its session, and the
+    /// restore drops its history entry too. A session that shows such a buffer
+    /// each time therefore grows no history across restarts.
+    #[test]
+    fn repeated_restores_do_not_grow_a_panes_history() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/regrow");
+        let exec = executor();
+        let state_path = ws_dir.join("state.ron");
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let held = open_held(&mut ws, &ws_dir.join("held.txt"), "held\n", &exec);
+        let focus = ws.panes.focus();
+        ws.panes.pane_mut(focus).record_shown(held);
+
+        for _ in 0..3 {
+            let (clean, _) = ws.buffers.open(&ws_dir.join("clean.txt"), "clean\n");
+            let focus = ws.panes.focus();
+            ws.panes.pane_mut(focus).record_shown(clean);
+            ws.save_state(&state_path, &fake).unwrap();
+
+            ws = Workspace::new(PathBuf::from("/elsewhere"), &exec, crate::test_notify());
+            ws.restore_state(&state_path, &fake, &exec).unwrap();
+        }
+
+        assert_eq!(
+            ws.panes.pane(ws.panes.focus()).buffer_history,
+            [held],
+            "the held buffer is the history's only entry after three restarts",
         );
     }
 
