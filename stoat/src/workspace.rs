@@ -50,7 +50,7 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     task::{Context, Poll},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -199,7 +199,7 @@ pub struct Workspace {
     /// The order of this workspace's session writes, shared with each write
     /// the blocking pool holds, so a close or a delete stops the writes still
     /// queued before it removes the session files.
-    pub(crate) save_gate: Arc<Mutex<SaveGate>>,
+    pub(crate) save_gate: Arc<SaveGate>,
     /// Persisted name of the finder scope this workspace last closed in, so
     /// `space p` reopens where the user left off. Holds `"all"`, `"modified"`,
     /// or a named-scope key, and is `None` until a finder closes here. Buffers

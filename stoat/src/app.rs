@@ -4901,7 +4901,7 @@ impl Stoat {
         };
         let (state, meta) = (ws.to_state(), ws.meta());
         let gate = Arc::clone(&ws.save_gate);
-        let seq = gate.lock().expect("save gate poisoned").issue();
+        let seq = gate.issue();
 
         let fs = self.fs_host.clone();
         let task = self.executor.spawn_blocking(move || {

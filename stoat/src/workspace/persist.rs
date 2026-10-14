@@ -36,7 +36,10 @@ use std::{
     collections::HashMap,
     io,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::Executor;
@@ -407,7 +410,7 @@ impl Workspace {
     /// The write goes through [`Self::save_gate`] as the newest save, so it
     /// writes nothing once the workspace is retired.
     pub(crate) fn save_state(&self, path: &Path, fs: &dyn FsHost) -> io::Result<()> {
-        let seq = self.save_gate.lock().expect("save gate poisoned").issue();
+        let seq = self.save_gate.issue();
         let mut state = self.to_state();
         state.resolve_reanchors();
         write_state_gated(&self.save_gate, seq, &state, &self.meta(), path, fs).map(|_| ())
@@ -684,44 +687,61 @@ pub(crate) fn rename_saved_session(
 /// pool, which runs the writes in no fixed order. A write the pool already
 /// holds when a close or a delete removes the session files also writes them
 /// again. Each save takes a sequence number with its snapshot, and each write
-/// holds the gate while it writes, so a write older than the last one written,
-/// one a move of the session superseded, or one for a retired workspace, lands
-/// nothing.
+/// holds the gate's state while it writes, so a write older than the last one
+/// written, one a move of the session superseded, or one for a retired
+/// workspace, lands nothing.
+///
+/// [`Self::issue`] takes no lock, so no save, close, delete, or `:cd` waits on
+/// the run loop for a write in progress. The state lock puts the writes, the
+/// retire, and the supersede in one order. The pool takes it, and so does the
+/// synchronous save of a quit, which must land before the process exits.
 ///
 /// See also:
 /// - [`write_state_gated`] for the write that reads the gate.
 #[derive(Default)]
 pub(crate) struct SaveGate {
-    issued: u64,
+    issued: AtomicU64,
+    state: Mutex<GateState>,
+}
+
+/// What the writes of one [`SaveGate`] did, read and changed under its lock.
+#[derive(Default)]
+struct GateState {
     written: u64,
     retired: bool,
 }
 
 impl SaveGate {
     /// Take the sequence number of a snapshot about to be taken.
-    pub(crate) fn issue(&mut self) -> u64 {
-        self.issued += 1;
-        self.issued
+    pub(crate) fn issue(&self) -> u64 {
+        self.issued.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// The sequence number the last [`Self::issue`] took, or 0 before the
+    /// first.
+    pub(crate) fn issued(&self) -> u64 {
+        self.issued.load(Ordering::Relaxed)
     }
 
     /// Stop every write of this workspace that has not landed, before its
     /// session files are removed.
     ///
-    /// The caller holds the gate's lock, so a write in progress finishes first
-    /// and none starts after.
-    pub(crate) fn retire(&mut self) {
-        self.retired = true;
+    /// Waits for a write in progress, and no write starts after.
+    pub(crate) fn retire(&self) {
+        self.state.lock().expect("save gate poisoned").retired = true;
     }
 
-    /// Skip every write issued so far, before the session file they name is
-    /// removed and the workspace saves under another path.
+    /// Skip every write numbered `seq` or lower, before the session file they
+    /// name is removed and the workspace saves under another path.
     ///
     /// A `:cd` moves the session to the new root's file, and a write issued
-    /// before it names the old one. The caller holds the gate's lock, so a
-    /// write in progress finishes before the removal, and every later save
-    /// takes a newer sequence and still lands.
-    pub(crate) fn supersede(&mut self) {
-        self.written = self.issued;
+    /// before it names the old one. The move reads `seq` from [`Self::issued`]
+    /// on the run loop and supersedes later on the pool. A save issued after
+    /// the move takes a higher number, so it lands whether its write or the
+    /// supersede runs first. Waits for a write in progress.
+    pub(crate) fn supersede_through(&self, seq: u64) {
+        let mut state = self.state.lock().expect("save gate poisoned");
+        state.written = state.written.max(seq);
     }
 }
 
@@ -729,17 +749,17 @@ impl SaveGate {
 /// workspace already landed, a move of its session superseded the save, or the
 /// workspace is retired.
 ///
-/// Holds `gate` for the whole write, so two writes of one workspace never
-/// overlap. Returns whether the write ran.
+/// Holds `gate`'s state for the whole write, so two writes of one workspace
+/// never overlap. Returns whether the write ran.
 pub(crate) fn write_state_gated(
-    gate: &Mutex<SaveGate>,
+    gate: &SaveGate,
     seq: u64,
     state: &WorkspaceStateV1,
     meta: &super::registry::WorkspaceMeta,
     path: &Path,
     fs: &dyn FsHost,
 ) -> io::Result<bool> {
-    let mut gate = gate.lock().expect("save gate poisoned");
+    let mut gate = gate.state.lock().expect("save gate poisoned");
     if gate.retired || seq <= gate.written {
         return Ok(false);
     }
@@ -1169,7 +1189,7 @@ mod tests {
         let mut ws = new_laid_out_workspace(PathBuf::from("/gated"), &exec);
         let path = PathBuf::from("/gated/state.ron");
         let meta_path = super::super::registry::meta_path_for(&path);
-        let gate = Mutex::new(SaveGate::default());
+        let gate = SaveGate::default();
         let write = |ws: &Workspace, seq| {
             write_state_gated(&gate, seq, &ws.to_state(), &ws.meta(), &path, &fake).unwrap()
         };
@@ -1187,7 +1207,7 @@ mod tests {
 
         fake.remove_file(&path).unwrap();
         fake.remove_file(&meta_path).unwrap();
-        gate.lock().unwrap().retire();
+        gate.retire();
         let retired = write(&ws, 3);
 
         assert_eq!(
@@ -1200,6 +1220,62 @@ mod tests {
             ),
             (true, false, "new".to_string(), false, [false, false]),
         );
+    }
+
+    /// The run loop issues a save while the pool writes another, so an issue
+    /// takes no lock that a write holds.
+    #[test]
+    fn an_issue_takes_no_lock_while_a_write_holds_the_gate() {
+        let gate = SaveGate::default();
+        let _write = gate.state.lock().expect("save gate poisoned");
+        assert_eq!((gate.issue(), gate.issue()), (1, 2));
+    }
+
+    /// A `:cd` reads its boundary on the run loop and supersedes on the pool,
+    /// so the save it issues next has its number before the supersede runs.
+    /// That save still lands, and the save queued before the move does not.
+    #[test]
+    fn a_save_issued_after_a_cd_still_lands() {
+        let gate = SaveGate::default();
+        let queued = gate.issue();
+        let boundary = gate.issued();
+        let after = gate.issue();
+        gate.supersede_through(boundary);
+
+        assert_eq!(
+            (
+                gated_write_lands(&gate, queued),
+                gated_write_lands(&gate, after)
+            ),
+            (false, true),
+        );
+    }
+
+    /// A supersede that reaches the pool after a newer save landed keeps that
+    /// save's mark, so an older save still in the queue does not write over
+    /// the newer file.
+    #[test]
+    fn a_late_supersede_keeps_a_newer_write_in_place() {
+        let gate = SaveGate::default();
+        let boundary = gate.issued();
+        let (older, newer) = (gate.issue(), gate.issue());
+        let newer_landed = gated_write_lands(&gate, newer);
+        gate.supersede_through(boundary);
+
+        assert_eq!(
+            (newer_landed, gated_write_lands(&gate, older)),
+            (true, false)
+        );
+    }
+
+    /// Whether the save numbered `seq` writes through `gate`, measured with a
+    /// fresh workspace written to a fresh fake.
+    fn gated_write_lands(gate: &SaveGate, seq: u64) -> bool {
+        let exec = executor();
+        let ws = new_laid_out_workspace(PathBuf::from("/gated"), &exec);
+        let path = PathBuf::from("/gated/state.ron");
+        write_state_gated(gate, seq, &ws.to_state(), &ws.meta(), &path, &FakeFs::new())
+            .expect("the write runs")
     }
 
     /// The editor a parked tab shows, or `None` when that tab's focused pane
