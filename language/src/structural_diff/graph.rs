@@ -18,16 +18,19 @@
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
+    line_diff,
     stack::Stack,
 };
 use std::cmp::min;
 
-/// The byte length above which a comment or a string pair skips the similarity
-/// test and stays two `Novel` runs.
+/// The byte length above which a comment or a string pair measures its
+/// similarity by lines rather than by chars.
 ///
 /// [`levenshtein_pct`] fills a table of one cell per char pair, so the cap keeps
-/// one vertex expansion under about 16 million cells. YAML block scalars and
-/// markdown paragraphs run long enough to need it.
+/// one vertex expansion under about 16 million cells. YAML block scalars,
+/// markdown paragraphs, and doc comments run long enough to pass it. Past it,
+/// [`similarity_pct`] counts the lines the two texts share, which stays linear
+/// in the text.
 const MAX_SIMILARITY_BYTES: usize = 4096;
 
 /// One delimiter pair we have descended into. `PopBoth` means both
@@ -91,12 +94,12 @@ pub enum Edge {
     /// will be diffed inside. Cheap but not free.
     EnterUnchangedDelimiter { depth_difference: u32 },
     /// Both sides have a comment-kind atom whose contents are
-    /// similar (Levenshtein-based). The replacement is preferred
+    /// similar, by [`similarity_pct`]. The replacement is preferred
     /// over two separate Novel edges when similarity is above 20%.
-    /// Cost is 500 + (100 - levenshtein_pct), so range is 500-600.
-    ReplacedComment { levenshtein_pct: u8 },
+    /// Cost is 500 + (100 - similarity_pct), so range is 500-600.
+    ReplacedComment { similarity_pct: u8 },
     /// Same as [`Edge::ReplacedComment`] but for string-kind atoms.
-    ReplacedString { levenshtein_pct: u8 },
+    ReplacedString { similarity_pct: u8 },
     /// LHS has a leaf with no counterpart on RHS.
     NovelAtomLHS,
     /// RHS has a leaf with no counterpart on LHS.
@@ -122,8 +125,9 @@ impl Edge {
             Edge::EnterUnchangedDelimiter { depth_difference } => 100 + min(40, depth_difference),
             Edge::NovelAtomLHS | Edge::NovelAtomRHS => 300,
             Edge::EnterNovelDelimiterLHS | Edge::EnterNovelDelimiterRHS => 300,
-            Edge::ReplacedComment { levenshtein_pct }
-            | Edge::ReplacedString { levenshtein_pct } => 500 + u32::from(100 - levenshtein_pct),
+            Edge::ReplacedComment { similarity_pct } | Edge::ReplacedString { similarity_pct } => {
+                500 + u32::from(100 - similarity_pct)
+            },
         }
     }
 }
@@ -184,20 +188,52 @@ pub fn is_string_atom(node: &Syntax<'_>) -> bool {
     }
 }
 
-/// Whether a comment or a string pair goes on to [`levenshtein_pct`].
+/// Whether a comment or a string pair goes on to [`similarity_pct`].
 ///
 /// The similarity never passes min(chars) / max(chars). A pair at or under 20
 /// percent by char count, which a replacement edge rejects anyway, therefore
 /// skips the test. A floor over byte lengths is not exact, because a multibyte
-/// char counts once in the similarity and several times in the length. A pair
-/// whose longer side passes [`MAX_SIMILARITY_BYTES`] skips the test for cost.
+/// char counts once in the similarity and several times in the length.
 pub fn similarity_possible(a: &str, b: &str) -> bool {
-    if a.len().max(b.len()) > MAX_SIMILARITY_BYTES {
-        return false;
-    }
     let (a_chars, b_chars) = (a.chars().count(), b.chars().count());
     let (shorter, longer) = (a_chars.min(b_chars), a_chars.max(b_chars));
     longer == 0 || shorter * 100 > 20 * longer
+}
+
+/// The similarity of a comment or a string pair as a percentage, 0 to 100.
+///
+/// A pair at or under [`MAX_SIMILARITY_BYTES`] measures by [`levenshtein_pct`].
+/// A longer pair measures by lines. Its similarity is the bytes of the lines
+/// that [`line_diff::align_lines`] pairs with a line of the same words,
+/// newlines included, over the longer side's bytes. So a long doc comment that
+/// kept most of its lines stays one replacement, at a cost linear in its text.
+///
+/// A one-line pair past the cap shares no line unless the two are equal, so it
+/// measures 0 however few chars changed.
+pub fn similarity_pct(a: &str, b: &str) -> u8 {
+    let longer = a.len().max(b.len());
+    if longer <= MAX_SIMILARITY_BYTES {
+        return levenshtein_pct(a, b);
+    }
+
+    let (a_lines, b_lines): (Vec<&str>, Vec<&str>) = (
+        a.split_inclusive('\n').collect(),
+        b.split_inclusive('\n').collect(),
+    );
+    let shared: usize = line_diff::align_lines(&a_lines, &b_lines)
+        .into_iter()
+        .filter_map(|pair| match pair {
+            (Some(i), Some(j))
+                if a_lines[i]
+                    .split_whitespace()
+                    .eq(b_lines[j].split_whitespace()) =>
+            {
+                Some(a_lines[i].len())
+            },
+            _ => None,
+        })
+        .sum();
+    (shared * 100 / longer) as u8
 }
 
 /// Compute a Levenshtein-distance-based similarity percentage
@@ -496,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn similarity_is_impossible_under_the_length_floor_and_over_the_cap() {
+    fn similarity_is_impossible_under_the_length_floor() {
         let long = "x".repeat(MAX_SIMILARITY_BYTES + 1);
         let multibyte = "ab\u{e9}\u{e9}\u{e9}\u{e9}";
 
@@ -508,9 +544,10 @@ mod tests {
                 similarity_possible(&long, &long),
                 similarity_possible("", ""),
             ],
-            [false, true, true, false, true],
+            [false, true, true, true, true],
             "one char in five sits on the floor, one in four passes it, two in six chars pass \
-             it though two in ten bytes do not, a side past the cap is out, two empty sides stay",
+             it though two in ten bytes do not, a pair past the cap goes on to the line \
+             measure, two empty sides stay",
         );
         assert!(
             levenshtein_pct(multibyte, "ab") > 20,
@@ -518,22 +555,43 @@ mod tests {
         );
     }
 
+    /// Past the cap a pair measures by the lines it shares, a reindented line
+    /// among them. One line past the cap shares nothing however close its chars
+    /// sit. Under the cap the measure stays the char one.
+    #[test]
+    fn a_pair_past_the_cap_measures_its_similarity_by_lines() {
+        let line = |i: usize, fill: &str| format!("{i:04}{}\n", fill.repeat(59));
+        let lhs: String = (0..100).map(|i| line(i, "x")).collect();
+        let rhs: String = (0..100)
+            .map(|i| match i {
+                42 => line(i, "y"),
+                77 => format!("    {}", line(i, "x")),
+                _ => line(i, "x"),
+            })
+            .collect();
+        let one_line = "x".repeat(MAX_SIMILARITY_BYTES + 1);
+
+        assert_eq!(
+            [
+                similarity_pct(&lhs, &rhs),
+                similarity_pct(&lhs, &lhs.replace('x', "z")),
+                similarity_pct(&one_line, &format!("{one_line}y")),
+                similarity_pct("kitten", "sitting"),
+            ],
+            [98, 0, 0, levenshtein_pct("kitten", "sitting")],
+            "99 shared lines of 64 bytes over 6,404, no shared line, one line past the cap, \
+             and the char measure under it",
+        );
+    }
+
     #[test]
     fn replaced_comment_cost_in_500_to_600_range() {
-        let edge = Edge::ReplacedComment {
-            levenshtein_pct: 80,
-        };
+        let edge = Edge::ReplacedComment { similarity_pct: 80 };
         let cost = edge.cost();
         assert!((500..=600).contains(&cost), "got cost {cost}");
         // High similarity should produce a lower cost.
-        let high_sim = Edge::ReplacedComment {
-            levenshtein_pct: 95,
-        }
-        .cost();
-        let low_sim = Edge::ReplacedComment {
-            levenshtein_pct: 30,
-        }
-        .cost();
+        let high_sim = Edge::ReplacedComment { similarity_pct: 95 }.cost();
+        let low_sim = Edge::ReplacedComment { similarity_pct: 30 }.cost();
         assert!(high_sim < low_sim);
     }
 

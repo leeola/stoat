@@ -1565,6 +1565,32 @@ mod tests {
         );
     }
 
+    /// A doc comment past the similarity cap that kept most of its lines pairs
+    /// as one prose change, so the refine marks the word that changed alone.
+    #[test]
+    fn a_long_comment_marks_only_its_changed_word() {
+        let lines: String = (0..100)
+            .map(|i| format!("* line {i:04} of a long doc comment that fills its row\n"))
+            .collect();
+        let lhs = format!("/**\n{lines}*/\nfn f() {{}}\n");
+        let rhs = lhs.replace("line 0042 of", "line 0042 OF");
+        let result = diff_with_language(&rust_lang(), &lhs, &rhs).unwrap();
+
+        assert_eq!(
+            (
+                result.changes.len(),
+                refined(&result, Side::Lhs, &lhs),
+                refined(&result, Side::Rhs, &rhs),
+            ),
+            (
+                2,
+                (DiffChangeKind::Replaced, true, vec!["of"]),
+                (DiffChangeKind::Replaced, true, vec!["OF"]),
+            ),
+            "one prose pair, refined to the word that changed on each side",
+        );
+    }
+
     /// Each pair gets an id of its own. The refinement keys its lookup on
     /// `pair_id`, so two pairs sharing one id collide and only one of them
     /// narrows.

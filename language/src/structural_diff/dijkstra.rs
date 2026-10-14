@@ -15,8 +15,8 @@ use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     fx::FxBuildHasher,
     graph::{
-        is_comment_atom, is_string_atom, levenshtein_pct, pop_all_parents, probably_punctuation,
-        push_lhs_delimiter, push_rhs_delimiter, similarity_possible, Edge, EnteredDelimiter,
+        is_comment_atom, is_string_atom, pop_all_parents, probably_punctuation, push_lhs_delimiter,
+        push_rhs_delimiter, similarity_pct, similarity_possible, Edge, EnteredDelimiter,
     },
     stack::Stack,
     unchanged::{mark_subtree, ChangeKind, ChangeMap},
@@ -304,24 +304,25 @@ fn expand(
                 // content pair via a Replaced* edge, so a tweaked
                 // comment/string does not show as two unrelated Novel runs.
                 if let (Syntax::Atom(lhs_atom), Syntax::Atom(rhs_atom)) = (lhs_node, rhs_node) {
-                    // The kind check is a cheap enum compare, while
-                    // Levenshtein is an O(n*m) DP. Gate on the kind first so
-                    // only same-kind comment/string pairs pay the similarity
-                    // cost -- code atoms, the common case, never match here.
+                    // The kind check is a cheap enum compare, while the
+                    // similarity is an O(n*m) DP under its cap. Gate on the
+                    // kind first so only same-kind comment/string pairs pay the
+                    // similarity cost -- code atoms, the common case, never
+                    // match here.
                     let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
                     let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
                     if (kind_match_comment || kind_match_string)
                         && similarity_possible(lhs_atom.content, rhs_atom.content)
                     {
-                        let levenshtein = levenshtein_pct(lhs_atom.content, rhs_atom.content);
-                        if levenshtein > 20 {
+                        let similarity = similarity_pct(lhs_atom.content, rhs_atom.content);
+                        if similarity > 20 {
                             let edge = if kind_match_comment {
                                 Edge::ReplacedComment {
-                                    levenshtein_pct: levenshtein,
+                                    similarity_pct: similarity,
                                 }
                             } else {
                                 Edge::ReplacedString {
-                                    levenshtein_pct: levenshtein,
+                                    similarity_pct: similarity,
                                 }
                             };
                             let (lhs_after, rhs_after, parents_after) = pop_all_parents(
@@ -628,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_long_similar_strings_over_the_cap_yields_novel() {
+    fn expand_one_line_strings_over_the_cap_yields_novel() {
         let mut arena = SyntaxArena::new();
         let lhs = mk_atom(&mut arena, "string_literal", "x".repeat(5000).leak());
         let rhs = mk_atom(
@@ -642,7 +643,29 @@ mod tests {
             !edges
                 .iter()
                 .any(|e| matches!(e, Edge::ReplacedString { .. })),
-            "a pair past the cap takes no replacement edge",
+            "a one-line pair past the cap shares no line, so it takes no replacement edge",
+        );
+    }
+
+    #[test]
+    fn expand_tall_similar_comments_over_the_cap_yields_replaced() {
+        let mut arena = SyntaxArena::new();
+        let body: String = (0..100)
+            .map(|i| format!("// line {i:04} of a long comment block that fills its row\n"))
+            .collect();
+        let lhs = mk_atom(&mut arena, "block_comment", body.clone().leak());
+        let rhs = mk_atom(
+            &mut arena,
+            "block_comment",
+            body.replace("line 0042", "LINE 0042").leak(),
+        );
+
+        let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
+        assert!(
+            edges
+                .iter()
+                .any(|e| matches!(e, Edge::ReplacedComment { similarity_pct: 99 })),
+            "a tall comment that kept 99 of its 100 lines takes a replacement edge, got {edges:?}",
         );
     }
 
