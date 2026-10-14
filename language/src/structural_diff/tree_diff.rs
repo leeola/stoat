@@ -242,18 +242,11 @@ pub fn prepare_diff<'a>(
     memo: Option<&TreeCache>,
     rhs_tree: Option<&Tree>,
 ) -> Option<PreparedDiff<'a>> {
-    prepare_per_file(
-        language,
-        lhs,
-        rhs,
-        cancel,
-        memo,
-        rhs_tree,
-        DEFAULT_BYTE_LIMIT,
-    )
-    .map(|prepared| PreparedDiff {
-        prepared,
-        _marker: PhantomData,
+    prepare_per_file(language, lhs, rhs, cancel, memo, rhs_tree, Limits::DEFAULT).map(|prepared| {
+        PreparedDiff {
+            prepared,
+            _marker: PhantomData,
+        }
     })
 }
 
@@ -474,6 +467,9 @@ struct PreparedFile<'a> {
     /// subtree equal on both sides. [`matched_atom_pairs`] expands them into
     /// the token pairs of the result.
     matched_nodes: Vec<(SyntaxId, SyntaxId)>,
+    /// The byte spans, lhs then rhs, of the sections whose search passed the
+    /// vertex cap or was cancelled, which [`DiffResult::unsearched`] reports.
+    unsearched: Vec<(Range<usize>, Range<usize>)>,
 }
 
 /// Borrowed view of the arenas + line indices for one prepared file.
@@ -486,8 +482,25 @@ struct PreparedFileView<'a> {
     rhs_lines: &'a LineIndex,
 }
 
+/// The bounds that [`prepare_per_file`] runs one file under.
+#[derive(Clone, Copy)]
+struct Limits {
+    /// The size in bytes above which a side skips the tree pass.
+    bytes: usize,
+    /// The vertex count past which a section's search gives up.
+    vertices: usize,
+}
+
+impl Limits {
+    /// The bounds of every public entry point.
+    const DEFAULT: Self = Self {
+        bytes: DEFAULT_BYTE_LIMIT,
+        vertices: DEFAULT_GRAPH_LIMIT,
+    };
+}
+
 /// Run the parse / lower / preprocess / Dijkstra / slider stages for
-/// one file. Returns `None` if either side is over `byte_limit` bytes or
+/// one file. Returns `None` if either side is over `limits.bytes` bytes or
 /// fails to parse, mirroring the [`diff_with_language`] fallback contract.
 /// The caller then routes that file through [`super::diff_lines`].
 fn prepare_per_file<'a>(
@@ -497,9 +510,9 @@ fn prepare_per_file<'a>(
     cancel: Option<&AtomicBool>,
     memo: Option<&TreeCache>,
     rhs_tree: Option<&Tree>,
-    byte_limit: usize,
+    limits: Limits,
 ) -> Option<PreparedFile<'a>> {
-    if lhs.len() > byte_limit || rhs.len() > byte_limit {
+    if lhs.len() > limits.bytes || rhs.len() > limits.bytes {
         return None;
     }
 
@@ -533,6 +546,7 @@ fn prepare_per_file<'a>(
     let sections = std::mem::take(&mut preprocess.sections);
     let mut replaced_atoms = Vec::new();
     let mut matched_nodes = std::mem::take(&mut preprocess.pairs);
+    let mut unsearched = Vec::new();
     for (lhs_run, rhs_run) in &sections {
         // A section empty on one side is a pure insertion or deletion. Its
         // nodes stay Pending, and collect_changes emits them as Novel, so there
@@ -549,7 +563,7 @@ fn prepare_per_file<'a>(
             &rhs_arena,
             lhs_run.first().copied(),
             rhs_run.first().copied(),
-            DEFAULT_GRAPH_LIMIT,
+            limits.vertices,
             cancel,
         ) {
             SearchOutcome::Found(path) => {
@@ -563,7 +577,11 @@ fn prepare_per_file<'a>(
                     &mut matched_nodes,
                 );
             },
-            SearchOutcome::ExceededGraphLimit => {},
+            // A cancelled search lands here too, and its section is just as
+            // unanswered.
+            SearchOutcome::ExceededGraphLimit => {
+                unsearched.push((run_span(&lhs_arena, lhs_run), run_span(&rhs_arena, rhs_run)));
+            },
         }
     }
 
@@ -595,7 +613,18 @@ fn prepare_per_file<'a>(
         rhs_text: rhs,
         replaced_atoms,
         matched_nodes,
+        unsearched,
     })
+}
+
+/// The bytes from the start of the first node of `run` to the end of its last.
+fn run_span(arena: &SyntaxArena<'_>, run: &[SyntaxId]) -> Range<usize> {
+    match (run.first(), run.last()) {
+        (Some(&first), Some(&last)) => {
+            full_byte_range(arena, first).start..full_byte_range(arena, last).end
+        },
+        _ => 0..0,
+    }
 }
 
 /// Convert a prepared file's residual change maps and the changeset's
@@ -649,6 +678,7 @@ fn finalize_per_file(
         changes,
         fell_back_to_line_diff: false,
         matched: Vec::new(),
+        unsearched: prepared.unsearched.clone(),
     }
 }
 
@@ -2237,7 +2267,19 @@ mod tests {
         let lang = rust_lang();
         let (ten, eleven) = ("fn a() {}\n", "fn ab() {}\n");
         let prepares = |lhs: &str, rhs: &str| {
-            prepare_per_file(&lang, lhs, rhs, None, None, None, 10).is_some()
+            prepare_per_file(
+                &lang,
+                lhs,
+                rhs,
+                None,
+                None,
+                None,
+                Limits {
+                    bytes: 10,
+                    ..Limits::DEFAULT
+                },
+            )
+            .is_some()
         };
 
         assert_eq!(
@@ -2294,6 +2336,56 @@ mod tests {
         // The structural-diff pipeline completed; we got changes even
         // though Dijkstra bailed immediately.
         assert!(!result.changes.is_empty());
+    }
+
+    #[test]
+    fn a_section_over_the_cap_is_reported_unsearched() {
+        let (lhs, rhs) = ("fn a() { x(1, 2, 3) }", "fn a() { y(4, 5, 6) }");
+        let result = diff_capped(lhs, rhs, 10);
+
+        let spans: Vec<(&str, &str)> = result
+            .unsearched
+            .iter()
+            .map(|(l, r)| (&lhs[l.clone()], &rhs[r.clone()]))
+            .collect();
+        assert_eq!(
+            spans,
+            [("x(1, 2, 3)", "y(4, 5, 6)")],
+            "the changed call is the one section, and the cap stops its search",
+        );
+    }
+
+    #[test]
+    fn a_search_that_finishes_reports_nothing_unsearched() {
+        let result = diff_with_language(
+            &rust_lang(),
+            "fn a() { x(1, 2, 3) }",
+            "fn a() { y(4, 5, 6) }",
+        )
+        .unwrap();
+
+        assert!(
+            result.unsearched.is_empty(),
+            "the search finished: {:?}",
+            result.unsearched,
+        );
+    }
+
+    /// [`diff_with_language`] with each section's search capped at `vertices`.
+    fn diff_capped(lhs: &str, rhs: &str, vertices: usize) -> DiffResult {
+        let limits = Limits {
+            vertices,
+            ..Limits::DEFAULT
+        };
+        let prepared = prepare_per_file(&rust_lang(), lhs, rhs, None, None, None, limits)
+            .expect("both sides parse");
+        finalize_single(
+            &PreparedDiff {
+                prepared,
+                _marker: PhantomData,
+            },
+            MatchedPairs::Collect,
+        )
     }
 
     #[test]

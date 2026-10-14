@@ -220,6 +220,14 @@ pub struct DiffResult {
     /// tokens, so its result leaves this empty, and so does a diff run under
     /// [`MatchedPairs::Skip`].
     pub matched: Vec<MatchedPair>,
+    /// The byte spans, lhs then rhs, of the changed sections whose search
+    /// passed the vertex cap or was cancelled.
+    ///
+    /// The changes inside them are the preprocessing's whole `Novel` runs and
+    /// the move pass's guesses, not a search's answer. A consumer that holds a
+    /// finer answer for those bytes, such as a line diff's char refinement,
+    /// keeps it there. The line fallback leaves this empty.
+    pub unsearched: Vec<(Range<usize>, Range<usize>)>,
 }
 
 /// Public entry point for callers without a language. Routes to the

@@ -1615,7 +1615,13 @@ pub(super) fn compute_diff_map(
             )
             && !tree.fell_back_to_line_diff
         {
-            merge_structural_detail(&mut hunks, &tree.changes, base_text, buffer_text);
+            merge_structural_detail(
+                &mut hunks,
+                &tree.changes,
+                &tree.unsearched,
+                base_text,
+                buffer_text,
+            );
         }
         DiffMap::from_hunks(hunks, Some(base.base.clone()))
     };

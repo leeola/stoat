@@ -1880,6 +1880,12 @@ pub(crate) fn changes_to_hunks(
 /// whitespace: tree-sitter sees the statements as unchanged nodes that moved,
 /// where the line differ sees every line's prefix rewritten.
 ///
+/// A hunk that reaches a section in `unsearched`, the sections the tree search
+/// gave up on, keeps the detail, status, and marked rows that
+/// [`changes_to_hunks`] gave it. The tree changes there are whole `Novel` runs
+/// and the move pass's guesses, which wash far more than the line pass's char
+/// refinement.
+///
 /// A `Modified` hunk the tree pass finds nothing in takes an empty
 /// [`TokenDetail`] rather than `None`. The renderer washes nothing and softens
 /// nothing for an empty span list, which is the intended reading of a
@@ -1898,6 +1904,7 @@ pub(crate) fn changes_to_hunks(
 pub(crate) fn merge_structural_detail(
     hunks: &mut [DiffHunk],
     tree_changes: &[stoat_language::structural_diff::DiffChange],
+    unsearched: &[(Range<usize>, Range<usize>)],
     base_text: &str,
     buffer_text: &str,
 ) {
@@ -1934,6 +1941,13 @@ pub(crate) fn merge_structural_detail(
         }
         let buffer_bytes =
             line_range_to_byte_range(&buffer_starts, buffer_text.len(), &hunk.buffer_line_range);
+        let overlaps = |a: &Range<usize>, b: &Range<usize>| a.start < b.end && b.start < a.end;
+        if unsearched
+            .iter()
+            .any(|(lhs, rhs)| overlaps(lhs, &hunk.base_byte_range) || overlaps(rhs, &buffer_bytes))
+        {
+            continue;
+        }
         let mut buffer_spans = Vec::new();
         let mut base_spans = Vec::new();
         let mut moved_ranges = Vec::new();
@@ -2342,6 +2356,7 @@ mod tests {
         multi_buffer::MultiBuffer,
     };
     use std::sync::Arc;
+    use stoat_language::structural_diff::{ChangeKind as LangChangeKind, DiffChange, Side};
 
     #[test]
     fn line_mapping_matches_prefix_newline_count() {
@@ -3083,6 +3098,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3149,6 +3165,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3214,6 +3231,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3272,6 +3290,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3356,6 +3375,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3393,6 +3413,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -3772,6 +3793,61 @@ mod tests {
         assert_eq!(dm.status_for_line(0), DiffStatus::Unchanged);
         assert_eq!(dm.status_for_line(1), DiffStatus::Modified);
         assert_eq!(dm.status_for_line(2), DiffStatus::Unchanged);
+    }
+
+    #[test]
+    fn an_unsearched_hunk_keeps_the_line_pass_detail() {
+        let base = "one\ntwo\nthree\nfour\nfive\n";
+        let buffer = "ONE\ntwo\nthree\nfour\nFIVE\n";
+        let novel = |side, byte_range| DiffChange {
+            side,
+            byte_range,
+            kind: LangChangeKind::Novel,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+            refined_spans: None,
+            prose: false,
+        };
+        let tree = [
+            novel(Side::Lhs, 0..3),
+            novel(Side::Lhs, 19..23),
+            novel(Side::Rhs, 0..3),
+            novel(Side::Rhs, 19..23),
+        ];
+
+        let span = ChangeSpan {
+            byte_range: 19..23,
+            kind: ChangeKind::Novel,
+            move_metadata: None,
+            prose: ProseChange::None,
+        };
+        let tree_detail = Arc::new(TokenDetail {
+            buffer_spans: vec![span.clone()],
+            base_spans: vec![span],
+        });
+
+        // A span on either side alone keeps the first hunk's detail. The empty
+        // range past the text is the side that reaches nothing.
+        for unsearched in [[(0..3, 0..3)], [(0..3, 30..30)], [(30..30, 0..3)]] {
+            let mut hunks = super::changes_to_hunks(
+                &stoat_language::structural_diff::diff(base, buffer).changes,
+                base,
+                buffer,
+            );
+            let line_pass = hunks[0].token_detail.clone();
+
+            super::merge_structural_detail(&mut hunks, &tree, &unsearched, base, buffer);
+
+            assert_eq!(
+                hunks
+                    .iter()
+                    .map(|hunk| hunk.token_detail.clone())
+                    .collect::<Vec<_>>(),
+                [line_pass, Some(tree_detail.clone())],
+                "with {unsearched:?} unsearched, the first hunk keeps the line pass's detail",
+            );
+        }
     }
 
     #[test]
@@ -4326,6 +4402,7 @@ mod tests {
             changes,
             fell_back_to_line_diff: false,
             matched: Vec::new(),
+            unsearched: Vec::new(),
         };
         let dm = DiffMap::from_structural_changes(result, Arc::new(lhs_text.to_string()), rhs_text);
 
@@ -4407,6 +4484,7 @@ mod tests {
                 changes,
                 fell_back_to_line_diff: false,
                 matched: Vec::new(),
+                unsearched: Vec::new(),
             },
             Arc::new(lhs_text.to_string()),
             rhs_text,
@@ -4485,7 +4563,7 @@ mod tests {
             base,
             buffer,
         );
-        super::merge_structural_detail(&mut hunks, &tree.changes, base, buffer);
+        super::merge_structural_detail(&mut hunks, &tree.changes, &tree.unsearched, base, buffer);
         hunks.into_iter().map(|hunk| hunk.token_detail).collect()
     }
 }

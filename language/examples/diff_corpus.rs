@@ -23,7 +23,8 @@
 //! Stoat's changes disagree, and keeps the closest painting. A fixture whose
 //! language has no grammar here runs the line pass and gets timings only,
 //! because no grammar resolves its node paths. A fixture with no human mapping
-//! gets timings only too.
+//! gets timings only too. The `unsrch` column counts the sections whose search
+//! passed the vertex cap, where the changes are the preprocessing's guesses.
 //!
 //! `--baseline` defaults to the committed `benches/diff_corpus_baseline.csv`.
 //! It reports every fixture whose agreement or fallback moved, and every
@@ -58,7 +59,7 @@ const DEFAULT_BASELINE: &str = concat!(
 /// The CSV header, one column per field of a [`Row`] in order.
 const CSV_HEADER: &str = "dataset,name,language,before_lines,after_lines,min_ms,fell_back,\
 unresolved_paths,groups,line_mismatches,line_mismatches_no_moves,moved_changes,\
-painting_bytes,painting_bytes_no_moves,painting";
+painting_bytes,painting_bytes_no_moves,painting,unsearched";
 
 /// The smallest time, in milliseconds, that the baseline compare reports as
 /// grown. Timer noise moves a run under it by more than twice.
@@ -96,6 +97,7 @@ struct Row {
     after_lines: usize,
     min_ms: f64,
     fell_back: bool,
+    unsearched: usize,
     unresolved_paths: Option<usize>,
     groups: Option<bool>,
     line_mismatches: Option<usize>,
@@ -153,7 +155,7 @@ fn run() -> Result<(), String> {
     let registry = LanguageRegistry::standard();
     let mut rows = Vec::with_capacity(fixtures.len());
     println!(
-        "{:<11} {:<70} {:<6} {:>6} {:>6} {:>9} {:>4} {:>4} {:>6} {:>6} {:>6} {:>6} {:>6}",
+        "{:<11} {:<70} {:<6} {:>6} {:>6} {:>9} {:>4} {:>6} {:>4} {:>6} {:>6} {:>6} {:>6} {:>6}",
         "dataset",
         "name",
         "lang",
@@ -161,6 +163,7 @@ fn run() -> Result<(), String> {
         "after",
         "min ms",
         "fall",
+        "unsrch",
         "unres",
         "lines",
         "no-mv",
@@ -320,6 +323,7 @@ fn measure(fixture: &Fixture, registry: &LanguageRegistry, repeats: usize) -> Re
         after_lines: after.split('\n').count(),
         min_ms,
         fell_back: result.fell_back_to_line_diff,
+        unsearched: result.unsearched.len(),
         unresolved_paths: None,
         groups: None,
         line_mismatches: None,
@@ -784,7 +788,10 @@ fn print_row(row: &Row) {
     let or_dash =
         |value: Option<usize>| value.map_or_else(|| "-".to_string(), |value| value.to_string());
     println!(
-        "{:<11} {:<70} {:<6} {:>6} {:>6} {:>9.3} {:>4} {:>4} {:>6} {:>6} {:>6} {:>6} {:>6} {}",
+        concat!(
+            "{:<11} {:<70} {:<6} {:>6} {:>6} {:>9.3} {:>4} {:>6} ",
+            "{:>4} {:>6} {:>6} {:>6} {:>6} {:>6} {}",
+        ),
         row.dataset,
         row.name,
         row.language,
@@ -792,6 +799,7 @@ fn print_row(row: &Row) {
         row.after_lines,
         row.min_ms,
         if row.fell_back { "yes" } else { "no" },
+        row.unsearched,
         or_dash(row.unresolved_paths),
         or_dash(row.line_mismatches),
         or_dash(row.line_mismatches_no_moves),
@@ -898,6 +906,7 @@ fn write_csv(path: &Path, rows: &[Row]) -> Result<(), String> {
                 .as_ref()
                 .map(|painting| painting.name.replace(',', ";"))
                 .unwrap_or_default(),
+            row.unsearched.to_string(),
         ];
         csv.push_str(&fields.join(","));
         csv.push('\n');
