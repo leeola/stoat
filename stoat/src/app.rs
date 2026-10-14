@@ -29,7 +29,7 @@ use crate::{
     },
     lsp::{
         pending::{Pending, StampedPending},
-        watched_files::WatchedFilesRegistration,
+        watched_files::FileWatchers,
     },
     minimap::emit::{self},
     mouse::{self, mouse_event_kind},
@@ -1543,15 +1543,16 @@ pub struct Stoat {
     /// is parked, so only its capacity carries over.
     pub(crate) lsp_drain_hosts: Vec<Arc<dyn LspHost>>,
     pub(crate) lsp_drain_buffers: Vec<BufferId>,
-    /// The file watchers each language server registered, keyed by the name
-    /// that [`named_hosts_iter`](crate::lsp::registry::LspRegistry::named_hosts_iter)
+    /// The file watchers each language server registered, and the files on
+    /// disk they name, keyed by the name that
+    /// [`named_hosts_iter`](crate::lsp::registry::LspRegistry::named_hosts_iter)
     /// gives the server.
     ///
     /// A server that registers watchers turns its own watcher off, so
     /// [`debounce::drain_fs_watch_events`] sends it each change they name. A
     /// server holds an entry only while it watches something, so an empty map
     /// lets the drain skip the glob tests.
-    pub(crate) lsp_file_watchers: std::collections::HashMap<String, Vec<WatchedFilesRegistration>>,
+    pub(crate) lsp_file_watchers: std::collections::HashMap<String, FileWatchers>,
     /// Last buffer version a `did_change` debounce has been
     /// scheduled for. Bumped synchronously on the edit-detection
     /// tick so a buffer is never enqueued twice for the same
@@ -4978,8 +4979,14 @@ impl Stoat {
         let index_edits = debounce::drain_pending_index_edits(self);
         let autosave = debounce::drain_pending_workspace_autosave(self);
         let signature_help = debounce::drain_pending_signature_help(self);
+        let watched_file_walks = debounce::drain_watched_file_walks(self);
 
-        diff_refresh || code_search || index_edits || autosave || signature_help
+        diff_refresh
+            || code_search
+            || index_edits
+            || autosave
+            || signature_help
+            || watched_file_walks
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {

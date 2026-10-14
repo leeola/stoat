@@ -146,6 +146,11 @@ impl PathEdit {
 /// the turn. The server turned its own watcher off when it registered them, so
 /// these notifications are its only view of the disk.
 ///
+/// A directory that leaves the disk goes to each server as a deletion of every
+/// file that the server's
+/// [`FileWatchers`](crate::lsp::watched_files::FileWatchers) record holds below
+/// it. The watcher raises no event for the files that a moved directory held.
+///
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
 /// again when it stops there, so a checkout's worth of paths drains over
 /// several turns instead of stalling one.
@@ -198,6 +203,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
     let mut finder_changes = Vec::new();
     let mut lsp_changes: HashMap<String, Vec<FileEvent>> = HashMap::new();
+    let mut departed = Vec::new();
     for (path, kind) in events {
         let in_git_dir = path.starts_with(&git_dir);
         let is_ignore_file = path
@@ -226,7 +232,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
         }
 
         if !in_git_dir && !stoat.lsp_file_watchers.is_empty() && path.starts_with(&lsp_root) {
-            note_watched_file_change(stoat, &path, kind, &mut lsp_changes);
+            note_watched_file_change(stoat, &path, kind, &mut lsp_changes, &mut departed);
         }
 
         // A save that writes a temp file and renames it over its target reaches
@@ -322,6 +328,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
 
     apply_finder_changes(stoat, &git_root, finder_changes);
 
+    report_departed_files(stoat, &departed, &mut lsp_changes);
     for (server, changes) in lsp_changes {
         notify_watched_files(stoat, &server, changes);
     }
@@ -563,15 +570,17 @@ fn dir_ignored(
 /// Record a change to `path` for each language server whose file watchers name
 /// it, in the turn's batch of watched-files notifications.
 ///
-/// A directory is left out. The servers watch files, and the entries of a
-/// directory raise events of their own. A rename names one path and no
-/// direction, so the stat tells a file that arrived at the path from one that
-/// left it.
+/// A directory that arrives is left out, because its entries arrive as events
+/// of their own. A path that leaves the disk also goes on `departed`, because a
+/// directory that moves away raises no event for the files it held. A rename
+/// names one path and no direction, so the stat tells a file that arrived at
+/// the path from one that left it.
 fn note_watched_file_change(
-    stoat: &Stoat,
+    stoat: &mut Stoat,
     path: &Path,
     kind: FsEventKind,
     changes: &mut HashMap<String, Vec<FileEvent>>,
+    departed: &mut Vec<PathBuf>,
 ) {
     let arrived = match kind {
         FsEventKind::Removed => None,
@@ -589,14 +598,21 @@ fn note_watched_file_change(
         FsEventKind::Renamed => FileChangeType::DELETED,
     };
 
+    if arrived.is_none() {
+        departed.push(path.to_path_buf());
+    }
+    for watchers in stoat.lsp_file_watchers.values_mut() {
+        if arrived.is_none() {
+            watchers.note_departure(path);
+        } else if change == FileChangeType::CREATED {
+            watchers.note_arrival(path);
+        }
+    }
+
     let mut watching = stoat
         .lsp_file_watchers
         .iter()
-        .filter(|(_, registrations)| {
-            registrations
-                .iter()
-                .any(|registration| registration.matches(path, change))
-        })
+        .filter(|(_, watchers)| watchers.matches(path, change))
         .map(|(server, _)| server)
         .peekable();
     if watching.peek().is_none() {
@@ -611,6 +627,66 @@ fn note_watched_file_change(
             typ: change,
         });
     }
+}
+
+/// Add a deletion to the turn's batch for each recorded file below a path in
+/// `departed`, for each server whose delete watchers name the file.
+///
+/// Runs after the turn's own events, and each of those took the file it named
+/// out of the record. A removal that reports each of its files and then their
+/// directory in one turn therefore reports each file once.
+fn report_departed_files(
+    stoat: &mut Stoat,
+    departed: &[PathBuf],
+    changes: &mut HashMap<String, Vec<FileEvent>>,
+) {
+    for (server, watchers) in &mut stoat.lsp_file_watchers {
+        let gone: Vec<PathBuf> = departed
+            .iter()
+            .flat_map(|dir| watchers.take_departed_below(dir))
+            .collect();
+        if !gone.is_empty() {
+            changes
+                .entry(server.clone())
+                .or_default()
+                .extend(deletions(&gone));
+        }
+    }
+}
+
+/// Land each language server's finished walk of the files its watchers name.
+///
+/// A file that left the disk while the walk was out goes to the server as a
+/// deletion here, because the drain leaves those files to the landing. Reports
+/// whether a notification went out, which is work a settle waits on.
+pub(crate) fn drain_watched_file_walks(stoat: &mut Stoat) -> bool {
+    let mut reports = Vec::new();
+    for (server, watchers) in &mut stoat.lsp_file_watchers {
+        let Some(gone) = watchers.land_walk() else {
+            continue;
+        };
+        if !gone.is_empty() {
+            reports.push((server.clone(), deletions(&gone)));
+        }
+    }
+
+    let reported = !reports.is_empty();
+    for (server, changes) in reports {
+        notify_watched_files(stoat, &server, changes);
+    }
+    reported
+}
+
+/// A deletion event for each of `paths`, leaving out a path that no URI names.
+fn deletions(paths: &[PathBuf]) -> Vec<FileEvent> {
+    paths
+        .iter()
+        .filter_map(|path| action_handlers::lsp::path_to_uri(path))
+        .map(|uri| FileEvent {
+            uri,
+            typ: FileChangeType::DELETED,
+        })
+        .collect()
 }
 
 /// Send `server` the watched-files changes that one drain turn collected for it.
@@ -930,7 +1006,11 @@ fn reindex_external_path(stoat: &mut Stoat, path: PathBuf) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{file_finder::FinderPathCache, host::FakeFsOp, test_fixture};
+    use crate::{
+        file_finder::FinderPathCache,
+        host::{FakeFsOp, FsHost},
+        test_fixture,
+    };
     use futures::FutureExt;
     use lsp_types::GlobPattern;
     use std::time::Duration;
@@ -1128,6 +1208,129 @@ mod tests {
         );
     }
 
+    /// A directory that moves away raises one event, on the directory. Each
+    /// watched file it held reaches the server as a deletion, at any depth,
+    /// whether the walk found it or it arrived later. A file that no glob
+    /// names, and a file beside the directory, stay out.
+    #[test]
+    fn a_directory_moved_away_reaches_the_server_as_a_deletion_of_each_file() {
+        let mut h = walk_landed(&[
+            "/repo/src/foo/a.rs",
+            "/repo/src/foo/notes.md",
+            "/repo/src/foo/sub/b.rs",
+            "/repo/src/keep.rs",
+        ]);
+        h.fake_fs().insert_file("/repo/src/foo/new.rs", "");
+        watched_file_changes(&mut h, &[("/repo/src/foo/new.rs", FsEventKind::Created)]);
+        take_off_disk(&h, "/repo/src/foo");
+
+        assert_eq!(
+            watched_file_changes(&mut h, &[("/repo/src/foo", FsEventKind::Renamed)]),
+            [
+                uris(&["/repo/src/foo/new.rs"], FileChangeType::CREATED),
+                uris(
+                    &[
+                        "/repo/src/foo/a.rs",
+                        "/repo/src/foo/new.rs",
+                        "/repo/src/foo/sub/b.rs"
+                    ],
+                    FileChangeType::DELETED
+                ),
+            ],
+        );
+    }
+
+    /// The two files that the removal tests seed in one directory.
+    const FOO_FILES: [&str; 2] = ["/repo/src/foo/a.rs", "/repo/src/foo/b.rs"];
+
+    /// A removal raises an event for each file and one for their directory.
+    /// Each file event takes its file out of the record, so the directory
+    /// reports none of them a second time.
+    #[test]
+    fn a_directory_removed_file_by_file_reports_each_file_once() {
+        assert_eq!(
+            removed_file_by_file(walk_landed(&FOO_FILES)),
+            [uris(&FOO_FILES, FileChangeType::DELETED)],
+        );
+    }
+
+    /// The landing of a walk that was out for the whole removal reports none of
+    /// the files a second time either.
+    #[test]
+    fn a_removal_while_the_walk_is_out_reports_each_file_once() {
+        assert_eq!(
+            removed_file_by_file(walk_out(&FOO_FILES)),
+            [uris(&FOO_FILES, FileChangeType::DELETED)],
+        );
+    }
+
+    /// The walk reads the disk on the pool and lands on a later turn. A
+    /// directory that moves away in between reaches the server when the walk
+    /// lands, from the files the walk found in it.
+    #[test]
+    fn a_directory_moved_away_before_the_walk_lands_is_reported_when_it_lands() {
+        let mut h = walk_out(&["/repo/src/foo/a.rs"]);
+        take_off_disk(&h, "/repo/src/foo");
+
+        assert_eq!(
+            watched_file_changes(&mut h, &[("/repo/src/foo", FsEventKind::Renamed)]),
+            [uris(&["/repo/src/foo/a.rs"], FileChangeType::DELETED)],
+        );
+    }
+
+    /// A file that is back on disk before the walk lands arrived after its
+    /// directory left. The landing does not report it deleted after the server
+    /// heard of its creation.
+    #[test]
+    fn a_file_back_before_the_walk_lands_is_not_reported_deleted() {
+        let mut h = walk_out(&["/repo/src/foo/a.rs"]);
+        take_off_disk(&h, "/repo/src/foo");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/src/foo"), FsEventKind::Renamed);
+        drain_fs_watch_events(&mut h.stoat);
+
+        h.fake_fs().insert_file("/repo/src/foo/a.rs", "");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/src/foo"), FsEventKind::Renamed);
+        drain_until_quiet(&mut h);
+
+        assert_eq!(
+            watched_file_changes(&mut h, &[]),
+            [uris(&["/repo/src/foo/a.rs"], FileChangeType::CREATED)],
+        );
+    }
+
+    /// A server registers its watchers again when it reloads its project, and
+    /// that starts a second walk. A walk that reads the disk after a directory
+    /// left finds none of its files, so the landing reports them from the
+    /// record that the walk replaces.
+    #[test]
+    fn a_directory_gone_before_a_second_walk_is_reported_from_the_record() {
+        let mut h = walk_landed(&["/repo/src/foo/a.rs"]);
+        take_off_disk(&h, "/repo/src/foo");
+        watch_rust_files(&mut h);
+
+        assert_eq!(
+            watched_file_changes(&mut h, &[("/repo/src/foo", FsEventKind::Renamed)]),
+            [uris(&["/repo/src/foo/a.rs"], FileChangeType::DELETED)],
+        );
+    }
+
+    /// A directory that moves away while a second walk is out reaches the
+    /// server once, though the walk and the record it replaces both hold its
+    /// files.
+    #[test]
+    fn a_directory_moved_away_during_a_second_walk_is_reported_once() {
+        let mut h = walk_landed(&["/repo/src/foo/a.rs"]);
+        watch_rust_files(&mut h);
+        take_off_disk(&h, "/repo/src/foo");
+
+        assert_eq!(
+            watched_file_changes(&mut h, &[("/repo/src/foo", FsEventKind::Renamed)]),
+            [uris(&["/repo/src/foo/a.rs"], FileChangeType::DELETED)],
+        );
+    }
+
     /// Register a `**/*.rs` file watcher from the harness's server.
     fn watch_rust_files(h: &mut crate::test_harness::TestHarness) {
         let rust_files = test_fixture::watched_files_registration(
@@ -1160,6 +1363,65 @@ mod tests {
                     .map(|event| (event.uri.as_str().to_string(), event.typ))
                     .collect()
             })
+            .collect()
+    }
+
+    /// Seed `files` and register a `**/*.rs` file watcher.
+    ///
+    /// The test pool runs the walk that the registration starts at once. So the
+    /// walk read the disk as seeded, and it is out until the next settle lands
+    /// it.
+    fn walk_out(files: &[&str]) -> crate::test_harness::TestHarness {
+        let mut h = ignored_dir_harness();
+        for file in files {
+            h.fake_fs().insert_file(file, "");
+        }
+        watch_rust_files(&mut h);
+        h
+    }
+
+    /// Seed `files`, and register a `**/*.rs` file watcher whose walk landed.
+    fn walk_landed(files: &[&str]) -> crate::test_harness::TestHarness {
+        let mut h = walk_out(files);
+        h.settle();
+        h
+    }
+
+    /// Take [`FOO_FILES`] and their directory off the disk, and report the
+    /// removal as the watcher does, with an event for the directory and one
+    /// for each file.
+    fn removed_file_by_file(
+        mut h: crate::test_harness::TestHarness,
+    ) -> Vec<Vec<(String, FileChangeType)>> {
+        take_off_disk(&h, "/repo/src/foo");
+        watched_file_changes(
+            &mut h,
+            &[
+                ("/repo/src/foo", FsEventKind::Removed),
+                (FOO_FILES[0], FsEventKind::Removed),
+                (FOO_FILES[1], FsEventKind::Removed),
+            ],
+        )
+    }
+
+    /// Take `dir` and everything below it off the disk with no watch event, as
+    /// a move away leaves it.
+    fn take_off_disk(h: &crate::test_harness::TestHarness, dir: &str) {
+        let fs = h.fake_fs();
+        for file in fs.walk_workspace_files(Path::new(dir)) {
+            fs.remove_file(&file).expect("a seeded file");
+        }
+        for sub in fs.walk_workspace_dirs(Path::new(dir)).iter().rev() {
+            fs.remove_dir(sub).expect("an emptied directory");
+        }
+    }
+
+    /// The changes of one notification, each of `paths` as a file URI with the
+    /// change type `typ`.
+    fn uris(paths: &[&str], typ: FileChangeType) -> Vec<(String, FileChangeType)> {
+        paths
+            .iter()
+            .map(|path| (format!("file://{path}"), typ))
             .collect()
     }
 

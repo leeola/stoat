@@ -203,6 +203,9 @@ fn drain_incoming_requests_from(stoat: &mut Stoat, host: &Arc<dyn LspHost>) {
 /// server that reloads its project registers again under the old id, and the
 /// replacement keeps one copy. A request that registers no file watchers
 /// leaves [`Stoat::lsp_file_watchers`] as it was.
+///
+/// Each request that holds watchers starts a walk of the language-server root,
+/// which refills the server's record of the files its watchers name.
 fn register_file_watchers(
     stoat: &mut Stoat,
     host: &Arc<dyn LspHost>,
@@ -219,11 +222,19 @@ fn register_file_watchers(
         return;
     };
 
+    let root = stoat.workspaces[stoat.lsp_workspace].git_root.clone();
     let held = stoat.lsp_file_watchers.entry(server).or_default();
     for registration in compiled {
-        held.retain(|watching| watching.id != registration.id);
-        held.push(registration);
+        held.registrations
+            .retain(|watching| watching.id != registration.id);
+        held.registrations.push(registration);
     }
+    held.walk(
+        &stoat.executor,
+        stoat.fs_host.clone(),
+        root,
+        stoat.drain_notify.clone(),
+    );
 }
 
 /// Drop each file watcher of the server of `host` that `unregistrations` names
@@ -240,8 +251,9 @@ fn unregister_file_watchers(
         return;
     };
 
-    held.retain(|watching| unregistrations.iter().all(|gone| gone.id != watching.id));
-    if held.is_empty() {
+    held.registrations
+        .retain(|watching| unregistrations.iter().all(|gone| gone.id != watching.id));
+    if held.registrations.is_empty() {
         stoat.lsp_file_watchers.remove(&server);
     }
 }
@@ -898,8 +910,9 @@ mod tests {
             .stoat
             .lsp_file_watchers
             .iter()
-            .map(|(server, registrations)| {
-                let ids = registrations
+            .map(|(server, watchers)| {
+                let ids = watchers
+                    .registrations
                     .iter()
                     .map(|registration| registration.id.as_str())
                     .collect();
