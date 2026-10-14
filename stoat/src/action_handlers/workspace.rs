@@ -41,18 +41,21 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
 
     stoat.save_workspace(stoat.active_workspace);
 
+    // The fresh workspace carries the copy's identity from the start, as a
+    // picker activation does, so it shows the copy's name before the replay
+    // lands.
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
-    ws.apply_state(state, &stoat.executor);
+    ws.uid = state.uid;
+    ws.name = state.name.clone();
+    ws.parent = state.parent;
     ws.layout(stoat.size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
     switch_active_workspace(stoat, id);
 
-    // The copy round-trips through to_state/apply_state, so any terminal or
-    // commits pane arrives with a dead id. Respawn gives the copy its own shells
-    // and lists rather than dangling references into the source workspace.
-    super::respawn_terminal_panes(stoat);
-    super::respawn_commits_panes(stoat);
+    // The buffers replay on the pool. The install respawns the terminal and
+    // commits panes, which arrive with the source's ids.
+    stoat.spawn_state_restore(id, state);
     UpdateEffect::Redraw
 }
 

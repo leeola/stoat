@@ -544,16 +544,18 @@ pub(crate) enum SpawnScope {
     Global,
 }
 
-/// A finished off-thread `--continue` restore, produced by the blocking task and
+/// A finished off-thread workspace restore, produced by the blocking task and
 /// drained by [`Stoat::install_pending_workspace_restore`].
 ///
 /// `outcome` carries the replayed buffer registry and the remaining workspace
-/// state, or the read/parse error. `path` is retained for the log line, and
-/// `workspace` identifies the restore target so the install can confirm it is
-/// still fresh before clobbering it.
+/// state, or the read/parse error. `path` names the session file that a
+/// `--continue` or picker restore read, for the log line and the identity fork.
+/// A workspace copy reads no file, so it holds `None` there. `workspace`
+/// identifies the restore target, which the install confirms is still fresh
+/// before it clobbers it.
 pub(crate) struct PendingWorkspaceRestore {
     workspace: WorkspaceId,
-    path: PathBuf,
+    path: Option<PathBuf>,
     outcome: io::Result<(
         crate::buffer_registry::BufferRegistry,
         crate::workspace::persist::WorkspaceStateV1,
@@ -4677,17 +4679,7 @@ impl Stoat {
     /// workspace stopped being fresh while the restore ran. Keeping the read and
     /// op-log replay off the main thread lets the first frame paint immediately.
     pub(crate) fn spawn_workspace_restore(&mut self, workspace: WorkspaceId, path: PathBuf) {
-        if let Some(ws) = self.workspaces.get_mut(workspace) {
-            ws.badges
-                .remove_by_source(crate::badge::BadgeSource::SessionRestore);
-            ws.badges.insert(crate::badge::Badge {
-                source: crate::badge::BadgeSource::SessionRestore,
-                anchor: crate::badge::Anchor::BottomRight,
-                state: crate::badge::BadgeState::Active,
-                label: "restoring session".to_string(),
-                detail: None,
-            });
-        }
+        self.show_restore_badge(workspace);
 
         let executor = self.executor.clone();
         let fs_host = self.fs_host.clone();
@@ -4702,11 +4694,58 @@ impl Stoat {
             *pending.lock().expect("pending workspace restore mutex") =
                 Some(PendingWorkspaceRestore {
                     workspace,
-                    path,
+                    path: Some(path),
                     outcome,
                 });
         })
         .detach();
+    }
+
+    /// Kick off an off-thread install of `state` into `workspace`, which a copy
+    /// of a live workspace makes.
+    ///
+    /// Shows the "restoring session" badge and replays the buffers on the
+    /// blocking pool. [`Self::install_pending_workspace_restore`] installs the
+    /// result as it installs a session restore, so the run loop pays for no op
+    /// log replay.
+    pub(crate) fn spawn_state_restore(
+        &mut self,
+        workspace: WorkspaceId,
+        state: crate::workspace::persist::WorkspaceStateV1,
+    ) {
+        self.show_restore_badge(workspace);
+
+        let executor = self.executor.clone();
+        let pending = self.pending_workspace_restore.clone();
+        self.spawn_woken(async move {
+            let parts = executor
+                .spawn_blocking(move || crate::workspace::persist::restore_parts(state))
+                .await;
+            *pending.lock().expect("pending workspace restore mutex") =
+                Some(PendingWorkspaceRestore {
+                    workspace,
+                    path: None,
+                    outcome: Ok(parts),
+                });
+        })
+        .detach();
+    }
+
+    /// Show the "restoring session" badge on `workspace`, in place of any
+    /// earlier one.
+    fn show_restore_badge(&mut self, workspace: WorkspaceId) {
+        let Some(ws) = self.workspaces.get_mut(workspace) else {
+            return;
+        };
+        ws.badges
+            .remove_by_source(crate::badge::BadgeSource::SessionRestore);
+        ws.badges.insert(crate::badge::Badge {
+            source: crate::badge::BadgeSource::SessionRestore,
+            anchor: crate::badge::Anchor::BottomRight,
+            state: crate::badge::BadgeState::Active,
+            label: "restoring session".to_string(),
+            detail: None,
+        });
     }
 
     /// Install a finished workspace restore, or drop it.
@@ -4751,7 +4790,9 @@ impl Stoat {
                     ?err,
                     "failed to restore workspace state; starting fresh"
                 );
-                self.fork_unrestored(workspace, &path);
+                if let Some(path) = &path {
+                    self.fork_unrestored(workspace, path);
+                }
                 return;
             },
         };
@@ -4765,7 +4806,9 @@ impl Stoat {
                 ?path,
                 "workspace changed before session restore landed; dropping restore"
             );
-            self.fork_unrestored(workspace, &path);
+            if let Some(path) = &path {
+                self.fork_unrestored(workspace, path);
+            }
             return;
         }
 

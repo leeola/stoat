@@ -1762,7 +1762,10 @@ fn decode_text(buf: Vec<u8>) -> std::io::Result<(String, bool)> {
 mod tests {
     use super::*;
     use crate::{
+        buffer::OPS_COMPACT_THRESHOLD,
+        multi_buffer::MultiBuffer,
         pane::{DockPanel, DockVisibility},
+        selection::SelectionsCollection,
         test_harness::{editor, keys, stoat},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1773,6 +1776,7 @@ mod tests {
     };
     use stoat_config::Settings;
     use stoat_scheduler::TestScheduler;
+    use stoat_text::{Bias, SelectionGoal};
 
     fn stoat_with_config(user: Option<String>) -> Stoat {
         let scheduler = Arc::new(TestScheduler::new());
@@ -3084,6 +3088,107 @@ mod tests {
         assert_eq!(guard.snapshot.visible_text.to_string(), "original text");
     }
 
+    /// A copy replays its buffers on the blocking pool rather than on the run
+    /// loop, so it waits under the restoring badge until the replay installs.
+    #[test]
+    fn copying_a_workspace_replays_on_the_pool() {
+        let mut h = Stoat::test();
+        h.fake_fs.insert_file("/work/note.txt", b"original text");
+        h.stoat.open_file(Path::new("/work/note.txt"));
+        h.stoat.active_workspace_mut().name = "source".to_owned();
+        h.settle();
+
+        let hops = h.blocking_calls();
+        let name = h.stoat.active_workspace().name.clone();
+        let state = |h: &crate::test_harness::TestHarness| {
+            let ws = h.stoat.active_workspace();
+            (
+                ws.badges
+                    .find_by_source(crate::badge::BadgeSource::SessionRestore)
+                    .is_some(),
+                h.blocking_calls() - hops,
+                ws.name.clone(),
+                ws.buffers.open_paths(),
+            )
+        };
+        dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
+        let pending = state(&h);
+        h.settle();
+        h.stoat.drive_background();
+
+        assert_eq!(
+            [pending, state(&h)],
+            [
+                (true, 0, name.clone(), Vec::new()),
+                (
+                    false,
+                    1,
+                    name,
+                    vec![Path::new("/work/note.txt").to_path_buf()]
+                ),
+            ],
+            "the copy waits under its badge and its source's name until one pool hop \
+             replays its buffers",
+        );
+    }
+
+    /// A compacted history drops the insertions that a live anchor names, so a
+    /// copy re-takes its anchors against the replayed seed. A cursor inside the
+    /// appended run stays where it was instead of falling to the file's top.
+    #[test]
+    fn a_copy_keeps_a_cursor_inside_a_compacted_buffers_appended_run() {
+        let mut h = Stoat::test();
+        h.fake_fs.insert_file("/work/long.txt", b"abcdefghij\n");
+        h.stoat.open_file(Path::new("/work/long.txt"));
+        let cursor = 11 + OPS_COMPACT_THRESHOLD / 2;
+
+        let focused_buffer = |stoat: &mut Stoat| {
+            let editor = focused_editor_mut(stoat).expect("an editor has the focus");
+            let id = editor.buffer_id;
+            stoat
+                .active_workspace()
+                .buffers
+                .get(id)
+                .expect("buffer open")
+        };
+        let buffer = focused_buffer(&mut h.stoat);
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            for _ in 0..OPS_COMPACT_THRESHOLD {
+                let end = guard.rope().len();
+                guard.edit(end..end, "x");
+            }
+        }
+        let multi = MultiBuffer::singleton(buffer).snapshot();
+        let mut selections = SelectionsCollection::new();
+        selections.insert_cursor(
+            multi.anchor_at(cursor, Bias::Right),
+            SelectionGoal::None,
+            &multi,
+        );
+        focused_editor_mut(&mut h.stoat)
+            .expect("an editor has the focus")
+            .selections = selections;
+
+        dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
+        h.settle();
+        h.stoat.drive_background();
+
+        let head = focused_editor_mut(&mut h.stoat)
+            .expect("the copy's editor has the focus")
+            .selections
+            .newest_anchor()
+            .start;
+        let landed = focused_buffer(&mut h.stoat)
+            .read()
+            .expect("buffer poisoned")
+            .resolve_anchor(&head);
+        assert_eq!(
+            landed, cursor,
+            "the copy's cursor stays inside the appended run"
+        );
+    }
+
     #[test]
     fn copy_workspace_gets_distinct_uid() {
         let mut h = Stoat::test();
@@ -3107,6 +3212,8 @@ mod tests {
         let source = h.stoat.active_workspace;
 
         dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
+        h.settle();
+        h.stoat.drive_background();
 
         let copy = h.stoat.active_workspace();
         let live = match copy.panes.pane(copy.panes.focus()).view {

@@ -15750,25 +15750,52 @@ fn switching_to_a_workspace_with_a_target_reconnects_to_it() {
     let mut h = Stoat::test();
     install_passthrough(&mut h.stoat);
     h.stoat.terminal_reported = true;
-    h.stoat.active_workspace_mut().remote = Some(ssh::RemoteTarget {
+    let target = h.create_workspace();
+    h.stoat.workspaces[target].remote = Some(mosh_to_box());
+
+    action_handlers::workspace::switch_active_workspace(&mut h.stoat, target);
+
+    assert!(
+        handed_to_box_over_mosh(&h.stoat),
+        "the workspace switched to hands its window back",
+    );
+}
+
+/// A copy takes its source's target with the rest of its state, which lands
+/// after the switch onto the copy. The install hands the window back then.
+#[test]
+fn a_copy_of_a_workspace_with_a_target_reconnects_once_it_installs() {
+    let mut h = Stoat::test();
+    install_passthrough(&mut h.stoat);
+    h.stoat.terminal_reported = true;
+    h.stoat.active_workspace_mut().remote = Some(mosh_to_box());
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
+    h.settle();
+    h.stoat.drive_background();
+
+    assert!(
+        handed_to_box_over_mosh(&h.stoat),
+        "the copy hands its window back to its source's host",
+    );
+}
+
+fn mosh_to_box() -> ssh::RemoteTarget {
+    ssh::RemoteTarget {
         transport: ssh::Transport::Mosh,
         host: "box".to_owned(),
         args: Vec::new(),
-    });
+    }
+}
 
-    // The copy carries the source's target and is switched to, which is
-    // the switch path a picker selection also takes.
-    action_handlers::dispatch(&mut h.stoat, &stoat_action::CopyWorkspace);
-
-    assert!(
-        matches!(
-            h.stoat.passthrough,
-            Some(ssh::Passthrough::Pending {
-                transport: ssh::Transport::Mosh,
-                ref host,
-                ..
-            }) if host == "box"
-        ),
-        "the workspace switched to hands its window back",
-    );
+/// Whether the window waits to hand over to `box` over mosh.
+fn handed_to_box_over_mosh(stoat: &Stoat) -> bool {
+    matches!(
+        stoat.passthrough,
+        Some(ssh::Passthrough::Pending {
+            transport: ssh::Transport::Mosh,
+            ref host,
+            ..
+        }) if host == "box"
+    )
 }

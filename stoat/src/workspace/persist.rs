@@ -440,6 +440,7 @@ impl Workspace {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn apply_state(&mut self, mut state: WorkspaceStateV1, executor: &Executor) {
         state.resolve_reanchors();
         self.buffers
@@ -449,9 +450,9 @@ impl Workspace {
 
     /// Install a pre-built buffer `registry` and the remaining restored `state`.
     ///
-    /// The async `--continue` path builds the registry off the main thread with
-    /// [`read_restore_parts`] and hands it here, where only the cheap remainder
-    /// runs. `state.buffers` is ignored in favor of `registry`.
+    /// A `--continue` restore and a workspace copy build the registry off the
+    /// main thread with [`restore_parts`] and hand it here, where only the cheap
+    /// remainder runs. `state.buffers` is ignored in favor of `registry`.
     pub(crate) fn install_restored(
         &mut self,
         registry: BufferRegistry,
@@ -870,11 +871,22 @@ pub(crate) fn read_restore_parts(
     fs.read(path, &mut buf)?;
     let body = String::from_utf8(buf)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let mut state: WorkspaceStateV1 = ron::from_str(&body)
+    let state: WorkspaceStateV1 = ron::from_str(&body)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+    Ok(restore_parts(state))
+}
+
+/// The buffer registry `state` restores, and the rest of the state to install
+/// with it through [`Workspace::install_restored`].
+///
+/// Replays each buffer's op log and undo tree, so a caller on the run loop runs
+/// this on the blocking pool. The reanchors that a live snapshot carries
+/// resolve first, against the same histories.
+pub(crate) fn restore_parts(mut state: WorkspaceStateV1) -> (BufferRegistry, WorkspaceStateV1) {
+    state.resolve_reanchors();
     let mut registry = BufferRegistry::new();
     registry.restore_from(std::mem::take(&mut state.buffers));
-    Ok((registry, state))
+    (registry, state)
 }
 
 fn remap_editor_views_in_panes(panes: &mut PaneTree, remap: &HashMap<EditorId, EditorId>) {
