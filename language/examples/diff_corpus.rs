@@ -399,6 +399,12 @@ fn timed_diff(
 /// children from reading as changes. A `delete_with_children` or
 /// `insert_with_children` node touches its whole range. Identical entries and
 /// group members touch nothing, so their paths are not resolved.
+///
+/// An `update` pair and a differing own content touch only the lines that
+/// changed when they hold content on more than one line, as
+/// [`touch_changed_lines`] describes. A human maps a changed string or block
+/// scalar as one node, and the lines that did not change inside it are no part
+/// of the edit.
 fn human_touched(
     language: &Language,
     mapping: &Value,
@@ -440,11 +446,22 @@ fn human_touched(
 
         match operation {
             "delete" | "update" | "insert" => {
-                if let Some(node) = leaf(before_node).filter(|_| operation != "insert") {
-                    touch(&mut touched.before, &before_lines, node.byte_range());
-                }
-                if let Some(node) = leaf(after_node).filter(|_| operation != "delete") {
-                    touch(&mut touched.after, &after_lines, node.byte_range());
+                let lhs = leaf(before_node).filter(|_| operation != "insert");
+                let rhs = leaf(after_node).filter(|_| operation != "delete");
+                match (lhs, rhs) {
+                    (Some(lhs), Some(rhs)) => touch_changed_lines(
+                        &mut touched,
+                        (before, &before_lines, &[lhs.byte_range()]),
+                        (after, &after_lines, &[rhs.byte_range()]),
+                    ),
+                    _ => {
+                        if let Some(node) = lhs {
+                            touch(&mut touched.before, &before_lines, node.byte_range());
+                        }
+                        if let Some(node) = rhs {
+                            touch(&mut touched.after, &after_lines, node.byte_range());
+                        }
+                    },
                 }
             },
             "match_but_not_identical" => {
@@ -453,12 +470,11 @@ fn human_touched(
                 };
                 let (lhs_own, rhs_own) = (own_content(lhs), own_content(rhs));
                 if squeeze(before, &lhs_own) != squeeze(after, &rhs_own) {
-                    for range in lhs_own {
-                        touch(&mut touched.before, &before_lines, range);
-                    }
-                    for range in rhs_own {
-                        touch(&mut touched.after, &after_lines, range);
-                    }
+                    touch_changed_lines(
+                        &mut touched,
+                        (before, &before_lines, &lhs_own),
+                        (after, &after_lines, &rhs_own),
+                    );
                 }
             },
             "delete_with_children" => {
@@ -600,6 +616,78 @@ fn touch(lines: &mut [bool], bounds: &[Range<usize>], range: Range<usize>) {
         }
         *line = true;
     }
+}
+
+/// Touch the lines on which the ranges of a changed node differ between its
+/// two sides, each side given as its text, its line bounds, and the ranges.
+///
+/// Ranges that hold content on one line at most on each side touch whole, as
+/// [`touch`] marks them. Taller ones pair their lines by
+/// [`structural_diff::align_lines`]. A pair whose texts differ once whitespace
+/// goes touches both of its lines, and a line with no counterpart touches
+/// alone. So lines inserted inside a block scalar touch alone, as a line diff
+/// marks them.
+fn touch_changed_lines(
+    touched: &mut Sides,
+    (before, before_lines, before_ranges): (&str, &[Range<usize>], &[Range<usize>]),
+    (after, after_lines, after_ranges): (&str, &[Range<usize>], &[Range<usize>]),
+) {
+    let before_parts = line_parts(before, before_lines, before_ranges);
+    let after_parts = line_parts(after, after_lines, after_ranges);
+    if before_parts.len() <= 1 && after_parts.len() <= 1 {
+        for range in before_ranges {
+            touch(&mut touched.before, before_lines, range.clone());
+        }
+        for range in after_ranges {
+            touch(&mut touched.after, after_lines, range.clone());
+        }
+        return;
+    }
+
+    let pairs = {
+        let before_texts: Vec<&str> = before_parts.iter().map(|(_, part)| part.as_str()).collect();
+        let after_texts: Vec<&str> = after_parts.iter().map(|(_, part)| part.as_str()).collect();
+        structural_diff::align_lines(&before_texts, &after_texts)
+    };
+    let squeezed =
+        |part: &str| -> String { part.chars().filter(|ch| !ch.is_whitespace()).collect() };
+    for pair in pairs {
+        match pair {
+            (Some(lhs), Some(rhs)) => {
+                let ((lhs_line, lhs_part), (rhs_line, rhs_part)) =
+                    (&before_parts[lhs], &after_parts[rhs]);
+                if squeezed(lhs_part) != squeezed(rhs_part) {
+                    touched.before[*lhs_line] = true;
+                    touched.after[*rhs_line] = true;
+                }
+            },
+            (Some(lhs), None) => touched.before[before_parts[lhs].0] = true,
+            (None, Some(rhs)) => touched.after[after_parts[rhs].0] = true,
+            (None, None) => {},
+        }
+    }
+}
+
+/// The text that `ranges` hold on each line they touch by the rule of
+/// [`touch`], as `(line index, text)`, without the lines whose text is all
+/// whitespace, which hold no content to compare.
+fn line_parts(text: &str, lines: &[Range<usize>], ranges: &[Range<usize>]) -> Vec<(usize, String)> {
+    let mut parts: Vec<(usize, String)> = Vec::new();
+    for range in ranges.iter().filter(|range| !range.is_empty()) {
+        let first = lines.partition_point(|line| line.end <= range.start);
+        for (index, line) in lines.iter().enumerate().skip(first) {
+            if line.start >= range.end {
+                break;
+            }
+            let part = &text[range.start.max(line.start)..range.end.min(line.end)];
+            match parts.last_mut() {
+                Some((last, joined)) if *last == index => joined.push_str(part),
+                _ => parts.push((index, part.to_string())),
+            }
+        }
+    }
+    parts.retain(|(_, part)| !part.trim().is_empty());
+    parts
 }
 
 /// The count of lines, over both sides, where `human` and `stoat` disagree.
@@ -994,6 +1082,12 @@ mod tests {
             .expect("rust language")
     }
 
+    fn yaml() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(Path::new("x.yaml"))
+            .expect("yaml language")
+    }
+
     #[test]
     fn a_path_resolves_by_kind_and_occurrence() {
         let text = "fn a() {}\nfn b() {}";
@@ -1031,6 +1125,94 @@ mod tests {
                 0,
             ),
             "the deleted function's three lines and nothing else",
+        );
+    }
+
+    /// An update of a leaf over several lines touches the lines that changed. A
+    /// line inserted inside a string touches alone, a reindented line touches
+    /// nothing, and a line rewritten touches on both sides. A one-line leaf
+    /// touches whole, even when only its whitespace changed.
+    #[test]
+    fn an_update_of_a_tall_leaf_touches_only_its_changed_lines() {
+        let content = json!(["const_item:1", "string_literal:1", "string_content:1"]);
+        let mapping = json!({
+            "entries": [{"operation": "update", "before_path": content, "after_path": content}],
+        });
+
+        let tall = human_touched(
+            &rust(),
+            &mapping,
+            "const S: &str = \"one\ntwo\nthree\";\n",
+            "const S: &str = \"one\n  two\nnew\nTHREE\";\n",
+        );
+        let short = human_touched(
+            &rust(),
+            &mapping,
+            "const S: &str = \"one two\";\n",
+            "const S: &str = \"one  two\";\n",
+        );
+
+        assert_eq!(
+            (
+                tall.touched,
+                tall.unresolved,
+                short.touched,
+                short.unresolved
+            ),
+            (
+                Sides {
+                    before: vec![false, false, true, false],
+                    after: vec![false, false, true, true, false],
+                },
+                0,
+                Sides {
+                    before: vec![true, false],
+                    after: vec![true, false],
+                },
+                0,
+            ),
+            "the rewritten and inserted lines of the tall string, the whole short one",
+        );
+    }
+
+    /// A differing own content over several lines touches the lines that
+    /// changed, as a line diff marks a block scalar that gained a line. A blank
+    /// line holds no content, so the one that the edit replaced touches nothing.
+    #[test]
+    fn a_tall_own_content_touches_only_its_changed_lines() {
+        let scalar = json!([
+            "document:1",
+            "block_node:1",
+            "block_mapping:1",
+            "block_mapping_pair:1",
+            "block_node:1",
+            "block_scalar:1",
+        ]);
+        let mapping = json!({
+            "entries": [{
+                "operation": "match_but_not_identical",
+                "before_path": scalar,
+                "after_path": scalar,
+            }],
+        });
+
+        let human = human_touched(
+            &yaml(),
+            &mapping,
+            "run: |\n  one\n\n  two\n",
+            "run: |\n  one\n  new\n  two\n",
+        );
+
+        assert_eq!(
+            (human.touched, human.unresolved),
+            (
+                Sides {
+                    before: vec![false, false, false, false, false],
+                    after: vec![false, false, true, false, false],
+                },
+                0,
+            ),
+            "the new line alone",
         );
     }
 
