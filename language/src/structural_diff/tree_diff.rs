@@ -567,8 +567,20 @@ fn prepare_per_file<'a>(
         }
     }
 
-    fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes);
-    fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes);
+    fix_all_sliders(
+        &lhs_arena,
+        lhs_root,
+        &mut preprocess.lhs_changes,
+        &mut matched_nodes,
+        Side::Lhs,
+    );
+    fix_all_sliders(
+        &rhs_arena,
+        rhs_root,
+        &mut preprocess.rhs_changes,
+        &mut matched_nodes,
+        Side::Rhs,
+    );
 
     Some(PreparedFile {
         lhs_arena,
@@ -1090,6 +1102,10 @@ mod tests {
     use super::*;
     use crate::{structural_diff, LanguageRegistry};
 
+    const TEST_MODS: &str = "#[cfg(test)]\nmod a;\n#[cfg(test)]\nmod b;\n#[cfg(test)]\nmod d;\n";
+    const TEST_MODS_WITH_C: &str =
+        "#[cfg(test)]\nmod a;\n#[cfg(test)]\nmod b;\n#[cfg(test)]\nmod c;\n#[cfg(test)]\nmod d;\n";
+
     fn rust_lang() -> Arc<Language> {
         LanguageRegistry::standard()
             .for_path(std::path::Path::new("a.rs"))
@@ -1170,12 +1186,13 @@ mod tests {
                 token("foo", 1, 1),
                 token("(", 1, 1),
                 token("bar", 1, 2),
+                token(",", 1, 3),
                 token("baz", 1, 4),
                 token(")", 1, 5),
                 token(";", 1, 5),
                 token("}", 2, 6),
             ],
-            "the slider hands the old comma's partner to the novel run, so the comma pairs nothing",
+            "the slider moves the kept comma to line 3, and its pair moves with it",
         );
     }
 
@@ -1322,6 +1339,71 @@ mod tests {
                     Side::Rhs => rhs,
                 };
                 (c.side, &source[c.byte_range.clone()], c.kind)
+            })
+            .collect()
+    }
+
+    /// An item inserted with its attribute among identical attributes leaves
+    /// the old attributes on their old items, so the novel attribute is the
+    /// one above the new item.
+    #[test]
+    fn an_inserted_attribute_marks_the_attribute_above_its_item() {
+        let result = diff_with_language(&rust_lang(), TEST_MODS, TEST_MODS_WITH_C).unwrap();
+
+        assert_eq!(
+            change_rows(&result, TEST_MODS, TEST_MODS_WITH_C),
+            [
+                (Side::Rhs, "#[cfg(test)]", 4),
+                (Side::Rhs, "mod", 5),
+                (Side::Rhs, "c;", 5),
+            ],
+            "the attribute above mod c and mod c itself",
+        );
+    }
+
+    /// The pair of an attribute that slid moves with it, so every unchanged
+    /// token still pairs, each with its line on the right side.
+    #[test]
+    fn a_slide_keeps_the_token_pairs() {
+        let result = diff_with_language(&rust_lang(), TEST_MODS, TEST_MODS_WITH_C).unwrap();
+
+        let mut lines: Vec<(usize, usize, usize)> = Vec::new();
+        for (_, _, lhs_line, rhs_line) in matched_lines(&result, TEST_MODS, TEST_MODS_WITH_C) {
+            match lines.last_mut() {
+                Some((lhs, rhs, tokens)) if (*lhs, *rhs) == (lhs_line, rhs_line) => *tokens += 1,
+                _ => lines.push((lhs_line, rhs_line, 1)),
+            }
+        }
+        assert_eq!(
+            lines,
+            [
+                (0, 0, 7),
+                (1, 1, 3),
+                (2, 2, 7),
+                (3, 3, 3),
+                (4, 6, 7),
+                (5, 7, 3)
+            ],
+            "30 pairs, with the old third attribute on the one above mod d",
+        );
+    }
+
+    /// Each change as `(side, text, line)`, in the order the diff emits them.
+    fn change_rows<'a>(
+        result: &DiffResult,
+        lhs: &'a str,
+        rhs: &'a str,
+    ) -> Vec<(Side, &'a str, usize)> {
+        result
+            .changes
+            .iter()
+            .map(|c| {
+                let source = match c.side {
+                    Side::Lhs => lhs,
+                    Side::Rhs => rhs,
+                };
+                let line = source[..c.byte_range.start].matches('\n').count();
+                (c.side, &source[c.byte_range.clone()], line)
             })
             .collect()
     }

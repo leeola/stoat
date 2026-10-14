@@ -19,7 +19,7 @@ use super::{
         push_lhs_delimiter, push_rhs_delimiter, Edge, EnteredDelimiter,
     },
     stack::Stack,
-    unchanged::{ChangeKind, ChangeMap},
+    unchanged::{mark_subtree, ChangeKind, ChangeMap},
 };
 use smallvec::SmallVec;
 use std::{
@@ -534,16 +534,6 @@ pub fn populate_change_map(
             // emits it as a Novel DiffChange.
             Edge::NovelAtomLHS | Edge::EnterNovelDelimiterLHS => {},
             Edge::NovelAtomRHS | Edge::EnterNovelDelimiterRHS => {},
-        }
-    }
-}
-
-fn mark_subtree(arena: &SyntaxArena<'_>, id: SyntaxId, changes: &mut ChangeMap, kind: ChangeKind) {
-    let mut stack = vec![id];
-    while let Some(current) = stack.pop() {
-        changes.mark(current, kind);
-        if let Syntax::List(list) = arena.get(current) {
-            stack.extend(list.children.iter().copied());
         }
     }
 }

@@ -288,7 +288,12 @@ fn match_subtrees(
 }
 
 /// Mark `id` and every transitive descendant in the same arena as `kind`.
-fn mark_subtree(arena: &SyntaxArena<'_>, id: SyntaxId, changes: &mut ChangeMap, kind: ChangeKind) {
+pub(crate) fn mark_subtree(
+    arena: &SyntaxArena<'_>,
+    id: SyntaxId,
+    changes: &mut ChangeMap,
+    kind: ChangeKind,
+) {
     let mut stack = vec![id];
     while let Some(current) = stack.pop() {
         changes.mark(current, kind);
