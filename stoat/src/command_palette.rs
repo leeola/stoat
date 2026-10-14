@@ -3697,6 +3697,22 @@ mod tests {
     }
 
     #[test]
+    fn a_gzip_row_previews_its_text() {
+        let mut h = Stoat::test();
+        let root = seed_palette_workspace(&mut h, &[]);
+        h.fake_fs().insert_file(
+            root.join("f.rs.gz"),
+            crate::test_harness::gzip(b"fn a() {}\n"),
+        );
+
+        h.type_text(":o ");
+        h.snapshot();
+        h.settle();
+
+        assert_eq!(arg_preview_text(&h), "fn a() {}\n");
+    }
+
+    #[test]
     fn buffer_arg_submit_activates_selected_buffer() {
         let mut h = Stoat::test();
         let root =

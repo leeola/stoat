@@ -1581,6 +1581,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_finder_previews_a_gzip_file_as_its_text() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[]);
+        h.fake_fs().insert_file(
+            root.join("a.rs.gz"),
+            crate::test_harness::gzip(b"fn a() {}\n"),
+        );
+
+        h.type_keys("space p");
+        h.snapshot();
+
+        let preview = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .core
+            .preview
+            .buffer;
+        let language = h.stoat.active_workspace().buffers.language_for(preview);
+        assert_eq!(
+            (preview_text(&h), language.map(|language| language.name)),
+            ("fn a() {}\n".to_string(), Some("rust")),
+        );
+    }
+
     /// The buffer picker's two scopes flip with each other, so Shift-Tab in the
     /// picker never lands on a file scope.
     #[test]

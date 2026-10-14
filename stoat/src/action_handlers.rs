@@ -1732,7 +1732,7 @@ fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// The two leading bytes of every gzip member.
-const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
+pub(crate) const GZIP_MAGIC: &[u8] = &[0x1f, 0x8b];
 
 /// Decode a file's bytes as UTF-8 text, decompressing a gzip stream first, and
 /// say whether it was one.

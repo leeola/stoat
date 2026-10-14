@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::GZIP_MAGIC,
     buffer::BufferId,
     editor_state::{EditorId, EditorState, ScrollGlide},
     fuzzy,
@@ -11,6 +12,7 @@ use crate::{
 };
 use std::{
     collections::{HashMap, VecDeque},
+    io::Read,
     mem,
     ops::Range,
     path::{Path, PathBuf},
@@ -1922,6 +1924,9 @@ impl Preview {
 /// content so the preview pane always renders. Output is run through
 /// [`sanitize::sanitize_preview_text`] so unsanitized bytes never reach the
 /// rope.
+///
+/// A gzip stream, told by its leading bytes, decompresses to at most the same
+/// limit, and a stream that the prefix cut short shows the text before the cut.
 fn read_preview(fs_host: &dyn FsHost, path: &Path) -> String {
     let mut buf = Vec::new();
     if fs_host
@@ -1929,6 +1934,19 @@ fn read_preview(fs_host: &dyn FsHost, path: &Path) -> String {
         .is_err()
     {
         return "<unreadable>".to_string();
+    }
+    if buf.starts_with(GZIP_MAGIC) {
+        let mut out = Vec::new();
+        let decoded = flate2::read::MultiGzDecoder::new(&buf[..])
+            .take(PREVIEW_BYTE_LIMIT as u64)
+            .read_to_end(&mut out);
+        // A prefix ends the stream early, so the decoder's trailing error is
+        // the expected shape of one. Only a stream that yields nothing is
+        // corrupt.
+        if decoded.is_err() && out.is_empty() {
+            return "<unreadable>".to_string();
+        }
+        buf = out;
     }
     let limit = PREVIEW_BYTE_LIMIT.min(buf.len());
     let raw = match std::str::from_utf8(&buf[..limit]) {
@@ -2502,6 +2520,80 @@ mod tests {
         );
 
         picker.dispose(ws);
+    }
+
+    #[test]
+    fn a_gzip_file_previews_as_its_text_in_its_inner_language() {
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file("/repo/a.rs.gz", crate::test_harness::gzip(b"fn a() {}\n"));
+        assert_eq!(
+            previewed(&fs, "/repo/a.rs.gz"),
+            ("fn a() {}\n".to_string(), Some("rust")),
+        );
+    }
+
+    /// The text decompresses past the cap, so only the decoder's limit keeps
+    /// the pane at the size a plain file's prefix gets.
+    #[test]
+    fn a_gzip_preview_stops_at_the_byte_cap() {
+        let text = "0123456789\n".repeat(20_000);
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file(
+            "/repo/big.txt.gz",
+            crate::test_harness::gzip(text.as_bytes()),
+        );
+        assert_eq!(
+            previewed(&fs, "/repo/big.txt.gz").0,
+            text[..PREVIEW_BYTE_LIMIT]
+        );
+    }
+
+    #[test]
+    fn a_cut_gzip_stream_previews_the_text_before_the_cut() {
+        let full: String = (0..4000).map(|i| format!("line {i}\n")).collect();
+        let bytes = crate::test_harness::gzip(full.as_bytes());
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file("/repo/cut.txt.gz", &bytes[..bytes.len() * 3 / 5]);
+
+        let (shown, _) = previewed(&fs, "/repo/cut.txt.gz");
+        assert!(
+            !shown.is_empty() && full.starts_with(&shown),
+            "the pane shows a leading run of the text, got {} bytes",
+            shown.len(),
+        );
+    }
+
+    #[test]
+    fn a_corrupt_gzip_stream_previews_as_unreadable() {
+        let fs = crate::host::FakeFs::new();
+        fs.insert_file("/repo/bad.gz", [0x1f, 0x8b, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(previewed(&fs, "/repo/bad.gz").0, "<unreadable>");
+    }
+
+    /// The text a preview of `path` on `fs` shows, and the language it paints
+    /// that text in.
+    fn previewed(fs: &crate::host::FakeFs, path: &str) -> (String, Option<&'static str>) {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let language_registry = h.stoat.language_registry.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let mut preview = Preview::new(ws, executor);
+        preview.sync(ws, fs, &language_registry, PreviewSource::File(p(path)));
+
+        let text = ws
+            .buffers
+            .get(preview.buffer)
+            .expect("preview buffer")
+            .read()
+            .expect("preview buffer poisoned")
+            .rope()
+            .to_string();
+        let language = ws
+            .buffers
+            .language_for(preview.buffer)
+            .map(|language| language.name);
+        preview.dispose(ws);
+        (text, language)
     }
 
     /// A source with no language previews as plain text, even after a source
