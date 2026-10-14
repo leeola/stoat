@@ -1239,16 +1239,91 @@ mod tests {
     /// as moved pairs with nothing, as the reader sees it marked.
     #[test]
     fn a_moved_token_carries_no_matched_pair() {
-        let lhs = "fn f() {\n    a();\n}\n";
-        let rhs = "fn f() {\n    if c {\n        a();\n    }\n}\n";
+        let lhs = "fn f() {\n    a();\n    b();\n}\nfn k() {}\n";
+        let rhs = "fn f() {\n    a();\n    c();\n}\nfn k() {}\nfn g() {\n    a();\n    b();\n}\n";
         let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
 
         let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
         assert_eq!(
             matched_lines(&result, lhs, rhs),
-            [token("fn", 0, 0), token("f", 0, 0), token("()", 0, 0)],
-            "the body moved into the if, so its braces and its call pair nothing",
+            [
+                token("fn", 0, 0),
+                token("f", 0, 0),
+                token("()", 0, 0),
+                token("fn", 4, 4),
+                token("k", 4, 4),
+                token("()", 4, 4),
+                token("{}", 4, 4),
+            ],
+            "the body of f moved to g, so its braces and its calls pair nothing",
         );
+    }
+
+    /// The search pairs the old branch with the inner `if` of the new chain,
+    /// so the move pass finds no `Pending` copy of it to re-tag.
+    #[test]
+    fn a_new_first_branch_marks_only_its_own_tokens() {
+        let lhs = "fn main() {\n  let number = 11;\n  if number % 2 == 0 {\n    \
+                   println!(\"Even\");\n  } else {\n    println!(\"Odd\");\n  }\n}\n";
+        let rhs = "fn main() {\n  let number = 11;\n  if number == 0 {\n    \
+                   println!(\"Zero\");\n  } else if number % 2 == 0 {\n    \
+                   println!(\"Even\");\n  } else {\n    println!(\"Odd\");\n  }\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let novel = |text| (Side::Rhs, text, DiffChangeKind::Novel);
+        assert_eq!(
+            change_texts(&result, lhs, rhs),
+            [
+                novel("number"),
+                novel("=="),
+                novel("0"),
+                novel("{"),
+                novel("println!(\"Zero\");"),
+                novel("}"),
+                novel("else"),
+                novel("if"),
+            ],
+            "the new branch alone, with the old branch paired in place",
+        );
+    }
+
+    /// The search pairs the old `else` block with the one that the new
+    /// `else if` arm nests, so no copy of it is left to pair as a move.
+    #[test]
+    fn a_wrapper_around_an_unchanged_block_is_no_move() {
+        let lhs = "fn f() -> u8 {\n    let v = if a() {\n        1\n    } else if b() {\n        \
+                   2\n    } else {\n        (0, Kind::Remote)\n    };\n    v\n}\n";
+        let rhs = "fn f() -> u8 {\n    let v = if a() {\n        1\n    } else if b() {\n        \
+                   2\n    } else if c() {\n        (4, Kind::Terminal)\n    } else {\n        \
+                   (0, Kind::Remote)\n    };\n    v\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let changes = change_texts(&result, lhs, rhs);
+        assert!(
+            changes
+                .iter()
+                .all(|(_, _, kind)| *kind != DiffChangeKind::Moved),
+            "the else block stays in place: {changes:?}",
+        );
+    }
+
+    /// Each change as `(side, text, kind)`, in the order the diff emits them.
+    fn change_texts<'a>(
+        result: &DiffResult,
+        lhs: &'a str,
+        rhs: &'a str,
+    ) -> Vec<(Side, &'a str, DiffChangeKind)> {
+        result
+            .changes
+            .iter()
+            .map(|c| {
+                let source = match c.side {
+                    Side::Lhs => lhs,
+                    Side::Rhs => rhs,
+                };
+                (c.side, &source[c.byte_range.clone()], c.kind)
+            })
+            .collect()
     }
 
     /// A line diff has no tokens, so it names no pairs even over lines it

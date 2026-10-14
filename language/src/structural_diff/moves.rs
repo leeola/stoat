@@ -1,16 +1,23 @@
 //! Post-Dijkstra move detection.
 //!
-//! After the unchanged-preprocessing pass and the Dijkstra search have
-//! tagged every node either [`ChangeKind::Unchanged`] or
-//! [`ChangeKind::Pending`], residual `Pending` nodes whose
-//! [`super::ContentId`] appears on both sides are candidates for a
-//! *move*: byte-for-byte equal subtrees that differ only in relative
-//! position, including cross-indentation moves inside a different
-//! parent. The move pass rewrites those candidates to
-//! [`ChangeKind::Moved`] and publishes a [`MoveRecord`] that links each
-//! right-side target to its left-side source(s).
+//! The unchanged-preprocessing pass and the Dijkstra search tag every node
+//! either [`ChangeKind::Unchanged`] or [`ChangeKind::Pending`]. A subtree is a
+//! move candidate only when an atom under it is still `Pending`. Candidates
+//! with the same [`super::ContentId`] on both sides are *moves*, byte-for-byte
+//! equal subtrees that the search did not pair in place. This includes
+//! cross-indentation moves inside a different parent. The move pass rewrites
+//! paired candidates to [`ChangeKind::Moved`] and publishes a [`MoveRecord`]
+//! that links each right-side target to its left-side source(s).
 //!
-//! Cardinality mirrors what code review cares about:
+//! A subtree that the search matched in place is never a candidate, so a copy
+//! of it is a plain addition with no provenance. An added copy of an attribute
+//! or a statement leaves the existing copies unchanged. A new wrapper around an
+//! unchanged block re-tags nothing.
+//!
+//! Cardinality mirrors what code review cares about. Every participant is a
+//! subtree the search left `Pending`. The N:1 and 1:N shapes therefore appear
+//! only where the search did not pair the copies in order, such as where
+//! unchanged anchors separate them.
 //!
 //! - `1:1` one source, one target. The common "function moved" case.
 //! - `N:1` (consolidation) one target with N source candidates. Emitted when the same block existed
@@ -53,6 +60,23 @@ fn precompute_leaf_counts(arena: &SyntaxArena<'_>) -> Vec<usize> {
         }
     }
     counts
+}
+
+/// Whether each node's subtree holds an atom that `changes` leaves
+/// [`ChangeKind::Pending`].
+///
+/// A list reads its children, never its own tag. The singleton-list recursion
+/// in [`super::unchanged`] marks children only, so a list it descended into
+/// keeps `Pending` over content that matched in full.
+fn precompute_has_pending(arena: &SyntaxArena<'_>, changes: &ChangeMap) -> Vec<bool> {
+    let mut has_pending = vec![false; arena.len()];
+    for i in 0..arena.len() {
+        has_pending[i] = match arena.get(SyntaxId(i)) {
+            Syntax::Atom(_) => changes.get(SyntaxId(i)) == ChangeKind::Pending,
+            Syntax::List(list) => list.children.iter().any(|c| has_pending[c.0]),
+        };
+    }
+    has_pending
 }
 
 fn precompute_depths(parents: &[Option<SyntaxId>]) -> Vec<usize> {
@@ -161,9 +185,8 @@ pub fn find_moves(
 /// file 1's RHS pairs across the file boundary.
 ///
 /// See [`find_moves`] for the single-file conventions this generalises
-/// (scans full arena including Unchanged copies, applies
-/// [`MIN_LEAVES`] / [`MAX_AMBIGUITY`] / [`is_trivial`] gates,
-/// structural-preservation skip).
+/// (indexes only subtrees that hold a `Pending` atom, applies
+/// [`MIN_LEAVES`] / [`MAX_AMBIGUITY`] / [`is_trivial`] gates).
 pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMoveRecord> {
     let n = files.len();
 
@@ -173,6 +196,8 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     let mut rhs_leaf_counts_per: Vec<Vec<usize>> = Vec::with_capacity(n);
     let mut lhs_depths_per: Vec<Vec<usize>> = Vec::with_capacity(n);
     let mut rhs_depths_per: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut lhs_pending_per: Vec<Vec<bool>> = Vec::with_capacity(n);
+    let mut rhs_pending_per: Vec<Vec<bool>> = Vec::with_capacity(n);
     for f in files.iter() {
         let lhs_parents = build_parent_map(f.lhs_arena);
         let rhs_parents = build_parent_map(f.rhs_arena);
@@ -186,6 +211,8 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
         rhs_leaf_counts_per.push(rhs_leaves);
         lhs_depths_per.push(lhs_depths);
         rhs_depths_per.push(rhs_depths);
+        lhs_pending_per.push(precompute_has_pending(f.lhs_arena, f.lhs_changes));
+        rhs_pending_per.push(precompute_has_pending(f.rhs_arena, f.rhs_changes));
     }
 
     let mut lhs_by_cid = CidIndex::default();
@@ -194,12 +221,14 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
         index_candidates(
             f.lhs_arena,
             &lhs_leaf_counts_per[file_idx],
+            &lhs_pending_per[file_idx],
             file_idx,
             &mut lhs_by_cid,
         );
         index_candidates(
             f.rhs_arena,
             &rhs_leaf_counts_per[file_idx],
+            &rhs_pending_per[file_idx],
             file_idx,
             &mut rhs_by_cid,
         );
@@ -235,16 +264,6 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     let mut paired_rhs = NodeSet::default();
     let mut records: Vec<ChangesetMoveRecord> = Vec::new();
 
-    // A duplication copies a source that itself stays in place, so its
-    // Unchanged original and Unchanged in-place twin must not be rewritten
-    // to Moved even though they are paired (the pairing exists so records
-    // carry provenance for the new copies). Marking them would render a
-    // phantom change at an untouched location. Only the 1:N duplication
-    // shape fills these. A consolidation or plain move still marks its
-    // Unchanged nodes as before.
-    let mut stay_lhs = NodeSet::default();
-    let mut stay_rhs = NodeSet::default();
-
     for (cid, _, _) in &shared {
         let lhs_cand = lhs_by_cid.get(cid).expect("cid in shared set");
         let rhs_cand = rhs_by_cid.get(cid).expect("cid in shared set");
@@ -258,29 +277,6 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
             continue;
         }
 
-        // Pure structural preservation: counts match 1:1 and every
-        // copy is already Unchanged. Not a move.
-        if lhs_avail.len() == rhs_avail.len()
-            && lhs_avail
-                .iter()
-                .all(|(fi, id)| files[*fi].lhs_changes.get(*id) == ChangeKind::Unchanged)
-            && rhs_avail
-                .iter()
-                .all(|(fi, id)| files[*fi].rhs_changes.get(*id) == ChangeKind::Unchanged)
-        {
-            continue;
-        }
-
-        if lhs_avail.len() == 1 && rhs_avail.len() > 1 {
-            record_duplication_stays(
-                files,
-                lhs_avail[0],
-                &rhs_avail,
-                &mut stay_lhs,
-                &mut stay_rhs,
-            );
-        }
-
         emit_records_multi(
             files,
             &lhs_avail,
@@ -292,16 +288,10 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     }
 
     for (fi, id) in &paired_lhs {
-        if stay_lhs.contains(&(*fi, *id)) {
-            continue;
-        }
         let f = &mut files[*fi];
         mark_subtree_moved(f.lhs_arena, *id, f.lhs_changes);
     }
     for (fi, id) in &paired_rhs {
-        if stay_rhs.contains(&(*fi, *id)) {
-            continue;
-        }
         let f = &mut files[*fi];
         mark_subtree_moved(f.rhs_arena, *id, f.rhs_changes);
     }
@@ -329,14 +319,13 @@ type CidIndex = HashMap<ContentId, Vec<FileNode>, FxBuildHasher>;
 /// A set of changeset nodes, Fx-hashed for the same reason as [`CidIndex`].
 type NodeSet = HashSet<FileNode, FxBuildHasher>;
 
-/// Walk every node in `arena` and group it into `out` by [`ContentId`].
-/// Includes Unchanged nodes so consolidation and duplication counts reflect
-/// every copy in the arena, not just the ones that survived the
-/// unchanged-preprocessing pass. The caller compares LHS and RHS
-/// counts to decide whether a content id is a real move or pure
-/// structural preservation. Applies the [`is_trivial`] denylist and
-/// [`MIN_LEAVES`] threshold at index time so noise candidates never
-/// enter the pairing loop.
+/// Group into `out`, by [`ContentId`], each node of `arena` whose subtree holds
+/// a `Pending` atom.
+///
+/// A subtree that the search matched in full is no candidate. A copy of it on
+/// the other side is then an addition, not a move of an original that stayed
+/// in place. The [`is_trivial`] denylist and the [`MIN_LEAVES`] threshold also
+/// apply at index time, so noise candidates never enter the pairing loop.
 ///
 /// Every file of a side fills one shared `out`, so a content id that spans
 /// files accumulates its candidates in place. Grouping per file and merging
@@ -344,11 +333,15 @@ type NodeSet = HashSet<FileNode, FxBuildHasher>;
 fn index_candidates(
     arena: &SyntaxArena<'_>,
     leaf_counts: &[usize],
+    has_pending: &[bool],
     file_idx: usize,
     out: &mut CidIndex,
 ) {
     for (i, &leaf_count) in leaf_counts.iter().enumerate() {
         let id = SyntaxId(i);
+        if !has_pending[i] {
+            continue;
+        }
         if is_trivial(arena, id) {
             continue;
         }
@@ -384,30 +377,6 @@ fn filter_unpaired_multi(
             !paired.contains(&(*fi, *id)) && !ancestor_in_set_multi(parents_per, *fi, *id, paired)
         })
         .collect()
-}
-
-/// Record the participants of a 1:N duplication that stayed in place. When
-/// the single LHS source is `Unchanged`, it was copied rather than moved,
-/// so neither it nor any `Unchanged` in-place twin among the targets may be
-/// rewritten to `Moved`. Doing so would render a phantom change at an
-/// untouched location. The `Pending` targets are the genuine new copies and
-/// are left for the marking pass to handle.
-fn record_duplication_stays(
-    files: &[FileMoveInput<'_>],
-    src: FileNode,
-    targets: &[FileNode],
-    stay_lhs: &mut NodeSet,
-    stay_rhs: &mut NodeSet,
-) {
-    if files[src.0].lhs_changes.get(src.1) != ChangeKind::Unchanged {
-        return;
-    }
-    stay_lhs.insert(src);
-    for &target in targets {
-        if files[target.0].rhs_changes.get(target.1) == ChangeKind::Unchanged {
-            stay_rhs.insert(target);
-        }
-    }
 }
 
 fn emit_records_multi(
@@ -652,6 +621,43 @@ mod tests {
         source[range].contains(needle)
     }
 
+    /// The atom changes under each node whose text in `source` is `text`, one
+    /// list per node, both levels in byte order.
+    fn atom_kinds_of_copies(
+        arena: &SyntaxArena<'_>,
+        changes: &ChangeMap,
+        source: &str,
+        text: &str,
+    ) -> Vec<Vec<ChangeKind>> {
+        let mut copies: Vec<SyntaxId> = (0..arena.len())
+            .map(SyntaxId)
+            .filter(|id| source[full_byte_range(arena, *id)] == *text)
+            .collect();
+        copies.sort_by_key(|id| full_byte_range(arena, *id).start);
+        copies
+            .iter()
+            .map(|id| atom_kinds(arena, changes, *id))
+            .collect()
+    }
+
+    fn atom_kinds(arena: &SyntaxArena<'_>, changes: &ChangeMap, id: SyntaxId) -> Vec<ChangeKind> {
+        match arena.get(id) {
+            Syntax::Atom(_) => vec![changes.get(id)],
+            Syntax::List(list) => list
+                .children
+                .iter()
+                .flat_map(|child| atom_kinds(arena, changes, *child))
+                .collect(),
+        }
+    }
+
+    fn moved_nodes(arena: &SyntaxArena<'_>, changes: &ChangeMap) -> Vec<SyntaxId> {
+        (0..arena.len())
+            .map(SyntaxId)
+            .filter(|id| is_moved(changes, *id))
+            .collect()
+    }
+
     #[test]
     fn straight_function_move() {
         // Two top-level functions swap order. mark_unchanged pairs one
@@ -717,14 +723,21 @@ mod tests {
 
     #[test]
     fn consolidation_n_to_1() {
-        // Same block appears in two LHS functions; RHS factored into
+        // Same block appears in two LHS functions. RHS factored it into
         // one shared function. The single RHS target carries BOTH LHS
-        // sources in its `lhs_sources` list (ambiguous).
-        let lhs = "fn first() { let temp = heavy_computation(a, b, c); save(temp); }\n\
-                   fn second() { let temp = heavy_computation(a, b, c); save(temp); }";
-        let rhs = "fn shared() { let temp = heavy_computation(a, b, c); save(temp); }\n\
+        // sources in its `lhs_sources` list (ambiguous). The unchanged
+        // k-functions anchor the copies apart, so neither pairs in place.
+        let lhs = "fn k1() { keep_one(1, 2, 3); }\n\
+                   fn first() { let temp = heavy_computation(a, b, c); save(temp); }\n\
+                   fn k2() { keep_two(4, 5, 6); }\n\
+                   fn second() { let temp = heavy_computation(a, b, c); save(temp); }\n\
+                   fn k3() { keep_three(7, 8, 9); }\n";
+        let rhs = "fn k1() { keep_one(1, 2, 3); }\n\
                    fn first() { shared(); }\n\
-                   fn second() { shared(); }";
+                   fn k2() { keep_two(4, 5, 6); }\n\
+                   fn second() { shared(); }\n\
+                   fn k3() { keep_three(7, 8, 9); }\n\
+                   fn shared() { let temp = heavy_computation(a, b, c); save(temp); }\n";
         let (lhs_arena, rhs_arena, _, _, _, records) = find_moves_in(lhs, rhs);
 
         let consolidation = records
@@ -754,10 +767,21 @@ mod tests {
     #[test]
     fn duplication_1_to_n() {
         // One LHS callsite, two RHS copies. Expect two records, each
-        // with the single LHS source; together they form the 1:N set.
-        let lhs = "fn only() { render_widget(config, style, theme); }";
-        let rhs = "fn first() { render_widget(config, style, theme); }\n\
-                   fn second() { render_widget(config, style, theme); }";
+        // with the single LHS source. Together they form the 1:N set.
+        // The unchanged k-functions anchor the body apart from both
+        // copies, so none of them pairs in place.
+        let lhs = "fn k1() { keep_one(1, 2, 3); }\n\
+                   fn a() { render_widget(config, style, theme); }\n\
+                   fn k2() { keep_two(4, 5, 6); }\n\
+                   fn b() {}\n\
+                   fn k3() { keep_three(7, 8, 9); }\n\
+                   fn c() {}\n";
+        let rhs = "fn k1() { keep_one(1, 2, 3); }\n\
+                   fn a() {}\n\
+                   fn k2() { keep_two(4, 5, 6); }\n\
+                   fn b() { render_widget(config, style, theme); }\n\
+                   fn k3() { keep_three(7, 8, 9); }\n\
+                   fn c() { render_widget(config, style, theme); }\n";
         let (lhs_arena, rhs_arena, _, _, _, records) = find_moves_in(lhs, rhs);
 
         let render_moves: Vec<&MoveRecord> = records
@@ -791,47 +815,45 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_of_unchanged_statement_leaves_original() {
-        // fn a is byte-identical on both sides; fn b gains a copy of a's
-        // body. The duplication legitimately produces a record for every
-        // RHS copy, but only the new copy in fn b may be marked Moved.
-        // Rewriting the untouched original or its twin would render a
-        // phantom change where nothing moved.
+    fn a_copy_of_an_unchanged_statement_is_novel() {
         let lhs = "fn a() { let x = make_thing(1, 2); }\nfn b() {}";
         let rhs = "fn a() { let x = make_thing(1, 2); }\n\
                    fn b() { let x = make_thing(1, 2); }";
-        let (_, rhs_arena, _, _, pre, records) = find_moves_in(lhs, rhs);
+        let (lhs_arena, rhs_arena, _, _, pre, records) = find_moves_in(lhs, rhs);
 
-        let mut targets: Vec<SyntaxId> = records
-            .iter()
-            .map(|r| r.rhs_target)
-            .filter(|t| contains_text(&rhs_arena, *t, rhs, "make_thing"))
-            .collect();
-        targets.sort_by_key(|t| full_byte_range(&rhs_arena, *t).start);
+        let statement = "let x = make_thing(1, 2);";
+        let (unchanged, pending) = (ChangeKind::Unchanged, ChangeKind::Pending);
         assert_eq!(
-            targets.len(),
-            2,
-            "one record per RHS copy of the duplicated body; got {records:?}"
+            (
+                records,
+                atom_kinds_of_copies(&lhs_arena, &pre.lhs_changes, lhs, statement),
+                atom_kinds_of_copies(&rhs_arena, &pre.rhs_changes, rhs, statement),
+            ),
+            (
+                vec![],
+                vec![vec![unchanged; 10]],
+                vec![vec![unchanged; 10], vec![pending; 10]],
+            ),
+            "no record, the original and its twin unchanged, and the copy novel",
         );
-        let (twin, new_copy) = (targets[0], targets[1]);
+    }
 
-        let original = records
-            .iter()
-            .find(|r| r.rhs_target == new_copy)
-            .and_then(|r| r.lhs_sources.first().copied())
-            .expect("the new copy's record names the LHS original");
+    #[test]
+    fn an_added_copy_leaves_the_existing_copies_unchanged() {
+        let method = "    #[cfg(any(target_os = \"android\", target_os = \"ios\"))]\n    \
+                      fn x(&self) {\n        sleep(1.).await;\n    }\n";
+        let lhs = format!("impl S {{\n{method}{method}}}\n");
+        let rhs = format!("impl S {{\n{method}{method}{method}}}\n");
+        let (lhs_arena, rhs_arena, _, _, pre, records) = find_moves_in(&lhs, &rhs);
 
-        assert!(
-            is_moved(&pre.rhs_changes, new_copy),
-            "the new copy in fn b is the move destination"
-        );
-        assert!(
-            !is_moved(&pre.lhs_changes, original),
-            "the untouched LHS original must stay unchanged, not Moved"
-        );
-        assert!(
-            !is_moved(&pre.rhs_changes, twin),
-            "the unchanged RHS twin in fn a must stay unchanged, not Moved"
+        assert_eq!(
+            (
+                records,
+                moved_nodes(&lhs_arena, &pre.lhs_changes),
+                moved_nodes(&rhs_arena, &pre.rhs_changes),
+            ),
+            (vec![], vec![], vec![]),
+            "the third copy is an addition, and the two copies in place stay put",
         );
     }
 

@@ -3773,12 +3773,12 @@ mod tests {
 
         let (h, buffer_id) = settled_rust_diff(BASE, BUFFER);
         let spans = detail_spans_of(&h, buffer_id);
-        // Only the two tokens the block itself added. The line differ washes
-        // nine spans here, one per rewritten indent.
+        // The block adds four tokens, `if`, `x`, and its two braces. The line
+        // differ washes nine spans here, one per rewritten indent.
         assert_eq!(
             spans,
-            [(1, 2)],
-            "the reindented statements wash nothing, and only `if x` marks"
+            [(1, 4)],
+            "the reindented statements wash nothing, and only `if x` and its braces mark"
         );
     }
 
