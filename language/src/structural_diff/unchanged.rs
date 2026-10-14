@@ -14,7 +14,9 @@
 //!    tagged [`ChangeKind::Unchanged`] recursively.
 //!
 //! 2. **LCS anchors.** Over the remaining middle, diff child `ContentId`s to recover the matched
-//!    subsequence. Each match is an anchor, marked unchanged along with its subtree.
+//!    subsequence. Each match is an anchor, marked unchanged along with its subtree. In a middle
+//!    whose two node counts multiply to at most 2,000, a matched atom anchors nothing and stays in
+//!    its section, so one shared operator or comma does not split a small edit apart.
 //!
 //! 3. **Emit sections.** The unmatched run between two consecutive anchors is a changed section. A
 //!    lone same-kind list on each side recurses into its children instead, so a small edit inside a
@@ -45,6 +47,27 @@ use std::{
     cell::OnceCell,
     collections::{HashMap, HashSet},
 };
+
+/// The product of a middle's node counts, lhs times rhs, at or under which a
+/// matched atom anchors no split.
+///
+/// One shared atom splits a small edit apart. The `||` of a left-nested chain
+/// splits `[a, ||, b]` against `[a || b, ||, c]` into sections that pair `a`
+/// with `a || b` and `b` with `c`, so the two `b` land in different sections
+/// and the search marks each one novel. Inside its section, the atom pairs
+/// wherever the search finds the cheapest alignment.
+///
+/// The bound is a product because the search costs about two vertices per node
+/// of the product, as [`PAIRING_THRESHOLD`] records. So a middle at the budget
+/// searches about 4,000 vertices, a few milliseconds. A large middle needs its
+/// atoms. With no budget, the comma between two changed top-level pairs of
+/// json-ipfs-ipfs-desktop-only-update-version-strings stops splitting them, and
+/// one section of 198,000 nodes a side passes the vertex cap.
+///
+/// A reordered list pays for the rule. In `{a::B, C, D}` against `{D, C, a::B}`,
+/// the search keeps the larger `a::B` and marks `C` and the commas, where the
+/// anchors kept `C` and the commas and marked the two names that moved.
+const ATOM_ANCHOR_BUDGET: u64 = 2_000;
 
 /// The count of subtrees, each unique on its own side, that two unmatched
 /// sibling lists must share to recurse as a pair before the search.
@@ -150,45 +173,50 @@ pub struct PreprocessResult {
 /// How many times each content id occurs in one arena.
 type IdCounts = HashMap<ContentId, u32, FxBuildHasher>;
 
-/// The [`SideFacts`] of both arenas, which the run handling reads.
+/// The node count and the atom leaf count of each subtree of one arena, as
+/// [`SyntaxArena::subtree_counts`] gives them.
+type SubtreeCounts = Vec<(u32, u32)>;
+
+/// The facts about both arenas that the anchor and run handling read, lhs
+/// first.
 ///
-/// The facts form on the first read, once per [`mark_unchanged`]. Only a run
-/// with members on both sides and two or more on one side reads them, so a
-/// diff whose runs all pair one to one never pays for the passes over both
-/// arenas.
+/// Each table forms on its first read, once per [`mark_unchanged`]. A diff
+/// whose middles hold no atom anchor and whose runs all pair one to one never
+/// pays for the passes over both arenas.
 #[derive(Default)]
 struct ArenaFacts {
-    sides: OnceCell<(SideFacts, SideFacts)>,
-}
-
-/// The facts about one arena that [`ArenaFacts`] holds.
-struct SideFacts {
     /// The occurrences of each content id, which tell
     /// [`is_mostly_unchanged_pair`] which subtrees are unique on their side.
-    ids: IdCounts,
-    /// The node and atom leaf counts of each subtree, which size a run for
-    /// [`PAIRING_THRESHOLD`] and weigh what [`pair_by_shared_content`] finds.
-    sizes: Vec<(u32, u32)>,
+    ///
+    /// It takes a hash per node, and only a run with members on both sides and
+    /// two or more on one side reads it.
+    ids: OnceCell<(IdCounts, IdCounts)>,
+    /// The node and atom leaf counts of each subtree.
+    ///
+    /// They size a middle for [`ATOM_ANCHOR_BUDGET`] and a run for
+    /// [`PAIRING_THRESHOLD`], and weigh what [`pair_by_shared_content`] finds.
+    /// Most diffs hold an atom anchor somewhere, so most build them, in one
+    /// pass with no hashing.
+    sizes: OnceCell<(SubtreeCounts, SubtreeCounts)>,
 }
 
 impl ArenaFacts {
-    /// The lhs and rhs facts, built from the two arenas on the first call.
-    fn sides(
+    fn ids(
         &self,
         lhs_arena: &SyntaxArena<'_>,
         rhs_arena: &SyntaxArena<'_>,
-    ) -> &(SideFacts, SideFacts) {
-        self.sides
-            .get_or_init(|| (SideFacts::of(lhs_arena), SideFacts::of(rhs_arena)))
+    ) -> &(IdCounts, IdCounts) {
+        self.ids
+            .get_or_init(|| (count_ids(lhs_arena), count_ids(rhs_arena)))
     }
-}
 
-impl SideFacts {
-    fn of(arena: &SyntaxArena<'_>) -> Self {
-        Self {
-            ids: count_ids(arena),
-            sizes: arena.subtree_counts(),
-        }
+    fn sizes(
+        &self,
+        lhs_arena: &SyntaxArena<'_>,
+        rhs_arena: &SyntaxArena<'_>,
+    ) -> &(SubtreeCounts, SubtreeCounts) {
+        self.sizes
+            .get_or_init(|| (lhs_arena.subtree_counts(), rhs_arena.subtree_counts()))
     }
 }
 
@@ -279,7 +307,8 @@ fn pair_children(
     // Phase 2: LCS anchors over the middle. Matched pairs are byte-for-byte
     // equal, so mark them and their descendants Unchanged.
     let anchors = if !lhs_mid.is_empty() && !rhs_mid.is_empty() {
-        lcs_pairs(lhs_arena, rhs_arena, lhs_mid, rhs_mid)
+        let pairs = lcs_pairs(lhs_arena, rhs_arena, lhs_mid, rhs_mid);
+        splitting_anchors(lhs_arena, rhs_arena, lhs_mid, rhs_mid, pairs, facts)
     } else {
         Vec::new()
     };
@@ -309,6 +338,35 @@ fn pair_children(
         lhs_cursor = lhs_anchor + 1;
         rhs_cursor = rhs_anchor + 1;
     }
+}
+
+/// The pairs of `pairs` that anchor a split of the two middles.
+///
+/// Every list pair anchors. An atom pair anchors only when the node counts of
+/// the two middles, the anchors counted too, multiply past
+/// [`ATOM_ANCHOR_BUDGET`]. Under the budget, the atom stays in its section for
+/// the search to pair.
+fn splitting_anchors(
+    lhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena<'_>,
+    lhs_mid: &[SyntaxId],
+    rhs_mid: &[SyntaxId],
+    pairs: Vec<(usize, usize)>,
+    facts: &ArenaFacts,
+) -> Vec<(usize, usize)> {
+    let is_atom =
+        |&(lhs, _): &(usize, usize)| matches!(lhs_arena.get(lhs_mid[lhs]), Syntax::Atom(_));
+    // Every member holds a node, so member counts that multiply past the budget
+    // put the node counts past it too, and the size table stays unread.
+    let members = lhs_mid.len() as u64 * rhs_mid.len() as u64;
+    if members > ATOM_ANCHOR_BUDGET || !pairs.iter().any(is_atom) {
+        return pairs;
+    }
+    let (lhs_sizes, rhs_sizes) = facts.sizes(lhs_arena, rhs_arena);
+    if node_total(lhs_sizes, lhs_mid) * node_total(rhs_sizes, rhs_mid) > ATOM_ANCHOR_BUDGET {
+        return pairs;
+    }
+    pairs.into_iter().filter(|pair| !is_atom(pair)).collect()
 }
 
 /// Recurse into one unmatched run between two anchors, or emit it as
@@ -409,8 +467,7 @@ fn is_mostly_unchanged_pair(
     ) {
         return false;
     }
-    let (lhs_facts, rhs_facts) = facts.sides(lhs_arena, rhs_arena);
-    let (lhs_counts, rhs_counts) = (&lhs_facts.ids, &rhs_facts.ids);
+    let (lhs_counts, rhs_counts) = facts.ids(lhs_arena, rhs_arena);
     let unique = |counts: &IdCounts, id: ContentId| counts.get(&id) == Some(&1);
 
     let mut rhs_unique: HashSet<ContentId, FxBuildHasher> = HashSet::default();
@@ -460,11 +517,13 @@ fn pairs_by_content(
     if lhs_run.len() < 2 || rhs_run.len() < 2 {
         return false;
     }
-    let (lhs_facts, rhs_facts) = facts.sides(lhs_arena, rhs_arena);
-    let nodes = |sizes: &[(u32, u32)], run: &[SyntaxId]| {
-        run.iter().map(|id| u64::from(sizes[id.0].0)).sum::<u64>()
-    };
-    nodes(&lhs_facts.sizes, lhs_run) * nodes(&rhs_facts.sizes, rhs_run) > PAIRING_THRESHOLD
+    let (lhs_sizes, rhs_sizes) = facts.sizes(lhs_arena, rhs_arena);
+    node_total(lhs_sizes, lhs_run) * node_total(rhs_sizes, rhs_run) > PAIRING_THRESHOLD
+}
+
+/// The nodes of the subtrees of `run`, by the counts in `sizes`.
+fn node_total(sizes: &[(u32, u32)], run: &[SyntaxId]) -> u64 {
+    run.iter().map(|id| u64::from(sizes[id.0].0)).sum()
 }
 
 /// Emit `lhs_run` against `rhs_run` split at the pairs that
@@ -516,9 +575,9 @@ fn pair_by_shared_content(
     rhs_run: &[SyntaxId],
     facts: &ArenaFacts,
 ) -> Vec<(usize, usize)> {
-    let (lhs_facts, rhs_facts) = facts.sides(lhs_arena, rhs_arena);
-    let lhs_holders = holders(lhs_arena, lhs_run, &lhs_facts.sizes);
-    let rhs_holders = holders(rhs_arena, rhs_run, &rhs_facts.sizes);
+    let (lhs_sizes, rhs_sizes) = facts.sizes(lhs_arena, rhs_arena);
+    let lhs_holders = holders(lhs_arena, lhs_run, lhs_sizes);
+    let rhs_holders = holders(rhs_arena, rhs_run, rhs_sizes);
     let held_by = |id: ContentId| {
         let lhs_count = lhs_holders.get(&id).map_or(0, SmallVec::len);
         rhs_holders
@@ -530,7 +589,7 @@ fn pair_by_shared_content(
     for (i, &member) in lhs_run.iter().enumerate() {
         let mut stack = vec![member];
         while let Some(id) = stack.pop() {
-            let leaves = lhs_facts.sizes[id.0].1;
+            let leaves = lhs_sizes[id.0].1;
             if leaves < PAIRING_MIN_LEAVES {
                 continue;
             }
@@ -905,6 +964,94 @@ mod tests {
                 vec!["fn c() { z(); }", "fn d() { w(); }"],
             )],
             "with no unique subtree in common, the run stays one section",
+        );
+    }
+
+    /// A grown binary chain shares its `||` with the old one. Under the budget
+    /// the `||` anchors nothing, so the old chain's three children stay in one
+    /// section beside the new chain's three.
+    #[test]
+    fn an_atom_anchors_no_split_in_a_small_run() {
+        let lhs = "fn f() { if a.is_some() || b.is_some() { go(); } }";
+        let rhs = "fn f() { if a.is_some() || b.is_some() || c { go(); } }";
+
+        assert_eq!(
+            section_texts(lhs, rhs),
+            [(
+                vec!["a.is_some()", "||", "b.is_some()"],
+                vec!["a.is_some() || b.is_some()", "||", "c"],
+            )],
+            "one section holds both chains",
+        );
+    }
+
+    /// A list anchors at every size, so the tuple an array kept splits its two
+    /// edits apart, while the commas beside it anchor nothing.
+    #[test]
+    fn a_list_anchors_a_split_in_a_small_run() {
+        assert_eq!(
+            section_texts(
+                "fn f() { let a = [0, (1, 1), 2]; }",
+                "fn f() { let a = [9999, (1, 1), 8888]; }",
+            ),
+            [
+                (vec!["0", ","], vec!["9999", ","]),
+                (vec![",", "2"], vec![",", "8888"])
+            ],
+            "the kept tuple splits the run, and each comma stays with its edit",
+        );
+    }
+
+    /// Past the budget an atom anchors again, so the commas of a long array
+    /// keep its first and last edits apart. The node counts decide, not the
+    /// member counts, so ten members that hold eight tuples keep their commas
+    /// too. Ten numbers with the same edits search as one section.
+    #[test]
+    fn an_atom_anchors_a_split_past_the_budget() {
+        let source = |items: &[String]| format!("fn f() {{ let a = [{}]; }}", items.join(", "));
+        let ends_edited = |items: Vec<String>| {
+            let mut edited = items.clone();
+            let last = edited.len() - 1;
+            edited[0] = "9999".to_string();
+            edited[last] = "8888".to_string();
+            (source(&items), source(&edited))
+        };
+        let numbers = |len: usize| (0..len).map(|i| i.to_string()).collect::<Vec<_>>();
+        let tuples = (0..10)
+            .map(|i| match i {
+                0 | 9 => i.to_string(),
+                _ => format!("({i}, {i}, {i})"),
+            })
+            .collect::<Vec<_>>();
+
+        let (lhs, rhs) = ends_edited(numbers(1501));
+        assert_eq!(
+            section_texts(&lhs, &rhs),
+            [(vec!["0"], vec!["9999"]), (vec!["1500"], vec!["8888"])],
+            "the commas of a long array keep its two edits apart",
+        );
+
+        let (lhs, rhs) = ends_edited(tuples);
+        assert_eq!(
+            section_texts(&lhs, &rhs),
+            [(vec!["0"], vec!["9999"]), (vec!["9"], vec!["8888"])],
+            "19 members holding 75 nodes a side keep their commas",
+        );
+
+        let (lhs, rhs) = ends_edited(numbers(10));
+        assert_eq!(
+            section_texts(&lhs, &rhs),
+            [(
+                vec![
+                    "0", ",", "1", ",", "2", ",", "3", ",", "4", ",", "5", ",", "6", ",", "7", ",",
+                    "8", ",", "9"
+                ],
+                vec![
+                    "9999", ",", "1", ",", "2", ",", "3", ",", "4", ",", "5", ",", "6", ",", "7",
+                    ",", "8", ",", "8888"
+                ],
+            )],
+            "ten numbers and their commas search as one section",
         );
     }
 

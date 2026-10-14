@@ -1381,6 +1381,24 @@ mod tests {
             .collect()
     }
 
+    /// A binary chain that grows an operand keeps its old chain whole, so the
+    /// new `||` and its operand are the only change.
+    #[test]
+    fn a_grown_binary_chain_marks_only_the_new_operand() {
+        let lhs = "fn f() { if a.is_some() || b.is_some() { go(); } }";
+        let rhs = "fn f() { if a.is_some() || b.is_some() || c { go(); } }";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        assert_eq!(
+            change_texts(&result, lhs, rhs),
+            [
+                (Side::Rhs, "||", DiffChangeKind::Novel),
+                (Side::Rhs, "c", DiffChangeKind::Novel),
+            ],
+            "the lhs keeps every token, and the rhs adds the second `||` and `c`",
+        );
+    }
+
     /// An item inserted with its attribute among identical attributes leaves
     /// the old attributes on their old items, so the novel attribute is the
     /// one above the new item.
