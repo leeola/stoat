@@ -36,15 +36,20 @@ use std::{
 /// even on the biggest graphs we'd run.
 const CANCEL_POLL_INTERVAL: usize = 4096;
 
-/// Default graph cap, matching difftastic's default. It bounds the vertex
-/// arena so that a pathological single-section rewrite -- one changed
-/// region too large to diff structurally -- degrades to
-/// preprocessing-only instead of searching an unbounded graph.
+/// The vertex count past which one section's search gives up, so a
+/// pathological rewrite costs a bounded memory spike.
 ///
-/// Per-section search keeps ordinary edits orders of magnitude below this,
-/// so only a worst case ever reaches the cap. The fallback path is always
-/// available when it does.
-pub const DEFAULT_GRAPH_LIMIT: usize = 3_000_000;
+/// A vertex costs about 200 bytes with its edge pool and its seen-map key, so
+/// the cap bounds one search near 200 MB. The peel and the pairing in
+/// [`super::unchanged`] split the runs whose members share content, which
+/// leaves the cap to guard runs whose members share nothing. A section past
+/// the cap keeps the line pass's detail in the editor, through
+/// [`super::DiffResult::unsearched`].
+///
+/// One million is the smallest cap that changed no fixture's agreement in the
+/// corpus harness. At 500,000, the largest fixture, a 75,000-node file,
+/// reached the cap and gained 40 mismatched lines.
+pub const DEFAULT_GRAPH_LIMIT: usize = 1_000_000;
 
 /// Distinct full-parents-stack variants explored per shallow key.
 /// Difftastic caps at 2 so the search can tell popping both delimiters
