@@ -2718,6 +2718,10 @@ mod tests {
                     ("workspace_picker", KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                         "SubmitPromptInput"
                     },
+                    // The palette walks its command history on the arrows and
+                    // keeps Ctrl-p and Ctrl-n for the list.
+                    ("palette", KeyCode::Up, KeyModifiers::NONE) => "PromptHistoryPrev",
+                    ("palette", KeyCode::Down, KeyModifiers::NONE) => "PromptHistoryNext",
                     _ => action,
                 };
                 let bound = keymap

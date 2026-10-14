@@ -1584,15 +1584,15 @@ mod tests {
     }
 
     #[test]
-    fn command_palette_down_then_enter_dispatches_selection() {
+    fn command_palette_ctrl_n_then_enter_dispatches_selection() {
         let mut h = Stoat::test();
         h.type_text(":focus");
-        h.type_keys("down enter");
+        h.type_keys("ctrl-n enter");
         assert!(h.stoat.command_palette.is_none());
     }
 
     #[test]
-    fn palette_alt_up_recalls_and_reexecutes_a_recorded_command() {
+    fn palette_up_recalls_and_reexecutes_a_recorded_command() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/hist");
         let sub = root.join("sub");
@@ -1605,11 +1605,11 @@ mod tests {
 
         h.stoat.active_workspace_mut().git_root = root;
         h.type_text(":");
-        h.type_keys("alt-up enter");
+        h.type_keys("up enter");
         assert_eq!(
             h.stoat.active_workspace().git_root,
             sub,
-            "Alt-Up recalls the recorded cd line and Enter re-runs it"
+            "Up recalls the recorded cd line and Enter re-runs it"
         );
     }
 
@@ -1624,7 +1624,7 @@ mod tests {
             InputHistory::from_entries(vec![format!("cd {}", sub.display()), "w".to_string()]);
 
         h.type_text(":sub");
-        h.type_keys("alt-up enter");
+        h.type_keys("up enter");
         assert_eq!(
             h.stoat.active_workspace().git_root,
             sub,
@@ -1639,7 +1639,7 @@ mod tests {
             InputHistory::from_entries(vec!["cd /alpha".to_string(), "cd /beta".to_string()]);
 
         h.type_text(":");
-        h.type_keys("alt-up");
+        h.type_keys("up");
         assert_eq!(
             palette_text(&h),
             "cd /beta",
@@ -1648,11 +1648,11 @@ mod tests {
 
         h.type_text("x");
         h.stoat.drive_background();
-        h.type_keys("alt-up");
+        h.type_keys("up");
         assert_eq!(
             palette_text(&h),
             "cd /betax",
-            "the edit ends the walk, so Alt-Up captures the new needle (which matches nothing)"
+            "the edit ends the walk, so Up captures the new needle (which matches nothing)"
         );
     }
 
@@ -1679,32 +1679,37 @@ mod tests {
     }
 
     #[test]
-    fn palette_arrows_move_the_list_not_history() {
+    fn palette_arrows_recall_history_not_the_list() {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().palette_history =
             InputHistory::from_entries(vec!["w".to_string()]);
+        let place = |h: &TestHarness| {
+            (
+                h.stoat.command_palette.as_ref().expect("open").selected,
+                palette_text(h),
+            )
+        };
 
         h.type_text(":");
-        h.type_keys("down");
-        assert_eq!(
-            h.stoat.command_palette.as_ref().expect("open").selected,
-            1,
-            "Down moves the list selection down"
-        );
         h.type_keys("up");
         assert_eq!(
-            h.stoat.command_palette.as_ref().expect("open").selected,
-            0,
-            "Up moves the list selection up"
+            place(&h),
+            (0, "w".to_string()),
+            "Up recalls the history and leaves the list selection"
         );
-        assert_eq!(palette_text(&h), "", "the arrows never recall history");
+        h.type_keys("down");
+        assert_eq!(
+            place(&h),
+            (0, String::new()),
+            "Down past the newest restores the typed text and leaves the list selection"
+        );
     }
 
     #[test]
     fn a_fuzzy_list_submit_records_the_entry_head() {
         let mut h = Stoat::test();
         h.type_text(":focus");
-        h.type_keys("down enter");
+        h.type_keys("ctrl-n enter");
 
         let history = h
             .stoat
@@ -3739,7 +3744,9 @@ mod tests {
     fn snapshot_command_palette_filter_scrolls_to_selection() {
         let mut h = Stoat::test();
         h.type_text(":");
-        h.type_keys("down down down down down down down down down down down down");
+        h.type_keys(
+            "ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n ctrl-n",
+        );
         h.assert_snapshot("command_palette_filter_scrolls_to_selection");
     }
 }

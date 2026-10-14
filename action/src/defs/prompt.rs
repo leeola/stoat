@@ -45,7 +45,8 @@ define_action!(
     "recall older prompt history",
     "Recall the previous entry from the open prompt's history, fish-style: \
      the already-typed text is a substring needle that filters matches. A \
-     prompt that keeps no history does nothing. Bound by default to Alt-Up.",
+     prompt that keeps no history does nothing. Bound by default to Alt-Up, \
+     and in the command palette to Up as well.",
     ActionPriority::Normal,
     palette_visible = false
 );
@@ -58,7 +59,8 @@ define_action!(
     "recall newer prompt history",
     "Recall the next entry toward the newest in the open prompt's history, \
      under the same substring needle. Stepping past the newest restores the \
-     originally-typed text. Bound by default to Alt-Down.",
+     originally-typed text. Bound by default to Alt-Down, and in the command \
+     palette to Down as well.",
     ActionPriority::Normal,
     palette_visible = false
 );
