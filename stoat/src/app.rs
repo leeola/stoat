@@ -5119,6 +5119,7 @@ impl Stoat {
                 self.size = Rect::new(0, 0, w, h);
                 let size = self.size;
                 self.active_workspace_mut().layout(size);
+                tracing::debug!(target: "stoat::app", cols = w, rows = h, "terminal resized");
                 // A drag reports a resize per column or row it crosses, and each
                 // one moves every pool's rectangle, so the pools hold their
                 // fills until this window closes.

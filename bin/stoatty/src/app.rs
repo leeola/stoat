@@ -1622,6 +1622,7 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             WindowEvent::Focused(gained) => {
                 state.focused = gained;
+                tracing::debug!(gained, "window focus");
                 state.gpu.set_cursor_fill(if gained {
                     CursorFill::Solid
                 } else {
@@ -1667,6 +1668,7 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 state.scale_factor = scale_factor;
+                tracing::info!(scale_factor, "scale factor changed");
                 state
                     .gpu
                     .set_font_size(state.font_size, scale_factor as f32);
@@ -3715,6 +3717,7 @@ fn apply_primary_resize(state: &mut State) {
     let Some((width, height)) = state.pending_resize.take() else {
         return;
     };
+    let grid_before = state.gpu.grid_size();
     state.gpu.resize(width, height);
     let (rows, cols) = state.gpu.grid_size();
     let (pixel_width, pixel_height) =
@@ -3723,6 +3726,11 @@ fn apply_primary_resize(state: &mut State) {
     let _ = state
         .pty
         .resize(rows as u16, cols as u16, pixel_width, pixel_height);
+    // A dragged edge resizes once per frame, and the grid moves only when a
+    // whole cell fits or goes.
+    if (rows, cols) != grid_before {
+        tracing::debug!(cols, rows, width, height, "window resized");
+    }
 }
 
 /// Fit one aux window's surface to the size its last batch settled on,
