@@ -103,6 +103,9 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
             h.send_command(&text);
         }
     }
+    if run_state.shell_handle.is_some() {
+        tracing::info!(target: "stoat::run", command = %text, "run pane command sent");
+    }
 
     UpdateEffect::Redraw
 }
@@ -204,10 +207,17 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
                 run_state.shell_handle = Some(handle);
             }
             stoat.modal_run = Some(id);
+            tracing::info!(
+                target: "stoat::run",
+                command = %command,
+                cwd = %cwd.display(),
+                ?id,
+                "run started"
+            );
             UpdateEffect::Redraw
         },
         Err(e) => {
-            tracing::warn!("failed to spawn command: {e}");
+            tracing::warn!(target: "stoat::run", "failed to spawn command: {e}");
             let ws = stoat.active_workspace_mut();
             if let Some(state) = ws.runs.remove(id) {
                 state.dispose(ws);

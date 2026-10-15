@@ -8296,6 +8296,12 @@ impl Stoat {
                     {
                         block.finished = true;
                         block.exit_status = exit;
+                        tracing::info!(
+                            target: "stoat::run",
+                            command = %block.command,
+                            ?exit,
+                            "run finished"
+                        );
                     }
                 }
                 for text in block.grid.clipboard_writes.drain(..) {
@@ -8341,6 +8347,12 @@ impl Stoat {
                 if !block.finished {
                     block.finished = true;
                     block.exit_status = exit_status;
+                    tracing::info!(
+                        target: "stoat::run",
+                        command = %block.command,
+                        exit = ?exit_status,
+                        "run finished"
+                    );
                 }
                 if on_screen {
                     UpdateEffect::Redraw
@@ -8376,6 +8388,7 @@ impl Stoat {
                 UpdateEffect::None
             },
             PtyNotification::TermExited { term_id, .. } => {
+                tracing::info!(target: "stoat::terminal", ?term_id, "terminal exited");
                 let pane_ids = ws
                     .panes
                     .split_pane_ids()

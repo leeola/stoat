@@ -238,6 +238,13 @@ pub(super) fn spawn_terminal_view(stoat: &mut Stoat) -> View {
         token,
     ));
     spawn_term_reader(&executor, session, workspace, term_id, pty_tx);
+    tracing::info!(
+        target: "stoat::terminal",
+        program = %program,
+        cwd = %cwd.display(),
+        ?term_id,
+        "terminal spawned"
+    );
     View::Terminal(term_id)
 }
 

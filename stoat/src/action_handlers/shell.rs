@@ -68,6 +68,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     if cmd.is_empty() {
         return true;
     }
+    tracing::info!(target: "stoat::run", cmd = %cmd, ?action, "shell pipe");
     let shell_host = stoat.shell_host.clone();
     match action {
         ShellAction::Pipe => apply_pipe(stoat, &*shell_host, &cmd),
@@ -113,6 +114,12 @@ fn run_shell(
     let out = host
         .run(cmd, stdin.as_bytes(), None, diff)
         .map_err(|err| format!("Shell command failed: {err}"))?;
+    tracing::debug!(
+        target: "stoat::run",
+        exit_code = out.exit_code,
+        stderr_len = out.stderr.len(),
+        "shell pipe finished"
+    );
 
     let mut text = match (out.exit_code == 0, out.stderr.is_empty()) {
         (false, true) => {
