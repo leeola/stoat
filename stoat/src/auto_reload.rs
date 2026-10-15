@@ -227,6 +227,9 @@ pub(crate) fn stat_and_read_buffer(
     if read_in_flight(stoat, id) {
         return false;
     }
+    if logs_change(stoat, path, mode) {
+        tracing::info!(target: "stoat::file", path = %path.display(), "file changed on disk");
+    }
 
     let result: Arc<Mutex<Option<AutoReloadResult>>> = Arc::new(Mutex::new(None));
     let task = {
@@ -266,6 +269,21 @@ fn read_in_flight(stoat: &Stoat, id: BufferId) -> bool {
         .pending_auto_reloads
         .iter()
         .any(|p| (p.workspace, p.id) == (workspace, id))
+}
+
+/// Whether an external change of `path`, reloaded under `mode`, gets a
+/// `stoat::file` line.
+///
+/// A buffer that follows its file changes by design, so a line per change
+/// repeats on every poll. The session's own log changes with every line
+/// written, so a line about it is itself the next change, and the lines never
+/// stop.
+fn logs_change(stoat: &Stoat, path: &Path, mode: AutoReloadMode) -> bool {
+    mode == AutoReloadMode::Off
+        && stoat
+            .session_log
+            .as_ref()
+            .is_none_or(|log| log.path != path)
 }
 
 /// Read `path` and work out the edit that brings `old` up to it.
@@ -460,6 +478,16 @@ fn install_reload(
         .active_workspace_mut()
         .buffers
         .set_disk_mtime(id, mtime);
+    if let Some(path) = stoat.active_workspace().buffers.path_for(id)
+        && logs_change(stoat, path, mode)
+    {
+        tracing::info!(
+            target: "stoat::file",
+            path = %path.display(),
+            on_screen,
+            "reloaded buffer from disk"
+        );
+    }
 
     let ws = stoat.active_workspace_mut();
     for eid in tail_followers {
@@ -739,6 +767,12 @@ fn reload_from_disk(
         .active_workspace_mut()
         .buffers
         .set_disk_mtime(id, mtime);
+    tracing::info!(
+        target: "stoat::file",
+        path = %path.display(),
+        unchanged,
+        "reloaded buffer"
+    );
 
     if unchanged {
         ReloadOutcome::Unchanged
