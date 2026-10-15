@@ -543,7 +543,7 @@ fn drop_other_diff_views(ws: &mut Workspace, keep: PaneId) {
 /// Opening the view lands the cursor once the file's hunks are in, which takes
 /// a frame or more when they are not current, so the loop paints the view
 /// first. [`land_toggle_jump`] places the cursor. Toggling the view off leaves
-/// the cursor untouched.
+/// the cursor untouched, also when the hunks of the open land after the close.
 ///
 /// See also:
 /// - [`enter_diff_view`], the entry half, which turns the view on where the reader stands.
@@ -711,9 +711,11 @@ pub(crate) fn pump_diff_wants(stoat: &mut Stoat) -> bool {
 ///
 /// A landing acts only where the reader still is, since the reader moves on
 /// while the hunks are on the pool. A latched view needs its editor to show
-/// `buffer_id` in a latched split pane, a toggle jump or a pair verdict needs
-/// its editor focused, and a change press or a file hop needs the focused
-/// buffer to be `buffer_id`. Otherwise the landing is dropped.
+/// `buffer_id` in a latched split pane. A toggle jump or a pair verdict needs
+/// its editor focused with the diff view still on, so a view closed before the
+/// hunks land keeps the cursor and the open file. A change press or a file hop
+/// needs the focused buffer to be `buffer_id`. Otherwise the landing is
+/// dropped.
 fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) {
     let focused = stoat.focused_editor_ids();
     match landing {
@@ -735,12 +737,12 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
             }
         },
         DiffLanding::ToggleJump { editor, origin } => {
-            if focused.is_some_and(|(id, _)| id == editor) {
+            if focused_diff_view(stoat, editor) {
                 land_toggle_jump(stoat, origin);
             }
         },
         DiffLanding::PairVerdict { editor } => {
-            if focused.is_some_and(|(id, _)| id == editor) && !editor_shows_changes(stoat, editor) {
+            if focused_diff_view(stoat, editor) && !editor_shows_changes(stoat, editor) {
                 stoat.set_status("the two files do not differ");
             }
         },
@@ -765,6 +767,18 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
             }
         },
     }
+}
+
+/// Whether `editor` holds the focus and still shows the diff view.
+fn focused_diff_view(stoat: &Stoat, editor: EditorId) -> bool {
+    stoat
+        .focused_editor_ids()
+        .is_some_and(|(id, _)| id == editor)
+        && stoat
+            .active_workspace()
+            .editors
+            .get(editor)
+            .is_some_and(|state| state.diff_view)
 }
 
 /// Whether the editor's diff map holds a hunk or a staged mark.
@@ -1798,9 +1812,8 @@ mod tests {
     }
 
     /// A repo where `a.rs` and `b.rs` differ from HEAD on their second row and
-    /// `clean.rs` matches it, open on `a.rs` with the latch armed and its hunks
-    /// in.
-    fn latched_pair() -> TestHarness {
+    /// `clean.rs` matches it, with no file open.
+    fn repo_with_a_clean_file() -> TestHarness {
         let mut h = TestHarness::with_size(80, 14);
         h.stage_review_scenario(
             "/repo",
@@ -1812,6 +1825,13 @@ mod tests {
             let mut builder = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
             builder.head_file("clean.rs", "same\n");
         }
+        h
+    }
+
+    /// [`repo_with_a_clean_file`] open on `a.rs` with the latch armed and its
+    /// hunks in.
+    fn latched_pair() -> TestHarness {
+        let mut h = repo_with_a_clean_file();
         h.open_file(Path::new("/repo/a.rs"));
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
         h.settle();
@@ -1917,23 +1937,25 @@ mod tests {
         );
     }
 
+    /// The number of entries on the focused pane's jumplist.
+    fn jump_count(h: &TestHarness) -> usize {
+        let panes = &h.stoat.active_workspace().panes;
+        panes.pane(panes.focus()).jumplist.entries().len()
+    }
+
     #[test]
     fn a_diff_toggle_jumps_to_the_nearest_change_when_its_hunks_land() {
         let mut h = TestHarness::with_size(80, 14);
         h.stage_review_scenario("/repo", &[("a.rs", "a\nb\n", "a\nc\n")]);
         h.open_file(Path::new("/repo/a.rs"));
-        let jumps = |h: &TestHarness| {
-            let panes = &h.stoat.active_workspace().panes;
-            panes.pane(panes.focus()).jumplist.entries().len()
-        };
-        let jumps_before = jumps(&h);
+        let jumps_before = jump_count(&h);
 
         h.stoat.toggle_diff_view();
         assert_eq!(
             (
                 review_cursor_row(&mut h),
                 want_state(&mut h, "/repo/a.rs").1,
-                jumps(&h),
+                jump_count(&h),
             ),
             (0, true, jumps_before),
             "the cursor waits for the hunks",
@@ -1941,9 +1963,61 @@ mod tests {
 
         h.settle();
         assert_eq!(
-            (review_cursor_row(&mut h), jumps(&h)),
+            (review_cursor_row(&mut h), jump_count(&h)),
             (1, jumps_before + 1),
             "the cursor lands on the change, and the jump goes on the jumplist",
+        );
+    }
+
+    /// A second toggle closes the view while the hunks of the first are still
+    /// on the pool, and their landing finds the view closed.
+    #[test]
+    fn a_diff_closed_before_its_hunks_land_leaves_the_cursor() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\n", "a\nc\n")]);
+        h.open_file(Path::new("/repo/a.rs"));
+        let jumps_before = jump_count(&h);
+
+        h.stoat.toggle_diff_view();
+        h.stoat.toggle_diff_view();
+        let pending = want_state(&mut h, "/repo/a.rs").1;
+        h.settle();
+
+        assert_eq!(
+            (
+                pending,
+                review_cursor_row(&mut h),
+                jump_count(&h),
+                want_state(&mut h, "/repo/a.rs").0,
+            ),
+            (true, 0, jumps_before, false),
+            "the hunks land after the close, and the cursor and the jumplist stay",
+        );
+    }
+
+    /// A layout key closes the view of a clean file while its hunks are on the
+    /// pool, so their landing does not cross into the first changed file.
+    #[test]
+    fn a_layout_key_before_the_hunks_land_leaves_the_clean_file_open() {
+        let mut h = repo_with_a_clean_file();
+        h.open_file(Path::new("/repo/clean.rs"));
+
+        h.stoat.toggle_diff_view();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::TogglePaneWiden);
+        let pending = want_state(&mut h, "/repo/clean.rs").1;
+        h.settle();
+
+        assert_eq!(
+            (
+                pending,
+                pair_view(&mut h),
+                h.stoat.pending_message.as_deref()
+            ),
+            (
+                true,
+                (false, false, Some(PathBuf::from("/repo/clean.rs"))),
+                Some("diff closed"),
+            ),
         );
     }
 
@@ -2528,6 +2602,23 @@ mod tests {
         h.settle();
 
         assert_eq!(h.stoat.pending_message.as_deref(), None);
+    }
+
+    /// A focus key closes a pair diff while its hunks are on the pool, so no
+    /// verdict and no change walk reports on the closed pair.
+    #[test]
+    fn a_pair_diff_closed_before_its_hunks_land_gets_no_verdict() {
+        let mut h = TestHarness::with_size(120, 20);
+        h.open_side_by_side(("/pair/a.txt", "same\n"), ("/pair/b.txt", "same\n"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let pending = want_state(&mut h, "/pair/b.txt").1;
+        h.settle();
+
+        assert_eq!(
+            (pending, h.stoat.pending_message.as_deref()),
+            (true, Some("diff closed")),
+        );
     }
 
     /// The git diff on the measured file before the press shows changes, and
