@@ -253,6 +253,12 @@ pub(super) fn open_file_finder(
         _ => Vec::new(),
     };
     let finder_scopes = stoat.settings.finder_scopes.clone();
+    tracing::debug!(
+        target: "stoat::picker",
+        ?initial_scope,
+        ?open_intent,
+        "file finder opened"
+    );
 
     let ws = stoat.active_workspace_mut();
     let mut finder = FileFinder::new(
@@ -565,6 +571,13 @@ pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
             finder.open_intent,
         )
     };
+    tracing::info!(
+        target: "stoat::picker",
+        path = %path.display(),
+        ?intent,
+        term = term.is_some(),
+        "file finder pick"
+    );
     close_file_finder(stoat);
     if let Some(term) = term {
         return Some(super::terminal::show_terminal(stoat, term, intent));

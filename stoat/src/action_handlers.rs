@@ -49,6 +49,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::FsHost,
     jumplist::JumpList,
+    keymap_state::{self, ActiveModal},
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace::diff::WorktreeBase,
 };
@@ -207,6 +208,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     // made and then moved on from waits to surprise a later yank.
     stoat.take_selected_register();
     conflict_view::disarm_clobber_unless_pick(stoat, action.kind());
+    let modal_before = keymap_state::active_modal(stoat);
 
     let group_buffer = if manages_own_undo_group(action.kind()) {
         None
@@ -1237,7 +1239,41 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());
     }
+    log_picker_open(stoat, action, modal_before);
     effect
+}
+
+/// Log one `debug` line on `stoat::picker` when `action` opened a picker.
+///
+/// A picker counts as opened only when a modal is up that was not before the
+/// action ran, so a second open of a picker already up logs nothing. A re-fire
+/// through `OpenLastPicker` or a palette command logs once, from the opening
+/// action's own dispatch, because neither of those is an opener kind.
+fn log_picker_open(stoat: &Stoat, action: &dyn Action, modal_before: Option<ActiveModal>) {
+    if !opens_picker_kind(action.kind()) {
+        return;
+    }
+    let modal = keymap_state::active_modal(stoat);
+    if modal.is_some() && modal != modal_before {
+        tracing::debug!(target: "stoat::picker", action = action.def().name(), "picker opened");
+    }
+}
+
+/// Action kinds that open a picker, for the `picker opened` line.
+///
+/// Wider than [`is_picker_open_kind`], which also decides what `OpenLastPicker`
+/// re-fires. The help, workspace, symbol, and commit pickers open here too.
+fn opens_picker_kind(kind: ActionKind) -> bool {
+    is_picker_open_kind(kind)
+        || matches!(
+            kind,
+            ActionKind::OpenHelp
+                | ActionKind::SwitchWorkspace
+                | ActionKind::OpenSymbolPicker
+                | ActionKind::OpenWorkspaceSymbolPicker
+                | ActionKind::GitReview
+                | ActionKind::GitLs
+        )
 }
 
 /// Actions that drive the undo history themselves, so [`dispatch`] must not wrap
