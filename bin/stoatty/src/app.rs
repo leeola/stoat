@@ -860,6 +860,12 @@ struct State {
     /// or `None` when none is, tracked from `MouseInput` so a drag-motion report
     /// can encode which button is being dragged.
     pressed_button: Option<u8>,
+    /// The side button held down in this window, or `None` when none is.
+    ///
+    /// A focus loss sends its release, because a release after the focus moves
+    /// reaches the window that took the focus, and the program reads a press
+    /// with no release as a button still held.
+    held_side_button: Option<MouseButton>,
     /// Whether the pointer sits in the right half of its cell, tracked from
     /// `CursorMoved` so a native grid selection anchors on the correct edge.
     pointer_side_right: bool,
@@ -1197,6 +1203,7 @@ impl ApplicationHandler<PtyEvent> for App {
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
+            held_side_button: None,
             pointer_side_right: false,
             native_drag: false,
             clipboard: None,
@@ -1630,6 +1637,15 @@ impl ApplicationHandler<PtyEvent> for App {
                     // Regaining focus clears any pending attention request, e.g.
                     // a dock bounce a bell raised while the window was in back.
                     state.window.request_user_attention(None);
+                } else if let Some(button) = state.held_side_button.take()
+                    && let Some(event) = side_button_event(
+                        button,
+                        false,
+                        state.pointer_cell,
+                        modifier_bits(state.modifiers),
+                    )
+                {
+                    send_window_event(state, event);
                 }
             },
             WindowEvent::Occluded(hidden) => {
@@ -1905,22 +1921,17 @@ impl ApplicationHandler<PtyEvent> for App {
                 // The side buttons ride the window socket rather than the pty.
                 // Their xterm encoding sets the 128 bit, which the child's
                 // parser rejects outright, so no in-band report could reach it.
-                if matches!(button, MouseButton::Back | MouseButton::Forward)
-                    && let Some(ipc) = ipc_button(button)
-                {
-                    if element_state == ElementState::Pressed {
-                        let (col, row) = state.pointer_cell;
-                        send_window_event(
-                            state,
-                            WindowIpcEvent::Mouse {
-                                window: 0,
-                                kind: MouseKind::Press(ipc),
-                                col: col as u16,
-                                row: row as u16,
-                                mods: modifier_bits(state.modifiers),
-                            },
-                        );
+                if matches!(button, MouseButton::Back | MouseButton::Forward) {
+                    let pressed = element_state == ElementState::Pressed;
+                    if let Some(event) = side_button_event(
+                        button,
+                        pressed,
+                        state.pointer_cell,
+                        modifier_bits(state.modifiers),
+                    ) {
+                        send_window_event(state, event);
                     }
+                    state.held_side_button = pressed.then_some(button);
                     return;
                 }
 
@@ -2250,6 +2261,35 @@ fn aux_drag_event(
         kind: MouseKind::Drag(button),
         col: cell.0,
         row: cell.1,
+        mods,
+    })
+}
+
+/// The report the primary window sends for a side button going down or up at
+/// `cell`, or `None` for any other button.
+///
+/// Both edges go out, so the program sees when a hold of the button ends.
+fn side_button_event(
+    button: MouseButton,
+    pressed: bool,
+    cell: (usize, usize),
+    mods: u8,
+) -> Option<WindowIpcEvent> {
+    if !matches!(button, MouseButton::Back | MouseButton::Forward) {
+        return None;
+    }
+
+    let ipc = ipc_button(button)?;
+    let kind = if pressed {
+        MouseKind::Press(ipc)
+    } else {
+        MouseKind::Release(ipc)
+    };
+    Some(WindowIpcEvent::Mouse {
+        window: 0,
+        kind,
+        col: cell.0 as u16,
+        row: cell.1 as u16,
         mods,
     })
 }
@@ -4024,10 +4064,10 @@ mod tests {
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
         grid_window_size, net_font_step, notification_should_show, pool_composite,
-        pool_grid_reports, selection_copy_text, snap_shift_to_pixels, step_popovers,
-        swallow_super_combo, update_cell_pixels, wheel_upstream, zoom_route, ActivePool, ForceFull,
-        FrameOutcome, Input, PendingResize, PoolView, PtyWrite, TermEvent, Visibility,
-        WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
+        pool_grid_reports, selection_copy_text, side_button_event, snap_shift_to_pixels,
+        step_popovers, swallow_super_combo, update_cell_pixels, wheel_upstream, zoom_route,
+        ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite, TermEvent,
+        Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -5519,6 +5559,36 @@ mod tests {
                 })
             ),
             "the report carries its window and the button being held"
+        );
+    }
+
+    #[test]
+    fn a_side_button_reports_its_press_and_its_release() {
+        use stoatty_protocol::window_ipc::{
+            MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent,
+        };
+        use winit::event::MouseButton;
+
+        let at_cell = |kind, mods| WindowIpcEvent::Mouse {
+            window: 0,
+            kind,
+            col: 3,
+            row: 4,
+            mods,
+        };
+
+        assert_eq!(
+            [
+                side_button_event(MouseButton::Back, true, (3, 4), 0),
+                side_button_event(MouseButton::Forward, false, (3, 4), 2),
+                side_button_event(MouseButton::Left, true, (3, 4), 0),
+            ],
+            [
+                Some(at_cell(MouseKind::Press(IpcMouseButton::Back), 0)),
+                Some(at_cell(MouseKind::Release(IpcMouseButton::Forward), 2)),
+                None,
+            ],
+            "a side button reports both edges, and another button reports nothing"
         );
     }
 
