@@ -1561,6 +1561,7 @@ pub(crate) fn drop_unreferenced_scratch(ws: &mut crate::workspace::Workspace, id
 
     ws.buffers.remove(id);
     ws.release_buffer(id, None);
+    tracing::debug!(target: "stoat::file", buffer_id = ?id, "dropped unreferenced scratch buffer");
 
     // A jumplist entry outliving its buffer would resolve into nothing on the
     // next walk, which is what the close path purges for the same reason.

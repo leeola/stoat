@@ -386,6 +386,19 @@ fn ensure_open(stoat: &mut Stoat, path: &Path) -> Result<BufferId, WorkspaceEdit
         let rope = buffer.read().expect("buffer lock").rope().clone();
         (id, rope)
     };
+
+    let buffers = &stoat.workspaces[workspace].buffers;
+    tracing::info!(
+        target: "stoat::file",
+        path = %path.display(),
+        buffer_id = ?id,
+        lines = rope.max_point().row + 1,
+        bytes = rope.len(),
+        lang = ?buffers.language_for(id).map(|l| l.name),
+        origin = "workspace edit",
+        read_only = ?buffers.read_only(id),
+        "opened file"
+    );
     crate::lsp::session::notify_buffer_opened(stoat, workspace, id, path, rope);
     Ok(id)
 }

@@ -454,9 +454,9 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
 /// `target`.
 ///
 /// The shared tail of the sync and background open paths. It registers the
-/// buffer (deduping on path), records `origin` on it, applies mtime and
-/// language, notifies LSP unless the file was compressed, records the pane
-/// switch, and installs the editor.
+/// buffer (deduping on path), logs a file it newly registers, records `origin`
+/// on it, applies mtime and language, notifies LSP unless the file was
+/// compressed, records the pane switch, and installs the editor.
 ///
 /// `workspace` is named rather than taken as the active one because the
 /// background path installs a read that may have finished after the user
@@ -473,7 +473,7 @@ fn finish_open(
     let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
 
-    let (buffer_id, buffer, read_only) = {
+    let (buffer_id, buffer, read_only, existed) = {
         let ws = &mut stoat.workspaces[workspace];
         // Opening a path already registered hands back the existing buffer and
         // discards `content`. Everything read alongside it describes a file the
@@ -507,8 +507,32 @@ fn finish_open(
         {
             ws.buffers.set_language(buffer_id, lang);
         }
-        (buffer_id, buffer, ws.buffers.read_only(buffer_id))
+        (buffer_id, buffer, ws.buffers.read_only(buffer_id), existed)
     };
+
+    if !existed {
+        // One guard for both counts. Two guards in one macro call live until the
+        // statement ends. A second read of a std `RwLock` on the same thread then
+        // blocks behind any waiting writer, and that writer waits on the first
+        // guard.
+        let (lines, bytes) = {
+            let buffer = buffer.read().expect("buffer lock");
+            (buffer.line_count(), buffer.rope().len())
+        };
+        let ws = &stoat.workspaces[workspace];
+        tracing::info!(
+            target: "stoat::file",
+            path = %absolute.display(),
+            ?buffer_id,
+            lines,
+            bytes,
+            lang = ?ws.buffers.language_for(buffer_id).map(|l| l.name),
+            ?origin,
+            ?read_only,
+            pane = ws.panes.pane(target).index,
+            "opened file"
+        );
+    }
 
     // The server indexes the gzip bytes under this path, and the text handed to
     // it disagrees with the file, so a compressed buffer stays out of LSP.
@@ -800,6 +824,7 @@ pub(crate) fn close_buffer_by_id(stoat: &mut Stoat, buffer_id: BufferId) -> Upda
     stoat
         .active_workspace_mut()
         .release_buffer(buffer_id, path.as_deref());
+    tracing::info!(target: "stoat::file", ?buffer_id, ?path, "closed buffer");
 
     // Purge the closed buffer from every pane's history and jumplist, so no
     // later switch or walk resolves a stale entry into it.
