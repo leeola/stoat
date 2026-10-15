@@ -39,6 +39,7 @@ use std::{
 };
 use stoat_language::{Language, LanguageRegistry};
 use stoat_text::SelectionGoal;
+use tracing::field;
 
 /// Cache key matching what [`populate_diff_cache`] writes, so a scan reads back
 /// the hunks a prior install stored for an unchanged file.
@@ -196,6 +197,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     };
 
     drop_focused_pair(stoat);
+    tracing::info!(target: "stoat::review", rev, sha = %sha, "diff base set");
     stoat
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::named(rev, sha)));
@@ -454,6 +456,15 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
             .active_workspace_mut()
             .drop_latched_view(buffer_id, editor);
         ensure_diff_map(stoat, buffer_id, None);
+        tracing::info!(
+            target: "stoat::review",
+            path = stoat
+                .active_workspace()
+                .buffers
+                .path_for(buffer_id)
+                .map(|path| field::display(path.display())),
+            "entered diff view"
+        );
     }
 }
 
@@ -492,6 +503,7 @@ pub(super) fn exit_diff_view(stoat: &mut Stoat) -> bool {
     if !commits_open && panes.widened() == Some(focus) {
         panes.unwiden();
     }
+    tracing::info!(target: "stoat::review", "left diff view");
     true
 }
 

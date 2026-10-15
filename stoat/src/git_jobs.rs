@@ -131,8 +131,20 @@ pub(crate) fn enqueue(stoat: &mut Stoat, job: GitJob) {
 
     let queue = &mut stoat.git_jobs.queue;
     match key.and_then(|key| queue.iter_mut().find(|queued| queued.key == Some(key))) {
-        Some(queued) => *queued = job,
-        None => queue.push_back(job),
+        Some(queued) => {
+            *queued = job;
+            tracing::debug!(target: "stoat::git", label, ?key, "git job replaced a queued job");
+        },
+        None => {
+            queue.push_back(job);
+            tracing::debug!(
+                target: "stoat::git",
+                label,
+                ?key,
+                queued = queue.len(),
+                "git job queued"
+            );
+        },
     }
     if stoat.git_jobs.running.is_none() {
         start_next(stoat);
