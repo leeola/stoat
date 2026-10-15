@@ -151,11 +151,11 @@ fn spawn_commit_list(
 ) -> Option<CommitListId> {
     let git_root = stoat.active_workspace().git_root.clone();
     let Some(repo) = stoat.git_host.discover(&git_root) else {
-        tracing::warn!("spawn_commit_list: not inside a git repository");
+        tracing::warn!(target: "stoat::review", "spawn_commit_list: not inside a git repository");
         return None;
     };
     let Some(workdir) = repo.workdir() else {
-        tracing::warn!("spawn_commit_list: git repo has no workdir");
+        tracing::warn!(target: "stoat::review", "spawn_commit_list: git repo has no workdir");
         return None;
     };
 

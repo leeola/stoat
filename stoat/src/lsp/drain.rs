@@ -131,7 +131,7 @@ fn drain_incoming_requests_from(stoat: &mut Stoat, host: &Arc<dyn LspHost>) {
         let id = request.id().clone();
         let result: Result<Value, LspResponseError> = match request {
             IncomingRequest::WorkDoneProgressCreate { params, .. } => {
-                tracing::debug!(target: "stoat::lsp", ?params, "workDoneProgress/create");
+                tracing::trace!(target: "stoat::lsp", ?params, "workDoneProgress/create");
                 Ok(Value::Null)
             },
             IncomingRequest::RegisterCapability { params, .. } => {
@@ -496,15 +496,16 @@ fn drain_notifications_from(
                         published,
                         spans,
                     );
-                    tracing::info!(
+                    tracing::debug!(
                         target: "stoat::lsp",
+                        server,
                         path = %path.display(),
                         count,
                         "diagnostics applied",
                     );
                 } else {
                     tracing::debug!(
-                        target: "stoat::app",
+                        target: "stoat::lsp",
                         uri = uri.as_str(),
                         "diagnostics arrived for non-file URI; dropped",
                     );
@@ -516,7 +517,7 @@ fn drain_notifications_from(
             },
             other => {
                 tracing::debug!(
-                    target: "stoat::app",
+                    target: "stoat::lsp",
                     ?other,
                     "unhandled LSP notification"
                 );

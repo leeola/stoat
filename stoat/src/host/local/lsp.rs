@@ -274,6 +274,7 @@ impl LocalLsp {
             .expect("lsp pending map poisoned")
             .insert(id, tx);
 
+        let started = Instant::now();
         let body = serde_json::to_vec(&Envelope {
             jsonrpc: "2.0",
             id: Some(id),
@@ -300,6 +301,14 @@ impl LocalLsp {
         };
         let received = rx.await;
         guard.armed = false;
+        tracing::trace!(
+            target: "stoat::lsp",
+            method,
+            id,
+            ms = started.elapsed().as_millis() as u64,
+            ok = matches!(received, Ok(Ok(_))),
+            "lsp request"
+        );
 
         match received {
             Ok(Ok(raw)) => parse_result(raw).await,
@@ -480,6 +489,7 @@ impl LspHost for LocalLsp {
         let _ = self.notify("exit", Value::Null);
         reap_child(&self.child, REAP_TIMEOUT, REAP_POLL).await;
         guard.armed = false;
+        tracing::info!(target: "stoat::lsp", "language server shut down");
         Ok(())
     }
 
@@ -781,7 +791,10 @@ fn reader_loop(
     let mut active_progress = HashSet::new();
     loop {
         let n = match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => {
+                tracing::info!(target: "stoat::lsp", "language server closed its stdout");
+                break;
+            },
             Ok(n) => n,
         };
         decoder.push(&buf[..n]);
@@ -850,13 +863,16 @@ fn writer_loop(
     drop(waiting);
 }
 
-/// Forward the child's stderr lines to the `stoat::lsp` tracing target. Language
-/// servers log to stderr, so this keeps that stream visible without mixing it
-/// into the protocol channel.
+/// Forward the child's stderr lines to the `stoat::lsp::stderr` tracing target.
+/// Language servers log to stderr, so this keeps that stream visible without
+/// mixing it into the protocol channel.
+///
+/// The target is its own so that a filter such as `stoat::lsp::stderr=warn`
+/// quiets a chatty server and keeps the editor's own `stoat::lsp` lines.
 fn stderr_loop(stderr: ChildStderr) {
     for line in BufReader::new(stderr).lines() {
         match line {
-            Ok(line) => tracing::debug!(target: "stoat::lsp", "{line}"),
+            Ok(line) => tracing::debug!(target: "stoat::lsp::stderr", "{line}"),
             Err(_) => break,
         }
     }

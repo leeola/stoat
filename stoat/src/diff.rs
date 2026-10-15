@@ -59,6 +59,7 @@ pub fn scan_working_tree(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => {
                 tracing::warn!(
+                    target: "stoat::diff",
                     path = %file.path.display(),
                     error = %e,
                     "scan_working_tree: skip file",
