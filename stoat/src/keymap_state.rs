@@ -834,7 +834,11 @@ pub(crate) fn resolve_action(
         match arg_to_param_value(arg, captured) {
             Some(value) => params.push(value),
             None => {
-                tracing::warn!("action `{name}`: cannot convert arg {:?}", arg.value);
+                tracing::warn!(
+                    target: "stoat::keymap",
+                    "action `{name}`: cannot convert arg {:?}",
+                    arg.value
+                );
                 return None;
             },
         }
@@ -842,7 +846,7 @@ pub(crate) fn resolve_action(
     match (entry.create)(&params) {
         Ok(action) => Some(action),
         Err(e) => {
-            tracing::warn!("action `{name}`: {e}");
+            tracing::warn!(target: "stoat::keymap", "action `{name}`: {e}");
             None
         },
     }

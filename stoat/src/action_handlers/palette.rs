@@ -648,12 +648,22 @@ fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         PaletteOutcome::Dispatch(entry, params, line) => {
+            tracing::info!(
+                target: "stoat::command",
+                line = %line,
+                action = entry.def.name(),
+                "command"
+            );
             stoat.active_workspace_mut().palette_history.push(line);
             close_palette(stoat);
             match (entry.create)(&params) {
                 Ok(action) => super::dispatch(stoat, &*action),
                 Err(e) => {
-                    tracing::warn!("palette dispatch `{}`: {e}", entry.def.name());
+                    tracing::warn!(
+                        target: "stoat::command",
+                        "palette dispatch `{}`: {e}",
+                        entry.def.name()
+                    );
                     UpdateEffect::Redraw
                 },
             }

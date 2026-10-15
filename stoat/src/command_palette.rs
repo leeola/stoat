@@ -803,7 +803,17 @@ impl CommandPalette {
                     let line = format!("{} {}", history_head(entry), chosen);
                     PaletteOutcome::Dispatch(entry, vec![value], line)
                 },
-                Err(_) => PaletteOutcome::None,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat::command",
+                        command = entry.def.name(),
+                        param = param.name,
+                        arg = %chosen,
+                        %err,
+                        "command argument rejected"
+                    );
+                    PaletteOutcome::None
+                },
             };
         }
 
@@ -846,7 +856,10 @@ impl CommandPalette {
                     .replace_text(ws, &format!("{} ", entry.command_name));
                 PaletteOutcome::None
             },
-            None => PaletteOutcome::None,
+            None => {
+                tracing::info!(target: "stoat::command", text = %text, "no command matched");
+                PaletteOutcome::None
+            },
         }
     }
 }
