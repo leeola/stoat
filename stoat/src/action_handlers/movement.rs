@@ -2322,22 +2322,22 @@ pub(crate) fn execute_replace(stoat: &mut Stoat, text: &str) -> UpdateEffect {
 
 pub(super) fn undo(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
-    apply_buffer_history(stoat, count, |buf| buf.undo())
+    apply_buffer_history(stoat, count, "undo", |buf| buf.undo())
 }
 
 pub(super) fn redo(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
-    apply_buffer_history(stoat, count, |buf| buf.redo())
+    apply_buffer_history(stoat, count, "redo", |buf| buf.redo())
 }
 
 pub(super) fn earlier(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
-    apply_buffer_history(stoat, count, |buf| buf.earlier())
+    apply_buffer_history(stoat, count, "earlier", |buf| buf.earlier())
 }
 
 pub(super) fn later(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
-    apply_buffer_history(stoat, count, |buf| buf.later())
+    apply_buffer_history(stoat, count, "later", |buf| buf.later())
 }
 
 pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
@@ -2369,7 +2369,7 @@ pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
 }
 
-fn apply_buffer_history<F>(stoat: &mut Stoat, count: u32, op: F) -> UpdateEffect
+fn apply_buffer_history<F>(stoat: &mut Stoat, count: u32, step: &str, op: F) -> UpdateEffect
 where
     F: Fn(&mut crate::buffer::TextBuffer) -> Option<Arc<[Selection<Anchor>]>>,
 {
@@ -2396,6 +2396,14 @@ where
         }
         restored
     };
+    tracing::debug!(
+        target: "stoat::edit",
+        ?buffer_id,
+        count,
+        step,
+        restored = restored.is_some(),
+        "buffer history step"
+    );
 
     let Some(selections) = restored else {
         return UpdateEffect::None;

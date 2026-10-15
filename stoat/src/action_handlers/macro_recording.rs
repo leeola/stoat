@@ -26,10 +26,17 @@ pub(super) fn toggle_record(stoat: &mut Stoat) -> UpdateEffect {
         let name = rec.register.name();
         if super::yank::write_fragments_to_register(stoat, rec.register, vec![text]) {
             stoat.set_status(format!("recorded to register {name}"));
+            tracing::debug!(
+                target: "stoat::edit",
+                register = %name,
+                keys = rec.keys.len(),
+                "macro recorded"
+            );
         }
     } else {
         let register = stoat.macro_register();
         stoat.set_status(format!("recording to register {}", register.name()));
+        tracing::debug!(target: "stoat::edit", register = %register.name(), "macro recording");
         stoat.macro_recording = Some(MacroRecording {
             register,
             keys: Vec::new(),
@@ -81,6 +88,13 @@ pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char, count: u32) -> UpdateE
         return UpdateEffect::Redraw;
     };
 
+    tracing::debug!(
+        target: "stoat::edit",
+        register = %register.name(),
+        keys = keys.len(),
+        count,
+        "macro replay"
+    );
     stoat.replaying_registers.push(register);
     let mut effect = UpdateEffect::None;
     for _ in 0..count {
