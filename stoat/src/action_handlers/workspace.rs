@@ -16,6 +16,7 @@ use std::{
     sync::Arc,
 };
 use time::OffsetDateTime;
+use tracing::field;
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     let git_root = stoat.active_workspace().git_root.clone();
@@ -27,6 +28,7 @@ pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     ws.layout(stoat.size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
+    log_created(&stoat.workspaces[id]);
     switch_active_workspace(stoat, id);
     UpdateEffect::Redraw
 }
@@ -54,6 +56,7 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     ws.layout(stoat.size());
     let id = stoat.workspaces.insert(ws);
     stoat.workspaces[id].id = id;
+    log_created(&stoat.workspaces[id]);
     switch_active_workspace(stoat, id);
 
     // The buffers replay on the pool. The install respawns the terminal and
@@ -62,15 +65,30 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+fn log_created(ws: &Workspace) {
+    tracing::info!(
+        target: "stoat::workspace",
+        uid = %ws.uid,
+        root = %ws.git_root.display(),
+        parent = ws.parent.map(field::display),
+        "created workspace"
+    );
+}
+
 pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.workspaces.len() <= 1 {
         // FIXME: surface a user-visible error once we have a status surface
         // for non-badge errors; tracing-only feedback is invisible in the TUI.
-        tracing::warn!("refusing to close last workspace");
+        tracing::warn!(target: "stoat::workspace", "refusing to close last workspace");
         return UpdateEffect::None;
     }
 
     let active_id = stoat.active_workspace;
+    tracing::info!(
+        target: "stoat::workspace",
+        uid = %stoat.workspaces[active_id].uid,
+        "closed workspace"
+    );
     remove_open_session(stoat, active_id);
 
     let replacement: WorkspaceId = stoat
@@ -98,11 +116,25 @@ pub(super) fn close_workspace(stoat: &mut Stoat) -> UpdateEffect {
 /// workspace left and open the entered one's, through
 /// [`crate::lsp::session::mirror_workspace`].
 pub(crate) fn switch_active_workspace(stoat: &mut Stoat, next: WorkspaceId) {
+    let from = stoat.active_workspace;
+    // A close removes the workspace it leaves before it switches away.
+    let from_uid = stoat.workspaces.get(from).map(|ws| ws.uid);
     stoat.active_workspace = next;
     stoat.active_workspace_mut().last_active = stoat.executor.system_now();
     let size = stoat.size();
     stoat.active_workspace_mut().layout(size);
     stoat.watch_active_root();
+    if from != next {
+        let ws = stoat.active_workspace();
+        tracing::info!(
+            target: "stoat::workspace",
+            from = from_uid.map(field::display),
+            to = %ws.uid,
+            name = %ws.display_name(),
+            root = %ws.git_root.display(),
+            "switched workspace"
+        );
+    }
 
     if stoat.active_workspace().remote.is_some() {
         stoat.remote_pending = true;
@@ -209,13 +241,19 @@ fn workspace_picker_rename_finish(stoat: &mut Stoat) -> UpdateEffect {
                 .spawn_blocking(move || {
                     if let Err(err) = persist::rename_saved_session(&state_path, &name, fs.as_ref())
                     {
-                        tracing::error!(?state_path, ?err, "failed to rename saved session");
+                        tracing::error!(
+                            target: "stoat::workspace",
+                            ?state_path,
+                            ?err,
+                            "failed to rename saved session"
+                        );
                     }
                 })
                 .detach();
         },
         (None, None) => {},
     }
+    tracing::info!(target: "stoat::workspace", old = %old, name = %name, "renamed workspace");
     stoat.set_status(format!("renamed session {old} to {name}"));
     UpdateEffect::Redraw
 }
@@ -348,7 +386,12 @@ fn remove_session_files(fs: &dyn FsHost, state_path: &Path) {
         if fs.exists(target)
             && let Err(err) = fs.remove_file(target)
         {
-            tracing::warn!(?target, ?err, "failed to delete workspace file");
+            tracing::warn!(
+                target: "stoat::workspace",
+                ?target,
+                ?err,
+                "failed to delete workspace file"
+            );
         }
     }
 }
@@ -580,7 +623,9 @@ fn activate_inactive_workspace(
 pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
     match crate::dump::dumps_dir() {
         Ok(dumps) => dump_into(stoat, name, OffsetDateTime::now_utc(), &dumps),
-        Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
+        Err(e) => {
+            tracing::error!(target: "stoat::workspace", error = %e, name = %name, "dump failed")
+        },
     }
 }
 
@@ -596,7 +641,7 @@ fn dump_into(stoat: &Stoat, name: &str, at: OffsetDateTime, dumps: &Path) {
     let pending = match crate::dump::capture(workspace, stoat.focused_mode(), name, at, dumps) {
         Ok(pending) => pending,
         Err(e) => {
-            tracing::error!(error = %e, name = %name, "dump failed");
+            tracing::error!(target: "stoat::workspace", error = %e, name = %name, "dump failed");
             return;
         },
     };
@@ -606,14 +651,19 @@ fn dump_into(stoat: &Stoat, name: &str, at: OffsetDateTime, dumps: &Path) {
     stoat
         .executor
         .spawn_blocking(move || match pending.write(fs.as_ref()) {
-            Ok(id) => tracing::info!(id = %id, "dump captured"),
-            Err(e) => tracing::error!(error = %e, name = %name, "dump failed"),
+            Ok(id) => tracing::info!(target: "stoat::workspace", id = %id, "dump captured"),
+            Err(e) => {
+                tracing::error!(target: "stoat::workspace", error = %e, name = %name, "dump failed")
+            },
         })
         .detach();
 }
 
 pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
-    stoat.active_workspace_mut().name = name.to_string();
+    let ws = stoat.active_workspace_mut();
+    let old = ws.display_name().to_owned();
+    ws.name = name.to_string();
+    tracing::info!(target: "stoat::workspace", old = %old, name = %name, "renamed workspace");
 }
 
 /// Set the active workspace's `git_root` to `path`, the root the file finder,
@@ -686,6 +736,7 @@ pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
             }
 
             let root = stoat.active_workspace().git_root.display().to_string();
+            tracing::info!(target: "stoat::workspace", root = %root, "workspace root changed");
             stoat.set_status(format!("Current working directory is now {root}"));
         },
         Ok(_) => {
