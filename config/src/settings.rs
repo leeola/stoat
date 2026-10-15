@@ -20,6 +20,19 @@ pub enum MouseCapturePolicy {
     Never,
 }
 
+/// A pointer button whose hold repeats its press, the way a held key repeats.
+///
+/// The platform repeats a held key but never a held button, so the editor
+/// repeats the press of a listed button itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepeatButton {
+    Left,
+    Middle,
+    Right,
+    Back,
+    Forward,
+}
+
 /// How the editor gutter numbers lines. `Off` hides the number column
 /// (diagnostic marks only); `Absolute` shows each line's own number;
 /// `Relative` shows the distance from the cursor line (Helix-style).
@@ -113,6 +126,16 @@ pub struct Settings {
     /// Mouse-capture policy at terminal startup. `None` falls back to
     /// [`MouseCapturePolicy::Auto`].
     pub mouse_capture: Option<MouseCapturePolicy>,
+    /// Pointer buttons whose hold repeats the press. `None` falls back to
+    /// `[Back, Forward]`. Set via `mouse.repeat_buttons = [back, forward];` in
+    /// stcfg, from the words `left`, `middle`, `right`, `back`, and `forward`.
+    pub mouse_repeat_buttons: Option<Vec<RepeatButton>>,
+    /// Milliseconds a listed button is held before its press first repeats.
+    /// `None` falls back to 500. Set via `mouse.repeat_delay = N;` in stcfg.
+    pub mouse_repeat_delay: Option<u32>,
+    /// Milliseconds between the repeats of a held listed button. `None` falls
+    /// back to 40. Set via `mouse.repeat_interval = N;` in stcfg.
+    pub mouse_repeat_interval: Option<u32>,
     /// Rows the view keeps between the primary cursor and the top or bottom
     /// edge when following it. `None` falls back to 3. Set via
     /// `editor.scrolloff = N;` in stcfg.
@@ -314,6 +337,9 @@ impl Settings {
             review_precompute: other.review_precompute.or(self.review_precompute),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
+            mouse_repeat_buttons: other.mouse_repeat_buttons.or(self.mouse_repeat_buttons),
+            mouse_repeat_delay: other.mouse_repeat_delay.or(self.mouse_repeat_delay),
+            mouse_repeat_interval: other.mouse_repeat_interval.or(self.mouse_repeat_interval),
             scrolloff: other.scrolloff.or(self.scrolloff),
             jump_scrolloff: other.jump_scrolloff.or(self.jump_scrolloff),
             editor_line_numbers: other.editor_line_numbers.or(self.editor_line_numbers),
@@ -407,6 +433,36 @@ impl Settings {
                 };
                 if let Some(p) = policy {
                     self.mouse_capture = Some(p);
+                }
+            },
+            ["mouse", "repeat_buttons"] => {
+                if let Value::Array(items) = &setting.value.node {
+                    self.mouse_repeat_buttons = Some(
+                        items
+                            .iter()
+                            .filter_map(|item| match &item.node {
+                                Value::String(s) | Value::Ident(s) => match s.as_str() {
+                                    "left" => Some(RepeatButton::Left),
+                                    "middle" => Some(RepeatButton::Middle),
+                                    "right" => Some(RepeatButton::Right),
+                                    "back" => Some(RepeatButton::Back),
+                                    "forward" => Some(RepeatButton::Forward),
+                                    _ => None,
+                                },
+                                _ => None,
+                            })
+                            .collect(),
+                    );
+                }
+            },
+            ["mouse", "repeat_delay"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.mouse_repeat_delay = Some(n as u32);
+                }
+            },
+            ["mouse", "repeat_interval"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.mouse_repeat_interval = Some(n as u32);
                 }
             },
             ["editor", "scrolloff"] => {
@@ -648,6 +704,9 @@ mod tests {
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1017,6 +1076,9 @@ mod tests {
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1064,6 +1126,9 @@ mod tests {
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1120,6 +1185,9 @@ mod tests {
             review_precompute: None,
             theme: None,
             mouse_capture: None,
+            mouse_repeat_buttons: None,
+            mouse_repeat_delay: None,
+            mouse_repeat_interval: None,
             scrolloff: None,
             jump_scrolloff: None,
             editor_line_numbers: None,
@@ -1159,6 +1227,9 @@ mod tests {
             review_precompute: None,
             theme: None,
             mouse_capture: None,
+            mouse_repeat_buttons: None,
+            mouse_repeat_delay: None,
+            mouse_repeat_interval: None,
             scrolloff: None,
             jump_scrolloff: None,
             editor_line_numbers: None,
@@ -1200,6 +1271,9 @@ mod tests {
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1244,6 +1318,9 @@ mod tests {
             review_precompute: None,
             theme: None,
             mouse_capture: None,
+            mouse_repeat_buttons: None,
+            mouse_repeat_delay: None,
+            mouse_repeat_interval: None,
             scrolloff: None,
             jump_scrolloff: None,
             editor_line_numbers: None,
@@ -1286,6 +1363,9 @@ mod tests {
                 review_precompute: None,
                 theme: None,
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1341,6 +1421,9 @@ mod tests {
                 review_precompute: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1388,6 +1471,9 @@ mod tests {
                 review_precompute: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
+                mouse_repeat_buttons: None,
+                mouse_repeat_delay: None,
+                mouse_repeat_interval: None,
                 scrolloff: None,
                 jump_scrolloff: None,
                 editor_line_numbers: None,
@@ -1432,6 +1518,9 @@ mod tests {
             review_precompute: None,
             theme: Some("a".into()),
             mouse_capture: None,
+            mouse_repeat_buttons: None,
+            mouse_repeat_delay: None,
+            mouse_repeat_interval: None,
             scrolloff: None,
             jump_scrolloff: None,
             editor_line_numbers: None,
@@ -1471,6 +1560,9 @@ mod tests {
             review_precompute: None,
             theme: Some("b".into()),
             mouse_capture: None,
+            mouse_repeat_buttons: None,
+            mouse_repeat_delay: None,
+            mouse_repeat_interval: None,
             scrolloff: None,
             jump_scrolloff: None,
             editor_line_numbers: None,
@@ -1535,6 +1627,30 @@ mod tests {
     fn from_config_ignores_unknown_mouse_capture_value() {
         let config = parse_ok(r#"on init { mouse.capture = "elsewhere"; }"#);
         assert_eq!(Settings::from_config(&config).mouse_capture, None);
+    }
+
+    #[test]
+    fn from_config_extracts_mouse_repeat() {
+        let config = parse_ok(
+            r#"on init {
+                mouse.repeat_buttons = [back, "forward", bogus];
+                mouse.repeat_delay = 300;
+                mouse.repeat_interval = 25;
+            }"#,
+        );
+        let settings = Settings::from_config(&config);
+        assert_eq!(
+            (
+                settings.mouse_repeat_buttons,
+                settings.mouse_repeat_delay,
+                settings.mouse_repeat_interval,
+            ),
+            (
+                Some(vec![RepeatButton::Back, RepeatButton::Forward]),
+                Some(300),
+                Some(25),
+            ),
+        );
     }
 
     #[test]

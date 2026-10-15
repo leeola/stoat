@@ -121,6 +121,26 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "auto",
         },
         SettingDef {
+            path: &[Lit("mouse"), Lit("repeat_buttons")],
+            shape: ValueShape::StringArray,
+            doc: "Pointer buttons whose hold repeats the press, from left, middle, \
+                  right, back, and forward.",
+            default: "[back, forward]",
+        },
+        SettingDef {
+            path: &[Lit("mouse"), Lit("repeat_delay")],
+            shape: ValueShape::Number,
+            doc: "Milliseconds a listed button is held before its press first \
+                  repeats.",
+            default: "500",
+        },
+        SettingDef {
+            path: &[Lit("mouse"), Lit("repeat_interval")],
+            shape: ValueShape::Number,
+            doc: "Milliseconds between the repeats of a held listed button.",
+            default: "40",
+        },
+        SettingDef {
             path: &[Lit("editor"), Lit("scrolloff")],
             shape: ValueShape::Number,
             doc: "Rows kept between the primary cursor and the top or bottom edge \

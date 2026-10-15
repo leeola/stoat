@@ -1188,7 +1188,9 @@ pub(crate) fn resolve_config_action(action: &stoat_config::Action) -> ResolvedAc
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use stoat_config::{LineNumbers, MouseCapturePolicy, Settings, TabBarMode, WrapMode};
+    use stoat_config::{
+        LineNumbers, MouseCapturePolicy, RepeatButton, Settings, TabBarMode, WrapMode,
+    };
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -3520,6 +3522,9 @@ mod tests {
                 review_precompute: Some(false),
                 theme: Some("default_dark".to_string()),
                 mouse_capture: Some(MouseCapturePolicy::Auto),
+                mouse_repeat_buttons: Some(vec![RepeatButton::Back, RepeatButton::Forward]),
+                mouse_repeat_delay: Some(500),
+                mouse_repeat_interval: Some(40),
                 scrolloff: Some(3),
                 jump_scrolloff: Some(0),
                 editor_line_numbers: Some(LineNumbers::Relative),

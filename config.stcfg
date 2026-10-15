@@ -265,6 +265,14 @@ on init {
     # capture on, never disables it.
     mouse.capture = auto;
 
+    # A held button in mouse.repeat_buttons repeats its press the way a held key
+    # does: first after mouse.repeat_delay milliseconds, then every
+    # mouse.repeat_interval milliseconds. The buttons are any of left, middle,
+    # right, back, and forward.
+    mouse.repeat_buttons = [back, forward];
+    mouse.repeat_delay = 500;
+    mouse.repeat_interval = 40;
+
     # Load the workspace's direnv environment automatically (nix flakes,
     # `.envrc`). On by default. Set false to disable all automatic loading.
     direnv.load = true;

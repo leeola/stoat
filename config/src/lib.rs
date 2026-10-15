@@ -10,7 +10,9 @@ pub use ast::{
 };
 pub use error::{format_errors, ParseError};
 pub use schema::{settings_schema, PathSeg, SettingDef, ValueShape};
-pub use settings::{LineNumbers, MinimapMode, MouseCapturePolicy, Settings, TabBarMode, WrapMode};
+pub use settings::{
+    LineNumbers, MinimapMode, MouseCapturePolicy, RepeatButton, Settings, TabBarMode, WrapMode,
+};
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     parser::parse(source)
