@@ -20,7 +20,7 @@ use crate::{
 use lsp_types::{DidChangeWatchedFilesParams, FileChangeType, FileEvent};
 use std::{
     collections::{HashMap, HashSet},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -109,7 +109,8 @@ pub(crate) const POOL_SETTLE_DEBOUNCE: std::time::Duration = std::time::Duration
 
 /// One drain turn's edit of the cached finder paths.
 struct PathEdit {
-    /// Listed paths whose last event this turn took them away.
+    /// Listed paths whose last event this turn took them away, or that lie
+    /// below a path whose last event took it away.
     departing: HashSet<OsString>,
     /// The length buckets of the departing paths, which let the removal skip
     /// hashing almost every path it keeps.
@@ -130,6 +131,45 @@ impl PathEdit {
     }
 }
 
+/// The paths that a drain turn's last events took off the disk, tested as the
+/// directories of listed paths.
+///
+/// A directory that moves away raises one event, on the directory, and no event
+/// names the files it held. A listed path below one of these left with it.
+struct DepartedPaths<'a> {
+    paths: HashSet<&'a [u8]>,
+    /// The distinct byte lengths of `paths`, ascending.
+    ///
+    /// A departed path holds a listed one only where a separator ends a prefix
+    /// of the listed path. So a test costs one probe per length, and not one per
+    /// departed path, which a checkout's turn names by the hundred.
+    lengths: Vec<usize>,
+}
+
+impl<'a> DepartedPaths<'a> {
+    fn new(last: &'a HashMap<OsString, bool>) -> Self {
+        let paths: HashSet<&[u8]> = last
+            .iter()
+            .filter(|(_, arrived)| !**arrived)
+            .map(|(path, _)| path.as_encoded_bytes())
+            .collect();
+        let mut lengths: Vec<usize> = paths.iter().map(|path| path.len()).collect();
+        lengths.sort_unstable();
+        lengths.dedup();
+        Self { paths, lengths }
+    }
+
+    fn hold_ancestor_of(&self, held: &OsStr) -> bool {
+        let held = held.as_encoded_bytes();
+        self.lengths
+            .iter()
+            .take_while(|&&len| len < held.len())
+            .any(|&len| {
+                std::path::is_separator(char::from(held[len])) && self.paths.contains(&held[..len])
+            })
+    }
+}
+
 /// Drain queued [`crate::host::FsWatchEvent`]s from the active
 /// [`FsWatchHost`], routing each to the debounce its path calls for.
 ///
@@ -146,10 +186,13 @@ impl PathEdit {
 /// the turn. The server turned its own watcher off when it registered them, so
 /// these notifications are its only view of the disk.
 ///
-/// A directory that leaves the disk goes to each server as a deletion of every
-/// file that the server's
-/// [`FileWatchers`](crate::lsp::watched_files::FileWatchers) record holds below
-/// it. The watcher raises no event for the files that a moved directory held.
+/// The watcher raises no event for the files that a departed directory held, so
+/// each consumer finds them in its own record. The code index reindexes each
+/// file that its [`IndexedFiles`](crate::code_index::files::IndexedFiles) record
+/// holds below the directory, and each reindex finds its file gone. The cached
+/// finder list drops each listed path below the directory. Each server hears a
+/// deletion of every file below it that the server's
+/// [`FileWatchers`](crate::lsp::watched_files::FileWatchers) record holds.
 ///
 /// Takes at most [`FS_WATCH_DRAIN_CAP`] events per turn and wakes the loop
 /// again when it stops there, so a checkout's worth of paths drains over
@@ -312,6 +355,10 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             {
                 stoat.finder_path_epoch += 1;
             }
+
+            if arrived.is_none() && path.starts_with(&git_root) {
+                reindex_departed_files(stoat, &path, &git_root);
+            }
         }
 
         if in_git_dir {
@@ -456,6 +503,11 @@ fn apply_finder_changes(stoat: &mut Stoat, git_root: &Path, changes: Vec<(PathBu
 /// twice. A save writes a temp name and renames it over the target, which comes
 /// out as a departure of a name the list never held and an arrival of one it
 /// already holds, so it plans no edit at all.
+///
+/// A listed path with no event of its own departs when it lies below a path
+/// that departs, because a directory that moves away raises no event for the
+/// files it held. A path's own event outranks its directory's. The stat behind
+/// an arrival is newer than a removal, which carries none.
 fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit {
     // Keyed by bytes, not by `Path` components. The watcher names a file as its
     // watched directory joined with the entry name, and the walk names it as
@@ -473,24 +525,24 @@ fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit 
         }
     }
 
+    let departed = DepartedPaths::new(&last);
     let mut departing = HashSet::new();
     let mut departing_lengths = [false; PATH_LENGTH_BUCKETS];
     let mut listed = HashSet::new();
     for held in paths {
         let bytes = held.as_os_str();
         let bucket = bytes.len() % PATH_LENGTH_BUCKETS;
-        if !lengths[bucket] {
-            continue;
-        }
-        match last.get(bytes) {
-            Some(false) => {
-                departing_lengths[bucket] = true;
-                departing.insert(bytes.to_os_string());
-            },
-            Some(true) => {
-                listed.insert(bytes);
-            },
-            None => {},
+        let own = if lengths[bucket] {
+            last.get(bytes).copied()
+        } else {
+            None
+        };
+
+        if own == Some(true) {
+            listed.insert(bytes);
+        } else if own == Some(false) || departed.hold_ancestor_of(bytes) {
+            departing_lengths[bucket] = true;
+            departing.insert(bytes.to_os_string());
         }
     }
 
@@ -914,6 +966,28 @@ pub(crate) fn drain_pending_workspace_autosave(stoat: &mut Stoat) -> bool {
         stoat.save_workspace(stoat.active_workspace);
     }
     false
+}
+
+/// Arm a reindex for each file that the code index records below `dir`, a path
+/// that left the disk.
+///
+/// A directory that moves away raises one event, on the directory, and no event
+/// names the files it held. Each reindex finds its file gone and takes it out of
+/// the graph, and a file that is back on disk by then reindexes instead. A path
+/// that was a file has nothing recorded below it.
+fn reindex_departed_files(stoat: &mut Stoat, dir: &Path, git_root: &Path) {
+    let Some(rel_dir) = crate::code_index::build::relpath(git_root, dir) else {
+        return;
+    };
+    let departed: Vec<PathBuf> = stoat
+        .active_workspace()
+        .file_paths
+        .below(Path::new(&rel_dir))
+        .map(|rel| git_root.join(rel))
+        .collect();
+    for path in departed {
+        arm_index_external_edit_debounce(stoat, path);
+    }
 }
 
 /// Collect `path` for a debounced reindex after an external change.
@@ -1469,6 +1543,113 @@ mod tests {
             (edit.departing, edit.arriving),
             (HashSet::new(), Vec::new())
         );
+    }
+
+    /// A departed directory takes the listed paths below it, and not a sibling
+    /// whose name extends its own. A path's own arrival outranks the departure
+    /// of its directory.
+    #[test]
+    fn a_departed_directory_takes_the_listed_paths_below_it() {
+        let paths = ["d/a", "d/sub/b", "d/c", "d.rs", "dx/e"].map(PathBuf::from);
+        let changes = vec![(PathBuf::from("d"), false), (PathBuf::from("d/c"), true)];
+
+        let edit = plan_path_edit(&paths, changes);
+        assert_eq!(
+            (edit.departing, edit.arriving),
+            (
+                HashSet::from(["d/a", "d/sub/b"].map(OsString::from)),
+                Vec::new()
+            ),
+        );
+    }
+
+    /// One directory's files at two depths, beside a file and a directory whose
+    /// names extend the directory's name.
+    const FOO_TREE: [&str; 4] = [
+        "/repo/src/foo/a.rs",
+        "/repo/src/foo/sub/b.rs",
+        "/repo/src/foo.rs",
+        "/repo/src/foobar/c.rs",
+    ];
+
+    /// What is left of [`FOO_TREE`] once `/repo/src/foo` moves away.
+    const FOO_SIBLINGS: [&str; 2] = ["/repo/src/foo.rs", "/repo/src/foobar/c.rs"];
+
+    /// A directory that moves away raises one event, on the directory. Each
+    /// file it held leaves the code graph, at any depth.
+    #[test]
+    fn a_directory_moved_away_leaves_the_code_graph() {
+        let mut h = ignored_dir_harness();
+        for file in FOO_TREE {
+            h.fake_fs().insert_file(file, "fn f() {}\n");
+            h.fake_fs_watcher()
+                .inject(Path::new(file), FsEventKind::Created);
+        }
+        drain_fs_watch_events(&mut h.stoat);
+        land_reindexes(&mut h);
+
+        move_foo_away(&mut h);
+        land_reindexes(&mut h);
+
+        assert_eq!(graph_files(&h), FOO_SIBLINGS);
+    }
+
+    /// A move out of the tree takes the directory's files out of the cached
+    /// finder list, and the list stands in place of a walk.
+    #[test]
+    fn a_directory_moved_away_leaves_the_cached_finder_list() {
+        let mut h = ignored_dir_harness();
+        for file in FOO_TREE {
+            h.fake_fs().insert_file(file, "");
+        }
+        let epoch = h.stoat.finder_path_epoch;
+        h.stoat.finder_path_cache = Some(FinderPathCache {
+            root: PathBuf::from("/repo"),
+            paths: Arc::new(FOO_TREE.map(PathBuf::from).to_vec()),
+            epoch,
+            display: None,
+        });
+
+        move_foo_away(&mut h);
+
+        let listed = h
+            .stoat
+            .finder_path_cache
+            .as_ref()
+            .map(|cache| cache.paths.as_ref().clone());
+        assert_eq!(
+            (listed, h.stoat.finder_path_epoch),
+            (Some(FOO_SIBLINGS.map(PathBuf::from).to_vec()), epoch),
+        );
+    }
+
+    /// Take `/repo/src/foo` off the disk, and drain the one event that a move
+    /// away raises, on the directory.
+    fn move_foo_away(h: &mut crate::test_harness::TestHarness) {
+        take_off_disk(h, "/repo/src/foo");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/src/foo"), FsEventKind::Renamed);
+        drain_fs_watch_events(&mut h.stoat);
+    }
+
+    /// Land the reindexes that the drained events armed in the code graph.
+    fn land_reindexes(h: &mut crate::test_harness::TestHarness) {
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        h.stoat.drain_index_updates();
+    }
+
+    /// The files of [`FOO_TREE`] whose symbols the code graph holds.
+    fn graph_files(h: &crate::test_harness::TestHarness) -> Vec<&'static str> {
+        let ws = h.stoat.active_workspace();
+        FOO_TREE
+            .into_iter()
+            .filter(|file| {
+                let rel = file.strip_prefix("/repo/").expect("a file under the root");
+                ws.code_graph
+                    .content_hash(crate::code_index::build::file_id(rel))
+                    .is_some()
+            })
+            .collect()
     }
 
     /// An event arriving into an idle session wakes the loop by itself.

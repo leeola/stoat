@@ -6,5 +6,6 @@
 //! sibling modules.
 
 pub(crate) mod build;
+pub(crate) mod files;
 pub(crate) mod nav;
 pub(crate) mod store;

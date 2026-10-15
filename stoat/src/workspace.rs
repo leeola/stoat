@@ -13,6 +13,7 @@ use crate::{
     buffer_registry::BufferRegistry,
     code_index::{
         build::{indexable, reindex_buffer, IndexUpdate, ReindexTarget},
+        files::IndexedFiles,
         nav::TrailState,
     },
     commit_list::{CommitListId, CommitListSnap, CommitListState},
@@ -273,7 +274,7 @@ pub struct Workspace {
     /// Workspace-relative path for each indexed [`FileId`], so navigation can
     /// recover a symbol's file from its graph id. The graph keys files by a
     /// one-way hash, so this is the only way back to a path.
-    pub(crate) file_paths: HashMap<FileId, PathBuf>,
+    pub(crate) file_paths: IndexedFiles,
     /// Byte ranges changed against HEAD for each file with a working-tree
     /// diff, in the working-tree text's byte space. Rebuilt by
     /// [`scan_changed_ranges`] so diff-filtered navigation asks whether a
@@ -487,7 +488,7 @@ impl Workspace {
             redraw_notify: redraw,
             code_graph: CodeGraph::new(),
             index_generation: 0,
-            file_paths: HashMap::new(),
+            file_paths: IndexedFiles::default(),
             changed_ranges: HashMap::new(),
             changed_ranges_memo: HashMap::new(),
             #[cfg(test)]
