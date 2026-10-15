@@ -6,6 +6,7 @@ use crate::{
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::OpenOrigin,
+    button_repeat::{self, ButtonRepeat, PressSource},
     code_index::{
         build::IndexUpdate,
         store::{IndexWrites, ManifestEdit},
@@ -1308,6 +1309,15 @@ pub struct Stoat {
     /// burst walks a hundred jumps. A notch inside [`WHEEL_BINDING_COOLDOWN`]
     /// of this scrolls instead of dispatching.
     pub(crate) wheel_binding_last: Option<std::time::Instant>,
+    /// The repeat a held listed pointer button armed, or `None` when no such
+    /// button is held.
+    ///
+    /// A key press and a window-socket disconnect end it, as do the gestures
+    /// [`button_repeat::note_press`] reads. Its timer only wakes the run loop.
+    /// [`button_repeat::drain`] reads the due time on the scheduler clock, and
+    /// dropping the repeat cancels the wake, as replacing
+    /// [`Self::pending_message_expiry`] does.
+    pub(crate) button_repeat: Option<ButtonRepeat>,
     /// Sub-notch wheel travel held for the consumers that step by whole
     /// notches: a keymap wheel binding, the boxed modals, the hover popup, and
     /// a run pane.
@@ -2581,6 +2591,7 @@ impl Stoat {
             pending_message_expiry: None,
             walkthrough_exit_timer: None,
             wheel_binding_last: None,
+            button_repeat: None,
             wheel_line_remainder: 0.0,
             change_walk_wrap: true,
             pending_count: None,
@@ -3010,6 +3021,8 @@ impl Stoat {
             },
             WindowIpc::Disconnected => {
                 self.window_ipc_connected = false;
+                // No release arrives after a disconnect, so the repeat ends here.
+                self.button_repeat = None;
                 return UpdateEffect::None;
             },
             WindowIpc::Event(event) => event,
@@ -3026,6 +3039,16 @@ impl Stoat {
             mods,
         } = event
         {
+            button_repeat::note_press(
+                self,
+                PressSource::Window {
+                    window,
+                    kind,
+                    col,
+                    row,
+                    mods,
+                },
+            );
             return self.handle_aux_mouse(window, kind, col, row, mods);
         }
 
@@ -3392,7 +3415,7 @@ impl Stoat {
     /// land on a primary pane whose rect overlaps. `col`/`row` are
     /// window-relative, which equal pane-relative coordinates since a detached
     /// pane's area sits at (0, 0).
-    fn handle_aux_mouse(
+    pub(crate) fn handle_aux_mouse(
         &mut self,
         window: u32,
         kind: MouseKind,
@@ -5044,6 +5067,7 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                self.button_repeat = None;
                 let scrolloff = self.settings.scrolloff.unwrap_or(3);
 
                 // A key pressed mid wheel-glide first clamps the anchored cursor
@@ -5081,6 +5105,7 @@ impl Stoat {
                 }
             },
             Event::Mouse(mouse) => {
+                button_repeat::note_press(self, PressSource::Terminal(mouse));
                 let workspace_before = self.active_workspace;
                 let term_before = self.focused_term_id();
                 let effect = mouse::handle_mouse(self, mouse);
@@ -8598,6 +8623,7 @@ impl Stoat {
         // Not gated on the pumps' progress. The `.git` refresh drain stales
         // every map and still reports none.
         self.drive_diff_jobs();
+        button_repeat::drain(self);
     }
 
     /// Advance every asynchronous request the editor has out, and report
