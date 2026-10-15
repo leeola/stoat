@@ -448,6 +448,13 @@ pub(crate) const AUTO_RELOAD_POLL: std::time::Duration = std::time::Duration::fr
 /// wakes the run loop so [`crate::render::frame`] can clear the expired message.
 const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Shortest gap between two `stoat::session` snapshot lines that saves log.
+///
+/// A save follows every pause in the user's input, far too often for a line
+/// each. One line a minute still lets a reader find what was open at any moment
+/// from the nearest line.
+const SESSION_SNAPSHOT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Shortest gap between two wheel notches that both run a keymap binding.
 ///
 /// A trackpad flick emits a stream of per-line reports far faster than this,
@@ -1869,6 +1876,9 @@ pub struct Stoat {
     /// [`debounce::arm_workspace_autosave`] reads to leave the window alone
     /// rather than pushing it back.
     pub(crate) pending_workspace_autosave: Option<stoat_scheduler::Task<()>>,
+    /// When the last `stoat::session` snapshot line logged, on the scheduler
+    /// clock, so a save logs one at most every [`SESSION_SNAPSHOT_MIN_GAP`].
+    last_session_snapshot: Option<std::time::Instant>,
     /// When the grid's geometry counts as settled after a resize, and the timer
     /// that wakes the run loop at that moment.
     ///
@@ -2691,6 +2701,7 @@ impl Stoat {
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
             pending_workspace_autosave: None,
+            last_session_snapshot: None,
             pool_settle: None,
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
@@ -4021,6 +4032,7 @@ impl Stoat {
                     // the pump inside `drive_background` once the write lands on
                     // the last pane, so quit on the frame it completes.
                     if std::mem::take(&mut self.quit_requested) {
+                        self.log_session_snapshot("exit");
                         self.save_all_workspaces();
                         break;
                     }
@@ -4063,6 +4075,7 @@ impl Stoat {
                     }
                 },
                 UpdateEffect::Quit => {
+                    self.log_session_snapshot("exit");
                     self.save_all_workspaces();
                     break;
                 },
@@ -4861,7 +4874,15 @@ impl Stoat {
         if let Some(ws) = self.workspaces.get_mut(workspace) {
             ws.install_restored(buffers, state, &executor);
             ws.assign_languages_from_paths(&registry);
+            tracing::info!(
+                target: "stoat::session",
+                session = ?path,
+                buffers = ws.buffers.len(),
+                open = ?ws.buffers.open_paths(),
+                "session restored"
+            );
         }
+        self.log_session_snapshot("restore");
         if self.active_workspace != workspace {
             if let Some(ws) = self.workspaces.get_mut(workspace) {
                 ws.restored_in_background = true;
@@ -4961,6 +4982,13 @@ impl Stoat {
             }
         });
         self.pending_workspace_saves.insert(workspace, task);
+
+        let snapshot_due = self
+            .last_session_snapshot
+            .is_none_or(|last| self.executor.now() >= last + SESSION_SNAPSHOT_MIN_GAP);
+        if snapshot_due {
+            self.log_session_snapshot("save");
+        }
     }
 
     /// Persist a workspace's state before returning.
@@ -4999,6 +5027,37 @@ impl Stoat {
         for ws in self.workspaces.values() {
             self.save_workspace_now(ws);
         }
+    }
+
+    /// Log one `debug` line on `stoat::session` that says what the user has
+    /// open and where they are, so a reader of the session log finds the open
+    /// files of any moment from the nearest line.
+    ///
+    /// `reason` names the event that asked for the line. The line lists every
+    /// open path, so it is built only when the target logs at `debug`.
+    fn log_session_snapshot(&mut self, reason: &str) {
+        if !tracing::enabled!(target: "stoat::session", tracing::Level::DEBUG) {
+            return;
+        }
+        self.last_session_snapshot = Some(self.executor.now());
+
+        let cursor = self.focused_cursor_pos().map(|(_, offset)| offset);
+        let focused = self.focused_editor_ids().map(|(_, buffer)| buffer);
+        let ws = self.active_workspace();
+        tracing::debug!(
+            target: "stoat::session",
+            reason,
+            workspace = %ws.display_name(),
+            root = %ws.git_root.display(),
+            tabs = ws.tabs.len(),
+            tab = ws.active_tab,
+            buffers = ws.buffers.len(),
+            open = ?ws.buffers.open_paths(),
+            focused = ?focused.and_then(|buffer| ws.buffers.path_for(buffer)),
+            ?cursor,
+            mode = %self.focused_mode(),
+            "session snapshot"
+        );
     }
 
     /// Apply what the outside world pushed at the editor since the last pass,
