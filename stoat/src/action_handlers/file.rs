@@ -19,7 +19,7 @@ use std::{
     pin::Pin,
     sync::{mpsc, Arc},
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stoat_text::Rope;
 
@@ -452,6 +452,7 @@ fn land_format_on_save(stoat: &mut Stoat, outcome: FormatOnSaveOutcome) -> Write
     let current = buffer_version(stoat, outcome.buffer_id);
     if let Some(edits) = outcome.edits {
         if current == Some(outcome.version) {
+            let edit_count = edits.len();
             #[allow(clippy::mutable_key_type)]
             let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
             changes.insert(outcome.uri, edits);
@@ -467,6 +468,13 @@ fn land_format_on_save(stoat: &mut Stoat, outcome: FormatOnSaveOutcome) -> Write
                     target: "stoat::lsp",
                     ?err,
                     "format-on-save edit failed to apply",
+                );
+            } else if edit_count > 0 {
+                tracing::info!(
+                    target: "stoat::file",
+                    path = %outcome.path.display(),
+                    edits = edit_count,
+                    "format-on-save applied"
                 );
             }
             sync::notify_buffer_changes_pending(stoat);
@@ -538,6 +546,13 @@ fn write_buffer_to_disk(
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.mark_clean();
     }
+    tracing::info!(
+        target: "stoat::file",
+        path = %path.display(),
+        bytes = text.len(),
+        held = true,
+        "saved buffer"
+    );
     // The bytes reached the disk, which is what the repo-wide tally reads.
     stoat.active_workspace_mut().stale_hunk_tally();
     if let Some(mtime) = stoat
@@ -674,6 +689,10 @@ pub(crate) struct PendingSave {
     /// A buffer that has moved past it stays dirty when the write lands, since
     /// the disk then holds older text than the buffer does.
     version: u64,
+    /// The written text's length before its line endings are restored. A CRLF
+    /// file gets one more byte per line on disk than this count.
+    bytes: usize,
+    started: Instant,
 }
 
 /// Start streaming `buffer_id`'s current text to `path` off the run loop.
@@ -695,6 +714,8 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
     let redraw = stoat.redraw_notify.clone();
     let target = path.to_path_buf();
     let (tx, rx) = mpsc::channel();
+    let bytes = rope.len();
+    let started = Instant::now();
 
     let task = {
         let target = target.clone();
@@ -721,6 +742,8 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
         buffer_id,
         path: target,
         version,
+        bytes,
+        started,
     });
 }
 
@@ -789,6 +812,14 @@ fn finish_pending_save(stoat: &mut Stoat, pending: &PendingSave) {
     if held && let Some(buffer) = stoat.active_workspace().buffers.get(pending.buffer_id) {
         buffer.write().expect("buffer poisoned").mark_clean();
     }
+    tracing::info!(
+        target: "stoat::file",
+        path = %pending.path.display(),
+        bytes = pending.bytes,
+        ms = pending.started.elapsed().as_millis() as u64,
+        held,
+        "saved buffer"
+    );
     // The bytes reached the disk, which is what the repo-wide tally reads.
     stoat.active_workspace_mut().stale_hunk_tally();
     if let Some(mtime) = stoat
