@@ -63,6 +63,7 @@ use futures::FutureExt;
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
+    borrow::Cow,
     ffi::OsStr,
     io,
     ops::Range,
@@ -765,6 +766,23 @@ struct CursorEdit {
     /// landing inside what it wrote, longer for one stepping over text it left
     /// alone.
     caret: usize,
+}
+
+/// Where the user is, compared before and after a call to log a move.
+///
+/// See also:
+/// - [`Stoat::log_focus_change`] for the compare and the line it logs.
+#[derive(PartialEq, Eq)]
+struct FocusSnapshot {
+    workspace: WorkspaceId,
+    tab: usize,
+    /// The focused split pane's [`Pane::index`](crate::pane::Pane::index).
+    pane: u32,
+    /// The dock with focus. A dock takes focus without a change to the split
+    /// pane's focus, so `pane` alone misses a move into a dock.
+    dock: Option<DockId>,
+    buffer: Option<BufferId>,
+    mode: String,
 }
 
 pub struct Stoat {
@@ -3966,7 +3984,9 @@ impl Stoat {
 
             match effect {
                 UpdateEffect::Redraw => {
+                    let focus_before = self.focus_before_change();
                     self.drive_background();
+                    self.log_focus_change(focus_before);
                     // A remote session owns the screen, so nothing this process
                     // draws may reach it. Background work still advanced above,
                     // which is what keeps saves and language servers alive
@@ -5002,6 +5022,7 @@ impl Stoat {
 
         debounce::drain_fs_watch_events(self);
         self.drain_external();
+        let focus_before = self.focus_before_change();
 
         // Only what the user did. A resize arms nothing because their next
         // input does, and fs-watch or LSP traffic moves disk-backed state the
@@ -5077,12 +5098,75 @@ impl Stoat {
         crate::lsp::pull_diagnostics::pull_diagnostics_trigger(self);
         crate::lsp::semantic_tokens::semantic_tokens_trigger(self);
         crate::lsp::folding::folding_ranges_trigger(self);
+        self.log_focus_change(focus_before);
 
         if user_input {
             debounce::arm_workspace_autosave(self);
         }
 
         effect
+    }
+
+    /// Where the user is before a call that moves focus, for
+    /// [`Self::log_focus_change`] to compare against after the call.
+    ///
+    /// `None` when the `stoat::focus` log is off, so a run without the line
+    /// takes no snapshot and no copy of the mode.
+    fn focus_before_change(&self) -> Option<FocusSnapshot> {
+        tracing::enabled!(target: "stoat::focus", tracing::Level::DEBUG)
+            .then(|| self.focus_snapshot())
+    }
+
+    fn focus_snapshot(&self) -> FocusSnapshot {
+        let ws = self.active_workspace();
+        FocusSnapshot {
+            workspace: self.active_workspace,
+            tab: ws.active_tab,
+            pane: ws.panes.pane(ws.panes.focus()).index,
+            dock: match ws.focus {
+                FocusTarget::Dock(dock) => Some(dock),
+                FocusTarget::SplitPane => None,
+            },
+            buffer: self.focused_editor_ids().map(|(_, buffer)| buffer),
+            mode: self.focused_mode().to_owned(),
+        }
+    }
+
+    /// Log one `debug` line on `stoat::focus` when the user is no longer where
+    /// `before` says.
+    ///
+    /// The line comes from a compare, not from the setters. The mode and the
+    /// pane focus change at many sites, and some of them go around the setters,
+    /// so a line per setter misses some moves and repeats others.
+    fn log_focus_change(&mut self, before: Option<FocusSnapshot>) {
+        let Some(before) = before else {
+            return;
+        };
+        let after = self.focus_snapshot();
+        if after == before {
+            return;
+        }
+
+        let cursor = self.focused_cursor_pos().map(|(_, offset)| offset);
+        let ws = self.active_workspace();
+        let path = match after.buffer {
+            Some(buffer) => ws
+                .buffers
+                .path_for(buffer)
+                .map_or(Cow::Borrowed("scratch"), Path::to_string_lossy),
+            None => Cow::Borrowed("none"),
+        };
+        tracing::debug!(
+            target: "stoat::focus",
+            workspace = %ws.display_name(),
+            tab = after.tab,
+            pane = after.pane,
+            dock = ?after.dock,
+            %path,
+            mode = %after.mode,
+            ?cursor,
+            "focus changed"
+        );
     }
 
     /// Spawn `future` on the executor and wake the run loop once it
