@@ -998,6 +998,12 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         encoding,
     );
 
+    tracing::info!(
+        target: "stoat::lsp",
+        path = %source_path.display(),
+        server = %server,
+        "code actions requested"
+    );
     let params = CodeActionParams {
         text_document: TextDocumentIdentifier { uri: source_uri },
         range: lsp_range,
@@ -1089,6 +1095,12 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
                     }),
                 })
                 .collect();
+            tracing::debug!(
+                target: "stoat::lsp",
+                server = %server,
+                count = entries.len(),
+                "code actions landed"
+            );
             if entries.is_empty() {
                 crate::lsp::session::set_lsp_status(
                     stoat,
@@ -1101,6 +1113,7 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(None) => {
+            tracing::debug!(target: "stoat::lsp", count = 0, "code actions landed");
             crate::lsp::session::set_lsp_status(
                 stoat,
                 "lsp: no code actions available".to_string(),
@@ -1143,6 +1156,7 @@ fn skipped_as_stale(stoat: &mut Stoat, stamp: &DocumentStamp, what: &str) -> boo
     if stamp.is_current(stoat) {
         return false;
     }
+    tracing::warn!(target: "stoat::lsp", what, "lsp reply skipped, buffer changed");
     crate::lsp::session::set_lsp_status(stoat, format!("lsp: {what} skipped, buffer changed"));
     true
 }
@@ -1177,6 +1191,7 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
     let Some(entry) = picker.entries.into_iter().nth(index) else {
         return false;
     };
+    tracing::info!(target: "stoat::lsp", index, title = entry.title(), "code action picked");
     let buffer_id = stoat.focused_editor_ids().map(|(_, id)| id);
     match entry {
         CodeActionEntry::Direct {
@@ -1463,6 +1478,12 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         return true;
     }
 
+    tracing::info!(
+        target: "stoat::lsp",
+        new_name = %new_name,
+        uri = rename_state.source_uri.as_str(),
+        "rename requested"
+    );
     let params = RenameParams {
         text_document_position: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
@@ -1519,12 +1540,17 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
         && !skipped_as_stale(stoat, &requested_at, "rename")
     {
         let encoding = requested_at.encoding();
-        if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, encoding) {
-            tracing::warn!(
+        match crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, encoding) {
+            Ok(outcome) => tracing::info!(
+                target: "stoat::lsp",
+                files = outcome.buffers_edited.len(),
+                "rename applied"
+            ),
+            Err(err) => tracing::warn!(
                 target: "stoat::lsp",
                 ?err,
                 "rename workspace edit failed to apply",
-            );
+            ),
         }
         // The pump runs outside the input loop that arms the change debounce.
         // Without this call, the servers hear of the edited buffers only at the
@@ -2142,6 +2168,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         encoding,
     );
 
+    tracing::info!(target: "stoat::lsp", path = %source_path.display(), "format requested");
     let params = DocumentRangeFormattingParams {
         text_document: TextDocumentIdentifier {
             uri: source_uri.clone(),
@@ -2209,6 +2236,7 @@ pub(crate) fn format_document(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
+    tracing::info!(target: "stoat::lsp", path = %source_path.display(), "format requested");
     let params = DocumentFormattingParams {
         text_document: TextDocumentIdentifier {
             uri: source_uri.clone(),
@@ -2250,6 +2278,7 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
     if let Some(FormatResponse { uri, edits }) = response
         && !skipped_as_stale(stoat, &requested_at, "format")
     {
+        let (uri_text, edit_count) = (uri.as_str().to_owned(), edits.len());
         #[allow(clippy::mutable_key_type)]
         let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
         changes.insert(uri, edits);
@@ -2258,14 +2287,18 @@ pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
             document_changes: None,
             change_annotations: None,
         };
-        if let Err(err) =
-            crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, requested_at.encoding())
-        {
-            tracing::warn!(
+        match crate::lsp::edit_apply::apply_workspace_edit(stoat, edit, requested_at.encoding()) {
+            Ok(_) => tracing::info!(
+                target: "stoat::lsp",
+                uri = uri_text.as_str(),
+                edits = edit_count,
+                "format applied"
+            ),
+            Err(err) => tracing::warn!(
                 target: "stoat::lsp",
                 ?err,
                 "format text edit failed to apply",
-            );
+            ),
         }
     }
     true

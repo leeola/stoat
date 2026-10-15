@@ -110,6 +110,12 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
     let Some(source_uri) = action_handlers::lsp::path_to_uri(&source_path) else {
         return UpdateEffect::None;
     };
+    tracing::info!(
+        target: "stoat::lsp",
+        path = %source_path.display(),
+        offset = cursor_offset,
+        "hover requested"
+    );
 
     // The position was measured after edits whose change may still be sitting in
     // its debounce, and a server cannot place a position in text it has not been
@@ -242,6 +248,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(HoverOutcome::Content(response)) => {
+            tracing::debug!(target: "stoat::lsp", outcome = "content", "hover landed");
             // Drop a response whose editor lost focus while the request was in
             // flight, so the popup never anchors against a pane that did not
             // request it.
@@ -266,6 +273,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(HoverOutcome::Empty) => {
+            tracing::debug!(target: "stoat::lsp", outcome = "empty", "hover landed");
             // A busy server is still worth naming, so an empty result during
             // work-done progress reports which operation is running. The
             // progress segment already shows the percentage, so none is added.
@@ -285,6 +293,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             true
         },
         Poll::Ready(HoverOutcome::Failed) => {
+            tracing::debug!(target: "stoat::lsp", outcome = "failed", "hover landed");
             session::set_lsp_status(stoat, "lsp: hover request failed".to_string());
             stoat.pending_hover = None;
             true
