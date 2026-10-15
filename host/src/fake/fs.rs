@@ -1536,15 +1536,17 @@ mod tests {
     }
 
     #[test]
-    fn walk_all_files_streaming_yields_ignored_files_but_not_dot_git() {
+    fn walk_all_files_streaming_lists_past_gitignore_but_not_the_hard_tier() {
         let fs = FakeFs::new();
         let root = PathBuf::from("/repo");
         fs.insert_files([
             ("/repo/.git/HEAD", "ref: refs/heads/main".as_bytes()),
             ("/repo/.gitignore", "*.log\n".as_bytes()),
+            ("/repo/.stoatignore", "vendor/\n".as_bytes()),
             ("/repo/a.log", "log".as_bytes()),
             ("/repo/src/main.rs", "fn main() {}".as_bytes()),
             ("/repo/target/debug/app", "bin".as_bytes()),
+            ("/repo/vendor/lib.js", "js".as_bytes()),
         ]);
 
         let mut paths = Vec::new();
@@ -1562,11 +1564,11 @@ mod tests {
             relative,
             [
                 Path::new(".gitignore"),
+                Path::new(".stoatignore"),
                 Path::new("a.log"),
                 Path::new("src/main.rs"),
-                Path::new("target/debug/app"),
             ],
-            "the files the repo's .gitignore and the defaults exclude, and none under .git",
+            "the gitignored file, nothing in .git or the hard tier",
         );
     }
 

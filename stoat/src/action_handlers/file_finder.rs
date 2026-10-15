@@ -336,11 +336,11 @@ pub(super) fn spawn_workspace_walk(
     (walk_rx, task)
 }
 
-/// Spawn a walk of every file under `root`, the ignored ones included, in the
+/// Spawn a walk of every file under `root` outside the hard ignore tier, in the
 /// shape [`spawn_workspace_walk`] returns.
 ///
-/// Feeds a fallback of ignored files, which lists what the workspace walk
-/// leaves out.
+/// Feeds a fallback of ignored files, which lists what the soft ignore tier
+/// hides from the workspace walk.
 ///
 /// The walk stops itself once it has sent [`BROWSE_PATH_CAP`] paths, whether
 /// or not its owner drains them. Without the cap, an owner that stops draining

@@ -2404,13 +2404,17 @@ mod tests {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(
             &mut h,
-            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
         );
 
         h.type_keys("space p");
         h.type_text("main.toml");
         settle_fallback(&mut h);
-        assert_eq!(finder_rows(&h), ["target/debug/main.toml"]);
+        assert_eq!(finder_rows(&h), ["out/main.toml"]);
 
         h.type_keys("backspace backspace backspace backspace backspace");
         let _ = h.snapshot();
@@ -2477,7 +2481,11 @@ mod tests {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(
             &mut h,
-            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
         );
         let slots = |h: &TestHarness| {
             let ws = h.stoat.active_workspace();
@@ -2505,7 +2513,11 @@ mod tests {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(
             &mut h,
-            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
         );
         h.type_keys("space p");
         h.type_text("main.toml");
@@ -2536,7 +2548,7 @@ mod tests {
 
         h.type_text(".toml");
         settle_fallback(&mut h);
-        assert_eq!(finder_rows(&h), ["target/debug/main.toml"]);
+        assert_eq!(finder_rows(&h), ["out/main.toml"]);
     }
 
     #[test]

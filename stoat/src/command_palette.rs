@@ -3346,9 +3346,13 @@ mod tests {
         let mut h = Stoat::test();
         let root = seed_palette_workspace(
             &mut h,
-            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
         );
-        let toml = root.join("target/debug/main.toml");
+        let toml = root.join("out/main.toml");
 
         h.type_text(":o main.toml");
         settle_arg_fallback(&mut h);
@@ -3358,12 +3362,47 @@ mod tests {
         assert_eq!(editor::focused_buffer_path(&h.stoat), toml);
     }
 
+    #[test]
+    fn an_open_tail_fallback_skips_what_stoatignore_lists() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[
+                (".stoatignore", "out/\n"),
+                (".gitignore", "out/\n"),
+                ("src/main.rs", ""),
+                ("out/main.toml", ""),
+            ],
+        );
+
+        h.type_text(":o main.toml");
+        for _ in 0..8 {
+            let _ = h.snapshot();
+            h.settle();
+        }
+
+        assert_eq!(
+            (
+                arg_picker(&h).ignored.as_ref().map(|f| f.lists_nothing()),
+                arg_rows(&h),
+            ),
+            (Some(true), vec![]),
+            "the fallback walked and matched nothing, since .stoatignore hides out/",
+        );
+    }
+
     /// Seed a workspace whose `:o` fallback of ignored files stood in for
     /// `main.toml`, with the tail then cut back to `main`, which the listed
     /// `src/main.rs` matches. Returns the workspace root.
     fn open_tail_back_on_a_listed_match(h: &mut TestHarness) -> PathBuf {
-        let root =
-            seed_palette_workspace(h, &[("src/main.rs", ""), ("target/debug/main.toml", "")]);
+        let root = seed_palette_workspace(
+            h,
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
+        );
         h.type_text(":o main.toml");
         settle_arg_fallback(h);
 
@@ -3412,7 +3451,11 @@ mod tests {
         let mut h = Stoat::test();
         seed_palette_workspace(
             &mut h,
-            &[("src/main.rs", ""), ("target/debug/main.toml", "")],
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
         );
         let slots = |h: &TestHarness| {
             let ws = h.stoat.active_workspace();

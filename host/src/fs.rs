@@ -28,6 +28,13 @@ pub(crate) const DEFAULT_STOATIGNORE: &str = include_str!("../../stoatignore");
 /// The production walker reads all three, with `.stoatignore` as its custom
 /// file. An edit of any of them moves what the walk yields. Code that mirrors
 /// the walk reads this list, so the two stay in step.
+///
+/// The rules form two tiers. The hard tier is each `.stoatignore` merged with
+/// the baked-in [`DEFAULT_STOATIGNORE`], and no picker lists a file it hides.
+/// The soft tier is the other two files, with the global excludes and the
+/// `.git/info/exclude` that the production walker also reads.
+/// [`FsHost::walk_all_files_streaming`] applies the hard tier alone, so the
+/// pickers' fallback of ignored files lists what the soft tier hides.
 pub const IGNORE_FILE_NAMES: [&str; 3] = [".gitignore", ".ignore", ".stoatignore"];
 
 #[derive(Clone, Copy, Debug)]
@@ -208,12 +215,16 @@ pub trait FsHost: Send + Sync {
         self.walk_workspace_files_streaming(root, &mut |batch| on_batch(batch));
     }
 
-    /// Streams every file under `root`, the ignored ones included.
+    /// Streams every file under `root` outside the hard ignore tier.
     ///
-    /// No ignore rule applies. The walk reads no `.gitignore`, `.stoatignore`,
-    /// or `.ignore` file, consults no global excludes, and skips none of the
-    /// trees the workspace walk always excludes, such as `target/`. The walk
-    /// skips an entry named `.git`, as a directory or a file, because the
+    /// The walk applies the baked-in [`DEFAULT_STOATIGNORE`] and each
+    /// `.stoatignore` as the workspace walk does, and no other rule. A
+    /// `.stoatignore` negation does not undo a default here either.
+    ///
+    /// The walk reads no `.gitignore` or `.ignore` file, consults no global
+    /// excludes or `.git/info/exclude`, and keeps hidden files. So it lists
+    /// what those rules hide from the workspace walk. Like the workspace walk,
+    /// it skips an entry named `.git`, as a directory or a file. The
     /// repository's own store holds nothing a user opens.
     ///
     /// Batches hold up to [`WALK_BATCH_SIZE`] paths and arrive in walker order,
@@ -221,7 +232,8 @@ pub trait FsHost: Send + Sync {
     /// walk before the next batch.
     ///
     /// See also:
-    /// - [`Self::walk_workspace_files_streaming`] for the walk that honors the ignore rules.
+    /// - [`Self::walk_workspace_files_streaming`] for the walk that honors every ignore rule.
+    /// - [`IGNORE_FILE_NAMES`] for the two tiers of ignore rules.
     fn walk_all_files_streaming(
         &self,
         root: &Path,
@@ -263,7 +275,14 @@ pub fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
     let defaults = build_default_ignore(root);
     let mut stack: Vec<Gitignore> = Vec::new();
     let mut out = Vec::new();
-    walk_dir(fs, root, &defaults, &mut stack, &mut out);
+    walk_dir(
+        fs,
+        root,
+        &IGNORE_FILE_NAMES,
+        &defaults,
+        &mut stack,
+        &mut out,
+    );
     out.sort();
     out
 }
@@ -277,7 +296,14 @@ pub fn manual_walk_dirs(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
     let defaults = build_default_ignore(root);
     let mut stack: Vec<Gitignore> = Vec::new();
     let mut out = vec![root.to_path_buf()];
-    walk_dirs(fs, root, &defaults, &mut stack, &mut out);
+    walk_dirs(
+        fs,
+        root,
+        &IGNORE_FILE_NAMES,
+        &defaults,
+        &mut stack,
+        &mut out,
+    );
     out.sort();
     out
 }
@@ -293,7 +319,15 @@ pub fn manual_walk_streaming(
     let defaults = build_default_ignore(root);
     let mut stack: Vec<Gitignore> = Vec::new();
     let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
-    let flow = walk_dir_streaming(fs, root, &defaults, &mut stack, &mut buffer, on_batch);
+    let flow = walk_dir_streaming(
+        fs,
+        root,
+        &IGNORE_FILE_NAMES,
+        &defaults,
+        &mut stack,
+        &mut buffer,
+        on_batch,
+    );
     if flow.is_continue() && !buffer.is_empty() {
         let _ = on_batch(buffer);
     }
@@ -302,15 +336,27 @@ pub fn manual_walk_streaming(
 /// The in-memory form of [`FsHost::walk_all_files_streaming`], for hosts that
 /// walk their own state.
 ///
-/// It is [`manual_walk_streaming`] with no ignore rule applied, and it skips an
-/// entry named `.git`, as the trait method requires.
+/// It is [`manual_walk_streaming`] with the hard ignore tier alone. It reads
+/// each `.stoatignore` from `root` down, beside the baked-in
+/// [`DEFAULT_STOATIGNORE`], and no other ignore file. It skips an entry named
+/// `.git`, as the trait method requires.
 pub fn manual_walk_all_streaming(
     fs: &dyn FsHost,
     root: &Path,
     on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
 ) {
+    let defaults = build_default_ignore(root);
+    let mut stack: Vec<Gitignore> = Vec::new();
     let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
-    let flow = walk_all_dir_streaming(fs, root, &mut buffer, on_batch);
+    let flow = walk_dir_streaming(
+        fs,
+        root,
+        &[".stoatignore"],
+        &defaults,
+        &mut stack,
+        &mut buffer,
+        on_batch,
+    );
     if flow.is_continue() && !buffer.is_empty() {
         let _ = on_batch(buffer);
     }
@@ -338,7 +384,7 @@ pub fn walk_excludes(fs: &dyn FsHost, root: &Path, path: &Path, is_dir: bool) ->
     // apply to the entries it holds, and an excluded entry ends the descent.
     let mut components = relative.components().peekable();
     while let Some(component) = components.next() {
-        push_dir_ignores(fs, &dir, &mut stack);
+        push_dir_ignores(fs, &dir, &IGNORE_FILE_NAMES, &mut stack);
         dir.push(component);
         let entry_is_dir = is_dir || components.peek().is_some();
         if path_is_ignored(&defaults, &stack, &dir, entry_is_dir) {
@@ -355,6 +401,14 @@ pub fn walk_excludes(fs: &dyn FsHost, root: &Path, path: &Path, is_dir: bool) ->
 /// answers stand in for each other, and only settings stated in one place keep
 /// that true. What separates them is which entries they yield and whether they
 /// walk on one thread or many.
+///
+/// The walk skips an entry named `.git`, a directory or a file. A linked
+/// worktree or a submodule holds a `.git` file in place of the directory. That
+/// file points at the repository's store, which holds nothing a user opens.
+///
+/// The production [`FsHost::walk_all_files_streaming`] starts from this walk
+/// too and turns the soft ignore tier off, so the hard tier stays stated in
+/// one place.
 fn workspace_walk_builder(root: &Path) -> WalkBuilder {
     let defaults = build_default_ignore(root);
     let mut builder = WalkBuilder::new(root);
@@ -364,7 +418,7 @@ fn workspace_walk_builder(root: &Path) -> WalkBuilder {
         .add_custom_ignore_filename(".stoatignore")
         .filter_entry(move |entry| {
             let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-            !defaults.matched(entry.path(), is_dir).is_ignore()
+            entry.file_name() != ".git" && !defaults.matched(entry.path(), is_dir).is_ignore()
         });
     builder
 }
@@ -385,11 +439,12 @@ pub(crate) fn build_default_ignore(root: &Path) -> Gitignore {
 fn walk_dir(
     fs: &dyn FsHost,
     dir: &Path,
+    names: &[&str],
     defaults: &Gitignore,
     stack: &mut Vec<Gitignore>,
     out: &mut Vec<PathBuf>,
 ) {
-    let pushed = push_dir_ignores(fs, dir, stack);
+    let pushed = push_dir_ignores(fs, dir, names, stack);
 
     let entries = match fs.list_dir(dir) {
         Ok(e) => e,
@@ -405,7 +460,7 @@ fn walk_dir(
             continue;
         }
         if entry.is_dir {
-            walk_dir(fs, &path, defaults, stack, out);
+            walk_dir(fs, &path, names, defaults, stack, out);
         } else {
             out.push(path);
         }
@@ -419,11 +474,12 @@ fn walk_dir(
 fn walk_dirs(
     fs: &dyn FsHost,
     dir: &Path,
+    names: &[&str],
     defaults: &Gitignore,
     stack: &mut Vec<Gitignore>,
     out: &mut Vec<PathBuf>,
 ) {
-    let pushed = push_dir_ignores(fs, dir, stack);
+    let pushed = push_dir_ignores(fs, dir, names, stack);
 
     let entries = match fs.list_dir(dir) {
         Ok(e) => e,
@@ -441,7 +497,7 @@ fn walk_dirs(
         if path_is_ignored(defaults, stack, &path, true) {
             continue;
         }
-        walk_dirs(fs, &path, defaults, stack, out);
+        walk_dirs(fs, &path, names, defaults, stack, out);
         out.push(path);
     }
 
@@ -451,12 +507,13 @@ fn walk_dirs(
 fn walk_dir_streaming(
     fs: &dyn FsHost,
     dir: &Path,
+    names: &[&str],
     defaults: &Gitignore,
     stack: &mut Vec<Gitignore>,
     buffer: &mut Vec<PathBuf>,
     on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
 ) -> ControlFlow<()> {
-    let pushed = push_dir_ignores(fs, dir, stack);
+    let pushed = push_dir_ignores(fs, dir, names, stack);
 
     let entries = match fs.list_dir(dir) {
         Ok(e) => e,
@@ -473,7 +530,7 @@ fn walk_dir_streaming(
             continue;
         }
         if entry.is_dir {
-            flow = walk_dir_streaming(fs, &path, defaults, stack, buffer, on_batch);
+            flow = walk_dir_streaming(fs, &path, names, defaults, stack, buffer, on_batch);
         } else {
             buffer.push(path);
             if buffer.len() >= WALK_BATCH_SIZE {
@@ -490,42 +547,14 @@ fn walk_dir_streaming(
     flow
 }
 
-fn walk_all_dir_streaming(
+fn push_dir_ignores(
     fs: &dyn FsHost,
     dir: &Path,
-    buffer: &mut Vec<PathBuf>,
-    on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
-) -> ControlFlow<()> {
-    let Ok(entries) = fs.list_dir(dir) else {
-        return ControlFlow::Continue(());
-    };
-
-    let mut flow = ControlFlow::Continue(());
-    for entry in entries {
-        if entry.name == ".git" {
-            continue;
-        }
-
-        let path = dir.join(entry.name.as_str());
-        if entry.is_dir {
-            flow = walk_all_dir_streaming(fs, &path, buffer, on_batch);
-        } else {
-            buffer.push(path);
-            if buffer.len() >= WALK_BATCH_SIZE {
-                let batch = std::mem::replace(buffer, Vec::with_capacity(WALK_BATCH_SIZE));
-                flow = on_batch(batch);
-            }
-        }
-        if flow.is_break() {
-            break;
-        }
-    }
-    flow
-}
-
-fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
+    names: &[&str],
+    stack: &mut Vec<Gitignore>,
+) -> usize {
     let mut pushed = 0;
-    for name in IGNORE_FILE_NAMES {
+    for name in names {
         if let Some(matcher) = read_ignore_file(fs, dir, name) {
             stack.push(matcher);
             pushed += 1;
@@ -547,7 +576,9 @@ fn read_ignore_file(fs: &dyn FsHost, dir: &Path, name: &str) -> Option<Gitignore
 }
 
 fn path_is_ignored(defaults: &Gitignore, stack: &[Gitignore], path: &Path, is_dir: bool) -> bool {
-    if defaults.matched(path, is_dir).is_ignore() {
+    if path.file_name().is_some_and(|name| name == ".git")
+        || defaults.matched(path, is_dir).is_ignore()
+    {
         return true;
     }
     let mut decision: Option<bool> = None;
@@ -721,11 +752,12 @@ impl FsHost for LocalFs {
         root: &Path,
         on_batch: &mut dyn FnMut(Vec<PathBuf>) -> ControlFlow<()>,
     ) {
-        let walker = WalkBuilder::new(root)
-            .standard_filters(false)
-            .filter_entry(|entry| entry.file_name() != ".git")
-            .build();
-        stream_files(walker, on_batch);
+        let mut builder = workspace_walk_builder(root);
+        // The standard filters are the soft tier, plus the reads of the ignore
+        // files above `root`. Those reads also find the `.stoatignore` files of
+        // the hard tier, so they come back on.
+        builder.standard_filters(false).parents(true);
+        stream_files(builder.build(), on_batch);
     }
 
     fn walk_workspace_files_parallel(
@@ -1219,18 +1251,21 @@ mod tests {
     ///
     /// The seeded `.git` makes the root a repository. With the standard filters
     /// on, a walker honors the `.gitignore` there and drops the dotfiles. This
-    /// walk lists them all, enters the trees the workspace walk always excludes,
-    /// and still skips `.git`.
+    /// walk lists both. It still skips `.git` and the trees of the hard tier,
+    /// the defaults' `target/` and `node_modules/` and the `.stoatignore`'s
+    /// `vendor/`.
     #[test]
-    fn walk_all_files_streaming_enters_the_built_trees() {
+    fn walk_all_files_streaming_lists_past_gitignore_but_not_the_hard_tier() {
         let tmp = TempDir::new().expect("tempdir");
         let root = tmp.path();
         for (file, contents) in [
             (".gitignore", "*.log\n"),
+            (".stoatignore", "vendor/\n"),
             ("a.log", "log"),
             ("src/a.rs", "fn a() {}"),
             ("target/debug/b", "bin"),
             ("node_modules/pkg/c.js", "js"),
+            ("vendor/lib.js", "js"),
             (".git/HEAD", "ref: refs/heads/main"),
         ] {
             let path = root.join(file);
@@ -1253,12 +1288,11 @@ mod tests {
             relative,
             [
                 Path::new(".gitignore"),
+                Path::new(".stoatignore"),
                 Path::new("a.log"),
-                Path::new("node_modules/pkg/c.js"),
                 Path::new("src/a.rs"),
-                Path::new("target/debug/b"),
             ],
-            "every file outside .git, the ignored and the built ones included",
+            "the gitignored file and the dotfiles, nothing in .git or the hard tier",
         );
     }
 }
