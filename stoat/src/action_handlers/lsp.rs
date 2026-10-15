@@ -45,6 +45,7 @@ use std::{
 };
 use stoat_scheduler::Task;
 use stoat_text::{Anchor, Bias, LineEnding, Point, Rope, SelectionGoal};
+use tracing::field;
 
 /// Which diagnostic [`goto_diagnostic`] goes to.
 ///
@@ -243,6 +244,7 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
+    log_jump_request("references", &site.path, site.offset, &hosts);
 
     let fs = stoat.fs_host.clone();
     let open = open_ropes(stoat);
@@ -394,6 +396,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     let Some(source_uri) = path_to_uri(&site.path) else {
         return UpdateEffect::None;
     };
+    log_jump_request(kind.status_label(), &site.path, site.offset, &hosts);
 
     let fs = stoat.fs_host.clone();
     let open = open_ropes(stoat);
@@ -458,6 +461,20 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
     });
     stoat.pending_lsp_jump = Some((kind.status_label(), task));
     UpdateEffect::None
+}
+
+/// Log a jump request of `kind` from `offset` in `path`, naming the servers
+/// asked, so the session log pairs it with the `lsp jump result` line that
+/// [`pump_lsp_jumps`] logs under the same kind.
+fn log_jump_request(kind: &str, path: &Path, offset: usize, hosts: &[(String, Arc<dyn LspHost>)]) {
+    tracing::info!(
+        target: "stoat::lsp",
+        kind,
+        path = %path.display(),
+        offset,
+        servers = ?hosts.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
+        "lsp jump requested"
+    );
 }
 
 /// Resolve every server's goto answer into [`LocationEntry`] values.
@@ -2298,6 +2315,13 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(mut entries) => {
+            tracing::info!(
+                target: "stoat::lsp",
+                kind = label,
+                results = entries.len(),
+                landing = entries.first().map(|entry| field::display(entry.path.display())),
+                "lsp jump result"
+            );
             match entries.len() {
                 0 => crate::lsp::session::set_lsp_status(stoat, format!("lsp: no {label} found")),
                 1 => {
