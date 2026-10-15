@@ -77,7 +77,7 @@ pub enum BadgeSource {
     SessionRestore,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub struct Badge {
     pub(crate) source: BadgeSource,
@@ -123,7 +123,21 @@ impl BadgeTray {
         }
     }
 
+    /// Raise `badge` in the tray of its anchor.
+    ///
+    /// An error badge logs one `warn` line on `stoat::status`. A caller that
+    /// derives its badge again on each frame inserts it only when it changes,
+    /// or the line repeats on each frame.
     pub(crate) fn insert(&mut self, badge: Badge) -> BadgeId {
+        if badge.state == BadgeState::Error {
+            tracing::warn!(
+                target: "stoat::status",
+                label = %badge.label,
+                detail = ?badge.detail,
+                "error badge shown"
+            );
+        }
+
         self.badges.insert(badge)
     }
 

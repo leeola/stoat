@@ -138,9 +138,21 @@ fn placements<'t>(
 /// replacing any agent badge left from a previous frame. Run each frame so the
 /// overlay tracks the status the render process reads on paint. A cleanly
 /// ended or absent session leaves no agent badge.
+///
+/// A badge equal to the one in the tray stays in place. An exited session's
+/// error badge stands for many frames, and [`BadgeTray::insert`] logs each
+/// error badge it takes.
 pub(crate) fn sync_agent_badge(tray: &mut BadgeTray, agent: Option<&AgentStatus>) {
+    let badge = agent.and_then(AgentStatus::badge);
+    let shown = tray
+        .find_by_source(BadgeSource::Agent)
+        .and_then(|id| tray.get(id));
+    if shown == badge.as_ref() {
+        return;
+    }
+
     tray.remove_by_source(BadgeSource::Agent);
-    if let Some(badge) = agent.and_then(AgentStatus::badge) {
+    if let Some(badge) = badge {
         tray.insert(badge);
     }
 }
@@ -409,6 +421,25 @@ mod tests {
         status.apply(AgentHookEvent::SessionEnd);
         sync_agent_badge(&mut tray, Some(&status));
         assert!(tray.find_by_source(BadgeSource::Agent).is_none());
+    }
+
+    #[test]
+    fn sync_keeps_an_unchanged_agent_badge() {
+        let mut tray = BadgeTray::new();
+        let mut status = AgentStatus::new();
+        status.mark_exited();
+
+        sync_agent_badge(&mut tray, Some(&status));
+        let shown = tray
+            .find_by_source(BadgeSource::Agent)
+            .expect("exited agent badge");
+        sync_agent_badge(&mut tray, Some(&status));
+
+        assert_eq!(
+            tray.find_by_source(BadgeSource::Agent),
+            Some(shown),
+            "agent badge id after a second sync"
+        );
     }
 
     #[test]

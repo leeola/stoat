@@ -5111,8 +5111,14 @@ impl Stoat {
     /// The status row paints one line, so `text` is flattened into one. A
     /// message carrying the output of a failed command reaches here with the
     /// newlines and control characters that output had.
+    ///
+    /// Each call logs the flattened text at `info` on `stoat::status`, so the
+    /// session log holds every message the user saw.
     pub(crate) fn set_status(&mut self, text: impl Into<String>) {
-        self.pending_message = Some(sanitize::sanitize_status_text(&text.into()));
+        let shown = self
+            .pending_message
+            .insert(sanitize::sanitize_status_text(&text.into()));
+        tracing::info!(target: "stoat::status", text = %shown, "status message");
         self.pending_message_deadline = Some(self.executor.now() + STATUS_MESSAGE_TTL);
 
         let timer = self.executor.timer(STATUS_MESSAGE_TTL);
