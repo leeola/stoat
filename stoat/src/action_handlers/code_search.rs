@@ -129,6 +129,12 @@ pub(crate) fn code_search_select(stoat: &mut Stoat) -> bool {
         finder.dispose(ws);
     }
     if let Some((path, offset)) = target {
+        tracing::info!(
+            target: "stoat::search",
+            path = %path.display(),
+            offset,
+            "code search result opened"
+        );
         super::jump::push_jump(stoat);
         super::dispatch(
             stoat,
@@ -583,6 +589,12 @@ pub(crate) fn pump_code_search(stoat: &mut Stoat) -> bool {
                     finder.push_matches(batch);
                     if finder.matches.len() >= MATCH_CAP {
                         finder.matches.truncate(MATCH_CAP);
+                        tracing::debug!(
+                            target: "stoat::search",
+                            matches = MATCH_CAP,
+                            capped = true,
+                            "code search finished"
+                        );
                         return true;
                     }
                 }
@@ -593,6 +605,12 @@ pub(crate) fn pump_code_search(stoat: &mut Stoat) -> bool {
                 return drained;
             },
             Err(TryRecvError::Disconnected) => {
+                tracing::debug!(
+                    target: "stoat::search",
+                    matches = stoat.code_search.as_ref().map_or(0, |finder| finder.matches.len()),
+                    capped = false,
+                    "code search finished"
+                );
                 return true;
             },
         }

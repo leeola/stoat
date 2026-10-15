@@ -323,8 +323,11 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         .push(query.clone());
 
     let last = LastSearch::new(query, direction, smart_case(stoat));
-    if let Some(regex) = last.regex.as_ref()
-        && jump_to_match(stoat, regex, direction, extend).moved()
+    let outcome = last
+        .regex
+        .as_ref()
+        .map(|regex| jump_to_match(stoat, regex, direction, extend));
+    if outcome.is_some_and(SearchOutcome::moved)
         && let Some(entry) = state.origin_jump
     {
         super::jump::push_entry(stoat, entry);
@@ -332,6 +335,13 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     if last.regex.is_none() {
         stoat.set_status(format!("invalid regex: {}", last.query));
     }
+    tracing::info!(
+        target: "stoat::search",
+        query = %last.query,
+        ?direction,
+        ?outcome,
+        "search"
+    );
     // The query reaches the frame directly rather than through any display
     // layer, so nothing else reports that the highlighted matches moved.
     stoat.paint_generation += 1;
@@ -438,6 +448,13 @@ fn repeat_search(
             break;
         }
     }
+    tracing::debug!(
+        target: "stoat::search",
+        ?outcome,
+        count,
+        ?direction,
+        "search repeated"
+    );
 
     match outcome {
         SearchOutcome::Landed => {},

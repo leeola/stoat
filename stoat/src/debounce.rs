@@ -775,6 +775,12 @@ pub(crate) fn drain_pending_code_search(stoat: &mut Stoat) -> bool {
             action_handlers::code_search::spawn_code_search(stoat, git_root, &query)
         {
             stoat.pending_code_search = Some(pending);
+            tracing::info!(
+                target: "stoat::search",
+                query = %query,
+                root = %stoat.active_workspace().git_root.display(),
+                "code search started"
+            );
             progressed = true;
         }
     }
