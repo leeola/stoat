@@ -536,6 +536,13 @@ impl Workspace {
         self.tabs[self.active_tab].parked = Some(outgoing);
         self.last_tab = Some(self.active_tab);
         self.active_tab = idx;
+        tracing::debug!(
+            target: "stoat::pane",
+            from = self.last_tab,
+            to = idx,
+            tabs = self.tabs.len(),
+            "switched tab"
+        );
         true
     }
 
@@ -548,6 +555,7 @@ impl Workspace {
             name: None,
         });
         self.switch_tab(self.tabs.len() - 1);
+        tracing::debug!(target: "stoat::pane", tab = self.tabs.len() - 1, "opened tab");
     }
 
     /// Remove tab `idx`, returning its pane tree for the caller to dispose of.
@@ -588,6 +596,7 @@ impl Workspace {
             other => other,
         };
 
+        tracing::debug!(target: "stoat::pane", idx, tabs = self.tabs.len(), "closed tab");
         removed
     }
 

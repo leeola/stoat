@@ -520,6 +520,7 @@ impl PaneTree {
     /// pane.
     pub fn split(&mut self, axis: Axis) -> PaneId {
         let anchor = &self.panes[self.focus_anchor()];
+        let from = anchor.index;
         let pane = Pane {
             view: anchor.view.clone(),
             prev_view: None,
@@ -537,6 +538,13 @@ impl PaneTree {
         self.insert_pane_leaf(new_pane_id, axis);
         self.set_focus(new_pane_id);
         self.recalculate();
+        tracing::debug!(
+            target: "stoat::pane",
+            ?axis,
+            from,
+            to = self.panes[new_pane_id].index,
+            "split pane"
+        );
         new_pane_id
     }
 
@@ -633,8 +641,13 @@ impl PaneTree {
         }
 
         self.detach_node(node_id);
-        self.panes.remove(id);
+        let closed = self.panes.remove(id);
         self.recalculate();
+        tracing::debug!(
+            target: "stoat::pane",
+            pane = closed.map(|pane| pane.index),
+            "closed pane"
+        );
         true
     }
 
