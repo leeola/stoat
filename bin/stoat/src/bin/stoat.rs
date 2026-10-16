@@ -29,9 +29,23 @@ const CLIENT_LOG_STEM: &str = "stoat-cli";
 const CLIENT_LOG_MAX: u64 = 4 * 1024 * 1024;
 
 fn main() {
-    // First, because a thread inherits the signal mask of the thread that
-    // spawns it. A thread spawned before this call keeps SIGWINCH unblocked, so
-    // the kernel hands the signal to it and crossterm's handler runs there.
+    // An allocation of 1 MiB or more gets a mapping of its own, and its free
+    // returns that mapping to the kernel. Under glibc's default, a large free
+    // raises this threshold. The transient buffers of the diff and index jobs
+    // then grow the arena of the pool thread that made them, and an arena keeps
+    // its high-water mark, so the resident size climbs with each settled edit
+    // while the live heap stays flat. A threshold set here does not rise.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: mallopt sets one allocator parameter, and this call runs before
+    // any other thread exists.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 1 << 20);
+    }
+
+    // Ahead of any thread spawn, because a thread inherits the signal mask of
+    // the thread that spawns it. A thread spawned before this call keeps
+    // SIGWINCH unblocked, so the kernel hands the signal to it and crossterm's
+    // handler runs there.
     if let Err(e) = stoat::tty::block_resize_signal() {
         eprintln!("Failed to block the resize signal: {e}");
         std::process::exit(1);
