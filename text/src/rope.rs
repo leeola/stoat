@@ -913,18 +913,19 @@ impl Rope {
 
     /// Byte range of `row`, exclusive of its newline.
     ///
-    /// Seeking the row's end rather than its start is what keeps this to one
-    /// descent. The chunk it lands on either starts on this row, meaning the
-    /// row began earlier and its start is that chunk's offset less the columns
-    /// already counted, or starts on an earlier row, meaning the row begins
-    /// inside it.
-    fn row_byte_range(&self, row: u32) -> Range<usize> {
+    /// A row past the last one answers the empty range at the rope's end. The
+    /// answer costs one tree descent however long the row is.
+    pub fn row_byte_range(&self, row: u32) -> Range<usize> {
         let max = self.max_point();
         if row > max.row {
             let len = self.len();
             return len..len;
         }
 
+        // A seek to the row's end keeps this to one descent. If the chunk it
+        // lands on starts on this row, the row starts in an earlier chunk, at
+        // this chunk's offset less the columns already counted. If the chunk
+        // starts on an earlier row, the row starts inside it.
         let (start, _end, chunk_opt) = self.chunks.find::<Dimensions<Point, usize>, _>(
             (),
             &Point::new(row, u32::MAX),

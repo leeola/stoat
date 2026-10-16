@@ -1714,24 +1714,8 @@ impl FoldSnapshot {
     /// every long one a fold does not span -- can be measured off the rope's
     /// own maps.
     pub fn plain_line_runs(&self, fold_row: u32) -> Option<MeasuredChunksInRange<'_>> {
-        if self.inlay_snapshot.has_inlays() {
-            return None;
-        }
-
-        let start = FoldPoint::new(fold_row, 0);
-        let end = FoldPoint::new(fold_row, self.line_len(fold_row));
-        let inlay_range = self.to_inlay_point(start)..self.to_inlay_point(end);
-        if !self.folds_in_range(inlay_range.clone()).is_empty() {
-            return None;
-        }
-
-        // With no inlays and no fold on the row, fold offsets are inlay offsets
-        // are buffer offsets, so the row is exactly this rope range.
-        let rope = self.inlay_snapshot.rope();
-        let start = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.start));
-        let end = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.end));
-
-        Some(rope.measured_chunks_in_range(start..end))
+        let (rope, range) = self.plain_line_range(fold_row)?;
+        Some(rope.measured_chunks_in_range(range))
     }
 
     /// The rope and the byte range `fold_row` covers of it.
@@ -1747,6 +1731,13 @@ impl FoldSnapshot {
             return None;
         }
 
+        // With no inlays and no folds, fold rows are buffer rows, so the rope
+        // answers for the row in one seek.
+        let rope = self.inlay_snapshot.rope();
+        if self.fold_count() == 0 {
+            return Some((rope, rope.row_byte_range(fold_row)));
+        }
+
         let start = FoldPoint::new(fold_row, 0);
         let end = FoldPoint::new(fold_row, self.line_len(fold_row));
         let inlay_range = self.to_inlay_point(start)..self.to_inlay_point(end);
@@ -1754,7 +1745,8 @@ impl FoldSnapshot {
             return None;
         }
 
-        let rope = self.inlay_snapshot.rope();
+        // With no inlays and no fold on the row, fold offsets are inlay offsets
+        // are buffer offsets, so the row is exactly this rope range.
         let start = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.start));
         let end = rope.point_to_offset(self.inlay_snapshot.to_buffer_point(inlay_range.end));
 
@@ -2157,6 +2149,9 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_text::{patch::Patch, Anchor, Bias};
+
+    /// Rows with a tab, with three-byte characters, and with ASCII alone.
+    const PLAIN_ROWS: &str = "a\tb\n\u{65e5}\u{672c}x\nfold\nlast";
 
     fn make_snapshot(content: &str) -> Arc<super::FoldSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -3938,6 +3933,70 @@ mod tests {
         // eight characters, and row 1 paints "hello..." with " world" folded.
         assert_eq!(snap.line_len(0), 12);
         assert_eq!(snap.line_len(1), 8);
+    }
+
+    fn plain_ranges(snap: &super::FoldSnapshot, rows: u32) -> Vec<Option<Range<usize>>> {
+        (0..rows)
+            .map(|row| snap.plain_line_range(row).map(|(_, range)| range))
+            .collect()
+    }
+
+    /// Without folds or inlays, each row is its line of the rope, a row past
+    /// the last one included.
+    #[test]
+    fn a_fold_free_row_is_its_line_of_the_rope() {
+        let snap = make_snapshot(PLAIN_ROWS);
+        assert_eq!(
+            plain_ranges(&snap, 5),
+            [
+                Some(0..3),
+                Some(4..11),
+                Some(12..16),
+                Some(17..21),
+                Some(21..21)
+            ],
+        );
+
+        let texts: Vec<String> = (0..4)
+            .map(|row| {
+                let runs = snap.plain_line_runs(row).expect("a fold-free row");
+                runs.map(|run| run.text).collect()
+            })
+            .collect();
+        assert_eq!(texts, ["a\tb", "\u{65e5}\u{672c}x", "fold", "last"]);
+    }
+
+    /// A fold that joins two rows leaves the rows around it their own lines,
+    /// past the rows it joins, and the folded row none.
+    #[test]
+    fn a_row_beside_a_fold_is_its_line_of_the_rope() {
+        let snap = make_snapshot_with_folds(
+            PLAIN_ROWS,
+            vec![(InlayPoint::new(1, 3), InlayPoint::new(2, 2))],
+        );
+        assert_eq!(
+            plain_ranges(&snap, 4),
+            [Some(0..3), None, Some(17..21), Some(21..21)],
+        );
+    }
+
+    /// A hint anywhere answers no row, since the rope does not hold the text a
+    /// hinted row paints.
+    #[test]
+    fn a_hinted_snapshot_answers_no_row() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), PLAIN_ROWS);
+        let buffer_snapshot = MultiBuffer::singleton(Arc::new(RwLock::new(buffer))).snapshot();
+        let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
+        let anchor = buffer_snapshot.anchor_at(1, Bias::Right);
+        inlay_map.splice(
+            &buffer_snapshot,
+            Vec::new(),
+            vec![(anchor, ": T".to_string(), InlayKind::Hint)],
+        );
+        let (inlay_snapshot, _) = inlay_map.sync(buffer_snapshot, &Patch::empty());
+        let (_, snap) = FoldMap::new(inlay_snapshot);
+
+        assert_eq!(plain_ranges(&snap, 4), [None, None, None, None]);
     }
 
     #[test]
