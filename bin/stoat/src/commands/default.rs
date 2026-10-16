@@ -151,24 +151,15 @@ enum Command {
     /// git supplies; positional args are not accepted in the
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
-    /// Thin client the owned Claude subshell's hooks invoke to push status
-    /// into the owning session.
-    AgentApi {
-        #[command(subcommand)]
-        sub: crate::commands::agent_api::AgentApiCommand,
-    },
     /// Open a file in the owning Stoat instance and block until it is closed,
     /// honoring the `$EDITOR <file>` contract. Set as the owned agent's editor.
     Editor {
         /// File to open in the parent instance.
         file: PathBuf,
     },
-    /// Interrogate a live session over its socket for LSP status, diagnostics,
-    /// or hover at a position. Prints the JSON reply.
-    Query {
-        #[command(subcommand)]
-        sub: crate::commands::query::QueryCommand,
-    },
+    /// Machine-facing commands for a live session. Every reply is one JSON
+    /// line. The root commands are for people.
+    Api(crate::commands::api::ApiArgs),
     /// Author and check the guided walkthroughs stored in this workspace under
     /// `.stoat/walkthroughs`.
     Walkthrough {
@@ -212,9 +203,8 @@ pub fn run(args: Args, session_log: Option<PathBuf>) -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::AgentApi { sub }) => crate::commands::agent_api::run(sub),
         Some(Command::Editor { file }) => crate::commands::editor::run(file),
-        Some(Command::Query { sub }) => crate::commands::query::run(sub),
+        Some(Command::Api(args)) => crate::commands::api::run(args),
         Some(Command::Walkthrough { sub }) => crate::commands::walkthrough::run(sub),
         Some(Command::Fixture(fixture)) => {
             run_fixture(fixture, text_proto_log, common, session_log)
@@ -851,8 +841,8 @@ mod tests {
             (&["--attach-serve", "main"], true),
             (&["--attachable", "main"], false),
             (&["diff"], false),
-            (&["query", "lsp-status"], false),
-            (&["agent-api", "hook", "start"], false),
+            (&["api", "lsp-status"], false),
+            (&["api", "hook", "start"], false),
             (&["editor", "a.rs"], false),
             (&["walkthrough", "list"], false),
             (&["completions", "fish"], false),

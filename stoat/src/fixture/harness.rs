@@ -9,7 +9,7 @@
 //! paints.
 //!
 //! The session agent socket is also bound, so a script can query live LSP
-//! status, diagnostics, and hover over the same protocol the `stoat query` CLI
+//! status, diagnostics, and hover over the same protocol the `stoat api` CLI
 //! speaks.
 
 use crate::{
@@ -116,7 +116,7 @@ pub enum HarnessError {
 }
 
 /// A structured session query, serialized to the newline-delimited JSON the
-/// session agent socket accepts. Mirrors the `stoat query` wire form; `line`
+/// session agent socket accepts. Mirrors the `stoat api` wire form; `line`
 /// and `col` are zero-based LSP UTF-16 positions.
 #[derive(Serialize)]
 #[serde(tag = "req", rename_all = "kebab-case")]
