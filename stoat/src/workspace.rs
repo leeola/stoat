@@ -342,6 +342,12 @@ pub struct Workspace {
     /// restore finds it with no pause.
     pub(crate) rebase_active: Option<ActiveRebase>,
     parse_jobs: HashMap<BufferId, ParseJob>,
+    /// The languages whose action queries a parse sent to the pool to compile.
+    ///
+    /// A language is warmed at the first parse of a buffer in it. The first
+    /// Enter, bracket motion, or textobject press then finds its query
+    /// compiled, and does not compile it on the run loop.
+    warmed_languages: std::collections::HashSet<&'static str>,
     /// Buffers whose last parse captured only what was on screen.
     ///
     /// Their tree is current but their tokens describe the viewport alone, so
@@ -504,6 +510,7 @@ impl Workspace {
             rebase: None,
             rebase_active: None,
             parse_jobs: HashMap::new(),
+            warmed_languages: std::collections::HashSet::new(),
             partial_token_buffers: std::collections::HashSet::new(),
             #[cfg(test)]
             parse_snapshot_clones: std::cell::Cell::new(0),
@@ -1366,6 +1373,17 @@ impl Workspace {
             let Some(lang) = self.buffers.language_for(buffer_id) else {
                 continue;
             };
+
+            // Detached, because a press that arrives first waits on the compile
+            // in flight, which costs it no more than compiling the query itself.
+            if self.warmed_languages.insert(lang.name) {
+                executor
+                    .spawn_blocking({
+                        let lang = lang.clone();
+                        move || lang.warm_queries()
+                    })
+                    .detach();
+            }
 
             #[cfg(test)]
             self.parse_snapshot_clones
@@ -2370,6 +2388,45 @@ mod tests {
         assert!(
             ws.buffers.syntax_version(id).is_some(),
             "and its highlights land through the job poll"
+        );
+    }
+
+    /// A language's first parse sends its action queries to the pool to
+    /// compile, and a second buffer in that language sends nothing more.
+    ///
+    /// The scheduler counts work only when it reaches the pool. Both buffers
+    /// are small enough to parse on the run loop, which keeps the parse itself
+    /// out of the count.
+    #[test]
+    fn a_language_warms_its_queries_at_its_first_parse_only() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::OpenFile;
+
+        let (mut h, _) = harness_with_file("/warm", "a.rs", b"fn f() {}\n");
+        let blocking_calls_of_a_pass = |h: &mut TestHarness| {
+            let before = h.blocking_calls();
+            h.stoat.drive_background();
+            h.blocking_calls() - before
+        };
+        let first = blocking_calls_of_a_pass(&mut h);
+
+        h.fake_fs().insert_file("/warm/b.rs", b"fn g() {}\n");
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/warm/b.rs"),
+            },
+        );
+        let second = blocking_calls_of_a_pass(&mut h);
+
+        assert_eq!(
+            (
+                first,
+                second,
+                h.stoat.active_workspace().warmed_languages.clone()
+            ),
+            (1, 0, std::collections::HashSet::from(["rust"])),
+            "the first rust buffer warms rust once, and the second finds it warm"
         );
     }
 

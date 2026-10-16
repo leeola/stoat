@@ -34,7 +34,10 @@ pub struct Language {
     /// None of these is read to paint a frame, and each costs tens of
     /// milliseconds to compile, so a session that never runs a bracket motion
     /// never pays for `brackets.scm`.
-    aux: AuxQueries,
+    ///
+    /// Every language of this name in the process shares them, so each query
+    /// compiles once per process rather than once per registry.
+    aux: &'static AuxQueries,
     /// Line-comment markers for languages that have them, ordered with the
     /// toggle token first (e.g. `["//", "///", "//!"]` for rust, `["#"]` for
     /// toml). Empty for languages without line comments (e.g. JSON, markdown).
@@ -95,6 +98,81 @@ struct AuxQueries {
     tags: LazyQuery,
 }
 
+impl AuxQueries {
+    /// The queries of the language called `name`, shared by every registry in
+    /// the process.
+    ///
+    /// A query compiles from static source against a static grammar, so every
+    /// language of one name compiles the same queries. Each editor builds its
+    /// own registry, and a test process builds one for each editor that a test
+    /// opens. Shared queries compile once per process instead.
+    ///
+    /// The first call for a name builds the set with `build`, and later calls
+    /// for that name hand back the same set. Each bundled language always pairs
+    /// its name with the same sources, which is what makes the name a key.
+    fn shared(name: &'static str, build: impl FnOnce() -> AuxQueries) -> &'static AuxQueries {
+        static SHARED: Mutex<Vec<(&'static str, &'static AuxQueries)>> = Mutex::new(Vec::new());
+
+        let mut shared = SHARED.lock().expect("shared aux queries poisoned");
+        if let Some((_, queries)) = shared.iter().find(|(known, _)| *known == name) {
+            return queries;
+        }
+
+        let queries: &'static AuxQueries = Box::leak(Box::new(build()));
+        shared.push((name, queries));
+        queries
+    }
+
+    fn new(
+        brackets: Option<&'static str>,
+        indents: Option<&'static str>,
+        textobjects: Option<&'static str>,
+        outline: Option<&'static str>,
+        tags: Option<&'static str>,
+    ) -> AuxQueries {
+        AuxQueries {
+            brackets: LazyQuery::new(brackets),
+            indents: LazyQuery::new(indents),
+            indent_split: OnceLock::new(),
+            textobjects: LazyQuery::new(textobjects),
+            textobject_kinds: OnceLock::new(),
+            outline: LazyQuery::new(outline),
+            tags: LazyQuery::new(tags),
+        }
+    }
+
+    /// The indents query split by where a new line's indent starts walking the
+    /// tree, built on the first call.
+    fn split_indents(&self, grammar: &TsLanguage) -> Option<&IndentQueries> {
+        self.indent_split
+            .get_or_init(|| {
+                let query = self.indents.get(grammar)?;
+                Some(IndentQueries::split(grammar, query, self.indents.src?))
+            })
+            .as_ref()
+    }
+
+    /// The textobjects query split into one query per kind of object, built for
+    /// every kind on the first call.
+    fn split_textobjects(&self, grammar: &TsLanguage) -> &[(String, Query)] {
+        self.textobject_kinds.get_or_init(|| {
+            match (self.textobjects.get(grammar), self.textobjects.src) {
+                (Some(query), Some(src)) => split_by_kind(grammar, query, src),
+                _ => Vec::new(),
+            }
+        })
+    }
+
+    /// Compiles every query in the set that has not compiled yet.
+    fn warm(&self, grammar: &TsLanguage) {
+        self.brackets.get(grammar);
+        self.split_indents(grammar);
+        self.split_textobjects(grammar);
+        self.outline.get(grammar);
+        self.tags.get(grammar);
+    }
+}
+
 /// One optional query, compiled from its source the first time it is read.
 #[derive(Default)]
 struct LazyQuery {
@@ -153,6 +231,22 @@ impl HighlightQuery {
 }
 
 impl Language {
+    /// Compiles every query an editor action reads, ahead of the first action
+    /// that reads one.
+    ///
+    /// Each of these queries compiles on its first read, on the reading
+    /// thread. Without a warm-up, the first Enter, bracket motion, or
+    /// textobject press in a language pays that compile on the thread that
+    /// handles the key.
+    ///
+    /// Blocks the calling thread for the compiles, which for rust add up to
+    /// tens of milliseconds, so call it on a pool thread. A read that arrives
+    /// while a compile runs waits for that compile alone. Later calls return
+    /// at once.
+    pub fn warm_queries(&self) {
+        self.aux.warm(&self.grammar);
+    }
+
     /// Bracket-pair query loaded from `brackets.scm`. Captures `@open` and
     /// `@close` for matched bracket-like tokens, driving the editor's
     /// match-brackets motion through [`crate::matching_bracket`]. `None` for
@@ -174,17 +268,7 @@ impl Language {
     ///
     /// `None` for grammars that ship no `indents.scm`.
     pub fn newline_indent_queries(&self) -> Option<&IndentQueries> {
-        self.aux
-            .indent_split
-            .get_or_init(|| {
-                let query = self.indent_query()?;
-                Some(IndentQueries::split(
-                    &self.grammar,
-                    query,
-                    self.aux.indents.src?,
-                ))
-            })
-            .as_ref()
+        self.aux.split_indents(&self.grammar)
     }
 
     /// Textobjects query loaded from `textobjects.scm`. Captures
@@ -217,14 +301,9 @@ impl Language {
     /// `None` when the language has no textobjects query or no pattern
     /// captures `capture_name`.
     pub fn textobject_query_for(&self, capture_name: &str) -> Option<&Query> {
-        let kinds = self.aux.textobject_kinds.get_or_init(|| {
-            match (self.textobjects_query(), self.aux.textobjects.src) {
-                (Some(query), Some(src)) => split_by_kind(&self.grammar, query, src),
-                _ => Vec::new(),
-            }
-        });
         let kind = capture_kind(capture_name);
-        kinds
+        self.aux
+            .split_textobjects(&self.grammar)
             .iter()
             .find(|(name, _)| name == kind)
             .map(|(_, query)| query)
@@ -567,15 +646,9 @@ fn make_language_with_injections(
         highlight_map: Mutex::new(HighlightMap::default()),
         injections,
         injection: OnceLock::new(),
-        aux: AuxQueries {
-            brackets: LazyQuery::new(brackets),
-            indents: LazyQuery::new(indents),
-            indent_split: OnceLock::new(),
-            textobjects: LazyQuery::new(textobjects),
-            textobject_kinds: OnceLock::new(),
-            outline: LazyQuery::new(outline),
-            tags: LazyQuery::new(tags),
-        },
+        aux: AuxQueries::shared(name, || {
+            AuxQueries::new(brackets, indents, textobjects, outline, tags)
+        }),
         line_comments,
         block_comments,
         pairs: pairs.unwrap_or(DEFAULT_PAIRS),
@@ -869,28 +942,51 @@ fn make_markdown_inline() -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::{LanguageRegistry, LazyQuery};
+    use super::{AuxQueries, LanguageRegistry, LazyQuery};
     use std::path::Path;
     use tree_sitter::Query;
 
     /// Nothing action-driven is compiled until something asks for it, which is
     /// what keeps it off the path to the first frame. Each costs tens of
     /// milliseconds, and a session may never run the motion that needs one.
+    ///
+    /// The query here is a private copy. Every registry in the process shares
+    /// the bundled ones, so their state depends on which tests ran before.
     #[test]
     fn an_aux_query_waits_to_be_asked_for_and_then_is_compiled_once() {
         let reg = LanguageRegistry::standard();
         let rust = reg.for_path(Path::new("a.rs")).expect("rust");
+        let brackets = LazyQuery::new(rust.aux.brackets.src);
 
         assert!(
-            rust.aux.brackets.compiled.get().is_none(),
-            "building the language did not compile it",
+            brackets.compiled.get().is_none(),
+            "holding the source compiled nothing",
         );
 
-        let first = rust.bracket_query().expect("rust ships brackets.scm") as *const _;
+        let first = brackets
+            .get(&rust.grammar)
+            .expect("rust ships brackets.scm") as *const _;
         assert_eq!(
-            rust.bracket_query().expect("still there") as *const _,
+            brackets.get(&rust.grammar).expect("still there") as *const _,
             first,
             "and asking again hands back the one already compiled",
+        );
+    }
+
+    /// Two registries hand back one compile of an action query, so a second
+    /// editor or preview does not compile it again.
+    #[test]
+    fn registries_share_one_compile_of_an_action_query() {
+        let compiled = || {
+            let reg = LanguageRegistry::deferred();
+            let rust = reg.for_path(Path::new("a.rs")).expect("rust");
+            rust.bracket_query().expect("rust ships brackets.scm") as *const Query
+        };
+
+        assert_eq!(
+            compiled(),
+            compiled(),
+            "the second registry finds the first one's compile"
         );
     }
 
@@ -1189,6 +1285,48 @@ mod tests {
                 .sum::<usize>(),
             full.pattern_count(),
             "every pattern lands in one kind",
+        );
+    }
+
+    /// Warming a language compiles every query an action reads, so the first
+    /// press that reads one finds it compiled.
+    ///
+    /// The language holds a private set of queries here. Every registry in the
+    /// process shares the bundled set, so its state depends on which tests ran
+    /// before.
+    #[test]
+    fn warming_leaves_no_action_query_to_compile() {
+        let mut rust = super::make_rust();
+        let bundled = rust.aux;
+        rust.aux = Box::leak(Box::new(AuxQueries::new(
+            bundled.brackets.src,
+            bundled.indents.src,
+            bundled.textobjects.src,
+            bundled.outline.src,
+            bundled.tags.src,
+        )));
+        let filled = |aux: &AuxQueries| {
+            [
+                aux.brackets.compiled.get().is_some(),
+                aux.indents.compiled.get().is_some(),
+                aux.indent_split.get().is_some(),
+                aux.textobjects.compiled.get().is_some(),
+                aux.textobject_kinds.get().is_some(),
+                aux.outline.compiled.get().is_some(),
+                aux.tags.compiled.get().is_some(),
+            ]
+        };
+
+        assert_eq!(
+            filled(rust.aux),
+            [false; 7],
+            "a fresh set compiles none of them up front"
+        );
+        rust.warm_queries();
+        assert_eq!(
+            filled(rust.aux),
+            [true; 7],
+            "warming leaves none of them for a press to compile"
         );
     }
 
