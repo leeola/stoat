@@ -660,6 +660,10 @@ impl SyntaxMap {
             // An info string is a handful of bytes and every fence in the
             // buffer produces one.
             let mut fence_token = String::new();
+            // The query runs once per filter range, so a fence whose node two
+            // ranges reach matches twice. Its content range names it, and the
+            // second match of a range already taken adds no second layer.
+            let mut fences_taken: HashSet<Range<usize>> = HashSet::new();
             // When the caller has supplied changed-range filters,
             // restrict the injection query to the union of those
             // ranges. The cursor's `set_byte_range` only accepts a
@@ -790,6 +794,9 @@ impl SyntaxMap {
                             let (true, Some(content)) = (has_token, content) else {
                                 continue;
                             };
+                            if !fences_taken.insert(content.clone()) {
+                                continue;
+                            }
                             let Some(candidates) = parent_lang.fence_candidates.get() else {
                                 continue;
                             };
@@ -2564,6 +2571,41 @@ mod tests {
             inline(&map),
             inline(&fresh),
             "a host node found by two filters must not become two layers"
+        );
+    }
+
+    /// A fence that two filter ranges reach keeps one layer.
+    ///
+    /// The walk queries each filter range on its own, so a fence whose node
+    /// spans two of them matches twice. A second layer over the same content
+    /// breaks the rule that layers of one depth and language never overlap.
+    #[test]
+    fn a_fence_two_filters_reach_keeps_one_layer() {
+        let lang = markdown_lang();
+        let body: String = (0..12).map(|i| format!("let v{i} = {i};\n")).collect();
+        let source = format!("# T\n\n```rust\n{body}```\n");
+        let rope = Rope::from(source.as_str());
+        let mut map = SyntaxMap::new();
+        map.reparse(&rope, lang.clone(), 1, None, None).unwrap();
+
+        let at = |text: &str| source.find(text).expect("fixture");
+        let filters = [
+            at("let v1 ")..at("let v1 ") + 1,
+            at("let v9 ")..at("let v9 ") + 1,
+        ];
+        map.reparse_within_changed_ranges(&rope, lang, 2, Some(&filters), None, None)
+            .expect("the walk must complete");
+
+        let fences: Vec<(usize, usize)> = map
+            .snapshot()
+            .iter_layers()
+            .filter(|l| l.language.name == "rust")
+            .map(|l| (l.start_offset as usize, l.end_offset as usize))
+            .collect();
+        assert_eq!(
+            fences,
+            [(at("let v0"), source.rfind("```").expect("fixture"))],
+            "one layer over the fence content"
         );
     }
 
