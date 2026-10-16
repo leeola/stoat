@@ -1,7 +1,8 @@
 use super::{
-    display_width, sampler, BlockPlacement, BlockProperties, BlockRowKind, BlockStyle, DisplayMap,
-    DisplayPoint, DisplayRow, DisplaySnapshot, HighlightStyle, HighlightStyleInterner, InlayKind,
-    InlayPoint, SemanticTokenHighlight, WrapSync,
+    display_width, highlights::HighlightEndpoints, sampler, BlockPlacement, BlockProperties,
+    BlockRowKind, BlockStyle, DisplayMap, DisplayPoint, DisplayRow, DisplaySnapshot,
+    HighlightStyle, HighlightStyleInterner, InlayKind, InlayPoint, SemanticTokenHighlight,
+    WrapSync,
 };
 use crate::{
     buffer::{BufferId, TextBuffer},
@@ -604,12 +605,14 @@ fn a_repaint_that_changed_nothing_reuses_its_endpoints() {
         "an unchanged frame reuses the resolve",
     );
 
-    // A different range describes different bytes, so it cannot answer from
-    // the same set.
+    // The set covers every byte of the narrower rows, so it answers for them.
     let narrower = display_map
         .snapshot()
         .highlighted_endpoints_cached(0..1, &mut cache);
-    assert!(!Arc::ptr_eq(&first, &narrower), "a new range rebuilds");
+    assert!(
+        Arc::ptr_eq(&first, &narrower),
+        "a range inside the set reuses it",
+    );
 
     shared.write().expect("poisoned").edit(0..0, "// edit\n");
     let after_edit = display_map
@@ -2253,7 +2256,7 @@ fn an_edit_after_a_splice_rebuilds_only_the_rows_it_touched() {
         wrap_edits.edits(),
     );
     let painted: String = wrap_snapshot
-        .chunks(150..151, Arc::from(Vec::new()))
+        .chunks(150..151, HighlightEndpoints::shared(Vec::new()))
         .map(|chunk| chunk.text.to_string())
         .collect();
     assert_eq!(

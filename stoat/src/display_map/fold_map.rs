@@ -1,5 +1,5 @@
 use super::{
-    highlights::{Chunk, HighlightCursor, HighlightEndpoint},
+    highlights::{Chunk, HighlightCursor, HighlightEndpoints},
     inlay_map::{InlayChunks, InlayOffset, InlayPoint, InlaySnapshot},
 };
 use crate::multi_buffer::MultiBufferSnapshot;
@@ -20,7 +20,8 @@ use stoat_text::{
 /// Shared empty highlight endpoints, for the row walkers that read the chunk
 /// stream only to count characters. Cloning this is a refcount bump where a
 /// fresh `Arc` would allocate on every call.
-static NO_ENDPOINTS: LazyLock<Arc<[HighlightEndpoint]>> = LazyLock::new(|| Arc::from(Vec::new()));
+static NO_ENDPOINTS: LazyLock<Arc<HighlightEndpoints>> =
+    LazyLock::new(|| HighlightEndpoints::shared(Vec::new()));
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FoldId(pub(crate) usize);
@@ -711,7 +712,7 @@ fn inlay_text_summary(inlay_snapshot: &InlaySnapshot, range: Range<usize>) -> Te
     let mut summary = TextSummary::default();
     let chunks = inlay_snapshot.chunks(
         InlayOffset(range.start)..InlayOffset(range.end),
-        Arc::from(Vec::new()),
+        HighlightEndpoints::shared(Vec::new()),
     );
     for chunk in chunks {
         ContextLessSummary::add_summary(&mut summary, &TextSummary::from_str(&chunk.text));
@@ -1558,7 +1559,7 @@ impl FoldSnapshot {
     pub fn chunks<'a>(
         &'a self,
         range: Range<FoldOffset>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
     ) -> FoldChunks<'a> {
         self.chunks_seeded(range, endpoints, None)
     }
@@ -1570,7 +1571,7 @@ impl FoldSnapshot {
     pub fn chunks_seeded<'a>(
         &'a self,
         range: Range<FoldOffset>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
         seed: Option<&HighlightCursor>,
     ) -> FoldChunks<'a> {
         if self.fold_count() == 0 {
@@ -1852,7 +1853,7 @@ pub enum FoldChunks<'a> {
 #[doc(hidden)]
 pub struct FoldChunksInner<'a> {
     snapshot: &'a FoldSnapshot,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     cursor: Cursor<'a, 'static, Transform, Dimensions<FoldOffset, InputOffset>>,
     inlay_chunks: Option<InlayChunks<'a>>,
     offset: FoldOffset,
@@ -2144,6 +2145,7 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
+            highlights::HighlightEndpoints,
             inlay_map::{InlayKind, InlayMap, InlayPoint},
             sampler::Sampler,
         },
@@ -2373,7 +2375,10 @@ mod tests {
         let (snap, _) = fold_map.sync(inlay_snap, &inlay_edits, None);
 
         let painted: String = snap
-            .chunks(FoldOffset(0)..snap.len(), Arc::from(Vec::new()))
+            .chunks(
+                FoldOffset(0)..snap.len(),
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .map(|chunk| chunk.text.to_string())
             .collect();
         let rows: Vec<&str> = painted.split('\n').collect();
@@ -2664,7 +2669,7 @@ mod tests {
         let painted: String = snap
             .chunks(
                 snap.row_start_offset(1)..snap.row_start_offset(2),
-                Arc::from(Vec::new()),
+                HighlightEndpoints::shared(Vec::new()),
             )
             .map(|chunk| chunk.text.to_string())
             .collect();
@@ -2902,7 +2907,7 @@ mod tests {
             .map(|row| {
                 snap.chunks(
                     snap.row_start_offset(row)..snap.row_start_offset(row + 1),
-                    Arc::from(Vec::new()),
+                    HighlightEndpoints::shared(Vec::new()),
                 )
                 .map(|chunk| chunk.text.to_string())
                 .collect::<String>()
@@ -3023,7 +3028,10 @@ mod tests {
         let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty(), None);
 
         let painted: String = snap
-            .chunks(FoldOffset(0)..snap.len(), Arc::from(Vec::new()))
+            .chunks(
+                FoldOffset(0)..snap.len(),
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .map(|chunk| chunk.text.to_string())
             .collect();
         assert_eq!(painted, "li...ne3", "one placeholder for the merged region");
@@ -3817,7 +3825,7 @@ mod tests {
         let painted: String = snap
             .chunks(
                 FoldOffset(0)..FoldOffset(snap.len().0),
-                Arc::from(Vec::new()),
+                HighlightEndpoints::shared(Vec::new()),
             )
             .map(|chunk| chunk.text.to_string())
             .collect();
@@ -3887,7 +3895,7 @@ mod tests {
             let painted: usize = snap
                 .chunks(
                     snap.row_start_offset(row)..snap.row_start_offset(row + 1),
-                    Arc::from(Vec::new()),
+                    HighlightEndpoints::shared(Vec::new()),
                 )
                 .map(|chunk| chunk.text.trim_end_matches('\n').len())
                 .sum();
@@ -3914,7 +3922,7 @@ mod tests {
             let painted: usize = snap
                 .chunks(
                     snap.row_start_offset(row)..snap.row_start_offset(row + 1),
-                    Arc::from(Vec::new()),
+                    HighlightEndpoints::shared(Vec::new()),
                 )
                 .map(|chunk| chunk.text.trim_end_matches('\n').len())
                 .sum();
@@ -4031,7 +4039,7 @@ mod tests {
         let snap = make_snapshot("hello\nworld");
         let end = snap.len();
         let text: String = snap
-            .chunks(FoldOffset(0)..end, Arc::from(Vec::new()))
+            .chunks(FoldOffset(0)..end, HighlightEndpoints::shared(Vec::new()))
             .map(|c| c.text.into_owned())
             .collect();
         assert_eq!(text, "hello\nworld");
@@ -4046,7 +4054,7 @@ mod tests {
         );
         let end = snap.len();
         let chunks: Vec<_> = snap
-            .chunks(FoldOffset(0)..end, Arc::from(Vec::new()))
+            .chunks(FoldOffset(0)..end, HighlightEndpoints::shared(Vec::new()))
             .collect();
         let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
         assert_eq!(text, "hello... foo");

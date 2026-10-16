@@ -1,6 +1,6 @@
 use super::{
     fold_map::FoldOffset,
-    highlights::{Chunk, HighlightCursor, HighlightEndpoint},
+    highlights::{Chunk, HighlightCursor, HighlightEndpoints},
     tab_map::{self, TabChunks, TabPoint, TabSnapshot},
 };
 use std::{
@@ -1368,7 +1368,7 @@ impl WrapSnapshot {
     pub fn chunks<'a>(
         &'a self,
         rows: Range<u32>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
     ) -> WrapChunks<'a> {
         self.chunks_seeded(rows, endpoints, None)
     }
@@ -1382,7 +1382,7 @@ impl WrapSnapshot {
     pub fn chunks_seeded<'a>(
         &'a self,
         rows: Range<u32>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
         seed: Option<&HighlightCursor>,
     ) -> WrapChunks<'a> {
         if self.wrap_width.is_none() {
@@ -1452,7 +1452,7 @@ pub enum WrapChunks<'a> {
 #[doc(hidden)]
 pub struct WrappedChunksInner<'a> {
     snapshot: &'a WrapSnapshot,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     rows: Range<u32>,
     current_row: u32,
     row_state: Option<RowChunksState<'a>>,
@@ -1818,6 +1818,7 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder},
+            highlights::HighlightEndpoints,
             inlay_map::InlayMap,
             sampler,
             tab_map::{self, TabMap, TabPoint},
@@ -2101,7 +2102,7 @@ mod tests {
     #[test]
     fn a_row_after_a_fold_reads_the_text_it_shows() {
         let line = format!("{}xyz{}", "ab".repeat(20), "cd".repeat(20));
-        let endpoints: Arc<[_]> = Arc::from(Vec::new());
+        let endpoints = HighlightEndpoints::shared(Vec::new());
 
         // Swept, since only the widths whose break falls between the
         // placeholder's first and last column open a stream inside it.
@@ -2132,7 +2133,7 @@ mod tests {
     #[test]
     fn chunks_agree_with_the_row_text_about_a_mark_on_the_break() {
         let snap = make_snapshot("aaaae\u{301}bbb", Some(5));
-        let endpoints: Arc<[_]> = Arc::from(Vec::new());
+        let endpoints = HighlightEndpoints::shared(Vec::new());
 
         for row in 0..snap.line_count() {
             let chunks: Vec<_> = snap.chunks(row..row + 1, endpoints.clone()).collect();
@@ -2402,7 +2403,7 @@ mod tests {
         let indent = snap.soft_wrap_indent(1) as usize;
         assert!(indent > 0);
 
-        let endpoints: Arc<[_]> = Arc::from(Vec::new());
+        let endpoints = HighlightEndpoints::shared(Vec::new());
         let chunks: Vec<_> = snap.chunks(1..2, endpoints).collect();
         let recovered: String = chunks.iter().flat_map(|c| c.text.chars()).collect();
         assert_eq!(
@@ -3031,7 +3032,7 @@ mod tests {
             one: &resolve,
             many: &resolve_batch,
         };
-        let endpoints: Arc<[_]> = Arc::from(create_highlight_endpoints(
+        let endpoints = HighlightEndpoints::shared(create_highlight_endpoints(
             &(0..10),
             &highlights,
             None,

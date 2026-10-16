@@ -1,5 +1,5 @@
 use crate::{
-    display_map::highlights::{BufferChunks, Chunk, HighlightCursor, HighlightEndpoint},
+    display_map::highlights::{BufferChunks, Chunk, HighlightCursor, HighlightEndpoints},
     multi_buffer::MultiBufferSnapshot,
 };
 use std::{
@@ -1061,7 +1061,7 @@ impl InlaySnapshot {
     pub fn chunks<'a>(
         &'a self,
         range: Range<InlayOffset>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
     ) -> InlayChunks<'a> {
         self.chunks_seeded(range, endpoints, None)
     }
@@ -1074,7 +1074,7 @@ impl InlaySnapshot {
     pub fn chunks_seeded<'a>(
         &'a self,
         range: Range<InlayOffset>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
         seed: Option<&HighlightCursor>,
     ) -> InlayChunks<'a> {
         if !self.has_inlays() {
@@ -1114,7 +1114,7 @@ pub enum InlayChunks<'a> {
 #[doc(hidden)]
 pub struct InlayChunksInner<'a> {
     snapshot: &'a InlaySnapshot,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     cursor: Cursor<'a, 'static, Transform, Dimensions<InlayOffset, InputOffset>>,
     buffer_chunks: Option<BufferChunks<'a>>,
     offset: InlayOffset,
@@ -1232,7 +1232,7 @@ mod tests {
     use super::{InlayMap, InlayPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
-        display_map::sampler::Sampler,
+        display_map::{highlights::HighlightEndpoints, sampler::Sampler},
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
@@ -1254,7 +1254,7 @@ mod tests {
         snapshot
             .chunks(
                 super::InlayOffset(0)..super::InlayOffset(snapshot.total_summary().len),
-                Arc::from(Vec::new()),
+                HighlightEndpoints::shared(Vec::new()),
             )
             .map(|chunk| chunk.text.to_string())
             .collect()
@@ -1828,7 +1828,7 @@ mod tests {
         use super::InlayOffset;
 
         let snap = make_snapshot("hello\nworld");
-        let endpoints = Arc::from(Vec::new());
+        let endpoints = HighlightEndpoints::shared(Vec::new());
         let total = snap.buffer.rope().len();
         let collected: String = snap
             .chunks(InlayOffset(0)..InlayOffset(total), endpoints)
@@ -1846,7 +1846,10 @@ mod tests {
         // Total inlay-space length: "hello" + ": str" + " world" = 5 + 5 + 6 = 16
         let total = 5 + 5 + 6;
         let chunks: Vec<_> = snap
-            .chunks(InlayOffset(0)..InlayOffset(total), Arc::from(Vec::new()))
+            .chunks(
+                InlayOffset(0)..InlayOffset(total),
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .collect();
 
         let full_text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
@@ -1868,7 +1871,10 @@ mod tests {
         // "abcde" (5) + "!!" (2) + "fghij" (5) = 12
         // Ask for inlay offsets [3, 9): expect "de" + "!!" + "fg" = "de!!fg".
         let chunks: Vec<_> = snap
-            .chunks(InlayOffset(3)..InlayOffset(9), Arc::from(Vec::new()))
+            .chunks(
+                InlayOffset(3)..InlayOffset(9),
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .collect();
         let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
         assert_eq!(text, "de!!fg");
@@ -1891,7 +1897,7 @@ mod tests {
         let text: String = snap
             .chunks(
                 super::InlayOffset(0)..super::InlayOffset(total),
-                Arc::from(Vec::new()),
+                HighlightEndpoints::shared(Vec::new()),
             )
             .map(|c| c.text.into_owned())
             .collect();

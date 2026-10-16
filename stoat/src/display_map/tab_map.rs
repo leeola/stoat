@@ -1,6 +1,6 @@
 use super::{
     fold_map::{FoldChunks, FoldOffset, FoldPoint, FoldSnapshot},
-    highlights::{Chunk, HighlightCursor, HighlightEndpoint},
+    highlights::{Chunk, HighlightCursor, HighlightEndpoints},
 };
 use std::{
     borrow::Cow,
@@ -337,7 +337,7 @@ impl TabSnapshot {
         &'a self,
         range: Range<FoldOffset>,
         start_column: u32,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
     ) -> TabChunks<'a> {
         self.chunks_seeded(range, start_column, endpoints, None)
     }
@@ -347,7 +347,7 @@ impl TabSnapshot {
         &'a self,
         range: Range<FoldOffset>,
         start_column: u32,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
         seed: Option<&HighlightCursor>,
     ) -> TabChunks<'a> {
         TabChunks {
@@ -976,6 +976,7 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder, FoldPoint},
+            highlights::HighlightEndpoints,
             inlay_map::{InlayKind, InlayMap},
             sampler::Sampler,
         },
@@ -1465,7 +1466,11 @@ mod tests {
         let snap = make_snapshot("hello world");
         let end = snap.fold_snapshot().len();
         let text: String = snap
-            .chunks(FoldOffset(0)..end, 0, Arc::from(Vec::new()))
+            .chunks(
+                FoldOffset(0)..end,
+                0,
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .map(|c| c.text.into_owned())
             .collect();
         assert_eq!(text, "hello world");
@@ -1478,7 +1483,11 @@ mod tests {
         let snap = make_snapshot("\thello");
         let end = snap.fold_snapshot().len();
         let chunks: Vec<_> = snap
-            .chunks(FoldOffset(0)..end, 0, Arc::from(Vec::new()))
+            .chunks(
+                FoldOffset(0)..end,
+                0,
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .collect();
 
         // A leading tab with tab_size=4 expands to 4 spaces.
@@ -1498,7 +1507,11 @@ mod tests {
         let snap = make_snapshot("ab\tcd");
         let end = snap.fold_snapshot().len();
         let chunks: Vec<_> = snap
-            .chunks(FoldOffset(0)..end, 0, Arc::from(Vec::new()))
+            .chunks(
+                FoldOffset(0)..end,
+                0,
+                HighlightEndpoints::shared(Vec::new()),
+            )
             .collect();
 
         // Expected expansion: "ab" + "  " (tab at col 2, expands to col 4) + "cd"

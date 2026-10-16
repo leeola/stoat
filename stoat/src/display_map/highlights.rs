@@ -9,7 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap},
-    ops::Range,
+    ops::{Deref, Range},
     sync::Arc,
 };
 use stoat_text::{Anchor, ChunksInRange, Rope};
@@ -614,27 +614,112 @@ impl PartialOrd for HighlightEndpoint {
     }
 }
 
+/// How many endpoints lie between two checkpoints of a [`HighlightEndpoints`],
+/// which bounds what a stream replays before its first chunk.
+const CHECKPOINT_STEP: usize = 32;
+
+/// A sorted endpoint list, with the replay state recorded every
+/// [`CHECKPOINT_STEP`] endpoints.
+///
+/// A stream works out the styles in force at its start by replaying the
+/// endpoints before it. It resumes from the last checkpoint at or before its
+/// start, so it replays at most one step rather than every endpoint before it.
+///
+/// Many streams open far past the first endpoint of their list. The cache pads
+/// its window past the viewport, the inlay and fold layers open a stream per
+/// segment between inlays and folds, and a painter that steps row by row opens
+/// one per row.
+#[derive(Debug)]
+pub struct HighlightEndpoints {
+    endpoints: Vec<HighlightEndpoint>,
+    checkpoints: Vec<Checkpoint>,
+}
+
+/// The replay state after the first `ep_idx` endpoints, the last of which lies
+/// at `last_offset`.
+#[derive(Debug)]
+struct Checkpoint {
+    last_offset: usize,
+    ep_idx: usize,
+    active: BTreeMap<HighlightKey, HighlightStyle>,
+}
+
+impl HighlightEndpoints {
+    /// Records the checkpoints of `endpoints`, which must be sorted by offset.
+    ///
+    /// The result lives behind an `Arc` because every chunk stream over a frame
+    /// reads the same list.
+    pub fn shared(endpoints: Vec<HighlightEndpoint>) -> Arc<Self> {
+        let mut checkpoints = Vec::with_capacity(endpoints.len() / CHECKPOINT_STEP);
+        let mut active = BTreeMap::new();
+        for (index, endpoint) in endpoints.iter().enumerate() {
+            if index > 0 && index % CHECKPOINT_STEP == 0 {
+                checkpoints.push(Checkpoint {
+                    last_offset: endpoints[index - 1].offset,
+                    ep_idx: index,
+                    active: active.clone(),
+                });
+            }
+            replay(&mut active, endpoint);
+        }
+
+        Arc::new(Self {
+            endpoints,
+            checkpoints,
+        })
+    }
+
+    /// The last checkpoint whose replayed endpoints all lie at or before
+    /// `offset`, or `None` when the first checkpoint lies past it.
+    fn resume_at(&self, offset: usize) -> Option<&Checkpoint> {
+        let index = self
+            .checkpoints
+            .partition_point(|checkpoint| checkpoint.last_offset <= offset);
+        index.checked_sub(1).map(|index| &self.checkpoints[index])
+    }
+}
+
+impl Deref for HighlightEndpoints {
+    type Target = [HighlightEndpoint];
+
+    fn deref(&self) -> &[HighlightEndpoint] {
+        &self.endpoints
+    }
+}
+
+/// Apply `endpoint` to the styles in force.
+fn replay(active: &mut BTreeMap<HighlightKey, HighlightStyle>, endpoint: &HighlightEndpoint) {
+    match &endpoint.style {
+        Some(style) => {
+            active.insert(endpoint.key, style.clone());
+        },
+        None => {
+            active.remove(&endpoint.key);
+        },
+    }
+}
+
 /// A viewport's endpoints plus one replay over them, for a painter working row
 /// by row.
 ///
 /// The review, diff and conflict views paint other things between rows, so they
 /// cannot hold one chunk stream open across the viewport the way the plain
 /// editor body does. Opening a stream per row instead makes each row re-derive
-/// its opening styles from the first endpoint, so the frame costs rows times
-/// endpoints. Holding this across the loop makes it cost the endpoints once.
+/// its opening styles from the nearest checkpoint. Holding this across the loop
+/// replays each endpoint once.
 ///
 /// `plain` records whether display offsets below the block layer are buffer
 /// offsets. They are not once anything is folded or an inlay is shown, and a
 /// replay measured in one coordinate says nothing about the other, so no seed is
-/// offered at all in that case and the rows simply cost what they used to.
+/// offered at all in that case and each row resumes from a checkpoint instead.
 pub struct RowHighlightCursor {
-    pub(crate) endpoints: Arc<[HighlightEndpoint]>,
+    pub(crate) endpoints: Arc<HighlightEndpoints>,
     cursor: HighlightCursor,
     plain: bool,
 }
 
 impl RowHighlightCursor {
-    pub fn new(endpoints: Arc<[HighlightEndpoint]>, plain: bool) -> Self {
+    pub fn new(endpoints: Arc<HighlightEndpoints>, plain: bool) -> Self {
         Self {
             endpoints,
             cursor: HighlightCursor::default(),
@@ -677,6 +762,11 @@ pub struct HighlightVersions {
     pub settings: u64,
 }
 
+/// The most a scroll pads its endpoint window past each end of the requested
+/// range. It bounds a padded build when the range itself is long, as a long
+/// line that does not wrap makes it.
+const MAX_PAD: usize = 16 * 1024;
+
 /// Visible-range highlight endpoints memoized across repaints.
 #[derive(Clone, Debug)]
 pub struct CachedHighlightEndpoints {
@@ -684,24 +774,25 @@ pub struct CachedHighlightEndpoints {
     text_ptr: usize,
     semantic_ptr: Option<usize>,
     lsp_ptr: Option<usize>,
+    /// The bytes the endpoints cover. They hold the range the endpoints were
+    /// built for and, when a scroll built them, a pad past each end.
     range: Range<usize>,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
 }
 
 impl CachedHighlightEndpoints {
-    fn is_valid(
+    /// Whether the endpoints came from these versions and highlight sets.
+    fn current(
         &self,
         versions: HighlightVersions,
         highlights: &TextHighlights,
         semantic: Option<&SemanticTokensHighlights>,
         lsp: Option<&SemanticTokensHighlights>,
-        range: &Range<usize>,
     ) -> bool {
         self.versions == versions
             && self.text_ptr == Arc::as_ptr(highlights) as usize
             && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
             && self.lsp_ptr == lsp.map(|s| Arc::as_ptr(s) as usize)
-            && self.range == *range
     }
 
     pub fn endpoints(&self) -> &[HighlightEndpoint] {
@@ -720,6 +811,17 @@ pub struct AnchorResolver<'a> {
     pub many: &'a dyn Fn(&[Anchor]) -> Vec<usize>,
 }
 
+/// The endpoints for `range`, answered from `cache` while its window holds the
+/// range and its versions and highlight sets are current.
+///
+/// A padded window costs a few exact builds, so only a scroll builds one. A
+/// scroll is a miss on current versions whose range overlaps the window. Its
+/// window reaches half the range's length past each end, up to [`MAX_PAD`], so
+/// the scrolls after it stay inside the window until the viewport moves half
+/// its length.
+///
+/// Any other miss builds the exact range. A jump gives no sign that a scroll
+/// follows, and a change to the text or the highlights arrives on every key.
 pub fn create_highlight_endpoints_cached(
     versions: HighlightVersions,
     range: &Range<usize>,
@@ -728,32 +830,40 @@ pub fn create_highlight_endpoints_cached(
     lsp_highlights: Option<&SemanticTokensHighlights>,
     resolver: &AnchorResolver<'_>,
     cache: &mut Option<CachedHighlightEndpoints>,
-) -> Arc<[HighlightEndpoint]> {
-    if let &mut Some(ref cached) = cache
-        && cached.is_valid(
-            versions,
-            highlights,
-            semantic_highlights,
-            lsp_highlights,
-            range,
-        )
+) -> Arc<HighlightEndpoints> {
+    let current = cache
+        .as_ref()
+        .filter(|cached| cached.current(versions, highlights, semantic_highlights, lsp_highlights));
+    if let Some(cached) = current
+        && cached.range.start <= range.start
+        && range.end <= cached.range.end
     {
         return cached.endpoints.clone();
     }
+
+    let scroll = current
+        .is_some_and(|cached| range.start < cached.range.end && cached.range.start < range.end);
+    let window = match scroll {
+        true => {
+            let pad = (range.len() / 2).min(MAX_PAD);
+            range.start.saturating_sub(pad)..range.end.saturating_add(pad)
+        },
+        false => range.clone(),
+    };
     let endpoints = create_highlight_endpoints(
-        range,
+        &window,
         highlights,
         semantic_highlights,
         lsp_highlights,
         resolver,
     );
-    let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
+    let arc = HighlightEndpoints::shared(endpoints);
     *cache = Some(CachedHighlightEndpoints {
         versions,
         text_ptr: Arc::as_ptr(highlights) as usize,
         semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
         lsp_ptr: lsp_highlights.map(|s| Arc::as_ptr(s) as usize),
-        range: range.clone(),
+        range: window,
         endpoints: arc.clone(),
     });
     arc
@@ -970,10 +1080,10 @@ pub fn highlighted_chunks<'a>(
 /// styles on the fly.
 ///
 /// Holds a single [`ChunksInRange`] cursor over the rope and an `Arc`-shared
-/// slice of pre-computed [`HighlightEndpoint`]s. Emits [`Chunk`]s without any
-/// per-chunk heap allocation: `text` is always a borrow of the rope's own
-/// chunk storage, the endpoints vector is built once by the caller, and only
-/// a small [`BTreeMap`] of active styles is carried across calls.
+/// [`HighlightEndpoints`] list. Emits [`Chunk`]s without any per-chunk heap
+/// allocation: `text` is always a borrow of the rope's own chunk storage, the
+/// endpoints vector is built once by the caller, and only a small [`BTreeMap`]
+/// of active styles is carried across calls.
 ///
 /// This is the bottom layer of the display map chunks pipeline. Higher layers
 /// ([`super::inlay_map::InlaySnapshot::chunks`], [`super::fold_map::FoldSnapshot::chunks`],
@@ -983,7 +1093,7 @@ pub struct BufferChunks<'a> {
     pending: &'a str,
     offset: usize,
     end: usize,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     ep_idx: usize,
     active: BTreeMap<HighlightKey, HighlightStyle>,
 }
@@ -1009,6 +1119,9 @@ pub struct HighlightCursor {
 impl HighlightCursor {
     /// Replay `endpoints` forward until the cursor describes `offset`.
     ///
+    /// A move past a checkpoint resumes from that checkpoint, so a long move
+    /// replays at most one step.
+    ///
     /// Only moves forward. An offset behind the cursor leaves it where it is,
     /// because the active set is accumulated and cannot be unwound, and a stream
     /// seeded from an unmoved cursor renders correctly anyway. The seed no
@@ -1018,20 +1131,18 @@ impl HighlightCursor {
     /// Going backwards is ordinary rather than a misuse. A caller stepping down
     /// display rows steps back whenever a row's chunks come from a run that
     /// started above it, as a wrapped line's continuation rows do.
-    pub fn advance_to(&mut self, offset: usize, endpoints: &[HighlightEndpoint]) {
+    pub fn advance_to(&mut self, offset: usize, endpoints: &HighlightEndpoints) {
         if offset < self.offset {
             return;
         }
+        if let Some(checkpoint) = endpoints.resume_at(offset)
+            && checkpoint.ep_idx > self.ep_idx
+        {
+            self.ep_idx = checkpoint.ep_idx;
+            self.active = checkpoint.active.clone();
+        }
         while self.ep_idx < endpoints.len() && endpoints[self.ep_idx].offset <= offset {
-            let ep = &endpoints[self.ep_idx];
-            match &ep.style {
-                Some(style) => {
-                    self.active.insert(ep.key, style.clone());
-                },
-                None => {
-                    self.active.remove(&ep.key);
-                },
-            }
+            replay(&mut self.active, &endpoints[self.ep_idx]);
             self.ep_idx += 1;
         }
         self.offset = offset;
@@ -1043,14 +1154,14 @@ impl<'a> BufferChunks<'a> {
     ///
     /// `endpoints` must be sorted by offset. Use [`create_highlight_endpoints`]
     /// (or the cached variant) to build them.
-    pub fn new(rope: &'a Rope, range: Range<usize>, endpoints: Arc<[HighlightEndpoint]>) -> Self {
+    pub fn new(rope: &'a Rope, range: Range<usize>, endpoints: Arc<HighlightEndpoints>) -> Self {
         Self::with_seed(rope, range, endpoints, None)
     }
 
     /// Like [`Self::new`], starting from a replay `seed` already advanced to the
     /// range's start.
     ///
-    /// Saves re-deriving the active styles by walking the endpoints below
+    /// Saves re-deriving the active styles from the nearest checkpoint below
     /// `range.start`, which is worth doing for a caller opening a stream per row
     /// over one shared endpoint list.
     ///
@@ -1060,14 +1171,17 @@ impl<'a> BufferChunks<'a> {
     pub fn with_seed(
         rope: &'a Rope,
         range: Range<usize>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
         seed: Option<&HighlightCursor>,
     ) -> Self {
         let start = range.start;
         let end = range.end;
         let (ep_idx, active) = match seed.filter(|cursor| cursor.offset == start) {
             Some(cursor) => (cursor.ep_idx, cursor.active.clone()),
-            None => (0, BTreeMap::new()),
+            None => match endpoints.resume_at(start) {
+                Some(checkpoint) => (checkpoint.ep_idx, checkpoint.active.clone()),
+                None => (0, BTreeMap::new()),
+            },
         };
         Self {
             text_chunks: rope.chunks_in_range(range),
@@ -1106,15 +1220,7 @@ impl<'a> Iterator for BufferChunks<'a> {
         while self.ep_idx < self.endpoints.len()
             && self.endpoints[self.ep_idx].offset <= self.offset
         {
-            let ep = &self.endpoints[self.ep_idx];
-            match &ep.style {
-                Some(style) => {
-                    self.active.insert(ep.key, style.clone());
-                },
-                None => {
-                    self.active.remove(&ep.key);
-                },
-            }
+            replay(&mut self.active, &self.endpoints[self.ep_idx]);
             self.ep_idx += 1;
         }
 
@@ -1148,52 +1254,70 @@ impl<'a> Iterator for BufferChunks<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_highlight_endpoints, highlighted_chunks, AnchorResolver, BufferChunks, Chunk,
-        HighlightCursor, HighlightEndpoint, HighlightKey, HighlightLayer, HighlightStyle,
-        TextHighlights,
+        create_highlight_endpoints, create_highlight_endpoints_cached, highlighted_chunks,
+        AnchorResolver, BufferChunks, CachedHighlightEndpoints, Chunk, HighlightCursor,
+        HighlightEndpoint, HighlightEndpoints, HighlightKey, HighlightLayer, HighlightStyle,
+        HighlightVersions, TextHighlights, MAX_PAD,
     };
     use ratatui::style::Color;
-    use std::{collections::HashMap, ops::Range, sync::Arc};
+    use std::{collections::HashMap, iter, ops::Range, sync::Arc};
     use stoat_text::{Anchor, Bias, Rope};
+
+    const VERSIONS: HighlightVersions = HighlightVersions {
+        buffer: 1,
+        settings: 1,
+    };
 
     /// Endpoints turning three overlapping styles on and off across the text,
     /// so a replay stopped part-way holds more than one active entry.
-    fn layered_endpoints() -> Arc<[HighlightEndpoint]> {
-        let colored = |color| HighlightStyle {
-            foreground: Some(color),
-            ..Default::default()
-        };
-        let spans = [
-            (HighlightLayer::SearchHighlight, colored(Color::Red), 2..30),
+    fn layered_endpoints() -> Arc<HighlightEndpoints> {
+        endpoints_of([
             (
-                HighlightLayer::SelectionHighlight,
+                HighlightKey::layer(HighlightLayer::SearchHighlight),
+                colored(Color::Red),
+                2..30,
+            ),
+            (
+                HighlightKey::layer(HighlightLayer::SelectionHighlight),
                 colored(Color::Green),
                 8..22,
             ),
             (
-                HighlightLayer::MatchingBracket,
+                HighlightKey::layer(HighlightLayer::MatchingBracket),
                 colored(Color::Blue),
                 14..40,
             ),
-        ];
+        ])
+    }
 
+    fn colored(color: Color) -> HighlightStyle {
+        HighlightStyle {
+            foreground: Some(color),
+            ..Default::default()
+        }
+    }
+
+    /// The sorted endpoints that open and close each span.
+    fn endpoints_of(
+        spans: impl IntoIterator<Item = (HighlightKey, HighlightStyle, Range<usize>)>,
+    ) -> Arc<HighlightEndpoints> {
         let mut endpoints = Vec::new();
-        for (layer, style, range) in spans {
+        for (key, style, range) in spans {
             endpoints.push(HighlightEndpoint {
                 offset: range.start,
                 is_start: true,
-                key: HighlightKey::layer(layer),
+                key,
                 style: Some(style),
             });
             endpoints.push(HighlightEndpoint {
                 offset: range.end,
                 is_start: false,
-                key: HighlightKey::layer(layer),
+                key,
                 style: None,
             });
         }
         endpoints.sort();
-        Arc::from(endpoints)
+        HighlightEndpoints::shared(endpoints)
     }
 
     fn styled_text(chunks: BufferChunks<'_>) -> Vec<(String, Option<HighlightStyle>)> {
@@ -1286,6 +1410,94 @@ mod tests {
         assert_eq!(render(&stepped), render(&at_once), "the walk lost state");
     }
 
+    /// A text with endpoints for several checkpoints, and the style each byte
+    /// takes from a replay of them from the first endpoint.
+    ///
+    /// Forty spans open on one offset, so a checkpoint lands inside a run of
+    /// equal offsets. That is where a resume one endpoint early or late shows.
+    fn checkpointed_fixture() -> (Rope, Arc<HighlightEndpoints>, Vec<Option<HighlightStyle>>) {
+        let red = (0..80).map(|i| {
+            let key = HighlightKey::layer(HighlightLayer::SearchHighlight);
+            (key, colored(Color::Red), i * 7..i * 7 + 4)
+        });
+        let green = (0..50).map(|i| {
+            let key = HighlightKey::layer(HighlightLayer::SelectionHighlight);
+            (key, colored(Color::Green), i * 11 + 3..i * 11 + 9)
+        });
+        let nested = (0..40u8).map(|slot| {
+            let key = HighlightKey::new(HighlightLayer::SemanticToken, u32::from(slot));
+            (
+                key,
+                colored(Color::Indexed(slot)),
+                200..210 + usize::from(slot),
+            )
+        });
+        let endpoints = endpoints_of(red.chain(green).chain(nested));
+        assert!(
+            endpoints
+                .checkpoints
+                .iter()
+                .any(|checkpoint| endpoints[checkpoint.ep_idx].offset == checkpoint.last_offset),
+            "no checkpoint lands inside a run of equal offsets",
+        );
+
+        let text = "a".repeat(600);
+        let replayed = byte_styles(
+            highlighted_chunks(&text, 0, &endpoints)
+                .map(|chunk| (chunk.text.to_owned(), chunk.style)),
+        );
+        (Rope::from(text.as_str()), endpoints, replayed)
+    }
+
+    /// The style each byte renders with, so streams that split their chunks at
+    /// different places compare equal when they style each byte alike.
+    fn byte_styles(
+        runs: impl IntoIterator<Item = (String, Option<HighlightStyle>)>,
+    ) -> Vec<Option<HighlightStyle>> {
+        runs.into_iter()
+            .flat_map(|(text, style)| iter::repeat_n(style, text.len()))
+            .collect()
+    }
+
+    /// A stream that resumes from a checkpoint must style each byte as a replay
+    /// from the first endpoint does, wherever the stream opens.
+    #[test]
+    fn a_stream_opened_anywhere_styles_as_a_full_replay() {
+        let (rope, endpoints, replayed) = checkpointed_fixture();
+        for start in 0..=rope.len() {
+            let streamed = BufferChunks::new(&rope, start..rope.len(), endpoints.clone());
+            assert_eq!(
+                byte_styles(styled_text(streamed)),
+                replayed[start..],
+                "opened at {start}",
+            );
+        }
+    }
+
+    /// A cursor that jumps to a checkpoint must seed the replay a walk from the
+    /// first endpoint reaches, for short and long strides alike.
+    #[test]
+    fn a_cursor_that_jumps_to_checkpoints_seeds_a_full_replay() {
+        let (rope, endpoints, replayed) = checkpointed_fixture();
+        for stride in [1, 13, 97] {
+            let mut cursor = HighlightCursor::default();
+            for start in (0..=rope.len()).step_by(stride) {
+                cursor.advance_to(start, &endpoints);
+                let seeded = BufferChunks::with_seed(
+                    &rope,
+                    start..rope.len(),
+                    endpoints.clone(),
+                    Some(&cursor),
+                );
+                assert_eq!(
+                    byte_styles(styled_text(seeded)),
+                    replayed[start..],
+                    "stride {stride}, seeded at {start}",
+                );
+            }
+        }
+    }
+
     fn anchor(offset: usize) -> Anchor {
         Anchor {
             timestamp: 0,
@@ -1337,6 +1549,133 @@ mod tests {
             eps.iter().map(|e| e.offset).collect::<Vec<_>>(),
             vec![2, 4],
             "only the range inside the viewport, not the one opening at its end"
+        );
+    }
+
+    /// Ten-byte highlights that open every thousand bytes up to 100_000.
+    fn spaced_highlights() -> TextHighlights {
+        make_highlights(vec![(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            colored(Color::Red),
+            (0..100).map(|i| i * 1000..i * 1000 + 10).collect(),
+        )])
+    }
+
+    /// The endpoint offsets of the [`spaced_highlights`] that overlap `window`.
+    fn spaced_offsets(window: Range<usize>) -> Vec<usize> {
+        (0..100)
+            .map(|i| i * 1000)
+            .filter(|start| *start < window.end && start + 10 > window.start)
+            .flat_map(|start| [start, start + 10])
+            .collect()
+    }
+
+    fn cached(
+        range: Range<usize>,
+        versions: HighlightVersions,
+        highlights: &TextHighlights,
+        cache: &mut Option<CachedHighlightEndpoints>,
+    ) -> Arc<HighlightEndpoints> {
+        let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(&resolve).collect::<Vec<usize>>();
+        let resolver = AnchorResolver {
+            one: &resolve,
+            many: &resolve_batch,
+        };
+        create_highlight_endpoints_cached(
+            versions, &range, highlights, None, None, &resolver, cache,
+        )
+    }
+
+    fn offsets(endpoints: &HighlightEndpoints) -> Vec<usize> {
+        endpoints.iter().map(|endpoint| endpoint.offset).collect()
+    }
+
+    /// A scroll pads its window by half the viewport past each end, so the
+    /// scrolls that stay inside the window rebuild nothing, forward or back.
+    #[test]
+    fn a_scroll_inside_the_window_reuses_its_endpoints() {
+        let highlights = spaced_highlights();
+        let mut cache = None;
+
+        let cold = cached(40_000..44_000, VERSIONS, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&cold),
+            spaced_offsets(40_000..44_000),
+            "a cold build"
+        );
+
+        let scrolled = cached(40_100..44_100, VERSIONS, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&scrolled),
+            spaced_offsets(38_100..46_100),
+            "a scroll"
+        );
+        for range in [40_200..44_200, 38_500..42_500] {
+            let inside = cached(range.clone(), VERSIONS, &highlights, &mut cache);
+            assert!(
+                Arc::ptr_eq(&scrolled, &inside),
+                "a scroll to {range:?} rebuilt inside the window",
+            );
+        }
+
+        let past = cached(42_500..46_500, VERSIONS, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&past),
+            spaced_offsets(40_500..48_500),
+            "a scroll past the window",
+        );
+    }
+
+    /// A jump or a change to the text or the highlights builds the viewport
+    /// alone, even where the window holds the viewport.
+    ///
+    /// A padded build costs a few exact ones, and an edit makes its change on
+    /// every key.
+    #[test]
+    fn a_jump_or_a_change_builds_the_viewport_alone() {
+        let highlights = spaced_highlights();
+        let mut cache = None;
+        cached(40_000..44_000, VERSIONS, &highlights, &mut cache);
+        cached(40_100..44_100, VERSIONS, &highlights, &mut cache);
+
+        let jumped = cached(70_000..74_000, VERSIONS, &highlights, &mut cache);
+        assert_eq!(offsets(&jumped), spaced_offsets(70_000..74_000), "a jump");
+
+        cached(70_100..74_100, VERSIONS, &highlights, &mut cache);
+        let edited = HighlightVersions {
+            buffer: 2,
+            ..VERSIONS
+        };
+        let after_edit = cached(70_200..74_200, edited, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&after_edit),
+            spaced_offsets(70_200..74_200),
+            "an edit"
+        );
+
+        cached(70_300..74_300, edited, &highlights, &mut cache);
+        let reinstalled = spaced_highlights();
+        let after_install = cached(70_400..74_400, edited, &reinstalled, &mut cache);
+        assert_eq!(
+            offsets(&after_install),
+            spaced_offsets(70_400..74_400),
+            "a new highlight set",
+        );
+    }
+
+    /// A scroll over a long range pads each end by [`MAX_PAD`] at most.
+    #[test]
+    fn a_scroll_over_a_long_range_pads_at_most_the_cap() {
+        let highlights = spaced_highlights();
+        let mut cache = None;
+        cached(20_000..60_000, VERSIONS, &highlights, &mut cache);
+
+        let scrolled = cached(20_100..60_100, VERSIONS, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&scrolled),
+            spaced_offsets(20_100 - MAX_PAD..60_100 + MAX_PAD),
+            "a scroll over a long range",
         );
     }
 
@@ -1572,8 +1911,8 @@ mod tests {
     #[test]
     fn enclosing_semantic_token_styles_scrolled_viewport() {
         use super::{
-            BufferChunks, BufferSemanticTokens, HighlightEndpoint, HighlightStyleInterner,
-            SemanticTokenHighlight, SemanticTokensHighlights,
+            BufferChunks, BufferSemanticTokens, HighlightStyleInterner, SemanticTokenHighlight,
+            SemanticTokensHighlights,
         };
         use crate::buffer::BufferId;
         use stoat_text::Rope;
@@ -1630,7 +1969,7 @@ mod tests {
         };
 
         let eps = create_highlight_endpoints(&(20..40), &text_hl, Some(&semantic), None, &resolver);
-        let endpoints: Arc<[HighlightEndpoint]> = Arc::from(eps);
+        let endpoints = HighlightEndpoints::shared(eps);
         let chunks: Vec<Chunk<'_>> = BufferChunks::new(&rope, 20..40, endpoints).collect();
 
         let first = chunks.first().expect("scrolled viewport must emit chunks");
@@ -1898,7 +2237,7 @@ mod tests {
             foreground: Some(Color::Blue),
             ..Default::default()
         };
-        let endpoints: Arc<[HighlightEndpoint]> = Arc::from(vec![
+        let endpoints = HighlightEndpoints::shared(vec![
             HighlightEndpoint {
                 offset: 50,
                 is_start: true,
@@ -1962,7 +2301,8 @@ mod tests {
         let text = "hello world";
         let rope = Rope::from(text);
         let chunks: Vec<Chunk<'_>> =
-            BufferChunks::new(&rope, 0..text.len(), Arc::from(Vec::new())).collect();
+            BufferChunks::new(&rope, 0..text.len(), HighlightEndpoints::shared(Vec::new()))
+                .collect();
         let joined: String = chunks.iter().map(|c| c.text.as_ref()).collect();
         assert_eq!(joined, text);
         for c in &chunks {
@@ -1984,7 +2324,7 @@ mod tests {
             foreground: Some(Color::Red),
             ..Default::default()
         };
-        let endpoints: Arc<[HighlightEndpoint]> = Arc::from(vec![
+        let endpoints = HighlightEndpoints::shared(vec![
             HighlightEndpoint {
                 offset: 2,
                 is_start: true,

@@ -409,7 +409,7 @@ pub enum BlockRowKind<'a> {
 }
 
 use super::{
-    highlights::{HighlightCursor, HighlightEndpoint},
+    highlights::{HighlightCursor, HighlightEndpoints},
     wrap_map::WrapChunks,
 };
 
@@ -425,7 +425,7 @@ use super::{
 /// per row.
 pub struct BlockChunks<'a> {
     snapshot: &'a BlockSnapshot,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     /// Advanced in step with the rows, since they are visited in order. A fresh
     /// seek per row would re-descend the tree for a position it already holds.
     cursor: Cursor<'a, 'static, Transform, Dimensions<InputRow, OutputRow>>,
@@ -1377,7 +1377,7 @@ impl BlockSnapshot {
         result
     }
 
-    pub fn chunks(&self, rows: Range<u32>, endpoints: Arc<[HighlightEndpoint]>) -> BlockChunks<'_> {
+    pub fn chunks(&self, rows: Range<u32>, endpoints: Arc<HighlightEndpoints>) -> BlockChunks<'_> {
         self.chunks_seeded(rows, endpoints, None)
     }
 
@@ -1391,7 +1391,7 @@ impl BlockSnapshot {
     pub fn chunks_seeded(
         &self,
         rows: Range<u32>,
-        endpoints: Arc<[HighlightEndpoint]>,
+        endpoints: Arc<HighlightEndpoints>,
         seed: Option<&HighlightCursor>,
     ) -> BlockChunks<'_> {
         BlockChunks {

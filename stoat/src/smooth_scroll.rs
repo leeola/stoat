@@ -20,7 +20,7 @@ use crate::{
     commit_list::CommitListState,
     completion::CompletionPopup,
     conflict_session::ConflictViewState,
-    display_map::{highlights::HighlightEndpoint, DisplayPoint, DisplaySnapshot},
+    display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot},
     file_finder::FileFinder,
     help::Help,
     render::{
@@ -124,7 +124,7 @@ pub(crate) fn render_page_fill(
     diff_view: bool,
     dim: f32,
     dials: DiffDials,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
     spotlight: Option<&Spotlight>,
 ) -> Vec<u8> {
@@ -226,7 +226,7 @@ pub(crate) fn render_page_from_snapshot(
     diff_view: bool,
     dim: f32,
     dials: DiffDials,
-    endpoints: Arc<[HighlightEndpoint]>,
+    endpoints: Arc<HighlightEndpoints>,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
     spotlight: Option<&Spotlight>,
 ) -> Vec<u8> {
@@ -899,7 +899,7 @@ pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
 #[cfg(test)]
 mod tests {
     use crate::{
-        display_map::{highlights::HighlightEndpoint, DisplaySnapshot},
+        display_map::{highlights::HighlightEndpoints, DisplaySnapshot},
         render::review::DiffDials,
     };
     use std::sync::Arc;
@@ -910,7 +910,7 @@ mod tests {
         snapshot: &DisplaySnapshot,
         top_row: u32,
         height: u16,
-    ) -> Arc<[HighlightEndpoint]> {
+    ) -> Arc<HighlightEndpoints> {
         snapshot.highlighted_endpoints(top_row..top_row + height as u32)
     }
 

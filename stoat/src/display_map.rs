@@ -1149,7 +1149,7 @@ impl DisplaySnapshot {
     pub fn highlighted_endpoints(
         &self,
         display_rows: Range<u32>,
-    ) -> Arc<[highlights::HighlightEndpoint]> {
+    ) -> Arc<highlights::HighlightEndpoints> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(self.inlay_highlights.as_ref()),
@@ -1173,7 +1173,7 @@ impl DisplaySnapshot {
         &self,
         display_rows: Range<u32>,
         cache: &mut Option<CachedHighlightEndpoints>,
-    ) -> Arc<[highlights::HighlightEndpoint]> {
+    ) -> Arc<highlights::HighlightEndpoints> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(self.inlay_highlights.as_ref()),
@@ -1195,7 +1195,7 @@ impl DisplaySnapshot {
     pub fn highlighted_chunks_with_endpoints(
         &self,
         display_rows: Range<u32>,
-        endpoints: Arc<[highlights::HighlightEndpoint]>,
+        endpoints: Arc<highlights::HighlightEndpoints>,
     ) -> BlockChunks<'_> {
         self.block_snapshot.chunks(display_rows, endpoints)
     }
@@ -1242,7 +1242,7 @@ impl DisplaySnapshot {
     /// A replay over `endpoints` for painting this snapshot row by row.
     pub fn row_highlight_cursor(
         &self,
-        endpoints: Arc<[highlights::HighlightEndpoint]>,
+        endpoints: Arc<highlights::HighlightEndpoints>,
     ) -> RowHighlightCursor {
         RowHighlightCursor::new(endpoints, self.offsets_are_buffer_offsets())
     }
@@ -1272,7 +1272,7 @@ impl DisplaySnapshot {
         &self,
         highlights: Highlights<'_>,
         range: Range<usize>,
-    ) -> Arc<[highlights::HighlightEndpoint]> {
+    ) -> Arc<highlights::HighlightEndpoints> {
         let buffer = self.buffer_snapshot();
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&EMPTY_TEXT_HIGHLIGHTS);
         let semantic_ref = highlights.semantic_token_highlights;
@@ -1290,7 +1290,7 @@ impl DisplaySnapshot {
             lsp_ref,
             &resolver,
         );
-        Arc::from(eps)
+        highlights::HighlightEndpoints::shared(eps)
     }
 
     /// Endpoint builder for [`Self::highlighted_chunks_cached`], routing through
@@ -1300,7 +1300,7 @@ impl DisplaySnapshot {
         highlights: Highlights<'_>,
         range: Range<usize>,
         cache: &mut Option<CachedHighlightEndpoints>,
-    ) -> Arc<[highlights::HighlightEndpoint]> {
+    ) -> Arc<highlights::HighlightEndpoints> {
         let buffer = self.buffer_snapshot();
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&EMPTY_TEXT_HIGHLIGHTS);
         let semantic_ref = highlights.semantic_token_highlights;

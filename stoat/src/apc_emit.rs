@@ -15,7 +15,7 @@ use crate::{
     action_handlers::view,
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     commit_list::Preview,
-    display_map::{DisplayPoint, DisplaySnapshot, PaintVersion},
+    display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot, PaintVersion},
     editor_state::{EditorId, ScrollGlide},
     input_view::InputView,
     minimap::emit::minimap_view_window,
@@ -2150,7 +2150,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                                     .saturating_add(height as u32);
                                 snapshot.highlighted_endpoints(top..bottom)
                             },
-                            _ => Arc::from(Vec::new()),
+                            _ => HighlightEndpoints::shared(Vec::new()),
                         };
                         // Resolving these walks every hunk anchor in the file
                         // and sorts the result, for an answer that does not
