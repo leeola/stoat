@@ -69,6 +69,12 @@ pub struct SyntaxLayer {
     pub end_offset: u32,
     pub language: Arc<Language>,
     pub tree: Tree,
+    /// Whether an edit reached this layer after its tree was last parsed.
+    ///
+    /// A layer no edit reached holds the same text over the same ranges. A walk
+    /// that finds its host ranges unchanged carries its tree and its nested
+    /// layers instead of parsing them again.
+    touched: bool,
 }
 
 impl std::fmt::Debug for SyntaxLayer {
@@ -349,6 +355,13 @@ impl SyntaxMap {
     /// already there. That is a narrower test than the layer not intersecting
     /// an edit. One sitting after an edit intersects nothing and still has to be
     /// replayed, since its tree holds absolute offsets the edit shifts.
+    ///
+    /// A layer an edit reaches is marked, and the mark stays until a reparse
+    /// parses that layer again. The reparse carries an unmarked layer whose host
+    /// ranges it finds unchanged, with no parse. An edit at either end of a
+    /// layer counts as reaching it. An insertion at the end of a layer moves
+    /// that end past the inserted text, so the layer then covers text that no
+    /// parse read.
     pub fn interpolate(&mut self, edits: &[PatchEdit<usize>], old_rope: &Rope, new_rope: &Rope) {
         let Some(first_edit) = edits.first().map(|edit| edit.old.start) else {
             return;
@@ -366,6 +379,10 @@ impl SyntaxMap {
             next.start_offset = translate_offset(edits, layer.start_offset as usize) as u32;
             next.end_offset =
                 (translate_offset(edits, layer.end_offset as usize) as u32).max(next.start_offset);
+            next.touched |= reaches_span(
+                edits,
+                layer.start_offset as usize..layer.end_offset as usize,
+            );
 
             next
         };
@@ -458,6 +475,12 @@ impl SyntaxMap {
     /// Prior trees from the same host range are reused as `old_tree`
     /// for incremental reparse.
     ///
+    /// A prior layer that no interpolated edit reached, and whose host ranges
+    /// the walk finds unchanged, is kept with its tree and its nested layers.
+    /// It costs no parse and no injection query. So an edit that changes the
+    /// root tree across the file costs the root injection query and little
+    /// more, when it lands outside every injection.
+    ///
     /// A caller holding a parse of this same rope passes it as `root` to
     /// skip the root parse, which is otherwise repeated work. The tree must
     /// be a parse of `rope` under `language`. It is installed as the depth-0
@@ -533,6 +556,7 @@ impl SyntaxMap {
             language: l.language.clone(),
             host_ranges: l.tree.included_ranges(),
             tree: l.tree.clone(),
+            touched: l.touched,
         };
         let prior_injections: Vec<PriorInjection> = match &prior_window {
             Some(window) => reachable_priors(&self.snapshot.layers, window)
@@ -603,6 +627,7 @@ impl SyntaxMap {
             end_offset: rope.len() as u32,
             language: language.clone(),
             tree: root_tree.clone(),
+            touched: false,
         }];
 
         // Process layers in FIFO order so each layer's children are
@@ -776,6 +801,18 @@ impl SyntaxMap {
                             let prior = priors_by_host
                                 .get(&(content.start as u32, content.end as u32, inner_lang.name))
                                 .copied();
+                            if let Some(prior) = prior
+                                && carry_unchanged_injection(
+                                    &mut new_layers,
+                                    prior,
+                                    parent_depth + 1,
+                                    &[included_range(rope, &content)],
+                                    &priors_by_span,
+                                    prior_key,
+                                )
+                            {
+                                continue;
+                            }
                             let Some(inner_tree) = parse_rope_range(
                                 &inner_lang,
                                 rope,
@@ -800,6 +837,7 @@ impl SyntaxMap {
                                 end_offset: content.end as u32,
                                 language: inner_lang,
                                 tree: inner_tree,
+                                touched: false,
                             });
                             queue.push_back(new_layers.len() - 1);
                         },
@@ -902,11 +940,30 @@ impl SyntaxMap {
                             )
                             .next();
 
+                        let included: Vec<tree_sitter::Range> =
+                            sorted.iter().map(|r| included_range(rope, r)).collect();
+                        if let Some(prior) = prior
+                            && carry_unchanged_injection(
+                                &mut new_layers,
+                                prior,
+                                parent_depth + 1,
+                                &included,
+                                &priors_by_span,
+                                prior_key,
+                            )
+                        {
+                            continue;
+                        }
+
                         let merged_start = found_start;
                         let merged_end = found_end;
-                        let Some(inner_tree) =
-                            parse_rope_combined_ranges(&inner_lang, rope, &sorted, prior, deadline)
-                        else {
+                        let Some(inner_tree) = parse_rope_combined_ranges(
+                            &inner_lang,
+                            rope,
+                            &included,
+                            prior,
+                            deadline,
+                        ) else {
                             if out_of_time() {
                                 return None;
                             }
@@ -930,6 +987,7 @@ impl SyntaxMap {
                             end_offset: merged_end as u32,
                             language: inner_lang.clone(),
                             tree: inner_tree,
+                            touched: false,
                         });
                         queue.push_back(new_layers.len() - 1);
                         continue;
@@ -947,6 +1005,18 @@ impl SyntaxMap {
                         let prior = priors_by_host
                             .get(&(r.start as u32, r.end as u32, inner_lang.name))
                             .copied();
+                        if let Some(prior) = prior
+                            && carry_unchanged_injection(
+                                &mut new_layers,
+                                prior,
+                                parent_depth + 1,
+                                &[included_range(rope, &r)],
+                                &priors_by_span,
+                                prior_key,
+                            )
+                        {
+                            continue;
+                        }
                         let Some(inner_tree) = parse_rope_range(
                             &inner_lang,
                             rope,
@@ -971,6 +1041,7 @@ impl SyntaxMap {
                             end_offset: r.end as u32,
                             language: inner_lang.clone(),
                             tree: inner_tree,
+                            touched: false,
                         });
                         queue.push_back(new_layers.len() - 1);
                     }
@@ -1093,10 +1164,12 @@ fn block_ranges(mut ranges: Vec<HostRange>) -> Vec<Vec<Range<usize>>> {
 
 /// Per-host injection layer from the previous parse.
 ///
-/// A reparse reuses prior work two ways. It hands the tree to tree-sitter
-/// as `old_tree` when the same host range reappears in this parse, and it
-/// keeps the whole layer when a filtered walk never visits the region and
-/// so cannot re-find it.
+/// A reparse reuses prior work three ways. It carries the layer and every
+/// layer nested in it, with no parse, when the same host ranges reappear and no
+/// edit reached the layer. It hands the tree to tree-sitter as `old_tree` when
+/// the same host range reappears after an edit reached it. It keeps the whole
+/// layer when a filtered walk does not visit the region, since that walk does
+/// not find the layer again.
 #[derive(Clone)]
 struct PriorInjection {
     depth: u32,
@@ -1117,6 +1190,21 @@ struct PriorInjection {
     /// byte-only comparison there accepts a prior whose points have drifted.
     host_ranges: Vec<tree_sitter::Range>,
     tree: Tree,
+    touched: bool,
+}
+
+impl PriorInjection {
+    /// The layer this prior was read from, as a walk carries it forward.
+    fn to_layer(&self) -> SyntaxLayer {
+        SyntaxLayer {
+            depth: self.depth,
+            start_offset: self.start_offset,
+            end_offset: self.end_offset,
+            language: self.language.clone(),
+            tree: self.tree.clone(),
+            touched: self.touched,
+        }
+    }
 }
 
 /// Injection layers grouped by the language and depth they sit at, so a lookup
@@ -1178,6 +1266,32 @@ impl<'a, T> InjectionIndex<'a, T> {
             .into_iter()
             .flat_map(move |group| group[start..].iter().copied())
             .take_while(move |item| key(item).span.start < span.end)
+    }
+
+    /// The non-empty layers deeper than `depth`, in every language, whose span
+    /// lies inside `span`, in no particular order.
+    ///
+    /// An empty layer is one whose text an edit replaced outright, which
+    /// [`carry_unvisited_injections`] drops. When that edit started at an end
+    /// of `span`, a neighbor's empty layer sits at that end.
+    fn nested(
+        &self,
+        depth: u32,
+        span: Range<usize>,
+        key: impl Fn(&T) -> IndexKey + Copy,
+    ) -> impl Iterator<Item = &'a T> {
+        let (start, end) = (span.start, span.end);
+        self.groups
+            .iter()
+            .filter(move |((group_depth, _), _)| *group_depth > depth)
+            .flat_map(move |(_, group)| {
+                let first = group.partition_point(|item| key(item).span.start < start);
+                group[first..]
+                    .iter()
+                    .copied()
+                    .take_while(move |item| key(item).span.end <= end)
+                    .filter(move |item| !key(item).span.is_empty())
+            })
     }
 }
 
@@ -1258,6 +1372,48 @@ fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
         write += 1;
     }
     ranges.truncate(write);
+}
+
+/// Carry `prior` and every layer nested inside it into `layers`, in place of a
+/// parse over `included`.
+///
+/// Returns false and carries nothing unless the walk found the prior at
+/// `depth` over the same included ranges, points included, and no edit reached
+/// it. Such a prior holds the text a parse reads, so the parse rebuilds the
+/// tree the prior already has. The layer's injection query also finds the
+/// nested layers that the prior set holds. No edit reached those either, since
+/// each one lies inside the prior's span.
+///
+/// The carry skips both for every layer no edit reached. That is most of the
+/// cost of an edit that changes the root tree across the file, such as an
+/// unclosed brace, because the walk then rediscovers every injection in it.
+///
+/// The nested layers are the deeper priors inside the prior's span. That is
+/// true only while layers at one depth never overlap, whatever their language.
+/// Every bundled grammar keeps this rule. Rust injects only markdown, and
+/// markdown injects inline nodes and fences, which are disjoint blocks. A
+/// grammar that injects two languages over overlapping host nodes breaks the
+/// rule, and this carry then gives the nested layers of one to the other.
+fn carry_unchanged_injection(
+    layers: &mut Vec<SyntaxLayer>,
+    prior: &PriorInjection,
+    depth: u32,
+    included: &[tree_sitter::Range],
+    priors_by_span: &InjectionIndex<'_, PriorInjection>,
+    prior_key: impl Fn(&PriorInjection) -> IndexKey + Copy,
+) -> bool {
+    if prior.touched || prior.depth != depth || prior.host_ranges != included {
+        return false;
+    }
+
+    let span = prior.start_offset as usize..prior.end_offset as usize;
+    layers.push(prior.to_layer());
+    layers.extend(
+        priors_by_span
+            .nested(depth, span, prior_key)
+            .map(PriorInjection::to_layer),
+    );
+    true
 }
 
 /// Re-add the prior injection layers a filtered walk could not have found.
@@ -1372,13 +1528,10 @@ fn carry_unvisited_injections(
         // Held back rather than pushed, because the index above borrows
         // `layers` for the whole loop. Carried layers cannot supersede one
         // another anyway, so nothing later in the loop would have seen them.
-        carried.push(SyntaxLayer {
-            depth: layer.depth,
-            start_offset: layer.start_offset,
-            end_offset: layer.end_offset,
-            language: layer.language.clone(),
-            tree: layer.tree.clone(),
-        });
+        //
+        // The layer keeps its touched mark. This carry parses nothing, so an
+        // edit that reached the layer still waits for a parse.
+        carried.push(layer.to_layer());
     }
 
     drop(fresh_index);
@@ -1420,7 +1573,24 @@ fn translate_offset(edits: &[PatchEdit<usize>], offset: usize) -> usize {
     }
 }
 
-/// Parse `rope` restricted to a list of byte ranges via
+/// Whether any of `edits` reaches `span`, with an edit at either end counted.
+///
+/// An end counts because of a pure insertion at the end of a span.
+/// [`translate_offset`] moves that end past the inserted text, and tree-sitter's
+/// edit of a tree's included ranges does the same. The layer then holds new text
+/// over host ranges that a walk finds unchanged.
+///
+/// `edits` must be sorted by `old.start` and non-overlapping, as for
+/// [`translate_offset`]. Their old ends are then sorted too, which is what the
+/// search reads.
+fn reaches_span(edits: &[PatchEdit<usize>], span: Range<usize>) -> bool {
+    let first_reaching = edits.partition_point(|edit| edit.old.end < span.start);
+    edits
+        .get(first_reaching)
+        .is_some_and(|edit| edit.old.start <= span.end)
+}
+
+/// Parse `rope` restricted to `included` via
 /// [`tree_sitter::Parser::set_included_ranges`]. The returned tree's
 /// nodes carry rope-absolute byte offsets and span all the included
 /// ranges as one logical document, which is how Zed handles "combined
@@ -1428,26 +1598,13 @@ fn translate_offset(edits: &[PatchEdit<usize>], offset: usize) -> usize {
 fn parse_rope_combined_ranges(
     language: &Language,
     rope: &Rope,
-    ranges: &[Range<usize>],
+    included: &[tree_sitter::Range],
     prior: Option<&PriorInjection>,
     deadline: Option<(Instant, &Executor)>,
 ) -> Option<Tree> {
-    if ranges.is_empty() {
+    if included.is_empty() {
         return None;
     }
-    let ts_ranges: Vec<tree_sitter::Range> = ranges
-        .iter()
-        .map(|r| {
-            let start_point = stoat_to_ts(rope.offset_to_point(r.start));
-            let end_point = stoat_to_ts(rope.offset_to_point(r.end));
-            tree_sitter::Range {
-                start_byte: r.start,
-                end_byte: r.end,
-                start_point,
-                end_point,
-            }
-        })
-        .collect();
     // A combined tree is only reused when it was built over the very ranges
     // being asked for again. An edit inside an existing host range keeps the set
     // equal, because `SyntaxMap::interpolate` shifts the prior tree's ranges
@@ -1472,10 +1629,18 @@ fn parse_rope_combined_ranges(
     //
     // The prior's own list is read off the record rather than off the tree,
     // which builds a fresh one a call.
-    let old_tree = prior
-        .filter(|p| p.host_ranges == ts_ranges)
-        .map(|p| &p.tree);
-    parse_rope_inner(language, rope, old_tree, Some(&ts_ranges), deadline, None)
+    let old_tree = prior.filter(|p| p.host_ranges == included).map(|p| &p.tree);
+    parse_rope_inner(language, rope, old_tree, Some(included), deadline, None)
+}
+
+/// The included range that a parse over `range` hands tree-sitter.
+fn included_range(rope: &Rope, range: &Range<usize>) -> tree_sitter::Range {
+    tree_sitter::Range {
+        start_byte: range.start,
+        end_byte: range.end,
+        start_point: stoat_to_ts(rope.offset_to_point(range.start)),
+        end_point: stoat_to_ts(rope.offset_to_point(range.end)),
+    }
 }
 
 fn stoat_to_ts(p: stoat_text::Point) -> tree_sitter::Point {
@@ -1527,6 +1692,7 @@ mod tests {
             end_offset: 12,
             language: lang.clone(),
             tree,
+            touched: false,
         };
         map.install_layers([layer], 1);
         assert_eq!(map.snapshot().layer_count(), 1);
@@ -1923,6 +2089,7 @@ mod tests {
             end_offset: end,
             language: lang.clone(),
             tree: parse_rust(""),
+            touched: false,
         };
         map.install_layers(
             [
@@ -3432,6 +3599,337 @@ mod tests {
         assert!(
             reached < all / 4,
             "one line's window must reach a fraction of the {all} layers, got {reached}",
+        );
+    }
+
+    /// Each injection layer's depth and language after a whole-file walk, and
+    /// whether the walk kept the tree that interpolate left on a layer with the
+    /// same key.
+    ///
+    /// Each of `replacements` swaps a range of `source` for its text. The
+    /// ranges come in ascending order. The walk reaches every layer, as it does
+    /// after an unclosed brace changes the root tree across the file.
+    ///
+    /// The id of the root's first child tells a carry from a parse. A node id is
+    /// the address of the slot that holds the node, and a child's slot lies in
+    /// its parent's subtree. A carried tree shares the prior root subtree, and a
+    /// parse builds a new one while the prior is still alive, so the new slot
+    /// never reuses the old address. The root node's own slot lies in the tree
+    /// handle, which every clone replaces, so its id tells nothing.
+    ///
+    /// Panics unless the walk lands on a fresh parse of the edited text, so a
+    /// carry that keeps a stale tree fails here whatever the caller asserts.
+    fn layers_kept_by_a_whole_file_walk(
+        lang: &Arc<Language>,
+        source: &str,
+        replacements: &[(Range<usize>, &str)],
+    ) -> Vec<(u32, &'static str, bool)> {
+        use stoat_text::patch::Edit as PatchEdit;
+
+        let mut text = String::new();
+        let mut edits = Vec::new();
+        let mut copied = 0;
+        for (old, inserted) in replacements {
+            text.push_str(&source[copied..old.start]);
+            let start = text.len();
+            text.push_str(inserted);
+            edits.push(PatchEdit {
+                old: old.clone(),
+                new: start..text.len(),
+            });
+            copied = old.end;
+        }
+        text.push_str(&source[copied..]);
+
+        let old_rope = Rope::from(source);
+        let new_rope = Rope::from(text.as_str());
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let roots = |map: &SyntaxMap| -> Vec<((u32, u32, &'static str), usize)> {
+            map.snapshot()
+                .iter_layers()
+                .filter(|l| l.depth > 0)
+                .map(|l| {
+                    let key = (l.depth, l.start_offset, l.language.name);
+                    let first_child = l
+                        .tree
+                        .root_node()
+                        .child(0)
+                        .expect("every fixture layer's root must hold a child to compare");
+                    (key, first_child.id())
+                })
+                .collect()
+        };
+        let interpolated = roots(&map);
+
+        #[allow(clippy::single_range_in_vec_init)]
+        let whole_file = vec![0..new_rope.len()];
+        map.reparse_within_changed_ranges(
+            &new_rope,
+            lang.clone(),
+            2,
+            Some(&whole_file),
+            None,
+            None,
+        )
+        .expect("the walk must complete");
+
+        let mut fresh = SyntaxMap::new();
+        fresh
+            .reparse(&new_rope, lang.clone(), 2, None, None)
+            .unwrap();
+        assert_eq!(
+            layer_shapes(&map),
+            layer_shapes(&fresh),
+            "the walk must land on a fresh parse"
+        );
+
+        roots(&map)
+            .into_iter()
+            .map(|layer| {
+                let ((depth, _, language), _) = layer;
+                (depth, language, interpolated.contains(&layer))
+            })
+            .collect()
+    }
+
+    /// Two hundred doc comments that alternate one-line and two-line blocks.
+    ///
+    /// A one-line block takes the walk's per-range path and a two-line block
+    /// takes its combined path, so the fixture reaches both. The blank line
+    /// after each function keeps every comment its own block.
+    fn two_hundred_doc_comments() -> String {
+        (0..200)
+            .map(|i| match i % 2 {
+                0 => format!("/// doc **bold{i}**\nfn f{i}() {{ let _ = {i}; }}\n\n"),
+                _ => format!("/// doc **bold{i}**\n/// more {i}\nfn f{i}() {{ let _ = {i}; }}\n\n"),
+            })
+            .collect()
+    }
+
+    /// A whole-file walk keeps every injection tree when the edit lands in code.
+    ///
+    /// An unclosed brace sends the walk over the whole file. Parsing every doc
+    /// comment again there, and querying each one for its inline layers, is
+    /// the cost the carry removes.
+    #[test]
+    fn a_whole_file_walk_keeps_every_tree_an_edit_misses() {
+        let source = two_hundred_doc_comments();
+        let at = source.find("fn f100() {").expect("fixture") + "fn f100() {".len();
+        let layers =
+            layers_kept_by_a_whole_file_walk(&rust_lang(), &source, &[(at..at, " let y = 2;")]);
+
+        assert_eq!(
+            layers.iter().filter(|(depth, ..)| *depth == 1).count(),
+            200,
+            "the fixture must give each doc comment its own markdown layer"
+        );
+        assert_eq!(
+            layers.iter().filter(|(.., kept)| !kept).collect::<Vec<_>>(),
+            Vec::<&(u32, &str, bool)>::new(),
+            "an edit in code must leave every injection tree in place"
+        );
+    }
+
+    /// An edit inside one doc comment parses that comment's layers alone.
+    #[test]
+    fn an_edit_in_one_doc_comment_parses_only_its_layers() {
+        let source = two_hundred_doc_comments();
+        let at = source.find("/// doc **bold100**").expect("fixture") + "/// doc ".len();
+        let layers = layers_kept_by_a_whole_file_walk(&rust_lang(), &source, &[(at..at, "very ")]);
+
+        let parsed: Vec<(u32, &str)> = layers
+            .iter()
+            .filter(|(.., kept)| !kept)
+            .map(|(depth, language, _)| (*depth, *language))
+            .collect();
+        assert_eq!(
+            parsed,
+            [(1, "markdown"), (2, "markdown-inline")],
+            "only the edited comment's markdown layer and its inline layer parse again"
+        );
+    }
+
+    /// A fence nested in a doc comment keeps its tree through a whole-file walk.
+    ///
+    /// An edit in code carries the comment's layer, and the fence comes along as
+    /// a nested layer. An edit in the comment's prose parses the comment again.
+    /// Its walk then finds the fence unchanged and carries it on its own.
+    #[test]
+    fn a_fence_in_a_doc_comment_keeps_its_tree() {
+        let lang = rust_lang();
+        let source = "/// Intro **text**.\n///\n/// ```rust\n/// fn b() {}\n/// ```\n\
+                      fn a() {\n    let x = 1;\n}\n";
+        let in_code = source.find("let x").expect("fixture");
+        let in_prose = source.find("Intro").expect("fixture") + "In".len();
+
+        assert_eq!(
+            layers_kept_by_a_whole_file_walk(&lang, source, &[(in_code..in_code, "x; ")]),
+            [
+                (1, "markdown", true),
+                (2, "markdown-inline", true),
+                (2, "rust", true)
+            ],
+            "an edit in code keeps every layer, the nested fence included"
+        );
+        assert_eq!(
+            layers_kept_by_a_whole_file_walk(&lang, source, &[(in_prose..in_prose, "x")]),
+            [
+                (1, "markdown", false),
+                (2, "markdown-inline", false),
+                (2, "rust", true)
+            ],
+            "an edit in the prose parses the comment again and keeps the fence"
+        );
+    }
+
+    /// Text typed at the end of a fence makes the walk parse the fence again.
+    ///
+    /// An insertion at a layer's end moves that end past the inserted text. The
+    /// prior then spans the grown fence over the host range the walk finds, so
+    /// only the touched mark keeps the walk from carrying the shorter text's
+    /// tree. The edit in the heading comes first so that interpolate replays the
+    /// fence, because a layer that ends at the first edit keeps its bounds.
+    #[test]
+    fn an_insertion_at_a_fence_end_parses_the_fence_again() {
+        let source = "# A *Title*\n\n```rust\nfn a() {}\n```\n";
+        let in_title = source.find("Title").expect("fixture") + "Ti".len();
+        let fence_end = source.rfind("```").expect("fixture");
+
+        assert_eq!(
+            layers_kept_by_a_whole_file_walk(
+                &markdown_lang(),
+                source,
+                &[
+                    (in_title..in_title, "x"),
+                    (fence_end..fence_end, "fn b() {}\n")
+                ]
+            ),
+            [(1, "markdown-inline", false), (1, "rust", false)],
+            "the grown fence must parse again rather than keep the shorter text's tree"
+        );
+    }
+
+    /// A doc line typed above a comment makes the walk parse the comment's
+    /// block again.
+    ///
+    /// The new line joins the block, but the edit lands before the comment's
+    /// text and leaves the prior untouched. Only the comparison of the two
+    /// range lists keeps the walk from carrying the one-line tree over the
+    /// two-line block.
+    #[test]
+    fn a_doc_line_typed_above_a_comment_parses_its_block_again() {
+        let source = "fn a() {}\n\n/// b **x**\nfn b() {}\n";
+        let above = source.find("/// b").expect("fixture");
+
+        assert_eq!(
+            layers_kept_by_a_whole_file_walk(
+                &rust_lang(),
+                source,
+                &[(above..above, "/// new **y**\n")]
+            ),
+            [(1, "markdown", false), (2, "markdown-inline", false)],
+            "the block that grew a line must parse again rather than keep the one-line tree"
+        );
+    }
+
+    /// A paragraph that leaves a fence parses again at its new depth.
+    ///
+    /// Text typed before the fence's opening line turns the fence into a
+    /// paragraph. The paragraph that was inside the fence keeps its range and
+    /// no edit reaches it, but it now sits one depth up. A prior is found by
+    /// range and language alone, so only the depth comparison keeps the walk
+    /// from carrying the layer at its old depth.
+    #[test]
+    fn a_paragraph_that_leaves_a_fence_parses_at_its_new_depth() {
+        let source = "```markdown\n\n*x* y\n```\n";
+
+        assert_eq!(
+            layers_kept_by_a_whole_file_walk(&markdown_lang(), source, &[(0..0, "*a* ")]),
+            [(1, "markdown-inline", false), (1, "markdown-inline", false)],
+            "the paragraph must parse at depth 1 rather than keep its depth-2 layer"
+        );
+    }
+
+    /// A carried layer leaves behind a neighbor's layer that an edit at its end
+    /// collapsed.
+    ///
+    /// The edit starts where the first comment's layer ends and deletes the
+    /// second comment's text, so the second comment's inline layer collapses to
+    /// an empty span at that end. An edit that starts at a layer's end does not
+    /// reach the layer, so the first comment's layer carries. The empty layer
+    /// inside its span belongs to the neighbor, and the walk must drop it.
+    #[test]
+    fn a_carried_layer_leaves_a_collapsed_neighbor_behind() {
+        let source = "/// one **a**\nfn a() {}\n\n/// two **b**\nfn b() {}\n";
+        let first_comment_end = {
+            let mut map = SyntaxMap::new();
+            map.reparse(&Rope::from(source), rust_lang(), 1, None, None)
+                .unwrap();
+            let first = map.snapshot().iter_layers().find(|l| l.depth == 1);
+            first.expect("a layer for the first comment").end_offset as usize
+        };
+        let second_text_end = source.find("**b**").expect("fixture") + "**b**".len();
+
+        assert_eq!(
+            layers_kept_by_a_whole_file_walk(
+                &rust_lang(),
+                source,
+                &[(first_comment_end..second_text_end, "")]
+            ),
+            [(1, "markdown", true), (2, "markdown-inline", true)],
+            "the first comment's layers carry, and the collapsed layer is gone"
+        );
+    }
+
+    /// A walk whose filter misses an edit leaves the edited layer marked, so a
+    /// later walk parses it.
+    ///
+    /// Filters on both sides of the fence put it inside the walk's window and
+    /// outside every filter, so the walk carries the fence with a tree that no
+    /// parse matched to its text. The mark is what makes the whole-file walk
+    /// after it parse the fence rather than carry it again.
+    #[test]
+    fn a_walk_that_misses_an_edit_leaves_the_layer_marked() {
+        use stoat_text::patch::Edit as PatchEdit;
+        let lang = markdown_lang();
+        let source = "head *a*\n\n```rust\nfn a() {}\n```\n\ntail *b*\n";
+        let at = source.find("{}\n```").expect("fixture") + "{}".len();
+        let inserted = "\nfn b() {}";
+        let text = format!("{}{inserted}{}", &source[..at], &source[at..]);
+        let (old_rope, new_rope) = (Rope::from(source), Rope::from(text.as_str()));
+
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang.clone(), 1, None, None).unwrap();
+        let edit = PatchEdit {
+            old: at..at,
+            new: at..at + inserted.len(),
+        };
+        map.interpolate(&[edit], &old_rope, &new_rope);
+
+        let around_the_fence = [0..1, text.find("tail").expect("fixture")..text.len()];
+        #[allow(clippy::single_range_in_vec_init)]
+        let whole_file = [0..text.len()];
+        for (version, changed) in [(2, &around_the_fence[..]), (3, &whole_file[..])] {
+            map.reparse_within_changed_ranges(
+                &new_rope,
+                lang.clone(),
+                version,
+                Some(changed),
+                None,
+                None,
+            )
+            .expect("the walk must complete");
+        }
+
+        let mut fresh = SyntaxMap::new();
+        fresh.reparse(&new_rope, lang, 3, None, None).unwrap();
+        assert_eq!(
+            layer_shapes(&map),
+            layer_shapes(&fresh),
+            "the whole-file walk must parse the fence that the narrow walk passed over"
         );
     }
 }
