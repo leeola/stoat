@@ -10,9 +10,29 @@
 //! whichever algorithm walks it. These are the sweeps as they were before the
 //! per-file and per-name indexes, so the differential below is against the
 //! behaviour that shipped rather than against a fresh build.
+//!
+//! [`CodeGraph::apply_reindex`] merges in place and keeps the binding of every
+//! edge an edit keeps, where a sweep evicts and binds afresh. Its oracle,
+//! [`CodeGraph::reference_apply_reindex`], records those bindings, sweeps, and
+//! gives them back.
 
-use crate::{ref_kind_for, CodeGraph, Confidence, FileId, FileShard, SymbolKey, Target};
-use std::collections::{HashMap, HashSet};
+use crate::{ref_kind_for, CodeGraph, Confidence, EdgeKind, FileId, FileShard, SymbolKey, Target};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+/// What the oracle pairs a file's prior edge with a new one by, as
+/// [`CodeGraph::apply_reindex`] pairs them.
+#[derive(PartialEq, Eq, Hash)]
+struct Paired {
+    from: SymbolKey,
+    kind: EdgeKind,
+    target: PairedTarget,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+enum PairedTarget {
+    Key(SymbolKey),
+    Name(String),
+}
 
 impl CodeGraph {
     /// Re-index one file by sweeping the whole graph, as the shipped code did.
@@ -21,6 +41,106 @@ impl CodeGraph {
         self.insert_shard(shard);
         self.reference_reresolve_inner();
         self.reference_rebuild_adjacency();
+    }
+
+    /// Merge one file's new shard by sweeping, landing where
+    /// [`CodeGraph::apply_reindex`] lands.
+    ///
+    /// The merge keeps the binding of every edge the edit keeps. Those are the
+    /// file's edges whose source, kind, and target the shard keeps, and the
+    /// edges from other files into a symbol the shard keeps. A sweep evicts and
+    /// binds afresh, so this records those bindings, sweeps, and gives them
+    /// back.
+    pub(crate) fn reference_apply_reindex(&mut self, file: FileId, shard: FileShard) {
+        let prior: HashSet<SymbolKey> = self
+            .by_file
+            .get(&file)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        let kept: HashSet<SymbolKey> = shard
+            .symbols
+            .iter()
+            .map(|sym| sym.key)
+            .filter(|key| prior.contains(key))
+            .collect();
+
+        // The edges of other files keep their ids through the sweep.
+        let incoming: Vec<(u32, Target, Confidence)> = self
+            .live_edges()
+            .filter(|(_, edge)| !prior.contains(&edge.from))
+            .filter(|(_, edge)| matches!(&edge.to, Target::Sym(key) if kept.contains(key)))
+            .map(|(id, edge)| (id, edge.to.clone(), edge.confidence))
+            .collect();
+
+        // The file's edges as the merge pairs them, in site order, once a
+        // dropped symbol has degraded the edges into it.
+        let mut held: HashMap<Paired, VecDeque<(Target, Confidence)>> = HashMap::new();
+        let mut own: Vec<u32> = self.edges_by_file.get(&file).cloned().unwrap_or_default();
+        own.sort_by_key(|&id| self.edge(id).map_or(0, |edge| edge.site_range.start));
+        for id in own {
+            let Some(edge) = self.edge(id) else {
+                continue;
+            };
+            let degraded = match &edge.to {
+                Target::Sym(key) if prior.contains(key) && !kept.contains(key) => {
+                    ref_kind_for(edge.kind).map(|kind| Target::Unresolved {
+                        name: self.symbols[key].name.clone(),
+                        kind,
+                    })
+                },
+                _ => None,
+            };
+            let (to, confidence) = match degraded {
+                Some(to) => (to, Confidence::NameMatch),
+                None => (edge.to.clone(), edge.confidence),
+            };
+            if let Some(key) = self.paired(edge.from, edge.kind, &to) {
+                held.entry(key).or_default().push_back((to, confidence));
+            }
+        }
+
+        self.reference_evict_inner(file);
+        self.insert_shard(shard);
+
+        for (id, to, confidence) in incoming {
+            let edge = self.edges[id as usize]
+                .as_mut()
+                .expect("an edge of another file outlives the sweep");
+            edge.to = to;
+            edge.confidence = confidence;
+        }
+
+        let fresh: Vec<u32> = self.edges_by_file.get(&file).cloned().unwrap_or_default();
+        for id in fresh {
+            let Some(key) = self
+                .edge(id)
+                .and_then(|edge| self.paired(edge.from, edge.kind, &edge.to))
+            else {
+                continue;
+            };
+            if let Some((to, confidence)) = held.get_mut(&key).and_then(VecDeque::pop_front) {
+                let edge = self.edges[id as usize]
+                    .as_mut()
+                    .expect("a fresh edge is live");
+                edge.to = to;
+                edge.confidence = confidence;
+            }
+        }
+
+        self.reference_rebuild_adjacency();
+    }
+
+    /// What an edge from `from` of `kind` to `to` pairs by, or `None` for a
+    /// resolved target whose symbol is gone.
+    fn paired(&self, from: SymbolKey, kind: EdgeKind, to: &Target) -> Option<Paired> {
+        let target = match (to, kind) {
+            (Target::Sym(key), EdgeKind::Contains) => PairedTarget::Key(*key),
+            (Target::Sym(key), _) => PairedTarget::Name(self.symbols.get(key)?.name.clone()),
+            (Target::Unresolved { name, .. }, _) => PairedTarget::Name(name.clone()),
+        };
+        Some(Paired { from, kind, target })
     }
 
     /// Remove one file by sweeping the whole graph, as the shipped code did.
@@ -132,7 +252,9 @@ impl CodeGraph {
 #[cfg(test)]
 mod tests {
     use crate::{build_shard, CodeGraph, FileId, FileShard};
-    use stoat_language::{extract_references, extract_symbols, parse_rope, LanguageRegistry};
+    use stoat_language::{
+        extract_references, extract_symbols, parse_rope, LanguageRegistry, SymbolKind,
+    };
     use stoat_text::Rope;
 
     /// A graph's content with every edge id erased.
@@ -325,10 +447,10 @@ mod tests {
     }
 
     /// The application applies a whole drain of index updates before resolving
-    /// once, so the adjacency an eviction consults is whatever the last resolve
-    /// left plus what the applies since have linked. That is the shape the
-    /// incremental eviction has to be right under, and it is the only one the
-    /// editor ever uses.
+    /// once, so the adjacency an eviction or a merge consults is whatever the
+    /// last resolve left plus what the applies since have linked. That is the
+    /// shape the incremental eviction and the in-place merge have to be right
+    /// under, and it is the only one the editor ever uses.
     #[test]
     fn a_batch_of_applies_lands_where_the_sweeps_do() {
         let shards = Shards::new();
@@ -351,8 +473,7 @@ mod tests {
                     } else {
                         let shard = shards.of(file, &rel, &source(&mut rng));
                         fast.apply_reindex(file, shard.clone());
-                        slow.reference_evict_inner(file);
-                        slow.insert_shard(shard);
+                        slow.reference_apply_reindex(file, shard);
                     }
                 }
 
@@ -365,6 +486,91 @@ mod tests {
                     "seed {seed} round {round} diverged"
                 );
             }
+        }
+    }
+
+    /// Repeated calls to one name pair in site order around an edit, as the
+    /// sweep pairs them.
+    ///
+    /// The two calls hold different bindings. The first stays unresolved from a
+    /// time the name was ambiguous, and the second bound once the name was
+    /// unique. The edit
+    /// adds calls before and between them, so the suffix that matches by
+    /// position holds a call whose name the middle also holds. Pairing that
+    /// suffix call by position moves the binding to another site.
+    #[test]
+    fn repeated_calls_pair_in_site_order_around_an_edit() {
+        let shards = Shards::new();
+        let mut fast = CodeGraph::new();
+        let mut slow = CodeGraph::new();
+        let mut apply = |file: u32, text: Option<&str>| {
+            let file = FileId(file);
+            match text {
+                Some(text) => {
+                    let shard = shards.of(file, &format!("f{}.rs", file.0), text);
+                    fast.apply_reindex(file, shard.clone());
+                    slow.reference_apply_reindex(file, shard);
+                },
+                None => {
+                    fast.apply_remove(file);
+                    slow.reference_evict_inner(file);
+                },
+            }
+        };
+
+        apply(0, Some("fn a() {}\n"));
+        apply(2, Some("fn a() {}\n"));
+        apply(1, Some("fn driver() {\n    a();\n}\n"));
+        apply(2, None);
+        apply(1, Some("fn driver() {\n    a();\n    a();\n}\n"));
+        apply(2, Some("fn a() {}\n"));
+        apply(
+            1,
+            Some("fn driver() {\n    a();\n    b();\n    a();\n    a();\n}\n"),
+        );
+
+        fast.reresolve_unresolved();
+        slow.reference_reresolve();
+        assert_eq!(
+            canonical(&fast),
+            canonical(&slow),
+            "the bound call keeps its place among the calls to its name"
+        );
+    }
+
+    /// A key that two items share merges as the sweep does, with one name entry
+    /// per occurrence.
+    ///
+    /// Two inherent `impl` blocks on one type share the impl's key. Dropping one
+    /// leaves the key in the shard once, and adding it back puts it there twice
+    /// again, so the merge has to follow the count.
+    #[test]
+    fn a_key_two_items_share_merges_as_the_sweep_does() {
+        let shards = Shards::new();
+        let two = "struct Foo;\nimpl Foo {\n    fn a() {}\n}\nimpl Foo {\n    fn b() {}\n}\n\
+                   fn driver() {\n    a();\n}\n";
+        let one = "struct Foo;\nimpl Foo {\n    fn a() {}\n}\nfn driver() {\n    a();\n}\n";
+        let mut fast = CodeGraph::new();
+        let mut slow = CodeGraph::new();
+
+        for (step, text) in [two, one, two].into_iter().enumerate() {
+            let shard = shards.of(FileId(0), "f0.rs", text);
+            fast.apply_reindex(FileId(0), shard.clone());
+            slow.reference_apply_reindex(FileId(0), shard);
+            fast.reresolve_unresolved();
+            slow.reference_reresolve();
+
+            let impls = fast.by_name["Foo"]
+                .iter()
+                .filter(|(kind, _)| *kind == SymbolKind::Impl)
+                .map(|(_, key)| *key)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                (impls.len(), impls.windows(2).all(|pair| pair[0] == pair[1])),
+                (if text == two { 2 } else { 1 }, true),
+                "step {step}: the impl key is in the name index once per block"
+            );
+            assert_eq!(canonical(&fast), canonical(&slow), "step {step} diverged");
         }
     }
 }

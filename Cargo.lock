@@ -696,6 +696,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "postcard",
+ "rustc-hash 2.1.2",
  "serde",
  "smallvec",
  "stoat_language",

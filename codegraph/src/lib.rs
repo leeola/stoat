@@ -11,10 +11,13 @@
 //! The kind taxonomy and the [`Confidence`] scale stay open so a later
 //! scope-aware or LSP pass can add richer edges without a reindex.
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    hash::Hash,
+    iter,
     ops::Range,
 };
 use stoat_language::{RefKind, SymbolKind};
@@ -70,7 +73,7 @@ pub struct Symbol {
 /// relation from the impl to the trait, and [`EdgeKind::Contains`] the
 /// structural nesting of a definition inside another. The set stays open for
 /// richer edge kinds later.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EdgeKind {
     Calls,
     References,
@@ -200,6 +203,28 @@ pub struct GraphStats {
     pub unresolved_edges: usize,
 }
 
+/// What [`CodeGraph::apply_reindex`] pairs a file's prior edge with a new one
+/// by.
+///
+/// The site moves with every edit above it, so it orders the candidates within
+/// a pairing instead of naming one. A resolved reference pairs by the name it
+/// resolved from, since a new edge carries only the name it was written with.
+#[derive(PartialEq, Eq, Hash)]
+struct EdgeMatch<'a> {
+    from: SymbolKey,
+    kind: EdgeKind,
+    target: MatchTarget<'a>,
+}
+
+/// The target half of an [`EdgeMatch`].
+#[derive(PartialEq, Eq, Hash)]
+enum MatchTarget<'a> {
+    /// The child of an [`EdgeKind::Contains`] edge, which the edge names by key.
+    Key(SymbolKey),
+    /// The name a reference was written with.
+    Name(&'a str),
+}
+
 impl CodeGraph {
     /// Create an empty graph. Populate it by merging [`FileShard`]s.
     pub fn new() -> Self {
@@ -270,39 +295,17 @@ impl CodeGraph {
         let mut files: HashSet<FileId> = HashSet::new();
         for sym in shard.symbols {
             files.insert(sym.file);
-            let key = sym.key;
-
-            // Cloned only where a map takes ownership of a name it does not
-            // already hold. A file's symbols repeat names across shards, and a
-            // clone per symbol per drained shard is what this loop paid.
-            if !self.dirty_names.contains(&sym.name) {
-                self.dirty_names.insert(sym.name.clone());
-            }
-            match self.by_name.get_mut(&sym.name) {
-                Some(entries) => entries.push((sym.kind, key)),
-                None => {
-                    self.by_name
-                        .entry(sym.name.clone())
-                        .or_default()
-                        .push((sym.kind, key));
-                },
-            }
-
-            self.by_file.entry(sym.file).or_default().push(key);
-            self.symbols.insert(key, sym);
+            self.by_file.entry(sym.file).or_default().push(sym.key);
+            self.register_symbol(sym);
         }
         for file in &files {
             self.content_hashes.insert(*file, content_hash);
             self.sort_file_index(*file);
         }
 
-        for mut edge in shard.edges {
-            let (confidence, resolved) = self.resolve_target(&edge.to);
-            edge.confidence = confidence;
-
+        for edge in shard.edges {
             let origin = self.symbols.get(&edge.from).map(|sym| sym.file);
-            let linked = resolved.inspect(|&key| edge.to = Target::Sym(key));
-            let id = self.push_edge(edge);
+            let id = self.add_edge(edge);
 
             // An edge whose source symbol is not in the graph belongs to no
             // file's eviction set, so it would outlive every file. Shards carry
@@ -310,20 +313,60 @@ impl CodeGraph {
             if let Some(origin) = origin {
                 self.edges_by_file.entry(origin).or_default().push(id);
             }
-            match linked {
-                Some(key) => self.link_edge(id, key),
-                // Borrowed from the edge store rather than cloned. The name
-                // index is a field beside it, so the two borrows stay apart and
-                // a bucket that already exists costs no allocation.
-                None => {
-                    if let Some(Target::Unresolved { name, .. }) =
-                        self.edges[id as usize].as_ref().map(|edge| &edge.to)
-                    {
-                        file_unresolved(&mut self.unresolved_by_name, name, id);
-                    }
-                },
-            }
         }
+    }
+
+    /// Add a symbol to the symbol table and the name index, marking its name
+    /// dirty.
+    ///
+    /// The caller files the key under its file.
+    fn register_symbol(&mut self, sym: Symbol) {
+        let key = sym.key;
+
+        // Cloned only where a map takes ownership of a name it does not
+        // already hold. A file's symbols repeat names across shards, and a
+        // clone per symbol per drained shard is what this loop paid.
+        if !self.dirty_names.contains(&sym.name) {
+            self.dirty_names.insert(sym.name.clone());
+        }
+        match self.by_name.get_mut(&sym.name) {
+            Some(entries) => entries.push((sym.kind, key)),
+            None => {
+                self.by_name
+                    .entry(sym.name.clone())
+                    .or_default()
+                    .push((sym.kind, key));
+            },
+        }
+
+        self.symbols.insert(key, sym);
+    }
+
+    /// Resolve and store one edge, either linking it or filing it under the
+    /// name it waits on, and return its id.
+    ///
+    /// The caller files the id under its source's file.
+    fn add_edge(&mut self, mut edge: Edge) -> u32 {
+        let (confidence, resolved) = self.resolve_target(&edge.to);
+        edge.confidence = confidence;
+
+        let linked = resolved.inspect(|&key| edge.to = Target::Sym(key));
+        let id = self.push_edge(edge);
+
+        match linked {
+            Some(key) => self.link_edge(id, key),
+            // Borrowed from the edge store rather than cloned. The name
+            // index is a field beside it, so the two borrows stay apart and
+            // a bucket that already exists costs no allocation.
+            None => {
+                if let Some(Target::Unresolved { name, .. }) =
+                    self.edges[id as usize].as_ref().map(|edge| &edge.to)
+                {
+                    file_unresolved(&mut self.unresolved_by_name, name, id);
+                }
+            },
+        }
+        id
     }
 
     /// Store `edge` and report the id it can be found under, reusing a
@@ -599,18 +642,310 @@ impl CodeGraph {
 
     /// Re-index one file without re-resolving edges.
     ///
-    /// Evicts the file's prior symbols and edges, then merges the new shard.
-    /// Unlike [`Self::reindex`], an edge naming a symbol this shard did not
-    /// bring is left unresolved even when another file defines it. A caller
-    /// applying many updates in a batch calls [`Self::reresolve_unresolved`]
-    /// once afterward to link them, and until then the graph answers as though
-    /// those definitions were absent.
+    /// Merges the new shard into the file's prior symbols and edges. A symbol
+    /// whose key the shard keeps takes the shard's ranges and body hash, and
+    /// keeps every edge into it. An edge of the file whose source, kind, and
+    /// target name the shard keeps, paired in site order, keeps its id and its
+    /// binding and takes the new site range. The shard's other symbols and
+    /// edges merge as [`Self::insert_shard`] merges them, and a symbol the
+    /// shard drops leaves as [`Self::evict_file`] removes it.
     ///
-    /// The adjacency stays exact throughout, so a query mid-batch is answered
-    /// correctly for the links that are present.
+    /// Only a symbol the shard adds or drops changes a name's definitions, so
+    /// only those names wait for the next [`Self::reresolve_unresolved`]. A body
+    /// edit leaves that pass nothing to do.
+    ///
+    /// A kept edge keeps the definition it bound, even when its name has since
+    /// gained a second one, where a fresh merge of the same text leaves the edge
+    /// unresolved. Bindings already depend on edit order, as
+    /// [`Self::reresolve_unresolved`] describes.
+    ///
+    /// An edge waiting on a name whose definitions this merge changed, such as a
+    /// caller of a dropped symbol, stays unresolved until
+    /// [`Self::reresolve_unresolved`] runs. A caller applying many updates in a
+    /// batch calls it once afterward. The adjacency stays exact throughout, so a
+    /// query mid-batch is answered correctly for the links that are present.
     pub fn apply_reindex(&mut self, file: FileId, shard: FileShard) {
-        self.evict_file_inner(file);
-        self.insert_shard(shard);
+        let Some(prior) = self.by_file.remove(&file) else {
+            self.insert_shard(shard);
+            return;
+        };
+
+        let keys = self.merge_symbols(&prior, shard.symbols);
+        self.merge_edges(file, shard.edges);
+
+        if keys.is_empty() {
+            self.content_hashes.remove(&file);
+            return;
+        }
+        self.by_file.insert(file, keys);
+        self.content_hashes.insert(file, shard.content_hash);
+    }
+
+    /// Merge a file's new symbols over its `prior` keys, returning the file's
+    /// keys ordered by definition start, as [`Self::sort_file_index`] orders
+    /// them.
+    ///
+    /// One key occurs more than once in a file when two items share it, such as
+    /// two inherent `impl` blocks on one type. The name index holds one entry
+    /// per occurrence, as [`Self::insert_shard`] files them, so a kept key whose
+    /// count changes gains or loses entries and marks its name dirty. The last
+    /// occurrence is the one the symbol table holds, so its start orders the
+    /// key.
+    fn merge_symbols(&mut self, prior: &[SymbolKey], symbols: Vec<Symbol>) -> Vec<SymbolKey> {
+        let mut held: FxHashMap<SymbolKey, usize> =
+            FxHashMap::with_capacity_and_hasher(prior.len(), Default::default());
+        for key in prior {
+            *held.entry(*key).or_default() += 1;
+        }
+        // Each key's occurrences, and the definition start of its last one.
+        let mut wanted: FxHashMap<SymbolKey, (usize, usize)> =
+            FxHashMap::with_capacity_and_hasher(symbols.len(), Default::default());
+        for sym in &symbols {
+            let entry = wanted.entry(sym.key).or_default();
+            *entry = (entry.0 + 1, sym.def_range.start);
+        }
+
+        // In the prior order, so the edges a drop degrades join their buckets
+        // in the same order on every run.
+        let mut dropped: Vec<SymbolKey> = Vec::new();
+        for key in prior {
+            if !wanted.contains_key(key) && held.remove(key).is_some() {
+                dropped.push(*key);
+            }
+        }
+        for key in &dropped {
+            self.degrade_edges_into(*key);
+        }
+        for key in &dropped {
+            // Both directions are empty by now, as in an eviction. The file's
+            // edges out of the symbol leave with the unpaired edges.
+            self.out.remove(key);
+            self.inn.remove(key);
+            if let Some(sym) = self.symbols.remove(key) {
+                self.dirty_names.insert(sym.name.clone());
+                remove_name_entry(&mut self.by_name, &sym.name, *key);
+            }
+        }
+
+        let mut keys = Vec::with_capacity(symbols.len());
+        for sym in symbols {
+            keys.push(sym.key);
+            match self
+                .symbols
+                .get_mut(&sym.key)
+                .filter(|_| held.contains_key(&sym.key))
+            {
+                Some(kept) => {
+                    kept.def_range = sym.def_range;
+                    kept.name_range = sym.name_range;
+                    kept.body_hash = sym.body_hash;
+                },
+                None => self.register_symbol(sym),
+            }
+        }
+
+        for key in prior {
+            let Some(before) = held.remove(key) else {
+                continue;
+            };
+            let after = wanted[key].0;
+            if after != before {
+                self.recount_name_entries(*key, before, after);
+            }
+        }
+
+        // Read off the local map rather than the symbol table, whose lookups
+        // were a fifth of what a merge cost.
+        keys.sort_by_key(|key| wanted[key].1);
+        keys
+    }
+
+    /// Bring `key`'s entries in the name index from `before` to `after`.
+    ///
+    /// The name's count of definitions changes, so its name is marked dirty.
+    fn recount_name_entries(&mut self, key: SymbolKey, before: usize, after: usize) {
+        let Some(sym) = self.symbols.get(&key) else {
+            return;
+        };
+        let (name, kind) = (sym.name.clone(), sym.kind);
+
+        let entries = self.by_name.entry(name.clone()).or_default();
+        if after > before {
+            entries.extend(iter::repeat_n((kind, key), after - before));
+        } else {
+            let mut surplus = before - after;
+            entries.retain(|entry| {
+                let drop = surplus > 0 && entry.1 == key;
+                surplus -= usize::from(drop);
+                !drop
+            });
+        }
+        self.dirty_names.insert(name);
+    }
+
+    /// Merge a file's new edges over its prior ones.
+    ///
+    /// A prior edge pairs with a new one that has its [`EdgeMatch`]. Within one
+    /// match the prior edges go in site order, so the first call to a name keeps
+    /// the id of the first call before the edit. A paired edge keeps its id and
+    /// binding and takes the new site range. An unpaired prior edge leaves the
+    /// graph, and an unpaired new one joins it as [`Self::insert_shard`] adds
+    /// edges. The file's ids stay in shard order, which is site order within
+    /// each match.
+    ///
+    /// An edit leaves the edges before it and after it as they were, so the
+    /// common prefix and suffix of the two lists pair by position, and only the
+    /// edges between them go through a map. That pairs as the map does. Within
+    /// one match the prefix holds the first edges of both sides and the suffix
+    /// the last ones. A match that the middle also holds sends its suffix
+    /// edges to the map, so they pair in order behind the middle ones.
+    fn merge_edges(&mut self, file: FileId, edges: Vec<Edge>) {
+        let prior = self.edges_by_file.remove(&file).unwrap_or_default();
+        // The prior edge that each new edge pairs with.
+        let mut pairs: Vec<Option<u32>> = vec![None; edges.len()];
+
+        let unpaired: Vec<u32> = {
+            let prior_keys: Vec<Option<EdgeMatch<'_>>> = prior
+                .iter()
+                .map(|&id| self.edge(id).and_then(|edge| self.edge_match(edge)))
+                .collect();
+            let new_keys: Vec<Option<EdgeMatch<'_>>> =
+                edges.iter().map(|edge| self.edge_match(edge)).collect();
+            let same = |i: usize, j: usize| prior_keys[i].is_some() && prior_keys[i] == new_keys[j];
+
+            let mut head = 0;
+            while head < prior.len().min(edges.len()) && same(head, head) {
+                pairs[head] = Some(prior[head]);
+                head += 1;
+            }
+            let mut tail = 0;
+            while tail < (prior.len() - head).min(edges.len() - head)
+                && same(prior.len() - 1 - tail, edges.len() - 1 - tail)
+            {
+                tail += 1;
+            }
+            let (prior_tail, new_tail) = (prior.len() - tail, edges.len() - tail);
+
+            let middle: FxHashSet<&EdgeMatch<'_>> = prior_keys[head..prior_tail]
+                .iter()
+                .chain(&new_keys[head..new_tail])
+                .flatten()
+                .collect();
+            let in_middle =
+                |key: &Option<EdgeMatch<'_>>| key.as_ref().is_some_and(|key| middle.contains(key));
+
+            // Inline queues, since most matches hold one edge and a heap queue
+            // apiece was a third of what a merge cost.
+            let mut queues: FxHashMap<&EdgeMatch<'_>, SmallVec<[u32; 2]>> = FxHashMap::default();
+            let mut unpaired: Vec<u32> = Vec::new();
+            let prior_mapped = (prior_tail..prior.len()).filter(|&i| in_middle(&prior_keys[i]));
+            for i in (head..prior_tail).chain(prior_mapped) {
+                match &prior_keys[i] {
+                    Some(key) => queues.entry(key).or_default().push(prior[i]),
+                    None => unpaired.push(prior[i]),
+                }
+            }
+            for queue in queues.values_mut() {
+                if queue.len() > 1 {
+                    queue.sort_by_key(|&id| self.edge(id).map_or(0, |edge| edge.site_range.start));
+                    // Taken from the back, so the earliest site pairs first.
+                    queue.reverse();
+                }
+            }
+
+            let new_mapped = (new_tail..edges.len()).filter(|&j| in_middle(&new_keys[j]));
+            for j in (head..new_tail).chain(new_mapped) {
+                pairs[j] = new_keys[j]
+                    .as_ref()
+                    .and_then(|key| queues.get_mut(key)?.pop());
+            }
+            for j in new_tail..edges.len() {
+                if !in_middle(&new_keys[j]) {
+                    pairs[j] = Some(prior[j - new_tail + prior_tail]);
+                }
+            }
+
+            // Sorted, so the slots free in the same order on every run.
+            unpaired.extend(queues.into_values().flatten());
+            unpaired.sort_unstable();
+            unpaired
+        };
+
+        // Ahead of the new edges, so they take the slots this frees.
+        self.unlink_edges(&unpaired);
+
+        let mut ids: Vec<u32> = Vec::with_capacity(edges.len());
+        for (edge, pair) in edges.into_iter().zip(pairs) {
+            if let Some(id) = pair {
+                if let Some(kept) = self.edges[id as usize].as_mut() {
+                    kept.site_range = edge.site_range;
+                }
+                ids.push(id);
+                continue;
+            }
+
+            let origin = self.symbols.get(&edge.from).map(|sym| sym.file);
+            let id = self.add_edge(edge);
+            match origin {
+                Some(origin) if origin == file => ids.push(id),
+                Some(origin) => self.edges_by_file.entry(origin).or_default().push(id),
+                None => {},
+            }
+        }
+        if !ids.is_empty() {
+            self.edges_by_file.insert(file, ids);
+        }
+    }
+
+    /// What [`Self::apply_reindex`] pairs `edge` by, or `None` for a resolved
+    /// edge whose target symbol is gone, which no new edge pairs with.
+    fn edge_match<'a>(&'a self, edge: &'a Edge) -> Option<EdgeMatch<'a>> {
+        let target = match (&edge.to, edge.kind) {
+            (Target::Sym(key), EdgeKind::Contains) => MatchTarget::Key(*key),
+            (Target::Sym(key), _) => MatchTarget::Name(&self.symbols.get(key)?.name),
+            (Target::Unresolved { name, .. }, _) => MatchTarget::Name(name),
+        };
+        Some(EdgeMatch {
+            from: edge.from,
+            kind: edge.kind,
+            target,
+        })
+    }
+
+    /// Take the edges `ids` out of the adjacency and the name index, then free
+    /// their slots.
+    ///
+    /// Grouped by bucket for the reason [`Self::evict_file_inner`] groups them.
+    /// Call targets repeat hard, so one file's edges reach a handful of very
+    /// large buckets, and a retain per edge rescans a whole bucket every time.
+    fn unlink_edges(&mut self, ids: &[u32]) {
+        let mut waiting: FxHashMap<String, FxHashSet<u32>> = FxHashMap::default();
+        let mut arriving: FxHashMap<SymbolKey, FxHashSet<u32>> = FxHashMap::default();
+        let mut leaving: FxHashMap<SymbolKey, FxHashSet<u32>> = FxHashMap::default();
+        for &id in ids {
+            let Some(edge) = self.edge(id) else {
+                continue;
+            };
+            match &edge.to {
+                Target::Sym(key) => {
+                    arriving.entry(*key).or_default().insert(id);
+                    leaving.entry(edge.from).or_default().insert(id);
+                },
+                Target::Unresolved { name, .. } => {
+                    waiting.entry(name.clone()).or_default().insert(id);
+                },
+            }
+        }
+
+        drop_from_buckets(&mut self.unresolved_by_name, waiting);
+        drop_from_buckets(&mut self.inn, arriving);
+        drop_from_buckets(&mut self.out, leaving);
+
+        for &id in ids {
+            if self.edges[id as usize].take().is_some() {
+                self.free_edges.push(id);
+            }
+        }
     }
 
     /// Remove a file without re-resolving edges.
@@ -892,6 +1227,23 @@ fn drop_edge_from(adjacency: &mut HashMap<SymbolKey, SmallVec<[u32; 4]>>, key: S
     }
 }
 
+/// Drop the `dead` edge ids from each of their buckets, removing a bucket that
+/// empties.
+fn drop_from_buckets<K: Hash + Eq>(
+    buckets: &mut HashMap<K, SmallVec<[u32; 4]>>,
+    dead: FxHashMap<K, FxHashSet<u32>>,
+) {
+    for (key, dead) in dead {
+        let Some(bucket) = buckets.get_mut(&key) else {
+            continue;
+        };
+        bucket.retain(|held| !dead.contains(held));
+        if bucket.is_empty() {
+            buckets.remove(&key);
+        }
+    }
+}
+
 /// File an unresolved edge under the name it waits on.
 ///
 /// Takes the name by reference and clones only into a bucket that is not there
@@ -954,6 +1306,7 @@ mod tests {
         build_shard, CodeGraph, Confidence, Dir, Edge, EdgeKind, FileId, FileShard, GraphStats,
         Symbol, SymbolKey, Target,
     };
+    use std::collections::HashSet;
     use stoat_language::{
         extract_references, extract_symbols, parse_rope, LanguageRegistry, RefKind, SymbolKind,
     };
@@ -1443,6 +1796,128 @@ mod tests {
             graph.resolve_target(&call("shared")),
             (Confidence::Ambiguous, None),
             "three candidates leave the edge pointing at none of them",
+        );
+    }
+
+    /// A graph where a.rs calls `foo`, which b.rs defines, with the call
+    /// resolved.
+    fn calling_graph() -> CodeGraph {
+        let mut graph = CodeGraph::new();
+        graph.insert_shard(shard_of(FileId(0), "a.rs", "fn a() {\n    foo();\n}\n"));
+        graph.insert_shard(shard_of(FileId(1), "b.rs", "fn foo() {}\n"));
+        graph.reresolve_unresolved();
+        graph
+    }
+
+    /// A body edit keeps the file's edges under their ids, and leaves no name
+    /// for a re-resolution.
+    ///
+    /// The call pairs with its prior edge by source, kind, and name, so it keeps
+    /// its id and its link and only moves its site. No definition changes, so
+    /// the next re-resolution has nothing to do.
+    #[test]
+    fn a_body_edit_keeps_edge_ids_and_dirties_no_name() {
+        let mut graph = calling_graph();
+        let ids = graph.edges_by_file[&FileId(0)].clone();
+
+        let edited = shard_of(
+            FileId(0),
+            "a.rs",
+            "fn a() {\n    let x = 1;\n    foo();\n}\n",
+        );
+        let call = edited.edges.iter().find(|e| e.kind == EdgeKind::Calls);
+        let site = call.expect("the shard holds the call").site_range.clone();
+        let def = edited.symbols[0].def_range.clone();
+        graph.apply_reindex(FileId(0), edited);
+
+        let a = key_for(&graph, "a", SymbolKind::Function);
+        let foo = key_for(&graph, "foo", SymbolKind::Function);
+        let call = call_edge(&graph);
+        assert_eq!(
+            (
+                graph.edges_by_file[&FileId(0)].clone(),
+                call.to,
+                call.site_range,
+                graph.dirty_names.clone(),
+                graph.symbols[&a].def_range.clone(),
+            ),
+            (ids, Target::Sym(foo), site, HashSet::new(), def),
+            "the call keeps its id and its link, and takes the new site and range"
+        );
+    }
+
+    /// A dropped symbol degrades the calls into it and dirties its name alone.
+    #[test]
+    fn a_removed_symbol_degrades_its_callers() {
+        let mut graph = calling_graph();
+        graph.apply_reindex(
+            FileId(1),
+            shard_of(FileId(1), "b.rs", "// foo moved away\n"),
+        );
+
+        let call = call_edge(&graph);
+        assert_eq!(
+            (call.to, call.confidence, graph.dirty_names.clone()),
+            (
+                Target::Unresolved {
+                    name: "foo".to_string(),
+                    kind: RefKind::Call,
+                },
+                Confidence::NameMatch,
+                HashSet::from(["foo".to_string()]),
+            ),
+            "the call waits on the name again, and only that name is dirty"
+        );
+    }
+
+    /// An added call takes one new edge, and the call already there keeps its
+    /// id.
+    #[test]
+    fn an_added_call_adds_one_edge_and_keeps_the_rest() {
+        let mut graph = calling_graph();
+        let ids = graph.edges_by_file[&FileId(0)].clone();
+        let next = graph.edges.len() as u32;
+
+        graph.apply_reindex(
+            FileId(0),
+            shard_of(FileId(0), "a.rs", "fn a() {\n    foo();\n    bar();\n}\n"),
+        );
+
+        assert_eq!(
+            graph.edges_by_file[&FileId(0)],
+            [ids, vec![next]].concat(),
+            "the call to foo keeps its id, and the call to bar takes the next slot"
+        );
+    }
+
+    /// A reindex of a file the graph has never held merges as an insert does.
+    #[test]
+    fn a_reindex_of_an_unknown_file_equals_an_insert() {
+        let shard = shard_of(FileId(0), "a.rs", "fn a() {\n    foo();\n}\nfn foo() {}\n");
+        let mut merged = CodeGraph::new();
+        merged.apply_reindex(FileId(0), shard.clone());
+        let mut inserted = CodeGraph::new();
+        inserted.insert_shard(shard);
+
+        let state = |graph: &CodeGraph| {
+            (
+                graph.symbols.clone(),
+                graph.edges.clone(),
+                graph.free_edges.clone(),
+                graph.unresolved_by_name.clone(),
+                graph.dirty_names.clone(),
+                graph.edges_by_file.clone(),
+                graph.out.clone(),
+                graph.inn.clone(),
+                graph.by_name.clone(),
+                graph.by_file.clone(),
+                graph.content_hashes.clone(),
+            )
+        };
+        assert_eq!(
+            state(&merged),
+            state(&inserted),
+            "every index matches the insert's"
         );
     }
 }
