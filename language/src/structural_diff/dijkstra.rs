@@ -176,8 +176,8 @@ impl VertexArena {
 /// Mirrors `references/difftastic/src/diff/graph.rs:363-410`
 /// `allocate_if_new`.
 pub fn shortest_path(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_root: Option<SyntaxId>,
     rhs_root: Option<SyntaxId>,
     graph_limit: usize,
@@ -244,8 +244,8 @@ pub fn shortest_path(
 /// Mirrors `references/difftastic/src/diff/graph.rs:493-794`
 /// `set_neighbours`.
 fn expand(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     va: &mut VertexArena,
     seen: &mut SeenMap,
     vid: u32,
@@ -270,7 +270,7 @@ fn expand(
                 // edge can beat a same-content match, so stop here.
                 let edge = Edge::UnchangedNode {
                     depth_difference: 0,
-                    probably_punctuation: probably_punctuation(lhs_node),
+                    probably_punctuation: probably_punctuation(lhs_arena, lhs_node),
                 };
                 let (lhs_after, rhs_after, parents_after) = pop_all_parents(
                     lhs_arena,
@@ -312,9 +312,10 @@ fn expand(
                     let kind_match_comment = is_comment_atom(lhs_node) && is_comment_atom(rhs_node);
                     let kind_match_string = is_string_atom(lhs_node) && is_string_atom(rhs_node);
                     if (kind_match_comment || kind_match_string)
-                        && similarity_possible(lhs_atom.content, rhs_atom.content)
+                        && similarity_possible(lhs_arena.text(lhs_atom), rhs_arena.text(rhs_atom))
                     {
-                        let similarity = similarity_pct(lhs_atom.content, rhs_atom.content);
+                        let similarity =
+                            similarity_pct(lhs_arena.text(lhs_atom), rhs_arena.text(rhs_atom));
                         if similarity > 20 {
                             let edge = if kind_match_comment {
                                 Edge::ReplacedComment {
@@ -370,8 +371,8 @@ fn expand(
 /// Emit the "novel on lhs" step: skip the lhs node (descending into it if
 /// it is a list) while the rhs position stays put.
 fn expand_novel_lhs(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     va: &mut VertexArena,
     seen: &mut SeenMap,
     lhs_id: SyntaxId,
@@ -393,8 +394,8 @@ fn expand_novel_lhs(
 
 /// The rhs counterpart of [`expand_novel_lhs`].
 fn expand_novel_rhs(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     va: &mut VertexArena,
     seen: &mut SeenMap,
     rhs_id: SyntaxId,
@@ -493,8 +494,8 @@ fn reconstruct_path(va: &VertexArena, end: u32) -> Vec<PathStep> {
 /// Mirrors `references/difftastic/src/diff/graph.rs:796-847`
 /// `populate_change_map`.
 pub fn populate_change_map(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     path: &[PathStep],
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
@@ -551,7 +552,7 @@ mod tests {
     use super::*;
     use crate::{
         parse,
-        structural_diff::{arena::Atom, lower_tree, ChangeMap, ContentId},
+        structural_diff::{lower_tree, ChangeMap},
         LanguageRegistry,
     };
     use std::sync::Arc;
@@ -562,27 +563,17 @@ mod tests {
             .unwrap()
     }
 
-    fn lower(source: &str) -> (SyntaxArena<'_>, SyntaxId) {
+    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        lower_tree(&tree, source)
-    }
-
-    fn mk_atom(arena: &mut SyntaxArena<'_>, kind: &'static str, content: &'static str) -> SyntaxId {
-        arena.alloc(Syntax::Atom(Atom {
-            kind,
-            byte_range: 0..content.len(),
-            content,
-            content_id: ContentId::for_atom(kind, content),
-            next_sibling: None,
-        }))
+        lower_tree(&tree, Arc::from(source))
     }
 
     /// Expand a fresh single-vertex arena and return the kinds of edge it
     /// generates, exercising [`expand`] the way the search loop does.
     fn expanded_edges(
-        lhs_arena: &SyntaxArena<'_>,
-        rhs_arena: &SyntaxArena<'_>,
+        lhs_arena: &SyntaxArena,
+        rhs_arena: &SyntaxArena,
         lhs: Option<SyntaxId>,
         rhs: Option<SyntaxId>,
     ) -> Vec<Edge> {
@@ -596,9 +587,9 @@ mod tests {
 
     #[test]
     fn expand_matching_atoms_yields_unchanged() {
-        let mut arena = SyntaxArena::new();
-        let lhs = mk_atom(&mut arena, "ident", "x");
-        let rhs = mk_atom(&mut arena, "ident", "x");
+        let mut arena = SyntaxArena::default();
+        let lhs = arena.alloc_atom("ident", "x");
+        let rhs = arena.alloc_atom("ident", "x");
         let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
         assert!(edges
             .iter()
@@ -607,9 +598,9 @@ mod tests {
 
     #[test]
     fn expand_distinct_atoms_yields_only_novel() {
-        let mut arena = SyntaxArena::new();
-        let lhs = mk_atom(&mut arena, "ident", "alpha");
-        let rhs = mk_atom(&mut arena, "ident", "beta");
+        let mut arena = SyntaxArena::default();
+        let lhs = arena.alloc_atom("ident", "alpha");
+        let rhs = arena.alloc_atom("ident", "beta");
         let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
         assert!(!edges.is_empty());
         assert!(edges
@@ -619,9 +610,9 @@ mod tests {
 
     #[test]
     fn expand_similar_comments_yields_replaced() {
-        let mut arena = SyntaxArena::new();
-        let lhs = mk_atom(&mut arena, "line_comment", "// alpha beta gamma");
-        let rhs = mk_atom(&mut arena, "line_comment", "// alpha beta delta");
+        let mut arena = SyntaxArena::default();
+        let lhs = arena.alloc_atom("line_comment", "// alpha beta gamma");
+        let rhs = arena.alloc_atom("line_comment", "// alpha beta delta");
         let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
         assert!(edges
             .iter()
@@ -630,13 +621,9 @@ mod tests {
 
     #[test]
     fn expand_one_line_strings_over_the_cap_yields_novel() {
-        let mut arena = SyntaxArena::new();
-        let lhs = mk_atom(&mut arena, "string_literal", "x".repeat(5000).leak());
-        let rhs = mk_atom(
-            &mut arena,
-            "string_literal",
-            format!("{}y", "x".repeat(4999)).leak(),
-        );
+        let mut arena = SyntaxArena::default();
+        let lhs = arena.alloc_atom("string_literal", &"x".repeat(5000));
+        let rhs = arena.alloc_atom("string_literal", &format!("{}y", "x".repeat(4999)));
 
         let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
         assert!(
@@ -649,16 +636,12 @@ mod tests {
 
     #[test]
     fn expand_tall_similar_comments_over_the_cap_yields_replaced() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let body: String = (0..100)
             .map(|i| format!("// line {i:04} of a long comment block that fills its row\n"))
             .collect();
-        let lhs = mk_atom(&mut arena, "block_comment", body.clone().leak());
-        let rhs = mk_atom(
-            &mut arena,
-            "block_comment",
-            body.replace("line 0042", "LINE 0042").leak(),
-        );
+        let lhs = arena.alloc_atom("block_comment", &body);
+        let rhs = arena.alloc_atom("block_comment", &body.replace("line 0042", "LINE 0042"));
 
         let edges = expanded_edges(&arena, &arena, Some(lhs), Some(rhs));
         assert!(

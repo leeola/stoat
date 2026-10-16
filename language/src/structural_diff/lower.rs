@@ -18,28 +18,40 @@ use super::{
     arena::{Atom, List, Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
 };
-use std::ops::Range;
+#[cfg(test)]
+use std::cell::Cell;
+use std::{ops::Range, sync::Arc};
 use tree_sitter::TreeCursor;
+
+#[cfg(test)]
+thread_local! {
+    /// How many trees this thread has lowered, so a test can tell a lowering
+    /// that a memo spared from one that ran.
+    pub(super) static LOWERINGS: Cell<usize> = const { Cell::new(0) };
+}
 
 /// Lower an entire [`tree_sitter::Tree`]'s root node into a fresh
 /// [`SyntaxArena`]. The returned [`SyntaxId`] is the root of the
 /// lowered structure; iterate via [`SyntaxArena::get`] from there.
 ///
-/// `source` must be the same byte slice that produced the tree. Atom
-/// content slices borrow from it, so the arena's lifetime is bounded
-/// by `source`.
-pub fn lower_tree<'a>(tree: &tree_sitter::Tree, source: &'a str) -> (SyntaxArena<'a>, SyntaxId) {
+/// `source` must be the text that produced the tree. The arena keeps it, and
+/// each atom names its text in it by byte range.
+pub fn lower_tree(tree: &tree_sitter::Tree, source: Arc<str>) -> (SyntaxArena, SyntaxId) {
+    #[cfg(test)]
+    LOWERINGS.with(|count| count.set(count.get() + 1));
+
     let root = tree.root_node();
 
     // The descendant count bounds the arena from above rather than matching it.
     // A node with no named children lowers to one atom however many anonymous
     // descendants it holds. Over-reserving is the safe direction here, and the
     // bound is tight in practice.
-    let mut arena = SyntaxArena::with_capacity(root.descendant_count());
+    let text = Arc::clone(&source);
+    let mut arena = SyntaxArena::with_capacity(source, root.descendant_count());
 
     let mut cursor = tree.walk();
     let mut scratch = Scratch::default();
-    let root_id = lower_node(&mut arena, &mut cursor, source, &mut scratch);
+    let root_id = lower_node(&mut arena, &mut cursor, &text, &mut scratch);
     arena.link_siblings();
     (arena, root_id)
 }
@@ -56,25 +68,24 @@ struct Scratch {
     cids: Vec<ContentId>,
 }
 
-fn lower_node<'a>(
-    arena: &mut SyntaxArena<'a>,
+fn lower_node(
+    arena: &mut SyntaxArena,
     cursor: &mut TreeCursor<'_>,
-    source: &'a str,
+    source: &str,
     scratch: &mut Scratch,
 ) -> SyntaxId {
     let node = cursor.node();
     let kind = node.kind();
 
     if node.named_child_count() == 0 {
-        // Leaf: emit as an atom with the literal source slice for its
-        // byte range.
-        let range = node.start_byte()..node.end_byte();
-        let content = &source[range.start.min(source.len())..range.end.min(source.len())];
+        // Leaf: emit as an atom over its byte range. The content id hashes the
+        // same slice that the arena reads back for the atom's text.
+        let byte_range = node.start_byte()..node.end_byte();
+        let content = &source[byte_range.start.min(source.len())..byte_range.end.min(source.len())];
         return arena.alloc(Syntax::Atom(Atom {
             kind,
-            byte_range: range,
-            content,
             content_id: ContentId::for_atom(kind, content),
+            byte_range,
             next_sibling: None,
         }));
     }
@@ -108,7 +119,6 @@ fn lower_node<'a>(
         children,
         content_id,
         next_sibling: None,
-        _marker: std::marker::PhantomData,
     }))
 }
 
@@ -124,7 +134,7 @@ fn lower_node<'a>(
 /// boundaries, which is the convention the extent helpers read as "no explicit
 /// delimiter, derive the extent from the children instead".
 fn delimiter_ranges(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     node: tree_sitter::Node<'_>,
     child_ids: &[SyntaxId],
 ) -> (Range<usize>, Range<usize>) {
@@ -145,7 +155,7 @@ fn delimiter_ranges(
     let (Syntax::Atom(open), Syntax::Atom(close)) = (arena.get(*first), arena.get(*last)) else {
         return undelimited();
     };
-    if !BRACKET_PAIRS.contains(&(open.content, close.content)) {
+    if !BRACKET_PAIRS.contains(&(arena.text(open), arena.text(close))) {
         return undelimited();
     }
 
@@ -165,7 +175,7 @@ mod tests {
     use super::*;
     use crate::{parse, LanguageRegistry};
 
-    fn rust_lang() -> std::sync::Arc<crate::Language> {
+    fn rust_lang() -> Arc<crate::Language> {
         LanguageRegistry::standard()
             .for_path(std::path::Path::new("a.rs"))
             .unwrap()
@@ -176,7 +186,7 @@ mod tests {
         let source = "fn main() {}";
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        let (arena, root_id) = lower_tree(&tree, source);
+        let (arena, root_id) = lower_tree(&tree, Arc::from(source));
 
         // The arena must contain at least the root and one inner
         // function_item; for "fn main() {}" the rust grammar produces
@@ -200,7 +210,7 @@ mod tests {
         let source = "fn alpha() {}";
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        let (arena, root_id) = lower_tree(&tree, source);
+        let (arena, root_id) = lower_tree(&tree, Arc::from(source));
 
         // Walk the lowered tree and find an atom whose content is "alpha".
         let mut stack = vec![root_id];
@@ -209,7 +219,7 @@ mod tests {
             match arena.get(id) {
                 Syntax::List(l) => stack.extend(l.children.iter().copied()),
                 Syntax::Atom(a) => {
-                    if a.content == "alpha" {
+                    if arena.text(a) == "alpha" {
                         found_alpha = true;
                         break;
                     }
@@ -220,7 +230,7 @@ mod tests {
     }
 
     /// Depth-first search for the first list of `kind`.
-    fn find_list<'a>(arena: &'a SyntaxArena<'a>, root: SyntaxId, kind: &str) -> &'a List<'a> {
+    fn find_list<'a>(arena: &'a SyntaxArena, root: SyntaxId, kind: &str) -> &'a List {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if let Syntax::List(list) = arena.get(id) {
@@ -238,14 +248,14 @@ mod tests {
         let source = "fn a() { x + y; }";
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        let (arena, root_id) = lower_tree(&tree, source);
+        let (arena, root_id) = lower_tree(&tree, Arc::from(source));
 
         let binary = find_list(&arena, root_id, "binary_expression");
         let contents: Vec<&str> = binary
             .children
             .iter()
             .map(|c| match arena.get(*c) {
-                Syntax::Atom(a) => a.content,
+                Syntax::Atom(a) => arena.text(a),
                 Syntax::List(l) => l.kind,
             })
             .collect();
@@ -257,7 +267,7 @@ mod tests {
         let source = "fn a() { x + y; }";
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        let (arena, root_id) = lower_tree(&tree, source);
+        let (arena, root_id) = lower_tree(&tree, Arc::from(source));
 
         let block = find_list(&arena, root_id, "block");
         assert_eq!(&source[block.open_byte_range.clone()], "{");
@@ -272,13 +282,13 @@ mod tests {
         let source = "fn a() { let x = 1; }";
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        let (arena, root_id) = lower_tree(&tree, source);
+        let (arena, root_id) = lower_tree(&tree, Arc::from(source));
 
         let decl = find_list(&arena, root_id, "let_declaration");
         let ends: Vec<&str> = [decl.children.first(), decl.children.last()]
             .iter()
             .map(|c| match arena.get(*c.expect("children")) {
-                Syntax::Atom(a) => a.content,
+                Syntax::Atom(a) => arena.text(a),
                 Syntax::List(l) => l.kind,
             })
             .collect();
@@ -297,8 +307,8 @@ mod tests {
         let lang = rust_lang();
         let tree1 = parse(&lang, source, None).unwrap();
         let tree2 = parse(&lang, source, None).unwrap();
-        let (arena1, root1) = lower_tree(&tree1, source);
-        let (arena2, root2) = lower_tree(&tree2, source);
+        let (arena1, root1) = lower_tree(&tree1, Arc::from(source));
+        let (arena2, root2) = lower_tree(&tree2, Arc::from(source));
         assert_eq!(
             arena1.get(root1).content_id(),
             arena2.get(root2).content_id()
@@ -310,8 +320,8 @@ mod tests {
         let lang = rust_lang();
         let tree_a = parse(&lang, "fn foo() {}", None).unwrap();
         let tree_b = parse(&lang, "fn bar() {}", None).unwrap();
-        let (arena_a, root_a) = lower_tree(&tree_a, "fn foo() {}");
-        let (arena_b, root_b) = lower_tree(&tree_b, "fn bar() {}");
+        let (arena_a, root_a) = lower_tree(&tree_a, Arc::from("fn foo() {}"));
+        let (arena_b, root_b) = lower_tree(&tree_b, Arc::from("fn bar() {}"));
         assert_ne!(
             arena_a.get(root_a).content_id(),
             arena_b.get(root_b).content_id(),

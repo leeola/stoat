@@ -10,7 +10,7 @@
 //! borrows without interior mutation.
 
 use super::content_id::ContentId;
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 /// Stable handle to a node owned by a [`SyntaxArena`]. Indices are dense
 /// (one per allocation) and only valid for the arena that produced them.
@@ -20,13 +20,13 @@ pub struct SyntaxId(pub usize);
 /// One node in the structural-diff intermediate tree. Either a delimited
 /// container with children (`List`) or a literal leaf (`Atom`).
 #[derive(Debug)]
-pub enum Syntax<'a> {
-    List(List<'a>),
-    Atom(Atom<'a>),
+pub enum Syntax {
+    List(List),
+    Atom(Atom),
 }
 
 #[derive(Debug)]
-pub struct List<'a> {
+pub struct List {
     /// Tree-sitter node kind, kept for diagnostics and the punctuation
     /// heuristic in the cost function.
     pub kind: &'static str,
@@ -48,21 +48,14 @@ pub struct List<'a> {
     /// [`SyntaxArena::link_siblings`] after the tree is fully
     /// constructed; until then it stays `None`.
     pub next_sibling: Option<SyntaxId>,
-    /// Gives `List` the source lifetime that [`Syntax`] carries.
-    ///
-    /// An atom borrows its text from the source, and a list borrows nothing of
-    /// its own, so the marker is what uses the lifetime parameter.
-    pub _marker: std::marker::PhantomData<&'a ()>,
 }
 
 #[derive(Debug)]
-pub struct Atom<'a> {
+pub struct Atom {
     pub kind: &'static str,
+    /// The atom's text in the source of its arena, which
+    /// [`SyntaxArena::text`] reads.
     pub byte_range: Range<usize>,
-    /// Literal text of this atom. The lifetime ties the slice to the
-    /// source string the arena was built against; nodes never outlive
-    /// their source.
-    pub content: &'a str,
     pub content_id: ContentId,
     /// Sibling that follows this node in its parent's children list,
     /// or `None` if this is the last child (or the root). Set by
@@ -71,39 +64,50 @@ pub struct Atom<'a> {
     pub next_sibling: Option<SyntaxId>,
 }
 
-/// Owns every [`Syntax`] node in a single diff invocation. Drop the arena
-/// and the entire tree drops with it.
+/// Owns every [`Syntax`] node of one lowered tree, and the source text that
+/// its atoms name by byte range.
+///
+/// The arena holds the text rather than borrowing it, so it outlives the call
+/// that lowered it. A diff base that does not change between diffs is then
+/// lowered once.
 #[derive(Default)]
-pub struct SyntaxArena<'a> {
-    nodes: Vec<Syntax<'a>>,
+pub struct SyntaxArena {
+    nodes: Vec<Syntax>,
+    source: Arc<str>,
 }
 
-impl<'a> SyntaxArena<'a> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// An arena sized for `nodes` entries up front.
+impl SyntaxArena {
+    /// An arena over `source`, sized for `nodes` entries up front.
     ///
     /// Lowering pushes one entry per node of a whole parse tree, which is tens
     /// of thousands for an ordinary source file and a dozen or more reallocs
     /// from an empty `Vec`. Callers that know the tree's node count in advance
     /// pay one allocation instead.
-    pub fn with_capacity(nodes: usize) -> Self {
+    pub fn with_capacity(source: Arc<str>, nodes: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(nodes),
+            source,
         }
     }
 
     /// Move `node` into the arena and return its [`SyntaxId`].
-    pub fn alloc(&mut self, node: Syntax<'a>) -> SyntaxId {
+    pub fn alloc(&mut self, node: Syntax) -> SyntaxId {
         let id = SyntaxId(self.nodes.len());
         self.nodes.push(node);
         id
     }
 
-    pub fn get(&self, id: SyntaxId) -> &Syntax<'a> {
+    pub fn get(&self, id: SyntaxId) -> &Syntax {
         &self.nodes[id.0]
+    }
+
+    /// The text of `atom`, read from this arena's source.
+    ///
+    /// A range past the end of the source reads as cut off at the end, so a
+    /// tree that names more bytes than its text holds yields short text.
+    pub fn text(&self, atom: &Atom) -> &str {
+        let len = self.source.len();
+        &self.source[atom.byte_range.start.min(len)..atom.byte_range.end.min(len)]
     }
 
     pub fn len(&self) -> usize {
@@ -184,7 +188,25 @@ impl<'a> SyntaxArena<'a> {
     }
 }
 
-impl<'a> Syntax<'a> {
+#[cfg(test)]
+impl SyntaxArena {
+    /// Append `content` to the source and allocate an atom over it.
+    ///
+    /// A test that builds an arena by hand and reads its atoms' text back needs
+    /// each atom at its own range of one source.
+    pub(super) fn alloc_atom(&mut self, kind: &'static str, content: &str) -> SyntaxId {
+        let start = self.source.len();
+        self.source = Arc::from(format!("{}{content}", self.source));
+        self.alloc(Syntax::Atom(Atom {
+            kind,
+            byte_range: start..start + content.len(),
+            content_id: ContentId::for_atom(kind, content),
+            next_sibling: None,
+        }))
+    }
+}
+
+impl Syntax {
     pub fn content_id(&self) -> ContentId {
         match self {
             Syntax::List(l) => l.content_id,
@@ -214,11 +236,10 @@ impl<'a> Syntax<'a> {
 mod tests {
     use super::*;
 
-    fn mk_atom(kind: &'static str, content: &'static str, range: Range<usize>) -> Syntax<'static> {
+    fn mk_atom(kind: &'static str, content: &'static str, range: Range<usize>) -> Syntax {
         Syntax::Atom(Atom {
             kind,
             byte_range: range,
-            content,
             content_id: ContentId::for_atom(kind, content),
             next_sibling: None,
         })
@@ -228,7 +249,7 @@ mod tests {
         kind: &'static str,
         children: Vec<SyntaxId>,
         child_ids: &[ContentId],
-    ) -> Syntax<'static> {
+    ) -> Syntax {
         Syntax::List(List {
             kind,
             open_byte_range: 0..1,
@@ -236,13 +257,12 @@ mod tests {
             children,
             content_id: ContentId::for_list(kind, child_ids),
             next_sibling: None,
-            _marker: std::marker::PhantomData,
         })
     }
 
     #[test]
     fn arena_holds_atoms() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let a = arena.alloc(mk_atom("ident", "foo", 0..3));
         let b = arena.alloc(mk_atom("ident", "bar", 4..7));
         assert_eq!(arena.len(), 2);
@@ -251,7 +271,7 @@ mod tests {
 
     #[test]
     fn arena_holds_lists_with_children() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let child1 = arena.alloc(mk_atom("ident", "x", 1..2));
         let child2 = arena.alloc(mk_atom("ident", "y", 3..4));
         let parent_id = arena.alloc(mk_list_with(
@@ -272,7 +292,7 @@ mod tests {
 
     #[test]
     fn list_content_id_collides_for_identical_structure() {
-        fn build(arena: &mut SyntaxArena<'_>) -> SyntaxId {
+        fn build(arena: &mut SyntaxArena) -> SyntaxId {
             let c1 = arena.alloc(mk_atom("ident", "x", 0..1));
             let c2 = arena.alloc(mk_atom("ident", "y", 0..1));
             arena.alloc(mk_list_with(
@@ -284,7 +304,7 @@ mod tests {
                 ],
             ))
         }
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let a = build(&mut arena);
         let b = build(&mut arena);
         assert_eq!(arena.get(a).content_id(), arena.get(b).content_id());
@@ -292,7 +312,7 @@ mod tests {
 
     #[test]
     fn link_siblings_sets_next_sibling_for_each_child() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let c1 = arena.alloc(mk_atom("ident", "a", 0..1));
         let c2 = arena.alloc(mk_atom("ident", "b", 0..1));
         let c3 = arena.alloc(mk_atom("ident", "c", 0..1));

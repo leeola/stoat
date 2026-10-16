@@ -33,7 +33,7 @@ use std::{
     collections::{HashMap, VecDeque},
     marker::PhantomData,
     ops::Range,
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex, MutexGuard},
 };
 use tree_sitter::Tree;
 
@@ -70,11 +70,24 @@ pub fn diff_with_language(language: &Arc<Language>, lhs: &str, rhs: &str) -> Opt
 /// one ancestor, so the base text arrives already parsed more often than not.
 /// Parsing dominates the per-file cost, which turns the repeat into a hash.
 ///
-/// Only the tree is kept. The lowered arena borrows the source text through
-/// its atom content slices, so it cannot outlive the call that built it.
+/// A base also keeps its lowered arena beside its tree. An editor diffs its
+/// buffer against one base after every settled edit, and lowering the base
+/// costs about as much as lowering the buffer. A diff takes the arena out for
+/// its search and puts it back when its prepared file drops.
 #[derive(Default)]
 pub struct TreeMemo {
-    entries: VecDeque<(TreeKey, Tree)>,
+    entries: VecDeque<(TreeKey, Tree, Option<LoweredBase>)>,
+}
+
+/// A base side's lowered arena and root, kept in a [`TreeMemo`] beside the
+/// base's tree.
+///
+/// Its sibling links are the ones [`SyntaxArena::link_siblings`] sets. A search
+/// relinks the runs it walks, so a prepared file restores the links before it
+/// puts the arena back.
+struct LoweredBase {
+    arena: SyntaxArena,
+    root: SyntaxId,
 }
 
 /// A shared [`TreeMemo`]. Callers that want hits across separate diffs hold
@@ -92,6 +105,9 @@ type TreeKey = ([u8; 32], &'static str);
 /// the files on screen or a merge over one ancestor, so the working set is
 /// small. Trees are large enough that keeping more of them to catch a rarer
 /// hit is the wrong trade.
+///
+/// An entry for a base also holds its lowered arena, about 110 bytes per node
+/// and a copy of the text, so a base the size of app.rs adds about 8 MB.
 const MEMO_CAPACITY: usize = 8;
 
 impl TreeMemo {
@@ -107,18 +123,42 @@ impl TreeMemo {
     fn get(&self, key: &TreeKey) -> Option<Tree> {
         self.entries
             .iter()
-            .find(|(entry, _)| entry == key)
-            .map(|(_, tree)| tree.clone())
+            .find(|(entry, _, _)| entry == key)
+            .map(|(_, tree, _)| tree.clone())
     }
 
     fn insert(&mut self, key: TreeKey, tree: Tree) {
-        if self.entries.iter().any(|(entry, _)| *entry == key) {
+        if self.entries.iter().any(|(entry, _, _)| *entry == key) {
             return;
         }
         if self.entries.len() == MEMO_CAPACITY {
             self.entries.pop_front();
         }
-        self.entries.push_back((key, tree));
+        self.entries.push_back((key, tree, None));
+    }
+
+    /// Take the lowered arena of `key`'s entry, which leaves the slot empty
+    /// while one diff searches the arena.
+    fn take_lowered(&mut self, key: &TreeKey) -> Option<LoweredBase> {
+        self.entries
+            .iter_mut()
+            .find(|(entry, _, _)| entry == key)?
+            .2
+            .take()
+    }
+
+    /// Put `lowered` in the slot of `key`'s entry.
+    ///
+    /// Two diffs of one base that run at once each lower an arena. The one that
+    /// gets back first fills the slot, and the other arena drops. An entry that
+    /// the memo dropped meanwhile takes nothing.
+    fn return_lowered(&mut self, key: &TreeKey, lowered: LoweredBase) {
+        let entry = self.entries.iter_mut().find(|(entry, _, _)| entry == key);
+        if let Some((_, _, slot)) = entry
+            && slot.is_none()
+        {
+            *slot = Some(lowered);
+        }
     }
 }
 
@@ -152,22 +192,67 @@ fn parse_memoized_within(
     memo: Option<&TreeCache>,
     retain_limit: usize,
 ) -> Option<Tree> {
-    // A text over the limit is never stored, so its lookup always misses.
-    let Some(memo) = memo.filter(|_| text.len() <= retain_limit) else {
-        return parse(language, text, None);
-    };
+    match MemoSlot::new(language, text, memo, retain_limit) {
+        Some(slot) => slot.parse(language, text),
+        None => parse(language, text, None),
+    }
+}
 
-    let key: TreeKey = (blake3::hash(text.as_bytes()).into(), language.name);
-    if let Some(tree) = memo.lock().expect("tree memo poisoned").get(&key) {
-        return Some(tree);
+/// Where a [`TreeMemo`] keeps the tree of one text, and its lowered arena when
+/// the text is a base.
+struct MemoSlot {
+    memo: TreeCache,
+    key: TreeKey,
+}
+
+impl MemoSlot {
+    /// The slot of `text` parsed as `language` in `memo`, or `None` when there is
+    /// no memo or `text` is over `retain_limit`.
+    ///
+    /// A text over the limit is never stored, so a lookup for it always misses.
+    fn new(
+        language: &Language,
+        text: &str,
+        memo: Option<&TreeCache>,
+        retain_limit: usize,
+    ) -> Option<Self> {
+        let memo = memo.filter(|_| text.len() <= retain_limit)?;
+        Some(Self {
+            memo: Arc::clone(memo),
+            key: (blake3::hash(text.as_bytes()).into(), language.name),
+        })
     }
 
-    let tree = parse(language, text, None)?;
-    memo.lock()
-        .expect("tree memo poisoned")
-        .insert(key, tree.clone());
+    /// Parse `text`, answering from the memo when the slot holds a tree, and
+    /// filling the slot when it does not.
+    fn parse(&self, language: &Arc<Language>, text: &str) -> Option<Tree> {
+        if let Some(tree) = self.lock().get(&self.key) {
+            return Some(tree);
+        }
 
-    Some(tree)
+        let tree = parse(language, text, None)?;
+        self.lock().insert(self.key, tree.clone());
+        Some(tree)
+    }
+
+    fn take_lowered(&self) -> Option<LoweredBase> {
+        self.lock().take_lowered(&self.key)
+    }
+
+    /// Put `lowered` back in the slot.
+    ///
+    /// A poisoned lock drops `lowered` instead, which costs the next diff only
+    /// its head start. This runs from a drop, and a panic in a drop during an
+    /// unwind aborts the process.
+    fn return_lowered(&self, lowered: LoweredBase) {
+        if let Ok(mut memo) = self.memo.lock() {
+            memo.return_lowered(&self.key, lowered);
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, TreeMemo> {
+        self.memo.lock().expect("tree memo poisoned")
+    }
 }
 
 /// Variant of [`diff_with_language`] that accepts an optional
@@ -209,8 +294,8 @@ pub fn diff_with_language_cancellable(
 /// expensive per-file stages run once even when a file needs both.
 ///
 /// The `'a` lifetime ties the value to the source texts it was prepared
-/// from. The arenas inside borrow those texts through their atom content
-/// slices, so the retained value never outlives its sources.
+/// from, which finalizing reads to refine each replaced pair. Dropping the
+/// value puts a memoized base's lowered arena back in its memo.
 pub struct PreparedDiff<'a> {
     prepared: PreparedFile<'a>,
     _marker: PhantomData<&'a str>,
@@ -436,8 +521,8 @@ pub fn diff_changeset_from_slots(mut slots: Vec<ChangesetSlot<'_>>) -> Vec<DiffR
 /// identifying [`BufferRef`] travels alongside in [`ChangesetSlot`]
 /// rather than here, since single-file diffs have no buffer.
 struct PreparedFile<'a> {
-    lhs_arena: SyntaxArena<'a>,
-    rhs_arena: SyntaxArena<'a>,
+    lhs_arena: SyntaxArena,
+    rhs_arena: SyntaxArena,
     lhs_root: SyntaxId,
     rhs_root: SyntaxId,
     lhs_changes: ChangeMap,
@@ -460,14 +545,36 @@ struct PreparedFile<'a> {
     /// The byte spans, lhs then rhs, of the sections whose search passed the
     /// vertex cap or was cancelled, which [`DiffResult::unsearched`] reports.
     unsearched: Vec<(Range<usize>, Range<usize>)>,
+    /// The memo slot of the base, which takes `lhs_arena` back when the file
+    /// drops. `None` when the diff ran with no memo or the base is too large to
+    /// keep.
+    base_slot: Option<MemoSlot>,
+}
+
+/// The arena goes back on drop rather than when the search ends, because
+/// finalizing reads `lhs_arena` after [`prepare_per_file`] returns.
+impl Drop for PreparedFile<'_> {
+    fn drop(&mut self) {
+        let Some(slot) = self.base_slot.take() else {
+            return;
+        };
+        // The search relinked the runs it walked, and the next diff of this base
+        // walks the links that the lowering set.
+        let mut arena = std::mem::take(&mut self.lhs_arena);
+        arena.link_siblings();
+        slot.return_lowered(LoweredBase {
+            arena,
+            root: self.lhs_root,
+        });
+    }
 }
 
 /// Borrowed view of the arenas + line indices for one prepared file.
 /// Used by [`build_move_metadata_changeset`] when materialising
 /// [`MoveSource`]s for cross-file moves.
 struct PreparedFileView<'a> {
-    lhs_arena: &'a SyntaxArena<'a>,
-    rhs_arena: &'a SyntaxArena<'a>,
+    lhs_arena: &'a SyntaxArena,
+    rhs_arena: &'a SyntaxArena,
     lhs_lines: &'a LineIndex,
     rhs_lines: &'a LineIndex,
 }
@@ -509,7 +616,7 @@ fn prepare_per_file<'a>(
     // Only `lhs` is memoized. It is the base in every caller, where `rhs` is
     // the buffer being edited, so retaining `rhs` would never be read back and
     // would evict live base entries.
-    let lhs_tree = parse_memoized(language, lhs, memo)?;
+    let base_slot = MemoSlot::new(language, lhs, memo, DEFAULT_BYTE_LIMIT);
 
     // A tree built from another grammar aborts the process inside tree-sitter,
     // so the guard lives here rather than at each caller. Editors reach this
@@ -524,8 +631,18 @@ fn prepare_per_file<'a>(
         },
     };
 
-    let (mut lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
-    let (mut rhs_arena, rhs_root) = lower_tree(rhs_tree, rhs);
+    // A memoized base comes back lowered, so only a miss parses and lowers it.
+    let (mut lhs_arena, lhs_root) = match base_slot.as_ref().and_then(MemoSlot::take_lowered) {
+        Some(LoweredBase { arena, root }) => (arena, root),
+        None => {
+            let lhs_tree = match &base_slot {
+                Some(slot) => slot.parse(language, lhs)?,
+                None => parse(language, lhs, None)?,
+            };
+            lower_tree(&lhs_tree, Arc::from(lhs))
+        },
+    };
+    let (mut rhs_arena, rhs_root) = lower_tree(rhs_tree, Arc::from(rhs));
 
     let mut preprocess = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
@@ -604,11 +721,12 @@ fn prepare_per_file<'a>(
         replaced_atoms,
         matched_nodes,
         unsearched,
+        base_slot,
     })
 }
 
 /// The bytes from the start of the first node of `run` to the end of its last.
-fn run_span(arena: &SyntaxArena<'_>, run: &[SyntaxId]) -> Range<usize> {
+fn run_span(arena: &SyntaxArena, run: &[SyntaxId]) -> Range<usize> {
     match (run.first(), run.last()) {
         (Some(&first), Some(&last)) => {
             full_byte_range(arena, first).start..full_byte_range(arena, last).end
@@ -700,7 +818,7 @@ fn matched_atom_pairs(
                 prepared.rhs_arena.get(rhs_id),
             ) {
                 (Syntax::Atom(lhs), Syntax::Atom(rhs)) => {
-                    if lhs.content == rhs.content
+                    if prepared.lhs_arena.text(lhs) == prepared.rhs_arena.text(rhs)
                         && !lhs.byte_range.is_empty()
                         && lhs_changes.get(lhs_id) == ChangeKind::Unchanged
                         && rhs_changes.get(rhs_id) == ChangeKind::Unchanged
@@ -742,7 +860,7 @@ fn matched_atom_pairs(
 /// different metadata stay separate so downstream callers can offer
 /// per-move jump actions.
 fn collect_changes(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     root: SyntaxId,
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
@@ -830,7 +948,7 @@ fn arc_opt_eq(a: &Option<Arc<MoveMetadata>>, b: &Option<Arc<MoveMetadata>>) -> b
 }
 
 fn walk_emit_atoms(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     id: SyntaxId,
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
@@ -885,8 +1003,8 @@ fn walk_emit_atoms(
 fn pair_replaced_atoms(
     changes: &mut [DiffChange],
     pairs: &[(SyntaxId, SyntaxId)],
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
 ) {
     let mut next_pair_id = 0u32;
     for (lhs_id, rhs_id) in pairs {
@@ -912,7 +1030,7 @@ fn pair_replaced_atoms(
 }
 
 /// The byte range of the atom at `id`, or `None` when `id` names a list.
-fn atom_range(arena: &SyntaxArena<'_>, id: SyntaxId) -> Option<Range<usize>> {
+fn atom_range(arena: &SyntaxArena, id: SyntaxId) -> Option<Range<usize>> {
     match arena.get(id) {
         Syntax::Atom(atom) => Some(atom.byte_range.clone()),
         Syntax::List(_) => None,
@@ -1016,7 +1134,7 @@ fn build_move_metadata_changeset(
     out
 }
 
-fn walk_descendants(arena: &SyntaxArena<'_>, root: SyntaxId, f: &mut impl FnMut(SyntaxId)) {
+fn walk_descendants(arena: &SyntaxArena, root: SyntaxId, f: &mut impl FnMut(SyntaxId)) {
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         f(id);
@@ -1041,7 +1159,7 @@ fn move_source_for_changeset(
     views: &[PreparedFileView<'_>],
 ) -> MoveSource {
     let view = &views[src_idx];
-    let (arena, lines): (&SyntaxArena<'_>, &LineIndex) = match side {
+    let (arena, lines): (&SyntaxArena, &LineIndex) = match side {
         Side::Lhs => (view.lhs_arena, view.lhs_lines),
         Side::Rhs => (view.rhs_arena, view.rhs_lines),
     };
@@ -1060,7 +1178,7 @@ fn move_source_for_changeset(
     }
 }
 
-fn full_byte_range(arena: &SyntaxArena<'_>, id: SyntaxId) -> Range<usize> {
+fn full_byte_range(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
     match arena.get(id) {
         Syntax::Atom(a) => a.byte_range.clone(),
         Syntax::List(l) => {
@@ -1122,7 +1240,11 @@ impl LineIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{structural_diff, LanguageRegistry};
+    use crate::{
+        structural_diff::{self, lower::LOWERINGS},
+        LanguageRegistry,
+    };
+    use std::cell::Cell;
 
     const TEST_MODS: &str = "#[cfg(test)]\nmod a;\n#[cfg(test)]\nmod b;\n#[cfg(test)]\nmod d;\n";
     const TEST_MODS_WITH_C: &str =
@@ -2400,8 +2522,47 @@ mod tests {
         assert_eq!(guard.entries.len(), MEMO_CAPACITY, "capacity is the bound");
         let oldest = <[u8; 32]>::from(blake3::hash(b"fn f0() { call(); }\n"));
         assert!(
-            !guard.entries.iter().any(|(key, _)| key.0 == oldest),
+            !guard.entries.iter().any(|(key, _, _)| key.0 == oldest),
             "the first base is the one evicted",
+        );
+    }
+
+    /// The second diff against one base takes the lowered base from the memo,
+    /// and the memo then holds that base with the links a fresh lowering sets.
+    ///
+    /// Each search relinks the runs it walks. A base kept with those links ends
+    /// the next search early, at the end of a run of the diff before.
+    #[test]
+    fn a_memoized_base_is_lowered_once_and_kept_with_its_links() {
+        let lang = rust_lang();
+        let base = "fn a() { one(); two(); }\nfn b() { three(); }\n";
+        let memo: TreeCache = TreeCache::default();
+        let lowerings = || LOWERINGS.with(Cell::get);
+
+        let before = lowerings();
+        for rhs in [
+            "fn a() { one(); TWO(); }\nfn b() { three(); }\n",
+            "fn a() { one(); two(); }\nfn b() { THREE(); }\n",
+        ] {
+            prepare_diff(&lang, base, rhs, None, Some(&memo), None).expect("diff parses");
+        }
+        let lowered = lowerings() - before;
+
+        let links = |arena: &SyntaxArena| -> Vec<Option<SyntaxId>> {
+            (0..arena.len())
+                .map(|i| arena.get(SyntaxId(i)).next_sibling())
+                .collect()
+        };
+        let (fresh, _) = lower_tree(&parse(&lang, base, None).unwrap(), Arc::from(base));
+        let guard = memo.lock().expect("memo poisoned");
+        let kept = guard.entries[0]
+            .2
+            .as_ref()
+            .expect("the memo keeps the base");
+        assert_eq!(
+            (lowered, links(&kept.arena)),
+            (3, links(&fresh)),
+            "two diffs lower the base once and each buffer once, and keep fresh links",
         );
     }
 

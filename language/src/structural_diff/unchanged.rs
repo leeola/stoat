@@ -201,19 +201,15 @@ struct ArenaFacts {
 }
 
 impl ArenaFacts {
-    fn ids(
-        &self,
-        lhs_arena: &SyntaxArena<'_>,
-        rhs_arena: &SyntaxArena<'_>,
-    ) -> &(IdCounts, IdCounts) {
+    fn ids(&self, lhs_arena: &SyntaxArena, rhs_arena: &SyntaxArena) -> &(IdCounts, IdCounts) {
         self.ids
             .get_or_init(|| (count_ids(lhs_arena), count_ids(rhs_arena)))
     }
 
     fn sizes(
         &self,
-        lhs_arena: &SyntaxArena<'_>,
-        rhs_arena: &SyntaxArena<'_>,
+        lhs_arena: &SyntaxArena,
+        rhs_arena: &SyntaxArena,
     ) -> &(SubtreeCounts, SubtreeCounts) {
         self.sizes
             .get_or_init(|| (lhs_arena.subtree_counts(), rhs_arena.subtree_counts()))
@@ -224,9 +220,9 @@ impl ArenaFacts {
 /// returning a [`PreprocessResult`] that tags every node either
 /// [`ChangeKind::Unchanged`] or [`ChangeKind::Pending`].
 pub fn mark_unchanged(
-    lhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
     lhs_root: SyntaxId,
-    rhs_arena: &SyntaxArena<'_>,
+    rhs_arena: &SyntaxArena,
     rhs_root: SyntaxId,
 ) -> PreprocessResult {
     let mut result = PreprocessResult {
@@ -271,8 +267,8 @@ pub fn mark_unchanged(
 /// its members by shared content, as [`emit_run`] describes. Every other
 /// non-empty run goes to `out.sections` for the per-section Dijkstra search.
 fn pair_children(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
     facts: &ArenaFacts,
@@ -347,8 +343,8 @@ fn pair_children(
 /// [`ATOM_ANCHOR_BUDGET`]. Under the budget, the atom stays in its section for
 /// the search to pair.
 fn splitting_anchors(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_mid: &[SyntaxId],
     rhs_mid: &[SyntaxId],
     pairs: Vec<(usize, usize)>,
@@ -382,8 +378,8 @@ fn splitting_anchors(
 /// The peel and the pairing keep edited members apart, so the search runs
 /// inside each member and never over the whole run as one section.
 fn emit_run(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_run: &[SyntaxId],
     rhs_run: &[SyntaxId],
     facts: &ArenaFacts,
@@ -435,8 +431,8 @@ fn emit_run(
 /// Recurse into `lhs_id` and `rhs_id` when they are two lists of one kind, or
 /// emit the pair as a one-member section.
 fn emit_pair(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
     facts: &ArenaFacts,
@@ -455,8 +451,8 @@ fn emit_pair(
 /// matched parent does not count again through its children. The counts span
 /// each whole arena, so a subtree repeated anywhere in its file pins nothing.
 fn is_mostly_unchanged_pair(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs: SyntaxId,
     rhs: SyntaxId,
     facts: &ArenaFacts,
@@ -508,8 +504,8 @@ fn is_mostly_unchanged_pair(
 /// rest as additions, while the search descends into the wrapper and aligns
 /// them all. A run that fails the member count reads no facts.
 fn pairs_by_content(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_run: &[SyntaxId],
     rhs_run: &[SyntaxId],
     facts: &ArenaFacts,
@@ -532,8 +528,8 @@ fn node_total(sizes: &[(u32, u32)], run: &[SyntaxId]) -> u64 {
 /// Each pair goes to [`emit_pair`], and each stretch between two pairs goes
 /// through [`emit_run`] again.
 fn emit_paired(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_run: &[SyntaxId],
     rhs_run: &[SyntaxId],
     facts: &ArenaFacts,
@@ -569,8 +565,8 @@ fn emit_paired(
 /// most once. The result is their heaviest chain whose rhs indices rise with
 /// the lhs indices, so the run splits into stretches in order.
 fn pair_by_shared_content(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_run: &[SyntaxId],
     rhs_run: &[SyntaxId],
     facts: &ArenaFacts,
@@ -633,7 +629,7 @@ fn pair_by_shared_content(
 /// A node under the minimum is skipped with all of its descendants, because
 /// no subtree inside it reaches the minimum either.
 fn holders(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     run: &[SyntaxId],
     sizes: &[(u32, u32)],
 ) -> HashMap<ContentId, SmallVec<[u32; 4]>, FxBuildHasher> {
@@ -658,7 +654,7 @@ fn holders(
     holders
 }
 
-fn same_kind_lists(lhs: &Syntax<'_>, rhs: &Syntax<'_>) -> bool {
+fn same_kind_lists(lhs: &Syntax, rhs: &Syntax) -> bool {
     matches!((lhs, rhs), (Syntax::List(lhs), Syntax::List(rhs)) if lhs.kind == rhs.kind)
 }
 
@@ -698,8 +694,8 @@ fn heaviest_rising_chain(pairs: &[(usize, usize, u64)]) -> Vec<(usize, usize)> {
 /// function whose body changed, say -- descends so only its changed statements
 /// become sections rather than the whole body.
 fn recurse_singleton_lists(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
     facts: &ArenaFacts,
@@ -718,7 +714,7 @@ fn recurse_singleton_lists(
     }
 }
 
-fn count_ids(arena: &SyntaxArena<'_>) -> IdCounts {
+fn count_ids(arena: &SyntaxArena) -> IdCounts {
     let mut counts = IdCounts::default();
     for i in 0..arena.len() {
         *counts
@@ -733,8 +729,8 @@ fn count_ids(arena: &SyntaxArena<'_>) -> IdCounts {
 ///
 /// One call does both, so no matched subtree goes unrecorded.
 fn match_subtrees(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_id: SyntaxId,
     rhs_id: SyntaxId,
     out: &mut PreprocessResult,
@@ -756,7 +752,7 @@ fn match_subtrees(
 
 /// Mark `id` and every transitive descendant in the same arena as `kind`.
 pub(crate) fn mark_subtree(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     id: SyntaxId,
     changes: &mut ChangeMap,
     kind: ChangeKind,
@@ -770,7 +766,7 @@ pub(crate) fn mark_subtree(
     }
 }
 
-fn list_children(arena: &SyntaxArena<'_>, id: SyntaxId) -> Vec<SyntaxId> {
+fn list_children(arena: &SyntaxArena, id: SyntaxId) -> Vec<SyntaxId> {
     match arena.get(id) {
         Syntax::List(l) => l.children.clone(),
         Syntax::Atom(_) => Vec::new(),
@@ -791,8 +787,8 @@ fn list_children(arena: &SyntaxArena<'_>, id: SyntaxId) -> Vec<SyntaxId> {
 /// degenerate repeats. The per-section Dijkstra search recovers those, so
 /// the diff output is unchanged.
 fn lcs_pairs(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs: &[SyntaxId],
     rhs: &[SyntaxId],
 ) -> Vec<(usize, usize)> {
@@ -857,13 +853,13 @@ mod tests {
             .unwrap()
     }
 
-    fn lower(source: &str) -> (SyntaxArena<'_>, SyntaxId) {
+    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
         let lang = rust_lang();
         let tree = parse(&lang, source, None).unwrap();
-        lower_tree(&tree, source)
+        lower_tree(&tree, std::sync::Arc::from(source))
     }
 
-    fn count_unchanged(arena: &SyntaxArena<'_>, root: SyntaxId, changes: &ChangeMap) -> usize {
+    fn count_unchanged(arena: &SyntaxArena, root: SyntaxId, changes: &ChangeMap) -> usize {
         let mut stack = vec![root];
         let mut count = 0usize;
         while let Some(id) = stack.pop() {
@@ -877,7 +873,7 @@ mod tests {
         count
     }
 
-    fn count_total(arena: &SyntaxArena<'_>, root: SyntaxId) -> usize {
+    fn count_total(arena: &SyntaxArena, root: SyntaxId) -> usize {
         let mut stack = vec![root];
         let mut count = 0usize;
         while let Some(id) = stack.pop() {
@@ -1081,7 +1077,7 @@ mod tests {
         let (rhs_arena, rhs_root) = lower(&rhs);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
-        let keep = |arena: &SyntaxArena<'_>, source: &str, changes: &ChangeMap| {
+        let keep = |arena: &SyntaxArena, source: &str, changes: &ChangeMap| {
             let id = (0..arena.len())
                 .map(SyntaxId)
                 .find(|id| {
@@ -1101,7 +1097,7 @@ mod tests {
             "every node of keep is unchanged on both sides",
         );
 
-        let kinds = |arena: &SyntaxArena<'_>, ids: &[SyntaxId]| -> Vec<&str> {
+        let kinds = |arena: &SyntaxArena, ids: &[SyntaxId]| -> Vec<&str> {
             ids.iter().map(|id| arena.get(*id).kind()).collect()
         };
         let sections: Vec<_> = result
@@ -1236,7 +1232,7 @@ mod tests {
         let (rhs_arena, rhs_root) = lower(rhs);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
-        let texts = |arena: &SyntaxArena<'_>, source: &'a str, ids: &[SyntaxId]| -> Vec<&'a str> {
+        let texts = |arena: &SyntaxArena, source: &'a str, ids: &[SyntaxId]| -> Vec<&'a str> {
             ids.iter().map(|id| &source[span(arena, *id)]).collect()
         };
         result
@@ -1247,7 +1243,7 @@ mod tests {
     }
 
     /// The byte span from the first atom under `id` to the last.
-    fn span(arena: &SyntaxArena<'_>, id: SyntaxId) -> Range<usize> {
+    fn span(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
         match arena.get(id) {
             Syntax::Atom(atom) => atom.byte_range.clone(),
             Syntax::List(list) => {
@@ -1276,17 +1272,16 @@ mod tests {
     fn lcs_pairs_in_order() {
         // Trivial sanity check on the LCS routine: input [A, B, C] and
         // [A, X, B] should produce [(0,0), (1,2)].
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         use crate::structural_diff::{
             arena::{Atom, Syntax},
             ContentId,
         };
-        let mk = |arena: &mut SyntaxArena<'_>, name: &str| {
+        let mk = |arena: &mut SyntaxArena, name: &str| {
             let id = ContentId::for_atom("ident", name);
             arena.alloc(Syntax::Atom(Atom {
                 kind: "ident",
                 byte_range: 0..0,
-                content: "",
                 content_id: id,
                 next_sibling: None,
             }))
@@ -1315,12 +1310,11 @@ mod tests {
             arena::{Atom, Syntax},
             ContentId,
         };
-        let mut arena = SyntaxArena::new();
-        let mk = |arena: &mut SyntaxArena<'_>, name: &str| {
+        let mut arena = SyntaxArena::default();
+        let mk = |arena: &mut SyntaxArena, name: &str| {
             arena.alloc(Syntax::Atom(Atom {
                 kind: "ident",
                 byte_range: 0..0,
-                content: "",
                 content_id: ContentId::for_atom("ident", name),
                 next_sibling: None,
             }))

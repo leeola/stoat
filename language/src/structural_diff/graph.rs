@@ -138,14 +138,14 @@ impl Edge {
 /// definition matches Difftastic closely enough that the +200
 /// penalty has the intended effect (variable matches win over comma
 /// matches).
-pub fn probably_punctuation(node: &Syntax<'_>) -> bool {
+pub fn probably_punctuation(arena: &SyntaxArena, node: &Syntax) -> bool {
     match node {
         Syntax::Atom(atom) => {
             let kind = atom.kind;
             if kind.contains("punctuation") {
                 return true;
             }
-            let trimmed = atom.content.trim();
+            let trimmed = arena.text(atom).trim();
             // Single ASCII char that isn't alphanumeric: probably a
             // delimiter or operator.
             trimmed.len() == 1
@@ -160,7 +160,7 @@ pub fn probably_punctuation(node: &Syntax<'_>) -> bool {
 
 /// Detect a comment-kind atom. Tree-sitter grammars conventionally
 /// name comment nodes with `comment` somewhere in the kind.
-pub fn is_comment_atom(node: &Syntax<'_>) -> bool {
+pub fn is_comment_atom(node: &Syntax) -> bool {
     match node {
         Syntax::Atom(atom) => atom.kind.contains("comment"),
         Syntax::List(_) => false,
@@ -174,7 +174,7 @@ pub fn is_comment_atom(node: &Syntax<'_>) -> bool {
 /// `double_quote_scalar`, `single_quote_scalar`, and `block_scalar`, and the
 /// block grammar of tree-sitter-markdown holds the text of a paragraph or a
 /// heading in one `inline` leaf, so those kinds count too.
-pub fn is_string_atom(node: &Syntax<'_>) -> bool {
+pub fn is_string_atom(node: &Syntax) -> bool {
     match node {
         Syntax::Atom(atom) => {
             atom.kind.contains("string")
@@ -279,8 +279,8 @@ pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
 /// `lhs_parent_id` / `rhs_parent_id` separately; we fold those into
 /// the `EnteredDelimiter` payloads.
 pub fn pop_all_parents(
-    lhs_arena: &SyntaxArena<'_>,
-    rhs_arena: &SyntaxArena<'_>,
+    lhs_arena: &SyntaxArena,
+    rhs_arena: &SyntaxArena,
     lhs_pos: Option<SyntaxId>,
     rhs_pos: Option<SyntaxId>,
     parents: Stack<EnteredDelimiter>,
@@ -440,20 +440,6 @@ pub(crate) fn push_rhs_delimiter(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structural_diff::{
-        arena::{Atom, Syntax, SyntaxArena, SyntaxId},
-        ContentId,
-    };
-
-    fn mk_atom(arena: &mut SyntaxArena<'_>, kind: &'static str, content: &'static str) -> SyntaxId {
-        arena.alloc(Syntax::Atom(Atom {
-            kind,
-            byte_range: 0..content.len(),
-            content,
-            content_id: ContentId::for_atom(kind, content),
-            next_sibling: None,
-        }))
-    }
 
     #[test]
     fn edge_costs_are_ordered_correctly() {
@@ -511,7 +497,7 @@ mod tests {
 
     #[test]
     fn yaml_scalar_and_markdown_inline_kinds_are_string_atoms() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let kinds = [
             "double_quote_scalar",
             "single_quote_scalar",
@@ -521,7 +507,7 @@ mod tests {
         ];
 
         let strings = kinds.map(|kind| {
-            let id = mk_atom(&mut arena, kind, "text");
+            let id = arena.alloc_atom(kind, "text");
             is_string_atom(arena.get(id))
         });
         assert_eq!(
@@ -597,10 +583,10 @@ mod tests {
 
     #[test]
     fn probably_punctuation_detects_single_chars() {
-        let mut arena = SyntaxArena::new();
-        let comma = mk_atom(&mut arena, "punctuation.delimiter", ",");
-        let ident = mk_atom(&mut arena, "identifier", "alpha");
-        assert!(probably_punctuation(arena.get(comma)));
-        assert!(!probably_punctuation(arena.get(ident)));
+        let mut arena = SyntaxArena::default();
+        let comma = arena.alloc_atom("punctuation.delimiter", ",");
+        let ident = arena.alloc_atom("identifier", "alpha");
+        assert!(probably_punctuation(&arena, arena.get(comma)));
+        assert!(!probably_punctuation(&arena, arena.get(ident)));
     }
 }

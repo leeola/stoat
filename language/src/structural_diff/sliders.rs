@@ -54,7 +54,7 @@ use std::collections::HashMap;
 /// component that indexes `arena`. A pair whose node slides out of an
 /// unchanged run moves to the node that takes its place.
 pub fn fix_all_sliders(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     root: SyntaxId,
     changes: &mut ChangeMap,
     pairs: &mut [(SyntaxId, SyntaxId)],
@@ -69,7 +69,7 @@ pub fn fix_all_sliders(
 }
 
 fn fix_sliders_recursive(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     id: SyntaxId,
     changes: &mut ChangeMap,
     slides: &mut Vec<(SyntaxId, SyntaxId)>,
@@ -101,7 +101,7 @@ fn fix_sliders_recursive(
 /// point, with no oscillation between passes. Two passes still run, because a
 /// cascade of slides moves the boundaries again in the second pass.
 fn slide_within_children(
-    arena: &SyntaxArena<'_>,
+    arena: &SyntaxArena,
     children: &[SyntaxId],
     changes: &mut ChangeMap,
     slides: &mut Vec<(SyntaxId, SyntaxId)>,
@@ -141,7 +141,7 @@ fn slide_within_children(
 }
 
 /// Whether `id` and every node under it carry `kind`.
-fn is_deep(arena: &SyntaxArena<'_>, id: SyntaxId, changes: &ChangeMap, kind: ChangeKind) -> bool {
+fn is_deep(arena: &SyntaxArena, id: SyntaxId, changes: &ChangeMap, kind: ChangeKind) -> bool {
     let mut stack = vec![id];
     while let Some(current) = stack.pop() {
         if changes.get(current) != kind {
@@ -196,18 +196,17 @@ mod tests {
     const U: ChangeKind = ChangeKind::Unchanged;
     const N: ChangeKind = ChangeKind::Pending;
 
-    fn mk_atom(arena: &mut SyntaxArena<'_>, kind: &'static str, content: &'static str) -> SyntaxId {
+    fn mk_atom(arena: &mut SyntaxArena, kind: &'static str, content: &'static str) -> SyntaxId {
         arena.alloc(Syntax::Atom(Atom {
             kind,
             byte_range: 0..0,
-            content,
             content_id: ContentId::for_atom(kind, content),
             next_sibling: None,
         }))
     }
 
     fn mk_list(
-        arena: &mut SyntaxArena<'_>,
+        arena: &mut SyntaxArena,
         kind: &'static str,
         children: Vec<SyntaxId>,
         cids: &[ContentId],
@@ -219,13 +218,12 @@ mod tests {
             children,
             content_id: ContentId::for_list(kind, cids),
             next_sibling: None,
-            _marker: std::marker::PhantomData,
         }))
     }
 
     /// Build a list with children [A, B, A, B, C] all of identical
     /// kind so that `next_sibling` linking puts them in sequence.
-    fn build_test_list(arena: &mut SyntaxArena<'_>) -> (SyntaxId, [SyntaxId; 5]) {
+    fn build_test_list(arena: &mut SyntaxArena) -> (SyntaxId, [SyntaxId; 5]) {
         let a1 = mk_atom(arena, "ident", "A");
         let b1 = mk_atom(arena, "ident", "B");
         let a2 = mk_atom(arena, "ident", "A");
@@ -244,7 +242,7 @@ mod tests {
     }
 
     /// A list over the atoms `x y`, as `[list, x, y]`.
-    fn mk_pair(arena: &mut SyntaxArena<'_>) -> [SyntaxId; 3] {
+    fn mk_pair(arena: &mut SyntaxArena) -> [SyntaxId; 3] {
         let x = mk_atom(arena, "ident", "x");
         let y = mk_atom(arena, "ident", "y");
         let cids = [
@@ -257,7 +255,7 @@ mod tests {
     /// `[A1, B, A2, C]`, where `A1` and `A2` are equal lists from [`mk_pair`],
     /// tagged `U N N U` all the way down. Returns the root, every node in
     /// source order (`A1 x y B A2 x y C`), and the tags.
-    fn list_slide_input(arena: &mut SyntaxArena<'_>) -> (SyntaxId, [SyntaxId; 8], ChangeMap) {
+    fn list_slide_input(arena: &mut SyntaxArena) -> (SyntaxId, [SyntaxId; 8], ChangeMap) {
         let [a1, a1x, a1y] = mk_pair(arena);
         let b = mk_atom(arena, "ident", "B");
         let [a2, a2x, a2y] = mk_pair(arena);
@@ -280,7 +278,7 @@ mod tests {
         // Initial:  U U N N U  (region [A B] is novel)
         // After slide-left: B in region matches B preceding it, so
         // the boundary moves: U N N U U.
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let (root, children) = build_test_list(&mut arena);
         let mut changes = ChangeMap::new();
         changes.mark(children[0], ChangeKind::Unchanged); // A
@@ -300,7 +298,7 @@ mod tests {
     #[test]
     fn slider_no_op_when_neighbors_dont_match() {
         // Children: A B C D E (all distinct, novel run [B C D])
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let a = mk_atom(&mut arena, "ident", "A");
         let b = mk_atom(&mut arena, "ident", "B");
         let c = mk_atom(&mut arena, "ident", "C");
@@ -335,7 +333,7 @@ mod tests {
     #[test]
     fn slider_handles_empty_pending_run() {
         // All Unchanged: nothing should change.
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let (root, children) = build_test_list(&mut arena);
         let mut changes = ChangeMap::new();
         for c in children {
@@ -349,7 +347,7 @@ mod tests {
 
     #[test]
     fn a_list_slide_moves_its_atoms_too() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let (root, nodes, mut changes) = list_slide_input(&mut arena);
 
         fix_all_sliders(&arena, root, &mut changes, &mut [], Side::Rhs);
@@ -363,7 +361,7 @@ mod tests {
 
     #[test]
     fn a_slide_repoints_the_matched_pair() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let (root, nodes, mut changes) = list_slide_input(&mut arena);
         let lhs = SyntaxId(100);
         let mut pairs = [(lhs, nodes[0])];
@@ -375,7 +373,7 @@ mod tests {
 
     #[test]
     fn a_cascade_carries_each_pair_one_step() {
-        let mut arena = SyntaxArena::new();
+        let mut arena = SyntaxArena::default();
         let lists = [
             mk_pair(&mut arena),
             mk_pair(&mut arena),
@@ -406,7 +404,7 @@ mod tests {
     #[test]
     fn a_partial_match_on_either_side_blocks_the_slide() {
         for (node, kind) in [(2, N), (5, U)] {
-            let mut arena = SyntaxArena::new();
+            let mut arena = SyntaxArena::default();
             let (root, nodes, mut changes) = list_slide_input(&mut arena);
             changes.mark(nodes[node], kind);
             let before = nodes.map(|id| changes.get(id));
