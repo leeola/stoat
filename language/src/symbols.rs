@@ -245,8 +245,8 @@ pub fn grammar_yields_symbols(grammar: &TsLanguage) -> bool {
 ///
 /// A definition takes its kind and its container path from the items that hold
 /// it. For example, a rename of an impl's type changes the container of every
-/// method in the impl. Thus a partial re-extraction covers the whole item that
-/// holds each edit, not only the edited bytes.
+/// method in the impl. Thus a partial re-extraction covers the whole item when
+/// an edit meets the item's header, not only the edited bytes.
 pub fn enclosing_symbol_item(node: Node<'_>) -> Option<Node<'_>> {
     let mut current = Some(node);
     while let Some(node) = current {

@@ -790,9 +790,8 @@ fn shard_of(rel_path: &str, rope: &Rope, defs: Vec<SymbolDef>, refs: Vec<RefSite
 ///
 /// The edits name the text that changed. Tree-sitter's changed ranges between
 /// the edited tree of `prev` and `tree` name the regions whose structure
-/// changed, which sometimes lie far from the edit. Each range widens to the
-/// symbol item that holds it, because an item's kind and container come from
-/// the items around it. A range that no item holds widens to the whole text.
+/// changed, which sometimes lie far from the edit. [`reach`] widens each range
+/// to what its change touches.
 ///
 /// The widening looks in both trees. Tree-sitter compares the trees node by
 /// node, so a function that moves from one module into the next reads as
@@ -808,35 +807,84 @@ fn edit_window(
     let mut edited = prev.tree.clone();
     edit_tree(&mut edited, patch.edits(), &prev.text, rope);
 
+    // A node that a change cuts short or extends ends up touching the changed
+    // range rather than meeting it. A token that an edit trims shows no
+    // structure change, and an item whose end moves stops where the changed
+    // range starts. The byte on each side puts such a node inside the range.
     let len = rope.len();
-    let reached: Vec<Range<usize>> = patch
+    let widen = |range: Range<usize>| range.start.saturating_sub(1)..range.end + 1;
+    let changed: Vec<Range<usize>> = edited
+        .changed_ranges(tree)
+        .map(|range| widen(range.start_byte..range.end_byte))
+        .collect();
+    let reached = patch
         .edits()
         .iter()
-        .map(|edit| edit.new.clone())
-        .chain(
-            edited
-                .changed_ranges(tree)
-                .map(|range| range.start_byte..range.end_byte),
-        )
-        .collect();
+        .map(|edit| widen(edit.new.clone()))
+        .chain(changed);
+
     let mut window: Vec<Range<usize>> = reached
-        .iter()
         .flat_map(|range| {
-            let start = range.start.min(len);
-            let end = range.end.clamp(start, len);
-            [tree.root_node(), edited.root_node()].map(|root| {
-                root.descendant_for_byte_range(start, end)
-                    .and_then(enclosing_symbol_item)
-                    .map_or(0..len, |item| {
-                        let item = item.byte_range();
-                        item.start.min(len)..item.end.min(len)
-                    })
-            })
+            [tree.root_node(), edited.root_node()].map(|root| reach(root, &range, len))
         })
         .collect();
     window.sort_unstable_by_key(|range| range.start);
     syntax_parse::merge_ranges(&mut window);
     window
+}
+
+/// The bytes of the tree at `root` whose extraction a change over `range`
+/// reaches, cut off at `len`.
+///
+/// A definition takes its kind and container from the headers of the items
+/// that hold it, which are the bytes before each item's body. So a change that
+/// meets the header of the item around it, or that lies in an item with no
+/// body, reaches the whole item. An item that the range meets only in part
+/// lies inside the smallest named node that holds the range, and the cases
+/// below take that item whole.
+///
+/// Elsewhere a change reaches the smallest named node that holds it. In an
+/// item's body or in the file it reaches only the members it meets, each one
+/// whole, so a doc comment or a blank line between two methods reaches neither
+/// method. A boundary that moves and carries members into another item shows
+/// as a change over those members or over the header of an item they leave.
+fn reach(root: Node<'_>, range: &Range<usize>, len: usize) -> Range<usize> {
+    let cut = |span: Range<usize>| span.start.min(len)..span.end.min(len);
+    let start = range.start.min(len);
+    let end = range.end.clamp(start, len);
+    let Some(named) = root.named_descendant_for_byte_range(start, end) else {
+        return 0..len;
+    };
+
+    let item = enclosing_symbol_item(named);
+    let body = item.and_then(|item| item.child_by_field_name("body"));
+    if let Some(item) = item {
+        let header_end = body.map_or(item.end_byte(), |body| body.start_byte());
+        if item.start_byte() < end && start < header_end {
+            return cut(item.byte_range());
+        }
+    }
+
+    if body == Some(named) || named == root {
+        cut(members_met(named, start..end))
+    } else {
+        cut(named.byte_range())
+    }
+}
+
+/// The span of the children of `list` that `range` meets, together with
+/// `range` itself.
+fn members_met(list: Node<'_>, range: Range<usize>) -> Range<usize> {
+    let mut span = range.clone();
+    let mut member = list.first_child_for_byte(range.start);
+    while let Some(node) = member.filter(|node| node.start_byte() < range.end) {
+        if range.start < node.end_byte() {
+            span.start = span.start.min(node.start_byte());
+            span.end = span.end.max(node.end_byte());
+        }
+        member = node.next_sibling();
+    }
+    span
 }
 
 /// `range` shifted through `patch`, or `None` when the entry at `range` is
@@ -1309,30 +1357,55 @@ fn free() {
         assert_windowed_matches_whole(TRAIT_IMPL, &[(at..at, "        let p: Point = added();\n")]);
     }
 
-    /// A settle re-runs the queries over the method that holds the edit and
-    /// nothing around it, which keeps a settle in a large impl cheap.
-    #[test]
-    fn a_line_typed_in_a_method_re_runs_the_queries_over_that_method_alone() {
+    /// The window of the extraction that follows `edits` to `source`.
+    fn window_after(source: &str, edits: &[(Range<usize>, &str)]) -> Vec<Range<usize>> {
         let language = rust();
-        let mut buffer = TextBuffer::with_text(BufferId::new(0), TRAIT_IMPL);
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), source);
         let (_, first) = extract(&language, &buffer, None);
-        let at = after(TRAIT_IMPL, "first();\n");
-        buffer.edit(at..at, "        added();\n");
+        for (range, text) in edits {
+            buffer.edit(range.clone(), text);
+        }
         let (_, second) = extract(&language, &buffer, Some(&first));
 
-        let rope = &buffer.snapshot.visible_text;
         let patch = buffer.snapshot.edits_since(first.version);
-        let text = rope.to_string();
-        let hello = text.find("fn hello").unwrap()..text.find("\n\n    fn bye").unwrap();
-        assert_eq!(edit_window(&first, &patch, rope, &second.tree), [hello]);
+        edit_window(&first, &patch, &buffer.snapshot.visible_text, &second.tree)
+    }
+
+    /// A settle re-runs the queries over the statements an edit meets and
+    /// nothing around them, which keeps a settle in a large function cheap.
+    #[test]
+    fn a_line_typed_in_a_method_re_runs_the_queries_over_that_line_alone() {
+        let (at, line) = (after(TRAIT_IMPL, "first();\n"), "        added();\n");
+        let widened_line = at - 1..at + line.len() + 1;
+        assert_eq!(window_after(TRAIT_IMPL, &[(at..at, line)]), [widened_line]);
+    }
+
+    /// Text between two methods sits in the impl's body and meets neither
+    /// method, so it re-runs the queries over itself alone.
+    #[test]
+    fn text_between_two_methods_re_runs_the_queries_over_that_text_alone() {
+        let at = TRAIT_IMPL.find("    fn bye").unwrap();
+        for text in ["    /// Says goodbye.\n", "\n"] {
+            let widened_text = at - 1..at + text.len() + 1;
+            assert_eq!(
+                window_after(TRAIT_IMPL, &[(at..at, text)]),
+                [widened_text],
+                "the window of {text:?}",
+            );
+            assert_windowed_matches_whole(TRAIT_IMPL, &[(at..at, text)]);
+        }
     }
 
     /// The impl's type is the container of every method in it, so the rename
     /// re-extracts the whole impl rather than the renamed word.
+    ///
+    /// A letter changed inside the name meets only the name's own node, so
+    /// only the impl's header reaches the methods.
     #[test]
     fn a_renamed_impl_type_extracts_as_the_whole_file_does() {
         let at = TRAIT_IMPL.find("Point").unwrap();
         assert_windowed_matches_whole(TRAIT_IMPL, &[(at..at + "Point".len(), "Spot")]);
+        assert_windowed_matches_whole(TRAIT_IMPL, &[(at + 1..at + 2, "a")]);
     }
 
     /// The brace completes an open block in `f`, which ends the impl before `g`
@@ -1407,6 +1480,35 @@ mod b {
     #[test]
     fn a_settle_with_no_edit_extracts_as_the_whole_file_does() {
         assert_windowed_matches_whole(TRAIT_IMPL, &[]);
+    }
+
+    /// An edit from the end of one module into the header of the next takes
+    /// both modules whole. The name of the second is the container of the
+    /// function in it, which lies outside the edit.
+    #[test]
+    fn an_edit_across_two_items_extracts_as_the_whole_file_does() {
+        let source = "mod a {\n    fn f() {}\n}\n\nmod b {\n    fn g() {}\n}\n";
+        let (start, end) = (after(source, "fn f() {}"), after(source, "mod b"));
+        assert_windowed_matches_whole(source, &[(start..end, "\n}\n\nmod c")]);
+    }
+
+    /// A deletion that cuts a call name back leaves the name touching the
+    /// deleted range. Tree-sitter reports no structure change for a token that
+    /// only changed size, so the window takes the byte on each side of an edit.
+    #[test]
+    fn a_name_cut_back_by_a_deletion_extracts_as_the_whole_file_does() {
+        let source = "fn f() {\n    m.getpub(x);\n}\n";
+        let at = after(source, "m.get");
+        assert_windowed_matches_whole(source, &[(at..at + "pub".len(), "")]);
+    }
+
+    /// A brace typed at the end closes a module that ran to the end of the
+    /// file. The old module ends where the changed range starts, so a changed
+    /// range takes the byte on each side as an edit does.
+    #[test]
+    fn a_brace_that_closes_an_open_module_extracts_as_the_whole_file_does() {
+        let source = "mod a {\n    fn f() {}\n\n    fn g() {}\n\n    fn h() {}\n";
+        assert_windowed_matches_whole(source, &[(source.len()..source.len(), "}")]);
     }
 
     /// Text inserted at either end of an entry lands outside it, and an edit
