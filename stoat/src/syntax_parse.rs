@@ -608,8 +608,9 @@ fn invalidated_ranges(
 /// touch.
 ///
 /// Touching entries merge because the tokens crossing a shared boundary are the
-/// same set either way, and one wider query beats two adjacent ones.
-fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
+/// same set either way, and one wider query beats two adjacent ones. The code
+/// index merges its re-extraction window here for the same reason.
+pub(crate) fn merge_ranges(ranges: &mut Vec<Range<usize>>) {
     let mut write = 0;
     for read in 0..ranges.len() {
         if write > 0 && ranges[read].start <= ranges[write - 1].end {

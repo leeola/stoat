@@ -126,7 +126,16 @@ enum ItemKind {
 /// capture (i.e. it is not an outline query). Matches whose `@item` node
 /// kind maps to no [`SymbolKind`] are skipped, so running a non-rust
 /// outline query yields no symbols.
-pub fn extract_symbols(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<SymbolDef> {
+///
+/// A `range` limits the walk to the matches whose nodes meet it. A match whose
+/// root node meets the range comes back whole, so a definition that encloses
+/// the range comes back too.
+pub fn extract_symbols(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    range: Option<Range<usize>>,
+) -> Vec<SymbolDef> {
     let mut out = Vec::new();
     let (Some(item_idx), Some(name_idx)) = (
         query.capture_index_for_name("item"),
@@ -137,6 +146,9 @@ pub fn extract_symbols(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Symbol
 
     let provider = RopeTextProvider { rope };
     let mut cursor_h = QueryCursorHandle::new();
+    if let Some(range) = range {
+        cursor_h.set_byte_range(range);
+    }
     let mut matches = cursor_h.matches(query, root, provider);
     while let Some(m) = matches.next() {
         let mut item_node = None;
@@ -174,7 +186,17 @@ pub fn extract_symbols(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Symbol
 /// [`RefKind`] its capture name maps to. Returns an empty vector when `query`
 /// has no `@reference.*` capture. The result is in the query cursor's match
 /// order, not sorted.
-pub fn extract_references(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<RefSite> {
+///
+/// A `range` limits the walk to the matches whose nodes meet it. A match comes
+/// back whole, so a site outside the range comes back when its match's root
+/// node meets the range, such as the trait named in the header of an impl that
+/// holds the range.
+pub fn extract_references(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    range: Option<Range<usize>>,
+) -> Vec<RefSite> {
     let mut out = Vec::new();
 
     let kinds: Vec<(u32, RefKind)> = query
@@ -189,6 +211,9 @@ pub fn extract_references(query: &Query, root: Node<'_>, rope: &Rope) -> Vec<Ref
 
     let provider = RopeTextProvider { rope };
     let mut cursor_h = QueryCursorHandle::new();
+    if let Some(range) = range {
+        cursor_h.set_byte_range(range);
+    }
     let mut matches = cursor_h.matches(query, root, provider);
     while let Some(m) = matches.next() {
         for cap in m.captures {
@@ -213,6 +238,24 @@ pub fn grammar_yields_symbols(grammar: &TsLanguage) -> bool {
     SYMBOL_ITEMS
         .iter()
         .any(|(name, _)| grammar.id_for_node_kind(name, true) != 0)
+}
+
+/// The node itself or its nearest ancestor that a symbol comes from, such as
+/// the function or impl that holds it, or `None` outside every such item.
+///
+/// A definition takes its kind and its container path from the items that hold
+/// it. For example, a rename of an impl's type changes the container of every
+/// method in the impl. Thus a partial re-extraction covers the whole item that
+/// holds each edit, not only the edited bytes.
+pub fn enclosing_symbol_item(node: Node<'_>) -> Option<Node<'_>> {
+    let mut current = Some(node);
+    while let Some(node) = current {
+        if SYMBOL_ITEMS.iter().any(|(kind, _)| *kind == node.kind()) {
+            return Some(node);
+        }
+        current = node.parent();
+    }
+    None
 }
 
 /// Map a tags-query capture name to the [`RefKind`] it records, or `None`
@@ -279,7 +322,8 @@ fn text_of(node: Node<'_>, rope: &Rope) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_references, extract_symbols, grammar_yields_symbols, RefKind, SymbolDef, SymbolKind,
+        enclosing_symbol_item, extract_references, extract_symbols, grammar_yields_symbols,
+        RefKind, SymbolDef, SymbolKind,
     };
     use crate::{language::LanguageRegistry, parse_rope};
     use stoat_text::Rope;
@@ -326,7 +370,7 @@ fn main() {
         let query = rust.outline_query().unwrap();
         let rope = Rope::from(SNIPPET);
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let mut syms = extract_symbols(query, tree.root_node(), &rope);
+        let mut syms = extract_symbols(query, tree.root_node(), &rope, None);
         syms.sort_by_key(|s| (s.def_range.start, s.def_range.end));
         syms
     }
@@ -432,7 +476,7 @@ fn demo() {
         let query = rust.tags_query().unwrap();
         let rope = Rope::from(CALLS);
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let mut refs = extract_references(query, tree.root_node(), &rope);
+        let mut refs = extract_references(query, tree.root_node(), &rope, None);
         refs.sort_by_key(|r| r.site_range.start);
 
         let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
@@ -466,7 +510,7 @@ fn demo() {
         let query = rust.tags_query().unwrap();
         let rope = Rope::from(TYPE_USES);
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let mut refs = extract_references(query, tree.root_node(), &rope);
+        let mut refs = extract_references(query, tree.root_node(), &rope, None);
         refs.sort_by_key(|r| r.site_range.start);
 
         let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
@@ -489,7 +533,7 @@ fn demo() {
         let query = rust.tags_query().unwrap();
         let rope = Rope::from("fn f(p: foo::Bar) {}");
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let refs = extract_references(query, tree.root_node(), &rope);
+        let refs = extract_references(query, tree.root_node(), &rope, None);
 
         let got: Vec<(&str, RefKind)> = refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
         assert_eq!(got, vec![("Bar", RefKind::Type)]);
@@ -502,7 +546,7 @@ fn demo() {
         let query = rust.tags_query().unwrap();
         let rope = Rope::from("impl Greet for Point {}");
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let refs = extract_references(query, tree.root_node(), &rope);
+        let refs = extract_references(query, tree.root_node(), &rope, None);
 
         let mut got: Vec<(&str, RefKind)> =
             refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
@@ -524,7 +568,7 @@ fn demo() {
         let query = rust.tags_query().unwrap();
         let rope = Rope::from("impl foo::Greet for Point {}");
         let tree = parse_rope(rust, &rope, None).unwrap();
-        let refs = extract_references(query, tree.root_node(), &rope);
+        let refs = extract_references(query, tree.root_node(), &rope, None);
 
         let mut got: Vec<(&str, RefKind)> =
             refs.iter().map(|r| (r.name.as_str(), r.kind)).collect();
@@ -536,6 +580,31 @@ fn demo() {
                 ("Greet", RefKind::Type),
                 ("Point", RefKind::Type),
             ]
+        );
+    }
+
+    #[test]
+    fn a_window_keeps_only_the_items_that_meet_it() {
+        let src = "fn first() {\n    a();\n}\n\nfn second() {\n    b();\n}\n";
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        let (outline, tags) = (rust.outline_query().unwrap(), rust.tags_query().unwrap());
+        let rope = Rope::from(src);
+        let tree = parse_rope(rust, &rope, None).unwrap();
+        let root = tree.root_node();
+
+        let at = src.find("b()").unwrap();
+        let item = enclosing_symbol_item(root.descendant_for_byte_range(at, at).unwrap()).unwrap();
+        let window = Some(item.byte_range());
+
+        let defs = extract_symbols(outline, root, &rope, window.clone());
+        let refs = extract_references(tags, root, &rope, window);
+        let whole_defs = extract_symbols(outline, root, &rope, None);
+        let whole_refs = extract_references(tags, root, &rope, None);
+        assert_eq!(
+            (defs, refs),
+            (whole_defs[1..].to_vec(), whole_refs[1..].to_vec()),
+            "the window over `second` drops `first` and its call to `a`"
         );
     }
 }

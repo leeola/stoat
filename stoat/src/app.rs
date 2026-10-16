@@ -4540,12 +4540,16 @@ impl Stoat {
                     rel_path,
                     shard,
                     persist,
+                    extraction,
                 } => {
                     let to_persist =
                         persist.then(|| (codegraph::encode_shard(&shard), shard.content_hash));
                     let Some(ws) = self.workspaces.get_mut(workspace) else {
                         continue;
                     };
+                    if let Some(extraction) = extraction {
+                        ws.store_index_extraction(extraction);
+                    }
                     ws.code_graph.apply_reindex(file, shard);
                     ws.file_paths.insert(file, PathBuf::from(&rel_path));
                     ws.index_generation += 1;

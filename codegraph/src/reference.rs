@@ -362,8 +362,10 @@ mod tests {
                 .expect("rust language");
             let rope = Rope::from(text);
             let tree = parse_rope(rust, &rope, None).expect("parse");
-            let defs = extract_symbols(rust.outline_query().unwrap(), tree.root_node(), &rope);
-            let refs = extract_references(rust.tags_query().unwrap(), tree.root_node(), &rope);
+            let defs =
+                extract_symbols(rust.outline_query().unwrap(), tree.root_node(), &rope, None);
+            let refs =
+                extract_references(rust.tags_query().unwrap(), tree.root_node(), &rope, None);
             build_shard(file, file_rel, [0u8; 32], text, defs, refs)
         }
     }

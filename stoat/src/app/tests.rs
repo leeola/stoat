@@ -2365,6 +2365,7 @@ fn batched_reindex_drain_cross_links_like_sequential() {
                 edges,
             },
             persist: false,
+            extraction: None,
         };
 
         stoat
@@ -2538,6 +2539,7 @@ fn reindex_replaces_a_files_symbols_in_the_graph() {
                 edges: vec![],
             },
             persist: false,
+            extraction: None,
         })
         .unwrap();
     stoat.drain_index_updates();
@@ -2909,6 +2911,18 @@ fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
             .step(caller, codegraph::EdgeKind::Calls, codegraph::Dir::Down),
         vec![callee],
         "the edit's new call appears as a Calls edge in the graph",
+    );
+    let version = ws
+        .buffers
+        .get(buffer_id)
+        .expect("buffer")
+        .read()
+        .expect("poisoned")
+        .version();
+    assert_eq!(
+        ws.index_extraction_version(buffer_id),
+        Some(version),
+        "the drain keeps the extraction that the next settle starts from",
     );
 }
 

@@ -9,10 +9,10 @@ use crate::{
     agent_ipc::BridgeOutcome,
     agent_status::AgentStatus,
     badge::BadgeTray,
-    buffer::{BufferId, SharedBuffer},
+    buffer::{BufferId, SharedBuffer, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
     code_index::{
-        build::{indexable, reindex_buffer, IndexUpdate, ReindexTarget},
+        build::{indexable, reindex_buffer, Extraction, IndexUpdate, ReindexTarget},
         files::IndexedFiles,
         nav::TrailState,
     },
@@ -58,7 +58,6 @@ use std::{
 };
 use stoat_language::{LanguageRegistry, Tree};
 use stoat_scheduler::{Executor, Task};
-use stoat_text::Rope;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     Notify,
@@ -373,6 +372,9 @@ pub struct Workspace {
     /// In-flight live-reindex jobs, one per buffer, held so the spawned
     /// extraction is not cancelled. Replaced when the buffer reparses.
     index_jobs: HashMap<BufferId, Task<()>>,
+    /// Each open buffer's last extraction, which the buffer's next reindex
+    /// starts from, so it re-runs the queries only where the text changed.
+    index_extractions: HashMap<BufferId, Arc<Extraction>>,
     /// Timers waiting out a buffer's typing before its symbols are extracted.
     ///
     /// A parse replaces the buffer's timer, so a burst leaves one survivor and
@@ -517,6 +519,7 @@ impl Workspace {
             diff: DiffState::default(),
             visible_buffers: Vec::new(),
             index_jobs: HashMap::new(),
+            index_extractions: HashMap::new(),
             index_debounce: HashMap::new(),
             index_fire_tx,
             index_fire_rx,
@@ -918,8 +921,26 @@ impl Workspace {
         self.cancel_parse_job(id);
         self.partial_token_buffers.remove(&id);
         self.index_jobs.remove(&id);
+        self.index_extractions.remove(&id);
         self.index_debounce.remove(&id);
         self.diff.release(id, path);
+    }
+
+    /// Keep `extraction` for its buffer's next reindex.
+    ///
+    /// A job that a later reindex replaced still runs to its end, so two
+    /// extractions of one buffer land in either order and the later version
+    /// stays. An extraction of a closed buffer is dropped, since nothing
+    /// releases it after the close.
+    pub(crate) fn store_index_extraction(&mut self, extraction: Arc<Extraction>) {
+        if self.buffers.get(extraction.buffer).is_none() {
+            return;
+        }
+        let kept = self.index_extractions.get(&extraction.buffer);
+        if kept.is_some_and(|kept| kept.version > extraction.version) {
+            return;
+        }
+        self.index_extractions.insert(extraction.buffer, extraction);
     }
 
     /// Park `waiter` on `buffer` until the buffer leaves the editor.
@@ -992,8 +1013,19 @@ impl Workspace {
         self.parse_jobs.contains_key(&id)
             || self.partial_token_buffers.contains(&id)
             || self.index_jobs.contains_key(&id)
+            || self.index_extractions.contains_key(&id)
             || self.index_debounce.contains_key(&id)
             || self.diff.holds(id, path)
+    }
+
+    /// The buffer version of the extraction that `id`'s next reindex starts
+    /// from, for a test outside this module that drives settles through the
+    /// drain.
+    #[cfg(test)]
+    pub(crate) fn index_extraction_version(&self, id: BufferId) -> Option<u64> {
+        self.index_extractions
+            .get(&id)
+            .map(|extraction| extraction.version)
     }
 
     /// Force the next [`Self::drive_diff_jobs`] pass to recompute `id`'s diff
@@ -1681,27 +1713,31 @@ impl Workspace {
         }
     }
 
-    /// The buffer's current text paired with the parse tree describing it, or
-    /// `None` once the buffer is gone.
+    /// The buffer's current snapshot paired with the parse tree describing it
+    /// and the buffer's last extraction, or `None` once the buffer is gone.
     ///
     /// The tree comes back only when its version matches the text's. That is
     /// the common case, since a reindex is asked for after the parse for this
     /// version landed, and extraction then skips re-parsing the file. An edit
     /// since that parse leaves the versions apart, and a tree built from other
     /// text puts every symbol range somewhere else, so that case parses again.
-    fn reindex_inputs(&self, buffer_id: BufferId) -> Option<(Rope, Option<Tree>)> {
-        let (text, version) = self.buffers.get(buffer_id).map(|shared| {
-            let guard = shared.read().expect("buffer poisoned");
-            (guard.snapshot.visible_text.clone(), guard.snapshot.version)
-        })?;
+    fn reindex_inputs(
+        &self,
+        buffer_id: BufferId,
+    ) -> Option<(TextBufferSnapshot, Option<Tree>, Option<Arc<Extraction>>)> {
+        let snapshot = self
+            .buffers
+            .get(buffer_id)
+            .map(|shared| shared.read().expect("buffer poisoned").snapshot.clone())?;
 
         let tree = self
             .buffers
             .syntax(buffer_id)
-            .filter(|syntax| syntax.version == version)
+            .filter(|syntax| syntax.version == snapshot.version)
             .map(|syntax| syntax.tree.clone());
+        let previous = self.index_extractions.get(&buffer_id).cloned();
 
-        Some((text, tree))
+        Some((snapshot, tree, previous))
     }
 
     /// Spawn a live re-index of `buffer_id` from its current text.
@@ -1733,7 +1769,7 @@ impl Workspace {
         if !indexable(&language) {
             return;
         }
-        let Some((text, tree)) = self.reindex_inputs(buffer_id) else {
+        let Some((snapshot, tree, previous)) = self.reindex_inputs(buffer_id) else {
             return;
         };
         let target = ReindexTarget {
@@ -1741,8 +1777,9 @@ impl Workspace {
             workspace: self.id,
             language,
             path,
-            text,
+            snapshot,
             tree,
+            previous,
             persist,
         };
         let task = reindex_buffer(
@@ -1878,6 +1915,7 @@ mod tests {
     use super::{BridgeWaiter, ParseJob, Workspace, INLINE_PARSE_MAX_BYTES};
     use crate::{
         buffer::BufferId,
+        code_index::build::IndexUpdate,
         host::FakeTerminalSession,
         pane::{Axis, DockPanel, DockSide, DockVisibility, View},
         term_screen::TermScreen,
@@ -2188,6 +2226,59 @@ mod tests {
             (Some("json"), false),
             "a resolved json buffer takes no reindex job",
         );
+    }
+
+    /// A settle keeps what it extracted, and the next settle of the buffer
+    /// starts from it. The newest settle's extraction stays when an older one
+    /// lands after it, and nothing stays once the buffer closes.
+    #[test]
+    fn a_second_settle_starts_from_the_stored_extraction() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let mut ws = Workspace::new(PathBuf::from("/repo"), &executor, crate::test_notify());
+        let (id, buffer) = ws.buffers.open(Path::new("/repo/a.rs"), "fn a() {}\n");
+        ws.assign_languages_from_paths(&LanguageRegistry::standard());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut settle = |ws: &mut Workspace| {
+            ws.enqueue_reindex(&executor, &tx, &crate::test_notify(), id, false);
+            scheduler.run_until_parked();
+            let Ok(IndexUpdate::Reindex {
+                extraction: Some(extraction),
+                ..
+            }) = rx.try_recv()
+            else {
+                panic!("a buffer settle sends its extraction");
+            };
+            extraction
+        };
+        let stored = |ws: &Workspace| -> Vec<(BufferId, u64)> {
+            ws.index_extractions
+                .iter()
+                .map(|(&id, extraction)| (id, extraction.version))
+                .collect()
+        };
+
+        let first = settle(&mut ws);
+        ws.store_index_extraction(first.clone());
+        buffer.write().unwrap().edit(9..9, "\nfn b() {}");
+        let handed = ws
+            .reindex_inputs(id)
+            .and_then(|(_, _, previous)| previous)
+            .map(|previous| previous.version);
+        let second = settle(&mut ws);
+        ws.store_index_extraction(second.clone());
+        ws.store_index_extraction(first.clone());
+        assert_eq!(
+            (handed, stored(&ws)),
+            (Some(first.version), vec![(id, second.version)]),
+            "the second settle got the first, and a late first left the second in place",
+        );
+
+        let path = ws.buffers.remove(id);
+        ws.release_buffer(id, path.as_deref());
+        ws.store_index_extraction(second);
+        assert_eq!(stored(&ws), [], "a closed buffer keeps no extraction");
     }
 
     #[test]

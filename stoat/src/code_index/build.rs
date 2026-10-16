@@ -10,15 +10,22 @@
 //! merge happens on the main thread, off the paint path.
 
 use crate::{
-    buffer_registry::fingerprint_bytes, code_index::store, host::FsHost, paths,
-    picker::DisplayCache, workspace::WorkspaceId,
+    buffer::{BufferId, TextBufferSnapshot},
+    buffer_registry::fingerprint_bytes,
+    code_index::store,
+    host::FsHost,
+    paths,
+    picker::DisplayCache,
+    syntax_parse,
+    workspace::WorkspaceId,
 };
 use codegraph::{
     build_shard, decode_shard, FileEntry, FileId, FileShard, Manifest, SCHEMA_VERSION,
 };
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
-    ops::ControlFlow,
+    ops::{ControlFlow, Range},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -27,11 +34,11 @@ use std::{
     time::Instant,
 };
 use stoat_language::{
-    extract_references, extract_symbols, grammar_yields_symbols, parse_rope, Language,
-    LanguageRegistry, Tree,
+    edit_tree, enclosing_symbol_item, extract_references, extract_symbols, grammar_yields_symbols,
+    parse_rope, Language, LanguageRegistry, Node, RefSite, SymbolDef, Tree,
 };
 use stoat_scheduler::{Executor, Task};
-use stoat_text::{LineEnding, Rope};
+use stoat_text::{patch::Patch, LineEnding, Rope};
 use tokio::sync::{mpsc::UnboundedSender, Notify};
 
 /// A unit of index progress delivered from the build job to the event loop.
@@ -77,6 +84,9 @@ pub(crate) enum IndexUpdate {
         rel_path: String,
         shard: FileShard,
         persist: bool,
+        /// What a buffer reindex extracted, which the drain stores for the
+        /// buffer's next reindex to start from. A reindex from disk has none.
+        extraction: Option<Arc<Extraction>>,
     },
     /// A file that vanished from disk. The drain evicts its symbols, deletes
     /// its shard, drops its manifest entry, and re-resolves.
@@ -278,12 +288,19 @@ pub(crate) struct ReindexTarget {
     pub(crate) workspace: WorkspaceId,
     pub(crate) language: Arc<Language>,
     pub(crate) path: PathBuf,
-    pub(crate) text: Rope,
-    /// The tree the parse pipeline already built for exactly `text`, when it has
-    /// one. Extraction reuses it rather than re-parsing the file, which is the
-    /// dominant cost of a reindex. `None` means the caller could not vouch that a
-    /// stored tree describes this text.
+    /// The buffer as it stands. Its edit history since `previous` names the
+    /// ranges to extract again.
+    pub(crate) snapshot: TextBufferSnapshot,
+    /// The tree the parse pipeline already built for exactly the snapshot's
+    /// text, when it has one. Extraction reuses it rather than re-parsing the
+    /// file, which is the dominant cost of a reindex. `None` means the caller
+    /// found no stored tree that describes this text.
     pub(crate) tree: Option<Tree>,
+    /// The buffer's last extraction, when one is stored.
+    ///
+    /// With it and a `tree`, the queries run only over the items that the
+    /// edits since reach, and every other entry carries over.
+    pub(crate) previous: Option<Arc<Extraction>>,
     /// Whether the resulting [`IndexUpdate::Reindex`] writes the shard and
     /// manifest entry as well as updating the graph.
     ///
@@ -291,6 +308,38 @@ pub(crate) struct ReindexTarget {
     /// later open warm-loads what is written. A plain edit leaves it clear and
     /// defers to whichever save follows.
     pub(crate) persist: bool,
+}
+
+/// What one reindex of an open buffer extracted, kept so the next reindex of
+/// the buffer re-runs the queries only where the text changed.
+///
+/// The text and the tree are the buffer's at `version`. A later reindex edits a
+/// copy of the tree to the later text and asks tree-sitter which ranges changed
+/// structure. For example, a closing brace that completes an open block in one
+/// function ends the impl around it early. The items after the brace then move
+/// out of the impl, far from the edit.
+pub(crate) struct Extraction {
+    /// The buffer whose edit history `version` counts in. A version means
+    /// nothing against the history of another buffer.
+    pub(crate) buffer: BufferId,
+    pub(crate) version: u64,
+    language: &'static str,
+    text: Rope,
+    tree: Tree,
+    /// The definitions and references of `text`, in the order that
+    /// [`canonical_order`] gives them.
+    defs: Vec<SymbolDef>,
+    refs: Vec<RefSite>,
+}
+
+impl Extraction {
+    /// Whether `snapshot` is this extraction's text or a later state of it, in
+    /// the same language, so the buffer's history holds the edits between them.
+    fn precedes(&self, snapshot: &TextBufferSnapshot, language: &Language) -> bool {
+        self.buffer == snapshot.buffer_id
+            && self.version <= snapshot.version
+            && self.language == language.name
+    }
 }
 
 /// Spawn a job to re-extract one edited buffer and deliver its
@@ -311,13 +360,19 @@ pub(crate) fn reindex_buffer(
             workspace,
             language,
             path,
-            text,
+            snapshot,
             tree,
+            previous,
             persist,
         } = target;
-        if let Some((rel_path, shard)) =
-            extract_shard(&language, &git_root, &path, &text, tree.as_ref())
-        {
+        if let Some((rel_path, shard, extraction)) = extract_buffer(
+            &language,
+            &git_root,
+            &path,
+            snapshot,
+            tree,
+            previous.as_deref(),
+        ) {
             let file = file_id(&rel_path);
             let _ = tx.send(IndexUpdate::Reindex {
                 workspace,
@@ -325,6 +380,7 @@ pub(crate) fn reindex_buffer(
                 rel_path,
                 shard,
                 persist,
+                extraction: Some(Arc::new(extraction)),
             });
             redraw.notify_one();
         }
@@ -403,19 +459,16 @@ pub(crate) fn reindex_path(
         // The caller's rel_path and the one extraction derives are the same
         // string from the same pair of paths, so the caller's is kept and the
         // second is dropped rather than allocated into the update.
-        if let Some((_, shard)) = extract_shard(
-            &language,
-            &git_root,
-            &path,
-            &Rope::from(text.as_str()),
-            None,
-        ) {
+        if let Some((_, shard)) =
+            extract_shard(&language, &git_root, &path, &Rope::from(text.as_str()))
+        {
             let _ = tx.send(IndexUpdate::Reindex {
                 workspace,
                 file,
                 rel_path,
                 shard,
                 persist: true,
+                extraction: None,
             });
             redraw.notify_one();
         }
@@ -544,64 +597,306 @@ fn index_file(
     }
 
     let text = read_utf8(fs, path)?;
-    extract_shard(&language, git_root, path, &Rope::from(text.as_str()), None)
+    extract_shard(&language, git_root, path, &Rope::from(text.as_str()))
 }
 
-/// Parse `text` as `language` and build the file's shard, or `None` when
-/// `path` is not under `git_root`.
+/// Parse `rope` as `language` and build the file's shard, or `None` when
+/// `path` is not under `git_root` or the text does not parse.
 ///
-/// Takes the source as a string so an open buffer can be re-indexed from
-/// its in-memory contents without a disk read.
+/// The cold build and a reindex from disk extract through this. An open buffer
+/// goes through [`extract_buffer`] instead, which reuses the buffer's parse
+/// tree and its last extraction.
 pub(crate) fn extract_shard(
     language: &Language,
     git_root: &Path,
     path: &Path,
     rope: &Rope,
-    tree: Option<&Tree>,
 ) -> Option<(String, FileShard)> {
     let rel_path = relpath(git_root, path)?;
+    let tree = parse_rope(language, rope, None)?;
+    let (defs, refs) = extract_whole(language, tree.root_node(), rope);
+    let shard = shard_of(&rel_path, rope, defs, refs);
+    Some((rel_path, shard))
+}
 
-    let parsed;
-    let tree = match tree {
-        Some(tree) => tree,
-        None => {
-            parsed = parse_rope(language, rope, None)?;
-            &parsed
+/// Build an open buffer's shard, beside the [`Extraction`] that the next
+/// reindex of the buffer starts from.
+///
+/// Returns `None` when `path` is not under `git_root` or the text does not
+/// parse. With a `tree` and a `previous` extraction that the snapshot
+/// continues, the queries run only where the edits since `previous` reach.
+/// The shard equals a whole-file extraction's either way.
+fn extract_buffer(
+    language: &Language,
+    git_root: &Path,
+    path: &Path,
+    snapshot: TextBufferSnapshot,
+    tree: Option<Tree>,
+    previous: Option<&Extraction>,
+) -> Option<(String, FileShard, Extraction)> {
+    let rel_path = relpath(git_root, path)?;
+    let rope = snapshot.visible_text.clone();
+
+    let (tree, (defs, refs)) = match (tree, previous) {
+        (Some(tree), Some(prev)) if prev.precedes(&snapshot, language) => {
+            let extracted = extract_since(language, prev, &snapshot, &tree);
+            (tree, extracted)
+        },
+        (tree, _) => {
+            let tree = match tree {
+                Some(tree) => tree,
+                None => parse_rope(language, &rope, None)?,
+            };
+            let extracted = extract_whole(language, tree.root_node(), &rope);
+            (tree, extracted)
         },
     };
-    let root = tree.root_node();
 
+    let shard = shard_of(&rel_path, &rope, defs.clone(), refs.clone());
+    let extraction = Extraction {
+        buffer: snapshot.buffer_id,
+        version: snapshot.version,
+        language: language.name,
+        text: rope,
+        tree,
+        defs,
+        refs,
+    };
+    Some((rel_path, shard, extraction))
+}
+
+/// The snapshot's definitions and references, with the queries run only over
+/// the window that the edits since `prev` reach.
+///
+/// An entry of `prev` that no edit meets and that lies outside the window
+/// carries over, shifted through the edits. The query output is cut to the
+/// window. A match that meets the window comes back whole, and its captures
+/// outside the window are among the entries that carry over.
+fn extract_since(
+    language: &Language,
+    prev: &Extraction,
+    snapshot: &TextBufferSnapshot,
+    tree: &Tree,
+) -> (Vec<SymbolDef>, Vec<RefSite>) {
+    let patch = snapshot.edits_since(prev.version);
+    if patch.is_empty() {
+        return (prev.defs.clone(), prev.refs.clone());
+    }
+
+    let rope = &snapshot.visible_text;
+    let window = edit_window(prev, &patch, rope, tree);
+
+    let mut defs: Vec<SymbolDef> = prev
+        .defs
+        .iter()
+        .filter_map(|def| {
+            let def_range = carry(&patch, &window, &def.def_range)?;
+            Some(SymbolDef {
+                name: def.name.clone(),
+                kind: def.kind,
+                def_range,
+                name_range: shift(&patch, &def.name_range),
+                container: def.container.clone(),
+            })
+        })
+        .collect();
+    let mut refs: Vec<RefSite> = prev
+        .refs
+        .iter()
+        .filter_map(|site| {
+            let site_range = carry(&patch, &window, &site.site_range)?;
+            Some(RefSite {
+                name: site.name.clone(),
+                kind: site.kind,
+                site_range,
+            })
+        })
+        .collect();
+
+    let hull = window[0].start..window[window.len() - 1].end;
+    let (fresh_defs, fresh_refs) = run_queries(language, tree.root_node(), rope, Some(hull));
+    defs.extend(
+        fresh_defs
+            .into_iter()
+            .filter(|def| meets_any(&window, &def.def_range, |range| range)),
+    );
+    refs.extend(
+        fresh_refs
+            .into_iter()
+            .filter(|site| meets_any(&window, &site.site_range, |range| range)),
+    );
+
+    canonical_order(&mut defs, &mut refs);
+    (defs, refs)
+}
+
+/// Every definition and reference in the tree at `root`, in canonical order.
+fn extract_whole(
+    language: &Language,
+    root: Node<'_>,
+    rope: &Rope,
+) -> (Vec<SymbolDef>, Vec<RefSite>) {
+    let (mut defs, mut refs) = run_queries(language, root, rope, None);
+    canonical_order(&mut defs, &mut refs);
+    (defs, refs)
+}
+
+/// Run the outline and tags queries over the matches that meet `range`, or
+/// over the whole tree when it is `None`.
+fn run_queries(
+    language: &Language,
+    root: Node<'_>,
+    rope: &Rope,
+    range: Option<Range<usize>>,
+) -> (Vec<SymbolDef>, Vec<RefSite>) {
     let defs = language
         .outline_query()
-        .as_ref()
-        .map(|query| extract_symbols(query, root, rope))
+        .map(|query| extract_symbols(query, root, rope, range.clone()))
         .unwrap_or_default();
     let refs = language
         .tags_query()
-        .as_ref()
-        .map(|query| extract_references(query, root, rope))
+        .map(|query| extract_references(query, root, rope, range))
         .unwrap_or_default();
+    (defs, refs)
+}
 
+/// Sort extracted entries into one order, whatever path extracted them.
+///
+/// The outline query yields an impl after its methods in places, so query
+/// order does not survive a merge of carried and fresh entries. The sorts are
+/// stable, so entries at one range keep their query order.
+fn canonical_order(defs: &mut [SymbolDef], refs: &mut [RefSite]) {
+    defs.sort_by_key(|def| (def.def_range.start, Reverse(def.def_range.end)));
+    refs.sort_by_key(|site| site.site_range.start);
+}
+
+/// The shard of the file at `rel_path`, holding `defs` and `refs`.
+fn shard_of(rel_path: &str, rope: &Rope, defs: Vec<SymbolDef>, refs: Vec<RefSite>) -> FileShard {
     // The shard hashes the whole file and each symbol's body by byte range, so
     // this one materialization is what those need and is not avoidable here.
     let text = rope.to_string();
-    let shard = build_shard(
-        file_id(&rel_path),
-        &rel_path,
+    build_shard(
+        file_id(rel_path),
+        rel_path,
         fingerprint_bytes(&text),
         &text,
         defs,
         refs,
-    );
-    Some((rel_path, shard))
+    )
+}
+
+/// The sorted, disjoint ranges of `rope` whose extraction the edits of `patch`
+/// since `prev` reach, where `tree` is the parse of `rope`.
+///
+/// The edits name the text that changed. Tree-sitter's changed ranges between
+/// the edited tree of `prev` and `tree` name the regions whose structure
+/// changed, which sometimes lie far from the edit. Each range widens to the
+/// symbol item that holds it, because an item's kind and container come from
+/// the items around it. A range that no item holds widens to the whole text.
+///
+/// The widening looks in both trees. Tree-sitter compares the trees node by
+/// node, so a function that moves from one module into the next reads as
+/// unchanged, and only the boundary between the modules changes. When an edit
+/// makes an item of the new tree swallow that boundary, that item holds
+/// neither module. In the old tree the item around the boundary holds both.
+fn edit_window(
+    prev: &Extraction,
+    patch: &Patch<usize>,
+    rope: &Rope,
+    tree: &Tree,
+) -> Vec<Range<usize>> {
+    let mut edited = prev.tree.clone();
+    edit_tree(&mut edited, patch.edits(), &prev.text, rope);
+
+    let len = rope.len();
+    let reached: Vec<Range<usize>> = patch
+        .edits()
+        .iter()
+        .map(|edit| edit.new.clone())
+        .chain(
+            edited
+                .changed_ranges(tree)
+                .map(|range| range.start_byte..range.end_byte),
+        )
+        .collect();
+    let mut window: Vec<Range<usize>> = reached
+        .iter()
+        .flat_map(|range| {
+            let start = range.start.min(len);
+            let end = range.end.clamp(start, len);
+            [tree.root_node(), edited.root_node()].map(|root| {
+                root.descendant_for_byte_range(start, end)
+                    .and_then(enclosing_symbol_item)
+                    .map_or(0..len, |item| {
+                        let item = item.byte_range();
+                        item.start.min(len)..item.end.min(len)
+                    })
+            })
+        })
+        .collect();
+    window.sort_unstable_by_key(|range| range.start);
+    syntax_parse::merge_ranges(&mut window);
+    window
+}
+
+/// `range` shifted through `patch`, or `None` when the entry at `range` is
+/// extracted again, because an edit meets it or its shifted range meets
+/// `window`.
+fn carry(
+    patch: &Patch<usize>,
+    window: &[Range<usize>],
+    range: &Range<usize>,
+) -> Option<Range<usize>> {
+    if meets_any(patch.edits(), range, |edit| &edit.old) {
+        return None;
+    }
+    let shifted = shift(patch, range);
+    (!meets_any(window, &shifted, |range| range)).then_some(shifted)
+}
+
+/// `range` moved through the edits of `patch`, for a range that no edit meets.
+///
+/// An end at an insertion point stays before the inserted text, where
+/// [`Patch::old_to_new`] carries it past. No edit meets the range, so the
+/// inserted text lies outside it.
+fn shift(patch: &Patch<usize>, range: &Range<usize>) -> Range<usize> {
+    let edits = patch.edits();
+    let end = match edits.partition_point(|edit| edit.old.start < range.end) {
+        0 => range.end,
+        ix => {
+            let edit = &edits[ix - 1];
+            if range.end >= edit.old.end {
+                edit.new.end + (range.end - edit.old.end)
+            } else {
+                edit.new.start
+            }
+        },
+    };
+    patch.old_to_new(range.start)..end
+}
+
+/// Whether `range` meets the span of one of `items`, whose spans are sorted
+/// and disjoint.
+///
+/// Two ranges meet when each starts before the other ends. Thus an empty span
+/// meets `range` only strictly inside it, as an insertion inside an entry
+/// does, and ranges that only touch do not meet. A query cursor applies the
+/// same test to its byte range.
+fn meets_any<T>(items: &[T], range: &Range<usize>, span: impl Fn(&T) -> &Range<usize>) -> bool {
+    let ix = items.partition_point(|item| span(item).end <= range.start);
+    items
+        .get(ix)
+        .is_some_and(|item| span(item).start < range.end)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        build_index, index_file, indexable, load_or_extract, IndexBuild, IndexUpdate, ShardSource,
+        build_index, carry, edit_window, extract_buffer, extract_shard, index_file, indexable,
+        load_or_extract, Extraction, IndexBuild, IndexUpdate, ShardSource,
     };
     use crate::{
+        buffer::{BufferId, TextBuffer},
         buffer_registry::fingerprint_bytes,
         code_index::store,
         host::{FakeFs, FakeFsOp, FsHost},
@@ -611,12 +906,16 @@ mod tests {
     use futures::FutureExt;
     use std::{
         collections::HashMap,
+        ops::Range,
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_language::LanguageRegistry;
+    use stoat_language::{edit_tree, parse_rope, Language, LanguageRegistry};
     use stoat_scheduler::TestScheduler;
-    use stoat_text::Rope;
+    use stoat_text::{
+        patch::{Edit, Patch},
+        Rope,
+    };
     use tokio::sync::Notify;
 
     /// Run a build to completion over `fs`, returning the updates it streamed.
@@ -899,50 +1198,231 @@ mod tests {
     #[test]
     fn a_supplied_tree_extracts_the_same_shard_as_parsing() {
         let source = "fn helper() {}\n\nfn main() {\n    helper();\n}\n";
-        let rope = Rope::from(source);
-        let language = LanguageRegistry::standard()
-            .for_path(Path::new("/repo/src/a.rs"))
-            .unwrap();
-
-        let fresh = super::extract_shard(
+        let language = rust();
+        let fresh = extract_shard(
             &language,
             Path::new("/repo"),
-            Path::new("/repo/src/a.rs"),
-            &rope,
+            Path::new(RUST_PATH),
+            &Rope::from(source),
+        )
+        .unwrap();
+
+        let (supplied, _) = extract(
+            &language,
+            &TextBuffer::with_text(BufferId::new(0), source),
             None,
-        )
-        .unwrap();
+        );
 
-        let tree = stoat_language::parse_rope(&language, &rope, None).unwrap();
-        let carried = super::extract_shard(
-            &language,
-            Path::new("/repo"),
-            Path::new("/repo/src/a.rs"),
-            &rope,
-            Some(&tree),
-        )
-        .unwrap();
-
-        let shape = |(rel, shard): &(String, codegraph::FileShard)| {
-            (
-                rel.clone(),
-                shard.content_hash,
-                shard
-                    .symbols
-                    .iter()
-                    .map(|s| (s.name.clone(), s.kind, s.def_range.clone(), s.body_hash))
-                    .collect::<Vec<_>>(),
-                shard
-                    .edges
-                    .iter()
-                    .map(|e| (e.kind, e.from, format!("{:?}", e.to)))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        assert_eq!(shape(&carried), shape(&fresh));
+        assert_eq!(supplied, fresh.1);
         assert!(
-            !carried.1.symbols.is_empty(),
+            !supplied.symbols.is_empty(),
             "the fixture must extract symbols, or the comparison proves nothing",
+        );
+    }
+
+    const RUST_PATH: &str = "/repo/src/a.rs";
+
+    const TRAIT_IMPL: &str = "\
+impl Greet for Point {
+    fn hello(&self) {
+        first();
+    }
+
+    fn bye(&self) {
+        second();
+    }
+}
+
+fn free() {
+    third();
+}
+";
+
+    fn rust() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(Path::new(RUST_PATH))
+            .unwrap()
+    }
+
+    /// The offset just past the first `needle` in `text`.
+    fn after(text: &str, needle: &str) -> usize {
+        text.find(needle).unwrap() + needle.len()
+    }
+
+    /// The shard and extraction of `buffer` as it stands, from a tree parsed the
+    /// way the parse pipeline parses it, incrementally from `previous` when one
+    /// is given.
+    fn extract(
+        language: &Language,
+        buffer: &TextBuffer,
+        previous: Option<&Extraction>,
+    ) -> (codegraph::FileShard, Extraction) {
+        let snapshot = buffer.snapshot.clone();
+        let old_tree = previous.map(|prev| {
+            let mut tree = prev.tree.clone();
+            let patch = snapshot.edits_since(prev.version);
+            edit_tree(&mut tree, patch.edits(), &prev.text, &snapshot.visible_text);
+            tree
+        });
+        let tree = parse_rope(language, &snapshot.visible_text, old_tree.as_ref()).unwrap();
+        let (_, shard, extraction) = extract_buffer(
+            language,
+            Path::new("/repo"),
+            Path::new(RUST_PATH),
+            snapshot,
+            Some(tree),
+            previous,
+        )
+        .unwrap();
+        (shard, extraction)
+    }
+
+    /// Extract `source`, apply `edits` in order, and extract again from the
+    /// first extraction. The second extraction equals a whole-file extraction
+    /// of the edited text.
+    ///
+    /// Each edit's range is in the text that the edits before it leave.
+    fn assert_windowed_matches_whole(source: &str, edits: &[(Range<usize>, &str)]) {
+        let language = rust();
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), source);
+        let (_, first) = extract(&language, &buffer, None);
+        for (range, text) in edits {
+            buffer.edit(range.clone(), text);
+        }
+        assert!(
+            first.precedes(&buffer.snapshot, &language),
+            "the second extraction takes the windowed path",
+        );
+
+        let (windowed_shard, windowed) = extract(&language, &buffer, Some(&first));
+        let (whole_shard, whole) = extract(&language, &buffer, None);
+        assert_eq!((&windowed.defs, &windowed.refs), (&whole.defs, &whole.refs));
+        assert_eq!(windowed_shard, whole_shard);
+    }
+
+    /// The impl's match comes back with the method's, and it brings the
+    /// references in the impl header with it. Those carry over from the first
+    /// extraction, so the window cuts them out of the query's output.
+    #[test]
+    fn a_line_typed_in_a_method_extracts_as_the_whole_file_does() {
+        let at = after(TRAIT_IMPL, "first();\n");
+        assert_windowed_matches_whole(TRAIT_IMPL, &[(at..at, "        let p: Point = added();\n")]);
+    }
+
+    /// A settle re-runs the queries over the method that holds the edit and
+    /// nothing around it, which keeps a settle in a large impl cheap.
+    #[test]
+    fn a_line_typed_in_a_method_re_runs_the_queries_over_that_method_alone() {
+        let language = rust();
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), TRAIT_IMPL);
+        let (_, first) = extract(&language, &buffer, None);
+        let at = after(TRAIT_IMPL, "first();\n");
+        buffer.edit(at..at, "        added();\n");
+        let (_, second) = extract(&language, &buffer, Some(&first));
+
+        let rope = &buffer.snapshot.visible_text;
+        let patch = buffer.snapshot.edits_since(first.version);
+        let text = rope.to_string();
+        let hello = text.find("fn hello").unwrap()..text.find("\n\n    fn bye").unwrap();
+        assert_eq!(edit_window(&first, &patch, rope, &second.tree), [hello]);
+    }
+
+    /// The impl's type is the container of every method in it, so the rename
+    /// re-extracts the whole impl rather than the renamed word.
+    #[test]
+    fn a_renamed_impl_type_extracts_as_the_whole_file_does() {
+        let at = TRAIT_IMPL.find("Point").unwrap();
+        assert_windowed_matches_whole(TRAIT_IMPL, &[(at..at + "Point".len(), "Spot")]);
+    }
+
+    /// The brace completes an open block in `f`, which ends the impl before `g`
+    /// and moves `g` out of it. The edit sits in `f`, so only tree-sitter's
+    /// changed ranges reach `g`.
+    #[test]
+    fn a_brace_that_ends_an_impl_early_extracts_as_the_whole_file_does() {
+        let source = "impl X {\n    fn f() {\n        {\n    }\n}\nfn g() {}\n";
+        let at = after(source, "        {");
+        assert_windowed_matches_whole(source, &[(at..at, "}")]);
+    }
+
+    /// Two edits make two window ranges. The one query over their hull also
+    /// finds the method between them, which carries over and does not come back
+    /// twice.
+    #[test]
+    fn edits_in_two_functions_extract_as_the_whole_file_does() {
+        let (hello, free) = (
+            after(TRAIT_IMPL, "first();\n"),
+            after(TRAIT_IMPL, "third();\n"),
+        );
+        assert_windowed_matches_whole(
+            TRAIT_IMPL,
+            &[
+                (free..free, "    fourth();\n"),
+                (hello..hello, "        added();\n"),
+            ],
+        );
+    }
+
+    /// An item typed flush between two others touches both. The item before it
+    /// keeps its end at the insertion point, and the item after it moves past
+    /// the inserted text.
+    #[test]
+    fn an_item_typed_flush_between_two_items_extracts_as_the_whole_file_does() {
+        let source = "fn a() { x(); }fn c() { z(); }\n";
+        let at = after(source, "x(); }");
+        assert_windowed_matches_whole(source, &[(at..at, "fn b() { y(); }")]);
+    }
+
+    /// A quote typed in `f` pairs with every quote after it, which turns the
+    /// end of `a` and the header of `b` into string tokens inside `f`. Then `h`
+    /// moves into `a` with its own subtree unchanged. In the new tree the
+    /// change sits inside `f`, so only the item around it in the old tree
+    /// reaches `h`.
+    #[test]
+    fn a_quote_that_swallows_a_module_boundary_extracts_as_the_whole_file_does() {
+        let source = "\
+mod a {
+    fn f() {
+        assert!(
+            !s.contains(\"x\"),
+            \"y z\"
+        );
+    }
+}
+
+mod b {
+    fn g() {
+        assert!(t(\"u\"), \"v\");
+    }
+
+    fn h() {}
+}
+";
+        let at = source.find("\"x\"").unwrap();
+        assert_windowed_matches_whole(source, &[(at..at, "\"")]);
+    }
+
+    /// A settle with no edit since the previous extraction runs no query and
+    /// returns the previous extraction's entries.
+    #[test]
+    fn a_settle_with_no_edit_extracts_as_the_whole_file_does() {
+        assert_windowed_matches_whole(TRAIT_IMPL, &[]);
+    }
+
+    /// Text inserted at either end of an entry lands outside it, and an edit
+    /// inside an entry stops it from carrying over. The window decides the rest,
+    /// so an empty window isolates these two rules.
+    #[test]
+    fn an_entry_carries_over_shifted_only_when_no_edit_meets_it() {
+        let edit = |old: Range<usize>, new: Range<usize>| Edit { old, new };
+        let patch = Patch::new(vec![
+            edit(5..5, 5..8),
+            edit(10..10, 13..16),
+            edit(20..21, 26..26),
+        ]);
+        assert_eq!(
+            [5..10, 18..22, 30..40].map(|range| carry(&patch, &[], &range)),
+            [Some(8..13), None, Some(35..45)],
         );
     }
 
