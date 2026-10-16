@@ -406,6 +406,13 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) perf: Option<PerfSegment>,
 }
 
+/// A screen buffer whose every cell holds `blank`, blanked off the run loop
+/// ahead of the paint that reuses it.
+pub(crate) struct BlankedBuffer {
+    pub(crate) buffer: Buffer,
+    pub(crate) blank: Cell,
+}
+
 /// A status-bar latency readout holding the most recent paint time and the
 /// p95 input-to-publish latency, both in microseconds.
 #[cfg(feature = "perf")]
@@ -659,6 +666,18 @@ pub(crate) fn themed_blank(theme: &crate::theme::Theme) -> Cell {
     cell.fg = themed_fg(theme);
     cell.bg = themed_bg(theme);
     cell
+}
+
+/// Blanks every cell of `buffer` to `blank`.
+///
+/// The run loop gives a published frame's buffer to a blocking-pool task that
+/// calls this. The fill of a whole screen then runs while the newest frame is
+/// on screen, not between a key and the frame it causes. The returned blank
+/// lets the paint that takes the buffer back tell whether the theme still
+/// matches.
+pub(crate) fn blank_buffer(mut buffer: Buffer, blank: Cell) -> BlankedBuffer {
+    buffer.content.fill(blank.clone());
+    BlankedBuffer { buffer, blank }
 }
 
 /// The foreground the theme gives ordinary text, for a caller that has nothing

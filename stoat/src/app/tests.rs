@@ -23,7 +23,7 @@ use crate::{
     workspace::diff::DiffBase,
 };
 use crossterm::event::{MouseButton, MouseEventKind};
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use std::{
     ops::Range,
     path::{Path, PathBuf},
@@ -4593,7 +4593,7 @@ fn hints_cache_reuses_rows_across_unchanged_frames() {
     h.stoat.key_hints_visible = true;
     let mut buf = Buffer::empty(h.stoat.size());
 
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
     let key = h.stoat.hints_cache.as_ref().expect("cache populated").key;
 
     // A rebuild would drop this sentinel row. Reuse keeps it.
@@ -4603,7 +4603,7 @@ fn hints_cache_reuses_rows_across_unchanged_frames() {
         toggle: None,
     });
 
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
     let cache = h.stoat.hints_cache.as_ref().expect("cache retained");
     assert_eq!(cache.key, key, "unchanged state keeps the same cache key");
     assert!(
@@ -4638,7 +4638,7 @@ fn the_git_chord_marks_its_toggles() {
 
     h.stoat.stoatty = true;
     let mut buf = Buffer::empty(h.stoat.size());
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
     let rgb = |name| style_rgb(h.stoat.theme.get(name).fg).expect("the theme colors the mark");
     let (active, inactive) = (rgb(scope::UI_TOGGLE_ACTIVE), rgb(scope::UI_TOGGLE_INACTIVE));
     let marks: Vec<(u16, [u8; 3])> = decode_stream(h.stoat.apc_scene.bytes())
@@ -4668,7 +4668,7 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
     h.stoat.key_hints_visible = true;
     let mut buf = Buffer::empty(h.stoat.size());
 
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
 
     let keys: Vec<&str> = h
         .stoat
@@ -4744,7 +4744,7 @@ fn select_mode_auto_shows_no_hints_box() {
 
     h.stoat.handle_key(bare(KeyCode::Char('v')));
     assert_eq!(h.stoat.focused_mode(), "select");
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
     assert!(
         h.stoat.hints_cache.is_none(),
         "select mode auto-shows no box"
@@ -4753,7 +4753,7 @@ fn select_mode_auto_shows_no_hints_box() {
     // `Escape` enters a primary mode, `h` is a plain editor key, and the root
     // toggle is unguarded, so the chord entry is all that stays.
     h.stoat.key_hints_visible = true;
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
     assert_eq!(
         hint_keys(&h.stoat),
         ["z"],
@@ -4763,7 +4763,7 @@ fn select_mode_auto_shows_no_hints_box() {
     h.stoat.key_hints_visible = false;
     h.stoat.handle_key(bare(KeyCode::Char('z')));
     assert_eq!(h.stoat.focused_mode(), "select_z");
-    h.stoat.paint_into(&mut buf);
+    h.stoat.paint_into(&mut buf, None);
     let mut keys = hint_keys(&h.stoat);
     keys.sort();
     assert_eq!(
@@ -4781,7 +4781,7 @@ fn select_mode_auto_shows_no_hints_box() {
 /// rather than as a pair of byte arrays.
 fn frame_scene(stoat: &mut Stoat) -> String {
     let mut buf = Buffer::empty(stoat.size());
-    stoat.paint_into(&mut buf);
+    stoat.paint_into(&mut buf, None);
     String::from_utf8_lossy(stoat.apc_scene.bytes()).into_owned()
 }
 
@@ -6030,6 +6030,89 @@ fn publish_one_diagnostic(h: &mut crate::test_harness::TestHarness, path: &std::
             ..Default::default()
         }],
         vec![anchors],
+    );
+}
+
+/// Paint one frame into `buf` as the run loop does with a buffer a blank job
+/// reported blanked to `blanked`, and return it.
+fn paint_blanked(
+    h: &mut crate::test_harness::TestHarness,
+    mut buf: Buffer,
+    blanked: &Cell,
+) -> Buffer {
+    h.stoat.paint_into(&mut buf, Some(blanked));
+    buf
+}
+
+/// A buffer of `#` cells on red, unlike any themed blank.
+///
+/// A cell that the fill skipped and no painter wrote keeps the poison, so the
+/// frame differs from a fresh paint.
+fn poisoned(area: Rect) -> Buffer {
+    let mut poison = Cell::new("#");
+    poison.bg = Color::Red;
+    Buffer::filled(area, poison)
+}
+
+#[test]
+fn a_buffer_blanked_off_the_loop_paints_a_fresh_frame() {
+    let mut h = Stoat::test();
+    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let blanked = Buffer::filled(h.stoat.size, blank.clone());
+
+    assert_eq!(paint_blanked(&mut h, blanked, &blank), h.stoat.render());
+}
+
+/// A theme change between the blank job and the paint leaves the buffer
+/// blanked to colors the frame no longer uses, so the paint fills it again.
+#[test]
+fn a_buffer_blanked_to_another_theme_is_filled_again() {
+    let mut h = Stoat::test();
+    let mut stale = crate::render::themed_blank(&h.stoat.theme);
+    stale.bg = Color::Blue;
+    let area = h.stoat.size;
+
+    assert_eq!(
+        paint_blanked(&mut h, poisoned(area), &stale),
+        h.stoat.render()
+    );
+}
+
+/// A resize between the blank job and the paint leaves the buffer at the old
+/// size, so the paint fills it again although its blank still matches.
+#[test]
+fn a_buffer_blanked_at_another_size_is_filled_again() {
+    let mut h = Stoat::test();
+    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let wider = Rect {
+        width: h.stoat.size.width + 1,
+        ..h.stoat.size
+    };
+
+    assert_eq!(
+        paint_blanked(&mut h, poisoned(wider), &blank),
+        h.stoat.render()
+    );
+}
+
+#[test]
+fn a_landed_blank_job_behind_a_running_one_is_taken() {
+    let (_running, pending) = oneshot::channel();
+    let (ended, closed) = oneshot::channel();
+    drop(ended);
+    let (done, landed) = oneshot::channel();
+    let _ = done.send(BlankedBuffer {
+        buffer: Buffer::empty(Rect::new(0, 0, 3, 1)),
+        blank: Cell::EMPTY,
+    });
+    let mut jobs = std::collections::VecDeque::from([pending, closed, landed]);
+
+    let taken = take_blanked(&mut jobs).map(|blanked| blanked.buffer.area.width);
+
+    assert_eq!(
+        (taken, jobs.len()),
+        (Some(3), 1),
+        "the landed buffer, with only the running job left",
     );
 }
 

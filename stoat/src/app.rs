@@ -43,7 +43,7 @@ use crate::{
         pane_cache::PaneCacheEntry,
         sanitize,
         undercurl::{self, UndercurlBatch},
-        PRIMARY_MODES,
+        BlankedBuffer, PRIMARY_MODES,
     },
     run::{CommandMark, PtyNotification, RunId},
     selection::merge_overlapping_spans,
@@ -61,7 +61,10 @@ use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use futures::FutureExt;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::{Buffer, Cell},
+    layout::Rect,
+};
 use slotmap::SlotMap;
 use std::{
     borrow::Cow,
@@ -85,6 +88,7 @@ use tokio::{
     io::AsyncBufReadExt,
     sync::{
         mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender},
+        oneshot::{self, error::TryRecvError},
         watch,
     },
 };
@@ -176,6 +180,17 @@ const SCROLL_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Alacritty bounds the same loop the same way, releasing the terminal after a
 /// fixed read so the renderer gets a turn.
 const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
+
+/// The number of blank jobs that [`Stoat::run`] keeps in flight on the blocking
+/// pool.
+///
+/// Each job holds a returned screen buffer and blanks it for a later paint. A
+/// key that arrives as soon as the frame before it lands gives one job only
+/// that key's update to land in, and a paint that finds no landed job fills a
+/// buffer on the loop. A second job gives each job two frame intervals, so
+/// presses at that pace still paint into blanked buffers. Each job costs one
+/// more screen buffer.
+const BLANK_JOBS_IN_FLIGHT: usize = 2;
 
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
 /// to read as motion, slow enough not to churn repaints while progress streams.
@@ -424,6 +439,31 @@ fn repo_tree_root(root: &Path, workdir: Option<&Path>) -> PathBuf {
 /// expensive enough that a count says nothing about what they cost.
 fn index_turn_spent(drained: usize, elapsed: std::time::Duration) -> bool {
     drained >= INDEX_DRAIN_CAP || elapsed >= INDEX_DRAIN_BUDGET
+}
+
+/// Takes the buffer of the first blank job that has landed.
+///
+/// A job that ended without a buffer leaves the queue too. The jobs run on
+/// separate pool threads, and a later job sometimes lands before an earlier
+/// one.
+fn take_blanked(
+    jobs: &mut std::collections::VecDeque<oneshot::Receiver<BlankedBuffer>>,
+) -> Option<BlankedBuffer> {
+    let mut landed = None;
+    jobs.retain_mut(|job| {
+        if landed.is_some() {
+            return true;
+        }
+        match job.try_recv() {
+            Ok(blanked) => {
+                landed = Some(blanked);
+                false
+            },
+            Err(TryRecvError::Closed) => false,
+            Err(TryRecvError::Empty) => true,
+        }
+    });
+    landed
 }
 
 /// Index into [`SPINNER_FRAMES`] for a spinner that has animated for `clock`
@@ -3862,10 +3902,14 @@ impl Stoat {
         let mut frame_timer = tokio::time::interval(SCROLL_FRAME);
         frame_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_tick: Option<std::time::Instant> = None;
-        // The prior frame's screen buffer, recycled into the next paint once the
-        // render thread has released it, so a redraw reuses one allocation rather
-        // than allocating a fresh ~screen-sized buffer per frame.
-        let mut recycled: Option<RenderFrame> = None;
+        // Each publish returns the buffer of the frame it replaces. A buffer that
+        // the UI thread no longer holds goes to a blocking-pool job, which blanks
+        // it while newer frames are on screen. The paint that takes it back then
+        // skips the themed fill. A buffer the UI thread still holds, or one that
+        // comes back while `BLANK_JOBS_IN_FLIGHT` jobs run, waits in `recycled`.
+        // A paint that finds no landed job fills that one on the loop.
+        let mut recycled: Option<Arc<Buffer>> = None;
+        let mut blanking = std::collections::VecDeque::new();
         let mut timer_won = false;
 
         loop {
@@ -4037,30 +4081,52 @@ impl Stoat {
                         break;
                     }
                     let (buffer, undercurl) = {
-                        // Reuse the released prior frame's allocation. paint_into
-                        // resizes and resets it, so it paints as a fresh buffer
-                        // would. The fallback fresh buffer double-clears (empty
-                        // then reset), acceptable on this rare path.
-                        let mut b = recycled
-                            .take()
-                            .and_then(|f| Arc::try_unwrap(f.buffer).ok())
-                            .unwrap_or_else(|| Buffer::empty(self.size));
+                        let (mut b, blank) = match take_blanked(&mut blanking) {
+                            Some(BlankedBuffer { buffer, blank }) => (buffer, Some(blank)),
+                            None => {
+                                let spare = recycled
+                                    .take()
+                                    .and_then(|arc| Arc::try_unwrap(arc).ok())
+                                    .unwrap_or_else(|| Buffer::empty(self.size));
+                                (spare, None)
+                            },
+                        };
                         #[cfg(feature = "perf")]
                         let painted = std::time::Instant::now();
-                        self.paint_into(&mut b);
+                        self.paint_into(&mut b, blank.as_ref());
                         #[cfg(feature = "perf")]
                         self.perf.record_paint(painted.elapsed());
                         let undercurl = undercurl::build(&b, self.pending_undercurls.spans());
                         (Arc::new(b), undercurl)
                     };
                     let cursor = self.primary_cursor_screen_pos();
-                    recycled = render.send_replace(Some(RenderFrame {
+                    let prior = render.send_replace(Some(RenderFrame {
                         buffer,
                         cursor,
                         undercurl,
                         #[cfg(feature = "perf")]
                         input_time: t_event,
                     }));
+                    if let Some(frame) = prior {
+                        if blanking.len() == BLANK_JOBS_IN_FLIGHT {
+                            recycled = Some(frame.buffer);
+                        } else {
+                            match Arc::try_unwrap(frame.buffer) {
+                                Ok(buffer) => {
+                                    let (tx, rx) = oneshot::channel();
+                                    let blank = crate::render::themed_blank(&self.theme);
+                                    self.executor
+                                        .spawn_blocking(move || {
+                                            let _ =
+                                                tx.send(crate::render::blank_buffer(buffer, blank));
+                                        })
+                                        .detach();
+                                    blanking.push_back(rx);
+                                },
+                                Err(held) => recycled = Some(held),
+                            }
+                        }
+                    }
                     #[cfg(feature = "perf")]
                     if let Some(started) = t_event {
                         self.perf.record_input_to_publish(started.elapsed());
@@ -8619,24 +8685,30 @@ impl Stoat {
     #[allow(dead_code)]
     pub(crate) fn render(&mut self) -> Buffer {
         let mut buf = Buffer::empty(self.size);
-        self.paint_into(&mut buf);
+        self.paint_into(&mut buf, None);
         buf
     }
 
     /// Paint the current state into `buf`, reusing its allocation.
     ///
-    /// Resizes `buf` to the current screen and blanks it to the theme's own
-    /// colors before drawing, so a recycled buffer paints byte-identically to a
-    /// fresh one. The event loop recycles the prior frame's buffer this way once
-    /// the render thread releases it, avoiding a per-frame screen allocation.
+    /// `blanked` names the cell that every cell of `buf` holds, when a task
+    /// blanked it ahead of this paint. A buffer blanked to the current theme at
+    /// the current size skips the fill. Any other buffer is resized and blanked
+    /// here first, so both paint byte-identically to a fresh buffer.
     ///
     /// Blanking to the theme rather than to Reset is what keeps the ambient
     /// screen following `:theme`. The terminal resolves a cell that reaches it
     /// at Reset against its own theme instead.
-    fn paint_into(&mut self, buf: &mut Buffer) {
+    fn paint_into(&mut self, buf: &mut Buffer, blanked: Option<&Cell>) {
         self.render_tick += 1;
+        let blank = crate::render::themed_blank(&self.theme);
+        // Checked before the resize, which pads a grown buffer with
+        // `Cell::EMPTY` rather than the blank.
+        let prefilled = buf.area == self.size && blanked == Some(&blank);
         buf.resize(self.size);
-        buf.content.fill(crate::render::themed_blank(&self.theme));
+        if !prefilled {
+            buf.content.fill(blank);
+        }
 
         // Keep every editor's syntax coloring in step with the session toggle
         // before painting, so a newly opened editor inherits the current
@@ -9135,7 +9207,7 @@ async fn connect_window_ipc(path: PathBuf, tx: UnboundedSender<WindowIpc>) {
 /// modules, and this keeps painting outside the run loop a test-only ability.
 #[cfg(test)]
 pub(crate) fn paint_frame(stoat: &mut Stoat, buf: &mut Buffer) {
-    stoat.paint_into(buf);
+    stoat.paint_into(buf, None);
 }
 
 /// Deliver one window-IPC event, for a test driving an aux window.
