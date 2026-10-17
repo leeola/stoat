@@ -198,8 +198,8 @@ lane that `lane_begin` names, and a decoration outside any lane belongs to
 lane 0. A `lane_begin` clears the decorations its lane holds and leaves the
 other lanes alone. An emitter thus re-declares only the lane that changed, with
 no `reset` and no re-send of the whole scene. Lanes do not nest, and a `reset`
-still clears every lane. A terminal below version 12 ignores both markers, so
-send lanes only to a terminal at version 12 or later.
+still clears every lane and closes an open one. A terminal below version 12
+ignores both markers, so send lanes only to a terminal at version 12 or later.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

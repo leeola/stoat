@@ -95,13 +95,13 @@ const MAX_REGION_VIEWPORTS: usize = 2;
 /// oversized run for a session that keeps rendering.
 const MAX_CAPTURE_BYTES: usize = 1 << 20;
 
-/// Entries one decoration list may hold between resets.
+/// The most entries one lane's decoration list holds between clears.
 ///
-/// Only `Gstoatty;reset` empties these lists, so an emitter that re-stamps its
-/// scene without ever sending one grows them without limit, and every
-/// projection re-walks the whole list on the way to running out of memory. A
-/// real scene stamps tens of decorations per frame, so the ceiling is far above
-/// anything a working emitter reaches.
+/// Only `Gstoatty;reset` or a `lane_begin` for the lane empties these lists, so
+/// an emitter that re-stamps its scene without either grows them without limit,
+/// and every projection re-walks the whole list on the way to running out of
+/// memory. A real scene stamps tens of decorations per frame, so the ceiling is
+/// far above anything a working emitter reaches.
 const MAX_DECORATIONS: usize = 4096;
 
 /// Pools one terminal may hold at once.
@@ -112,6 +112,15 @@ const MAX_DECORATIONS: usize = 4096;
 /// renderer walks all of them every frame. A real session runs one pool per
 /// visible pane.
 const MAX_POOLS: usize = 64;
+
+/// The most decoration lanes one terminal holds at once.
+///
+/// A lane is created by any unseen `lane_begin` id, and only a reset retires
+/// the ones the scene has stopped declaring, so a writer looping fresh ids
+/// grows the map for the session. [`MAX_DECORATIONS`] caps each lane's lists,
+/// so this cap is what bounds their sum. A real scene runs a lane or two per
+/// pane, the same order as [`MAX_POOLS`].
+const MAX_LANES: usize = 256;
 
 /// Minimap content stores one terminal may hold at once.
 ///
@@ -233,6 +242,8 @@ pub struct Terminal {
     warned_decoration_cap: bool,
     /// Whether a pool refused at [`MAX_POOLS`] has already been reported.
     warned_pool_cap: bool,
+    /// Whether a lane refused at [`MAX_LANES`] has already been reported.
+    warned_lane_cap: bool,
     /// Whether minimap input bounded at [`MAX_MINIMAP_STORES`],
     /// [`MAX_MINIMAP_LINES`], or [`MAX_MINIMAP_VIEWS`] has already been
     /// reported.
@@ -241,8 +252,12 @@ pub struct Terminal {
     /// same writer, and the log line names which of them fired.
     warned_minimap_cap: bool,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
-    /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
-    /// them, since the VT projection resets each cell's borders every frame.
+    /// [`Self::project`]. They persist until a `Gstoatty;reset` frame or a
+    /// re-declaration of their lane clears them, since the VT projection resets
+    /// each cell's borders every frame.
+    ///
+    /// This list and the decoration lists after it are the concatenation of
+    /// [`Self::lanes`] that [`Self::flatten_lanes`] rebuilds.
     borders: Vec<BorderCommand>,
     /// Panel regions set by `Gstoatty;panel` frames, applied to the grid's panel
     /// list by [`Self::project`]. They float above the cells like popovers, but
@@ -288,8 +303,7 @@ pub struct Terminal {
     line_layout: Option<LineLayoutCommand>,
     /// Per-component declaration-order seq, held in lockstep with the four
     /// accumulating decoration lists above so each grid component carries the
-    /// z-order the renderer occludes by. Pushed and cleared exactly where its
-    /// list is.
+    /// z-order the renderer occludes by. Rebuilt together with its list.
     panel_seq: Vec<u32>,
     icon_seq: Vec<u32>,
     text_run_seq: Vec<u32>,
@@ -297,8 +311,8 @@ pub struct Terminal {
     polyline_seq: Vec<u32>,
     sketch_seq: Vec<u32>,
     /// Declared minimap strips set by `Gstoatty;minimap` frames, applied to the
-    /// grid by [`Self::project`]. A decoration cleared by `Gstoatty;reset` like a
-    /// border, with a parallel [`Self::minimap_seq`] for z-order.
+    /// grid by [`Self::project`]. A decoration cleared like a border, with a
+    /// parallel [`Self::minimap_seq`] for z-order.
     minimaps: Vec<MinimapCommand>,
     minimap_seq: Vec<u32>,
     /// Minimap line-summary stores keyed by content id, spliced by
@@ -332,10 +346,18 @@ pub struct Terminal {
     /// [`Self::clear_minimap_journal`], which is the only thing that empties
     /// either.
     minimap_journal_lines: usize,
-    /// Next seq to stamp, incremented per decoration and reset by a
-    /// `Gstoatty;reset` frame. Starts at 1 so pool-composited content (seq 0)
-    /// sorts below every declared decoration.
-    decoration_seq: u32,
+    /// The decorations each lane holds, keyed by lane id.
+    ///
+    /// Every accumulating decoration lands here first. A [`BTreeMap`] so
+    /// [`Self::flatten_lanes`] concatenates the lanes in ascending id order,
+    /// which is the order a higher lane draws over a lower one.
+    lanes: BTreeMap<u32, LaneDecorations>,
+    /// The lane that decorations land in. It is the lane the last `lane_begin`
+    /// opened, or 0 outside any lane.
+    lane: u32,
+    /// Whether a lane changed since [`Self::flatten_lanes`] last rebuilt the
+    /// flat lists.
+    lanes_changed: bool,
     /// Which decoration command lists changed since the last [`Self::project`],
     /// so a projection re-stamps only the components that changed rather than all
     /// of them every frame.
@@ -553,6 +575,23 @@ impl DecorationDirty {
             minimaps: true,
         }
     }
+
+    /// Mark every category a lane holds, for a rebuild of the flat lists.
+    ///
+    /// The scroll region and the line layout stay as they are, since no lane
+    /// holds them.
+    fn mark_lane_categories(&mut self) {
+        self.borders = true;
+        self.panels = true;
+        self.scales = true;
+        self.popovers = true;
+        self.icons = true;
+        self.text_runs = true;
+        self.bars = true;
+        self.polylines = true;
+        self.sketches = true;
+        self.minimaps = true;
+    }
 }
 
 /// The decoration lists as the last projection stamped them.
@@ -565,8 +604,8 @@ impl DecorationDirty {
 ///
 /// Sequence numbers are held beside their lists because a list can come back
 /// identical while its numbers move. Comparing them is sound only because
-/// `clear_decorations` resets the counter, so a redeclare of the same scene
-/// reproduces the same numbers.
+/// `flatten_lanes` numbers from 1 on every rebuild, so a redeclare of the same
+/// scene reproduces the same numbers.
 #[derive(Default)]
 struct ProjectedDecorations {
     borders: Vec<BorderCommand>,
@@ -593,6 +632,74 @@ struct ProjectedDecorations {
     line_layout: Option<LineLayoutCommand>,
 }
 
+/// The decorations one lane holds, in the lane's own declaration order.
+///
+/// A lane is the unit an emitter re-declares, so each lane keeps its own lists
+/// and its own seq counter. The counter starts at 0 in every lane, because
+/// [`Terminal::flatten_lanes`] moves each lane's seqs past the lanes below it.
+#[derive(Default)]
+struct LaneDecorations {
+    borders: Vec<BorderCommand>,
+    panels: Vec<PanelCommand>,
+    scales: Vec<ScaleCommand>,
+    popovers: Vec<PopoverCommand>,
+    icons: Vec<IconCommand>,
+    text_runs: Vec<StoredTextRun>,
+    bars: Vec<BarCommand>,
+    polylines: Vec<PolylineCommand>,
+    sketches: Vec<SketchCommand>,
+    minimaps: Vec<MinimapCommand>,
+    panel_seq: Vec<u32>,
+    icon_seq: Vec<u32>,
+    text_run_seq: Vec<u32>,
+    bar_seq: Vec<u32>,
+    polyline_seq: Vec<u32>,
+    sketch_seq: Vec<u32>,
+    minimap_seq: Vec<u32>,
+    /// The lane-local seq the next sequenced decoration takes.
+    decoration_seq: u32,
+}
+
+impl LaneDecorations {
+    fn is_empty(&self) -> bool {
+        self.borders.is_empty()
+            && self.panels.is_empty()
+            && self.scales.is_empty()
+            && self.popovers.is_empty()
+            && self.icons.is_empty()
+            && self.text_runs.is_empty()
+            && self.bars.is_empty()
+            && self.polylines.is_empty()
+            && self.sketches.is_empty()
+            && self.minimaps.is_empty()
+    }
+
+    /// Empty every list and restart the seq counter.
+    ///
+    /// The lists keep their allocations, since an emitter re-declares a lane
+    /// with about as many decorations as it held before.
+    fn clear(&mut self) {
+        self.borders.clear();
+        self.panels.clear();
+        self.scales.clear();
+        self.popovers.clear();
+        self.icons.clear();
+        self.text_runs.clear();
+        self.bars.clear();
+        self.polylines.clear();
+        self.sketches.clear();
+        self.minimaps.clear();
+        self.panel_seq.clear();
+        self.icon_seq.clear();
+        self.text_run_seq.clear();
+        self.bar_seq.clear();
+        self.polyline_seq.clear();
+        self.sketch_seq.clear();
+        self.minimap_seq.clear();
+        self.decoration_seq = 0;
+    }
+}
+
 /// Push `item` onto `list` unless it already holds [`MAX_DECORATIONS`],
 /// reporting the first refusal through `warned` and returning whether the push
 /// landed.
@@ -615,6 +722,12 @@ fn push_capped<T>(list: &mut Vec<T>, item: T, warned: &mut bool) -> bool {
 
     list.push(item);
     true
+}
+
+/// Append a lane's lane-local `seqs` to the flat list `out`, each offset by
+/// `base`, the first seq past those the lanes below it hold.
+fn extend_renumbered(out: &mut Vec<u32>, seqs: &[u32], base: u32) {
+    out.extend(seqs.iter().map(|seq| base + seq));
 }
 
 /// The rows a slide of `moved_rows` uncovered in a window `rows` tall.
@@ -1059,6 +1172,7 @@ impl Terminal {
             warned_capture_cap: false,
             warned_decoration_cap: false,
             warned_pool_cap: false,
+            warned_lane_cap: false,
             warned_minimap_cap: false,
             frames_scratch: Vec::new(),
             frame_scratch: FrameScratch::default(),
@@ -1087,7 +1201,9 @@ impl Terminal {
             minimap_reclone: false,
             minimap_journal: Vec::new(),
             minimap_journal_lines: 0,
-            decoration_seq: 1,
+            lanes: BTreeMap::new(),
+            lane: 0,
+            lanes_changed: false,
             decorations_dirty: DecorationDirty::default(),
             output_since_project: false,
             // A new terminal is fully damaged and the grid it projects into holds
@@ -1160,6 +1276,7 @@ impl Terminal {
         self.damage_pending |= redraw;
         self.drain_listener_events();
         self.drain_staged();
+        self.flatten_lanes();
         // The alternate screen is its own surface for placements, and nothing
         // reports entering or leaving it. Polled here rather than inside the
         // parse body, because the mode only changes once the parser has run.
@@ -1332,6 +1449,10 @@ impl Terminal {
                         | Command::FillDecorations(_)
                         | Command::FillEnd
                         | Command::Reset
+                        // A dropped lane marker files every decoration after it
+                        // under the wrong lane.
+                        | Command::LaneBegin(_)
+                        | Command::LaneEnd
                         | Command::Popover(_)
                         | Command::PopoverEnd
                         | Command::TextRun(_)
@@ -1393,6 +1514,7 @@ impl Terminal {
         self.parser.stop_sync(&mut self.term);
         self.drain_listener_events();
         self.drain_staged();
+        self.flatten_lanes();
     }
 
     /// Take the bytes the terminal wants written back to the PTY, leaving none
@@ -1824,11 +1946,14 @@ impl Terminal {
                 self.commit_capture();
                 self.stage_or_apply(Command::Reset);
             },
-            // FIXME: Stoatty keeps one decoration list for all lanes and ignores
-            // the markers, so a re-declared lane adds to its earlier decorations
-            // instead of replacing them. The handshake still announces
-            // protocol 12.
-            Command::LaneBegin(_) | Command::LaneEnd => {},
+            // A lane marker commits an open capture first, so a run that was
+            // streaming when the marker arrived lands in the lane it opened in.
+            // The marker itself stages like a reset, in order with the
+            // decorations around it.
+            Command::LaneBegin(_) | Command::LaneEnd => {
+                self.commit_capture();
+                self.stage_or_apply(command);
+            },
             // Hello identifies the program behind the terminal and touches no
             // grid state. The host logs the event, and the terminal answers with
             // its own ident when one is installed.
@@ -2030,6 +2155,19 @@ impl Terminal {
         );
     }
 
+    /// Report the first lane this session refused at [`MAX_LANES`].
+    fn warn_lane_cap(&mut self, lane: u32) {
+        if self.warned_lane_cap {
+            return;
+        }
+        self.warned_lane_cap = true;
+        tracing::warn!(
+            lane,
+            cap = MAX_LANES,
+            "lane limit reached, refusing a new id"
+        );
+    }
+
     /// Report the first minimap input this session to be bounded, naming which
     /// limit fired through `reason`.
     fn warn_minimap_cap(&mut self, reason: &str) {
@@ -2060,31 +2198,38 @@ impl Terminal {
         }
     }
 
-    /// Apply a decoration command to its live list, marking that list dirty so the
-    /// next [`Self::project`] re-stamps it.
+    /// Apply a decoration command to the open lane, or act on a lane marker or a
+    /// reset.
     ///
     /// The completed `Popover` and `TextRun` commands arrive here already carrying
     /// their captured text from [`Self::commit_capture`], so they push directly
-    /// rather than reopening a capture. Only the accumulating decoration commands
-    /// and `Reset` reach this method. The stream-routing and pool commands act at
-    /// feed time in [`Self::apply_command`] and never route here.
+    /// rather than reopening a capture. Only the accumulating decoration commands,
+    /// the lane markers, and `Reset` reach this method. The stream-routing and
+    /// pool commands act at feed time in [`Self::apply_command`] and never route
+    /// here.
+    ///
+    /// A decoration waits in its lane until [`Self::flatten_lanes`] rebuilds the
+    /// flat lists the projection reads.
     fn apply_decoration(&mut self, command: Command) {
         match command {
             Command::Border(border) => {
-                if push_capped(&mut self.borders, border, &mut self.warned_decoration_cap) {
-                    self.decorations_dirty.borders = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.borders, border, &mut self.warned_decoration_cap) {
+                    self.lanes_changed = true;
                 }
             },
             Command::Panel(panel) => {
-                if push_capped(&mut self.panels, panel, &mut self.warned_decoration_cap) {
-                    self.panel_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.panels = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.panels, panel, &mut self.warned_decoration_cap) {
+                    lane.panel_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
             Command::Scale(scale) => {
-                if push_capped(&mut self.scales, scale, &mut self.warned_decoration_cap) {
-                    self.decorations_dirty.scales = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.scales, scale, &mut self.warned_decoration_cap) {
+                    self.lanes_changed = true;
                 }
             },
             Command::ScrollRegion(region) => {
@@ -2092,10 +2237,11 @@ impl Terminal {
                 self.decorations_dirty.scroll_region = true;
             },
             Command::Icon(icon) => {
-                if push_capped(&mut self.icons, icon, &mut self.warned_decoration_cap) {
-                    self.icon_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.icons = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.icons, icon, &mut self.warned_decoration_cap) {
+                    lane.icon_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
             Command::LineLayout(layout) => {
@@ -2103,53 +2249,61 @@ impl Terminal {
                 self.decorations_dirty.line_layout = true;
             },
             Command::Bar(bar) => {
-                if push_capped(&mut self.bars, bar, &mut self.warned_decoration_cap) {
-                    self.bar_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.bars = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.bars, bar, &mut self.warned_decoration_cap) {
+                    lane.bar_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
             Command::Polyline(polyline) => {
+                let lane = self.lanes.entry(self.lane).or_default();
                 if push_capped(
-                    &mut self.polylines,
+                    &mut lane.polylines,
                     polyline,
                     &mut self.warned_decoration_cap,
                 ) {
-                    self.polyline_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.polylines = true;
+                    lane.polyline_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
             Command::Sketch(sketch) => {
-                if push_capped(&mut self.sketches, sketch, &mut self.warned_decoration_cap) {
-                    self.sketch_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.sketches = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.sketches, sketch, &mut self.warned_decoration_cap) {
+                    lane.sketch_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
             Command::Popover(popover) => {
-                if push_capped(&mut self.popovers, popover, &mut self.warned_decoration_cap) {
-                    self.decorations_dirty.popovers = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.popovers, popover, &mut self.warned_decoration_cap) {
+                    self.lanes_changed = true;
                 }
             },
             Command::TextRun(text_run) => {
+                let lane = self.lanes.entry(self.lane).or_default();
                 if push_capped(
-                    &mut self.text_runs,
+                    &mut lane.text_runs,
                     text_run.into(),
                     &mut self.warned_decoration_cap,
                 ) {
-                    self.text_run_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.text_runs = true;
+                    lane.text_run_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
             Command::Minimap(minimap) => {
-                if push_capped(&mut self.minimaps, minimap, &mut self.warned_decoration_cap) {
-                    self.minimap_seq.push(self.decoration_seq);
-                    self.decoration_seq += 1;
-                    self.decorations_dirty.minimaps = true;
+                let lane = self.lanes.entry(self.lane).or_default();
+                if push_capped(&mut lane.minimaps, minimap, &mut self.warned_decoration_cap) {
+                    lane.minimap_seq.push(lane.decoration_seq);
+                    lane.decoration_seq += 1;
+                    self.lanes_changed = true;
                 }
             },
+            Command::LaneBegin(id) => self.begin_lane(id),
+            Command::LaneEnd => self.lane = 0,
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
             // the stream and pool controls, and the immediate minimap content,
@@ -2177,11 +2331,27 @@ impl Terminal {
             | Command::ConfigReload
             | Command::ZoomCapture { .. }
             | Command::FontStep { .. }
-            | Command::LaneBegin(_)
-            | Command::LaneEnd
             | Command::Kitty(_)
             | Command::ItermFile(_) => {},
         }
+    }
+
+    /// Open lane `id` for the decorations that follow, clearing what it held.
+    ///
+    /// An unseen id past [`MAX_LANES`] is refused and opens lane 0 instead, so a
+    /// writer looping fresh ids fills lane 0's capped lists rather than the map.
+    /// Lane 0 itself is exempt, since every decoration outside a lane lands
+    /// there anyway.
+    fn begin_lane(&mut self, id: u32) {
+        if id != 0 && !self.lanes.contains_key(&id) && self.lanes.len() >= MAX_LANES {
+            self.warn_lane_cap(id);
+            self.lane = 0;
+            return;
+        }
+
+        self.lanes.entry(id).or_default().clear();
+        self.lane = id;
+        self.lanes_changed = true;
     }
 
     /// Whether a DEC 2026 synchronized update is currently buffering.
@@ -2213,6 +2383,64 @@ impl Terminal {
             self.apply_decoration(command);
         }
         self.sync_staged = staged;
+    }
+
+    /// Rebuild the flat decoration lists the projection reads from the lanes.
+    ///
+    /// A no-op unless a lane changed since the last rebuild. The lanes
+    /// concatenate in ascending id order, and each decoration's seq moves past
+    /// every seq the lower lanes hold, so a higher lane draws over a lower one.
+    /// Numbering restarts at 1 on every rebuild, so a scene declared again
+    /// unchanged reproduces its numbers and the projection skips it.
+    fn flatten_lanes(&mut self) {
+        if !mem::take(&mut self.lanes_changed) {
+            return;
+        }
+
+        self.borders.clear();
+        self.panels.clear();
+        self.scales.clear();
+        self.popovers.clear();
+        self.icons.clear();
+        self.text_runs.clear();
+        self.bars.clear();
+        self.polylines.clear();
+        self.sketches.clear();
+        self.minimaps.clear();
+        self.panel_seq.clear();
+        self.icon_seq.clear();
+        self.text_run_seq.clear();
+        self.bar_seq.clear();
+        self.polyline_seq.clear();
+        self.sketch_seq.clear();
+        self.minimap_seq.clear();
+
+        // Seq 0 belongs to pool-composited content, which sorts below every
+        // declared decoration.
+        let mut base = 1;
+        for lane in self.lanes.values() {
+            self.borders.extend_from_slice(&lane.borders);
+            self.panels.extend_from_slice(&lane.panels);
+            self.scales.extend_from_slice(&lane.scales);
+            self.popovers.extend_from_slice(&lane.popovers);
+            self.icons.extend_from_slice(&lane.icons);
+            self.text_runs.extend_from_slice(&lane.text_runs);
+            self.bars.extend_from_slice(&lane.bars);
+            self.polylines.extend_from_slice(&lane.polylines);
+            self.sketches.extend_from_slice(&lane.sketches);
+            self.minimaps.extend_from_slice(&lane.minimaps);
+
+            extend_renumbered(&mut self.panel_seq, &lane.panel_seq, base);
+            extend_renumbered(&mut self.icon_seq, &lane.icon_seq, base);
+            extend_renumbered(&mut self.text_run_seq, &lane.text_run_seq, base);
+            extend_renumbered(&mut self.bar_seq, &lane.bar_seq, base);
+            extend_renumbered(&mut self.polyline_seq, &lane.polyline_seq, base);
+            extend_renumbered(&mut self.sketch_seq, &lane.sketch_seq, base);
+            extend_renumbered(&mut self.minimap_seq, &lane.minimap_seq, base);
+            base += lane.decoration_seq;
+        }
+
+        self.decorations_dirty.mark_lane_categories();
     }
 
     /// Snapshots of every declared smooth-scroll pool, in ascending-id (z) order.
@@ -2859,12 +3087,6 @@ impl Terminal {
         }
     }
 
-    /// Clear all accumulated stoatty decoration state.
-    ///
-    /// A `Gstoatty;reset` frame lands here. Without it the per-frame decoration
-    /// lists only grow, since the VT projection re-stamps them every frame, so a
-    /// program that redraws a frame at a new position would leave the old one
-    /// behind. Resetting lets a program redraw its decoration scene from scratch.
     /// Drop the dirty flags of categories a redeclare left unchanged.
     ///
     /// Every flag is raised together by a scene reset, so without this a scene
@@ -2939,37 +3161,41 @@ impl Terminal {
         }
     }
 
+    /// Clear all accumulated stoatty decoration state.
+    ///
+    /// A `Gstoatty;reset` frame lands here. Without it the per-frame decoration
+    /// lists only grow, since the VT projection re-stamps them every frame, so a
+    /// program that redraws a frame at a new position would leave the old one
+    /// behind. Resetting lets a program redraw its decoration scene from scratch.
+    ///
+    /// Every lane empties and the open lane closes, so the decorations that
+    /// follow land in lane 0. A lane that held nothing is retired, since the
+    /// scene has stopped declaring it. The others keep their allocations for
+    /// the re-declaration an emitter sends behind its reset.
     fn clear_decorations(&mut self) {
-        self.borders.clear();
-        self.panels.clear();
-        self.scales.clear();
-        self.popovers.clear();
-        self.icons.clear();
-        self.text_runs.clear();
-        self.bars.clear();
-        self.polylines.clear();
-        self.sketches.clear();
-        self.panel_seq.clear();
-        self.icon_seq.clear();
-        self.text_run_seq.clear();
-        self.bar_seq.clear();
-        self.polyline_seq.clear();
-        self.sketch_seq.clear();
         // A minimap declaration is a decoration and clears here. Its content
         // store is persistent state that survives, retired by its own drop.
         //
         // A view has no drop of its own, since minimap_drop keys on the content
         // id, so this is the only place one can be retired. The prune runs
-        // against the outgoing declarations, before they are cleared. An emitter
-        // prefixes a reset to every re-stamp, so a strip the scene still draws
-        // has to keep its thumb across that reset, while one it has stopped
-        // declaring is what this retires.
-        let declared = &self.minimaps;
-        self.minimap_views
-            .retain(|strip_id, _| declared.iter().any(|strip| strip.strip_id == *strip_id));
-        self.minimaps.clear();
-        self.minimap_seq.clear();
-        self.decoration_seq = 1;
+        // against the outgoing declarations of every lane, before they are
+        // cleared. An emitter prefixes a reset to every re-stamp, so a strip the
+        // scene still draws has to keep its thumb across that reset, while one
+        // it has stopped declaring is what this retires.
+        let lanes = &self.lanes;
+        self.minimap_views.retain(|strip_id, _| {
+            lanes
+                .values()
+                .flat_map(|lane| &lane.minimaps)
+                .any(|strip| strip.strip_id == *strip_id)
+        });
+        self.lanes.retain(|_, lane| {
+            let declared = !lane.is_empty();
+            lane.clear();
+            declared
+        });
+        self.lane = 0;
+        self.lanes_changed = true;
         self.scroll_region = None;
         self.line_layout = None;
         // Every list emptied, so the next projection must re-apply all of them to

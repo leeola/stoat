@@ -8,7 +8,7 @@
 //! decoration between the two frames belongs to that lane, and a decoration
 //! outside any lane belongs to lane 0. A `lane_begin` clears the decorations
 //! its lane already holds, and the other lanes keep theirs. A bare `reset`
-//! still clears every lane.
+//! still clears every lane, and it closes an open lane.
 //!
 //! Lanes do not nest. A `lane_begin` inside an open lane opens the new lane in
 //! its place.

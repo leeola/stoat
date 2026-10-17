@@ -1,7 +1,7 @@
 use super::{
     insert_room, journal_past_bounds, mark_selection_change, uncovered_rows, whole_row, Arc,
     Cursor, CursorShape, Damage, MinimapJournal, SelectionRange, TermEvent, Terminal, ESC,
-    MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_MINIMAP_JOURNAL, MAX_MINIMAP_JOURNAL_LINES,
+    MAX_CAPTURE_BYTES, MAX_DECORATIONS, MAX_LANES, MAX_MINIMAP_JOURNAL, MAX_MINIMAP_JOURNAL_LINES,
     MAX_MINIMAP_LINES, MAX_MINIMAP_STORES, MAX_MINIMAP_VIEWS, MAX_POOLS, PAGE_POOL_CAPACITY,
     XTVERSION_REPLY,
 };
@@ -20,19 +20,20 @@ use alacritty_terminal::{
 use stoatty_protocol::command::{
     encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_decorations_scope,
     encode_fill_end, encode_fill_rows_scope, encode_font_step, encode_hello, encode_icon,
-    encode_ident_reply, encode_line_layout, encode_minimap, encode_minimap_drop,
-    encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline, encode_pool_anchor,
-    encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop, encode_pool_region,
-    encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
-    encode_scroll_region, encode_sketch, encode_text_run, encode_window_open, encode_zoom_capture,
-    BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand,
-    HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand,
-    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand, MinimapRun,
-    MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand,
-    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
-    PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
-    SketchStyle, SketchTiming, TextRunCommand, WindowOpenCommand,
+    encode_ident_reply, encode_lane_begin, encode_lane_end, encode_line_layout, encode_minimap,
+    encode_minimap_drop, encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline,
+    encode_pool_anchor, encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop,
+    encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
+    encode_scroll, encode_scroll_region, encode_sketch, encode_text_run, encode_text_run_end,
+    encode_window_open, encode_zoom_capture, BarCommand, BorderCommand,
+    BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand, HelloCommand, IconCommand,
+    IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
+    MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
+    PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
+    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand, PopoverCommand,
+    RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, SketchBounds,
+    SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
+    TextRunCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -2823,6 +2824,166 @@ fn advance_defers_redraw_for_decorations_inside_an_update() {
     assert!(
         terminal.advance(b"\x1b[?2026l"),
         "the ESU chunk warrants a redraw"
+    );
+}
+
+/// `body` wrapped in the markers of lane `id`.
+fn in_lane(id: u32, body: &[u8]) -> Vec<u8> {
+    [encode_lane_begin(id), body.to_vec(), encode_lane_end()].concat()
+}
+
+fn bar_at(x: i16) -> Vec<u8> {
+    encode_bar(&BarCommand {
+        x,
+        y: 0,
+        width: 1,
+        height: 16,
+        color: [1, 2, 3],
+    })
+}
+
+#[test]
+fn a_redeclared_lane_replaces_only_its_runs_and_bars() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(
+        &[
+            in_lane(1, &[text_run_frame("a"), bar_at(1)].concat()),
+            in_lane(2, &[text_run_frame("b"), bar_at(2)].concat()),
+        ]
+        .concat(),
+    );
+    terminal.project(&mut grid);
+
+    terminal.advance(&in_lane(1, &[text_run_frame("c"), bar_at(3)].concat()));
+    terminal.project(&mut grid);
+
+    let bars: Vec<i16> = grid.bars().iter().map(|bar| bar.x).collect();
+    assert_eq!(
+        (run_labels(&grid), bars),
+        (vec!["c", "b"], vec![3, 2]),
+        "lane 1's new declaration replaces its old one, and lane 2 keeps its own"
+    );
+}
+
+#[test]
+fn a_reset_clears_every_lane_retires_the_empty_ones_and_closes_the_open_one() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(
+        &[
+            text_run_frame("z"),
+            in_lane(1, &text_run_frame("a")),
+            in_lane(2, &[]),
+            encode_lane_begin(3),
+            text_run_frame("open"),
+        ]
+        .concat(),
+    );
+    terminal.advance(&[encode_reset(), text_run_frame("c"), in_lane(3, &[])].concat());
+    terminal.project(&mut grid);
+
+    assert_eq!(
+        run_labels(&grid),
+        ["c"],
+        "the reset closed lane 3, so its re-declaration leaves c in lane 0"
+    );
+    assert_eq!(
+        terminal.lanes.keys().copied().collect::<Vec<_>>(),
+        [0, 1, 3],
+        "the reset retires lane 2, which held nothing"
+    );
+}
+
+#[test]
+fn seq_order_follows_lane_id_then_declaration_order() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(
+        &[
+            in_lane(2, &bar_at(2)),
+            in_lane(1, &[bar_at(1), text_run_frame("x"), bar_at(4)].concat()),
+            bar_at(0),
+        ]
+        .concat(),
+    );
+    terminal.project(&mut grid);
+
+    let bars: Vec<(i16, u32)> = grid.bars().iter().map(|bar| (bar.x, bar.seq)).collect();
+    assert_eq!(
+        (bars, grid.text_runs()[0].seq),
+        (vec![(0, 1), (1, 2), (4, 4), (2, 5)], 3),
+        "lane 0 sorts first, lane 1 keeps its order across kinds, and lane 2 sorts last"
+    );
+}
+
+#[test]
+fn a_lane_redeclared_inside_an_update_lands_whole_at_its_end() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(
+        &[
+            in_lane(1, &text_run_frame("A")),
+            in_lane(2, &text_run_frame("other")),
+        ]
+        .concat(),
+    );
+    terminal.advance(b"\x1b[?2026h");
+    terminal.advance(&in_lane(1, &text_run_frame("B")));
+    terminal.project(&mut grid);
+    assert_eq!(
+        run_labels(&grid),
+        ["A", "other"],
+        "the prior lane holds mid-update"
+    );
+
+    terminal.advance(b"\x1b[?2026l");
+    terminal.project(&mut grid);
+    assert_eq!(
+        run_labels(&grid),
+        ["B", "other"],
+        "the update's end swaps the lane in whole"
+    );
+}
+
+#[test]
+fn a_lane_marker_commits_an_open_run_into_its_lane() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    let mut open_run = text_run_frame("a");
+    open_run.truncate(open_run.len() - encode_text_run_end().len());
+
+    terminal.advance(&[encode_lane_begin(1), open_run, encode_lane_end()].concat());
+    terminal.project(&mut grid);
+    assert_eq!(
+        run_labels(&grid),
+        ["a"],
+        "the marker commits the run it cut off"
+    );
+
+    terminal.advance(&in_lane(1, &[]));
+    terminal.project(&mut grid);
+    assert_eq!(
+        run_labels(&grid),
+        Vec::<&str>::new(),
+        "the run landed in lane 1, which the re-declaration emptied"
+    );
+}
+
+#[test]
+fn lanes_past_the_cap_fall_back_to_lane_zero() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    let stream: Vec<u8> = (1..=MAX_LANES as u32 + 2)
+        .flat_map(|id| in_lane(id, &bar_at(1)))
+        .collect();
+    terminal.advance(&stream);
+    terminal.project(&mut grid);
+
+    assert_eq!(
+        (terminal.lanes.len(), grid.bars().len()),
+        (MAX_LANES + 1, MAX_LANES + 2),
+        "the two refused ids draw their bars from lane 0 rather than growing the map"
     );
 }
 
