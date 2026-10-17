@@ -53,6 +53,13 @@ pub enum ApiCommand {
         #[arg(long)]
         text: bool,
     },
+    /// Every selection of the focused editor, as 1-based inclusive points and a
+    /// range in the walkthrough grammar.
+    Selection {
+        /// Also print the bytes each selection covers.
+        #[arg(long)]
+        text: bool,
+    },
     /// LSP host liveness, and each server's process id and capabilities.
     LspStatus,
     /// Diagnostics for `--path`, or every tracked path when it is omitted.
@@ -94,6 +101,10 @@ enum QueryRequest {
     LspStatus,
     SessionInfo,
     Focus {
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        text: bool,
+    },
+    Selection {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         text: bool,
     },
@@ -148,6 +159,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
             return Ok(());
         },
         ApiCommand::Focus { text } => QueryRequest::Focus { text },
+        ApiCommand::Selection { text } => QueryRequest::Selection { text },
         ApiCommand::LspStatus => QueryRequest::LspStatus,
         ApiCommand::Diagnostics { path } => QueryRequest::Diagnostics { path },
         ApiCommand::Hover { path, line, col } => QueryRequest::Hover { path, line, col },
@@ -455,6 +467,14 @@ mod tests {
         assert_eq!(
             wire(&QueryRequest::Focus { text: true }),
             r#"{"req":"focus","text":true}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Selection { text: false }),
+            r#"{"req":"selection"}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Selection { text: true }),
+            r#"{"req":"selection","text":true}"#
         );
         assert_eq!(
             wire(&QueryRequest::Diagnostics { path: None }),

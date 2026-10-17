@@ -137,6 +137,10 @@ pub enum AgentQuery {
     /// [`crate::session_report::focus`] reports them, with the text on screen
     /// when `text` is set.
     Focus { text: bool },
+    /// Every selection of the focused editor, as
+    /// [`crate::session_report::selection`] reports them, with the covered
+    /// bytes when `text` is set.
+    Selection { text: bool },
     /// Diagnostics for `path`, or for every tracked path when `None`.
     Diagnostics { path: Option<PathBuf> },
     /// Hover at an LSP UTF-16 `line`/`col` within `path`.
@@ -170,6 +174,11 @@ enum AgentRequest {
     SessionInfo,
     /// `{"req":"focus"}` or `{"req":"focus","text":true}`.
     Focus {
+        #[serde(default)]
+        text: bool,
+    },
+    /// `{"req":"selection"}` or `{"req":"selection","text":true}`.
+    Selection {
         #[serde(default)]
         text: bool,
     },
@@ -385,6 +394,7 @@ async fn serve_connection<R>(
                 AgentRequest::LspStatus => AgentQuery::LspStatus,
                 AgentRequest::SessionInfo => AgentQuery::SessionInfo,
                 AgentRequest::Focus { text } => AgentQuery::Focus { text },
+                AgentRequest::Selection { text } => AgentQuery::Selection { text },
                 AgentRequest::Diagnostics { path } => AgentQuery::Diagnostics { path },
                 AgentRequest::Hover { path, line, col } => AgentQuery::Hover { path, line, col },
             };
@@ -491,7 +501,7 @@ fn parse_hook_line(line: &str) -> Result<AgentHookEvent, serde_json::Error> {
 /// Answer a runtime [`AgentQuery`] from live session state, firing `reply` with
 /// the JSON result.
 ///
-/// `lsp-status`, `session-info`, `focus`, and `diagnostics` reply
+/// `lsp-status`, `session-info`, `focus`, `selection`, and `diagnostics` reply
 /// synchronously. `hover` requires the path to be open in the `uid` session
 /// (otherwise `{"error":"not open"}`) and runs the request on a detached task
 /// so the event loop never blocks on the server.
@@ -525,6 +535,9 @@ pub(crate) fn answer_agent_query(
         },
         AgentQuery::Focus { text } => {
             let _ = reply.send(crate::session_report::focus(stoat, uid, text));
+        },
+        AgentQuery::Selection { text } => {
+            let _ = reply.send(crate::session_report::selection(stoat, uid, text));
         },
         AgentQuery::Diagnostics { path } => {
             let value = match path {

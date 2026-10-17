@@ -3,14 +3,19 @@
 
 use crate::{
     app::Stoat,
+    buffer::BufferId,
     display_map::DisplayPoint,
     keymap_state,
     pane::{DockSide, FocusTarget},
-    workspace::{self, Workspace, WorkspaceUid},
+    workspace::{self, Workspace, WorkspaceId, WorkspaceUid},
 };
 use serde_json::{json, Value};
-use std::{path::Path, process, time::UNIX_EPOCH};
-use stoat_text::Point;
+use std::{
+    path::{Path, PathBuf},
+    process,
+    time::UNIX_EPOCH,
+};
+use stoat_text::{Bias, Point};
 
 /// The `session-info` report on the workspace that `uid` names.
 ///
@@ -55,12 +60,7 @@ pub(crate) fn session_info(stoat: &Stoat, uid: WorkspaceUid) -> Value {
 /// is no editor. With `with_text`, the editor report also carries the text of
 /// its lines on screen. An unknown `uid` reports an error object.
 pub(crate) fn focus(stoat: &mut Stoat, uid: WorkspaceUid, with_text: bool) -> Value {
-    let Some(ws_id) = stoat
-        .workspaces
-        .iter()
-        .find(|(_, ws)| ws.uid == uid)
-        .map(|(id, _)| id)
-    else {
+    let Some(ws_id) = workspace_id(stoat, uid) else {
         return json!({ "error": "unknown session" });
     };
     let active = ws_id == stoat.active_workspace;
@@ -109,11 +109,7 @@ fn editor_report(ws: &mut Workspace, with_text: bool) -> Value {
     let Some((editor_id, buffer_id)) = ws.focused_editor() else {
         return Value::Null;
     };
-    let path = ws.buffers.path_for(buffer_id).map(Path::to_path_buf);
-    let relative_path = path
-        .as_deref()
-        .and_then(|path| path.strip_prefix(&ws.git_root).ok())
-        .map(Path::to_path_buf);
+    let (path, relative_path) = buffer_paths(ws, buffer_id);
     let dirty = ws
         .buffers
         .get(buffer_id)
@@ -179,24 +175,133 @@ fn editor_report(ws: &mut Workspace, with_text: bool) -> Value {
     report
 }
 
+/// The `selection` report on every selection of the focused editor in the
+/// workspace that `uid` names.
+///
+/// Each selection gives `start` and `end` as inclusive points, where `end` is
+/// the first byte of the last covered character, and `range` in the
+/// walkthrough grammar, so a reported range feeds back into a walkthrough stop.
+/// The inclusive grammar has no empty form, so a zero-width selection reports
+/// `start`, `end`, and `cursor` at one point and sets `empty`. The selections
+/// come in the editor's own order. With `with_text`, each one also carries the
+/// bytes it covers. An unknown `uid`, or a focused view that is no editor,
+/// reports an error object.
+pub(crate) fn selection(stoat: &Stoat, uid: WorkspaceUid, with_text: bool) -> Value {
+    let Some(ws) = workspace_id(stoat, uid).map(|id| &stoat.workspaces[id]) else {
+        return json!({ "error": "unknown session" });
+    };
+    let Some((editor, buffer_id)) = ws
+        .focused_editor()
+        .and_then(|(editor_id, buffer_id)| Some((ws.editors.get(editor_id)?, buffer_id)))
+    else {
+        return json!({ "error": "no editor has focus" });
+    };
+    let (path, relative_path) = buffer_paths(ws, buffer_id);
+
+    let buffer = editor.display_map.buffer_snapshot();
+    let rope = buffer.rope();
+    let position = |offset: usize| {
+        let point = rope.offset_to_point(offset);
+        (point.row + 1, point.column + 1)
+    };
+    let primary = editor.selections.primary_index();
+    let selections: Vec<Value> = editor
+        .selections
+        .resolved_reads(&buffer)
+        .iter()
+        .enumerate()
+        .map(|(index, read)| {
+            let (start, end) = (read.head.min(read.tail), read.head.max(read.tail));
+            let empty = start == end;
+            let last = if empty {
+                start
+            } else {
+                rope.clip_offset(end - 1, Bias::Left)
+            };
+            let cursor = stoat_text::cursor_offset(rope, read.tail, read.head);
+            let [start_point, end_point, cursor_point] = [start, last, cursor].map(position);
+
+            let mut report = json!({
+                "primary": index == primary,
+                "reversed": read.reversed,
+                "empty": empty,
+                "start": point_json(start_point),
+                "end": point_json(end_point),
+                "cursor": point_json(cursor_point),
+                "range": format!(
+                    "{}:{}-{}:{}",
+                    start_point.0, start_point.1, end_point.0, end_point.1
+                ),
+            });
+            if with_text {
+                report["text"] = json!(rope.slice(start..end).to_string());
+            }
+            report
+        })
+        .collect();
+
+    json!({
+        "path": path,
+        "relative_path": relative_path,
+        "mode": editor.mode,
+        "count": selections.len(),
+        "selections": selections,
+    })
+}
+
+/// The id of the open workspace that `uid` names.
+fn workspace_id(stoat: &Stoat, uid: WorkspaceUid) -> Option<WorkspaceId> {
+    stoat
+        .workspaces
+        .iter()
+        .find(|(_, ws)| ws.uid == uid)
+        .map(|(id, _)| id)
+}
+
+/// The path of the file `buffer_id` holds, and that path below the workspace
+/// root.
+///
+/// The first is `None` for a scratch buffer. The second is also `None` for a
+/// file outside the root.
+fn buffer_paths(ws: &Workspace, buffer_id: BufferId) -> (Option<PathBuf>, Option<PathBuf>) {
+    let path = ws.buffers.path_for(buffer_id).map(Path::to_path_buf);
+    let relative_path = path
+        .as_deref()
+        .and_then(|path| path.strip_prefix(&ws.git_root).ok())
+        .map(Path::to_path_buf);
+    (path, relative_path)
+}
+
+fn point_json((line, col): (u32, u32)) -> Value {
+    json!({ "line": line, "col": col })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
+        action_handlers,
         test_fixture::{open_buffer, seed},
         test_harness::TestHarness,
     };
     use std::time::Duration;
+    use stoat_text::SelectionGoal;
 
-    /// A fresh harness with a 60-line `main.rs` open in its focused pane and
-    /// no paint yet, with the session's uid and the file's lines.
-    fn sixty_line_file() -> (TestHarness, WorkspaceUid, Vec<String>) {
+    /// A fresh harness with `text` as `main.rs`, open in its focused pane and
+    /// with no paint yet, and the session's uid.
+    fn open_text(text: &str) -> (TestHarness, WorkspaceUid) {
         let mut h = TestHarness::with_size(80, 24);
-        let lines: Vec<String> = (1..=60).map(|n| format!("line {n}")).collect();
-        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
-        let root = seed(&mut h, &[("main.rs", text.as_str())]);
+        let root = seed(&mut h, &[("main.rs", text)]);
         open_buffer(&mut h, root.join("main.rs"));
         let uid = h.stoat.active_workspace().uid;
+        (h, uid)
+    }
+
+    /// [`open_text`] on a 60-line file, with the file's lines.
+    fn sixty_line_file() -> (TestHarness, WorkspaceUid, Vec<String>) {
+        let lines: Vec<String> = (1..=60).map(|n| format!("line {n}")).collect();
+        let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+        let (h, uid) = open_text(&text);
         (h, uid, lines)
     }
 
@@ -312,6 +417,107 @@ mod tests {
         assert_eq!(
             [&report["workspace"]["active"], &report["modal"]],
             [&json!(false), &Value::Null],
+        );
+    }
+
+    #[test]
+    fn a_forward_selection_reports_its_first_and_last_byte() {
+        let (mut h, uid) = open_text("abc\ndef\n");
+        h.type_keys("v l l");
+
+        assert_eq!(
+            selection(&h.stoat, uid, false)["selections"],
+            json!([{
+                "primary": true,
+                "reversed": false,
+                "empty": false,
+                "start": { "line": 1, "col": 1 },
+                "end": { "line": 1, "col": 3 },
+                "cursor": { "line": 1, "col": 3 },
+                "range": "1:1-1:3",
+            }]),
+        );
+    }
+
+    #[test]
+    fn a_reversed_selection_keeps_its_cursor_on_the_start() {
+        let (mut h, uid) = open_text("abc\ndef\n");
+        h.type_keys("l l v h h");
+
+        let report = selection(&h.stoat, uid, false);
+        let first = &report["selections"][0];
+        assert_eq!(
+            (&first["reversed"], &first["cursor"]),
+            (&json!(true), &first["start"]),
+        );
+    }
+
+    #[test]
+    fn selection_text_returns_the_covered_bytes() {
+        let (mut h, uid) = open_text("abc\ndef\n");
+        h.type_keys("v l l");
+
+        assert_eq!(
+            selection(&h.stoat, uid, true)["selections"][0]["text"],
+            "abc"
+        );
+    }
+
+    #[test]
+    fn every_cursor_is_reported_with_the_primary_marked() {
+        let (mut h, uid) = open_text("abc\ndef\n");
+        h.type_action("AddSelectionBelow()");
+
+        let report = selection(&h.stoat, uid, false);
+        let primaries: Vec<&Value> = report["selections"]
+            .as_array()
+            .expect("a selection list")
+            .iter()
+            .map(|selection| &selection["primary"])
+            .collect();
+        assert_eq!(
+            (&report["count"], primaries),
+            (&json!(2), vec![&json!(false), &json!(true)]),
+        );
+    }
+
+    #[test]
+    fn a_multibyte_column_counts_bytes() {
+        let (mut h, uid) = open_text("\u{e9}a\n");
+        h.type_keys("l");
+
+        assert_eq!(
+            selection(&h.stoat, uid, false)["selections"][0]["start"],
+            json!({ "line": 1, "col": 3 }),
+        );
+    }
+
+    #[test]
+    fn a_zero_width_selection_reports_empty() {
+        let (mut h, uid) = open_text("abc\ndef\n");
+        {
+            let editor =
+                action_handlers::focused_editor_mut(&mut h.stoat).expect("an editor has focus");
+            let anchor = editor
+                .display_map
+                .buffer_snapshot()
+                .anchor_at(0, Bias::Left);
+            editor
+                .selections
+                .set_single_range(anchor, anchor, false, SelectionGoal::None);
+        }
+
+        let report = selection(&h.stoat, uid, false);
+        let only = &report["selections"][0];
+        let origin = json!({ "line": 1, "col": 1 });
+        assert_eq!(
+            [
+                &only["empty"],
+                &only["start"],
+                &only["end"],
+                &only["cursor"]
+            ],
+            [&json!(true), &origin, &origin, &origin],
         );
     }
 }
