@@ -647,16 +647,8 @@ impl Workspace {
     ///
     /// A pane in the diff view names the diff by its two sides, as the sides
     /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. A file measured against
-    /// another file names the two files there. A pane that shows a commits
-    /// list reads `commits`, in a parked tab too, and so does a rebase screen
-    /// opened over that list. An editor otherwise names its file, or reads as
-    /// scratch when it has none. A terminal or an agent names itself
-    /// by the title its child set, cut the same way, and by its kind until the
-    /// child sets one. A run pane names its kind. An out-of-range index is
-    /// empty.
-    ///
-    /// The kind names match the `pane` keymap predicate's, so what the bar
-    /// shows and what a binding condition matches on read the same.
+    /// another file names the two files there. Any other pane reads as
+    /// [`Self::view_title`] names its view. An out-of-range index is empty.
     ///
     /// A `RenameTab` override wins over the derived name, so a renamed tab keeps
     /// its title no matter what its focused pane shows.
@@ -688,7 +680,19 @@ impl Workspace {
             return text::truncate_to_cols(&format!("{left} → {right}"), TAB_TITLE_MAX_COLS);
         }
 
-        match &tree.pane(tree.focus()).view {
+        self.view_title(&tree.pane(tree.focus()).view)
+    }
+
+    /// What a pane that shows `view` calls itself in the tab bar.
+    ///
+    /// An editor names its file, or reads as scratch when it has none. A
+    /// terminal or an agent names itself by the title its child set, cut to
+    /// [`TAB_TITLE_MAX_COLS`], and by its kind until the child sets one. A
+    /// commits list reads `commits`, in a parked tab too, and so does a rebase
+    /// screen opened over that list. A run pane names its kind, an image names
+    /// its file, and a label reads `pane`.
+    pub(crate) fn view_title(&self, view: &View) -> String {
+        match view {
             View::Editor(id) => self
                 .editors
                 .get(*id)
@@ -1953,8 +1957,11 @@ mod tests {
     use crate::{
         buffer::BufferId,
         code_index::build::IndexUpdate,
+        commit_list::CommitListId,
+        editor_state::EditorId,
         host::FakeTerminalSession,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
+        run::RunId,
         term_screen::TermScreen,
         term_session::{TermId, TermSession},
         test_harness::TestHarness,
@@ -2093,6 +2100,34 @@ mod tests {
 
         ws.focus = FocusTarget::Dock(dock);
         assert_eq!(ws.focused_editor(), Some(editor));
+    }
+
+    /// Default ids name no editor and no terminal, so each view falls back to
+    /// the name its kind reads as.
+    #[test]
+    fn view_title_names_each_view_kind() {
+        let h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace();
+
+        let titles: Vec<String> = [
+            View::Label("x".into()),
+            View::Editor(EditorId::default()),
+            View::Image {
+                path: PathBuf::from("/art/cat.png"),
+                px: (1, 1),
+            },
+            View::Run(RunId::default()),
+            View::Agent(TermId::default()),
+            View::Terminal(TermId::default()),
+            View::Commits(CommitListId::default()),
+        ]
+        .iter()
+        .map(|view| ws.view_title(view))
+        .collect();
+        assert_eq!(
+            titles,
+            ["pane", "scratch", "cat.png", "run", "agent", "term", "commits"]
+        );
     }
 
     #[test]

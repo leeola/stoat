@@ -7,7 +7,7 @@ use crate::{
     buffer_registry::OpenOrigin,
     display_map::DisplayPoint,
     keymap_state,
-    pane::{DockSide, FocusTarget, View},
+    pane::{DockSide, DockVisibility, FocusTarget, PaneTree, View},
     workspace::{self, Workspace, WorkspaceId, WorkspaceUid},
 };
 use serde_json::{json, Value};
@@ -322,6 +322,109 @@ fn shown_in(ws: &Workspace, buffer_id: BufferId) -> Vec<Value> {
     shown
 }
 
+/// The `layout` report on how the workspace that `uid` names arranges its
+/// tabs, panes, and docks on the terminal.
+///
+/// Each tab lists the split panes of its tree, in tree order, with their kind,
+/// title, and file. Only the active tab's panes carry an `area`, because a
+/// parked tree's rectangles are stale until it is laid out again. An unknown
+/// `uid` reports an error object.
+pub(crate) fn layout(stoat: &Stoat, uid: WorkspaceUid) -> Value {
+    let Some(ws) = workspace_id(stoat, uid).map(|id| &stoat.workspaces[id]) else {
+        return json!({ "error": "unknown session" });
+    };
+
+    let tabs: Vec<Value> = ws
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(idx, tab)| {
+            let active = idx == ws.active_tab;
+            // Only the active tab parks nothing, since its tree is `ws.panes`.
+            let tree = tab.parked.as_ref().unwrap_or(&ws.panes);
+            json!({
+                "index": idx,
+                "title": ws.tab_title(idx),
+                "active": active,
+                "renamed": tab.name.is_some(),
+                "panes": pane_reports(ws, tree, active),
+            })
+        })
+        .collect();
+
+    let docks: Vec<Value> = ws
+        .docks
+        .iter()
+        .map(|(dock_id, dock)| {
+            let (visibility, width) = match dock.visibility {
+                DockVisibility::Open { width } => ("open", Some(width)),
+                DockVisibility::Minimized => ("minimized", None),
+                DockVisibility::Hidden => ("hidden", None),
+            };
+            json!({
+                "side": dock_side_name(dock.side),
+                "visibility": visibility,
+                "width": width,
+                "kind": workspace::view_kind(&dock.view),
+                "title": ws.view_title(&dock.view),
+                "focused": ws.focus == FocusTarget::Dock(dock_id),
+            })
+        })
+        .collect();
+
+    let size = stoat.size();
+    let focus = match ws.focus {
+        FocusTarget::SplitPane => "pane",
+        FocusTarget::Dock(_) => "dock",
+    };
+    json!({
+        "size": { "cols": size.width, "rows": size.height },
+        "active_tab": ws.active_tab,
+        "focus": focus,
+        "tabs": tabs,
+        "docks": docks,
+    })
+}
+
+/// The split panes of `tree` in tree order, each with its kind, title, and
+/// file, and with its screen `area` when `with_area` is set.
+fn pane_reports(ws: &Workspace, tree: &PaneTree, with_area: bool) -> Vec<Value> {
+    tree.split_panes()
+        .map(|(pane_id, pane)| {
+            let mut report = json!({
+                "index": pane.index,
+                "focused": pane_id == tree.focus(),
+                "widened": tree.widened() == Some(pane_id),
+                "kind": workspace::view_kind(&pane.view),
+                "title": ws.view_title(&pane.view),
+                "path": view_path(ws, &pane.view),
+            });
+            if with_area {
+                let area = pane.area;
+                report["area"] = json!({
+                    "x": area.x,
+                    "y": area.y,
+                    "width": area.width,
+                    "height": area.height,
+                });
+            }
+            report
+        })
+        .collect()
+}
+
+/// The file `view` shows, as an editor's buffer path or an image's path.
+fn view_path<'a>(ws: &'a Workspace, view: &'a View) -> Option<&'a Path> {
+    match view {
+        View::Editor(id) => ws
+            .editors
+            .get(*id)
+            .and_then(|editor| ws.buffers.path_for(editor.buffer_id)),
+        View::Image { path, .. } => Some(path),
+        _ => None,
+    }
+}
+
 /// The id of the open workspace that `uid` names.
 fn workspace_id(stoat: &Stoat, uid: WorkspaceUid) -> Option<WorkspaceId> {
     stoat
@@ -367,6 +470,7 @@ mod tests {
         test_harness::TestHarness,
     };
     use std::time::Duration;
+    use stoat_action::Terminal;
     use stoat_text::SelectionGoal;
 
     /// A fresh harness with `text` as `main.rs`, open in its focused pane and
@@ -657,6 +761,101 @@ mod tests {
                     "shown": [{ "tab": 0, "pane": 0 }],
                 }],
             }),
+        );
+    }
+
+    /// Every pane `area` in a `layout` report, taken out so the rest of the
+    /// report holds only what the report itself decides.
+    fn take_areas(report: &mut Value) -> Vec<Value> {
+        let mut areas = Vec::new();
+        for tab in report["tabs"].as_array_mut().expect("a tab list") {
+            for pane in tab["panes"].as_array_mut().expect("a pane list") {
+                areas.extend(pane.as_object_mut().expect("a pane object").remove("area"));
+            }
+        }
+        areas
+    }
+
+    #[test]
+    fn layout_lists_the_panes_of_the_active_tab_with_their_geometry() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        h.stoat.active_workspace_mut().panes.split(Axis::Vertical);
+        action_handlers::dispatch(&mut h.stoat, &Terminal);
+        h.snapshot();
+
+        let uid = h.stoat.active_workspace().uid;
+        let mut report = layout(&h.stoat, uid);
+        let areas = take_areas(&mut report);
+        assert_eq!(
+            report,
+            json!({
+                "size": { "cols": 80, "rows": 24 },
+                "active_tab": 0,
+                "focus": "pane",
+                "tabs": [{
+                    "index": 0,
+                    "title": "term",
+                    "active": true,
+                    "renamed": false,
+                    "panes": [
+                        {
+                            "index": 0,
+                            "focused": false,
+                            "widened": false,
+                            "kind": "editor",
+                            "title": "a.rs",
+                            "path": "/lsp-did-open-test/a.rs",
+                        },
+                        {
+                            "index": 1,
+                            "focused": true,
+                            "widened": false,
+                            "kind": "terminal",
+                            "title": "term",
+                            "path": null,
+                        },
+                    ],
+                }],
+                "docks": [],
+            }),
+        );
+
+        let inside = |area: &Value| {
+            let [x, y, width, height] =
+                ["x", "y", "width", "height"].map(|key| area[key].as_u64().expect("a number"));
+            width > 0 && height > 0 && x + width <= 80 && y + height <= 24
+        };
+        assert!(
+            areas.len() == 2 && areas.iter().all(inside),
+            "two non-empty pane areas inside the 80x24 terminal: {areas:?}"
+        );
+    }
+
+    #[test]
+    fn a_parked_tab_lists_its_panes_without_geometry() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.type_action("NewTab()");
+        h.snapshot();
+
+        let uid = h.stoat.active_workspace().uid;
+        let report = layout(&h.stoat, uid);
+        let parked_pane = json!({
+            "index": 0,
+            "focused": true,
+            "widened": false,
+            "kind": "editor",
+            "title": "scratch",
+            "path": null,
+        });
+        assert_eq!(
+            (
+                &report["active_tab"],
+                &report["tabs"][0]["panes"],
+                report["tabs"][1]["panes"][0].get("area").is_some(),
+            ),
+            (&json!(1), &json!([parked_pane]), true),
         );
     }
 }

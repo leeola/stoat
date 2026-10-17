@@ -63,6 +63,9 @@ pub enum ApiCommand {
     /// Every buffer of the session's workspace, with its unsaved state and the
     /// tabs, panes, and docks that show it.
     Buffers,
+    /// The terminal size, every tab with its panes, each pane's kind, title,
+    /// file, and screen area, and every dock.
+    Layout,
     /// LSP host liveness, and each server's process id and capabilities.
     LspStatus,
     /// Diagnostics for `--path`, or every tracked path when it is omitted.
@@ -112,6 +115,7 @@ enum QueryRequest {
         text: bool,
     },
     Buffers,
+    Layout,
     Diagnostics {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
@@ -165,6 +169,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
         ApiCommand::Focus { text } => QueryRequest::Focus { text },
         ApiCommand::Selection { text } => QueryRequest::Selection { text },
         ApiCommand::Buffers => QueryRequest::Buffers,
+        ApiCommand::Layout => QueryRequest::Layout,
         ApiCommand::LspStatus => QueryRequest::LspStatus,
         ApiCommand::Diagnostics { path } => QueryRequest::Diagnostics { path },
         ApiCommand::Hover { path, line, col } => QueryRequest::Hover { path, line, col },
@@ -482,6 +487,7 @@ mod tests {
             r#"{"req":"selection","text":true}"#
         );
         assert_eq!(wire(&QueryRequest::Buffers), r#"{"req":"buffers"}"#);
+        assert_eq!(wire(&QueryRequest::Layout), r#"{"req":"layout"}"#);
         assert_eq!(
             wire(&QueryRequest::Diagnostics { path: None }),
             r#"{"req":"diagnostics"}"#
