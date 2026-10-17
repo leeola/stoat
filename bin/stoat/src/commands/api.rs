@@ -51,7 +51,8 @@ pub enum ApiCommand {
     /// Open files in the session, beside the user.
     ///
     /// Inside a terminal pane the files cover that pane. Elsewhere they open in
-    /// the focused pane, or in a fresh split with `--split`.
+    /// a fresh split with `--split`, and without it in the focused pane unless
+    /// that pane shows the agent, a shell, or a run, which keep their panes.
     Open {
         /// Files to open. A relative path resolves against the working
         /// directory.
@@ -69,9 +70,9 @@ pub enum ApiCommand {
     /// Show a file in the session with a range selected and on screen, and
     /// print the range selected.
     ///
-    /// The file shows in the focused pane when that pane shows an editor, and
-    /// otherwise in another editor pane or a fresh split. Keyboard focus stays
-    /// where it is.
+    /// The file shows in the focused pane unless that pane shows the agent, a
+    /// shell, or a run, and then in another pane or a fresh split. Keyboard
+    /// focus stays where it is.
     Goto {
         /// File to show. A relative path resolves against the working
         /// directory.

@@ -15,9 +15,10 @@
 //! `open` opens files in front of the terminal pane the caller runs in, which
 //! is what makes a `stoat <file>` inside a pane reach the instance hosting it.
 //! With no terminal it opens them in a fresh split, as an owned agent's
-//! `$EDITOR` asks, or in the focused pane. It holds the caller until those
-//! files close when it asks to wait, and answers whether each closed clean. A
-//! caller that goes away while it waits leaves no waiter behind.
+//! `$EDITOR` asks, or in the focused pane unless that pane shows the agent, a
+//! shell, or a run. It holds the caller until those files close when it asks
+//! to wait, and answers whether each closed clean. A caller that goes away
+//! while it waits leaves no waiter behind.
 
 use crate::{
     agent_status::AgentHookEvent,
@@ -87,8 +88,9 @@ pub enum AgentControl {
     /// [`token`](crate::term_session::TermSession::token) it is, in front of the
     /// shell that asked. With no such terminal and `split`, they open in a fresh
     /// split beside the focused pane, as an agent's `$EDITOR` asks. Otherwise
-    /// they open in the focused pane. Each path past the first takes a split of
-    /// its own.
+    /// they open in the pane [`crate::agent_goto::target_pane`] picks, which
+    /// never shows the agent, a shell, or a run. Each path past the first takes
+    /// a split of its own.
     ///
     /// `done` answers whether a waiter was registered. It fires on every path
     /// through the handler, since a caller parked on a reply that never comes
@@ -183,7 +185,7 @@ enum AgentRequest {
     /// The paths are absolute, since the requesting shell's working directory
     /// is not the workspace root. `term` is the terminal's `STOAT_TERM_ID`, and
     /// it is absent outside a terminal pane. `wait` and `split` are false when
-    /// absent, so the plain form opens in the focused pane and exits.
+    /// absent, so the plain form opens without a split of its own and exits.
     Open {
         paths: Vec<PathBuf>,
         #[serde(default)]
@@ -849,6 +851,55 @@ mod tests {
                 shown_path(&h, focus),
             ),
             (1, focus, Some(root.join("a.rs"))),
+        );
+    }
+
+    #[test]
+    fn an_open_with_no_terminal_and_no_split_keeps_a_focused_process_pane() {
+        let after_open = |show: fn(&mut TestHarness)| {
+            let mut h = TestHarness::with_size(80, 24);
+            let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+            h.stoat.set_agent_socket_dir("/state".into());
+            show(&mut h);
+            let (process, view) = {
+                let ws = h.stoat.active_workspace();
+                let focus = ws.panes.focus();
+                (focus, ws.panes.pane(focus).view.clone())
+            };
+
+            open_with_no_terminal(&mut h, vec![root.join("a.rs")], false);
+
+            let ws = h.stoat.active_workspace();
+            let beside = ws
+                .panes
+                .split_pane_ids()
+                .into_iter()
+                .find(|&pane| pane != process);
+            (
+                crate::workspace::view_kind(&view),
+                ws.panes.focus() == process && ws.panes.pane(process).view == view,
+                beside.and_then(|pane| shown_path(&h, pane)) == Some(root.join("a.rs")),
+            )
+        };
+
+        assert_eq!(
+            [
+                after_open(|h| {
+                    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SpawnClaude);
+                }),
+                after_open(|h| {
+                    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+                }),
+                after_open(|h| {
+                    h.open_run();
+                }),
+            ],
+            [
+                ("agent", true, true),
+                ("terminal", true, true),
+                ("run", true, true)
+            ],
+            "the process pane keeps its view and focus, and the file opens beside it",
         );
     }
 

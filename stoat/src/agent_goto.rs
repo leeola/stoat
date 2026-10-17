@@ -18,19 +18,18 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::{ops, path::Path};
+use stoat_scheduler::Executor;
 use stoat_text::{Bias, Rope, SelectionGoal};
 
 /// Show `path` in the active workspace with the range `spec` names selected
 /// and framed on screen, and return the reply for the request.
 ///
-/// The file shows in the focused pane when that pane shows an editor, else in
-/// the first split pane that shows one, else in a fresh split beside the
-/// focused pane. A pane that shows the agent, a shell, or a run never takes
-/// the file, because the file then hides the process that the pane shows.
-/// Keyboard focus stays where it is, and the goto sets no mode.
+/// The file shows in the pane [`target_pane`] picks, which never shows the
+/// agent, a shell, or a run. Keyboard focus stays where it is, and the goto
+/// sets no mode.
 ///
-/// A pane that already showed an editor records where it was on its
-/// jumplist, so a backward jump there returns to it.
+/// A pane that showed an editor records where it was on its jumplist, so a
+/// backward jump there returns to it.
 ///
 /// The reply names the absolute path and the range selected, in the form the
 /// `selection` report gives. A path with no file, a file that opens as no
@@ -50,7 +49,13 @@ pub(crate) fn goto(stoat: &mut Stoat, path: &Path, spec: RangeSpec) -> Value {
     }
 
     let cannot_open = || json!({ "error": format!("cannot open {} as text", absolute.display()) });
-    let target = target_pane(stoat);
+    let target = {
+        let executor = stoat.executor.clone();
+        let ws = stoat.active_workspace_mut();
+        let pane = target_pane(ws, executor);
+        push_jump(ws, pane);
+        pane
+    };
     if buffer_lifecycle::open_file_in_pane_now(stoat, target, &absolute, OpenOrigin::Named)
         .is_none()
     {
@@ -95,19 +100,24 @@ pub(crate) fn goto(stoat: &mut Stoat, path: &Path, spec: RangeSpec) -> Value {
     })
 }
 
-/// The pane [`goto`] shows its file in.
+/// The pane an agent's file shows in when no terminal pane names one.
 ///
-/// A pane that shows an editor records its position first. A pane a split
-/// makes shows only a scratch editor, which is no place to return to.
-fn target_pane(stoat: &mut Stoat) -> PaneId {
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
+/// The focused pane takes the file unless it shows the agent, a shell, or a
+/// run, because the file then hides the process that the pane shows. The
+/// first split pane that shows none of those comes next, and a fresh split
+/// beside the focused pane comes last. Keyboard focus stays where it is.
+pub(crate) fn target_pane(ws: &mut Workspace, executor: Executor) -> PaneId {
     let focused = ws.panes.focus();
-    let editor_pane = std::iter::once(focused)
+    let free = std::iter::once(focused)
         .chain(ws.panes.split_pane_ids())
-        .find(|&pane| matches!(ws.panes.pane(pane).view, View::Editor(_)));
+        .find(|&pane| {
+            !matches!(
+                ws.panes.pane(pane).view,
+                View::Agent(_) | View::Terminal(_) | View::Run(_)
+            )
+        });
 
-    let Some(pane) = editor_pane else {
+    let Some(pane) = free else {
         let pane = ws.panes.split(Axis::Vertical);
         // The split copies the focused view, and an open that fails keeps that
         // copy in a second pane.
@@ -118,11 +128,10 @@ fn target_pane(stoat: &mut Stoat) -> PaneId {
     };
 
     // A widen covers every other pane. A focus move to a covered pane ends the
-    // widen, and the goto ends it for the same reason.
+    // widen, and a file shown there ends it for the same reason.
     if ws.panes.widened().is_some_and(|widened| widened != pane) {
         ws.panes.unwiden();
     }
-    push_jump(ws, pane);
     pane
 }
 

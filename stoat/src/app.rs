@@ -8068,7 +8068,7 @@ impl Stoat {
                             ws.focus = FocusTarget::SplitPane;
                             pane
                         },
-                        None => ws.panes.focus(),
+                        None => crate::agent_goto::target_pane(ws, executor.clone()),
                     }
                 };
 
