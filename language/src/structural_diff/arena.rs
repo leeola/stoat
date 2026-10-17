@@ -53,6 +53,9 @@ pub struct List {
 #[derive(Debug)]
 pub struct Atom {
     pub kind: &'static str,
+    /// Whether the atom is code, a comment, or a string, as
+    /// [`AtomClass::of`] reads `kind`.
+    pub class: AtomClass,
     /// The atom's text in the source of its arena, which
     /// [`SyntaxArena::text`] reads.
     pub byte_range: Range<usize>,
@@ -62,6 +65,51 @@ pub struct Atom {
     /// [`SyntaxArena::link_siblings`] after the tree is fully
     /// constructed.
     pub next_sibling: Option<SyntaxId>,
+}
+
+/// Which kind of text an atom holds, for the diff passes that treat prose
+/// apart from code.
+///
+/// A changed comment or string pairs with its old text by similarity and
+/// renders as prose, where a code atom pairs only when it is equal. The search
+/// and the emit pass ask for the class on every edge and every atom, so it is
+/// decided once, when the atom is made, rather than read off the kind name
+/// each time.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AtomClass {
+    Code,
+    Comment,
+    String,
+}
+
+impl AtomClass {
+    /// The class that tree-sitter's naming conventions give `kind`.
+    ///
+    /// Grammars name comment nodes with `comment` in the kind, and string
+    /// nodes with `string` or `char`. tree-sitter-yaml names its quoted and
+    /// block scalars `double_quote_scalar`, `single_quote_scalar`, and
+    /// `block_scalar`. The block grammar of tree-sitter-markdown holds the
+    /// text of a paragraph or a heading in one `inline` leaf. Those kinds are
+    /// strings too.
+    ///
+    /// A kind that names both a comment and a string is a comment, which is
+    /// also the edge the search prefers for a pair of them. No bundled grammar
+    /// has such a kind.
+    pub fn of(kind: &str) -> Self {
+        if kind.contains("comment") {
+            Self::Comment
+        } else if kind.contains("string")
+            || kind.contains("char")
+            || matches!(
+                kind,
+                "double_quote_scalar" | "single_quote_scalar" | "block_scalar" | "inline"
+            )
+        {
+            Self::String
+        } else {
+            Self::Code
+        }
+    }
 }
 
 /// Owns every [`Syntax`] node of one lowered tree, and the source text that
@@ -199,6 +247,7 @@ impl SyntaxArena {
         self.source = Arc::from(format!("{}{content}", self.source));
         self.alloc(Syntax::Atom(Atom {
             kind,
+            class: AtomClass::of(kind),
             byte_range: start..start + content.len(),
             content_id: ContentId::for_atom(kind, content),
             next_sibling: None,
@@ -239,6 +288,7 @@ mod tests {
     fn mk_atom(kind: &'static str, content: &'static str, range: Range<usize>) -> Syntax {
         Syntax::Atom(Atom {
             kind,
+            class: AtomClass::of(kind),
             byte_range: range,
             content_id: ContentId::for_atom(kind, content),
             next_sibling: None,
@@ -329,5 +379,32 @@ mod tests {
         assert_eq!(arena.get(c1).next_sibling(), Some(c2));
         assert_eq!(arena.get(c2).next_sibling(), Some(c3));
         assert_eq!(arena.get(c3).next_sibling(), None);
+    }
+
+    #[test]
+    fn an_atom_class_follows_each_naming_rule() {
+        let classes = [
+            "line_comment",
+            "string_literal",
+            "char_literal",
+            "double_quote_scalar",
+            "inline",
+            "doc_comment_string",
+            "identifier",
+        ]
+        .map(AtomClass::of);
+        assert_eq!(
+            classes,
+            [
+                AtomClass::Comment,
+                AtomClass::String,
+                AtomClass::String,
+                AtomClass::String,
+                AtomClass::String,
+                AtomClass::Comment,
+                AtomClass::Code,
+            ],
+            "comment, string, char, yaml scalar, markdown inline, both, and code",
+        );
     }
 }

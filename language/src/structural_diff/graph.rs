@@ -17,7 +17,7 @@
 //! encodes the matching list-ending semantics.
 
 use super::{
-    arena::{Syntax, SyntaxArena, SyntaxId},
+    arena::{AtomClass, Syntax, SyntaxArena, SyntaxId},
     line_diff,
     stack::Stack,
 };
@@ -158,34 +158,18 @@ pub fn probably_punctuation(arena: &SyntaxArena, node: &Syntax) -> bool {
     }
 }
 
-/// Detect a comment-kind atom. Tree-sitter grammars conventionally
-/// name comment nodes with `comment` somewhere in the kind.
+/// Detect a comment-kind atom.
+///
+/// See [`AtomClass::of`] for the kinds that count.
 pub fn is_comment_atom(node: &Syntax) -> bool {
-    match node {
-        Syntax::Atom(atom) => atom.kind.contains("comment"),
-        Syntax::List(_) => false,
-    }
+    matches!(node, Syntax::Atom(atom) if atom.class == AtomClass::Comment)
 }
 
 /// Detect a string-literal atom.
 ///
-/// Tree-sitter grammars conventionally name string nodes with `string` or
-/// `char` in the kind. tree-sitter-yaml names its quoted and block scalars
-/// `double_quote_scalar`, `single_quote_scalar`, and `block_scalar`, and the
-/// block grammar of tree-sitter-markdown holds the text of a paragraph or a
-/// heading in one `inline` leaf, so those kinds count too.
+/// See [`AtomClass::of`] for the kinds that count.
 pub fn is_string_atom(node: &Syntax) -> bool {
-    match node {
-        Syntax::Atom(atom) => {
-            atom.kind.contains("string")
-                || atom.kind.contains("char")
-                || matches!(
-                    atom.kind,
-                    "double_quote_scalar" | "single_quote_scalar" | "block_scalar" | "inline"
-                )
-        },
-        Syntax::List(_) => false,
-    }
+    matches!(node, Syntax::Atom(atom) if atom.class == AtomClass::String)
 }
 
 /// Whether a comment or a string pair goes on to [`similarity_pct`].

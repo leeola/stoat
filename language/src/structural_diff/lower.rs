@@ -15,7 +15,7 @@
 //! carrying only the named skeleton cannot tell `a + b` from `a - b`.
 
 use super::{
-    arena::{Atom, List, Syntax, SyntaxArena, SyntaxId},
+    arena::{Atom, AtomClass, List, Syntax, SyntaxArena, SyntaxId},
     content_id::ContentId,
 };
 #[cfg(test)]
@@ -84,6 +84,7 @@ fn lower_node(
         let content = &source[byte_range.start.min(source.len())..byte_range.end.min(source.len())];
         return arena.alloc(Syntax::Atom(Atom {
             kind,
+            class: AtomClass::of(kind),
             content_id: ContentId::for_atom(kind, content),
             byte_range,
             next_sibling: None,

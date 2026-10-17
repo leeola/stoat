@@ -1274,13 +1274,14 @@ mod tests {
         // [A, X, B] should produce [(0,0), (1,2)].
         let mut arena = SyntaxArena::default();
         use crate::structural_diff::{
-            arena::{Atom, Syntax},
+            arena::{Atom, AtomClass, Syntax},
             ContentId,
         };
         let mk = |arena: &mut SyntaxArena, name: &str| {
             let id = ContentId::for_atom("ident", name);
             arena.alloc(Syntax::Atom(Atom {
                 kind: "ident",
+                class: AtomClass::Code,
                 byte_range: 0..0,
                 content_id: id,
                 next_sibling: None,
@@ -1307,13 +1308,14 @@ mod tests {
         // table this replaced would allocate a 25M-cell matrix. Histogram
         // stays linear in memory and pairs everything but the changed node.
         use crate::structural_diff::{
-            arena::{Atom, Syntax},
+            arena::{Atom, AtomClass, Syntax},
             ContentId,
         };
         let mut arena = SyntaxArena::default();
         let mk = |arena: &mut SyntaxArena, name: &str| {
             arena.alloc(Syntax::Atom(Atom {
                 kind: "ident",
+                class: AtomClass::Code,
                 byte_range: 0..0,
                 content_id: ContentId::for_atom("ident", name),
                 next_sibling: None,

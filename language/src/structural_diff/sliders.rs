@@ -189,7 +189,7 @@ fn side_node(pair: &mut (SyntaxId, SyntaxId), side: Side) -> &mut SyntaxId {
 mod tests {
     use super::*;
     use crate::structural_diff::{
-        arena::{Atom, List, Syntax, SyntaxArena, SyntaxId},
+        arena::{Atom, AtomClass, List, Syntax, SyntaxArena, SyntaxId},
         ContentId,
     };
 
@@ -199,6 +199,7 @@ mod tests {
     fn mk_atom(arena: &mut SyntaxArena, kind: &'static str, content: &'static str) -> SyntaxId {
         arena.alloc(Syntax::Atom(Atom {
             kind,
+            class: AtomClass::of(kind),
             byte_range: 0..0,
             content_id: ContentId::for_atom(kind, content),
             next_sibling: None,
