@@ -1869,7 +1869,7 @@ fn layered_highlight_ids(language: &Arc<Language>, tree: &Tree, base_text: &str)
     let rope = Rope::from(base_text);
     let mut map = SyntaxMap::default();
     if map
-        .reparse(&rope, language.clone(), 0, Some(tree), None)
+        .reparse(&rope, language.clone(), 0, Some(tree))
         .is_none()
     {
         return Vec::new();

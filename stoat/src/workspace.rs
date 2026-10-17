@@ -54,7 +54,7 @@ use std::{
         Arc,
     },
     task::{Context, Poll},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use stoat_language::{LanguageRegistry, Tree};
 use stoat_scheduler::{Executor, Task};
@@ -66,21 +66,6 @@ use tokio::sync::{
 new_key_type! {
     pub struct WorkspaceId;
 }
-
-/// Largest buffer the run loop will try to parse itself before handing the
-/// work to the blocking pool.
-///
-/// The captures walk after the tree-sitter parse honours no deadline, so the
-/// only bound on it is the size of the file it walks. This is the size below
-/// which that walk is short enough to sit inside a frame.
-const INLINE_PARSE_MAX_BYTES: usize = 256 * 1024;
-
-/// How long the run loop gives an inline parse before abandoning it.
-///
-/// An edit to an already-parsed buffer reuses its tree and finishes well
-/// inside this. Anything that does not is a reparse worth moving off the run
-/// loop, which the abort does at the cost of the time already spent.
-const INLINE_PARSE_BUDGET: Duration = Duration::from_millis(1);
 
 /// The widest a terminal title, an agent title, or a diff's two sides get as a
 /// tab's name.
@@ -1468,40 +1453,6 @@ impl Workspace {
             .then(|| self.visible_rows(buffer_id))
             .flatten();
 
-            // A small buffer parses on the run loop first. The tree-sitter parse
-            // honors the deadline and the captures walk after it does not, so
-            // what bounds that walk is the size cap for a first parse, which
-            // narrows to the viewport anyway, and the abort inside for a parse
-            // carrying tokens, which faces the whole rope whenever its
-            // narrowed re-query gives up.
-            //
-            // Landing here rather than a frame later is what the keystroke
-            // feels. An abort leaves the prior state untouched, which is the
-            // contract that lets the pool attempt below carry on as if this
-            // never ran.
-            let mut prior = prior;
-            let mut prior_map = prior_map;
-            if snapshot.visible_text.len() <= INLINE_PARSE_MAX_BYTES {
-                let deadline = executor.now() + INLINE_PARSE_BUDGET;
-                let inline = parse_buffer_step(
-                    buffer_id,
-                    snapshot.clone(),
-                    &lang,
-                    &mut prior,
-                    &mut prior_map,
-                    prior_spans.as_deref(),
-                    prior_anchors.as_ref(),
-                    syntax_styles,
-                    Some((deadline, executor)),
-                    None,
-                    viewport.clone(),
-                );
-                if let Some(out) = inline {
-                    self.install_parse_output(out, executor, redraw_notify, &mut installed);
-                    continue;
-                }
-            }
-
             // The result installs through the job poll a frame later. Until then
             // the registry still holds the last landed tree and token set, so
             // auto-indent, textobjects, and the highlight readers answer from
@@ -1529,7 +1480,6 @@ impl Workspace {
                         prior_spans.as_deref(),
                         prior_anchors.as_ref(),
                         &styles,
-                        None,
                         Some(&cancel),
                         viewport,
                     )
@@ -1953,7 +1903,7 @@ pub(crate) fn view_kind(view: &View) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeWaiter, ParseJob, Workspace, INLINE_PARSE_MAX_BYTES};
+    use super::{BridgeWaiter, ParseJob, Workspace};
     use crate::{
         buffer::BufferId,
         code_index::build::IndexUpdate,
@@ -2469,126 +2419,81 @@ mod tests {
         );
     }
 
-    /// A buffer under the byte cap parses on the run loop, so its highlights
-    /// are there on the frame the edit landed rather than the one after.
+    /// A just-opened buffer parses on the blocking pool however small it is, so
+    /// the run loop never waits on tree-sitter.
     ///
     /// Driving once without ticking the scheduler is what separates the two
-    /// paths. A spawned job cannot have run yet, so a buffer settled at this
-    /// point can only have parsed inline.
+    /// paths. A spawned job does not land before the scheduler ticks, so a
+    /// buffer settled at this point parsed on the run loop.
     #[test]
-    fn a_small_buffer_parses_on_the_run_loop() {
+    fn a_small_buffer_parses_on_the_pool() {
         let (mut h, id) = harness_with_file("/small", "small.rs", b"fn f() {}\n");
         h.stoat.drive_background();
 
         let ws = h.stoat.active_workspace();
-        assert!(
-            !ws.parse_jobs.contains_key(&id),
-            "a buffer parsed inline spawns no background job"
-        );
-        assert!(
-            ws.buffers.syntax_version(id).is_some(),
-            "and its highlights are already installed"
+        assert_eq!(
+            (
+                ws.parse_jobs.contains_key(&id),
+                ws.buffers.syntax_version(id)
+            ),
+            (true, None),
+            "the buffer's first parse is a job, and nothing is installed yet",
         );
     }
 
-    /// An edit that restyles most of the file leaves the narrowed re-query with
-    /// nothing to save, and the walk that answers instead covers the whole rope
-    /// under no clock at all. Under the cap that walk is still a stall the
-    /// keystroke feels, so the parse goes to the pool rather than run it inline.
+    /// An edit to a ten-line buffer parses on the pool too, and its tokens
+    /// install on the drive after the job lands.
+    ///
+    /// Until then the registry keeps the last landed parse, which is what the
+    /// highlight readers answer from while the job runs.
     #[test]
-    fn an_inline_parse_whose_requery_gives_up_goes_to_the_pool() {
-        let source = "fn f() { let a = 1; }\n".repeat(200);
-        let (mut h, id) = harness_with_file("/requery", "wide.rs", source.as_bytes());
+    fn an_edit_to_a_small_buffer_parses_on_the_pool() {
+        let source = "fn f() { let a = 1; }\n".repeat(10);
+        let (mut h, id) = harness_with_file("/edit", "edit.rs", source.as_bytes());
+        let parse_state = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            (
+                ws.parse_jobs.contains_key(&id),
+                ws.buffers.syntax_version(id),
+            )
+        };
         h.stoat.drive_background();
-        let ws = h.stoat.active_workspace();
-        assert!(
-            ws.buffers.syntax_version(id).is_some() && !ws.partial_token_buffers.contains(&id),
-            "the file is styled whole, so the next parse has tokens to carry",
-        );
+        h.settle();
+        h.stoat.drive_background();
+        let opened = parse_state(&h);
 
-        // Rewriting the last three quarters of the file, which is what a paste
-        // over a wide selection does. The re-query's covers then reach past
-        // half the rope and it gives up rather than narrow anything.
-        //
         // Written through the registry rather than through the harness, whose
         // edit helper renders a frame and drives the parse with it.
-        {
-            let rewritten = "fn g() { let b = 2; }\n".repeat(150);
+        let (before, after) = {
             let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
             let mut guard = buffer.write().expect("buffer poisoned");
-            guard.edit(source.len() / 4..source.len(), &rewritten);
-        }
+            let before = guard.snapshot.version;
+            guard.edit(0..0, "// x\n");
+            (before, guard.snapshot.version)
+        };
         h.stoat.drive_background();
+        let in_flight = parse_state(&h);
 
-        let ws = h.stoat.active_workspace();
-        assert!(
-            ws.parse_jobs.contains_key(&id),
-            "the parse it cannot narrow spawns a background job",
-        );
-
-        // The scheduler tick resolves the blocking task, and the second drive
-        // is the poll that moves its output into the registry.
         h.settle();
         h.stoat.drive_background();
 
-        let ws = h.stoat.active_workspace();
-        assert!(
-            !ws.parse_jobs.contains_key(&id),
-            "the finished job leaves the map",
-        );
-        assert!(
-            ws.buffers.syntax_version(id).is_some(),
-            "and the tokens land through the job poll",
-        );
-    }
-
-    /// Past the cap the captures walk is too long to sit inside a frame, so the
-    /// work goes to the pool and lands through the job poll as before.
-    #[test]
-    fn a_large_buffer_still_parses_off_the_run_loop() {
-        let source = "fn f() {}\n".repeat(INLINE_PARSE_MAX_BYTES / 10 + 1);
-        assert!(
-            source.len() > INLINE_PARSE_MAX_BYTES,
-            "the fixture must exceed the cap",
-        );
-        let (mut h, id) = harness_with_file("/large", "large.rs", source.as_bytes());
-
-        // Driven once without ticking the scheduler, so a spawned job stays
-        // pending and observable.
-        h.stoat.drive_background();
-
-        let ws = h.stoat.active_workspace();
-        assert!(
-            ws.parse_jobs.contains_key(&id),
-            "a buffer past the cap spawns a background parse job"
-        );
-        assert!(
-            ws.buffers.syntax_version(id).is_none(),
-            "and is not parsed on the run loop"
-        );
-
-        // The scheduler tick resolves the blocking task. The second
-        // drive_background is the poll that moves its output into the registry.
-        h.settle();
-        h.stoat.drive_background();
-
-        let ws = h.stoat.active_workspace();
-        assert!(
-            !ws.parse_jobs.contains_key(&id),
-            "the finished job leaves the map"
-        );
-        assert!(
-            ws.buffers.syntax_version(id).is_some(),
-            "and its highlights land through the job poll"
+        assert_eq!(
+            [opened, in_flight, parse_state(&h)],
+            [
+                (false, Some(before)),
+                (true, Some(before)),
+                (false, Some(after))
+            ],
+            "the edit's parse runs on the pool over the last landed parse, then installs",
         );
     }
 
     /// A language's first parse sends its action queries to the pool to
     /// compile, and a second buffer in that language sends nothing more.
     ///
-    /// The scheduler counts work only when it reaches the pool. Both buffers
-    /// are small enough to parse on the run loop, which keeps the parse itself
-    /// out of the count.
+    /// The scheduler counts work only when it reaches the pool. Each pass also
+    /// sends its buffer's parse there, so the warm is the one call that the
+    /// first pass makes beyond the second.
     #[test]
     fn a_language_warms_its_queries_at_its_first_parse_only() {
         use crate::action_handlers::dispatch;
@@ -2617,7 +2522,7 @@ mod tests {
                 second,
                 h.stoat.active_workspace().warmed_languages.clone()
             ),
-            (1, 0, std::collections::HashSet::from(["rust"])),
+            (2, 1, std::collections::HashSet::from(["rust"])),
             "the first rust buffer warms rust once, and the second finds it warm"
         );
     }

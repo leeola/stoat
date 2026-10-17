@@ -1099,7 +1099,7 @@ mod tests {
     fn parse_at(lang: &Arc<Language>, rope: &Rope, version: u64) -> (SyntaxState, SyntaxMap) {
         let tree = stoat_language::parse_rope(lang, rope, None).expect("a rust parse");
         let mut map = SyntaxMap::new();
-        map.reparse(rope, lang.clone(), version, Some(&tree), None);
+        map.reparse(rope, lang.clone(), version, Some(&tree));
         let state = SyntaxState {
             tree,
             version,

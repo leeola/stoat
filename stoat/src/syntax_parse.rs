@@ -30,7 +30,6 @@ use std::{
 use stoat_language::{
     self as language, HighlightId, Language, SyntaxMapCapture, SyntaxSnapshot, SyntaxState,
 };
-use stoat_scheduler::Executor;
 use stoat_text::{patch::Patch, Bias, Rope};
 
 /// Result of a successful background parse, ready to be installed on the
@@ -70,20 +69,18 @@ pub(crate) struct ParseJobOutput {
 
 /// Whether a caller's cancel flag is set.
 ///
-/// [`parse_buffer_step`] reads it at each stretch of work that honors no
-/// deadline of its own, so a superseded parse stops between them rather than
-/// running to the end.
+/// [`parse_buffer_step`] reads it between the stretches of work that do not
+/// read the flag themselves, so a superseded parse stops between them rather
+/// than running to the end.
 fn cancelled(cancel: Option<&AtomicBool>) -> bool {
     cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
 }
 
-/// Synchronous core of the parse pipeline. When `deadline` is `Some`, every
-/// parse it runs aborts if it would exceed it and the function returns `None`,
-/// signalling that the caller should fall back to the background path. An
-/// abort leaves `prior` and `prior_syntax_map` untouched so that background
-/// attempt still has the previous parse to work from. `None` is also returned
-/// for ordinary parse failures (unsupported language, etc.); the difference
-/// does not matter for the call sites.
+/// Synchronous core of the parse pipeline, which the blocking pool runs.
+///
+/// A set `cancel` stops it early, and the function then returns `None` with
+/// `prior` and `prior_syntax_map` untouched. An ordinary parse failure, such as
+/// an unsupported language, also returns `None`.
 ///
 /// `prior_token_spans` and `prior_token_anchors` are the previous parse's
 /// tokens in its own byte coordinates and as anchors in the buffer. They must
@@ -101,7 +98,6 @@ pub(crate) fn parse_buffer_step(
     prior_token_spans: Option<&[(Range<usize>, HighlightStyleId)]>,
     prior_token_anchors: Option<&BufferSemanticTokens>,
     styles: &SyntaxStyles,
-    deadline: Option<(std::time::Instant, &Executor)>,
     cancel: Option<&AtomicBool>,
     viewport: Option<Range<u32>>,
 ) -> Option<ParseJobOutput> {
@@ -109,7 +105,7 @@ pub(crate) fn parse_buffer_step(
     let new_rope = snapshot.visible_text.clone();
 
     // Edit a clone of the prior tree rather than mutating it in place. If
-    // the parse aborts (deadline exceeded, etc.) the caller's prior must
+    // the parse stops early (cancelled, etc.) the caller's prior must
     // remain valid for the next attempt; an in-place edit would leave the
     // registry holding a half-edited tree that would double-stamp position
     // offsets when re-edited next call.
@@ -126,19 +122,15 @@ pub(crate) fn parse_buffer_step(
     let edited_tree = edited.as_ref().map(|(tree, _)| tree);
     let edits = edited.as_ref().map(|(_, edits)| edits);
 
-    let tree = match (deadline, cancel) {
-        (Some((dl, exec)), _) => {
-            language::parse_rope_within(lang, &new_rope, edited_tree, dl, exec)?
-        },
-        (None, Some(cancel)) => {
-            language::parse_rope_cancellable(lang, &new_rope, edited_tree, cancel)?
-        },
-        (None, None) => language::parse_rope(lang, &new_rope, edited_tree)?,
+    let tree = match cancel {
+        Some(cancel) => language::parse_rope_cancellable(lang, &new_rope, edited_tree, cancel)?,
+        None => language::parse_rope(lang, &new_rope, edited_tree)?,
     };
 
-    // The captures walk and the injection re-walk below honor no deadline, so a
-    // parse cancelled while they run would finish them for a result nothing
-    // reads. A set flag stops here instead, leaving `prior` as it was.
+    // The captures walk and the injection re-walk below do not read the flag.
+    // Without this check, a parse cancelled while they run finishes them for a
+    // result nothing reads. A set flag stops here instead, leaving `prior` as
+    // it was.
     if cancelled(cancel) {
         return None;
     }
@@ -160,10 +152,7 @@ pub(crate) fn parse_buffer_step(
     // refcount bumps.
     //
     // The root parsed above is handed in rather than parsed a second time, so
-    // what remains under the reparse is the injection layers, running on the
-    // same budget. A spent budget takes the `?` here rather than the rebuild
-    // below, since rebuilding from nothing would parse every one of those
-    // layers again only to abort again.
+    // what remains under the reparse is the injection layers.
     if cancelled(cancel) {
         return None;
     }
@@ -179,7 +168,6 @@ pub(crate) fn parse_buffer_step(
                 cur_version,
                 invalidated.as_deref(),
                 Some(&tree),
-                deadline,
             )?;
             Some((map, layer_changes))
         },
@@ -191,7 +179,7 @@ pub(crate) fn parse_buffer_step(
         Some((map, layer_changes)) => (map, layer_changes),
         None => {
             let mut map = stoat_language::SyntaxMap::default();
-            map.reparse(&new_rope, lang.clone(), cur_version, Some(&tree), deadline)?;
+            map.reparse(&new_rope, lang.clone(), cur_version, Some(&tree))?;
             (map, Vec::new())
         },
     };
@@ -233,17 +221,8 @@ pub(crate) fn parse_buffer_step(
         None
     };
 
-    // A re-query that gave up leaves the capture walk below, and that walk
-    // honors no clock of its own. A parse with tokens to carry is never handed
-    // a viewport to narrow it, so the walk it faces covers the whole rope,
-    // which is the stall a deadline exists to prevent. Handing the parse back
-    // undone sends it to the pool, where the same walk costs a frame instead.
-    if deadline.is_some() && prior_token_spans.is_some() && recaptured.is_none() {
-        return None;
-    }
-
-    // Past here the parse can no longer abort, so the caller's prior has done
-    // its job and every abort above has left it whole for the retry.
+    // Past here the parse no longer stops early, so the caller's prior has done
+    // its job, and every early return above has left it whole.
     prior.take();
     prior_syntax_map.take();
 
@@ -904,7 +883,6 @@ mod tests {
                 None,
                 &styles,
                 None,
-                None,
                 viewport,
             )
             .expect("parse should succeed")
@@ -946,179 +924,11 @@ mod tests {
         );
     }
 
-    /// When `parse_buffer_step` aborts on the deadline, the prior state
-    /// passed via `&mut Option<_>` must remain populated so the caller
-    /// can hand it to a follow-up parse without losing incrementality.
-    #[test]
-    fn parse_buffer_step_preserves_prior_on_deadline_abort() {
-        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-        let executor = scheduler.executor();
-        let lang = LanguageRegistry::standard()
-            .for_path(Path::new("a.rs"))
-            .unwrap();
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
-        let buffer_id = BufferId::new(1);
-
-        let text = "fn a() {}\n".repeat(10_000);
-        let mut buf = TextBuffer::with_text(buffer_id, &text);
-        let snap1 = buf.snapshot.clone();
-
-        let mut prior: Option<SyntaxState> = None;
-        let mut prior_map: Option<stoat_language::SyntaxMap> = None;
-        let out = parse_buffer_step(
-            buffer_id,
-            snap1,
-            &lang,
-            &mut prior,
-            &mut prior_map,
-            None,
-            None,
-            &styles,
-            None,
-            None,
-            None,
-        )
-        .expect("first parse should succeed");
-        let initial_version = out.syntax.version;
-
-        let mut prior: Option<SyntaxState> = Some(out.syntax);
-        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(out.syntax_map);
-        buf.edit(0..0, "// edit\n");
-        let snap2 = buf.snapshot.clone();
-
-        let deadline = executor.now();
-        let result = parse_buffer_step(
-            buffer_id,
-            snap2.clone(),
-            &lang,
-            &mut prior,
-            &mut prior_map,
-            None,
-            None,
-            &styles,
-            Some((deadline, &executor)),
-            None,
-            None,
-        );
-        assert!(result.is_none(), "expected deadline abort to return None");
-        let prior_state = prior
-            .as_ref()
-            .expect("prior must survive deadline abort, was consumed");
-        assert_eq!(
-            prior_state.version, initial_version,
-            "prior version must be unchanged",
-        );
-        assert!(
-            prior_map.is_some(),
-            "prior_syntax_map must survive deadline abort",
-        );
-
-        let recovery = parse_buffer_step(
-            buffer_id,
-            snap2,
-            &lang,
-            &mut prior,
-            &mut prior_map,
-            None,
-            None,
-            &styles,
-            None,
-            None,
-            None,
-        )
-        .expect("recovery parse should succeed");
-        assert!(recovery.syntax.version > initial_version);
-        assert!(prior.is_none(), "successful parse must consume the prior");
-        assert!(prior_map.is_none());
-    }
-
-    /// The deadline check inside `parse_rope_within` reads time from the
-    /// `Executor`, not the wall clock, so `TestScheduler::advance_clock`
-    /// drives the timeout deterministically.
-    #[test]
-    fn parse_buffer_step_deadline_uses_executor_clock() {
-        use std::time::Duration;
-        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-        let executor = scheduler.executor();
-        let lang = LanguageRegistry::standard()
-            .for_path(Path::new("a.rs"))
-            .unwrap();
-        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
-        let buffer_id = BufferId::new(1);
-
-        let text = "fn a() {}\n".repeat(10_000);
-        let mut buf = TextBuffer::with_text(buffer_id, &text);
-        let snap1 = buf.snapshot.clone();
-
-        let mut prior: Option<SyntaxState> = None;
-        let mut prior_map: Option<stoat_language::SyntaxMap> = None;
-        let out = parse_buffer_step(
-            buffer_id,
-            snap1,
-            &lang,
-            &mut prior,
-            &mut prior_map,
-            None,
-            None,
-            &styles,
-            None,
-            None,
-            None,
-        )
-        .expect("first parse should succeed");
-
-        let mut prior: Option<SyntaxState> = Some(out.syntax);
-        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(out.syntax_map);
-        buf.edit(0..0, "// edit\n");
-        let snap2 = buf.snapshot.clone();
-
-        let deadline = executor.now() + Duration::from_secs(3600);
-        let succeeded = parse_buffer_step(
-            buffer_id,
-            snap2,
-            &lang,
-            &mut prior,
-            &mut prior_map,
-            None,
-            None,
-            &styles,
-            Some((deadline, &executor)),
-            None,
-            None,
-        )
-        .expect("deadline far in the future should not abort");
-
-        let mut prior: Option<SyntaxState> = Some(succeeded.syntax);
-        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(succeeded.syntax_map);
-        buf.edit(0..0, "// edit2\n");
-        let snap3 = buf.snapshot.clone();
-
-        scheduler.advance_clock(Duration::from_secs(7200));
-
-        let aborted = parse_buffer_step(
-            buffer_id,
-            snap3,
-            &lang,
-            &mut prior,
-            &mut prior_map,
-            None,
-            None,
-            &styles,
-            Some((deadline, &executor)),
-            None,
-            None,
-        );
-        assert!(
-            aborted.is_none(),
-            "after advance_clock past the deadline, parse must abort",
-        );
-    }
-
     /// A parse the finder superseded has to leave the prior state alone.
     ///
-    /// The pool arm runs with no deadline, so the flag is the only thing that
-    /// stops it. An aborted parse that wrote to `prior` would leave the registry
-    /// holding a tree for text the preview no longer shows.
+    /// The flag is the only thing that stops a parse. A stopped parse that
+    /// wrote to `prior` leaves the registry with a tree for text that the
+    /// preview no longer shows.
     #[test]
     fn parse_buffer_step_preserves_prior_on_cancel() {
         let lang = LanguageRegistry::standard()
@@ -1140,7 +950,6 @@ mod tests {
             &styles,
             None,
             None,
-            None,
         )
         .expect("the first parse succeeds");
 
@@ -1159,7 +968,6 @@ mod tests {
             None,
             None,
             &styles,
-            None,
             Some(&cancel),
             None,
         );
@@ -1209,7 +1017,6 @@ mod tests {
                 &styles,
                 None,
                 None,
-                None,
             )
             .expect("first parse should succeed")
         };
@@ -1231,7 +1038,6 @@ mod tests {
                 &styles,
                 None,
                 None,
-                None,
             )
             .expect("incremental parse should succeed")
         };
@@ -1247,7 +1053,6 @@ mod tests {
                 None,
                 None,
                 &styles,
-                None,
                 None,
                 None,
             )
@@ -1353,7 +1158,6 @@ mod tests {
             styles,
             None,
             None,
-            None,
         )
         .expect("carried parse should succeed");
 
@@ -1369,7 +1173,6 @@ mod tests {
                 None,
                 None,
                 styles,
-                None,
                 None,
                 None,
             )
@@ -1715,7 +1518,6 @@ mod tests {
                 &styles,
                 None,
                 None,
-                None,
             )
             .expect("first parse should succeed")
         };
@@ -1735,7 +1537,7 @@ mod tests {
         );
         let mut map = first.syntax_map.clone();
         map.interpolate(edits.edits(), &first.syntax.rope_snapshot, &rope);
-        map.reparse(&rope, lang.clone(), snapshot.version, None, None)
+        map.reparse(&rope, lang.clone(), snapshot.version, None)
             .expect("reparse should succeed");
         let tree = map
             .snapshot()
@@ -1823,7 +1625,6 @@ mod tests {
                 &styles,
                 None,
                 None,
-                None,
             )
             .expect("first parse should succeed")
         };
@@ -1836,7 +1637,7 @@ mod tests {
 
         let mut map = first.syntax_map.clone();
         map.interpolate(edits.edits(), &first.syntax.rope_snapshot, &rope);
-        map.reparse(&rope, lang.clone(), snapshot.version, None, None)
+        map.reparse(&rope, lang.clone(), snapshot.version, None)
             .expect("reparse should succeed");
 
         let recapture = |cover: Range<usize>| {
@@ -1892,7 +1693,6 @@ mod tests {
                 &styles,
                 None,
                 None,
-                None,
             )
             .expect("first parse should succeed")
         };
@@ -1909,7 +1709,6 @@ mod tests {
             Some(&first.token_spans),
             Some(&first.token_channel),
             &styles,
-            None,
             None,
             None,
         )
@@ -1982,7 +1781,6 @@ mod tests {
             &styles,
             None,
             None,
-            None,
         )
         .expect("parse should succeed");
 
@@ -2023,7 +1821,6 @@ mod tests {
                 None,
                 None,
                 &styles,
-                None,
                 None,
                 None,
             )

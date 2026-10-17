@@ -4195,7 +4195,6 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec",
- "stoat_scheduler",
  "stoat_text",
  "tree-sitter",
  "tree-sitter-language",

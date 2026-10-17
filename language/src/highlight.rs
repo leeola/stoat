@@ -8,9 +8,7 @@ use std::{
         LazyLock, Mutex,
     },
     thread,
-    time::Instant,
 };
-use stoat_scheduler::Executor;
 use stoat_text::{patch::Edit as PatchEdit, ChunksInRange, Point, Rope};
 use tree_sitter::{
     InputEdit, Node, ParseOptions, ParseState, Parser, Point as TsPoint, QueryCursor,
@@ -161,29 +159,7 @@ pub fn parse(language: &Language, text: &str, old_tree: Option<&Tree>) -> Option
 /// `old_tree` enables incremental parsing: pass the previous [`Tree`] (after
 /// applying [`edit_tree`]) so tree-sitter can reuse unchanged subtrees.
 pub fn parse_rope(language: &Language, rope: &Rope, old_tree: Option<&Tree>) -> Option<Tree> {
-    parse_rope_inner(language, rope, old_tree, None, None, None)
-}
-
-/// Parse `rope` with a wall-clock deadline. Returns `None` if the parser
-/// aborts (deadline exceeded) or fails for any other reason. Used by the
-/// sync-parse fast path in [`crate`]'s host editor: small edits typically
-/// finish well within a millisecond, large reparses fall through to the
-/// background parser pool.
-pub fn parse_rope_within(
-    language: &Language,
-    rope: &Rope,
-    old_tree: Option<&Tree>,
-    deadline: Instant,
-    executor: &Executor,
-) -> Option<Tree> {
-    parse_rope_inner(
-        language,
-        rope,
-        old_tree,
-        None,
-        Some((deadline, executor)),
-        None,
-    )
+    parse_rope_inner(language, rope, old_tree, None, None)
 }
 
 /// Parse `rope`, stopping early once `cancel` is set.
@@ -201,7 +177,7 @@ pub fn parse_rope_cancellable(
     old_tree: Option<&Tree>,
     cancel: &AtomicBool,
 ) -> Option<Tree> {
-    parse_rope_inner(language, rope, old_tree, None, None, Some(cancel))
+    parse_rope_inner(language, rope, old_tree, None, Some(cancel))
 }
 
 /// Parse `rope` restricted to the given byte range via
@@ -217,7 +193,6 @@ pub fn parse_rope_range(
     rope: &Rope,
     range: Range<usize>,
     old_tree: Option<&Tree>,
-    deadline: Option<(Instant, &Executor)>,
 ) -> Option<Tree> {
     if range.start >= range.end || range.end > rope.len() {
         return None;
@@ -230,21 +205,19 @@ pub fn parse_rope_range(
         start_point,
         end_point,
     }];
-    parse_rope_inner(language, rope, old_tree, Some(&included), deadline, None)
+    parse_rope_inner(language, rope, old_tree, Some(&included), None)
 }
 
 /// Parse `rope` under every option the wrappers above expose.
 ///
-/// `included_ranges` restricts the parse to a set of byte ranges, and either a
-/// passed `deadline` or a set `cancel` aborts it. Both an abort and an ordinary
-/// parse failure come back as `None`. A caller that must tell them apart checks
-/// the clock or the flag itself.
+/// `included_ranges` restricts the parse to a set of byte ranges, and a set
+/// `cancel` aborts it. An abort and an ordinary parse failure both come back as
+/// `None`. A caller that must tell them apart checks the flag itself.
 pub(crate) fn parse_rope_inner(
     language: &Language,
     rope: &Rope,
     old_tree: Option<&Tree>,
     included_ranges: Option<&[tree_sitter::Range]>,
-    deadline: Option<(Instant, &Executor)>,
     cancel: Option<&AtomicBool>,
 ) -> Option<Tree> {
     with_parser(|parser| {
@@ -318,18 +291,15 @@ pub(crate) fn parse_rope_inner(
             }
         };
 
-        if deadline.is_none() && cancel.is_none() {
+        let Some(cancel) = cancel else {
             return parser.parse_with_options(&mut callback, old_tree, None);
-        }
+        };
 
-        // A partial tree is worse than none: it names rows the text does not
-        // hold. Both stops therefore discard what the parser hands back.
+        // A partial tree is worse than none, because it names rows that the text
+        // does not hold. A stop therefore discards what the parser hands back.
         let aborted = Cell::new(false);
         let mut progress = |_state: &ParseState| -> ControlFlow<()> {
-            let past_deadline =
-                deadline.is_some_and(|(deadline, executor)| executor.now() >= deadline);
-            let cancelled = cancel.is_some_and(|flag| flag.load(Ordering::Relaxed));
-            if past_deadline || cancelled {
+            if cancel.load(Ordering::Relaxed) {
                 aborted.set(true);
                 ControlFlow::Break(())
             } else {
