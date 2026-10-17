@@ -142,6 +142,20 @@ pub struct Point {
     pub col: u32,
 }
 
+/// A range as a command line or a `stoat api` request spells it, before a file
+/// says how long its lines are.
+///
+/// The bare-line forms cover whole lines, and where a line ends depends on the
+/// content. Keeping that unresolved is what lets [`parse_range`] stay pure, and
+/// keeps a [`Range`] from ever holding a column that names no byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RangeSpec {
+    /// `L` or `L-L`, covering those lines whole.
+    Lines { start: u32, end: u32 },
+    /// `L:C-L:C`, naming exact bytes.
+    Points(Range),
+}
+
 /// Which stop names the field an edit leaves alone and which it replaces.
 ///
 /// Every field is `None` by default, so a caller sets only what it changes.
@@ -226,6 +240,22 @@ pub enum WalkthroughError {
     #[snafu(display("range splits the character at byte {offset}"))]
     SplitCharacter {
         offset: usize,
+        #[snafu(implicit)]
+        location: ErrorLocation,
+    },
+
+    #[snafu(display("'{text}' is not a range: {reason}"))]
+    InvalidRange {
+        text: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: ErrorLocation,
+    },
+
+    #[snafu(display("'{text}' is not a point: {reason}"))]
+    InvalidPoint {
+        text: String,
+        reason: String,
         #[snafu(implicit)]
         location: ErrorLocation,
     },
@@ -609,11 +639,77 @@ fn byte_offset(content: &str, point: Point) -> Result<usize, WalkthroughError> {
     .fail()
 }
 
+/// Parse a range written as `L` for one whole line, `L-L` for a span of whole
+/// lines, or `L:C-L:C` for exact byte positions.
+///
+/// Lines and columns are 1-based and both ends are inclusive, matching how an
+/// editor reports a selection.
+///
+/// A mixed form such as `3-4:2` is refused rather than guessed at. Half a range
+/// in columns means the author meant columns for both ends, so accepting it
+/// silently widens or narrows the span they asked for.
+pub fn parse_range(text: &str) -> Result<RangeSpec, WalkthroughError> {
+    let invalid = |reason: String| InvalidRangeSnafu { text, reason }.build();
+    let number = |piece: &str| parse_line(piece).map_err(invalid);
+
+    let Some((start, end)) = text.split_once('-') else {
+        let line = number(text)?;
+        return Ok(RangeSpec::Lines {
+            start: line,
+            end: line,
+        });
+    };
+
+    match (start.split_once(':'), end.split_once(':')) {
+        (None, None) => Ok(RangeSpec::Lines {
+            start: number(start)?,
+            end: number(end)?,
+        }),
+        (Some((start_line, start_col)), Some((end_line, end_col))) => {
+            Ok(RangeSpec::Points(Range {
+                start: Point {
+                    line: number(start_line)?,
+                    col: number(start_col)?,
+                },
+                end: Point {
+                    line: number(end_line)?,
+                    col: number(end_col)?,
+                },
+            }))
+        },
+        _ => Err(invalid("it mixes a line with a line:column".into())),
+    }
+}
+
+/// Parse one position written as `L:C`, a 1-based line and byte column.
+///
+/// A bare line is refused, since a line alone names no byte.
+pub fn parse_point(text: &str) -> Result<Point, WalkthroughError> {
+    let invalid = |reason: String| InvalidPointSnafu { text, reason }.build();
+    let Some((line, col)) = text.split_once(':') else {
+        return Err(invalid("a point is a line:column".into()));
+    };
+
+    Ok(Point {
+        line: parse_line(line).map_err(invalid)?,
+        col: parse_line(col).map_err(invalid)?,
+    })
+}
+
+/// One 1-based number of a range or a point, or the reason `text` is none.
+fn parse_line(text: &str) -> Result<u32, String> {
+    match text.parse::<u32>() {
+        Ok(0) => Err("lines and columns start at 1, so 0 names nothing".into()),
+        Ok(value) => Ok(value),
+        Err(_) => Err(format!("'{text}' is not a number")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        snippet_for, validate, Annotation, AnnotationEdit, Finding, FindingKind, Location,
-        MoveTarget, Point, Range, StopEdit, Walkthrough,
+        parse_point, parse_range, snippet_for, validate, Annotation, AnnotationEdit, Finding,
+        FindingKind, Location, MoveTarget, Point, Range, RangeSpec, StopEdit, Walkthrough,
     };
     use std::path::{Path, PathBuf};
 
@@ -1386,6 +1482,44 @@ mod tests {
             seen,
             [("s2", None, FindingKind::Stale)],
             "s1 and its annotation read at abc, s2 reads the working tree",
+        );
+    }
+
+    #[test]
+    fn parse_range_reads_every_accepted_form() {
+        assert_eq!(
+            parse_range("3").ok(),
+            Some(RangeSpec::Lines { start: 3, end: 3 })
+        );
+        assert_eq!(
+            parse_range("3-7").ok(),
+            Some(RangeSpec::Lines { start: 3, end: 7 })
+        );
+        assert_eq!(
+            parse_range("3:1-7:12").ok(),
+            Some(RangeSpec::Points(range((3, 1), (7, 12))))
+        );
+    }
+
+    #[test]
+    fn parse_range_refuses_what_it_cannot_read() {
+        for text in [
+            "", "x", "3-", "-7", "3-4:2", "3:1-7", "0", "3:0-4:1", "3:1-4",
+        ] {
+            assert!(parse_range(text).is_err(), "accepted {text:?}");
+        }
+    }
+
+    #[test]
+    fn parse_point_reads_a_line_and_column() {
+        assert_eq!(parse_point("3:7").ok(), Some(point(3, 7)));
+    }
+
+    #[test]
+    fn parse_point_refuses_a_bare_line() {
+        assert_eq!(
+            parse_point("3").map_err(|error| error.to_string()),
+            Err("'3' is not a point: a point is a line:column".to_string()),
         );
     }
 }

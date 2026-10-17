@@ -22,7 +22,7 @@ use stoat::{
         self,
         store::{self, StoreError},
         Annotation, AnnotationEdit, Finding, FindingKind, Location, MoveTarget, Point, Range,
-        StopEdit, Walkthrough,
+        RangeSpec, StopEdit, Walkthrough,
     },
 };
 
@@ -281,20 +281,6 @@ pub struct MoveArgs {
     last: bool,
 }
 
-/// A range as the command line spells it, before a file says how long its lines
-/// are.
-///
-/// The bare-line forms cover whole lines, and where a line ends depends on the
-/// content. Keeping that unresolved is what lets [`parse_range`] stay pure, and
-/// keeps a [`Range`] from ever holding a column that names no byte.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RangeSpec {
-    /// `L` or `L-L`, covering those lines whole.
-    Lines { start: u32, end: u32 },
-    /// `L:C-L:C`, naming exact bytes.
-    Points(Range),
-}
-
 pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
     let fs = &LocalFs;
     let text = match sub {
@@ -477,55 +463,12 @@ impl MoveArgs {
     }
 }
 
-/// Parse a `--range` argument.
+/// Parse a `--range` argument with [`walkthrough::parse_range`].
 ///
-/// Accepts `L` for one whole line, `L-L` for a span of whole lines, and
-/// `L:C-L:C` for exact byte positions. Lines and columns are 1-based and both
-/// ends are inclusive, matching how an editor reports a selection.
-///
-/// A mixed form such as `3-4:2` is refused rather than guessed at. Half a range
-/// in columns means the author meant columns for both ends, so accepting it
-/// silently widens or narrows the span they asked for.
-pub fn parse_range(text: &str) -> Result<RangeSpec, Whatever> {
-    let Some((start, end)) = text.split_once('-') else {
-        let line = parse_line(text)?;
-        return Ok(RangeSpec::Lines {
-            start: line,
-            end: line,
-        });
-    };
-
-    match (start.split_once(':'), end.split_once(':')) {
-        (None, None) => Ok(RangeSpec::Lines {
-            start: parse_line(start)?,
-            end: parse_line(end)?,
-        }),
-        (Some((start_line, start_col)), Some((end_line, end_col))) => {
-            Ok(RangeSpec::Points(Range {
-                start: Point {
-                    line: parse_line(start_line)?,
-                    col: parse_line(start_col)?,
-                },
-                end: Point {
-                    line: parse_line(end_line)?,
-                    col: parse_line(end_col)?,
-                },
-            }))
-        },
-        _ => whatever!("'{text}' mixes a line with a line:column, which is not a range"),
-    }
-}
-
-/// One 1-based number of a range.
-fn parse_line(text: &str) -> Result<u32, Whatever> {
-    let value: u32 = text
-        .parse()
-        .ok()
-        .with_whatever_context(|| format!("'{text}' is not a number"))?;
-    match value {
-        0 => whatever!("lines and columns start at 1, so 0 names nothing"),
-        value => Ok(value),
-    }
+/// The error message is the parse error's own. The command prints only the
+/// outermost message, so a context line in its place hides the reason.
+fn range_arg(text: &str) -> Result<RangeSpec, Whatever> {
+    walkthrough::parse_range(text).with_whatever_context(|error| error.to_string())
 }
 
 /// Resolve `spec` against `content`, filling in where the lines it names end.
@@ -630,7 +573,7 @@ fn add_stop(
 ) -> Result<String, Whatever> {
     let mut walkthrough = load(fs, root, slug)?;
     let commit = commit.map(|rev| resolve_commit(root, rev)).transpose()?;
-    let focus = capture_at(fs, root, commit.as_deref(), file, parse_range(range)?)?;
+    let focus = capture_at(fs, root, commit.as_deref(), file, range_arg(range)?)?;
 
     let id = walkthrough
         .add_stop(title, narration, focus, commit, before)
@@ -681,7 +624,7 @@ fn edit_stop(
             };
             let file = file.map_or_else(|| root.join(&current.focus.path), Path::to_path_buf);
             let range = match range {
-                Some(text) => parse_range(text)?,
+                Some(text) => range_arg(text)?,
                 None => RangeSpec::Points(current.focus.range),
             };
             Some(capture_at(fs, root, at, &file, range)?)
@@ -766,7 +709,7 @@ fn add_annotation(
             root,
             owner.commit.as_deref(),
             &target,
-            parse_range(range)?,
+            range_arg(range)?,
         )?
     };
     let path = file.is_some().then_some(captured.path);
@@ -822,7 +765,7 @@ fn edit_annotation(
         _ => {
             let stored = find_annotation(&walkthrough, stop, annotation)?;
             let range = match range {
-                Some(text) => parse_range(text)?,
+                Some(text) => range_arg(text)?,
                 None => RangeSpec::Points(stored.range),
             };
 
@@ -1120,8 +1063,8 @@ fn relative_path(root: &Path, slug: &str) -> String {
 mod tests {
     use super::{
         add_annotation, add_stop, check, delete, edit_annotation, edit_stop, list, move_stop, new,
-        parse_range, remove_annotation, remove_stop, show, Annotation, Location, MoveArgs, Point,
-        Range, RangeSpec, Walkthrough,
+        remove_annotation, remove_stop, show, Annotation, Location, MoveArgs, Point, Range,
+        Walkthrough,
     };
     use git2::{Commit, Repository, Signature};
     use std::path::{Path, PathBuf};
@@ -1220,39 +1163,6 @@ mod tests {
             annotation.path.as_deref().and_then(Path::to_str),
             annotation.snippet.as_str(),
         )
-    }
-
-    fn lines(start: u32, end: u32) -> RangeSpec {
-        RangeSpec::Lines { start, end }
-    }
-
-    fn points(start: (u32, u32), end: (u32, u32)) -> RangeSpec {
-        RangeSpec::Points(Range {
-            start: Point {
-                line: start.0,
-                col: start.1,
-            },
-            end: Point {
-                line: end.0,
-                col: end.1,
-            },
-        })
-    }
-
-    #[test]
-    fn parse_range_reads_every_accepted_form() {
-        assert_eq!(parse_range("3").ok(), Some(lines(3, 3)));
-        assert_eq!(parse_range("3-7").ok(), Some(lines(3, 7)));
-        assert_eq!(parse_range("3:1-7:12").ok(), Some(points((3, 1), (7, 12))));
-    }
-
-    #[test]
-    fn parse_range_refuses_what_it_cannot_read() {
-        for text in [
-            "", "x", "3-", "-7", "3-4:2", "3:1-7", "0", "3:0-4:1", "3:1-4",
-        ] {
-            assert!(parse_range(text).is_err(), "accepted {text:?}");
-        }
     }
 
     /// A bare line covers the line whole, which needs the file to say where it
