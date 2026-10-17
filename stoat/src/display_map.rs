@@ -173,15 +173,6 @@ pub struct WrapSync {
     /// The buffer the whole sync ran against. Building another would read the
     /// live buffer for the same answer, this sync leaving it untouched.
     pub buffer_snapshot: MultiBufferSnapshot,
-    /// The buffer edits the sync computed, spanning from [`Self::since_version`]
-    /// to the buffer's version now.
-    ///
-    /// For a layer synced outside this call, which would otherwise ask the
-    /// buffer for the same window again. It has to be paired with the version it
-    /// opened at, since such a layer can be at a different one and a patch
-    /// spanning the wrong window carries to the wrong places.
-    pub buffer_edits: Patch<usize>,
-    pub since_version: u64,
 }
 
 /// One foldable region per entry, as a server named them, with the text a
@@ -228,14 +219,6 @@ pub struct DisplayMap {
     /// placements are buffer rows, so without this the block map has no way to
     /// learn how far an edit moved them.
     last_buffer_snapshot: Option<MultiBufferSnapshot>,
-    /// Buffer content version the crease map was last resolved against.
-    ///
-    /// The crease sync in [`Self::snapshot`] is skipped while
-    /// this matches the live buffer version. Anchor offsets move only on a
-    /// buffer edit, and `insert`/`remove` resolve creases eagerly at the
-    /// current version, so an unchanged version guarantees every crease is
-    /// already resolved and a re-sync would reproduce the same offsets.
-    last_crease_sync_version: u64,
     /// The blocks standing for each hunk in
     /// [`Self::inserted_diff_block_signature`], one per base line the hunk
     /// blocks.
@@ -334,7 +317,6 @@ impl DisplayMap {
             diagnostics_max_severity: None,
             last_buffer_version: version,
             last_buffer_snapshot: Some(buffer_snapshot),
-            last_crease_sync_version: version,
             inserted_diff_block_ids: Vec::new(),
             inserted_diff_block_signature: Vec::new(),
             conflict_padding_block_ids: Vec::new(),
@@ -722,7 +704,7 @@ impl DisplayMap {
     pub fn set_lsp_folding_ranges(&mut self, buffer_id: BufferId, ranges: FoldingRanges) {
         // A server re-answers on every settled edit, and its answer for a file
         // nobody restructured is the one already installed. Reinstalling it
-        // rebuilds the crease tree twice, hands every crease a fresh id, and
+        // rewrites the crease list twice, hands every crease a fresh id, and
         // bumps settings_generation, which throws away every highlight
         // endpoint cache with it.
         if self.lsp_folding_signature.get(&buffer_id) == Some(&ranges) {
@@ -837,8 +819,6 @@ impl DisplayMap {
             wrap_edits,
             buffer_row_edits,
             buffer_snapshot,
-            buffer_edits,
-            since_version,
         }
     }
 
@@ -886,8 +866,6 @@ impl DisplayMap {
             wrap_edits,
             buffer_row_edits,
             buffer_snapshot,
-            buffer_edits,
-            since_version,
         } = self.sync_through_wrap();
         let diff_map = buffer_snapshot.diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
@@ -931,12 +909,6 @@ impl DisplayMap {
         let block_snapshot = self
             .block_map
             .sync(wrap_snapshot, &wrap_edits, &buffer_row_edits);
-
-        if buffer_version != self.last_crease_sync_version {
-            self.crease_map
-                .sync(&buffer_snapshot, Some((&buffer_edits, since_version)));
-            self.last_crease_sync_version = buffer_version;
-        }
 
         let snapshot = DisplaySnapshot {
             block_snapshot,

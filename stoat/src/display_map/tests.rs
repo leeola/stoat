@@ -438,9 +438,9 @@ fn display_snapshot_version() {
 
 /// A server re-answers the folding request on every settled edit, and for
 /// a file whose structure nobody changed it answers the same ranges.
-/// Installing that answer costs two crease-tree rebuilds and a
-/// `settings_generation` bump, which invalidates every highlight endpoint
-/// cache, so the answer has to be recognized before any of it runs.
+/// Installing that answer mints a fresh id for every crease and bumps
+/// `settings_generation`, which invalidates every highlight endpoint cache,
+/// so the answer has to be recognized before any of it runs.
 #[test]
 fn an_unchanged_folding_answer_installs_nothing() {
     let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\n");
@@ -458,12 +458,18 @@ fn an_unchanged_folding_answer_installs_nothing() {
     dm.set_lsp_folding_ranges(BufferId::new(0), ranges.clone());
     dm.snapshot();
 
-    let installed = (dm.crease_map.tree_rebuilds(), dm.settings_generation);
+    let installed = |dm: &DisplayMap| {
+        (
+            dm.lsp_folding_crease_ids.get(&BufferId::new(0)).cloned(),
+            dm.settings_generation,
+        )
+    };
+    let before = installed(&dm);
     dm.set_lsp_folding_ranges(BufferId::new(0), ranges);
 
     assert_eq!(
-        (dm.crease_map.tree_rebuilds(), dm.settings_generation),
-        installed,
+        installed(&dm),
+        before,
         "the same ranges are already installed",
     );
 
@@ -478,45 +484,7 @@ fn an_unchanged_folding_answer_installs_nothing() {
     };
     dm.set_lsp_folding_ranges(BufferId::new(0), moved);
 
-    assert_ne!(
-        (dm.crease_map.tree_rebuilds(), dm.settings_generation),
-        installed,
-        "and a real change reaches the tree",
-    );
-}
-
-#[test]
-fn crease_sync_tracks_only_buffer_edits() {
-    let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\n");
-    let shared = Arc::new(RwLock::new(buffer));
-    let multi_buffer = MultiBuffer::singleton(shared.clone());
-    let mut dm = DisplayMap::new(multi_buffer, test_executor(), crate::test_notify());
-
-    let range = {
-        let snap = dm.multi_buffer.snapshot();
-        snap.anchor_at(0, stoat_text::Bias::Right)..snap.anchor_at(5, stoat_text::Bias::Left)
-    };
-    dm.set_lsp_folding_ranges(BufferId::new(0), vec![(range, None)]);
-
-    dm.snapshot();
-    let synced_at = dm.last_crease_sync_version;
-
-    dm.insert_blocks(Vec::new());
-    dm.snapshot();
-    assert_eq!(
-        dm.last_crease_sync_version, synced_at,
-        "a rebuild with an unchanged buffer version does not re-sync creases",
-    );
-
-    {
-        let mut buf = shared.write().unwrap();
-        buf.edit(0..0, "x");
-    }
-    dm.snapshot();
-    assert!(
-        dm.last_crease_sync_version > synced_at,
-        "a buffer edit re-syncs the crease map",
-    );
+    assert_ne!(installed(&dm), before, "and a real change reaches the map",);
 }
 
 #[test]
