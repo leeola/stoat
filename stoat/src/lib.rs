@@ -1,4 +1,5 @@
 pub mod action_handlers;
+pub(crate) mod agent_goto;
 pub mod agent_ipc;
 pub mod agent_status;
 pub mod apc_emit;

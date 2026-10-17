@@ -15,7 +15,7 @@ use stoat::{
     agent_status::AgentHookEvent,
     host::{FsHost, LocalFs},
     run,
-    walkthrough::{self, Point},
+    walkthrough::{self, Point, WalkthroughError},
     workspace::WorkspaceUid,
 };
 
@@ -65,6 +65,21 @@ pub enum ApiCommand {
         /// is the caller.
         #[arg(long)]
         split: bool,
+    },
+    /// Show a file in the session with a range selected and on screen, and
+    /// print the range selected.
+    ///
+    /// The file shows in the focused pane when that pane shows an editor, and
+    /// otherwise in another editor pane or a fresh split. Keyboard focus stays
+    /// where it is.
+    Goto {
+        /// File to show. A relative path resolves against the working
+        /// directory.
+        path: PathBuf,
+        /// The range as `L`, `L-L`, or `L:C-L:C`, with 1-based lines and byte
+        /// columns and inclusive ends, the form the other verbs report.
+        #[arg(value_parser = range_text)]
+        range: String,
     },
     /// The focused workspace, tab, pane, and modal, and the focused editor's
     /// file, cursor, and lines on screen.
@@ -143,6 +158,10 @@ enum QueryRequest {
         line: u32,
         col: u32,
     },
+    Goto {
+        path: PathBuf,
+        range: String,
+    },
 }
 
 /// One live session's answer to `session-info`.
@@ -196,6 +215,10 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
             line: position.line,
             col: position.col,
         },
+        ApiCommand::Goto { path, range } => QueryRequest::Goto {
+            path: cwd.join(path),
+            range,
+        },
         ApiCommand::Hook { name, values } => {
             let event = build_event(&name, &values)?;
             return send_event(&socket()?, &event);
@@ -212,6 +235,12 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
     let reply = query(&socket()?, &request, None)?;
     print!("{reply}");
     Ok(())
+}
+
+/// Check `text` as a range with [`walkthrough::parse_range`], and keep the
+/// text, which the session parses again.
+fn range_text(text: &str) -> Result<String, WalkthroughError> {
+    walkthrough::parse_range(text).map(|_| text.to_owned())
 }
 
 /// Resolve which session socket to reach.
@@ -558,6 +587,13 @@ mod tests {
                 col: 5,
             }),
             r#"{"req":"hover","path":"/a.rs","line":3,"col":5}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Goto {
+                path: PathBuf::from("/a.rs"),
+                range: "2:1-3:2".into(),
+            }),
+            r#"{"req":"goto","path":"/a.rs","range":"2:1-3:2"}"#
         );
     }
 

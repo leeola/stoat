@@ -65,6 +65,7 @@ use ratatui::{
     buffer::{Buffer, Cell},
     layout::Rect,
 };
+use serde_json::json;
 use slotmap::SlotMap;
 use std::{
     borrow::Cow,
@@ -8017,6 +8018,10 @@ impl Stoat {
     ///
     /// An [`AgentControl::ClientGone`] drops the waiters of a command that
     /// went away, and leaves the active workspace as it is.
+    ///
+    /// An [`AgentControl::Goto`] switches to the owning session the same way,
+    /// then shows its file with the range selected, as
+    /// [`crate::agent_goto::goto`] describes.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
             AgentControl::Open {
@@ -8140,6 +8145,25 @@ impl Stoat {
                     None => false,
                 };
                 let _ = done.send(held);
+                UpdateEffect::Redraw
+            },
+            AgentControl::Goto {
+                uid,
+                path,
+                spec,
+                reply,
+            } => {
+                let Some(ws_id) = self
+                    .workspaces
+                    .iter()
+                    .find(|(_, ws)| ws.uid == uid)
+                    .map(|(id, _)| id)
+                else {
+                    let _ = reply.send(json!({ "error": "unknown session" }));
+                    return UpdateEffect::None;
+                };
+                self.enter_agent_workspace(ws_id);
+                let _ = reply.send(crate::agent_goto::goto(self, &path, spec));
                 UpdateEffect::Redraw
             },
             AgentControl::ClientGone { uid, client } => {

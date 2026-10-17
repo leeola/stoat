@@ -9,16 +9,22 @@
 //! [`AgentEvent`], which it applies to the owning workspace's
 //! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
 //! rides [`AgentControl`] and expects a reply. A query answers with live
-//! session state. `open` opens files in front of the terminal pane the caller
-//! runs in, which is what makes a `stoat <file>` inside a pane reach the
-//! instance hosting it. With no terminal it opens them in a fresh split, as an
-//! owned agent's `$EDITOR` asks, or in the focused pane. It holds the caller
-//! until those files close when it asks to wait, and answers whether each
-//! closed clean. A caller that goes away while it waits leaves no waiter
-//! behind.
+//! session state. `goto` shows a file with a range selected and on screen,
+//! and answers with the range it selected.
+//!
+//! `open` opens files in front of the terminal pane the caller runs in, which
+//! is what makes a `stoat <file>` inside a pane reach the instance hosting it.
+//! With no terminal it opens them in a fresh split, as an owned agent's
+//! `$EDITOR` asks, or in the focused pane. It holds the caller until those
+//! files close when it asks to wait, and answers whether each closed clean. A
+//! caller that goes away while it waits leaves no waiter behind.
 
 use crate::{
-    agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
+    agent_status::AgentHookEvent,
+    app::Stoat,
+    host::LanguageServerFeature,
+    walkthrough::{self, RangeSpec},
+    workspace::WorkspaceUid,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
 use lsp_types::{HoverParams, TextDocumentIdentifier, TextDocumentPositionParams};
@@ -113,13 +119,27 @@ pub enum AgentControl {
         request: AgentQuery,
         reply: oneshot::Sender<Value>,
     },
+    /// Show `path` in the session's workspace with the range `spec` names
+    /// selected and on screen, and fire `reply` with the range selected or an
+    /// error.
+    ///
+    /// Keyboard focus stays where it is, so keys the user types for the agent
+    /// never reach the editor. See [`crate::agent_goto::goto`] for the pane
+    /// the file shows in.
+    Goto {
+        uid: WorkspaceUid,
+        path: PathBuf,
+        spec: RangeSpec,
+        reply: oneshot::Sender<Value>,
+    },
 }
 
 /// A read-only interrogation of live session state, answered by the event loop.
 ///
 /// Separate from the [`AgentRequest`] wire form so the control channel carries
-/// only genuine queries. The `open` request is an interaction routed through
-/// [`AgentControl::Open`] and never appears here.
+/// only genuine queries. The `open` and `goto` requests drive the editor
+/// through [`AgentControl::Open`] and [`AgentControl::Goto`] and never appear
+/// here.
 #[derive(Debug, PartialEq)]
 pub enum AgentQuery {
     /// LSP host liveness, plus each server's name, process id, and serialized
@@ -196,6 +216,12 @@ enum AgentRequest {
     /// `{"req":"hover","path":"...","line":N,"col":N}`. `line` and `col` are a
     /// 1-based line and byte column, as every other request reports positions.
     Hover { path: PathBuf, line: u32, col: u32 },
+    /// `{"req":"goto","path":"/abs/a","range":"L:C-L:C"}`.
+    ///
+    /// `range` takes every form [`walkthrough::parse_range`] reads. The
+    /// connection parses it, so a range that does not parse costs the event
+    /// loop nothing.
+    Goto { path: PathBuf, range: String },
 }
 
 /// The socket file a hook server bound, removed when the server stops.
@@ -302,8 +328,8 @@ pub async fn serve_agent_hooks(
 /// answers. When that answer holds buffers, the connection parks until the
 /// event loop releases its waiters, then replies `closed` with the exit status
 /// from [`held_status`], since the caller's `$EDITOR` blocks for exactly that
-/// long. Every request replies and reads on, so one connection carries a
-/// series.
+/// long. A `goto` whose range does not parse replies the parse error itself.
+/// Every request replies and reads on, so one connection carries a series.
 ///
 /// A client that goes away while parked is reported as
 /// [`AgentControl::ClientGone`], so its waiters do not outlive it.
@@ -393,25 +419,36 @@ async fn serve_connection<R>(
                 AgentRequest::Layout => AgentQuery::Layout,
                 AgentRequest::Diagnostics { path } => AgentQuery::Diagnostics { path },
                 AgentRequest::Hover { path, line, col } => AgentQuery::Hover { path, line, col },
+                AgentRequest::Goto { path, range } => {
+                    let reads_on = match walkthrough::parse_range(&range) {
+                        Ok(spec) => {
+                            relay(control_tx, &mut write_half, |reply| AgentControl::Goto {
+                                uid,
+                                path,
+                                spec,
+                                reply,
+                            })
+                            .await
+                        },
+                        Err(error) => {
+                            let refused = json!({ "error": error.to_string() });
+                            write_json_line(&mut write_half, &refused).await
+                        },
+                    };
+                    if !reads_on {
+                        return;
+                    }
+                    continue;
+                },
             };
 
-            let (reply_tx, reply_rx) = oneshot::channel();
-            if control_tx
-                .send(AgentControl::Query {
-                    uid,
-                    request: query,
-                    reply: reply_tx,
-                })
-                .await
-                .is_err()
-            {
-                return;
-            }
-            let value = match reply_rx.await {
-                Ok(value) => value,
-                Err(_) => return,
-            };
-            if !write_json_line(&mut write_half, &value).await {
+            let reads_on = relay(control_tx, &mut write_half, |reply| AgentControl::Query {
+                uid,
+                request: query,
+                reply,
+            })
+            .await;
+            if !reads_on {
                 return;
             }
             continue;
@@ -458,6 +495,29 @@ where
                 }
             },
         }
+    }
+}
+
+/// Send the control message `ask` builds around a reply channel, and write the
+/// reply to `out`.
+///
+/// Answers whether the connection reads on. It does not once the event loop is
+/// gone or the client takes no more writes.
+async fn relay<W>(
+    control_tx: &Sender<AgentControl>,
+    out: &mut W,
+    ask: impl FnOnce(oneshot::Sender<Value>) -> AgentControl,
+) -> bool
+where
+    W: AsyncWrite + Unpin,
+{
+    let (reply_tx, reply_rx) = oneshot::channel();
+    if control_tx.send(ask(reply_tx)).await.is_err() {
+        return false;
+    }
+    match reply_rx.await {
+        Ok(value) => write_json_line(out, &value).await,
+        Err(_) => false,
     }
 }
 
@@ -1722,6 +1782,43 @@ mod tests {
 
         // Both split halves must drop for the duplex to close and the server's
         // read loop to see EOF and return.
+        drop(client_write);
+        drop(replies);
+        conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_goto_with_a_bad_range_replies_an_error_and_keeps_reading() {
+        let (client, mut controls, conn) = serve_duplex(WorkspaceUid(9));
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+
+        client_write
+            .write_all(
+                b"{\"req\":\"goto\",\"path\":\"/a.rs\",\"range\":\"x\"}\n\
+                  {\"req\":\"goto\",\"path\":\"/a.rs\",\"range\":\"2\"}\n",
+            )
+            .await
+            .unwrap();
+        let refused = next_reply(&mut replies).await;
+        let Some(AgentControl::Goto {
+            path, spec, reply, ..
+        }) = controls.recv().await
+        else {
+            panic!("expected a goto control message");
+        };
+        reply.send(json!({ "reply": "goto" })).unwrap();
+
+        assert_eq!(
+            (refused, path, spec, next_reply(&mut replies).await),
+            (
+                json!({ "error": "'x' is not a range: 'x' is not a number" }),
+                PathBuf::from("/a.rs"),
+                RangeSpec::Lines { start: 2, end: 2 },
+                json!({ "reply": "goto" }),
+            ),
+        );
+
         drop(client_write);
         drop(replies);
         conn.await.unwrap();

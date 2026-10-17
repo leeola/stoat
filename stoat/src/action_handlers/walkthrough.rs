@@ -3,6 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
     code_index::{build, nav},
+    editor_state::EditorState,
     host::CommitInfo,
     render::{
         hover::{HoverFrame, HoverPopup},
@@ -693,17 +694,28 @@ fn jump_to_range(
     })
 }
 
-/// Frame `range`'s lines in the focused editor, as a jump to a declaration
-/// frames its block, so a stop or annotation lands whole on screen when it
-/// fits.
-///
-/// The stored end column is one-based and inclusive, so the block runs to the
-/// start of the line after the last and frames that last line whole.
+/// Frame `range`'s lines in the focused editor, so a stop or annotation lands
+/// whole on screen when it fits.
 fn frame_range(stoat: &mut Stoat, range: walkthrough::Range, glide: bool) {
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-    let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
-        return;
-    };
+    if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
+        frame_lines(editor, range, scrolloff, glide);
+    }
+}
+
+/// Frame `range`'s lines in `editor`, as a jump to a declaration frames its
+/// block.
+///
+/// The end column is one-based and inclusive, so the block runs to the start
+/// of the line after the last and frames that last line whole. The frame
+/// works from the editor's cursor, so a caller that moves the selection does
+/// that first.
+pub(crate) fn frame_lines(
+    editor: &mut EditorState,
+    range: walkthrough::Range,
+    scrolloff: u32,
+    glide: bool,
+) {
     let block = {
         let snapshot = editor.display_map.snapshot();
         let rope = snapshot.buffer_snapshot().rope();
