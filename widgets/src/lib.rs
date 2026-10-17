@@ -76,11 +76,30 @@ pub mod text_run;
 /// A dead scene swallows anything pushed into it regardless, so a caller that
 /// gets the choice wrong emits nothing rather than half a frame.
 ///
+/// The decoration side divides further into numbered lanes, which
+/// [`Self::set_lane`] opens and [`Self::end_lane`] closes. A terminal at
+/// protocol 12 or later reads them, and with [`Self::set_lane_protocol`] on, a
+/// flush writes only the lanes that changed, each inside its own lane markers.
+/// With it off, the lanes read end to end and flush as one undivided lane,
+/// which is what an older terminal understands.
+///
 /// Per frame: [`Self::clear`], let widgets append via [`Self::buffer`] or
 /// [`Self::dynamic_buffer`], then [`Self::flush_to`].
 pub struct ApcScene {
-    current: Vec<u8>,
-    previous: Vec<u8>,
+    /// The numbered decoration lanes, sorted by id. Lane 0 is always first, and
+    /// it holds every decoration appended outside a lane.
+    lanes: Vec<Lane>,
+    /// The index in [`Self::lanes`] of the lane [`Self::buffer`] appends to.
+    active: usize,
+    /// Whether the host reads lane markers, as [`Self::set_lane_protocol`] set.
+    lanes_enabled: bool,
+    /// Whether the next flush resets the terminal and sends the whole scene.
+    ///
+    /// Set by a switch of the lane protocol, since a flush in the other mode
+    /// left the terminal's lanes out of step with the baselines. A flush
+    /// without markers puts every lane's bytes in the terminal's lane 0, so a
+    /// lane sent on its own after it draws twice.
+    resync: bool,
     dynamic_current: Vec<u8>,
     dynamic_previous: Vec<u8>,
     live: bool,
@@ -94,8 +113,10 @@ impl ApcScene {
     /// Deadness is set explicitly via [`Self::set_live`].
     pub fn new() -> ApcScene {
         ApcScene {
-            current: Vec::new(),
-            previous: Vec::new(),
+            lanes: vec![Lane::new(0)],
+            active: 0,
+            lanes_enabled: false,
+            resync: false,
             dynamic_current: Vec::new(),
             dynamic_previous: Vec::new(),
             live: true,
@@ -118,10 +139,47 @@ impl ApcScene {
         self.live = live;
     }
 
-    /// Empty both scene lanes so widgets build the next frame from scratch.
+    /// Declare whether the host reads lane markers, which a stoatty at protocol
+    /// 12 or later does.
+    ///
+    /// Expected once per frame like [`Self::set_live`]. A switch makes the next
+    /// flush reset the terminal and send the whole scene.
+    pub fn set_lane_protocol(&mut self, enabled: bool) {
+        if self.lanes_enabled != enabled {
+            self.lanes_enabled = enabled;
+            self.resync = true;
+        }
+    }
+
+    /// Empty every lane so widgets build the next frame from scratch, and send
+    /// appends to lane 0 again.
     pub fn clear(&mut self) {
-        self.current.clear();
+        for lane in &mut self.lanes {
+            lane.current.clear();
+        }
+        self.active = 0;
         self.dynamic_current.clear();
+    }
+
+    /// Send the decorations that follow to lane `id`, until [`Self::end_lane`]
+    /// or the next [`Self::clear`].
+    ///
+    /// A lane is the unit a flush sends on its own, so a part of the frame that
+    /// changes apart from the rest, such as one pane's status row, gets a lane.
+    /// A change there then leaves the rest of the scene off the wire.
+    pub fn set_lane(&mut self, id: u32) {
+        self.active = match self.lanes.binary_search_by_key(&id, |lane| lane.id) {
+            Ok(index) => index,
+            Err(index) => {
+                self.lanes.insert(index, Lane::new(id));
+                index
+            },
+        };
+    }
+
+    /// Send the decorations that follow to lane 0 again.
+    pub fn end_lane(&mut self) {
+        self.active = 0;
     }
 
     /// Forget what the last flush wrote, so the next [`Self::flush_to`] sends
@@ -132,22 +190,25 @@ impl ApcScene {
     /// scene, and a matching lane would write nothing to put it back. Call this
     /// when the terminal comes back, then build the next frame as usual.
     pub fn forget_flushed(&mut self) {
-        self.previous.clear();
+        for lane in &mut self.lanes {
+            lane.previous.clear();
+        }
         self.dynamic_previous.clear();
     }
 
     /// The buffer widgets append their decoration frames into via the protocol's
     /// `encode_*_into` encoders.
     ///
-    /// This is the lane the flush's leading reset clears, so a widget that stops
-    /// appending here leaves the screen on the next flush. Every widget in the
-    /// kit but [`scroll_region::ScrollRegion`] emits into it.
+    /// It is the lane [`Self::set_lane`] opened, or lane 0 outside one. A widget
+    /// that stops appending here leaves the screen on the next flush, which
+    /// clears what the lane held. Every widget in the kit but
+    /// [`scroll_region::ScrollRegion`] emits into it.
     ///
     /// While dead this hands back a scratch buffer instead, so the append lands
     /// nowhere.
     pub fn buffer(&mut self) -> &mut Vec<u8> {
         match self.live {
-            true => &mut self.current,
+            true => &mut self.lanes[self.active].current,
             false => {
                 self.discard.clear();
                 &mut self.discard
@@ -180,13 +241,14 @@ impl ApcScene {
         }
     }
 
-    /// The decoration lane under construction, for a reader that inspects the
-    /// frame without appending to it.
+    /// The open lane under construction, for a reader that inspects the frame
+    /// without appending to it.
     ///
     /// Valid between [`Self::clear`] and [`Self::flush_to`], where it grows as
     /// the frame's widgets append. That window is what lets a caller record a
     /// length before some part of the frame paints and slice out what that part
-    /// emitted afterwards.
+    /// emitted afterwards. The length marks the lane that was open when it was
+    /// read, so the slice holds only while that lane stays open.
     ///
     /// After a flush the value is stale, and stale in one of two ways: a lane
     /// that was written holds the frame before the one just flushed, because the
@@ -194,7 +256,7 @@ impl ApcScene {
     /// unchanged holds the frame it just compared. Read it before the flush, not
     /// after.
     pub fn bytes(&self) -> &[u8] {
-        &self.current
+        &self.lanes[self.active].current
     }
 
     /// Append the surface's per-line row heights as a `line_layout` frame.
@@ -209,16 +271,23 @@ impl ApcScene {
     /// Flush the built scene to `out`, lane by lane, writing only what differs
     /// from the last flush.
     ///
-    /// A changed decoration lane writes a leading `Gstoatty;reset` so the
-    /// terminal drops the prior scene, then the new bytes. An unchanged one
-    /// writes nothing, since the terminal-side components from the previous
+    /// Without the lane protocol, the numbered lanes read end to end as one
+    /// decoration lane. A change anywhere in it writes a leading `Gstoatty;reset`
+    /// so the terminal drops the prior scene, then the new bytes. An unchanged
+    /// one writes nothing, since the terminal-side components from the previous
     /// flush still stand.
     ///
+    /// With the lane protocol, each numbered lane that changed goes out on its
+    /// own inside its lane markers. A lane that lost every decoration still
+    /// writes its bare markers, which clear it in the terminal. Lane 0 has no
+    /// markers. It changes behind a reset as above, and since a reset clears
+    /// every lane, every other lane with content then goes out again behind it.
+    ///
     /// The dynamic lane follows, never behind a reset of its own. It writes when
-    /// it changed, and also whenever the decoration lane just reset the terminal,
-    /// because that reset clears the persistent commands it holds too and an
-    /// unchanged lane never puts them back on its own. Writing it last is what
-    /// puts it after the reset rather than under it.
+    /// it changed, and also whenever a reset just went out, because that reset
+    /// clears the persistent commands it holds too and an unchanged lane never
+    /// puts them back on its own. Writing it last is what puts it after the
+    /// reset rather than under it.
     ///
     /// Each lane it writes becomes the baseline for the next comparison.
     ///
@@ -233,19 +302,66 @@ impl ApcScene {
             return Ok(());
         }
 
-        let decorations_changed = self.current != self.previous;
-        if decorations_changed {
-            out.write_all(&command::encode_reset())?;
-            out.write_all(&self.current)?;
-            std::mem::swap(&mut self.current, &mut self.previous);
-        }
+        let reset = match self.lanes_enabled {
+            true => self.flush_lanes(out)?,
+            false => self.flush_undivided(out)?,
+        };
+        self.resync = false;
 
-        if decorations_changed || self.dynamic_current != self.dynamic_previous {
+        if reset || self.dynamic_current != self.dynamic_previous {
             out.write_all(&self.dynamic_current)?;
             std::mem::swap(&mut self.dynamic_current, &mut self.dynamic_previous);
         }
 
         Ok(())
+    }
+
+    /// Write every lane behind one reset when the scene changed anywhere, and
+    /// return whether it did.
+    fn flush_undivided(&mut self, out: &mut impl Write) -> io::Result<bool> {
+        let changed = self.resync || concatenations_differ(&self.lanes);
+        if changed {
+            out.write_all(&command::encode_reset())?;
+            for lane in &mut self.lanes {
+                out.write_all(&lane.current)?;
+                std::mem::swap(&mut lane.current, &mut lane.previous);
+            }
+        }
+
+        Ok(changed)
+    }
+
+    /// Write each changed lane inside its markers, and return whether lane 0
+    /// wrote a reset.
+    ///
+    /// Behind a reset every lane's baseline moves to its current bytes, the
+    /// ones not sent included. The terminal then holds exactly those bytes,
+    /// since the reset emptied every lane that sends nothing.
+    fn flush_lanes(&mut self, out: &mut impl Write) -> io::Result<bool> {
+        let base = &mut self.lanes[0];
+        let reset = self.resync || base.current != base.previous;
+        if reset {
+            out.write_all(&command::encode_reset())?;
+            out.write_all(&base.current)?;
+            std::mem::swap(&mut base.current, &mut base.previous);
+        }
+
+        for lane in &mut self.lanes[1..] {
+            let send = match reset {
+                true => !lane.current.is_empty(),
+                false => lane.current != lane.previous,
+            };
+            if send {
+                out.write_all(&command::encode_lane_begin(lane.id))?;
+                out.write_all(&lane.current)?;
+                out.write_all(&command::encode_lane_end())?;
+            }
+            if send || reset {
+                std::mem::swap(&mut lane.current, &mut lane.previous);
+            }
+        }
+
+        Ok(reset)
     }
 }
 
@@ -253,6 +369,39 @@ impl Default for ApcScene {
     fn default() -> ApcScene {
         ApcScene::new()
     }
+}
+
+/// One numbered decoration lane, with the bytes under construction and the
+/// bytes the terminal holds for the lane as of the last flush.
+struct Lane {
+    id: u32,
+    current: Vec<u8>,
+    previous: Vec<u8>,
+}
+
+impl Lane {
+    fn new(id: u32) -> Lane {
+        Lane {
+            id,
+            current: Vec::new(),
+            previous: Vec::new(),
+        }
+    }
+}
+
+/// Whether the lanes' current bytes, read end to end, differ from their
+/// baselines read the same way.
+///
+/// Lanes that each equal their baseline settle it without a walk, which is
+/// every frame that changed nothing.
+fn concatenations_differ(lanes: &[Lane]) -> bool {
+    if lanes.iter().all(|lane| lane.current == lane.previous) {
+        return false;
+    }
+
+    let current = lanes.iter().flat_map(|lane| &lane.current);
+    let previous = lanes.iter().flat_map(|lane| &lane.previous);
+    !current.eq(previous)
 }
 
 /// How a session settles whether the host renders APC components.
@@ -491,8 +640,8 @@ fn install_panic_hook() {
 mod tests {
     use super::{restore_bytes, ApcScene};
     use stoatty_protocol::command::{
-        self, encode_border, encode_line_layout, encode_reset, encode_scroll_region, BorderCommand,
-        BorderStyle, LineLayoutCommand, ScrollRegionCommand,
+        self, encode_border, encode_lane_begin, encode_lane_end, encode_line_layout, encode_reset,
+        encode_scroll_region, BorderCommand, BorderStyle, LineLayoutCommand, ScrollRegionCommand,
     };
 
     fn border() -> BorderCommand {
@@ -636,6 +785,235 @@ mod tests {
         assert_eq!(out, expected, "and the region lands after the reset");
     }
 
+    /// Append `border` to lane `id`, then return to lane 0.
+    fn in_lane(scene: &mut ApcScene, id: u32, border: &BorderCommand) {
+        scene.set_lane(id);
+        command::encode_border_into(scene.buffer(), border);
+        scene.end_lane();
+    }
+
+    /// A frame with `base` in lane 0, `first` in lane 1, `second` in lane 2,
+    /// and the scroll region in the dynamic lane.
+    fn build_lanes(
+        scene: &mut ApcScene,
+        base: &BorderCommand,
+        first: &BorderCommand,
+        second: Option<&BorderCommand>,
+    ) {
+        scene.clear();
+        command::encode_border_into(scene.buffer(), base);
+        in_lane(scene, 1, first);
+        if let Some(second) = second {
+            in_lane(scene, 2, second);
+        }
+        command::encode_scroll_region_into(scene.dynamic_buffer(), &region());
+    }
+
+    fn flushed(scene: &mut ApcScene) -> Vec<u8> {
+        let mut out = Vec::new();
+        scene.flush_to(&mut out).expect("vec write");
+        out
+    }
+
+    #[test]
+    fn a_changed_lane_flushes_alone_inside_its_markers() {
+        let mut scene = ApcScene::new();
+        scene.set_lane_protocol(true);
+        build_lanes(&mut scene, &border(), &border(), Some(&border()));
+        flushed(&mut scene);
+
+        let moved = BorderCommand { top: 7, ..border() };
+        scene.set_lane_protocol(true);
+        build_lanes(&mut scene, &border(), &border(), Some(&moved));
+
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_lane_begin(2),
+                encode_border(&moved),
+                encode_lane_end()
+            ]
+            .concat(),
+            "no reset, no other lane, and no dynamic re-send"
+        );
+    }
+
+    #[test]
+    fn an_emptied_lane_flushes_its_bare_markers() {
+        let mut scene = ApcScene::new();
+        scene.set_lane_protocol(true);
+        build_lanes(&mut scene, &border(), &border(), Some(&border()));
+        flushed(&mut scene);
+
+        build_lanes(&mut scene, &border(), &border(), None);
+
+        assert_eq!(
+            flushed(&mut scene),
+            [encode_lane_begin(2), encode_lane_end()].concat(),
+            "the markers alone clear the lane the frame stopped declaring"
+        );
+    }
+
+    /// A reset empties every lane in the terminal, so the lanes it did not
+    /// touch have to go out again, and so does the dynamic lane.
+    #[test]
+    fn a_lane_zero_change_resets_and_re_sends_every_lane_with_content() {
+        let mut scene = ApcScene::new();
+        scene.set_lane_protocol(true);
+        build_lanes(&mut scene, &border(), &border(), Some(&border()));
+        flushed(&mut scene);
+
+        let moved = BorderCommand { top: 7, ..border() };
+        build_lanes(&mut scene, &moved, &border(), None);
+
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_reset(),
+                encode_border(&moved),
+                encode_lane_begin(1),
+                encode_border(&border()),
+                encode_lane_end(),
+                encode_scroll_region(&region()),
+            ]
+            .concat(),
+            "lane 1 goes out again, and the emptied lane 2 needs nothing behind the reset"
+        );
+
+        build_lanes(&mut scene, &moved, &border(), Some(&border()));
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_lane_begin(2),
+                encode_border(&border()),
+                encode_lane_end()
+            ]
+            .concat(),
+            "the reset left lane 2 empty, so declaring it again sends it"
+        );
+    }
+
+    #[test]
+    fn without_the_lane_protocol_every_lane_flushes_behind_one_reset() {
+        let moved = BorderCommand { top: 7, ..border() };
+        let frame = |scene: &mut ApcScene, second: &BorderCommand| {
+            scene.clear();
+            in_lane(scene, 2, second);
+            in_lane(scene, 1, &moved);
+            command::encode_border_into(scene.buffer(), &border());
+        };
+        let mut scene = ApcScene::new();
+
+        frame(&mut scene, &border());
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_reset(),
+                encode_border(&border()),
+                encode_border(&moved),
+                encode_border(&border()),
+            ]
+            .concat(),
+            "the lanes read end to end in id order, with no markers"
+        );
+
+        frame(&mut scene, &border());
+        assert_eq!(flushed(&mut scene), Vec::<u8>::new(), "an unchanged scene");
+
+        frame(&mut scene, &moved);
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_reset(),
+                encode_border(&border()),
+                encode_border(&moved),
+                encode_border(&moved),
+            ]
+            .concat(),
+            "a change in one lane sends them all"
+        );
+
+        scene.clear();
+        command::encode_border_into(scene.buffer(), &border());
+        command::encode_border_into(scene.buffer(), &moved);
+        in_lane(&mut scene, 2, &moved);
+        assert_eq!(
+            flushed(&mut scene),
+            Vec::<u8>::new(),
+            "bytes that moved between lanes but read the same end to end"
+        );
+    }
+
+    #[test]
+    fn end_lane_and_clear_send_appends_back_to_lane_zero() {
+        let moved = BorderCommand { top: 7, ..border() };
+        let mut scene = ApcScene::new();
+        scene.set_lane_protocol(true);
+        in_lane(&mut scene, 1, &border());
+        command::encode_border_into(scene.buffer(), &moved);
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_reset(),
+                encode_border(&moved),
+                encode_lane_begin(1),
+                encode_border(&border()),
+                encode_lane_end(),
+            ]
+            .concat(),
+            "the append after end_lane lands in lane 0"
+        );
+
+        scene.set_lane(1);
+        scene.clear();
+        command::encode_border_into(scene.buffer(), &moved);
+        assert_eq!(
+            flushed(&mut scene),
+            [encode_lane_begin(1), encode_lane_end()].concat(),
+            "the append after clear lands in lane 0, which holds the same bytes"
+        );
+    }
+
+    /// A flush without markers left lane 1's bytes in the terminal's lane 0,
+    /// so lane 1 sent alone afterwards draws twice.
+    #[test]
+    fn switching_the_lane_protocol_resets_and_sends_the_whole_scene() {
+        let mut scene = ApcScene::new();
+        build_lanes(&mut scene, &border(), &border(), None);
+        flushed(&mut scene);
+
+        scene.set_lane_protocol(true);
+        build_lanes(&mut scene, &border(), &border(), None);
+
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_reset(),
+                encode_border(&border()),
+                encode_lane_begin(1),
+                encode_border(&border()),
+                encode_lane_end(),
+                encode_scroll_region(&region()),
+            ]
+            .concat(),
+            "the unchanged scene goes out whole, lanes and all"
+        );
+
+        scene.set_lane_protocol(false);
+        build_lanes(&mut scene, &border(), &border(), None);
+        assert_eq!(
+            flushed(&mut scene),
+            [
+                encode_reset(),
+                encode_border(&border()),
+                encode_border(&border()),
+                encode_scroll_region(&region()),
+            ]
+            .concat(),
+            "switching back sends it whole once more, without markers"
+        );
+    }
+
     /// The verdict arrives after the session has already painted, so a scene
     /// flushes live and then learns the host is foreign. Its lanes are empty by
     /// then, which a byte comparison alone reads as a scene to tear down.
@@ -661,6 +1039,21 @@ mod tests {
         let mut scene = ApcScene::new();
         command::encode_border_into(scene.buffer(), &border());
 
+        let mark = scene.bytes().len();
+        let second = BorderCommand { top: 9, ..border() };
+        command::encode_border_into(scene.buffer(), &second);
+
+        assert_eq!(&scene.bytes()[mark..], encode_border(&second).as_slice());
+    }
+
+    /// The same mark and slice inside a lane, which is how a caller captures
+    /// what one part of the frame wrote to the lane it opened.
+    #[test]
+    fn bytes_reads_the_open_lane() {
+        let mut scene = ApcScene::new();
+        command::encode_border_into(scene.buffer(), &border());
+
+        scene.set_lane(3);
         let mark = scene.bytes().len();
         let second = BorderCommand { top: 9, ..border() };
         command::encode_border_into(scene.buffer(), &second);
