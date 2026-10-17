@@ -14,6 +14,7 @@ use std::{
 use stoat::{
     agent_status::AgentHookEvent,
     host::{FsHost, LocalFs},
+    input_parse::{self, InputParseError},
     run,
     walkthrough::{self, Point, WalkthroughError},
     workspace::WorkspaceUid,
@@ -91,6 +92,17 @@ pub enum ApiCommand {
     Act {
         /// The action, with its arguments in parentheses when it takes any.
         expr: String,
+    },
+    /// Type a key sequence into the session as a person types it, and print
+    /// the count of keys sent.
+    ///
+    /// The keys go to what has keyboard focus, and that includes the agent's
+    /// own terminal pane. A `<Wait:N>` step sends nothing.
+    Keys {
+        /// The keys in the `--inputs` grammar, such as `ihello<Esc>`, with
+        /// named and modified keys in angle brackets.
+        #[arg(value_parser = key_text)]
+        keys: String,
     },
     /// The focused workspace, tab, pane, and modal, and the focused editor's
     /// file, cursor, and lines on screen.
@@ -176,6 +188,9 @@ enum QueryRequest {
     Act {
         action: String,
     },
+    Keys {
+        keys: String,
+    },
 }
 
 /// One live session's answer to `session-info`.
@@ -234,6 +249,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
             range,
         },
         ApiCommand::Act { expr } => QueryRequest::Act { action: expr },
+        ApiCommand::Keys { keys } => QueryRequest::Keys { keys },
         ApiCommand::Hook { name, values } => {
             let event = build_event(&name, &values)?;
             return send_event(&socket()?, &event);
@@ -256,6 +272,12 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
 /// text, which the session parses again.
 fn range_text(text: &str) -> Result<String, WalkthroughError> {
     walkthrough::parse_range(text).map(|_| text.to_owned())
+}
+
+/// Check `text` as a key sequence with [`input_parse::parse_input_sequence`],
+/// and keep the text, which the session parses again.
+fn key_text(text: &str) -> Result<String, InputParseError> {
+    input_parse::parse_input_sequence(text).map(|_| text.to_owned())
 }
 
 /// Resolve which session socket to reach.
@@ -615,6 +637,12 @@ mod tests {
                 action: "MoveDown".into(),
             }),
             r#"{"req":"act","action":"MoveDown"}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Keys {
+                keys: "ihello<Esc>".into(),
+            }),
+            r#"{"req":"keys","keys":"ihello<Esc>"}"#
         );
     }
 

@@ -23,6 +23,7 @@ use crate::{
         ClipboardKind, EnvHost, FsEventKind, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs,
         LocalGit, LspHost, NoopFsWatcher,
     },
+    input_parse::InputStep,
     keymap::{self, Keymap, ResolvedAction, SideButton, StateValue},
     keymap_state::{
         self, active_modal, debug_assert_modal_exclusivity, modal_predicate, normalize_shift_event,
@@ -8013,6 +8014,11 @@ impl Stoat {
     /// session switches the active workspace. An action that
     /// [`keymap_state::parse_bound_action`] refuses replies its reason and
     /// changes nothing, not even the active workspace.
+    ///
+    /// An [`AgentControl::Keys`] sends each key through [`Self::update`], the
+    /// path of a key from the terminal, and replies with the count of keys
+    /// sent. It returns the merged effect of those keys, raised to a redraw at
+    /// least for the same reason as an act.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
             AgentControl::Open {
@@ -8179,6 +8185,29 @@ impl Stoat {
                 let name = action.name.clone();
                 let effect = self.run_bound_actions(&Arc::from([action]), None, false);
                 let _ = reply.send(json!({ "reply": "act", "action": name }));
+                effect.merge(UpdateEffect::Redraw)
+            },
+            AgentControl::Keys { uid, steps, reply } => {
+                let Some(ws_id) = self
+                    .workspaces
+                    .iter()
+                    .find(|(_, ws)| ws.uid == uid)
+                    .map(|(id, _)| id)
+                else {
+                    let _ = reply.send(json!({ "error": "unknown session" }));
+                    return UpdateEffect::None;
+                };
+
+                self.enter_agent_workspace(ws_id);
+                let mut effect = UpdateEffect::None;
+                let mut count = 0;
+                for step in steps {
+                    if let InputStep::Key(key) = step {
+                        effect = effect.merge(self.update(Event::Key(key)));
+                        count += 1;
+                    }
+                }
+                let _ = reply.send(json!({ "reply": "keys", "count": count }));
                 effect.merge(UpdateEffect::Redraw)
             },
             AgentControl::ClientGone { uid, client } => {

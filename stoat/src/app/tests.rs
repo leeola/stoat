@@ -14783,6 +14783,35 @@ fn act_rejects_an_unknown_action() {
     );
 }
 
+#[test]
+fn keys_type_into_the_focused_buffer() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "\n");
+    let uid = h.stoat.active_workspace().uid;
+    let (reply, mut replies) = oneshot::channel();
+
+    let effect = h.stoat.handle_agent_control(AgentControl::Keys {
+        uid,
+        steps: input_parse::parse_input_sequence("ihel<Wait:50>lo<Esc>").expect("parse"),
+        reply,
+    });
+
+    assert_eq!(
+        (
+            effect,
+            replies.try_recv().expect("a keys reply"),
+            buffer_text(&h, &path),
+            h.stoat.focused_mode(),
+        ),
+        (
+            UpdateEffect::Redraw,
+            json!({ "reply": "keys", "count": 7 }),
+            "hello\n".to_string(),
+            "normal",
+        ),
+    );
+}
+
 fn open_agent_editor(
     h: &mut crate::test_harness::TestHarness,
 ) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {

@@ -11,7 +11,8 @@
 //! rides [`AgentControl`] and expects a reply. A query answers with live
 //! session state. `goto` shows a file with a range selected and on screen,
 //! and answers with the range it selected. `act` runs one action written as a
-//! key binding names it, and answers with the action's name.
+//! key binding names it, and answers with the action's name. `keys` types a
+//! key sequence as a person types it, and answers with the count of keys.
 //!
 //! `open` opens files in front of the terminal pane the caller runs in, which
 //! is what makes a `stoat <file>` inside a pane reach the instance hosting it.
@@ -25,6 +26,7 @@ use crate::{
     agent_status::AgentHookEvent,
     app::Stoat,
     host::LanguageServerFeature,
+    input_parse::{self, InputStep},
     walkthrough::{self, RangeSpec},
     workspace::WorkspaceUid,
 };
@@ -145,14 +147,27 @@ pub enum AgentControl {
         expr: String,
         reply: oneshot::Sender<Value>,
     },
+    /// Type the keys of `steps` into the session's workspace, and fire `reply`
+    /// with the count of keys sent or an error.
+    ///
+    /// Each key takes the path of a key from the terminal, so modals, chords,
+    /// and the keymap act on it as on typing. The keys go to what has keyboard
+    /// focus, and that includes the agent's own terminal pane. A wait step
+    /// sends nothing, because nothing reads the screen between the keys of one
+    /// request. See [`Stoat::handle_agent_control`] for the effect.
+    Keys {
+        uid: WorkspaceUid,
+        steps: Vec<InputStep>,
+        reply: oneshot::Sender<Value>,
+    },
 }
 
 /// A read-only interrogation of live session state, answered by the event loop.
 ///
 /// Separate from the [`AgentRequest`] wire form so the control channel carries
-/// only genuine queries. The `open`, `goto`, and `act` requests drive the
-/// editor through [`AgentControl::Open`], [`AgentControl::Goto`], and
-/// [`AgentControl::Act`] and never appear here.
+/// only genuine queries. The `open`, `goto`, `act`, and `keys` requests drive
+/// the editor through [`AgentControl::Open`], [`AgentControl::Goto`],
+/// [`AgentControl::Act`], and [`AgentControl::Keys`] and never appear here.
 #[derive(Debug, PartialEq)]
 pub enum AgentQuery {
     /// LSP host liveness, plus each server's name, process id, and serialized
@@ -238,6 +253,12 @@ enum AgentRequest {
     /// `{"req":"act","action":"MoveDown"}` or
     /// `{"req":"act","action":"SetMode(\"insert\")"}`.
     Act { action: String },
+    /// `{"req":"keys","keys":"ihello<Esc>"}`.
+    ///
+    /// `keys` takes every form [`input_parse::parse_input_sequence`] reads. The
+    /// connection parses it, so a sequence that does not parse costs the event
+    /// loop nothing.
+    Keys { keys: String },
 }
 
 /// The socket file a hook server bound, removed when the server stops.
@@ -344,8 +365,9 @@ pub async fn serve_agent_hooks(
 /// answers. When that answer holds buffers, the connection parks until the
 /// event loop releases its waiters, then replies `closed` with the exit status
 /// from [`held_status`], since the caller's `$EDITOR` blocks for exactly that
-/// long. A `goto` whose range does not parse replies the parse error itself.
-/// Every request replies and reads on, so one connection carries a series.
+/// long. A `goto` whose range does not parse replies the parse error itself,
+/// and so does a `keys` whose sequence does not parse. Every request replies
+/// and reads on, so one connection carries a series.
 ///
 /// A client that goes away while parked is reported as
 /// [`AgentControl::ClientGone`], so its waiters do not outlive it.
@@ -463,6 +485,26 @@ async fn serve_connection<R>(
                         reply,
                     })
                     .await;
+                    if !reads_on {
+                        return;
+                    }
+                    continue;
+                },
+                AgentRequest::Keys { keys } => {
+                    let reads_on = match input_parse::parse_input_sequence(&keys) {
+                        Ok(steps) => {
+                            relay(control_tx, &mut write_half, |reply| AgentControl::Keys {
+                                uid,
+                                steps,
+                                reply,
+                            })
+                            .await
+                        },
+                        Err(error) => {
+                            let refused = json!({ "error": error.to_string() });
+                            write_json_line(&mut write_half, &refused).await
+                        },
+                    };
                     if !reads_on {
                         return;
                     }
@@ -1920,6 +1962,46 @@ mod tests {
         assert_eq!(
             (uid, expr, next_reply(&mut replies).await),
             (WorkspaceUid(9), "SetMode(\"insert\")".to_string(), answer),
+        );
+
+        drop(client_write);
+        drop(replies);
+        conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_malformed_key_sequence_replies_an_error_and_keeps_reading() {
+        let (client, mut controls, conn) = serve_duplex(WorkspaceUid(9));
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+
+        client_write
+            .write_all(
+                b"{\"req\":\"keys\",\"keys\":\"i<Bogus>\"}\n\
+                  {\"req\":\"keys\",\"keys\":\"ix<Esc>\"}\n",
+            )
+            .await
+            .unwrap();
+        let refused = next_reply(&mut replies).await;
+        let Some(AgentControl::Keys { uid, steps, reply }) = controls.recv().await else {
+            panic!("expected a keys control message");
+        };
+        let answer = json!({ "reply": "keys", "count": 3 });
+        reply.send(answer.clone()).unwrap();
+
+        let key = |code| InputStep::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        assert_eq!(
+            (refused, uid, steps, next_reply(&mut replies).await),
+            (
+                json!({ "error": "unknown key token '<Bogus>'" }),
+                WorkspaceUid(9),
+                vec![
+                    key(KeyCode::Char('i')),
+                    key(KeyCode::Char('x')),
+                    key(KeyCode::Esc)
+                ],
+                answer,
+            ),
         );
 
         drop(client_write);
