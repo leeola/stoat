@@ -130,6 +130,9 @@ pub enum AgentQuery {
     /// LSP host liveness, plus each server's name, process id, and serialized
     /// capabilities.
     LspStatus,
+    /// The session's name, root, and focused file, as
+    /// [`crate::session_report::session_info`] reports them.
+    SessionInfo,
     /// Diagnostics for `path`, or for every tracked path when `None`.
     Diagnostics { path: Option<PathBuf> },
     /// Hover at an LSP UTF-16 `line`/`col` within `path`.
@@ -159,6 +162,8 @@ enum AgentRequest {
     },
     /// `{"req":"lsp-status"}`.
     LspStatus,
+    /// `{"req":"session-info"}`.
+    SessionInfo,
     /// `{"req":"diagnostics"}` or `{"req":"diagnostics","path":"..."}`.
     Diagnostics { path: Option<PathBuf> },
     /// `{"req":"hover","path":"...","line":N,"col":N}`. `line`/`col` are LSP
@@ -369,6 +374,7 @@ async fn serve_connection<R>(
                     continue;
                 },
                 AgentRequest::LspStatus => AgentQuery::LspStatus,
+                AgentRequest::SessionInfo => AgentQuery::SessionInfo,
                 AgentRequest::Diagnostics { path } => AgentQuery::Diagnostics { path },
                 AgentRequest::Hover { path, line, col } => AgentQuery::Hover { path, line, col },
             };
@@ -475,9 +481,10 @@ fn parse_hook_line(line: &str) -> Result<AgentHookEvent, serde_json::Error> {
 /// Answer a runtime [`AgentQuery`] from live session state, firing `reply` with
 /// the JSON result.
 ///
-/// `lsp-status` and `diagnostics` reply synchronously. `hover` requires the path
-/// to be open in the `uid` session (otherwise `{"error":"not open"}`) and runs
-/// the request on a detached task so the event loop never blocks on the server.
+/// `lsp-status`, `session-info`, and `diagnostics` reply synchronously.
+/// `hover` requires the path to be open in the `uid` session (otherwise
+/// `{"error":"not open"}`) and runs the request on a detached task so the
+/// event loop never blocks on the server.
 pub(crate) fn answer_agent_query(
     stoat: &mut Stoat,
     uid: WorkspaceUid,
@@ -502,6 +509,9 @@ pub(crate) fn answer_agent_query(
                 "spawn_attempted": stoat.lsp_registry.spawn_attempted_any(),
                 "servers": servers,
             }));
+        },
+        AgentQuery::SessionInfo => {
+            let _ = reply.send(crate::session_report::session_info(stoat, uid));
         },
         AgentQuery::Diagnostics { path } => {
             let value = match path {

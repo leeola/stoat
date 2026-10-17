@@ -718,6 +718,26 @@ impl Workspace {
             .unwrap_or_else(|| kind.to_string())
     }
 
+    /// The editor in the focused pane or dock, and the buffer it shows.
+    ///
+    /// A run pane counts through its input editor. A modal or a paused rebase
+    /// takes input ahead of the pane but is not part of it, so
+    /// [`crate::app::Stoat::focused_editor_ids`] checks those first.
+    pub(crate) fn focused_editor(&self) -> Option<(EditorId, BufferId)> {
+        let view = match self.focus {
+            FocusTarget::SplitPane => &self.panes.pane(self.panes.focus()).view,
+            FocusTarget::Dock(dock_id) => &self.docks.get(dock_id)?.view,
+        };
+        match view {
+            View::Editor(id) => Some((*id, self.editors.get(*id)?.buffer_id)),
+            View::Run(id) => {
+                let input = &self.runs.get(*id)?.input;
+                Some((input.editor_id, input.buffer_id))
+            },
+            _ => None,
+        }
+    }
+
     /// Every pane tree in the workspace, the active one first.
     ///
     /// Use this for questions about whether anything still references an
@@ -1917,7 +1937,7 @@ mod tests {
         buffer::BufferId,
         code_index::build::IndexUpdate,
         host::FakeTerminalSession,
-        pane::{Axis, DockPanel, DockSide, DockVisibility, View},
+        pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         term_screen::TermScreen,
         term_session::{TermId, TermSession},
         test_harness::TestHarness,
@@ -1933,14 +1953,6 @@ mod tests {
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
     use tokio::sync::mpsc;
-    /// The editor showing in the workspace's focused pane, or `None` when the
-    /// focused pane shows something else.
-    fn focused_editor_id(ws: &Workspace) -> Option<crate::editor_state::EditorId> {
-        match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => Some(id),
-            _ => None,
-        }
-    }
 
     /// The rows of `:buffers` name every shell that a pane in any tab shows or
     /// covers, or that a dock shows, once each and oldest first. An agent is no
@@ -2043,11 +2055,38 @@ mod tests {
     }
 
     #[test]
+    fn focused_editor_follows_a_dock() {
+        let mut h = TestHarness::with_size(80, 24);
+        let ws = h.stoat.active_workspace_mut();
+        let editor = ws
+            .focused_editor()
+            .expect("the scratch pane shows an editor");
+
+        let pane = ws.panes.pane_mut(ws.panes.focus());
+        let view = pane.view.clone();
+        pane.view = View::Label("pane".into());
+        let dock = ws.docks.insert(DockPanel {
+            view,
+            side: DockSide::Left,
+            visibility: DockVisibility::Open { width: 20 },
+            default_width: 20,
+            area: Default::default(),
+        });
+        assert_eq!(ws.focused_editor(), None, "the focused pane shows a label");
+
+        ws.focus = FocusTarget::Dock(dock);
+        assert_eq!(ws.focused_editor(), Some(editor));
+    }
+
+    #[test]
     fn new_tab_parks_the_old_tree_and_opens_a_scratch_pane() {
         let mut h = TestHarness::with_size(80, 24);
         let executor = h.stoat.executor.clone();
         let ws = h.stoat.active_workspace_mut();
-        let first_editor = focused_editor_id(ws).expect("first tab shows an editor");
+        let first_editor = ws
+            .focused_editor()
+            .map(|(id, _)| id)
+            .expect("first tab shows an editor");
 
         ws.new_tab(&executor);
 
@@ -2062,7 +2101,7 @@ mod tests {
             "the active tab parks nothing, its tree is in ws.panes"
         );
         assert_ne!(
-            focused_editor_id(ws),
+            ws.focused_editor().map(|(id, _)| id),
             Some(first_editor),
             "the new tab shows its own scratch editor"
         );
@@ -2077,14 +2116,21 @@ mod tests {
 
         let executor = h.stoat.executor.clone();
         let ws = h.stoat.active_workspace_mut();
-        let first_editor = focused_editor_id(ws).expect("editor in the first tab");
+        let first_editor = ws
+            .focused_editor()
+            .map(|(id, _)| id)
+            .expect("editor in the first tab");
         let first_buffer = ws.editors[first_editor].buffer_id;
 
         ws.new_tab(&executor);
         assert!(ws.switch_tab(0), "switching back to the first tab");
 
         assert_eq!(ws.active_tab, 0);
-        assert_eq!(focused_editor_id(ws), Some(first_editor), "same editor id");
+        assert_eq!(
+            ws.focused_editor().map(|(id, _)| id),
+            Some(first_editor),
+            "same editor id"
+        );
         assert_eq!(
             ws.editors[first_editor].buffer_id, first_buffer,
             "same buffer"
@@ -2156,10 +2202,13 @@ mod tests {
         let mut h = TestHarness::with_size(80, 24);
         let executor = h.stoat.executor.clone();
         let ws = h.stoat.active_workspace_mut();
-        let parked_editor = focused_editor_id(ws).expect("editor in the first tab");
+        let parked_editor = ws
+            .focused_editor()
+            .map(|(id, _)| id)
+            .expect("editor in the first tab");
 
         ws.new_tab(&executor);
-        assert_ne!(focused_editor_id(ws), Some(parked_editor));
+        assert_ne!(ws.focused_editor().map(|(id, _)| id), Some(parked_editor));
 
         crate::action_handlers::gc_editor_if_unreferenced(
             h.stoat.active_workspace_mut(),

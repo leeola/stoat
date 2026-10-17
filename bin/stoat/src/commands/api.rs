@@ -1,10 +1,14 @@
 use clap::{Args, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
+    cmp::Reverse,
     io::{BufRead, BufReader, ErrorKind, Write},
+    net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use stoat::{
     agent_status::AgentHookEvent,
@@ -13,13 +17,19 @@ use stoat::{
     workspace::WorkspaceUid,
 };
 
+/// How long discovery waits on one session's `session-info` reply.
+///
+/// A healthy event loop answers within a frame. A stopped or wedged session
+/// costs this much on each discovery, and discovery then leaves it out.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// A `stoat api` invocation, which names one verb and, optionally, the session
 /// it reaches.
 #[derive(Args, Debug)]
 pub struct ApiArgs {
-    /// The session to reach, by the hex uid that STOAT_SESSION carries.
-    /// Without it, the environment names the session, or else the sole live
-    /// session.
+    /// The session to reach, by the hex uid that STOAT_SESSION carries or by
+    /// its workspace name. Without it, the environment names the session, or
+    /// else the live session whose root holds the working directory.
     #[arg(long, global = true, value_name = "ID")]
     session: Option<String>,
 
@@ -27,13 +37,15 @@ pub struct ApiArgs {
     sub: ApiCommand,
 }
 
-/// The verbs of `stoat api`, each sent to one session over its per-session
-/// socket.
+/// The verbs of `stoat api`.
 ///
-/// A query verb prints the session's one-line JSON reply. `hook` gets no reply
-/// and prints nothing.
+/// `sessions` asks every live session. Every other verb reaches one session
+/// over its per-session socket. A query verb prints the session's one-line
+/// JSON reply. `hook` gets no reply and prints nothing.
 #[derive(Subcommand, Debug)]
 pub enum ApiCommand {
+    /// Every live session's `session-info` reply, most recently active first.
+    Sessions,
     /// LSP host liveness, and each server's process id and capabilities.
     LspStatus,
     /// Diagnostics for `--path`, or every tracked path when it is omitted.
@@ -73,6 +85,7 @@ pub enum ApiCommand {
 #[serde(tag = "req", rename_all = "kebab-case")]
 enum QueryRequest {
     LspStatus,
+    SessionInfo,
     Diagnostics {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
@@ -84,71 +97,117 @@ enum QueryRequest {
     },
 }
 
-// The env reads are the blessed boundary. They hand the values straight to
-// resolve_socket, which is pure and unit-tested.
+/// One live session's answer to `session-info`.
+///
+/// The pick reads the typed fields. The rest of the reply rides along in
+/// `rest`, so `stoat api sessions` prints each reply whole.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+struct SessionInfo {
+    uid: String,
+    name: String,
+    git_root: PathBuf,
+    active: bool,
+    last_active_ms: u64,
+    #[serde(flatten)]
+    rest: Map<String, Value>,
+}
+
+// The env and working-directory reads are the blessed boundary. They hand the
+// values straight to resolve_socket, whose pick is pure and unit-tested.
 #[allow(clippy::disallowed_methods)]
 pub fn run(args: ApiArgs) -> Result<(), Whatever> {
-    let socket_path = {
-        let dir = run::agent_socket_dir().whatever_context("resolve agent socket directory")?;
+    let dir = run::agent_socket_dir().whatever_context("resolve agent socket directory")?;
+    let socket = || {
         resolve_socket(
             args.session.as_deref(),
             std::env::var("STOAT_AGENT_SOCK").ok(),
             std::env::var("STOAT_SESSION").ok(),
+            &std::env::current_dir().unwrap_or_default(),
             &dir,
             &LocalFs,
-        )?
+        )
     };
 
     let request = match args.sub {
+        ApiCommand::Sessions => {
+            let sessions = live_sessions(&dir, &LocalFs)?;
+            let replies: Vec<&SessionInfo> = sessions.iter().map(|(_, info)| info).collect();
+            let line = serde_json::to_string(&replies).whatever_context("serialize sessions")?;
+            println!("{line}");
+            return Ok(());
+        },
         ApiCommand::LspStatus => QueryRequest::LspStatus,
         ApiCommand::Diagnostics { path } => QueryRequest::Diagnostics { path },
         ApiCommand::Hover { path, line, col } => QueryRequest::Hover { path, line, col },
         ApiCommand::Hook { name, values } => {
-            return send_event(&socket_path, &build_event(&name, &values)?);
+            let event = build_event(&name, &values)?;
+            return send_event(&socket()?, &event);
         },
     };
 
-    let reply = query(&socket_path, &request)?;
+    let reply = query(&socket()?, &request, None)?;
     print!("{reply}");
     Ok(())
 }
 
 /// Resolve which session socket to reach.
 ///
-/// A `selector` uid wins, since a person who typed `--session` meant it. The
-/// spawn-injected `env_sock` path comes next, so a hook from a child whose XDG
-/// environment differs from its parent's still reaches the parent. An
-/// `env_session` uid comes third. With none of them, it scans `dir` for the
-/// sole live session.
+/// A `selector` that parses as hex is a uid, and it wins, since a person who
+/// typed `--session` meant it. The spawn-injected `env_sock` path comes next,
+/// so a hook from a child whose XDG environment differs from its parent's
+/// still reaches the parent. An `env_session` uid comes third. Otherwise it
+/// probes the live sessions in `dir` and picks one by the `selector` name or by
+/// `cwd`.
 fn resolve_socket(
     selector: Option<&str>,
     env_sock: Option<String>,
     env_session: Option<String>,
+    cwd: &Path,
     dir: &Path,
     fs: &dyn FsHost,
 ) -> Result<PathBuf, Whatever> {
     if let Some(selector) = selector {
-        return Ok(run::agent_socket_path_in(dir, parse_session_uid(selector)?));
-    }
-    if let Some(path) = env_sock {
+        if let Ok(uid) = parse_session_uid(selector) {
+            return Ok(run::agent_socket_path_in(dir, uid));
+        }
+    } else if let Some(path) = env_sock {
         return Ok(PathBuf::from(path));
-    }
-    if let Some(uid) = env_session {
+    } else if let Some(uid) = env_session {
         return Ok(run::agent_socket_path_in(dir, parse_session_uid(&uid)?));
     }
-    sole_live_socket(dir, fs)
+
+    let sessions = live_sessions(dir, fs)?;
+    // Session roots are absolute physical paths, so a relative or symlinked
+    // `cwd` must resolve before the prefix match.
+    let cwd = fs.canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    pick_session(&sessions, selector, &cwd).cloned()
 }
 
-/// The one live `agent-*.sock` in `dir`.
+/// Every live session in `dir` with its answer to `session-info`, most
+/// recently active first.
+///
+/// A session that does not answer within [`PROBE_TIMEOUT`], such as one that
+/// an older binary runs, is left out.
+fn live_sessions(dir: &Path, fs: &dyn FsHost) -> Result<Vec<(PathBuf, SessionInfo)>, Whatever> {
+    let mut sessions: Vec<(PathBuf, SessionInfo)> = live_sockets(dir, fs)?
+        .into_iter()
+        .filter_map(|socket| {
+            let reply = query(&socket, &QueryRequest::SessionInfo, Some(PROBE_TIMEOUT)).ok()?;
+            let info = serde_json::from_str(&reply).ok()?;
+            Some((socket, info))
+        })
+        .collect();
+    sessions.sort_by_key(|(_, info)| Reverse(info.last_active_ms));
+    Ok(sessions)
+}
+
+/// The live `agent-*.sock` files in `dir`, sorted.
 ///
 /// A session that ends normally removes its socket, but a session that SIGKILL
 /// or a crash ends leaves it behind. A candidate that refuses a connection has no session
 /// behind it, so this removes it through `fs` and skips it. Any other connect
 /// failure skips the candidate and keeps the file, since nothing proves it dead.
-///
-/// Zero or several live sockets is an error that names the candidates. The
-/// caller then picks one with `--session`.
-fn sole_live_socket(dir: &Path, fs: &dyn FsHost) -> Result<PathBuf, Whatever> {
+fn live_sockets(dir: &Path, fs: &dyn FsHost) -> Result<Vec<PathBuf>, Whatever> {
     let entries = fs
         .list_dir(dir)
         .whatever_context(format!("scan {}", dir.display()))?;
@@ -170,22 +229,52 @@ fn sole_live_socket(dir: &Path, fs: &dyn FsHost) -> Result<PathBuf, Whatever> {
         }
     }
 
-    if sockets.is_empty() {
-        whatever!("no session sockets found in {}", dir.display());
+    sockets.sort();
+    Ok(sockets)
+}
+
+/// The socket of the session that `name`, or else `cwd`, picks.
+///
+/// A name matches a session's name case-insensitively. Without one, a session
+/// matches when its git root holds `cwd`. Among matches the session on screen
+/// wins, then the latest active one. With no match and no name, a sole session
+/// is the pick. Otherwise the error lists every session, one per line.
+fn pick_session<'a>(
+    sessions: &'a [(PathBuf, SessionInfo)],
+    name: Option<&str>,
+    cwd: &Path,
+) -> Result<&'a PathBuf, Whatever> {
+    let wanted = name.map(str::to_lowercase);
+    let best = sessions
+        .iter()
+        .filter(|(_, info)| match &wanted {
+            Some(wanted) => info.name.to_lowercase() == *wanted,
+            None => cwd.starts_with(&info.git_root),
+        })
+        .max_by_key(|(_, info)| (info.active, info.last_active_ms));
+    if let Some((socket, _)) = best {
+        return Ok(socket);
     }
-    if sockets.len() > 1 {
-        sockets.sort();
-        let names: Vec<_> = sockets
+
+    let listing = || -> String {
+        sessions
             .iter()
-            .filter_map(|path| path.file_name())
-            .map(|name| name.to_string_lossy())
-            .collect();
-        whatever!(
-            "several sessions are live, pass --session <ID>: {}",
-            names.join(", ")
-        );
+            .map(|(_, info)| format!("\n{}  {}  {}", info.uid, info.name, info.git_root.display()))
+            .collect()
+    };
+    match (name, sessions) {
+        (_, []) => whatever!("no live session found"),
+        (None, [(socket, _)]) => Ok(socket),
+        (Some(name), _) => whatever!(
+            "no live session is named {name:?}, pass --session <ID>:{}",
+            listing()
+        ),
+        (None, _) => whatever!(
+            "several sessions are live and none holds {}, pass --session <ID>:{}",
+            cwd.display(),
+            listing()
+        ),
     }
-    Ok(sockets.into_iter().next().expect("one socket"))
 }
 
 fn parse_session_uid(session: &str) -> Result<WorkspaceUid, Whatever> {
@@ -195,7 +284,16 @@ fn parse_session_uid(session: &str) -> Result<WorkspaceUid, Whatever> {
 }
 
 /// Send one request line and return the session's one-line JSON reply.
-fn query(socket_path: &Path, request: &QueryRequest) -> Result<String, Whatever> {
+///
+/// The write half closes after the request. A session that does not know the
+/// request then ends the connection at once, where an open write half leaves
+/// the read to wait on a reply that never comes. With `read_timeout`, a reply
+/// slower than it is an error.
+fn query(
+    socket_path: &Path,
+    request: &QueryRequest,
+    read_timeout: Option<Duration>,
+) -> Result<String, Whatever> {
     let line = serde_json::to_string(request).whatever_context("serialize query request")?;
     let mut stream = UnixStream::connect(socket_path).whatever_context(format!(
         "connect to session socket {}",
@@ -207,6 +305,12 @@ fn query(socket_path: &Path, request: &QueryRequest) -> Result<String, Whatever>
     stream
         .write_all(b"\n")
         .whatever_context("write request terminator")?;
+    stream
+        .shutdown(Shutdown::Write)
+        .whatever_context("close the request half")?;
+    stream
+        .set_read_timeout(read_timeout)
+        .whatever_context("set the reply timeout")?;
 
     let mut reply = String::new();
     BufReader::new(&stream)
@@ -255,7 +359,8 @@ fn send_event(socket_path: &Path, event: &AgentHookEvent) -> Result<(), Whatever
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use serde_json::json;
+    use std::{os::unix::net::UnixListener, thread};
 
     fn wire(request: &QueryRequest) -> String {
         serde_json::to_string(request).unwrap()
@@ -277,15 +382,60 @@ mod tests {
             selector,
             env_sock.map(String::from),
             env_session.map(String::from),
+            Path::new("/"),
             Path::new("/state"),
             &LocalFs,
         )
         .unwrap()
     }
 
+    /// A session at `/state/agent-<uid>.sock` with the fields the pick reads.
+    fn session(
+        uid: &str,
+        name: &str,
+        root: &str,
+        active: bool,
+        last_active_ms: u64,
+    ) -> (PathBuf, SessionInfo) {
+        let info = SessionInfo {
+            uid: uid.into(),
+            name: name.into(),
+            git_root: root.into(),
+            active,
+            last_active_ms,
+            rest: Map::new(),
+        };
+        (PathBuf::from(format!("/state/agent-{uid}.sock")), info)
+    }
+
+    /// Serve `path` on a thread until a request line arrives, then answer it
+    /// with `reply`, or close with no reply as a session of an older binary
+    /// does.
+    fn fake_session(path: &Path, reply: Option<Value>) {
+        let listener = UnixListener::bind(path).unwrap();
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = String::new();
+                BufReader::new(&stream).read_line(&mut request).unwrap();
+                if request.is_empty() {
+                    continue;
+                }
+                if let Some(reply) = &reply {
+                    writeln!(stream, "{reply}").unwrap();
+                }
+                return;
+            }
+        });
+    }
+
     #[test]
     fn requests_serialize_to_wire_form() {
         assert_eq!(wire(&QueryRequest::LspStatus), r#"{"req":"lsp-status"}"#);
+        assert_eq!(
+            wire(&QueryRequest::SessionInfo),
+            r#"{"req":"session-info"}"#
+        );
         assert_eq!(
             wire(&QueryRequest::Diagnostics { path: None }),
             r#"{"req":"diagnostics"}"#
@@ -350,21 +500,103 @@ mod tests {
         let _listener = UnixListener::bind(&live).unwrap();
         drop(UnixListener::bind(&dead).unwrap());
 
-        assert_eq!(sole_live_socket(dir.path(), &LocalFs).unwrap(), live);
+        assert_eq!(live_sockets(dir.path(), &LocalFs).unwrap(), [live]);
         assert!(!dead.exists(), "the dead socket stays in the state dir");
     }
 
     #[test]
-    fn with_nothing_named_and_two_live_sockets_the_error_names_both() {
+    fn discovery_keeps_each_session_that_answers() {
         let dir = tempfile::tempdir().unwrap();
-        let _listeners = ["agent-1.sock", "agent-2.sock"]
-            .map(|name| UnixListener::bind(dir.path().join(name)).unwrap());
+        let answering = dir.path().join("agent-1.sock");
+        let reply = json!({
+            "uid": "1",
+            "name": "a",
+            "git_root": "/repo",
+            "active": true,
+            "last_active_ms": 5,
+            "pid": 7,
+        });
+        fake_session(&answering, Some(reply.clone()));
+        fake_session(&dir.path().join("agent-2.sock"), None);
 
         assert_eq!(
-            resolve_socket(None, None, None, dir.path(), &LocalFs)
+            live_sessions(dir.path(), &LocalFs).unwrap(),
+            [(
+                answering,
+                serde_json::from_value::<SessionInfo>(reply).unwrap()
+            )],
+        );
+    }
+
+    #[test]
+    fn a_name_selects_its_session() {
+        let sessions = [
+            session("1", "brave-otter", "/a", true, 9),
+            session("2", "calm-heron", "/b", false, 1),
+        ];
+        assert_eq!(
+            pick_session(&sessions, Some("Calm-Heron"), Path::new("/a")).unwrap(),
+            &sessions[1].0,
+        );
+    }
+
+    #[test]
+    fn the_cwd_picks_the_session_whose_root_holds_it() {
+        let sessions = [
+            session("1", "a", "/repo/a", true, 9),
+            session("2", "b", "/repo/b", false, 1),
+        ];
+        assert_eq!(
+            pick_session(&sessions, None, Path::new("/repo/b/src")).unwrap(),
+            &sessions[1].0,
+        );
+    }
+
+    #[test]
+    fn the_active_session_wins_a_shared_root() {
+        let sessions = [
+            session("1", "a", "/repo", false, 9),
+            session("2", "b", "/repo", true, 1),
+        ];
+        assert_eq!(
+            pick_session(&sessions, None, Path::new("/repo")).unwrap(),
+            &sessions[1].0,
+        );
+    }
+
+    #[test]
+    fn the_latest_session_wins_two_background_ones() {
+        let sessions = [
+            session("1", "a", "/repo", false, 1),
+            session("2", "b", "/repo", false, 9),
+        ];
+        assert_eq!(
+            pick_session(&sessions, None, Path::new("/repo")).unwrap(),
+            &sessions[1].0,
+        );
+    }
+
+    #[test]
+    fn an_unmatched_cwd_falls_back_to_the_sole_session() {
+        let sessions = [session("1", "a", "/repo", false, 1)];
+        assert_eq!(
+            pick_session(&sessions, None, Path::new("/elsewhere")).unwrap(),
+            &sessions[0].0,
+        );
+    }
+
+    #[test]
+    fn an_unmatched_cwd_with_several_sessions_lists_them() {
+        let sessions = [
+            session("1", "a", "/repo/a", false, 9),
+            session("2", "b", "/repo/b", false, 1),
+        ];
+        assert_eq!(
+            pick_session(&sessions, None, Path::new("/elsewhere"))
                 .unwrap_err()
                 .to_string(),
-            "several sessions are live, pass --session <ID>: agent-1.sock, agent-2.sock",
+            "several sessions are live and none holds /elsewhere, pass --session <ID>:\
+             \n1  a  /repo/a\n2  b  /repo/b",
         );
     }
 

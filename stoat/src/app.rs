@@ -6444,27 +6444,7 @@ impl Stoat {
             return Some((editor_id, buffer_id));
         }
 
-        let view = match ws.focus {
-            FocusTarget::SplitPane => {
-                let focused = ws.panes.focus();
-                ws.panes.pane(focused).view.clone()
-            },
-            FocusTarget::Dock(dock_id) => {
-                let dock = ws.docks.get(dock_id)?;
-                dock.view.clone()
-            },
-        };
-        match view {
-            View::Editor(id) => {
-                let editor = ws.editors.get(id)?;
-                Some((id, editor.buffer_id))
-            },
-            View::Run(id) => {
-                let run_state = ws.runs.get(id)?;
-                Some((run_state.input.editor_id, run_state.input.buffer_id))
-            },
-            _ => None,
-        }
+        ws.focused_editor()
     }
 
     /// Absolute terminal cell `(col, row)` of the primary cursor when the

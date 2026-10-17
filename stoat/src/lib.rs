@@ -75,6 +75,7 @@ mod review_session;
 pub mod run;
 mod selection;
 mod session_log;
+pub(crate) mod session_report;
 mod smooth_scroll;
 pub mod ssh;
 mod state_sweep;
