@@ -8,11 +8,14 @@
 //! A hook line forwards to the render process's event loop as an
 //! [`AgentEvent`], which it applies to the owning workspace's
 //! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
-//! rides [`AgentControl`] and expects a reply. A query answers with live
-//! session state. `goto` shows a file with a range selected and on screen,
-//! and answers with the range it selected. `act` runs one action written as a
-//! key binding names it, and answers with the action's name. `keys` types a
-//! key sequence as a person types it, and answers with the count of keys.
+//! rides [`AgentControl`] and expects a reply.
+//!
+//! A query answers with live session state. `goto` shows a file with a range
+//! selected and on screen, and answers with the range it selected. `act` runs
+//! one action written as a key binding names it, and answers with the action's
+//! name. `keys` types a key sequence as a person types it, and answers with the
+//! count of keys. `watch` holds the connection, and sends the focus and
+//! selection reports again each time they change.
 //!
 //! `open` opens files in front of the terminal pane the caller runs in, which
 //! is what makes a `stoat <file>` inside a pane reach the instance hosting it.
@@ -111,10 +114,11 @@ pub enum AgentControl {
         hold: Option<UnboundedSender<BridgeOutcome>>,
         done: oneshot::Sender<bool>,
     },
-    /// Connection `client` ended while it waited on buffers.
+    /// Connection `client` ended while it waited on buffers or watched the
+    /// view.
     ///
-    /// The event loop drops the waiters the connection parked, and the buffers
-    /// stay open with their edits.
+    /// The event loop drops the waiters the connection parked and its view
+    /// watcher, and the buffers stay open with their edits.
     ClientGone { uid: WorkspaceUid, client: u64 },
     /// Answer a live-session [`AgentQuery`] and fire `reply` with the JSON
     /// result. The connection stays open afterward, so several queries ride one
@@ -160,6 +164,16 @@ pub enum AgentControl {
         steps: Vec<InputStep>,
         reply: oneshot::Sender<Value>,
     },
+    /// Register a view watcher that sends the session's `focus` and
+    /// `selection` reports to `tx` at once, then again each time they change.
+    ///
+    /// The watcher goes when connection `client` ends, which a
+    /// [`Self::ClientGone`] reports, or when a send to `tx` fails.
+    Watch {
+        uid: WorkspaceUid,
+        client: u64,
+        tx: UnboundedSender<Value>,
+    },
 }
 
 /// A read-only interrogation of live session state, answered by the event loop.
@@ -167,7 +181,8 @@ pub enum AgentControl {
 /// Separate from the [`AgentRequest`] wire form so the control channel carries
 /// only genuine queries. The `open`, `goto`, `act`, and `keys` requests drive
 /// the editor through [`AgentControl::Open`], [`AgentControl::Goto`],
-/// [`AgentControl::Act`], and [`AgentControl::Keys`] and never appear here.
+/// [`AgentControl::Act`], and [`AgentControl::Keys`] and never appear here. A
+/// `watch` rides [`AgentControl::Watch`], since it answers more than once.
 #[derive(Debug, PartialEq)]
 pub enum AgentQuery {
     /// LSP host liveness, plus each server's name, process id, and serialized
@@ -259,6 +274,8 @@ enum AgentRequest {
     /// connection parses it, so a sequence that does not parse costs the event
     /// loop nothing.
     Keys { keys: String },
+    /// `{"req":"watch"}`.
+    Watch,
 }
 
 /// The socket file a hook server bound, removed when the server stops.
@@ -366,11 +383,15 @@ pub async fn serve_agent_hooks(
 /// event loop releases its waiters, then replies `closed` with the exit status
 /// from [`held_status`], since the caller's `$EDITOR` blocks for exactly that
 /// long. A `goto` whose range does not parse replies the parse error itself,
-/// and so does a `keys` whose sequence does not parse. Every request replies
-/// and reads on, so one connection carries a series.
+/// and so does a `keys` whose sequence does not parse. Every request but
+/// `watch` replies and reads on, so one connection carries a series.
 ///
-/// A client that goes away while parked is reported as
-/// [`AgentControl::ClientGone`], so its waiters do not outlive it.
+/// A `watch` is the last request a connection reads. The connection then
+/// writes each view the event loop sends, until the client goes away.
+///
+/// A client that goes away while parked or watching is reported as
+/// [`AgentControl::ClientGone`], so its waiters and its watcher do not outlive
+/// it.
 ///
 /// Otherwise returns when the client disconnects, a read fails, or a receiver
 /// is dropped. Blank lines are ignored and malformed lines are logged and
@@ -510,6 +531,23 @@ async fn serve_connection<R>(
                     }
                     continue;
                 },
+                AgentRequest::Watch => {
+                    let (view_tx, mut views) = tokio::sync::mpsc::unbounded_channel();
+                    if control_tx
+                        .send(AgentControl::Watch {
+                            uid,
+                            client,
+                            tx: view_tx,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    forward_views(&mut views, &mut lines, &mut write_half).await;
+                    report_client_gone(control_tx, uid, client).await;
+                    return;
+                },
             };
 
             let reads_on = relay(control_tx, &mut write_half, |reply| AgentControl::Query {
@@ -568,6 +606,40 @@ where
     }
 }
 
+/// Write each view that `views` yields to `out`, until the client goes away.
+///
+/// Returns when the client ends the connection, a read or a write fails, or
+/// the event loop drops the watcher. A line that arrives meanwhile is dropped,
+/// since a watching client sends none.
+async fn forward_views<L, W>(
+    views: &mut UnboundedReceiver<Value>,
+    lines: &mut Lines<L>,
+    out: &mut W,
+) where
+    L: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        // Both futures are cancel safe, so the arm that loses a round drops no
+        // input.
+        tokio::select! {
+            view = views.recv() => {
+                let Some(view) = view else {
+                    return;
+                };
+                if !write_json_line(out, &view).await {
+                    return;
+                }
+            },
+            line = lines.next_line() => {
+                if !matches!(line, Ok(Some(_))) {
+                    return;
+                }
+            },
+        }
+    }
+}
+
 /// Send the control message `ask` builds around a reply channel, and write the
 /// reply to `out`.
 ///
@@ -592,7 +664,8 @@ where
 }
 
 /// Tell the event loop that connection `client` went away while it waited on
-/// buffers, so the waiters it parked go too.
+/// buffers or watched the view, so the waiters it parked and its watcher go
+/// too.
 async fn report_client_gone(control_tx: &Sender<AgentControl>, uid: WorkspaceUid, client: u64) {
     let _ = control_tx
         .send(AgentControl::ClientGone { uid, client })
@@ -2006,6 +2079,44 @@ mod tests {
 
         drop(client_write);
         drop(replies);
+        conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_forwards_each_pushed_report_until_the_client_leaves() {
+        let uid = WorkspaceUid(15);
+        let (client, mut controls, conn) = serve_duplex(uid);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+
+        client_write
+            .write_all(b"{\"req\":\"watch\"}\nstray\n")
+            .await
+            .unwrap();
+        let Some(AgentControl::Watch {
+            uid: got_uid,
+            client: watcher,
+            tx,
+        }) = controls.recv().await
+        else {
+            panic!("expected a watch control message");
+        };
+        let views = [json!({ "view": 1 }), json!({ "view": 2 })];
+        for view in &views {
+            tx.send(view.clone()).unwrap();
+        }
+        let forwarded = [
+            next_reply(&mut replies).await,
+            next_reply(&mut replies).await,
+        ];
+
+        drop(client_write);
+        drop(replies);
+
+        assert_eq!(
+            (got_uid, forwarded, next_gone(&mut controls).await),
+            (uid, views, (uid, watcher)),
+        );
         conn.await.unwrap();
     }
 

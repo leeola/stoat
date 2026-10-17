@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
     cmp::Reverse,
-    io::{BufRead, BufReader, ErrorKind, Write},
+    io::{self, BufRead, BufReader, ErrorKind, Write},
     net::Shutdown,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -44,7 +44,8 @@ pub struct ApiArgs {
 ///
 /// `sessions` asks every live session. Every other verb reaches one session
 /// over its per-session socket. A query verb prints the session's one-line
-/// JSON reply. `hook` and `open` print nothing.
+/// JSON reply. `watch` prints a line for each change until the session ends.
+/// `hook` and `open` print nothing.
 #[derive(Subcommand, Debug)]
 pub enum ApiCommand {
     /// Every live session's `session-info` reply, most recently active first.
@@ -118,6 +119,12 @@ pub enum ApiCommand {
         #[arg(long)]
         text: bool,
     },
+    /// Print the `focus` and `selection` reports, then print them again each
+    /// time either one changes, until the session ends.
+    ///
+    /// Each line holds both reports, under `focus` and `selection`, without
+    /// the text.
+    Watch,
     /// Every buffer of the session's workspace, with its unsaved state and the
     /// tabs, panes, and docks that show it.
     Buffers,
@@ -191,6 +198,7 @@ enum QueryRequest {
     Keys {
         keys: String,
     },
+    Watch,
 }
 
 /// One live session's answer to `session-info`.
@@ -250,6 +258,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
         },
         ApiCommand::Act { expr } => QueryRequest::Act { action: expr },
         ApiCommand::Keys { keys } => QueryRequest::Keys { keys },
+        ApiCommand::Watch => return watch(&socket()?),
         ApiCommand::Hook { name, values } => {
             let event = build_event(&name, &values)?;
             return send_event(&socket()?, &event);
@@ -452,6 +461,36 @@ fn query(
     Ok(reply)
 }
 
+/// Send a `watch` request and print each line the session sends, until the
+/// session ends the connection.
+///
+/// The write half stays open, because the session reads its end as the client
+/// leaving. A reader that stops reading stdout, such as `head -n 1`, ends the
+/// watch with success.
+fn watch(socket_path: &Path) -> Result<(), Whatever> {
+    let line =
+        serde_json::to_string(&QueryRequest::Watch).whatever_context("serialize watch request")?;
+    let mut stream = UnixStream::connect(socket_path).whatever_context(format!(
+        "connect to session socket {}",
+        socket_path.display()
+    ))?;
+    stream
+        .write_all(line.as_bytes())
+        .whatever_context("write watch request")?;
+    stream
+        .write_all(b"\n")
+        .whatever_context("write request terminator")?;
+
+    let mut out = io::stdout().lock();
+    for view in BufReader::new(&stream).lines() {
+        let view = view.whatever_context("read a view")?;
+        if writeln!(out, "{view}").is_err() {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 /// Map a CLI hook name and its trailing values to the typed wire event.
 ///
 /// `pre-tool-use` consumes the first value as the tool name. The other hooks
@@ -644,6 +683,7 @@ mod tests {
             }),
             r#"{"req":"keys","keys":"ihello<Esc>"}"#
         );
+        assert_eq!(wire(&QueryRequest::Watch), r#"{"req":"watch"}"#);
     }
 
     #[test]

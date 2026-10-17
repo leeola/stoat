@@ -14812,6 +14812,62 @@ fn keys_type_into_the_focused_buffer() {
     );
 }
 
+/// Register a view watcher on the active session as connection `client`, and
+/// return the receiver its views arrive on.
+fn view_watcher(h: &mut crate::test_harness::TestHarness, client: u64) -> UnboundedReceiver<Value> {
+    let uid = h.stoat.active_workspace().uid;
+    let (tx, views) = tokio::sync::mpsc::unbounded_channel();
+    h.stoat
+        .handle_agent_control(AgentControl::Watch { uid, client, tx });
+    views
+}
+
+#[test]
+fn a_watcher_gets_the_view_once_and_then_only_on_change() {
+    let mut h = Stoat::test();
+    h.seed_focused_buffer("abc\ndef\n");
+    let mut views = view_watcher(&mut h, 1);
+    let first = views.try_recv().expect("the view at registration");
+
+    h.type_keys("j");
+    h.settle();
+    h.stoat.notify_view_watchers();
+    let moved = views.try_recv().expect("the view after the move");
+    h.stoat.notify_view_watchers();
+
+    let cursor = |view: &Value| view["selection"]["selections"][0]["cursor"].clone();
+    assert_eq!(
+        (cursor(&first), cursor(&moved), views.try_recv()),
+        (
+            json!({ "line": 1, "col": 1 }),
+            json!({ "line": 2, "col": 1 }),
+            Err(TryRecvError::Empty),
+        ),
+    );
+}
+
+#[test]
+fn a_gone_client_is_no_longer_a_watcher() {
+    let mut h = Stoat::test();
+    h.seed_focused_buffer("abc\ndef\n");
+    let _left = view_watcher(&mut h, 1);
+    drop(view_watcher(&mut h, 2));
+    let _kept = view_watcher(&mut h, 3);
+    let uid = h.stoat.active_workspace().uid;
+
+    h.stoat
+        .handle_agent_control(AgentControl::ClientGone { uid, client: 1 });
+    h.type_keys("j");
+    h.stoat.notify_view_watchers();
+
+    let clients: Vec<u64> = h.stoat.view_watchers.iter().map(|w| w.client).collect();
+    assert_eq!(
+        clients,
+        [3],
+        "the watcher that left and the one whose send failed go"
+    );
+}
+
 fn open_agent_editor(
     h: &mut crate::test_harness::TestHarness,
 ) -> (BufferId, UnboundedReceiver<BridgeOutcome>) {

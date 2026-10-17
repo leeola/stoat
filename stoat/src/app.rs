@@ -66,7 +66,7 @@ use ratatui::{
     buffer::{Buffer, Cell},
     layout::Rect,
 };
-use serde_json::json;
+use serde_json::{json, Value};
 use slotmap::SlotMap;
 use std::{
     borrow::Cow,
@@ -833,6 +833,20 @@ struct FocusSnapshot {
     dock: Option<DockId>,
     buffer: Option<BufferId>,
     mode: String,
+}
+
+/// A `stoat api watch` connection that follows what one session shows.
+///
+/// [`Stoat::notify_view_watchers`] sends the session's `focus` and `selection`
+/// reports to `tx` each time they differ from `last`, the view the watcher got
+/// last.
+struct ViewWatcher {
+    uid: WorkspaceUid,
+    /// The connection that asked, which an [`AgentControl::ClientGone`] names
+    /// when it ends.
+    client: u64,
+    tx: UnboundedSender<Value>,
+    last: Value,
 }
 
 pub struct Stoat {
@@ -1893,6 +1907,12 @@ pub struct Stoat {
     /// replaces the file and orphans the children already connected through it.
     /// Dropping a task stops its server, which removes its socket file.
     pub(crate) agent_servers: std::collections::HashMap<WorkspaceUid, stoat_scheduler::Task<()>>,
+    /// The live `stoat api watch` connections, in the order they registered.
+    ///
+    /// The run loop calls [`Self::notify_view_watchers`] after each turn that
+    /// redraws. A watcher costs one `focus` and one `selection` report per
+    /// redraw, and an empty list costs nothing.
+    view_watchers: Vec<ViewWatcher>,
     /// Finished direnv loads in the order they landed, drained by
     /// [`crate::project_env::install_pending`] in [`Self::drive_background`].
     ///
@@ -2739,6 +2759,7 @@ impl Stoat {
             serve_agent_sockets: false,
             session_log: None,
             agent_servers: std::collections::HashMap::new(),
+            view_watchers: Vec::new(),
             pending_env: Arc::new(std::sync::Mutex::new(Vec::new())),
             pending_workspace_restore: Arc::new(std::sync::Mutex::new(None)),
             pending_workspace_saves: std::collections::HashMap::new(),
@@ -4067,6 +4088,7 @@ impl Stoat {
                     let focus_before = self.focus_before_change();
                     self.drive_background();
                     self.log_focus_change(focus_before);
+                    self.notify_view_watchers();
                     // A remote session owns the screen, so nothing this process
                     // draws may reach it. Background work still advanced above,
                     // which is what keeps saves and language servers alive
@@ -8001,8 +8023,9 @@ impl Stoat {
     /// Returns [`UpdateEffect::None`] when no live workspace owns the session
     /// or the request names no file.
     ///
-    /// An [`AgentControl::ClientGone`] drops the waiters of a command that
-    /// went away, and leaves the active workspace as it is.
+    /// An [`AgentControl::ClientGone`] drops the waiters and the view watcher
+    /// of a connection that went away, and leaves the active workspace as it
+    /// is.
     ///
     /// An [`AgentControl::Goto`] switches to the owning session the same way,
     /// then shows its file with the range selected, as
@@ -8019,6 +8042,12 @@ impl Stoat {
     /// path of a key from the terminal, and replies with the count of keys
     /// sent. It returns the merged effect of those keys, raised to a redraw at
     /// least for the same reason as an act.
+    ///
+    /// An [`AgentControl::Watch`] registers a view watcher and sends it the
+    /// session's `focus` and `selection` reports at once. After each turn that
+    /// redraws, the run loop sends the reports again to each watcher whose
+    /// view changed. A watch for a session that no workspace holds replies an
+    /// error and registers nothing.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
             AgentControl::Open {
@@ -8210,7 +8239,23 @@ impl Stoat {
                 let _ = reply.send(json!({ "reply": "keys", "count": count }));
                 effect.merge(UpdateEffect::Redraw)
             },
+            AgentControl::Watch { uid, client, tx } => {
+                if !self.workspaces.iter().any(|(_, ws)| ws.uid == uid) {
+                    let _ = tx.send(json!({ "error": "unknown session" }));
+                    return UpdateEffect::None;
+                }
+                self.view_watchers.push(ViewWatcher {
+                    uid,
+                    client,
+                    tx,
+                    last: Value::Null,
+                });
+                self.notify_view_watchers();
+                UpdateEffect::None
+            },
             AgentControl::ClientGone { uid, client } => {
+                self.view_watchers
+                    .retain(|watcher| (watcher.uid, watcher.client) != (uid, client));
                 let Some((id, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == uid)
                 else {
                     return UpdateEffect::None;
@@ -8265,6 +8310,27 @@ impl Stoat {
 
         self.save_workspace(self.active_workspace);
         action_handlers::workspace::switch_active_workspace(self, ws_id);
+    }
+
+    /// Send each view watcher the `focus` and `selection` reports of its
+    /// session when they differ from the view it got last.
+    ///
+    /// A watcher whose connection is gone fails its send and goes.
+    fn notify_view_watchers(&mut self) {
+        // The reports borrow all of `self`, so the list leaves it for the pass.
+        let mut watchers = std::mem::take(&mut self.view_watchers);
+        watchers.retain_mut(|watcher| {
+            let view = json!({
+                "focus": crate::session_report::focus(self, watcher.uid, false),
+                "selection": crate::session_report::selection(self, watcher.uid, false),
+            });
+            if view == watcher.last {
+                return true;
+            }
+            watcher.last = view;
+            watcher.tx.send(watcher.last.clone()).is_ok()
+        });
+        self.view_watchers = watchers;
     }
 
     /// The split pane showing the terminal session named by `token`, with that
