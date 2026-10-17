@@ -7,6 +7,7 @@ use crate::{
     },
 };
 use ratatui::style::{Color, Modifier, Style};
+use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
@@ -619,6 +620,13 @@ impl PartialOrd for HighlightEndpoint {
 /// which bounds what a stream replays before its first chunk.
 const CHECKPOINT_STEP: usize = 32;
 
+/// The styles in force at one offset, sorted by key, which is the order they
+/// merge in.
+///
+/// A replay holds one to three of them at a time, so a sorted inline vector
+/// serves each insert, remove, and copy with no allocation.
+type ActiveStyles = SmallVec<[(HighlightKey, HighlightStyle); 4]>;
+
 /// A sorted endpoint list, with the replay state recorded every
 /// [`CHECKPOINT_STEP`] endpoints.
 ///
@@ -642,7 +650,7 @@ pub struct HighlightEndpoints {
 struct Checkpoint {
     last_offset: usize,
     ep_idx: usize,
-    active: BTreeMap<HighlightKey, HighlightStyle>,
+    active: ActiveStyles,
 }
 
 impl HighlightEndpoints {
@@ -652,7 +660,7 @@ impl HighlightEndpoints {
     /// reads the same list.
     pub fn shared(endpoints: Vec<HighlightEndpoint>) -> Arc<Self> {
         let mut checkpoints = Vec::with_capacity(endpoints.len() / CHECKPOINT_STEP);
-        let mut active = BTreeMap::new();
+        let mut active = ActiveStyles::new();
         for (index, endpoint) in endpoints.iter().enumerate() {
             if index > 0 && index % CHECKPOINT_STEP == 0 {
                 checkpoints.push(Checkpoint {
@@ -689,14 +697,15 @@ impl Deref for HighlightEndpoints {
 }
 
 /// Apply `endpoint` to the styles in force.
-fn replay(active: &mut BTreeMap<HighlightKey, HighlightStyle>, endpoint: &HighlightEndpoint) {
-    match &endpoint.style {
-        Some(style) => {
-            active.insert(endpoint.key, style.clone());
+fn replay(active: &mut ActiveStyles, endpoint: &HighlightEndpoint) {
+    let slot = active.binary_search_by_key(&endpoint.key, |(key, _)| *key);
+    match (&endpoint.style, slot) {
+        (Some(style), Ok(index)) => active[index].1 = style.clone(),
+        (Some(style), Err(index)) => active.insert(index, (endpoint.key, style.clone())),
+        (None, Ok(index)) => {
+            active.remove(index);
         },
-        None => {
-            active.remove(&endpoint.key);
-        },
+        (None, Err(_)) => {},
     }
 }
 
@@ -1202,7 +1211,7 @@ pub fn highlighted_chunks<'a>(
     text_offset: usize,
     endpoints: &'a [HighlightEndpoint],
 ) -> impl Iterator<Item = HighlightedChunk<'a>> {
-    let mut active: BTreeMap<HighlightKey, HighlightStyle> = BTreeMap::new();
+    let mut active = ActiveStyles::new();
     let mut ep_idx = 0;
     let mut pos = text_offset;
     let mut remaining = text;
@@ -1214,12 +1223,7 @@ pub fn highlighted_chunks<'a>(
 
         // Process all endpoints at the current position
         while ep_idx < endpoints.len() && endpoints[ep_idx].offset <= pos {
-            let ep = &endpoints[ep_idx];
-            if let Some(ref style) = ep.style {
-                active.insert(ep.key, style.clone());
-            } else {
-                active.remove(&ep.key);
-            }
+            replay(&mut active, &endpoints[ep_idx]);
             ep_idx += 1;
         }
 
@@ -1242,7 +1246,7 @@ pub fn highlighted_chunks<'a>(
             None
         } else {
             let mut merged = HighlightStyle::default();
-            for style in active.values() {
+            for (_, style) in &active {
                 merged.merge(style);
             }
             Some(merged)
@@ -1262,8 +1266,8 @@ pub fn highlighted_chunks<'a>(
 /// Holds a single [`ChunksInRange`] cursor over the rope and an `Arc`-shared
 /// [`HighlightEndpoints`] list. Emits [`Chunk`]s without any per-chunk heap
 /// allocation: `text` is always a borrow of the rope's own chunk storage, the
-/// endpoints vector is built once by the caller, and only a small [`BTreeMap`]
-/// of active styles is carried across calls.
+/// endpoints vector is built once by the caller, and only a short sorted list
+/// of active styles, held inline, is carried across calls.
 ///
 /// This is the bottom layer of the display map chunks pipeline. Higher layers
 /// ([`super::inlay_map::InlaySnapshot::chunks`], [`super::fold_map::FoldSnapshot::chunks`],
@@ -1275,7 +1279,7 @@ pub struct BufferChunks<'a> {
     end: usize,
     endpoints: Arc<HighlightEndpoints>,
     ep_idx: usize,
-    active: BTreeMap<HighlightKey, HighlightStyle>,
+    active: ActiveStyles,
 }
 
 /// How far an endpoint replay has got, and what it left active.
@@ -1293,7 +1297,7 @@ pub struct BufferChunks<'a> {
 pub struct HighlightCursor {
     offset: usize,
     ep_idx: usize,
-    active: BTreeMap<HighlightKey, HighlightStyle>,
+    active: ActiveStyles,
 }
 
 impl HighlightCursor {
@@ -1360,7 +1364,7 @@ impl<'a> BufferChunks<'a> {
             Some(cursor) => (cursor.ep_idx, cursor.active.clone()),
             None => match endpoints.resume_at(start) {
                 Some(checkpoint) => (checkpoint.ep_idx, checkpoint.active.clone()),
-                None => (0, BTreeMap::new()),
+                None => (0, ActiveStyles::new()),
             },
         };
         Self {
@@ -1379,7 +1383,7 @@ impl<'a> BufferChunks<'a> {
             return None;
         }
         let mut merged = HighlightStyle::default();
-        for style in self.active.values() {
+        for (_, style) in &self.active {
             merged.merge(style);
         }
         Some(merged)
@@ -1588,6 +1592,33 @@ mod tests {
             ))
         };
         assert_eq!(render(&stepped), render(&at_once), "the walk lost state");
+    }
+
+    /// A style that opens inside one on a higher layer merges under it, so
+    /// precedence follows the layer and not the order the styles opened in.
+    #[test]
+    fn a_lower_layer_opened_later_merges_under_a_higher_one() {
+        let endpoints = endpoints_of([
+            (
+                HighlightKey::layer(HighlightLayer::SelectionHighlight),
+                colored(Color::Green),
+                0..10,
+            ),
+            (
+                HighlightKey::new(HighlightLayer::SyntaxToken, 0),
+                colored(Color::Red),
+                2..6,
+            ),
+        ]);
+        let rope = Rope::from("0123456789");
+
+        assert_eq!(
+            styled_text(BufferChunks::new(&rope, 0..10, endpoints)),
+            ["01", "2345", "6789"]
+                .map(|text| (text.to_string(), Some(colored(Color::Green))))
+                .to_vec(),
+            "the selection wins over the syntax token inside it",
+        );
     }
 
     /// A text with endpoints for several checkpoints, and the style each byte
