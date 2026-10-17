@@ -141,6 +141,9 @@ pub enum AgentQuery {
     /// [`crate::session_report::selection`] reports them, with the covered
     /// bytes when `text` is set.
     Selection { text: bool },
+    /// Every buffer of the workspace and where each one shows, as
+    /// [`crate::session_report::buffers`] reports them.
+    Buffers,
     /// Diagnostics for `path`, or for every tracked path when `None`.
     Diagnostics { path: Option<PathBuf> },
     /// Hover at an LSP UTF-16 `line`/`col` within `path`.
@@ -182,6 +185,8 @@ enum AgentRequest {
         #[serde(default)]
         text: bool,
     },
+    /// `{"req":"buffers"}`.
+    Buffers,
     /// `{"req":"diagnostics"}` or `{"req":"diagnostics","path":"..."}`.
     Diagnostics { path: Option<PathBuf> },
     /// `{"req":"hover","path":"...","line":N,"col":N}`. `line`/`col` are LSP
@@ -395,6 +400,7 @@ async fn serve_connection<R>(
                 AgentRequest::SessionInfo => AgentQuery::SessionInfo,
                 AgentRequest::Focus { text } => AgentQuery::Focus { text },
                 AgentRequest::Selection { text } => AgentQuery::Selection { text },
+                AgentRequest::Buffers => AgentQuery::Buffers,
                 AgentRequest::Diagnostics { path } => AgentQuery::Diagnostics { path },
                 AgentRequest::Hover { path, line, col } => AgentQuery::Hover { path, line, col },
             };
@@ -501,10 +507,10 @@ fn parse_hook_line(line: &str) -> Result<AgentHookEvent, serde_json::Error> {
 /// Answer a runtime [`AgentQuery`] from live session state, firing `reply` with
 /// the JSON result.
 ///
-/// `lsp-status`, `session-info`, `focus`, `selection`, and `diagnostics` reply
-/// synchronously. `hover` requires the path to be open in the `uid` session
-/// (otherwise `{"error":"not open"}`) and runs the request on a detached task
-/// so the event loop never blocks on the server.
+/// `lsp-status`, `session-info`, `focus`, `selection`, `buffers`, and
+/// `diagnostics` reply synchronously. `hover` requires the path to be open in
+/// the `uid` session (otherwise `{"error":"not open"}`) and runs the request on
+/// a detached task so the event loop never blocks on the server.
 pub(crate) fn answer_agent_query(
     stoat: &mut Stoat,
     uid: WorkspaceUid,
@@ -538,6 +544,9 @@ pub(crate) fn answer_agent_query(
         },
         AgentQuery::Selection { text } => {
             let _ = reply.send(crate::session_report::selection(stoat, uid, text));
+        },
+        AgentQuery::Buffers => {
+            let _ = reply.send(crate::session_report::buffers(stoat, uid));
         },
         AgentQuery::Diagnostics { path } => {
             let value = match path {

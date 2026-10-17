@@ -60,6 +60,9 @@ pub enum ApiCommand {
         #[arg(long)]
         text: bool,
     },
+    /// Every buffer of the session's workspace, with its unsaved state and the
+    /// tabs, panes, and docks that show it.
+    Buffers,
     /// LSP host liveness, and each server's process id and capabilities.
     LspStatus,
     /// Diagnostics for `--path`, or every tracked path when it is omitted.
@@ -108,6 +111,7 @@ enum QueryRequest {
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         text: bool,
     },
+    Buffers,
     Diagnostics {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
@@ -160,6 +164,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
         },
         ApiCommand::Focus { text } => QueryRequest::Focus { text },
         ApiCommand::Selection { text } => QueryRequest::Selection { text },
+        ApiCommand::Buffers => QueryRequest::Buffers,
         ApiCommand::LspStatus => QueryRequest::LspStatus,
         ApiCommand::Diagnostics { path } => QueryRequest::Diagnostics { path },
         ApiCommand::Hover { path, line, col } => QueryRequest::Hover { path, line, col },
@@ -476,6 +481,7 @@ mod tests {
             wire(&QueryRequest::Selection { text: true }),
             r#"{"req":"selection","text":true}"#
         );
+        assert_eq!(wire(&QueryRequest::Buffers), r#"{"req":"buffers"}"#);
         assert_eq!(
             wire(&QueryRequest::Diagnostics { path: None }),
             r#"{"req":"diagnostics"}"#

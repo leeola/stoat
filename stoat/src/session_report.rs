@@ -4,9 +4,10 @@
 use crate::{
     app::Stoat,
     buffer::BufferId,
+    buffer_registry::OpenOrigin,
     display_map::DisplayPoint,
     keymap_state,
-    pane::{DockSide, FocusTarget},
+    pane::{DockSide, FocusTarget, View},
     workspace::{self, Workspace, WorkspaceId, WorkspaceUid},
 };
 use serde_json::{json, Value};
@@ -73,10 +74,7 @@ pub(crate) fn focus(stoat: &mut Stoat, uid: WorkspaceUid, with_text: bool) -> Va
     let editor = editor_report(ws, with_text);
     let pane = ws.panes.pane(ws.panes.focus());
     let dock = match ws.focus {
-        FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|dock| match dock.side {
-            DockSide::Left => "left",
-            DockSide::Right => "right",
-        }),
+        FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|dock| dock_side_name(dock.side)),
         FocusTarget::SplitPane => None,
     };
 
@@ -249,6 +247,81 @@ pub(crate) fn selection(stoat: &Stoat, uid: WorkspaceUid, with_text: bool) -> Va
     })
 }
 
+/// The `buffers` report on every buffer of the workspace that `uid` names, and
+/// on where each one shows.
+///
+/// The list holds every buffer the workspace has, including the ones a
+/// navigation only passed through and scratch buffers, which report a null
+/// `path`. Path-bound buffers come first, by path. `shown` names each tab and
+/// split pane, then each dock, whose editor holds the buffer. An unknown `uid`
+/// reports an error object.
+pub(crate) fn buffers(stoat: &Stoat, uid: WorkspaceUid) -> Value {
+    let Some(ws) = workspace_id(stoat, uid).map(|id| &stoat.workspaces[id]) else {
+        return json!({ "error": "unknown session" });
+    };
+
+    let buffers: Vec<Value> = ws
+        .buffers
+        .summaries()
+        .into_iter()
+        .map(|summary| {
+            let (path, relative_path) = buffer_paths(ws, summary.id);
+            let origin = match summary.origin {
+                OpenOrigin::Named => "named",
+                OpenOrigin::Visited => "visited",
+            };
+            json!({
+                "path": path,
+                "relative_path": relative_path,
+                "dirty": summary.dirty,
+                "origin": origin,
+                "preview": summary.preview,
+                "read_only": summary.read_only,
+                "shown": shown_in(ws, summary.id),
+            })
+        })
+        .collect();
+    json!({ "count": buffers.len(), "buffers": buffers })
+}
+
+/// Where `buffer_id` shows in `ws`, as each tab and split pane whose editor
+/// holds it, in tab order, then each dock whose editor holds it.
+fn shown_in(ws: &Workspace, buffer_id: BufferId) -> Vec<Value> {
+    let holds = |view: &View| match view {
+        View::Editor(id) => ws
+            .editors
+            .get(*id)
+            .is_some_and(|editor| editor.buffer_id == buffer_id),
+        _ => false,
+    };
+
+    let mut shown = Vec::new();
+    for tab in 0..ws.tabs.len() {
+        // The active tab's tree lives in `ws.panes`, and its own slot parks
+        // nothing.
+        let tree = if tab == ws.active_tab {
+            Some(&ws.panes)
+        } else {
+            ws.tabs[tab].parked.as_ref()
+        };
+        let Some(tree) = tree else {
+            continue;
+        };
+        for (_, pane) in tree.split_panes() {
+            if holds(&pane.view) {
+                shown.push(json!({ "tab": tab, "pane": pane.index }));
+            }
+        }
+    }
+
+    for dock in ws.docks.values() {
+        if holds(&dock.view) {
+            shown.push(json!({ "dock": dock_side_name(dock.side) }));
+        }
+    }
+    shown
+}
+
 /// The id of the open workspace that `uid` names.
 fn workspace_id(stoat: &Stoat, uid: WorkspaceUid) -> Option<WorkspaceId> {
     stoat
@@ -276,11 +349,20 @@ fn point_json((line, col): (u32, u32)) -> Value {
     json!({ "line": line, "col": col })
 }
 
+/// The name a report gives a dock on `side`.
+fn dock_side_name(side: DockSide) -> &'static str {
+    match side {
+        DockSide::Left => "left",
+        DockSide::Right => "right",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         action_handlers,
+        pane::Axis,
         test_fixture::{open_buffer, seed},
         test_harness::TestHarness,
     };
@@ -518,6 +600,63 @@ mod tests {
                 &only["cursor"]
             ],
             [&json!(true), &origin, &origin, &origin],
+        );
+    }
+
+    #[test]
+    fn buffers_lists_each_file_with_its_dirty_state_and_panes() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        h.stoat.active_workspace_mut().panes.split(Axis::Vertical);
+        open_buffer(&mut h, root.join("b.rs"));
+        h.edit_focused(0..0, "x");
+
+        let uid = h.stoat.active_workspace().uid;
+        assert_eq!(
+            buffers(&h.stoat, uid)["buffers"],
+            json!([
+                {
+                    "path": "/lsp-did-open-test/a.rs",
+                    "relative_path": "a.rs",
+                    "dirty": false,
+                    "origin": "named",
+                    "preview": false,
+                    "read_only": false,
+                    "shown": [{ "tab": 0, "pane": 0 }],
+                },
+                {
+                    "path": "/lsp-did-open-test/b.rs",
+                    "relative_path": "b.rs",
+                    "dirty": true,
+                    "origin": "named",
+                    "preview": false,
+                    "read_only": false,
+                    "shown": [{ "tab": 0, "pane": 1 }],
+                },
+            ]),
+        );
+    }
+
+    #[test]
+    fn a_scratch_buffer_lists_with_no_path() {
+        let h = TestHarness::with_size(80, 24);
+
+        let uid = h.stoat.active_workspace().uid;
+        assert_eq!(
+            buffers(&h.stoat, uid),
+            json!({
+                "count": 1,
+                "buffers": [{
+                    "path": null,
+                    "relative_path": null,
+                    "dirty": false,
+                    "origin": "visited",
+                    "preview": false,
+                    "read_only": false,
+                    "shown": [{ "tab": 0, "pane": 0 }],
+                }],
+            }),
         );
     }
 }

@@ -6,6 +6,7 @@ use crate::{
 use lsp_types::SemanticToken;
 use serde::{Deserialize, Serialize};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     ops::Range,
     path::{Path, PathBuf},
@@ -56,6 +57,18 @@ pub(crate) struct RetainedLspTokens {
 pub(crate) struct DirtyBuffer {
     pub id: BufferId,
     pub path: Option<PathBuf>,
+}
+
+/// One entry surfaced by [`BufferRegistry::summaries`], with the state a
+/// client listing the open buffers reports.
+#[derive(Clone, Debug)]
+pub(crate) struct BufferSummary {
+    pub id: BufferId,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+    pub origin: OpenOrigin,
+    pub preview: bool,
+    pub read_only: bool,
 }
 
 /// How aggressively a buffer re-reads its file when the on-disk copy changes.
@@ -506,12 +519,30 @@ impl BufferRegistry {
                 path: entry.path.clone(),
             })
             .collect();
-        out.sort_by(|a, b| match (&a.path, &b.path) {
-            (Some(ap), Some(bp)) => ap.cmp(bp),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => a.id.cmp(&b.id),
-        });
+        out.sort_by(|a, b| by_path_then_id((&a.path, a.id), (&b.path, b.id)));
+        out
+    }
+
+    /// Every buffer in the registry, path-bound ones first by path and scratch
+    /// buffers after by id.
+    ///
+    /// [`Self::dirty_buffers`] uses the same order. Unlike the buffer picker's
+    /// list, this keeps the buffers a navigation only passed through, since
+    /// they still hold state.
+    pub(crate) fn summaries(&self) -> Vec<BufferSummary> {
+        let mut out: Vec<BufferSummary> = self
+            .buffers
+            .iter()
+            .map(|(id, entry)| BufferSummary {
+                id: *id,
+                path: entry.path.clone(),
+                dirty: entry.buffer.read().expect("buffer poisoned").dirty,
+                origin: entry.origin,
+                preview: entry.preview,
+                read_only: entry.read_only.is_some(),
+            })
+            .collect();
+        out.sort_by(|a, b| by_path_then_id((&a.path, a.id), (&b.path, b.id)));
         out
     }
 
@@ -1041,6 +1072,17 @@ pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
     blake3::hash(text.as_bytes()).into()
 }
 
+/// The listing order of two buffers given as `(path, id)`, path-bound ones
+/// first by path and scratch buffers after by id.
+fn by_path_then_id(a: (&Option<PathBuf>, BufferId), b: (&Option<PathBuf>, BufferId)) -> Ordering {
+    match (a.0, b.0) {
+        (Some(a_path), Some(b_path)) => a_path.cmp(b_path),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.1.cmp(&b.1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1111,6 +1153,30 @@ mod tests {
         assert!(Arc::ptr_eq(&buf1, &buf2));
         let guard = buf1.read().unwrap();
         assert_eq!(guard.rope().to_string(), "hello");
+    }
+
+    #[test]
+    fn summaries_sort_paths_first_then_scratch_by_id() {
+        let mut reg = BufferRegistry::new();
+        let (first_scratch, _) = reg.new_scratch();
+        let (b, _) = reg.open(Path::new("/b.txt"), "");
+        let (second_scratch, _) = reg.new_scratch();
+        let (a, _) = reg.open(Path::new("/a.txt"), "");
+
+        let order: Vec<(BufferId, Option<PathBuf>)> = reg
+            .summaries()
+            .into_iter()
+            .map(|summary| (summary.id, summary.path))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                (a, Some(PathBuf::from("/a.txt"))),
+                (b, Some(PathBuf::from("/b.txt"))),
+                (first_scratch, None),
+                (second_scratch, None),
+            ],
+        );
     }
 
     /// A restored compressed buffer still holds text that is not its file's,
