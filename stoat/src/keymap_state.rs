@@ -8,7 +8,7 @@ use crate::{
     lsp::{registry::LspRegistry, LspSymbolKind},
     pane::{FocusTarget, View},
     rebase::RebasePause,
-    workspace::Workspace,
+    workspace::{self, Workspace},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
@@ -336,15 +336,7 @@ fn focused_view(ws: &Workspace) -> Option<&View> {
 
 /// The focused pane's kind as a `pane` predicate value.
 pub(crate) fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
-    Some(match focused_view(ws)? {
-        View::Label(_) => "label",
-        View::Editor(_) => "editor",
-        View::Run(_) => "run",
-        View::Agent(_) => "agent",
-        View::Terminal(_) => "terminal",
-        View::Commits(_) => "commits",
-        View::Image { .. } => "image",
-    })
+    focused_view(ws).map(workspace::view_kind)
 }
 
 /// The active `view` predicate value, naming the app screen in the foreground.

@@ -46,6 +46,13 @@ pub struct ApiArgs {
 pub enum ApiCommand {
     /// Every live session's `session-info` reply, most recently active first.
     Sessions,
+    /// The focused workspace, tab, pane, and modal, and the focused editor's
+    /// file, cursor, and lines on screen.
+    Focus {
+        /// Also print the text of the lines on screen.
+        #[arg(long)]
+        text: bool,
+    },
     /// LSP host liveness, and each server's process id and capabilities.
     LspStatus,
     /// Diagnostics for `--path`, or every tracked path when it is omitted.
@@ -86,6 +93,10 @@ pub enum ApiCommand {
 enum QueryRequest {
     LspStatus,
     SessionInfo,
+    Focus {
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        text: bool,
+    },
     Diagnostics {
         #[serde(skip_serializing_if = "Option::is_none")]
         path: Option<PathBuf>,
@@ -136,6 +147,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
             println!("{line}");
             return Ok(());
         },
+        ApiCommand::Focus { text } => QueryRequest::Focus { text },
         ApiCommand::LspStatus => QueryRequest::LspStatus,
         ApiCommand::Diagnostics { path } => QueryRequest::Diagnostics { path },
         ApiCommand::Hover { path, line, col } => QueryRequest::Hover { path, line, col },
@@ -435,6 +447,14 @@ mod tests {
         assert_eq!(
             wire(&QueryRequest::SessionInfo),
             r#"{"req":"session-info"}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Focus { text: false }),
+            r#"{"req":"focus"}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Focus { text: true }),
+            r#"{"req":"focus","text":true}"#
         );
         assert_eq!(
             wire(&QueryRequest::Diagnostics { path: None }),

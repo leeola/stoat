@@ -1930,6 +1930,23 @@ pub(crate) fn display_name_of<'a>(name: &'a str, git_root: &'a Path) -> &'a str 
         .unwrap_or("(unnamed)")
 }
 
+/// The kind of content `view` shows, by the name the `pane` keymap predicate
+/// matches on.
+///
+/// The `stoat api` reports name a pane's kind with the same word, so a kind an
+/// agent reads back works as a binding condition.
+pub(crate) fn view_kind(view: &View) -> &'static str {
+    match view {
+        View::Label(_) => "label",
+        View::Editor(_) => "editor",
+        View::Run(_) => "run",
+        View::Agent(_) => "agent",
+        View::Terminal(_) => "terminal",
+        View::Commits(_) => "commits",
+        View::Image { .. } => "image",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BridgeWaiter, ParseJob, Workspace, INLINE_PARSE_MAX_BYTES};
