@@ -8,19 +8,21 @@
 //! No key reaches this. A trigger fires from the post-event fan-out, and a pump
 //! collects the reply, both of them background work the user never asks for.
 
-use crate::{action_handlers, app::Stoat, buffer::BufferId, lsp, lsp::hosts};
+use crate::{
+    action_handlers, app::Stoat, buffer::BufferId, display_map::FoldingRanges, lsp, lsp::hosts,
+    multi_buffer::MultiBufferSnapshot,
+};
 use lsp_types::{FoldingRange, FoldingRangeParams, TextDocumentIdentifier};
 use std::{path::Path, time::Duration};
-use stoat_text::{Anchor, Bias, Point, Rope};
+use stoat_text::{Bias, Point, Rope};
 
 /// Debounce before requesting folding ranges, so a burst of edits collapses into
 /// a single request once typing settles.
 const FOLDING_RANGE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 /// A completed folding-range request's payload. It carries the buffer and each
-/// foldable region as a `(byte range, collapsed text)` pair in request-time
-/// coordinates.
-pub(crate) type FoldingRangesOutcome = (BufferId, Vec<(std::ops::Range<usize>, Option<String>)>);
+/// foldable region, anchored against the snapshot the request measured.
+pub(crate) type FoldingRangesOutcome = (BufferId, FoldingRanges);
 
 /// Request folding ranges for the focused editor when the server advertises the
 /// capability and the `(buffer, version)` key changed.
@@ -44,7 +46,7 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let Some((buffer_id, version, rope, params)) = build_folding_range_request(stoat) else {
+    let Some((buffer_id, version, snapshot, params)) = build_folding_range_request(stoat) else {
         return;
     };
 
@@ -54,31 +56,35 @@ pub(crate) fn folding_ranges_trigger(stoat: &mut Stoat) {
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
         executor.timer(FOLDING_RANGE_DEBOUNCE).await;
-        match host.folding_range(params).await {
-            Ok(Some(ranges)) => Some((buffer_id, convert_folding_ranges(ranges, &rope))),
-            Ok(None) => None,
+        let ranges = match host.folding_range(params).await {
+            Ok(Some(ranges)) => ranges,
+            Ok(None) => return None,
             Err(err) => {
                 tracing::warn!(target: "stoat::lsp", ?err, "folding_range request failed");
-                None
+                return None;
             },
-        }
+        };
+
+        // The scheduler pumps a spawned future on the run-loop thread. A large
+        // file's ranges cost rope descents per line and a walk over the
+        // fragment tree, which the blocking pool takes instead.
+        let anchored = executor
+            .spawn_blocking(move || anchored_folding_ranges(ranges, &snapshot))
+            .await;
+        Some((buffer_id, anchored))
     });
     stoat.pending_folding_ranges.arm(task);
 }
 
 fn build_folding_range_request(
     stoat: &mut Stoat,
-) -> Option<(BufferId, u64, Rope, FoldingRangeParams)> {
-    let (buffer_id, version, rope) = {
+) -> Option<(BufferId, u64, MultiBufferSnapshot, FoldingRangeParams)> {
+    let (buffer_id, snapshot) = {
         let editor = action_handlers::focused_editor_mut(stoat)?;
         let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        (
-            editor.buffer_id,
-            buf_snap.version(),
-            buf_snap.rope().clone(),
-        )
+        (editor.buffer_id, snapshot.buffer_snapshot().clone())
     };
+    let version = snapshot.version();
 
     let path = stoat
         .active_workspace()
@@ -91,7 +97,28 @@ fn build_folding_range_request(
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
     };
-    Some((buffer_id, version, rope, params))
+    Some((buffer_id, version, snapshot, params))
+}
+
+/// Anchor a server's folding ranges, as [`convert_folding_ranges`] spans them,
+/// against the snapshot the request measured.
+///
+/// The server counted lines in that snapshot's text. Its anchors name that
+/// text, so an edit that lands before the install moves each crease with it.
+fn anchored_folding_ranges(
+    ranges: Vec<FoldingRange>,
+    snapshot: &MultiBufferSnapshot,
+) -> FoldingRanges {
+    let spans = convert_folding_ranges(ranges, snapshot.rope());
+    let starts: Vec<usize> = spans.iter().map(|(span, _)| span.start).collect();
+    let ends: Vec<usize> = spans.iter().map(|(span, _)| span.end).collect();
+    snapshot
+        .anchors_at_batch(&starts, Bias::Right)
+        .into_iter()
+        .zip(snapshot.anchors_at_batch(&ends, Bias::Left))
+        .zip(spans)
+        .map(|((start, end), (_, collapsed_text))| (start..end, collapsed_text))
+        .collect()
 }
 
 /// Convert LSP folding ranges into `(byte range, collapsed text)` foldable spans
@@ -121,41 +148,20 @@ pub(crate) fn pump_lsp_folding_ranges(stoat: &mut Stoat) -> bool {
     let Some(outcome) = stoat.pending_folding_ranges.poll() else {
         return false;
     };
-    if let Some((buffer_id, items)) = outcome {
-        apply_folding_ranges(stoat, buffer_id, items);
+    if let Some((buffer_id, ranges)) = outcome {
+        apply_folding_ranges(stoat, buffer_id, ranges);
     }
     true
 }
 
-fn apply_folding_ranges(
-    stoat: &mut Stoat,
-    buffer_id: BufferId,
-    items: Vec<(std::ops::Range<usize>, Option<String>)>,
-) {
+fn apply_folding_ranges(stoat: &mut Stoat, buffer_id: BufferId, ranges: FoldingRanges) {
     let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
         return;
     };
     if editor.buffer_id != buffer_id {
         return;
     }
-
-    let anchored: Vec<(std::ops::Range<Anchor>, Option<String>)> = {
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        items
-            .into_iter()
-            .map(|(range, text)| {
-                (
-                    buf_snap.anchor_at(range.start, Bias::Right)
-                        ..buf_snap.anchor_at(range.end, Bias::Left),
-                    text,
-                )
-            })
-            .collect()
-    };
-    editor
-        .display_map
-        .set_lsp_folding_ranges(buffer_id, anchored);
+    editor.display_map.set_lsp_folding_ranges(buffer_id, ranges);
 }
 
 #[cfg(test)]
@@ -165,6 +171,7 @@ mod tests {
         test_fixture::{open_buffer, seed},
         test_harness::TestHarness,
     };
+    use stoat_text::Anchor;
 
     fn enable_folding_range(h: &TestHarness) {
         use lsp_types::{FoldingRangeProviderCapability, ServerCapabilities};
@@ -187,8 +194,9 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn folding_ranges_land_as_creases() {
+    /// A harness with `main.rs` open and a server that answers one range over
+    /// the three lines of `fn a`.
+    fn harness_with_one_fold() -> TestHarness {
         let mut h = TestHarness::with_size(40, 10);
         enable_folding_range(&h);
         let root = seed(&mut h, &[("main.rs", "fn a() {\n    x;\n}\n")]);
@@ -205,11 +213,57 @@ mod tests {
                 collapsed_text: None,
             }],
         );
+        h
+    }
+
+    #[test]
+    fn folding_ranges_land_as_creases() {
+        let mut h = harness_with_one_fold();
         h.type_keys("escape");
+        let before = h.blocking_calls();
         h.advance_clock(Duration::from_millis(550));
         assert_eq!(
             crease_point_ranges(&mut h),
             vec![Point::new(0, 8)..Point::new(2, 1)]
+        );
+        assert!(
+            h.blocking_calls() > before,
+            "and were anchored on the pool rather than the run loop",
+        );
+    }
+
+    /// A reply's lines name the text the request measured. An edit that lands
+    /// while the request is in flight moves that text, and each crease has to
+    /// move with it rather than stay at the offsets the text had.
+    ///
+    /// Text typed at either edge of a fold stays outside it. The header line
+    /// and the closing line keep what was typed on them in view.
+    #[test]
+    fn folding_ranges_stay_on_the_text_the_request_measured() {
+        let mut h = harness_with_one_fold();
+
+        // Arm the request, then edit the registry directly. That leaves the
+        // in-flight task alone. An edit by key replaces it with a new request.
+        h.type_keys("escape");
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        {
+            let buffers = &h.stoat.active_workspace().buffers;
+            let shared = buffers.get(buffer_id).expect("buffer");
+            let mut buffer = shared.write().expect("poisoned");
+            // At the end edge after the `}`, at the start edge after the `{`,
+            // and a line above the fold.
+            buffer.edit(17..17, "Y");
+            buffer.edit(8..8, "X");
+            buffer.edit(0..0, "// c\n");
+        }
+        h.advance_clock(Duration::from_millis(550));
+
+        assert_eq!(
+            crease_point_ranges(&mut h),
+            vec![Point::new(1, 9)..Point::new(3, 1)],
+            "the fold moved down a row with the body of fn a, edges excluded",
         );
     }
 }
