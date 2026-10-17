@@ -14,6 +14,7 @@ use stoat::{
     agent_status::AgentHookEvent,
     host::{FsHost, LocalFs},
     run,
+    walkthrough::{self, Point},
     workspace::WorkspaceUid,
 };
 
@@ -74,17 +75,15 @@ pub enum ApiCommand {
         #[arg(long)]
         path: Option<PathBuf>,
     },
-    /// Hover at an LSP position in a file open in the session.
+    /// Hover at a position in a file open in the session.
     Hover {
-        /// File to hover in. Must already be open in the session.
-        #[arg(long)]
+        /// File to hover in. Must already be open in the session. A relative
+        /// path resolves against the working directory.
         path: PathBuf,
-        /// Zero-based LSP (UTF-16) line.
-        #[arg(long)]
-        line: u32,
-        /// Zero-based LSP (UTF-16) character column.
-        #[arg(long)]
-        col: u32,
+        /// The position as `L:C`, a 1-based line and byte column, the form the
+        /// other verbs report.
+        #[arg(value_parser = walkthrough::parse_point)]
+        position: Point,
     },
     /// Send one hook event to the owning session's IPC socket and exit. The
     /// owned Claude subshell's hooks run this to push status into the session.
@@ -147,12 +146,13 @@ struct SessionInfo {
 #[allow(clippy::disallowed_methods)]
 pub fn run(args: ApiArgs) -> Result<(), Whatever> {
     let dir = run::agent_socket_dir().whatever_context("resolve agent socket directory")?;
+    let cwd = std::env::current_dir().unwrap_or_default();
     let socket = || {
         resolve_socket(
             args.session.as_deref(),
             std::env::var("STOAT_AGENT_SOCK").ok(),
             std::env::var("STOAT_SESSION").ok(),
-            &std::env::current_dir().unwrap_or_default(),
+            &cwd,
             &dir,
             &LocalFs,
         )
@@ -172,7 +172,11 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
         ApiCommand::Layout => QueryRequest::Layout,
         ApiCommand::LspStatus => QueryRequest::LspStatus,
         ApiCommand::Diagnostics { path } => QueryRequest::Diagnostics { path },
-        ApiCommand::Hover { path, line, col } => QueryRequest::Hover { path, line, col },
+        ApiCommand::Hover { path, position } => QueryRequest::Hover {
+            path: cwd.join(path),
+            line: position.line,
+            col: position.col,
+        },
         ApiCommand::Hook { name, values } => {
             let event = build_event(&name, &values)?;
             return send_event(&socket()?, &event);

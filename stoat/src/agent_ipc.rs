@@ -20,7 +20,7 @@ use crate::{
     agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
 };
 use futures::stream::{FuturesUnordered, StreamExt};
-use lsp_types::{HoverParams, Position, TextDocumentIdentifier, TextDocumentPositionParams};
+use lsp_types::{HoverParams, TextDocumentIdentifier, TextDocumentPositionParams};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -29,6 +29,7 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+use stoat_text::{Bias, Point};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines},
     net::UnixListener,
@@ -149,7 +150,8 @@ pub enum AgentQuery {
     Layout,
     /// Diagnostics for `path`, or for every tracked path when `None`.
     Diagnostics { path: Option<PathBuf> },
-    /// Hover at an LSP UTF-16 `line`/`col` within `path`.
+    /// Hover at a 1-based `line` and 1-based byte `col` within `path`, which
+    /// the answer converts to the server's position encoding.
     Hover { path: PathBuf, line: u32, col: u32 },
 }
 
@@ -194,8 +196,8 @@ enum AgentRequest {
     Layout,
     /// `{"req":"diagnostics"}` or `{"req":"diagnostics","path":"..."}`.
     Diagnostics { path: Option<PathBuf> },
-    /// `{"req":"hover","path":"...","line":N,"col":N}`. `line`/`col` are LSP
-    /// UTF-16 positions, forwarded to the server unconverted.
+    /// `{"req":"hover","path":"...","line":N,"col":N}`. `line` and `col` are a
+    /// 1-based line and byte column, as every other request reports positions.
     Hover { path: PathBuf, line: u32, col: u32 },
 }
 
@@ -516,7 +518,8 @@ fn parse_hook_line(line: &str) -> Result<AgentHookEvent, serde_json::Error> {
 /// `lsp-status`, `session-info`, `focus`, `selection`, `buffers`, `layout`,
 /// and `diagnostics` reply synchronously. `hover` requires the path to be open
 /// in the `uid` session (otherwise `{"error":"not open"}`) and runs the request
-/// on a detached task so the event loop never blocks on the server.
+/// on a detached task so the event loop never blocks on the server. A zero
+/// position or a line past the file's end replies an error before any request.
 pub(crate) fn answer_agent_query(
     stoat: &mut Stoat,
     uid: WorkspaceUid,
@@ -573,12 +576,18 @@ pub(crate) fn answer_agent_query(
             let _ = reply.send(value);
         },
         AgentQuery::Hover { path, line, col } => {
-            let buffer_id = stoat
+            let open = stoat
                 .workspaces
                 .iter()
                 .find(|(_, ws)| ws.uid == uid)
-                .and_then(|(_, ws)| ws.buffers.id_for_path(&path));
-            let Some(buffer_id) = buffer_id.filter(|id| stoat.lsp_opened.contains(id)) else {
+                .and_then(|(_, ws)| {
+                    let buffer_id = ws.buffers.id_for_path(&path)?;
+                    let buffer = ws.buffers.get(buffer_id)?;
+                    let rope = buffer.read().expect("buffer poisoned").rope().clone();
+                    Some((buffer_id, rope))
+                })
+                .filter(|(buffer_id, _)| stoat.lsp_opened.contains(buffer_id));
+            let Some((buffer_id, rope)) = open else {
                 let _ = reply.send(json!({ "error": "not open" }));
                 return;
             };
@@ -586,19 +595,34 @@ pub(crate) fn answer_agent_query(
                 let _ = reply.send(json!({ "error": "invalid path" }));
                 return;
             };
+            if line == 0 || col == 0 {
+                let _ = reply.send(json!({ "error": "lines and columns start at 1" }));
+                return;
+            }
+            if line - 1 > rope.max_point().row {
+                let _ = reply.send(json!({ "error": format!("no line {line}") }));
+                return;
+            }
 
+            // A column past the line's end clamps to the end, and one inside a
+            // character snaps back to the character's first byte.
+            let offset = rope.clip_offset(
+                rope.point_to_offset(Point::new(line - 1, col - 1)),
+                Bias::Left,
+            );
+            let lsp =
+                crate::lsp::hosts::lsp_for_feature(stoat, buffer_id, LanguageServerFeature::Hover);
             let params = HoverParams {
                 text_document_position_params: TextDocumentPositionParams {
                     text_document: TextDocumentIdentifier { uri },
-                    position: Position {
-                        line,
-                        character: col,
-                    },
+                    position: crate::lsp::util::byte_offset_to_lsp_pos(
+                        &rope,
+                        offset,
+                        lsp.offset_encoding(),
+                    ),
                 },
                 work_done_progress_params: Default::default(),
             };
-            let lsp =
-                crate::lsp::hosts::lsp_for_feature(stoat, buffer_id, LanguageServerFeature::Hover);
             stoat
                 .executor
                 .spawn(async move {
@@ -1131,8 +1155,8 @@ mod tests {
             uid,
             request: AgentQuery::Hover {
                 path: path.clone(),
-                line: 0,
-                col: 1,
+                line: 1,
+                col: 2,
             },
             reply: reply_tx,
         });
@@ -1146,6 +1170,64 @@ mod tests {
         assert_eq!(markup.value, "hover text");
     }
 
+    /// The fake speaks UTF-16, where the two-byte `\u{e9}` is one unit, so byte
+    /// column 4 of the first line is the server's character 2.
+    #[test]
+    fn hover_converts_a_byte_column_to_the_servers_encoding() {
+        use lsp_types::{Hover, HoverContents};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "\u{e9} abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_hover(path.to_str().unwrap(), 0, 2, "on a");
+
+        let uid = h.stoat.active_workspace().uid();
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        h.stoat.handle_agent_control(AgentControl::Query {
+            uid,
+            request: AgentQuery::Hover {
+                path,
+                line: 1,
+                col: 4,
+            },
+            reply: reply_tx,
+        });
+        h.settle();
+
+        let hover: Hover = serde_json::from_value(reply_rx.try_recv().expect("hover reply"))
+            .expect("a hover, not an error");
+        let HoverContents::Markup(markup) = hover.contents else {
+            panic!("expected markup hover contents");
+        };
+        assert_eq!(markup.value, "on a");
+    }
+
+    #[test]
+    fn hover_past_the_last_line_replies_an_error() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+
+        let uid = h.stoat.active_workspace().uid();
+        let (reply_tx, mut reply_rx) = oneshot::channel();
+        h.stoat.handle_agent_control(AgentControl::Query {
+            uid,
+            request: AgentQuery::Hover {
+                path,
+                line: 3,
+                col: 1,
+            },
+            reply: reply_tx,
+        });
+
+        assert_eq!(
+            reply_rx.try_recv().expect("synchronous error reply"),
+            serde_json::json!({ "error": "no line 3" }),
+        );
+    }
+
     #[test]
     fn query_hover_on_unopened_path_replies_error() {
         let mut h = TestHarness::with_size(40, 10);
@@ -1155,8 +1237,8 @@ mod tests {
             uid,
             request: AgentQuery::Hover {
                 path: PathBuf::from("/nope.rs"),
-                line: 0,
-                col: 0,
+                line: 1,
+                col: 1,
             },
             reply: reply_tx,
         });

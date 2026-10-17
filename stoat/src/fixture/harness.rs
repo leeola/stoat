@@ -116,8 +116,10 @@ pub enum HarnessError {
 }
 
 /// A structured session query, serialized to the newline-delimited JSON the
-/// session agent socket accepts. Mirrors the `stoat api` wire form; `line`
-/// and `col` are zero-based LSP UTF-16 positions.
+/// session agent socket accepts.
+///
+/// It mirrors the `stoat api` wire form, so `line` and `col` are a 1-based
+/// line and byte column, which the session converts to the server's encoding.
 #[derive(Serialize)]
 #[serde(tag = "req", rename_all = "kebab-case")]
 pub enum Query {

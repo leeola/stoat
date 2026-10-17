@@ -93,8 +93,8 @@ fn hover_over_symbol() {
             let hover = handle
                 .query(&Query::Hover {
                     path: main_path.clone(),
-                    line: 15,
-                    col: 27,
+                    line: 16,
+                    col: 28,
                 })
                 .await
                 .expect("hover query");
