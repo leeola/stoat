@@ -602,6 +602,103 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
     );
 }
 
+/// Open `a.txt` in a harness that confirmed a stoatty at the lane protocol,
+/// with the scene's flushes going to the returned receiver.
+fn lane_harness(
+    dir: &str,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let mut h = Stoat::test();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = LANE_PROTOCOL;
+
+    let root = PathBuf::from(dir);
+    let path = root.join("a.txt");
+    h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    (h, rx)
+}
+
+/// The commands of one painted and flushed frame.
+fn flushed_frame(
+    h: &mut crate::test_harness::TestHarness,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Vec<command::Command> {
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+    drain_apc(rx)
+}
+
+/// A cursor move along a line redraws only the focused pane's status row, so
+/// only that row's lane goes out, and no reset clears the rest of the scene.
+#[test]
+fn a_status_only_change_flushes_its_lane_alone() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx) = lane_harness("/lanes");
+    flushed_frame(&mut h, &mut rx);
+
+    h.type_keys("l");
+    let structure: Vec<Command> = flushed_frame(&mut h, &mut rx)
+        .into_iter()
+        .filter(|c| matches!(c, Command::Reset | Command::LaneBegin(_) | Command::LaneEnd))
+        .collect();
+
+    let ws = h.stoat.active_workspace();
+    let index = ws.panes.pane(ws.panes.focus()).index;
+    assert_eq!(
+        structure,
+        [
+            Command::LaneBegin(crate::render::status_lane(index)),
+            Command::LaneEnd
+        ],
+        "the status row's lane alone, with no reset"
+    );
+}
+
+/// stoatty occludes by declaration order across lanes, so a modal that covers
+/// the panes has to reach it after every pane's components.
+#[test]
+fn a_modal_flushes_in_the_lane_after_every_pane() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx) = lane_harness("/overlay");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+    h.settle();
+
+    let cmds = flushed_frame(&mut h, &mut rx);
+    let modal = help_layout(&h).modal;
+    let lanes: Vec<u32> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            Command::LaneBegin(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let overlay = cmds
+        .iter()
+        .position(|c| *c == Command::LaneBegin(crate::render::OVERLAY_LANE));
+    let panel = cmds
+        .iter()
+        .position(|c| matches!(c, Command::Panel(p) if p.top == modal.y && p.left == modal.x));
+
+    assert_eq!(
+        lanes.last(),
+        Some(&crate::render::OVERLAY_LANE),
+        "the overlay lane goes out after every pane lane, got {lanes:?}"
+    );
+    assert!(
+        matches!((overlay, panel), (Some(overlay), Some(panel)) if overlay < panel),
+        "the help panel rides the overlay lane, got {cmds:?}"
+    );
+}
+
 /// A bottom-right badge's panel covers the status row's right end, so the
 /// rich bar's right segments end where the badge starts. The cursor position
 /// is the rightmost of them, and a run past that edge is one the panel hides.

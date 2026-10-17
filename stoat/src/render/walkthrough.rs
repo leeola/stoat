@@ -1182,7 +1182,7 @@ mod tests {
     /// rather than calling it again, which would emit every part twice.
     fn frame(h: &mut TestHarness) -> Vec<Command> {
         h.stoat.render();
-        let bytes = h.stoat.apc_scene.bytes().to_vec();
+        let bytes = h.stoat.apc_scene.all_bytes();
 
         command::decode_stream(&bytes)
     }

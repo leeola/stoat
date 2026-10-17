@@ -63,6 +63,11 @@ const TERMINAL_ROWS_PROTOCOL: u32 = 10;
 /// pane's page carries the fade in its cells.
 const POOL_DIM_PROTOCOL: u32 = 11;
 
+/// The protocol version that reads lane markers, so a frame sends only the
+/// scene lanes that changed. Under an older terminal any change sends the
+/// whole scene behind a reset.
+const LANE_PROTOCOL: u32 = 12;
+
 /// A split pane showing a terminal or an agent, as the terminal-kind pool that
 /// draws it at the terminal font size.
 ///
@@ -133,14 +138,19 @@ pub(crate) enum PoolOwner {
 ///
 /// A no-op until [`Stoat::stoatty`] confirms a listener. [`ApcScene::flush_to`]
 /// writes nothing when the scene matches the previous flush, so steady-state
-/// or widget-free frames push no batch at all. Runs at the frame seam after
-/// the live frame is published, beside [`emit_smooth_scroll`].
+/// or widget-free frames push no batch at all. Under a terminal at
+/// [`LANE_PROTOCOL`] or later, a change sends only the scene lanes it touched.
+/// Runs at the frame seam after the live frame is published, beside
+/// [`emit_smooth_scroll`].
 pub(crate) fn emit_apc_scene(stoat: &mut Stoat) {
     let Some(apc_tx) = stoat.apc_tx.clone().filter(|_| stoat.stoatty) else {
         return;
     };
 
     let mut batch = Vec::new();
+    stoat
+        .apc_scene
+        .set_lane_protocol(stoat.stoatty_protocol >= LANE_PROTOCOL);
     let _ = stoat.apc_scene.flush_to(&mut batch);
     if !batch.is_empty() {
         let _ = apc_tx.send(batch);

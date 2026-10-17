@@ -259,6 +259,29 @@ impl ApcScene {
         &self.lanes[self.active].current
     }
 
+    /// The bytes lane `id` holds under construction, whichever lane is open.
+    ///
+    /// Empty for a lane nothing has opened. A caller that records what one part
+    /// of the frame wrote to several lanes marks each lane by its length here.
+    pub fn lane_bytes(&self, id: u32) -> &[u8] {
+        match self.lanes.binary_search_by_key(&id, |lane| lane.id) {
+            Ok(index) => &self.lanes[index].current,
+            Err(_) => &[],
+        }
+    }
+
+    /// Every lane under construction, read end to end in id order.
+    ///
+    /// That is the order the terminal composes the lanes in, so this is the
+    /// whole frame as a reader that composites it has to see it. Allocates,
+    /// unlike [`Self::bytes`].
+    pub fn all_bytes(&self) -> Vec<u8> {
+        self.lanes
+            .iter()
+            .flat_map(|lane| lane.current.iter().copied())
+            .collect()
+    }
+
     /// Append the surface's per-line row heights as a `line_layout` frame.
     ///
     /// Most lines are one row; a height above one is an integer-cell inline
@@ -1044,6 +1067,32 @@ mod tests {
         command::encode_border_into(scene.buffer(), &second);
 
         assert_eq!(&scene.bytes()[mark..], encode_border(&second).as_slice());
+    }
+
+    #[test]
+    fn lane_bytes_reads_a_lane_that_is_not_open() {
+        let mut scene = ApcScene::new();
+        in_lane(&mut scene, 2, &border());
+
+        assert_eq!(
+            (scene.lane_bytes(2), scene.lane_bytes(5)),
+            (encode_border(&border()).as_slice(), &[][..]),
+            "lane 2 holds its border, and a lane nothing opened holds nothing"
+        );
+    }
+
+    #[test]
+    fn all_bytes_reads_every_lane_in_id_order() {
+        let mut scene = ApcScene::new();
+        let moved = BorderCommand { top: 7, ..border() };
+        in_lane(&mut scene, 2, &moved);
+        command::encode_border_into(scene.buffer(), &border());
+
+        assert_eq!(
+            scene.all_bytes(),
+            [encode_border(&border()), encode_border(&moved)].concat(),
+            "lane 0 comes first, though lane 2 was written first"
+        );
     }
 
     /// The same mark and slice inside a lane, which is how a caller captures

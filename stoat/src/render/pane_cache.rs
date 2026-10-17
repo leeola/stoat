@@ -153,28 +153,30 @@ pub(crate) struct PaneCacheEntry {
     /// taking the bounding box instead would capture and replay cells belonging
     /// to whatever sits to its right on every other row.
     regions: Vec<(Rect, Vec<Cell>)>,
-    /// The pane's own slice of the frame's scene, which is contiguous because a
-    /// pane paints in one go.
-    scene: Vec<u8>,
+    /// The pane's own slice of each of its two scene lanes, by lane id. Each
+    /// slice is contiguous because a pane paints its lanes in one go.
+    scene: [(u32, Vec<u8>); 2],
     /// The spans as the pane pushed them. Their cell records are deliberately
     /// not kept, since those are filled from the finished buffer after every
     /// pane has painted.
     undercurls: Vec<(u16, u16, u16, [u8; 3])>,
 }
 
-/// The scene length and span count to hand [`PaneCacheEntry::capture_into`]
-/// once the pane has painted.
+/// The scene lane lengths and span count to hand
+/// [`PaneCacheEntry::capture_into`] once the pane has painted.
 #[derive(Clone, Copy)]
 pub(crate) struct PaintMark {
-    scene_len: usize,
+    /// Each lane the pane paints, with the lane's length before the paint.
+    lanes: [(u32, usize); 2],
     spans: usize,
 }
 
 impl PaintMark {
-    /// Where the frame's two append-only channels stood before a pane painted.
-    pub(crate) fn take(scene: &ApcScene, undercurls: &UndercurlBatch) -> Self {
+    /// Where the frame's append-only channels stood before a pane painted into
+    /// `lanes`.
+    pub(crate) fn take(scene: &ApcScene, lanes: [u32; 2], undercurls: &UndercurlBatch) -> Self {
         Self {
-            scene_len: scene.bytes().len(),
+            lanes: lanes.map(|id| (id, scene.lane_bytes(id).len())),
             spans: undercurls.spans().len(),
         }
     }
@@ -213,9 +215,11 @@ impl PaneCacheEntry {
         }
         self.regions.truncate(slots);
 
-        self.scene.clear();
-        self.scene
-            .extend_from_slice(&scene.bytes()[mark.scene_len..]);
+        for (&(id, start), (held_id, bytes)) in mark.lanes.iter().zip(&mut self.scene) {
+            *held_id = id;
+            bytes.clear();
+            bytes.extend_from_slice(&scene.lane_bytes(id)[start..]);
+        }
 
         self.undercurls.clear();
         self.undercurls.extend(
@@ -226,6 +230,9 @@ impl PaneCacheEntry {
     }
 
     /// Put the recorded paint back into this frame's three channels.
+    ///
+    /// Each scene slice goes back into the lane it came from, and the replay
+    /// leaves lane 0 open, as a paint at the render site does.
     ///
     /// The scene append lands nowhere while the scene is dead, which is the
     /// same place the original paint's did, so a session without a listener
@@ -244,7 +251,11 @@ impl PaneCacheEntry {
                     .clone_from_slice(&cells[row * width..(row + 1) * width]);
             }
         }
-        scene.buffer().extend_from_slice(&self.scene);
+        for (id, bytes) in &self.scene {
+            scene.set_lane(*id);
+            scene.buffer().extend_from_slice(bytes);
+        }
+        scene.end_lane();
         for &(x, y, len, color) in &self.undercurls {
             undercurls.push(x, y, len, color);
         }

@@ -2936,7 +2936,7 @@ mod tests {
 
         let needle = format!(" {title} ");
         let mut buf = stoat.render();
-        let cmds = command::decode_stream(stoat.apc_scene.bytes());
+        let cmds = command::decode_stream(&stoat.apc_scene.all_bytes());
         apc::composite_scene(&mut buf, &cmds);
         let area = buf.area;
         (area.y..area.y + area.height).any(|y| {

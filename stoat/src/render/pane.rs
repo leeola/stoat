@@ -6,7 +6,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, Placement, View},
     render::{
-        chrome, commits,
+        chrome, commits, content_lane,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         paint::{dim_rgb, style_rgb},
@@ -16,6 +16,7 @@ use crate::{
         },
         review::{DiffColumns, DiffLayout},
         run_pane::render_run_pane,
+        status_lane,
         term_pane::render_term_pane,
         undercurl::UndercurlBatch,
         FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
@@ -209,6 +210,9 @@ pub(crate) fn render_pane(
 
     dim_unfocused_pane(content_area, is_focused, frame, buf);
 
+    // The status row changes with every cursor move, so it rides a lane of its
+    // own and a move leaves the content lane off the wire.
+    scene.set_lane(status_lane(pane.index));
     render_pane_status(
         &pane.view,
         is_focused,
@@ -221,6 +225,7 @@ pub(crate) fn render_pane(
         buf,
         scene,
     );
+    scene.set_lane(content_lane(pane.index));
 
     // An unfocused diff view draws no cursor, so only a focused one has a line
     // under edit for the bar to keep clear of.

@@ -13,7 +13,10 @@ use crate::{
     host::FsEventKind,
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
-    render::{hints::HintRow, review::DiffDials, walkthrough::Spotlight},
+    render::{
+        content_lane, hints::HintRow, pane::pane_areas, review::DiffDials, status_lane,
+        walkthrough::Spotlight,
+    },
     run::GridSelection,
     term_session::{TermSelection, TermSession},
     test_fixture::{
@@ -4642,7 +4645,7 @@ fn the_git_chord_marks_its_toggles() {
     h.stoat.paint_into(&mut buf, None);
     let rgb = |name| style_rgb(h.stoat.theme.get(name).fg).expect("the theme colors the mark");
     let (active, inactive) = (rgb(scope::UI_TOGGLE_ACTIVE), rgb(scope::UI_TOGGLE_INACTIVE));
-    let marks: Vec<(u16, [u8; 3])> = decode_stream(h.stoat.apc_scene.bytes())
+    let marks: Vec<(u16, [u8; 3])> = decode_stream(&h.stoat.apc_scene.all_bytes())
         .into_iter()
         .filter_map(|command| match command {
             Command::Bar(bar) if bar.width == 2 && bar.height < 16 => Some((bar.height, bar.color)),
@@ -4783,7 +4786,7 @@ fn select_mode_auto_shows_no_hints_box() {
 fn frame_scene(stoat: &mut Stoat) -> String {
     let mut buf = Buffer::empty(stoat.size());
     stoat.paint_into(&mut buf, None);
-    String::from_utf8_lossy(stoat.apc_scene.bytes()).into_owned()
+    String::from_utf8_lossy(&stoat.apc_scene.all_bytes()).into_owned()
 }
 
 /// The same paint with every spliceable frame dropped, which is the scene a
@@ -6123,7 +6126,7 @@ type FrameOutput = (Buffer, Vec<u8>, Vec<(u16, u16, u16, [u8; 3])>);
 
 fn frame_output(h: &mut crate::test_harness::TestHarness) -> FrameOutput {
     let buf = h.stoat.render();
-    let scene = h.stoat.apc_scene.bytes().to_vec();
+    let scene = h.stoat.apc_scene.all_bytes();
     let spans = h
         .stoat
         .pending_undercurls
@@ -6171,6 +6174,97 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
     assert_eq!(replayed.0, repainted.0, "the cells match");
     assert_eq!(replayed.1, repainted.1, "the scene bytes match");
     assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+}
+
+/// Render one frame and return each split pane's content lane and status
+/// lane, in pane order.
+fn pane_lanes(h: &mut crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
+    let _ = h.stoat.render();
+    let indices: Vec<u32> = h
+        .stoat
+        .active_workspace()
+        .panes
+        .split_panes()
+        .map(|(_, pane)| pane.index)
+        .collect();
+    indices
+        .into_iter()
+        .flat_map(|index| [content_lane(index), status_lane(index)])
+        .map(|lane| h.stoat.apc_scene.lane_bytes(lane).to_vec())
+        .collect()
+}
+
+/// A replayed pane puts its status row and its content back into their own
+/// lanes, so stoatty still receives only the lane that changed.
+///
+/// The test above reads the lanes end to end. A status slice replayed into
+/// the content lane beside it reads the same there, so this compares each
+/// lane by id.
+#[test]
+fn a_replayed_pane_keeps_its_status_and_content_lanes() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+
+    h.type_keys("i");
+    h.type_text("X");
+    h.settle();
+
+    let painted_before = h.stoat.pane_paints;
+    let replayed = pane_lanes(&mut h);
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        1,
+        "the other pane replayed"
+    );
+
+    h.stoat.pane_cache.clear();
+    let repainted = pane_lanes(&mut h);
+
+    assert!(
+        replayed.iter().all(|lane| !lane.is_empty()),
+        "both lanes of both panes hold components"
+    );
+    assert_eq!(
+        replayed, repainted,
+        "each lane holds what a repaint puts there"
+    );
+}
+
+/// A pane's status row rides a lane apart from the rest of the pane, so a
+/// cursor move resends the row alone.
+///
+/// The diff view draws its sides bar after the status row, so the pane has to
+/// return to its content lane once the row is done.
+#[test]
+fn a_pane_status_lane_holds_its_status_row_alone() {
+    let mut h = Stoat::test();
+    diff_pair(&mut h);
+    let _ = h.stoat.render();
+
+    // A run's row rides in sixteenths of a cell, so this reads the cell row.
+    let text_rows = |lane: u32| -> Vec<i16> {
+        command::decode_stream(h.stoat.apc_scene.lane_bytes(lane))
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                command::Command::TextRun(run) => Some(run.row.div_euclid(16)),
+                _ => None,
+            })
+            .collect()
+    };
+    for (_, pane) in h.stoat.active_workspace().panes.split_panes() {
+        let status_row = pane_areas(pane.area, None).1.y as i16;
+        let status_rows = text_rows(status_lane(pane.index));
+        let content_rows = text_rows(content_lane(pane.index));
+
+        assert!(
+            !status_rows.is_empty() && status_rows.iter().all(|row| *row == status_row),
+            "the status lane holds only the status row {status_row}, got {status_rows:?}"
+        );
+        assert!(
+            !content_rows.is_empty() && !content_rows.contains(&status_row),
+            "the content lane holds none of it, got {content_rows:?}"
+        );
+    }
 }
 
 /// A badge raised over an unfocused pane's status row moves that row's

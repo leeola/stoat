@@ -115,6 +115,14 @@ pub(crate) const TEXT_SCALE_COMPACT: u16 = if cfg!(test) { 256 } else { 160 };
 /// separate from scroll pools, so `u32::MAX` never collides.
 pub(crate) const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
 
+/// The scene lane for everything a frame draws after its split panes, such as
+/// the dividers, the docks, and every overlay from a hover card to a modal.
+///
+/// stoatty composes lanes in ascending id order, and a panel occludes only what
+/// was declared before it. An overlay therefore has to sit in a lane above
+/// every pane's to cover them, and the highest id stays above any pane index.
+pub(crate) const OVERLAY_LANE: u32 = u32::MAX;
+
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
@@ -1075,7 +1083,9 @@ pub(crate) fn frame(
             continue;
         }
 
-        let mark = pane_cache::PaintMark::take(scene, undercurls);
+        let lanes = [content_lane(pane.index), status_lane(pane.index)];
+        let mark = pane_cache::PaintMark::take(scene, lanes, undercurls);
+        scene.set_lane(lanes[0]);
         pane::render_pane(
             pane,
             is_focused,
@@ -1093,6 +1103,7 @@ pub(crate) fn frame(
             undercurls,
             &mut lsp_badge_rect,
         );
+        scene.end_lane();
         stoat.pane_paints += 1;
 
         if let Some(key) = key {
@@ -1104,6 +1115,7 @@ pub(crate) fn frame(
                 .capture_into(key, &[content, status], buf, scene, undercurls, mark);
         }
     }
+    scene.set_lane(OVERLAY_LANE);
     stoat.lsp_badge_rect = lsp_badge_rect;
     if lsp_badge_rect.is_none() {
         stoat.lsp_badge_hovered = false;
@@ -1723,6 +1735,23 @@ pub(crate) fn frame(
     if mode == "space_pane_display" {
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
     }
+    scene.end_lane();
+}
+
+/// The scene lane of a pane's content, which holds its gutter, its minimap
+/// strip, and the cards it pops out.
+///
+/// Each pane takes two lanes, so a cursor move that redraws only the status
+/// row sends only that row. Lane 0 stays below every pane for the tab bar, and
+/// [`OVERLAY_LANE`] above them.
+pub(crate) fn content_lane(pane_index: u32) -> u32 {
+    1 + 2 * pane_index
+}
+
+/// The scene lane of a pane's status row, which changes with every cursor move
+/// while the content beside it stands.
+pub(crate) fn status_lane(pane_index: u32) -> u32 {
+    2 + 2 * pane_index
 }
 
 /// The pane that a rebase, reword, or conflict screen paints over.
