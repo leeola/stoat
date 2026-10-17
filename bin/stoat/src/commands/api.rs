@@ -82,6 +82,16 @@ pub enum ApiCommand {
         #[arg(value_parser = range_text)]
         range: String,
     },
+    /// Run one action in the session, written as a key binding names it, such
+    /// as `MoveDown` or `SetMode("insert")`, and print the action's name.
+    ///
+    /// The action runs as a key bound to the same text runs it. An action the
+    /// editor does not know, or an argument that does not fit, prints an
+    /// error.
+    Act {
+        /// The action, with its arguments in parentheses when it takes any.
+        expr: String,
+    },
     /// The focused workspace, tab, pane, and modal, and the focused editor's
     /// file, cursor, and lines on screen.
     Focus {
@@ -163,6 +173,9 @@ enum QueryRequest {
         path: PathBuf,
         range: String,
     },
+    Act {
+        action: String,
+    },
 }
 
 /// One live session's answer to `session-info`.
@@ -220,6 +233,7 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
             path: cwd.join(path),
             range,
         },
+        ApiCommand::Act { expr } => QueryRequest::Act { action: expr },
         ApiCommand::Hook { name, values } => {
             let event = build_event(&name, &values)?;
             return send_event(&socket()?, &event);
@@ -595,6 +609,12 @@ mod tests {
                 range: "2:1-3:2".into(),
             }),
             r#"{"req":"goto","path":"/a.rs","range":"2:1-3:2"}"#
+        );
+        assert_eq!(
+            wire(&QueryRequest::Act {
+                action: "MoveDown".into(),
+            }),
+            r#"{"req":"act","action":"MoveDown"}"#
         );
     }
 

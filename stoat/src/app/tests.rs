@@ -24,6 +24,7 @@ use crate::{
 };
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::style::{Color, Modifier};
+use serde_json::Value;
 use std::{
     ops::Range,
     path::{Path, PathBuf},
@@ -14724,6 +14725,62 @@ fn agent_event_for_unknown_session_is_ignored() {
 
     assert_eq!(effect, UpdateEffect::None);
     assert!(h.stoat.active_workspace().agent.is_none());
+}
+
+/// Send `expr` as an `act` request, and return the effect and the reply.
+fn act(h: &mut crate::test_harness::TestHarness, expr: &str) -> (UpdateEffect, Value) {
+    let uid = h.stoat.active_workspace().uid;
+    let (reply, mut replies) = oneshot::channel();
+    let effect = h.stoat.handle_agent_control(AgentControl::Act {
+        uid,
+        expr: expr.to_string(),
+        reply,
+    });
+    (effect, replies.try_recv().expect("an act reply"))
+}
+
+#[test]
+fn act_runs_a_named_action() {
+    let mut h = Stoat::test();
+    h.seed_focused_buffer("abc\ndef\n");
+
+    let (effect, reply) = act(&mut h, "MoveDown");
+
+    let uid = h.stoat.active_workspace().uid;
+    let report = crate::session_report::selection(&h.stoat, uid, false);
+    assert_eq!(
+        (effect, reply, &report["selections"][0]["cursor"]),
+        (
+            UpdateEffect::Redraw,
+            json!({ "reply": "act", "action": "MoveDown" }),
+            &json!({ "line": 2, "col": 1 }),
+        ),
+    );
+}
+
+#[test]
+fn act_passes_arguments() {
+    let mut h = Stoat::test();
+
+    let (_, reply) = act(&mut h, "SetMode(\"insert\")");
+
+    assert_eq!(
+        (reply, h.stoat.focused_mode()),
+        (json!({ "reply": "act", "action": "SetMode" }), "insert"),
+    );
+}
+
+#[test]
+fn act_rejects_an_unknown_action() {
+    let mut h = Stoat::test();
+
+    assert_eq!(
+        act(&mut h, "NoSuchAction"),
+        (
+            UpdateEffect::None,
+            json!({ "error": "unknown action `NoSuchAction`" }),
+        ),
+    );
 }
 
 fn open_agent_editor(

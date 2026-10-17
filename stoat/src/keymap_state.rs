@@ -4,7 +4,7 @@ use crate::{
     buffer::BufferId,
     diagnostics::DiagnosticSet,
     editor_state::EditorState,
-    keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
+    keymap::{self, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     lsp::{registry::LspRegistry, LspSymbolKind},
     pane::{FocusTarget, View},
     rebase::RebasePause,
@@ -12,7 +12,7 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
-use stoat_action::Action;
+use stoat_action::{registry::RegistryEntry, Action};
 
 /// The predicate field names [`StoatKeymapState`] derives itself, which a
 /// `SetVar` user variable may not shadow.
@@ -821,27 +821,82 @@ pub(crate) fn resolve_action(
     captured: Option<f64>,
 ) -> Option<Box<dyn Action>> {
     let entry = stoat_action::registry::lookup(name)?;
-    let mut params = Vec::with_capacity(args.len());
-    for arg in args {
-        match arg_to_param_value(arg, captured) {
-            Some(value) => params.push(value),
-            None => {
-                tracing::warn!(
-                    target: "stoat::keymap",
-                    "action `{name}`: cannot convert arg {:?}",
-                    arg.value
-                );
-                return None;
-            },
-        }
-    }
-    match (entry.create)(&params) {
+    match build_action(entry, args, captured) {
         Ok(action) => Some(action),
-        Err(e) => {
-            tracing::warn!(target: "stoat::keymap", "action `{name}`: {e}");
+        Err(reason) => {
+            tracing::warn!(target: "stoat::keymap", "action `{name}`: {reason}");
             None
         },
     }
+}
+
+/// Build `entry`'s action from `args`, or say which argument does not fit.
+fn build_action(
+    entry: &RegistryEntry,
+    args: &[ResolvedArg],
+    captured: Option<f64>,
+) -> Result<Box<dyn Action>, String> {
+    let params = args
+        .iter()
+        .map(|arg| {
+            arg_to_param_value(arg, captured)
+                .ok_or_else(|| format!("cannot convert arg {:?}", arg.value))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    (entry.create)(&params).map_err(|error| error.to_string())
+}
+
+/// Parse `expr` as one action in the keymap grammar, and check that it runs.
+///
+/// The text is what the right side of a binding holds, such as `MoveDown` or
+/// `SetMode("insert")`. The error gives the reason a key bound to the text
+/// drops it. The reason is a parse error, an unknown action, an argument that
+/// does not fit, a `SetMode` with no mode name, or a `SetVar` that
+/// [`user_var`] refuses. A `$num` argument has no key press to take a digit
+/// from, so it does not fit.
+pub(crate) fn parse_bound_action(expr: &str) -> Result<ResolvedAction, String> {
+    let parsed = stoat_config::parse_action(expr).map_err(|errors| {
+        let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
+        format!("cannot parse `{expr}`: {}", messages.join("; "))
+    })?;
+    let action = keymap::resolve_config_action(&parsed);
+
+    match action.name.as_str() {
+        "SetMode" => {
+            if action.args.first().and_then(arg_as_str).is_none() {
+                return Err("SetMode names no mode".to_string());
+            }
+        },
+        "SetVar" => {
+            user_var(&action)?;
+        },
+        name => {
+            let Some(entry) = stoat_action::registry::lookup(name) else {
+                return Err(format!("unknown action `{name}`"));
+            };
+            build_action(entry, &action.args, None)
+                .map_err(|reason| format!("action `{name}`: {reason}"))?;
+        },
+    }
+    Ok(action)
+}
+
+/// The variable a `SetVar(name, value)` action sets, or why it sets none.
+///
+/// A name that collides with a built-in predicate field is refused, so a
+/// config typo never shadows a built-in. A value shape that no predicate
+/// compares against is refused too.
+pub(crate) fn user_var(action: &ResolvedAction) -> Result<(String, StateValue), String> {
+    let Some(name) = action.args.first().and_then(arg_as_str) else {
+        return Err("SetVar names no variable".to_string());
+    };
+    if BUILTIN_FIELDS.contains(&name.as_str()) {
+        return Err(format!("SetVar name `{name}` shadows a built-in field"));
+    }
+    let Some(value) = action.args.get(1).and_then(arg_to_state_value) else {
+        return Err(format!("SetVar `{name}` has no usable value"));
+    };
+    Ok((name, value))
 }
 
 #[cfg(test)]
@@ -1351,6 +1406,43 @@ mod tests {
         assert_eq!(
             binding_display_desc(&[set_mode("prefix_tab")]),
             "prefix_tab mode"
+        );
+    }
+
+    #[test]
+    fn a_bound_action_parses_or_names_why_a_key_drops_it() {
+        let checked = |expr: &str| parse_bound_action(expr).map(|action| action.name);
+
+        assert_eq!(
+            [
+                "MoveDown",
+                "SetMode(\"insert\")",
+                "SetVar(\"tour\", true)",
+                "NoSuchAction",
+                "RenameWorkspace()",
+                "MoveDown($num)",
+                "SetMode(1)",
+                "SetVar(\"mode\", 1)",
+                "SetVar(\"tour\")",
+                "MoveDown(",
+            ]
+            .map(checked),
+            [
+                Ok("MoveDown".to_string()),
+                Ok("SetMode".to_string()),
+                Ok("SetVar".to_string()),
+                Err("unknown action `NoSuchAction`".to_string()),
+                Err("action `RenameWorkspace`: missing required parameter `name`".to_string()),
+                Err("action `MoveDown`: cannot convert arg StateRef(\"num\")".to_string()),
+                Err("SetMode names no mode".to_string()),
+                Err("SetVar name `mode` shadows a built-in field".to_string()),
+                Err("SetVar `tour` has no usable value".to_string()),
+                Err(
+                    "cannot parse `MoveDown(`: expected any or '#' or '\"' or '-' or '[' \
+                     or '{' or '$' or ')', found end of input"
+                        .to_string()
+                ),
+            ],
         );
     }
 }

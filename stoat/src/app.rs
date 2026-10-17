@@ -7078,32 +7078,16 @@ impl Stoat {
 
     /// Apply a `SetVar(name, value)` action to [`Self::user_vars`].
     ///
-    /// A name colliding with a built-in predicate field, or a value shape no
-    /// predicate can compare against, warns and is dropped, so a config typo
-    /// cannot shadow a built-in or store an uncomparable value.
+    /// An action that [`keymap_state::user_var`] refuses warns and is dropped.
     fn set_user_var(&mut self, action: &ResolvedAction) {
-        let Some(name) = action.args.first().and_then(keymap_state::arg_as_str) else {
-            return;
-        };
-        if keymap_state::BUILTIN_FIELDS.contains(&name.as_str()) {
-            tracing::warn!(
-                target: "stoat::keymap",
-                "SetVar name `{name}` shadows a built-in field and was ignored"
-            );
-            return;
+        match keymap_state::user_var(action) {
+            Ok((name, value)) => {
+                self.user_vars.insert(name, value);
+            },
+            Err(reason) => {
+                tracing::warn!(target: "stoat::keymap", "{reason} and was ignored");
+            },
         }
-        let Some(value) = action
-            .args
-            .get(1)
-            .and_then(keymap_state::arg_to_state_value)
-        else {
-            tracing::warn!(
-                target: "stoat::keymap",
-                "SetVar `{name}` has no usable value and was ignored"
-            );
-            return;
-        };
-        self.user_vars.insert(name, value);
     }
 
     pub(crate) fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
@@ -8022,6 +8006,13 @@ impl Stoat {
     /// An [`AgentControl::Goto`] switches to the owning session the same way,
     /// then shows its file with the range selected, as
     /// [`crate::agent_goto::goto`] describes.
+    ///
+    /// An [`AgentControl::Act`] runs its action as a key bound to the text
+    /// runs it, through [`Self::run_bound_actions`]. It returns that run's
+    /// effect, raised to a redraw at least, because a request for another
+    /// session switches the active workspace. An action that
+    /// [`keymap_state::parse_bound_action`] refuses replies its reason and
+    /// changes nothing, not even the active workspace.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
             AgentControl::Open {
@@ -8165,6 +8156,30 @@ impl Stoat {
                 self.enter_agent_workspace(ws_id);
                 let _ = reply.send(crate::agent_goto::goto(self, &path, spec));
                 UpdateEffect::Redraw
+            },
+            AgentControl::Act { uid, expr, reply } => {
+                let Some(ws_id) = self
+                    .workspaces
+                    .iter()
+                    .find(|(_, ws)| ws.uid == uid)
+                    .map(|(id, _)| id)
+                else {
+                    let _ = reply.send(json!({ "error": "unknown session" }));
+                    return UpdateEffect::None;
+                };
+                let action = match keymap_state::parse_bound_action(&expr) {
+                    Ok(action) => action,
+                    Err(reason) => {
+                        let _ = reply.send(json!({ "error": reason }));
+                        return UpdateEffect::None;
+                    },
+                };
+
+                self.enter_agent_workspace(ws_id);
+                let name = action.name.clone();
+                let effect = self.run_bound_actions(&Arc::from([action]), None, false);
+                let _ = reply.send(json!({ "reply": "act", "action": name }));
+                effect.merge(UpdateEffect::Redraw)
             },
             AgentControl::ClientGone { uid, client } => {
                 let Some((id, ws)) = self.workspaces.iter_mut().find(|(_, ws)| ws.uid == uid)

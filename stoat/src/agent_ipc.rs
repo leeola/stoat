@@ -10,7 +10,8 @@
 //! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
 //! rides [`AgentControl`] and expects a reply. A query answers with live
 //! session state. `goto` shows a file with a range selected and on screen,
-//! and answers with the range it selected.
+//! and answers with the range it selected. `act` runs one action written as a
+//! key binding names it, and answers with the action's name.
 //!
 //! `open` opens files in front of the terminal pane the caller runs in, which
 //! is what makes a `stoat <file>` inside a pane reach the instance hosting it.
@@ -134,14 +135,24 @@ pub enum AgentControl {
         spec: RangeSpec,
         reply: oneshot::Sender<Value>,
     },
+    /// Run `expr`, one action in the keymap grammar, in the session's
+    /// workspace, and fire `reply` with the action's name or an error.
+    ///
+    /// The action runs as a key bound to the same text runs it. See
+    /// [`Stoat::handle_agent_control`] for the run and its effect.
+    Act {
+        uid: WorkspaceUid,
+        expr: String,
+        reply: oneshot::Sender<Value>,
+    },
 }
 
 /// A read-only interrogation of live session state, answered by the event loop.
 ///
 /// Separate from the [`AgentRequest`] wire form so the control channel carries
-/// only genuine queries. The `open` and `goto` requests drive the editor
-/// through [`AgentControl::Open`] and [`AgentControl::Goto`] and never appear
-/// here.
+/// only genuine queries. The `open`, `goto`, and `act` requests drive the
+/// editor through [`AgentControl::Open`], [`AgentControl::Goto`], and
+/// [`AgentControl::Act`] and never appear here.
 #[derive(Debug, PartialEq)]
 pub enum AgentQuery {
     /// LSP host liveness, plus each server's name, process id, and serialized
@@ -224,6 +235,9 @@ enum AgentRequest {
     /// connection parses it, so a range that does not parse costs the event
     /// loop nothing.
     Goto { path: PathBuf, range: String },
+    /// `{"req":"act","action":"MoveDown"}` or
+    /// `{"req":"act","action":"SetMode(\"insert\")"}`.
+    Act { action: String },
 }
 
 /// The socket file a hook server bound, removed when the server stops.
@@ -437,6 +451,18 @@ async fn serve_connection<R>(
                             write_json_line(&mut write_half, &refused).await
                         },
                     };
+                    if !reads_on {
+                        return;
+                    }
+                    continue;
+                },
+                AgentRequest::Act { action } => {
+                    let reads_on = relay(control_tx, &mut write_half, |reply| AgentControl::Act {
+                        uid,
+                        expr: action,
+                        reply,
+                    })
+                    .await;
                     if !reads_on {
                         return;
                     }
@@ -1868,6 +1894,32 @@ mod tests {
                 RangeSpec::Lines { start: 2, end: 2 },
                 json!({ "reply": "goto" }),
             ),
+        );
+
+        drop(client_write);
+        drop(replies);
+        conn.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_act_request_routes_its_text_and_relays_the_reply() {
+        let (client, mut controls, conn) = serve_duplex(WorkspaceUid(9));
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+
+        client_write
+            .write_all(b"{\"req\":\"act\",\"action\":\"SetMode(\\\"insert\\\")\"}\n")
+            .await
+            .unwrap();
+        let Some(AgentControl::Act { uid, expr, reply }) = controls.recv().await else {
+            panic!("expected an act control message");
+        };
+        let answer = json!({ "reply": "act", "action": "SetMode" });
+        reply.send(answer.clone()).unwrap();
+
+        assert_eq!(
+            (uid, expr, next_reply(&mut replies).await),
+            (WorkspaceUid(9), "SetMode(\"insert\")".to_string(), answer),
         );
 
         drop(client_write);
