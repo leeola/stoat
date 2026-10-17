@@ -24,6 +24,7 @@ use crate::{
 use bar::decode_bar;
 use border::decode_border;
 use icon::decode_icon;
+use lane::decode_lane_begin;
 use line_layout::decode_line_layout;
 use minimap::{
     decode_minimap, decode_minimap_drop, decode_minimap_lines, decode_minimap_runs,
@@ -47,6 +48,7 @@ use window::{decode_window_close, decode_window_focus, decode_window_open};
 pub mod bar;
 pub mod border;
 pub mod icon;
+pub mod lane;
 pub mod line_layout;
 pub mod minimap;
 pub mod panel;
@@ -63,6 +65,7 @@ pub mod window;
 pub use bar::{encode_bar, encode_bar_into, BarCommand};
 pub use border::{encode_border, encode_border_into, BorderCommand, BorderStyle};
 pub use icon::{encode_icon, encode_icon_into, IconCommand, IconKind};
+pub use lane::{encode_lane_begin, encode_lane_begin_into, encode_lane_end, encode_lane_end_into};
 pub use line_layout::{encode_line_layout, encode_line_layout_into, LineLayoutCommand};
 pub use minimap::{
     encode_minimap, encode_minimap_drop, encode_minimap_drop_into, encode_minimap_into,
@@ -246,6 +249,16 @@ pub enum Command {
     /// Clear all accumulated stoatty decoration state, so the program can redraw
     /// its scene from scratch. Carries no payload.
     Reset,
+    /// Open a numbered decoration lane and clear the decorations it already
+    /// holds.
+    ///
+    /// The decorations that follow belong to the lane until [`Command::LaneEnd`],
+    /// so an emitter re-declares one lane and the other lanes keep theirs.
+    /// [`lane`] has the full rules.
+    LaneBegin(u32),
+    /// Close the lane that [`Command::LaneBegin`] opened, so the decorations
+    /// that follow belong to lane 0. Carries no payload.
+    LaneEnd,
     /// The terminal's own config file changed on disk, so it should re-read and
     /// re-apply it. Carries no payload: the terminal reads the file itself, and
     /// the program that sends this is only reporting that it wrote it.
@@ -428,6 +441,8 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::WindowClose(c) => encode_window_close_into(out, c),
         Command::WindowFocus(c) => encode_window_focus_into(out, c),
         Command::Reset => encode_reset_into(out),
+        Command::LaneBegin(id) => encode_lane_begin_into(out, *id),
+        Command::LaneEnd => encode_lane_end_into(out),
         Command::ConfigReload => encode_config_reload_into(out),
         Command::ZoomCapture { on, inband } => encode_zoom_capture_into(out, *on, *inband),
         Command::FontStep { delta } => encode_font_step_into(out, *delta),
@@ -483,6 +498,8 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "window_close" => decode_window_close(args).map(Command::WindowClose),
         "window_focus" => decode_window_focus(args).map(Command::WindowFocus),
         "reset" => Some(Command::Reset),
+        "lane_begin" => decode_lane_begin(args).map(Command::LaneBegin),
+        "lane_end" => Some(Command::LaneEnd),
         "config_reload" => Some(Command::ConfigReload),
         "zoom_capture" => decode_zoom_capture(args),
         "font_step" => decode_font_step(args),
@@ -648,6 +665,7 @@ mod tests {
                 "minimap_drop",
                 encode_minimap_drop(&MinimapDropCommand { content_id: 1 }),
             ),
+            ("lane_begin", encode_lane_begin(1)),
             // A popover's encoding is an open marker, its streamed content, and
             // a close marker, so only the opening frame is a decodable one.
             (
@@ -1167,6 +1185,8 @@ mod tests {
             }),
             Command::MinimapDrop(MinimapDropCommand { content_id: 9 }),
             Command::Reset,
+            Command::LaneBegin(7),
+            Command::LaneEnd,
         ];
 
         for command in commands {

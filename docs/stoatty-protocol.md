@@ -161,6 +161,8 @@ session control. "Head" is the fixed prefix of the first argument.
 | `window_close` | P | 4 B | |
 | `window_focus` | P | 4 B | |
 | `reset` | C | -- | Clears every decoration |
+| `lane_begin` | C | 4 B | Opens a numbered lane and clears its decorations |
+| `lane_end` | C | -- | Closes the open lane |
 | `config_reload` | C | -- | The terminal re-reads its own config file |
 | `zoom_capture` | C | 1 B | Claim or release the platform zoom combo |
 | `font_step` | C | 4 B | Step the terminal's font size |
@@ -189,6 +191,15 @@ by dim / 255, so a program fades an unfocused pane and keeps its pages as they
 are. A re-declare that changes only the dim keeps the pool's pages. A terminal
 below version 11 ignores the byte, so send such a terminal pages with the fade
 in their cells.
+
+From protocol version 12, `lane_begin` and `lane_end` split the decorations
+into numbered lanes. Each decoration between the two markers belongs to the
+lane that `lane_begin` names, and a decoration outside any lane belongs to
+lane 0. A `lane_begin` clears the decorations its lane holds and leaves the
+other lanes alone. An emitter thus re-declares only the lane that changed, with
+no `reset` and no re-send of the whole scene. Lanes do not nest, and a `reset`
+still clears every lane. A terminal below version 12 ignores both markers, so
+send lanes only to a terminal at version 12 or later.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

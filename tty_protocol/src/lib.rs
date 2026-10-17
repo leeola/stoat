@@ -94,9 +94,15 @@
 /// ignores the byte, so an emitter bakes the fade into the pages it sends to a
 /// terminal before version 11.
 ///
+/// Version 12 reads `lane_begin` and `lane_end`, which split the decorations
+/// into numbered lanes. A re-declared lane replaces only its own decorations,
+/// so an emitter re-sends the lane that changed rather than a reset and the
+/// whole scene. A terminal that predates it ignores both markers, so an
+/// emitter opens lanes only for a terminal at version 12 or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 pub mod command;
 pub mod detect;

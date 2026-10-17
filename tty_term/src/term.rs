@@ -1824,6 +1824,11 @@ impl Terminal {
                 self.commit_capture();
                 self.stage_or_apply(Command::Reset);
             },
+            // FIXME: Stoatty keeps one decoration list for all lanes and ignores
+            // the markers, so a re-declared lane adds to its earlier decorations
+            // instead of replacing them. The handshake still announces
+            // protocol 12.
+            Command::LaneBegin(_) | Command::LaneEnd => {},
             // Hello identifies the program behind the terminal and touches no
             // grid state. The host logs the event, and the terminal answers with
             // its own ident when one is installed.
@@ -2172,6 +2177,8 @@ impl Terminal {
             | Command::ConfigReload
             | Command::ZoomCapture { .. }
             | Command::FontStep { .. }
+            | Command::LaneBegin(_)
+            | Command::LaneEnd
             | Command::Kitty(_)
             | Command::ItermFile(_) => {},
         }
