@@ -1283,6 +1283,9 @@ impl DisplaySnapshot {
             one: &resolve,
             many: &resolve_batch,
         };
+        let edits = cache
+            .as_ref()
+            .map(|cached| buffer.edits_since(cached.versions.buffer));
         highlights::create_highlight_endpoints_cached(
             HighlightVersions {
                 buffer: buffer.version(),
@@ -1293,6 +1296,7 @@ impl DisplaySnapshot {
             semantic_ref,
             lsp_ref,
             &resolver,
+            edits.as_ref(),
             cache,
         )
     }

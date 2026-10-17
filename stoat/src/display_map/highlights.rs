@@ -1,6 +1,7 @@
 use crate::{
     buffer::BufferId,
     display_map::{
+        fold_map,
         inlay_map::{InlayId, InlayKind},
         DiagnosticSeverity,
     },
@@ -8,11 +9,11 @@ use crate::{
 use ratatui::style::{Color, Modifier, Style};
 use std::{
     borrow::Cow,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ops::{Deref, Range},
     sync::Arc,
 };
-use stoat_text::{Anchor, ChunksInRange, Rope};
+use stoat_text::{patch::Patch, Anchor, ChunksInRange, Rope};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HighlightStyle {
@@ -770,7 +771,7 @@ const MAX_PAD: usize = 16 * 1024;
 /// Visible-range highlight endpoints memoized across repaints.
 #[derive(Clone, Debug)]
 pub struct CachedHighlightEndpoints {
-    versions: HighlightVersions,
+    pub(super) versions: HighlightVersions,
     text_ptr: usize,
     semantic_ptr: Option<usize>,
     lsp_ptr: Option<usize>,
@@ -814,6 +815,11 @@ pub struct AnchorResolver<'a> {
 /// The endpoints for `range`, answered from `cache` while its window holds the
 /// range and its versions and highlight sets are current.
 ///
+/// A cache that only the buffer moved past is first carried across `edits`,
+/// the patch since its buffer version, so the frame that shows a typed
+/// character builds no endpoints. The carry declines when a highlight set
+/// moved or an edit reaches the window's edge, and the miss builds as below.
+///
 /// A padded window costs a few exact builds, so only a scroll builds one. A
 /// scroll is a miss on current versions whose range overlaps the window. Its
 /// window reaches half the range's length past each end, up to [`MAX_PAD`], so
@@ -821,7 +827,8 @@ pub struct AnchorResolver<'a> {
 /// its length.
 ///
 /// Any other miss builds the exact range. A jump gives no sign that a scroll
-/// follows, and a change to the text or the highlights arrives on every key.
+/// follows, and a change to the highlights arrives on every key.
+#[allow(clippy::too_many_arguments)]
 pub fn create_highlight_endpoints_cached(
     versions: HighlightVersions,
     range: &Range<usize>,
@@ -829,8 +836,21 @@ pub fn create_highlight_endpoints_cached(
     semantic_highlights: Option<&SemanticTokensHighlights>,
     lsp_highlights: Option<&SemanticTokensHighlights>,
     resolver: &AnchorResolver<'_>,
+    edits: Option<&Patch<usize>>,
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<HighlightEndpoints> {
+    if let Some(edits) = edits {
+        carry_cache(
+            cache,
+            versions,
+            highlights,
+            semantic_highlights,
+            lsp_highlights,
+            resolver,
+            edits,
+        );
+    }
+
     let current = cache
         .as_ref()
         .filter(|cached| cached.current(versions, highlights, semantic_highlights, lsp_highlights));
@@ -867,6 +887,166 @@ pub fn create_highlight_endpoints_cached(
         endpoints: arc.clone(),
     });
     arc
+}
+
+/// Bring `cache` to `versions` across `edits` when the buffer is all that moved
+/// since the cache was built.
+///
+/// Leaves the cache stale, for the hit test to refuse, when a highlight set
+/// moved, when an edit touches either end of the window, or when an edit
+/// touches an endpoint whose anchor no token names. An edit at the window's
+/// edge moves ranges across that edge, which only a build sees.
+///
+/// Text that an undo brings back holds the anchors it had before its removal.
+/// A pair that left the window when the text went does not come back with it,
+/// so it paints unstyled until the next parse installs a token set and the
+/// window is built again.
+fn carry_cache(
+    cache: &mut Option<CachedHighlightEndpoints>,
+    versions: HighlightVersions,
+    highlights: &TextHighlights,
+    semantic: Option<&SemanticTokensHighlights>,
+    lsp: Option<&SemanticTokensHighlights>,
+    resolver: &AnchorResolver<'_>,
+    edits: &Patch<usize>,
+) {
+    let Some(cached) = cache.as_mut() else {
+        return;
+    };
+    let only_the_buffer_moved = cached.versions.buffer < versions.buffer
+        && cached.current(
+            HighlightVersions {
+                buffer: cached.versions.buffer,
+                ..versions
+            },
+            highlights,
+            semantic,
+            lsp,
+        );
+    // A text highlight on a token layer has a slot that names no token.
+    let slots_name_tokens = !highlights.keys().any(|key| {
+        matches!(
+            key.layer,
+            HighlightLayer::SemanticToken | HighlightLayer::LspSemanticToken
+        )
+    });
+    let window = cached.range.clone();
+    let inside_or_apart = edits.edits().iter().all(|edit| {
+        edit.old.end < window.start
+            || window.end < edit.old.start
+            || (window.start < edit.old.start && edit.old.end < window.end)
+    });
+    if !(only_the_buffer_moved && slots_name_tokens && inside_or_apart) {
+        return;
+    }
+    let Some(endpoints) = carry_endpoints(&cached.endpoints, edits, semantic, lsp, resolver) else {
+        return;
+    };
+
+    let mut bounds = [window.start, window.end];
+    fold_map::carry_offsets(&mut bounds, &mut [false; 2], edits);
+    cached.versions = versions;
+    cached.range = bounds[0]..bounds[1];
+    cached.endpoints = HighlightEndpoints::shared(endpoints);
+}
+
+/// `endpoints` as they lie after `edits`, or `None` when an edit touches an
+/// endpoint whose anchor no token names.
+///
+/// An endpoint that no edit touches shifts by the edits before it. One that an
+/// edit touches is resolved from its anchor, because its bias decides which
+/// side of new text it falls on, and the buffer puts new text ahead of the
+/// fragments deleted where it lands. A pair the edits left empty goes, the way
+/// a fresh build skips an empty range.
+fn carry_endpoints(
+    endpoints: &[HighlightEndpoint],
+    edits: &Patch<usize>,
+    semantic: Option<&SemanticTokensHighlights>,
+    lsp: Option<&SemanticTokensHighlights>,
+    resolver: &AnchorResolver<'_>,
+) -> Option<Vec<HighlightEndpoint>> {
+    let mut offsets: Vec<usize> = endpoints.iter().map(|endpoint| endpoint.offset).collect();
+    let mut flags = vec![false; offsets.len()];
+    fold_map::carry_offsets(&mut offsets, &mut flags, edits);
+
+    let touched: Vec<usize> = flags
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &flag)| flag.then_some(index))
+        .collect();
+    let anchors = touched
+        .iter()
+        .map(|&index| endpoint_anchor(&endpoints[index], semantic, lsp))
+        .collect::<Option<Vec<Anchor>>>()?;
+    for (&index, offset) in touched.iter().zip((resolver.many)(&anchors)) {
+        offsets[index] = offset;
+    }
+
+    // An edit empties a pair only by reaching across all of it, so both of its
+    // endpoints are among the touched ones.
+    let touched_starts: HashMap<HighlightKey, usize> = touched
+        .iter()
+        .filter(|&&index| endpoints[index].is_start)
+        .map(|&index| (endpoints[index].key, offsets[index]))
+        .collect();
+    let emptied: HashSet<HighlightKey> = touched
+        .iter()
+        .filter(|&&index| {
+            !endpoints[index].is_start
+                && touched_starts.get(&endpoints[index].key) == Some(&offsets[index])
+        })
+        .map(|&index| endpoints[index].key)
+        .collect();
+
+    let mut carried: Vec<HighlightEndpoint> = endpoints
+        .iter()
+        .zip(offsets)
+        .filter(|(endpoint, _)| !emptied.contains(&endpoint.key))
+        .map(|(endpoint, offset)| HighlightEndpoint {
+            offset,
+            ..endpoint.clone()
+        })
+        .collect();
+    if touched.is_empty() {
+        debug_assert!(
+            carried.is_sorted(),
+            "a carry that resolves nothing keeps the order"
+        );
+    } else {
+        carried.sort();
+    }
+    Some(carried)
+}
+
+/// The anchor `endpoint` was resolved from, when its slot names one.
+///
+/// A token endpoint's slot is the token's index in its channel, which names the
+/// token only while its layer holds one channel, as a singleton buffer's does.
+/// A text highlight endpoint names no anchor.
+fn endpoint_anchor(
+    endpoint: &HighlightEndpoint,
+    semantic: Option<&SemanticTokensHighlights>,
+    lsp: Option<&SemanticTokensHighlights>,
+) -> Option<Anchor> {
+    let channels = match endpoint.key.layer {
+        HighlightLayer::SemanticToken => semantic?,
+        HighlightLayer::LspSemanticToken => lsp?,
+        _ => return None,
+    };
+    let mut values = channels.values();
+    let (Some(channel), None) = (values.next(), values.next()) else {
+        return None;
+    };
+
+    let index = endpoint.key.slot as usize;
+    (index < channel.len()).then(|| {
+        let range = &channel.token(index).range;
+        if endpoint.is_start {
+            range.start
+        } else {
+            range.end
+        }
+    })
 }
 
 /// Build the endpoint list for `range`.
@@ -1583,7 +1763,7 @@ mod tests {
             many: &resolve_batch,
         };
         create_highlight_endpoints_cached(
-            versions, &range, highlights, None, None, &resolver, cache,
+            versions, &range, highlights, None, None, &resolver, None, cache,
         )
     }
 
@@ -2370,5 +2550,281 @@ mod tests {
         let chunks: Vec<_> = highlighted_chunks(text, 0, &endpoints).collect();
         let joined: String = chunks.iter().map(|c| c.text).collect();
         assert_eq!(joined, text);
+    }
+
+    /// A cached window carried across real buffer edits, checked against a
+    /// fresh build of the same window after each one.
+    mod carry {
+        use crate::{
+            buffer::{BufferId, SharedBuffer, TextBuffer},
+            display_map::{
+                highlights::{
+                    create_highlight_endpoints, create_highlight_endpoints_cached, AnchorResolver,
+                    BufferSemanticTokens, CachedHighlightEndpoints, HighlightEndpoint,
+                    HighlightStyle, HighlightStyleInterner, HighlightVersions,
+                    SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
+                },
+                sampler::Sampler,
+            },
+            multi_buffer::MultiBuffer,
+        };
+        use ratatui::style::Color;
+        use std::{
+            cell::Cell,
+            cmp::Reverse,
+            collections::HashMap,
+            ops::Range,
+            sync::{Arc, RwLock},
+        };
+        use stoat_text::{Anchor, Bias};
+
+        const TEXT: &str = "fn main() {\n    let alpha = beta;\n    let gamma = alpha + 1;\n}\n";
+
+        /// A buffer with one tree-sitter token per word and per punctuation
+        /// byte, and one over the braces that encloses the rest, anchored the
+        /// way a parse anchors them.
+        struct Fixture {
+            shared: SharedBuffer,
+            multi: MultiBuffer,
+            text_highlights: TextHighlights,
+            semantic: SemanticTokensHighlights,
+        }
+
+        impl Fixture {
+            fn new() -> Self {
+                let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), TEXT)));
+                let multi = MultiBuffer::singleton(shared.clone());
+                let snap = multi.snapshot();
+
+                let mut interner = HighlightStyleInterner::default();
+                let style = interner.intern(HighlightStyle {
+                    foreground: Some(Color::Blue),
+                    ..Default::default()
+                });
+                let tokens: Arc<[SemanticTokenHighlight]> = token_ranges(TEXT)
+                    .into_iter()
+                    .map(|range| SemanticTokenHighlight {
+                        range: snap.anchor_at(range.start, Bias::Right)
+                            ..snap.anchor_at(range.end, Bias::Left),
+                        style,
+                    })
+                    .collect();
+                let channel =
+                    BufferSemanticTokens::new(tokens, Arc::new(interner), |a: &Anchor| {
+                        snap.resolve_anchor(a)
+                    });
+
+                Self {
+                    shared,
+                    multi,
+                    text_highlights: Arc::new(HashMap::new()),
+                    semantic: Arc::new(HashMap::from([(BufferId::new(0), channel)])),
+                }
+            }
+
+            /// Ask `cache` for the whole buffer with the edits since its
+            /// version, and report whether a bounds search ran, which only a
+            /// build does.
+            fn ask(&self, cache: &mut Option<CachedHighlightEndpoints>) -> bool {
+                let snap = self.multi.snapshot();
+                let edits = cache
+                    .as_ref()
+                    .map(|cached| snap.edits_since(cached.versions.buffer));
+                let searches = Cell::new(0);
+                let resolve = |a: &Anchor| {
+                    searches.set(searches.get() + 1);
+                    snap.resolve_anchor(a)
+                };
+                let resolve_batch = |a: &[Anchor]| snap.resolve_anchors_batch(a);
+                create_highlight_endpoints_cached(
+                    HighlightVersions {
+                        buffer: snap.version(),
+                        settings: 1,
+                    },
+                    &(0..snap.rope().len()),
+                    &self.text_highlights,
+                    Some(&self.semantic),
+                    None,
+                    &AnchorResolver {
+                        one: &resolve,
+                        many: &resolve_batch,
+                    },
+                    edits.as_ref(),
+                    cache,
+                );
+                searches.get() > 0
+            }
+
+            /// The endpoints a fresh build gives for the whole buffer.
+            fn fresh(&self) -> Vec<HighlightEndpoint> {
+                let snap = self.multi.snapshot();
+                let resolve = |a: &Anchor| snap.resolve_anchor(a);
+                let resolve_batch = |a: &[Anchor]| snap.resolve_anchors_batch(a);
+                create_highlight_endpoints(
+                    &(0..snap.rope().len()),
+                    &self.text_highlights,
+                    Some(&self.semantic),
+                    None,
+                    &AnchorResolver {
+                        one: &resolve,
+                        many: &resolve_batch,
+                    },
+                )
+            }
+
+            /// Replace `range` with `text`, then assert that `cache` carries
+            /// across the edit, with no bounds search, to the window and the
+            /// endpoints a fresh build gives.
+            fn edit_and_carry(
+                &self,
+                cache: &mut Option<CachedHighlightEndpoints>,
+                range: Range<usize>,
+                text: &str,
+                label: &str,
+            ) {
+                self.shared.write().expect("poisoned").edit(range, text);
+                let searched = self.ask(cache);
+                let len = self.multi.snapshot().rope().len();
+                let cached = cache.as_ref().expect("a cache");
+                assert_eq!(
+                    (searched, cached.range.clone(), cached.endpoints.to_vec()),
+                    (false, 0..len, self.fresh()),
+                    "{label}",
+                );
+            }
+        }
+
+        fn token_ranges(text: &str) -> Vec<Range<usize>> {
+            let bytes = text.as_bytes();
+            let mut ranges = Vec::new();
+            ranges.push(text.find('{').expect("braces")..text.rfind('}').expect("braces") + 1);
+            let mut at = 0;
+            while at < bytes.len() {
+                let start = at;
+                if bytes[at].is_ascii_alphanumeric() {
+                    while at < bytes.len() && bytes[at].is_ascii_alphanumeric() {
+                        at += 1;
+                    }
+                    ranges.push(start..at);
+                    continue;
+                }
+                if bytes[at].is_ascii_punctuation() {
+                    ranges.push(start..start + 1);
+                }
+                at += 1;
+            }
+            ranges.sort_by_key(|range| (range.start, Reverse(range.end)));
+            ranges
+        }
+
+        /// A cache over the whole buffer, built fresh.
+        fn built(fixture: &Fixture) -> Option<CachedHighlightEndpoints> {
+            let mut cache = None;
+            fixture.ask(&mut cache);
+            cache
+        }
+
+        #[test]
+        fn an_insertion_carries_the_window_to_a_fresh_build() {
+            let indent = TEXT.find("    let").expect("fixture") + 2;
+            let alpha = TEXT.find("alpha").expect("fixture");
+            for (at, label) in [
+                (indent, "before every token of the line"),
+                (alpha + 2, "inside a token"),
+                (alpha, "at a token's start"),
+                (alpha + 5, "at a token's end"),
+            ] {
+                let fixture = Fixture::new();
+                let mut cache = built(&fixture);
+                fixture.edit_and_carry(&mut cache, at..at, "xy", label);
+            }
+        }
+
+        #[test]
+        fn a_deletion_that_swallows_a_token_drops_its_pair() {
+            let fixture = Fixture::new();
+            let mut cache = built(&fixture);
+            let plus = TEXT.find('+').expect("fixture");
+            fixture.edit_and_carry(&mut cache, plus..plus + 1, "", "the + token");
+
+            let gamma = TEXT.find("gamma").expect("fixture");
+            fixture.edit_and_carry(&mut cache, gamma..gamma + 8, "", "gamma, = and both spaces");
+        }
+
+        /// A deletion of the closing brace lands the end of the token before
+        /// it and the end of the token the braces enclose on one offset. Their
+        /// old order is the reverse of their key order, so the carry must sort
+        /// them again.
+        #[test]
+        fn a_deletion_that_lands_two_ends_on_one_offset_sorts_them() {
+            let fixture = Fixture::new();
+            let mut cache = built(&fixture);
+            let brace = TEXT.rfind('}').expect("fixture");
+            fixture.edit_and_carry(
+                &mut cache,
+                brace - 1..brace + 1,
+                "",
+                "the brace and the break before it",
+            );
+        }
+
+        /// A backspace leaves the byte it removed behind at the cursor, and text
+        /// typed there goes ahead of it. A token end anchored to that byte then
+        /// lands past the new text, which only its anchor knows.
+        #[test]
+        fn typing_after_a_backspace_carries_the_end_the_removed_byte_held() {
+            let fixture = Fixture::new();
+            let mut cache = built(&fixture);
+            let end = TEXT.find("beta").expect("fixture") + 4;
+            fixture.edit_and_carry(
+                &mut cache,
+                end - 1..end,
+                "",
+                "backspace over beta's last byte",
+            );
+            fixture.edit_and_carry(&mut cache, end - 1..end - 1, "z", "typing where it was");
+        }
+
+        #[test]
+        fn a_window_carried_across_random_edits_matches_a_fresh_build() {
+            for seed in 1..=4 {
+                let fixture = Fixture::new();
+                let mut cache = built(&fixture);
+                let mut sampler = Sampler::new(seed);
+                for step in 0..10 {
+                    // Inside the window, which spans the buffer, and clear of
+                    // both of its ends.
+                    let len = fixture.multi.snapshot().rope().len() as u32;
+                    let start = 1 + sampler.below(len - 2);
+                    let end = (start + sampler.below(4)).min(len - 1);
+                    let text: String = (0..sampler.below(3))
+                        .map(|_| char::from(b'a' + sampler.below(26) as u8))
+                        .collect();
+                    fixture.edit_and_carry(
+                        &mut cache,
+                        start as usize..end as usize,
+                        &text,
+                        &format!("seed {seed} step {step}"),
+                    );
+                }
+            }
+        }
+
+        /// An edit at the window's edge moves ranges across that edge, so the
+        /// cache builds the window again instead of carrying it.
+        #[test]
+        fn an_edit_at_the_window_edge_builds_the_window_again() {
+            let fixture = Fixture::new();
+            let mut cache = built(&fixture);
+            fixture.shared.write().expect("poisoned").edit(0..0, "//");
+
+            let searched = fixture.ask(&mut cache);
+            let cached = cache.as_ref().expect("a cache");
+            assert_eq!(
+                (searched, cached.endpoints.to_vec()),
+                (true, fixture.fresh()),
+                "an insertion at the window's start",
+            );
+        }
     }
 }
