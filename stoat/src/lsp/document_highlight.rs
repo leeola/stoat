@@ -158,13 +158,17 @@ fn convert_document_highlights(
     rope: &Rope,
     encoding: OffsetEncoding,
 ) -> Vec<(std::ops::Range<usize>, bool)> {
+    let endpoints: Vec<_> = highlights
+        .iter()
+        .flat_map(|hl| [hl.range.start, hl.range.end])
+        .collect();
+    let offsets = util::lsp_positions_to_byte_offsets_batch(rope, &endpoints, encoding);
     highlights
-        .into_iter()
-        .map(|hl| {
-            let start = util::lsp_pos_to_byte_offset(rope, hl.range.start, encoding);
-            let end = util::lsp_pos_to_byte_offset(rope, hl.range.end, encoding);
+        .iter()
+        .zip(offsets.as_chunks::<2>().0)
+        .map(|(hl, pair)| {
             let is_write = hl.kind == Some(DocumentHighlightKind::WRITE);
-            (start..end, is_write)
+            (pair[0]..pair[1], is_write)
         })
         .collect()
 }

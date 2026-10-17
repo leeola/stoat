@@ -51,6 +51,12 @@ const URI_PATH_ILLEGAL: &AsciiSet = &CONTROLS
     .add(b'|')
     .add(b'}');
 
+/// The most rows without a position that the batch conversion steps over.
+///
+/// A longer gap restarts the walk with a descent. A step over one row costs
+/// about a twentieth of a restart, which takes three tree descents.
+const MAX_STEPPED_ROWS: u32 = 20;
+
 /// Percent-encode `path` for the path component of a `file:` URI.
 ///
 /// Without this a path holding a space or any non-ASCII character makes a
@@ -107,20 +113,99 @@ pub fn lsp_pos_to_byte_offset(rope: &Rope, pos: Position, encoding: OffsetEncodi
 
 /// Convert LSP [`Position`]s to byte offsets in `rope`, in the input order.
 ///
-/// Each position is converted through [`lsp_pos_to_byte_offset`], so the cost
-/// is proportional to how many positions arrived rather than to the size of the
-/// buffer. This walked one character cursor from the start of the rope instead,
-/// which beat seeking back when a seek cost more than it does now, but meant a
-/// handful of hints near the end of a large buffer decoded all of it to arrive.
+/// Each answer is what [`lsp_pos_to_byte_offset`] gives for the same position.
+/// The conversion answers the positions in line order from one forward walk
+/// over the rows they name. A token stream therefore costs about one pass over
+/// its rows rather than a descent per token. A row far past the one before it
+/// restarts the walk, so a few positions spread over a large buffer cost a
+/// restart each, not a pass over all of it.
 pub fn lsp_positions_to_byte_offsets_batch(
     rope: &Rope,
     positions: &[Position],
     encoding: OffsetEncoding,
 ) -> Vec<usize> {
-    positions
-        .iter()
-        .map(|&pos| lsp_pos_to_byte_offset(rope, pos, encoding))
-        .collect()
+    let key = |pos: &Position| (pos.line, pos.character);
+    let mut order: Vec<usize> = (0..positions.len()).collect();
+    if !positions.is_sorted_by_key(key) {
+        order.sort_unstable_by_key(|&index| key(&positions[index]));
+    }
+
+    let mut offsets = vec![0; positions.len()];
+    let mut text = String::new();
+    let mut walk = None;
+    for run in order.chunk_by(|&a, &b| positions[a].line == positions[b].line) {
+        let row = positions[run[0]].line;
+        let (mut rows, next_row, mut start) = match walk.take() {
+            Some((rows, next_row, start)) if row - next_row <= MAX_STEPPED_ROWS => {
+                (rows, next_row, start)
+            },
+            _ => (
+                rope.line_walk(row..u32::MAX),
+                row,
+                rope.point_to_offset(Point::new(row, 0)),
+            ),
+        };
+        for _ in next_row..row {
+            let Some((_, len)) = rows.next_len() else {
+                break;
+            };
+            start += len as usize + 1;
+        }
+
+        text.clear();
+        let Some(len) = rows.next_into(&mut text) else {
+            // A row past the last clips to the rope's end.
+            for &index in run {
+                offsets[index] = rope.len();
+            }
+            continue;
+        };
+        fill_row_offsets(&text, start, run, positions, encoding, &mut offsets);
+        walk = Some((rows, row + 1, start + len as usize + 1));
+    }
+    offsets
+}
+
+/// Writes the offset of each position in `run`, which all name the row `line`
+/// that starts at byte `start`.
+///
+/// A column clips to the last character boundary at or before it, and to the
+/// row's end. The run ascends, so one walk along the row answers all of it.
+fn fill_row_offsets(
+    line: &str,
+    start: usize,
+    run: &[usize],
+    positions: &[Position],
+    encoding: OffsetEncoding,
+    offsets: &mut [usize],
+) {
+    // An ASCII byte is one unit in every encoding, so a column on an ASCII row
+    // is its byte count.
+    if line.is_ascii() {
+        for &index in run {
+            offsets[index] = start + line.len().min(positions[index].character as usize);
+        }
+        return;
+    }
+
+    let width = |ch: char| match encoding {
+        OffsetEncoding::Utf8 => ch.len_utf8(),
+        OffsetEncoding::Utf16 => ch.len_utf16(),
+        OffsetEncoding::Utf32 => 1,
+    };
+    let mut chars = line.chars().peekable();
+    let (mut column, mut bytes) = (0, 0);
+    for &index in run {
+        let target = positions[index].character as usize;
+        while let Some(&ch) = chars.peek()
+            && column + width(ch) <= target
+        {
+            column += width(ch);
+            bytes += ch.len_utf8();
+            chars.next();
+        }
+        offsets[index] = start + bytes;
+    }
 }
 
 /// Converts a byte offset in `rope` to an LSP [`Position`] per
@@ -205,12 +290,14 @@ pub(crate) fn publish_spans(
     let guard = buffer.read().expect("buffer lock");
     let rope = guard.rope();
 
-    let ranges: Vec<ByteRange<usize>> = published
+    // An inverted range starts at its end, as `lsp_range_to_byte_range` reads it.
+    let endpoints: Vec<Position> = published
         .iter()
-        .map(|diag| lsp_range_to_byte_range(rope, diag.range, encoding))
+        .flat_map(|diag| [diag.range.start.min(diag.range.end), diag.range.end])
         .collect();
-    let starts: Vec<usize> = ranges.iter().map(|r| r.start).collect();
-    let ends: Vec<usize> = ranges.iter().map(|r| r.end).collect();
+    let offsets = lsp_positions_to_byte_offsets_batch(rope, &endpoints, encoding);
+    let starts: Vec<usize> = offsets.iter().step_by(2).copied().collect();
+    let ends: Vec<usize> = offsets.iter().skip(1).step_by(2).copied().collect();
 
     let snapshot = &guard.snapshot;
     snapshot
@@ -316,6 +403,35 @@ mod tests {
             after.resolve_anchor(&start)..after.resolve_anchor(&end),
             7..12,
             "the mark covers `bravo` alone, the Y before it and the Z after",
+        );
+    }
+
+    /// A range whose start follows its end publishes as the empty span at its
+    /// end, which is how [`lsp_range_to_byte_range`] reads such a range.
+    #[test]
+    fn publish_spans_read_an_inverted_range_as_empty_at_its_end() {
+        use lsp_types::Diagnostic;
+
+        let mut h = Stoat::test();
+        open_indent_buffer(&mut h, "a.txt", b"alpha bravo\n");
+        let path = PathBuf::from("/indent/a.txt");
+
+        let diag = Diagnostic::new_simple(Range::new(pos(0, 11), pos(0, 6)), "boom".to_string());
+        let buffers = &h.stoat.active_workspace().buffers;
+        let spans = publish_spans(&path, &[diag], OffsetEncoding::Utf16, buffers);
+        let (start, end) = spans[0]
+            .anchors
+            .expect("the buffer is open, so it anchored");
+
+        let buffer = buffers
+            .id_for_path(&path)
+            .and_then(|id| buffers.get(id))
+            .expect("open buffer");
+        let snapshot = buffer.read().expect("poisoned").snapshot.clone();
+        assert_eq!(
+            snapshot.resolve_anchor(&start)..snapshot.resolve_anchor(&end),
+            6..6,
+            "the span is empty at the range's end",
         );
     }
 
@@ -545,33 +661,55 @@ mod tests {
         );
     }
 
-    /// The batch is the per-position conversion applied to each position, so
-    /// this cannot fail as written. It is kept against the batch ever being
-    /// specialized again, which is what it caught back when it was.
+    /// The batch must answer what the single-position conversion does. The cases
+    /// are every character boundary, a column inside a multibyte character, a
+    /// column past a line's end, and rows past the last. The positions come in
+    /// no particular order, and the walk reaches their rows both by steps and by
+    /// restarts.
     #[test]
     fn positions_batch_matches_per_token() {
-        let text = "h\u{00e9}llo\nw\u{00f6}rld\n\u{1F600} tail\nlast line";
-        let r = rope(text);
+        // The walk restarts at `far` after row 9 and steps over every other gap.
+        let far = 10 + MAX_STEPPED_ROWS + 1;
+        let mut text: String = ["h\u{00e9}llo\n", "\u{1F600} tail\n", "plain\n"]
+            .iter()
+            .cycle()
+            .take(far as usize + 5)
+            .copied()
+            .collect();
+        text.push_str("last line");
+        let r = rope(&text);
         for enc in ENCODINGS {
-            // Positions a server emits sit on character boundaries, so derive
-            // them from each char-boundary offset. Add out-of-range and
-            // past-EOF positions, which clip identically both ways.
             let mut positions: Vec<Position> = std::iter::once(0)
                 .chain(text.char_indices().map(|(i, ch)| i + ch.len_utf8()))
                 .map(|off| byte_offset_to_lsp_pos(&r, off, enc))
+                .filter(|p| [0, 1, 2, 5, 9, far, far + 3, far + 5].contains(&p.line))
                 .collect();
-            positions.push(Position::new(0, 999));
-            positions.push(Position::new(99, 0));
+            // Inside the e-acute's two bytes, inside the emoji's two UTF-16
+            // units, past the ends of a non-ASCII and an ASCII line, a step
+            // past the last line, and far past it.
+            positions.extend([
+                pos(0, 2),
+                pos(1, 1),
+                pos(0, 999),
+                pos(2, 999),
+                pos(far + 7, 0),
+                pos(99, 0),
+            ]);
             positions.reverse();
+            let third = positions.len() / 3;
+            positions.rotate_left(third);
 
             let batch = lsp_positions_to_byte_offsets_batch(&r, &positions, enc);
-            for (i, p) in positions.iter().enumerate() {
-                assert_eq!(
-                    batch[i],
-                    lsp_pos_to_byte_offset(&r, *p, enc),
-                    "batch disagrees at {i} = {p:?} encoding {enc:?}"
-                );
-            }
+            let single: Vec<usize> = positions
+                .iter()
+                .map(|&p| lsp_pos_to_byte_offset(&r, p, enc))
+                .collect();
+            assert_eq!(batch, single, "encoding {enc:?}");
+            assert_eq!(
+                lsp_positions_to_byte_offsets_batch(&r, &[], enc),
+                Vec::<usize>::new(),
+                "an empty batch under {enc:?}",
+            );
         }
     }
 }
