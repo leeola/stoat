@@ -151,12 +151,6 @@ enum Command {
     /// git supplies; positional args are not accepted in the
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
-    /// Open a file in the owning Stoat instance and block until it is closed,
-    /// honoring the `$EDITOR <file>` contract. Set as the owned agent's editor.
-    Editor {
-        /// File to open in the parent instance.
-        file: PathBuf,
-    },
     /// Machine-facing commands for a live session. Every reply is one JSON
     /// line. The root commands are for people.
     Api(crate::commands::api::ApiArgs),
@@ -203,7 +197,6 @@ pub fn run(args: Args, session_log: Option<PathBuf>) -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::Editor { file }) => crate::commands::editor::run(file),
         Some(Command::Api(args)) => crate::commands::api::run(args),
         Some(Command::Walkthrough { sub }) => crate::commands::walkthrough::run(sub),
         Some(Command::Fixture(fixture)) => {
@@ -843,7 +836,7 @@ mod tests {
             (&["diff"], false),
             (&["api", "lsp-status"], false),
             (&["api", "hook", "start"], false),
-            (&["editor", "a.rs"], false),
+            (&["api", "open", "--wait", "a.rs"], false),
             (&["walkthrough", "list"], false),
             (&["completions", "fish"], false),
             (&["dump", "open", "id"], false),

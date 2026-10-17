@@ -9,12 +9,13 @@
 //! [`AgentEvent`], which it applies to the owning workspace's
 //! [`AgentStatus`](crate::agent_status::AgentStatus). A request line instead
 //! rides [`AgentControl`] and expects a reply. A query answers with live
-//! session state. `open-editor` parks the caller until its buffer closes and
-//! answers whether the buffer closed clean. `open-in-term` opens files in the
-//! terminal pane the caller runs in, which is what makes a `stoat <file>`
-//! inside a pane reach the instance hosting it, and holds the caller until
-//! those files close when it asks to wait. A caller that goes away while it
-//! waits leaves no waiter behind.
+//! session state. `open` opens files in front of the terminal pane the caller
+//! runs in, which is what makes a `stoat <file>` inside a pane reach the
+//! instance hosting it. With no terminal it opens them in a fresh split, as an
+//! owned agent's `$EDITOR` asks, or in the focused pane. It holds the caller
+//! until those files close when it asks to wait, and answers whether each
+//! closed clean. A caller that goes away while it waits leaves no waiter
+//! behind.
 
 use crate::{
     agent_status::AgentHookEvent, app::Stoat, host::LanguageServerFeature, workspace::WorkspaceUid,
@@ -74,35 +75,28 @@ pub enum BridgeOutcome {
 /// serde form, so the request travels outside the [`AgentHookEvent`] path. The
 /// event loop routes it by `uid` to the owning workspace.
 pub enum AgentControl {
-    /// Open `path` as a buffer in the session's workspace and keep the agent
-    /// blocked until that buffer leaves the editor.
+    /// Open `paths` in the session's workspace.
     ///
-    /// The release sends a [`BridgeOutcome`] on `done` and drops it, which
-    /// unblocks the parked socket connection so the agent's `$EDITOR`
-    /// invocation returns. A sender dropped with no outcome reads as closed.
-    OpenEditor {
-        uid: WorkspaceUid,
-        /// The connection that parks on the buffer, which a
-        /// [`Self::ClientGone`] names when it ends first.
-        client: u64,
-        path: PathBuf,
-        done: UnboundedSender<BridgeOutcome>,
-    },
-    /// Open `paths` in the split pane showing the terminal whose
-    /// [`token`](crate::term_session::TermSession::token) is `term`, in front of
-    /// the shell that asked.
+    /// With `term`, the files cover the split pane showing the terminal whose
+    /// [`token`](crate::term_session::TermSession::token) it is, in front of the
+    /// shell that asked. With no such terminal and `split`, they open in a fresh
+    /// split beside the focused pane, as an agent's `$EDITOR` asks. Otherwise
+    /// they open in the focused pane. Each path past the first takes a split of
+    /// its own.
     ///
     /// `done` answers whether a waiter was registered. It fires on every path
     /// through the handler, since a caller parked on a reply that never comes
     /// hangs the user's shell. With `hold`, each opened buffer takes a clone,
-    /// and the command returns when the last of them leaves the editor.
-    OpenInTerm {
+    /// and the command returns when the last of them leaves the editor. A
+    /// sender dropped with no outcome reads as closed.
+    Open {
         uid: WorkspaceUid,
         /// The connection that asked, which a [`Self::ClientGone`] names when
         /// it ends while held.
         client: u64,
-        term: u64,
+        term: Option<u64>,
         paths: Vec<PathBuf>,
+        split: bool,
         hold: Option<UnboundedSender<BridgeOutcome>>,
         done: oneshot::Sender<bool>,
     },
@@ -113,7 +107,7 @@ pub enum AgentControl {
     ClientGone { uid: WorkspaceUid, client: u64 },
     /// Answer a live-session [`AgentQuery`] and fire `reply` with the JSON
     /// result. The connection stays open afterward, so several queries ride one
-    /// connection, unlike the park-and-return [`Self::OpenEditor`].
+    /// connection.
     Query {
         uid: WorkspaceUid,
         request: AgentQuery,
@@ -124,8 +118,8 @@ pub enum AgentControl {
 /// A read-only interrogation of live session state, answered by the event loop.
 ///
 /// Separate from the [`AgentRequest`] wire form so the control channel carries
-/// only genuine queries. The `open-editor` request is a blocking interaction
-/// routed through [`AgentControl::OpenEditor`] and never appears here.
+/// only genuine queries. The `open` request is an interaction routed through
+/// [`AgentControl::Open`] and never appears here.
 #[derive(Debug, PartialEq)]
 pub enum AgentQuery {
     /// LSP host liveness, plus each server's name, process id, and serialized
@@ -164,17 +158,20 @@ pub enum AgentQuery {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "req", rename_all = "kebab-case")]
 enum AgentRequest {
-    /// `{"req":"open-editor","path":"..."}`.
-    OpenEditor { path: PathBuf },
-    /// `{"req":"open-in-term","term":N,"paths":["/abs/a"],"wait":true}`.
-    /// `term` is the terminal's `STOAT_TERM_ID`, and the paths are absolute,
-    /// since the requesting shell's working directory is not the workspace
-    /// root. `wait` is false when absent, which is the open-and-exit form.
-    OpenInTerm {
-        term: u64,
+    /// `{"req":"open","paths":["/abs/a"],"term":N,"wait":true,"split":false}`.
+    ///
+    /// The paths are absolute, since the requesting shell's working directory
+    /// is not the workspace root. `term` is the terminal's `STOAT_TERM_ID`, and
+    /// it is absent outside a terminal pane. `wait` and `split` are false when
+    /// absent, so the plain form opens in the focused pane and exits.
+    Open {
         paths: Vec<PathBuf>,
         #[serde(default)]
+        term: Option<u64>,
+        #[serde(default)]
         wait: bool,
+        #[serde(default)]
+        split: bool,
     },
     /// `{"req":"lsp-status"}`.
     LspStatus,
@@ -301,11 +298,12 @@ pub async fn serve_agent_hooks(
 /// `control_tx`, writing each request's reply back over the same connection.
 ///
 /// Each line is tried as an [`AgentRequest`] first, then as an
-/// [`AgentHookEvent`]. An open-editor request parks the connection until the
-/// event loop releases its waiter, then writes an `editor-closed` reply with
-/// the exit status from [`held_status`] and returns, since the caller's
-/// `$EDITOR` blocks for exactly that long. Every other request replies and
-/// reads on, so one connection carries a series.
+/// [`AgentHookEvent`]. An `open` request replies `opened` once the event loop
+/// answers. When that answer holds buffers, the connection parks until the
+/// event loop releases its waiters, then replies `closed` with the exit status
+/// from [`held_status`], since the caller's `$EDITOR` blocks for exactly that
+/// long. Every request replies and reads on, so one connection carries a
+/// series.
 ///
 /// A client that goes away while parked is reported as
 /// [`AgentControl::ClientGone`], so its waiters do not outlive it.
@@ -341,37 +339,21 @@ async fn serve_connection<R>(
 
         if let Ok(request) = serde_json::from_str::<AgentRequest>(trimmed) {
             let query = match request {
-                AgentRequest::OpenEditor { path } => {
-                    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
-                    if control_tx
-                        .send(AgentControl::OpenEditor {
-                            uid,
-                            client,
-                            path,
-                            done: done_tx,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                    let Some(status) = held_status(&mut done_rx, &mut lines).await else {
-                        report_client_gone(control_tx, uid, client).await;
-                        return;
-                    };
-                    let reply = json!({ "reply": "editor-closed", "status": status });
-                    let _ = write_json_line(&mut write_half, &reply).await;
-                    return;
-                },
-                AgentRequest::OpenInTerm { term, paths, wait } => {
+                AgentRequest::Open {
+                    paths,
+                    term,
+                    wait,
+                    split,
+                } => {
                     let (done_tx, done_rx) = oneshot::channel();
                     let (hold_tx, mut hold_rx) = tokio::sync::mpsc::unbounded_channel();
                     if control_tx
-                        .send(AgentControl::OpenInTerm {
+                        .send(AgentControl::Open {
                             uid,
                             client,
                             term,
                             paths,
+                            split,
                             hold: wait.then_some(hold_tx),
                             done: done_tx,
                         })
@@ -655,6 +637,10 @@ mod tests {
         time::Instant,
     };
 
+    /// The `open` line an owned agent's `$EDITOR` sends.
+    const AGENT_EDITOR_OPEN: &[u8] =
+        b"{\"req\":\"open\",\"paths\":[\"/tmp/msg\"],\"wait\":true,\"split\":true}\n";
+
     #[test]
     fn lsp_status_lists_each_running_server() {
         use lsp_types::{HoverProviderCapability, ServerCapabilities};
@@ -739,15 +725,71 @@ mod tests {
     ) -> (crate::app::UpdateEffect, oneshot::Receiver<bool>) {
         let uid = h.stoat.active_workspace().uid();
         let (done_tx, done_rx) = oneshot::channel();
-        let effect = h.stoat.handle_agent_control(AgentControl::OpenInTerm {
+        let effect = h.stoat.handle_agent_control(AgentControl::Open {
             uid,
             client: 0,
-            term,
+            term: Some(term),
             paths,
+            split: false,
             hold,
             done: done_tx,
         });
         (effect, done_rx)
+    }
+
+    /// Open `paths` with no terminal named, as an agent's `$EDITOR` or a shell
+    /// outside any pane asks.
+    fn open_with_no_terminal(h: &mut TestHarness, paths: Vec<PathBuf>, split: bool) {
+        let uid = h.stoat.active_workspace().uid();
+        h.stoat.handle_agent_control(AgentControl::Open {
+            uid,
+            client: 0,
+            term: None,
+            paths,
+            split,
+            hold: None,
+            done: oneshot::channel().0,
+        });
+    }
+
+    #[test]
+    fn an_open_with_no_terminal_and_split_opens_beside_the_focused_pane() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        let before = h.stoat.active_workspace().panes.focus();
+
+        open_with_no_terminal(&mut h, vec![root.join("a.rs")], true);
+
+        let ws = h.stoat.active_workspace();
+        let after = ws.panes.focus();
+        assert_eq!(
+            (
+                ws.panes.split_pane_ids().len(),
+                shown_path(&h, before),
+                shown_path(&h, after),
+            ),
+            (2, None, Some(root.join("a.rs"))),
+            "the scratch pane keeps its view and the file opens in a new split",
+        );
+    }
+
+    #[test]
+    fn an_open_with_no_terminal_and_no_split_uses_the_focused_pane() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "fn a() {}\n")]);
+        let focus = h.stoat.active_workspace().panes.focus();
+
+        open_with_no_terminal(&mut h, vec![root.join("a.rs")], false);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.panes.split_pane_ids().len(),
+                ws.panes.focus(),
+                shown_path(&h, focus),
+            ),
+            (1, focus, Some(root.join("a.rs"))),
+        );
     }
 
     /// Split a labelled pane beside the focused one and leave focus on it, so a
@@ -916,13 +958,16 @@ mod tests {
         let root = seed(&mut h, &[("d/x.rs", "")]);
         let (term_id, _) = terminal_in_focused_pane(&mut h);
         let uid = h.stoat.active_workspace().uid();
-        let (done, _done_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hold, _hold_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let _ = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+        let _ = h.stoat.handle_agent_control(AgentControl::Open {
             uid,
             client: 0,
-            path: root.join("d"),
-            done,
+            term: None,
+            paths: vec![root.join("d")],
+            split: true,
+            hold: Some(hold),
+            done: oneshot::channel().0,
         });
 
         assert_eq!(panes_showing_terminal(&h, term_id), 1);
@@ -1321,85 +1366,88 @@ mod tests {
 
     #[tokio::test]
     async fn open_editor_request_routes_to_control_and_replies_on_close() {
-        open_editor_replies(
-            BridgeOutcome::Closed,
-            "{\"reply\":\"editor-closed\",\"status\":0}\n",
-        )
-        .await;
+        open_editor_replies(BridgeOutcome::Closed, 0).await;
     }
 
     #[tokio::test]
     async fn an_abandoned_editor_replies_with_status_one() {
-        open_editor_replies(
-            BridgeOutcome::Abandoned,
-            "{\"reply\":\"editor-closed\",\"status\":1}\n",
-        )
-        .await;
+        open_editor_replies(BridgeOutcome::Abandoned, 1).await;
     }
 
-    /// Route an open-editor request, release its waiter with `outcome`, and
-    /// assert the connection answers `expected`.
-    async fn open_editor_replies(outcome: BridgeOutcome, expected: &str) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let (tx, _rx) = tokio::sync::mpsc::channel(8);
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(8);
+    /// Route the agent editor's `open` request, release its waiter with
+    /// `outcome`, and assert the connection answers `opened` and then `closed`
+    /// with `status`.
+    async fn open_editor_replies(outcome: BridgeOutcome, status: i32) {
         let uid = WorkspaceUid(5);
+        let (client, mut controls, conn) = serve_duplex(uid);
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut replies = BufReader::new(client_read).lines();
+        client_write.write_all(AGENT_EDITOR_OPEN).await.unwrap();
 
-        let (mut client, server) = tokio::io::duplex(256);
-        client
-            .write_all(b"{\"req\":\"open-editor\",\"path\":\"/tmp/msg\"}\n")
-            .await
-            .unwrap();
-
-        let conn = tokio::spawn(async move {
-            serve_connection(server, uid, &tx, &control_tx).await;
-        });
-
-        let AgentControl::OpenEditor {
+        let Some(AgentControl::Open {
             uid: got_uid,
-            path,
+            term,
+            paths,
+            split,
+            hold,
             done,
             ..
-        } = control_rx.recv().await.expect("control message")
+        }) = controls.recv().await
         else {
-            panic!("expected an open-editor control message");
+            panic!("expected an open control message");
         };
-        assert_eq!(got_uid, uid);
-        assert_eq!(path, PathBuf::from("/tmp/msg"));
+        assert_eq!(
+            (got_uid, term, paths, split),
+            (uid, None, vec![PathBuf::from("/tmp/msg")], true),
+        );
+        let hold = hold.expect("a request that waits carries a hold");
+        done.send(true).expect("connection parked on the open");
+        let opened = next_reply(&mut replies).await;
 
-        done.send(outcome)
-            .expect("connection still parked on the waiter");
-        drop(done);
+        hold.send(outcome).expect("connection parked on the hold");
+        drop(hold);
+        let closed = next_reply(&mut replies).await;
 
-        let mut reply = String::new();
-        client.read_to_string(&mut reply).await.unwrap();
-        assert_eq!(reply, expected);
+        assert_eq!(
+            [opened, closed],
+            [
+                json!({ "reply": "opened", "held": true }),
+                json!({ "reply": "closed", "status": status }),
+            ],
+        );
+        drop(client_write);
+        drop(replies);
         conn.await.unwrap();
     }
 
     #[test]
     fn open_in_term_decodes_its_token_and_paths() {
         let decoded: AgentRequest =
-            serde_json::from_str(r#"{"req":"open-in-term","term":7,"paths":["/abs/a","/abs/b"]}"#)
-                .expect("open-in-term decodes");
-        let AgentRequest::OpenInTerm { term, paths, wait } = decoded else {
-            panic!("expected an open-in-term request, got {decoded:?}");
+            serde_json::from_str(r#"{"req":"open","term":7,"paths":["/abs/a","/abs/b"]}"#)
+                .expect("an open decodes");
+        let AgentRequest::Open {
+            term,
+            paths,
+            wait,
+            split,
+        } = decoded
+        else {
+            panic!("expected an open request, got {decoded:?}");
         };
-        assert_eq!(term, 7);
+        assert_eq!(term, Some(7));
         assert_eq!(
             paths,
             vec![PathBuf::from("/abs/a"), PathBuf::from("/abs/b")]
         );
-        assert!(!wait, "a request with no wait field does not wait");
+        assert!(
+            !wait && !split,
+            "a request with no wait or split field does neither"
+        );
 
         let waiting: AgentRequest =
-            serde_json::from_str(r#"{"req":"open-in-term","term":7,"paths":[],"wait":true}"#)
-                .expect("a waiting open-in-term decodes");
-        assert!(matches!(
-            waiting,
-            AgentRequest::OpenInTerm { wait: true, .. }
-        ));
+            serde_json::from_str(r#"{"req":"open","term":7,"paths":[],"wait":true}"#)
+                .expect("a waiting open decodes");
+        assert!(matches!(waiting, AgentRequest::Open { wait: true, .. }));
     }
 
     #[tokio::test]
@@ -1419,10 +1467,10 @@ mod tests {
         });
 
         client_write
-            .write_all(b"{\"req\":\"open-in-term\",\"term\":3,\"paths\":[\"/abs/a\"]}\n")
+            .write_all(b"{\"req\":\"open\",\"term\":3,\"paths\":[\"/abs/a\"]}\n")
             .await
             .unwrap();
-        let AgentControl::OpenInTerm {
+        let AgentControl::Open {
             uid: got_uid,
             term,
             paths,
@@ -1431,10 +1479,10 @@ mod tests {
             ..
         } = control_rx.recv().await.expect("control message")
         else {
-            panic!("expected an open-in-term control message");
+            panic!("expected an open control message");
         };
         assert_eq!(got_uid, uid);
-        assert_eq!(term, 3);
+        assert_eq!(term, Some(3));
         assert_eq!(paths, vec![PathBuf::from("/abs/a")]);
         assert!(hold.is_none(), "a request with no wait holds nothing");
         done.send(false).expect("connection parked on the waiter");
@@ -1443,18 +1491,18 @@ mod tests {
             json!({ "reply": "opened", "held": false })
         );
 
-        // A second request over the same connection proves the read loop
-        // continued rather than returning like open-editor.
+        // A second request over the same connection proves the read loop goes
+        // on after a reply.
         client_write
-            .write_all(b"{\"req\":\"open-in-term\",\"term\":4,\"paths\":[\"/abs/b\"]}\n")
+            .write_all(b"{\"req\":\"open\",\"term\":4,\"paths\":[\"/abs/b\"]}\n")
             .await
             .unwrap();
-        let AgentControl::OpenInTerm { term, done, .. } =
+        let AgentControl::Open { term, done, .. } =
             control_rx.recv().await.expect("second control message")
         else {
-            panic!("expected a second open-in-term control message");
+            panic!("expected a second open control message");
         };
-        assert_eq!(term, 4);
+        assert_eq!(term, Some(4));
         done.send(false).expect("connection parked again");
         assert_eq!(
             next_reply(&mut replies).await,
@@ -1480,15 +1528,13 @@ mod tests {
         });
 
         client_write
-            .write_all(
-                b"{\"req\":\"open-in-term\",\"term\":3,\"paths\":[\"/abs/a\"],\"wait\":true}\n",
-            )
+            .write_all(b"{\"req\":\"open\",\"term\":3,\"paths\":[\"/abs/a\"],\"wait\":true}\n")
             .await
             .unwrap();
-        let AgentControl::OpenInTerm { hold, done, .. } =
+        let AgentControl::Open { hold, done, .. } =
             control_rx.recv().await.expect("control message")
         else {
-            panic!("expected an open-in-term control message");
+            panic!("expected an open control message");
         };
         let hold = hold.expect("a request that waits carries a hold");
         done.send(true).expect("connection parked on the open");
@@ -1528,19 +1574,20 @@ mod tests {
     #[tokio::test]
     async fn an_editor_client_that_leaves_while_parked_is_reported_gone() {
         let uid = WorkspaceUid(13);
-        let (mut client, mut controls, conn) = serve_duplex(uid);
-        client
-            .write_all(b"{\"req\":\"open-editor\",\"path\":\"/tmp/msg\"}\n")
-            .await
-            .unwrap();
-        let Some(AgentControl::OpenEditor {
+        let (client, mut controls, conn) = serve_duplex(uid);
+        let mut client = BufReader::new(client);
+        client.get_mut().write_all(AGENT_EDITOR_OPEN).await.unwrap();
+        let Some(AgentControl::Open {
             client: parked,
-            done: _waiter,
+            hold: _waiter,
+            done,
             ..
         }) = controls.recv().await
         else {
-            panic!("expected an open-editor control message");
+            panic!("expected an open control message");
         };
+        done.send(true).expect("connection parked on the open");
+        client.read_line(&mut String::new()).await.unwrap();
 
         drop(client);
 
@@ -1556,19 +1603,17 @@ mod tests {
             let mut client = BufReader::new(client);
             client
                 .get_mut()
-                .write_all(
-                    b"{\"req\":\"open-in-term\",\"term\":3,\"paths\":[\"/abs/a\"],\"wait\":true}\n",
-                )
+                .write_all(b"{\"req\":\"open\",\"term\":3,\"paths\":[\"/abs/a\"],\"wait\":true}\n")
                 .await
                 .unwrap();
-            let Some(AgentControl::OpenInTerm {
+            let Some(AgentControl::Open {
                 client: parked,
                 hold: _waiter,
                 done,
                 ..
             }) = controls.recv().await
             else {
-                panic!("expected an open-in-term control message");
+                panic!("expected an open control message");
             };
 
             if leaves_before_opened {
@@ -1722,14 +1767,11 @@ mod tests {
         let (server, _events, mut controls) = serve_at(&path).await;
 
         let mut editor = UnixStream::connect(&path).await.unwrap();
-        editor
-            .write_all(b"{\"req\":\"open-editor\",\"path\":\"/tmp/msg\"}\n")
-            .await
-            .unwrap();
+        editor.write_all(AGENT_EDITOR_OPEN).await.unwrap();
         // Held to the end of the test, so its waiter never fires and the first
         // connection stays parked.
         let parked = controls.recv().await;
-        assert!(matches!(parked, Some(AgentControl::OpenEditor { .. })));
+        assert!(matches!(parked, Some(AgentControl::Open { .. })));
 
         let mut query = UnixStream::connect(&path).await.unwrap();
         query

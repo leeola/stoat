@@ -323,9 +323,9 @@ mod tests {
         );
     }
 
-    /// Open a terminal in the focused pane, then cover it the way an
-    /// open-in-term request does. The buffer sits in front and the shell is
-    /// recorded behind it.
+    /// Open a terminal in the focused pane, then cover it the way an `open`
+    /// request that names the terminal does. The buffer sits in front and the
+    /// shell is recorded behind it.
     fn hide_a_live_terminal(h: &mut crate::test_harness::TestHarness) -> TermId {
         super::super::dispatch(&mut h.stoat, &stoat_action::Terminal);
 

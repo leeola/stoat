@@ -1,3 +1,4 @@
+use crate::commands::term_open::{self, Sent};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -42,11 +43,29 @@ pub struct ApiArgs {
 ///
 /// `sessions` asks every live session. Every other verb reaches one session
 /// over its per-session socket. A query verb prints the session's one-line
-/// JSON reply. `hook` gets no reply and prints nothing.
+/// JSON reply. `hook` and `open` print nothing.
 #[derive(Subcommand, Debug)]
 pub enum ApiCommand {
     /// Every live session's `session-info` reply, most recently active first.
     Sessions,
+    /// Open files in the session, beside the user.
+    ///
+    /// Inside a terminal pane the files cover that pane. Elsewhere they open in
+    /// the focused pane, or in a fresh split with `--split`.
+    Open {
+        /// Files to open. A relative path resolves against the working
+        /// directory.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Hold until every opened file leaves the editor. Exit status 1
+        /// reports a file left with unsaved edits, the `$EDITOR` contract.
+        #[arg(long)]
+        wait: bool,
+        /// Open in a fresh split beside the focused pane when no terminal pane
+        /// is the caller.
+        #[arg(long)]
+        split: bool,
+    },
     /// The focused workspace, tab, pane, and modal, and the focused editor's
     /// file, cursor, and lines on screen.
     Focus {
@@ -180,6 +199,13 @@ pub fn run(args: ApiArgs) -> Result<(), Whatever> {
         ApiCommand::Hook { name, values } => {
             let event = build_event(&name, &values)?;
             return send_event(&socket()?, &event);
+        },
+        ApiCommand::Open { paths, wait, split } => {
+            let term = std::env::var("STOAT_TERM_ID")
+                .ok()
+                .and_then(|id| id.parse::<u64>().ok());
+            let paths: Vec<PathBuf> = paths.iter().map(|path| cwd.join(path)).collect();
+            return open(&socket()?, &paths, term, wait, split);
         },
     };
 
@@ -392,6 +418,29 @@ fn send_event(socket_path: &Path, event: &AgentHookEvent) -> Result<(), Whatever
         .write_all(b"\n")
         .whatever_context("write hook event terminator")?;
     Ok(())
+}
+
+/// Send an `open` request for `paths` and wait as the session answers.
+///
+/// A held open returns once its files close. A file left with unsaved edits
+/// ends the process with status 1, the `$EDITOR` contract a waiting caller
+/// relies on.
+fn open(
+    socket: &Path,
+    paths: &[PathBuf],
+    term: Option<u64>,
+    wait: bool,
+    split: bool,
+) -> Result<(), Whatever> {
+    let line = term_open::request_line(term, paths, wait, split);
+    let sent = term_open::send(socket, &line).with_whatever_context(|error| {
+        format!("reach the session at {}: {error}", socket.display())
+    })?;
+    match sent {
+        Sent::Opened | Sent::Closed(0) => Ok(()),
+        Sent::Closed(status) => std::process::exit(status),
+        Sent::Unanswered => whatever!("the session closed without opening the files"),
+    }
 }
 
 #[cfg(test)]

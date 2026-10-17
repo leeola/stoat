@@ -3,7 +3,6 @@ pub mod attach;
 pub mod default;
 pub mod diff;
 pub mod dump;
-pub mod editor;
 pub mod fixture;
 pub mod term_open;
 pub mod walkthrough;

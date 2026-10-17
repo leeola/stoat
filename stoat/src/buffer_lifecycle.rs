@@ -654,9 +654,9 @@ pub(crate) fn show_buffer_in_pane(
 /// one. Any other view goes as a tab close disposes it: an editor unless
 /// another pane shows it, and a shell unless another view shows it.
 ///
-/// A shell the pane already records behind itself stays too. An open-in-term
-/// request records the shell there, then opens its first path into the shell's
-/// pane.
+/// A shell the pane already records behind itself stays too. An `open` request
+/// that names a terminal records the shell there, then opens its first path
+/// into the shell's pane.
 pub(crate) fn replace_pane_view(
     ws: &mut Workspace,
     executor: &Executor,
@@ -1969,9 +1969,9 @@ mod tests {
         );
     }
 
-    /// An open-in-term request records the shell behind its pane before it
-    /// opens its first path there, so an image in that pane leaves the shell
-    /// running for the pane to return to.
+    /// An `open` request that names a terminal records the shell behind its
+    /// pane before it opens its first path there, so an image in that pane
+    /// leaves the shell running for the pane to return to.
     #[test]
     fn an_image_opened_over_a_shell_the_pane_records_keeps_the_shell() {
         let mut h = TestHarness::with_size(40, 10);

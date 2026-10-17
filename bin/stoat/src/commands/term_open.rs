@@ -36,9 +36,9 @@ pub enum Forward {
     Failed(String),
 }
 
-/// How the instance answered a forwarded request.
+/// How the instance answered an `open` request.
 #[derive(Debug, PartialEq)]
-enum Sent {
+pub(crate) enum Sent {
     /// The connection ended with no reply.
     Unanswered,
     /// The instance took the files and holds nothing.
@@ -81,7 +81,7 @@ pub fn try_forward(files: &[PathBuf]) -> Forward {
 
 /// Ask the instance at `socket` to open `paths` in the terminal `token` names.
 fn forward_to(socket: &Path, token: u64, paths: &[PathBuf]) -> Forward {
-    match send(socket, &request_line(token, paths)) {
+    match send(socket, &request_line(Some(token), paths, true, false)) {
         Ok(Sent::Opened) => Forward::Opened,
         Ok(Sent::Closed(status)) => Forward::Closed(status),
         Ok(Sent::Unanswered) => Forward::Failed(format!(
@@ -116,18 +116,33 @@ fn absolutize(base: &Path, path: &Path) -> PathBuf {
     base.join(path)
 }
 
-/// Build the newline-free open-in-term request line.
-fn request_line(token: u64, paths: &[PathBuf]) -> String {
-    serde_json::json!({
-        "req": "open-in-term",
-        "term": token,
+/// Build the newline-free `open` request line.
+///
+/// A field at its default stays out of the line, since the session reads an
+/// absent `term` as none and an absent `wait` or `split` as false.
+pub(crate) fn request_line(
+    term: Option<u64>,
+    paths: &[PathBuf],
+    wait: bool,
+    split: bool,
+) -> String {
+    let mut request = serde_json::json!({
+        "req": "open",
         "paths": paths
             .iter()
             .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>(),
-        "wait": true,
-    })
-    .to_string()
+    });
+    if let Some(term) = term {
+        request["term"] = term.into();
+    }
+    if wait {
+        request["wait"] = true.into();
+    }
+    if split {
+        request["split"] = true.into();
+    }
+    request.to_string()
 }
 
 /// Send `line` to the socket and report how the instance answered.
@@ -135,9 +150,9 @@ fn request_line(token: u64, paths: &[PathBuf]) -> String {
 /// An open that the parent does not hold answers at once, and a held open
 /// answers when its buffers close. A connection that ends after a held open
 /// and before its close is a parent that went away, which reads as status 0,
-/// the rule `stoat editor` follows. A connection that ends before any reply is
-/// what a parent exiting mid-request looks like.
-fn send(socket: &Path, line: &str) -> std::io::Result<Sent> {
+/// so a waiting `$EDITOR` never hangs on a parent that exits. A connection
+/// that ends before any reply is what a parent exiting mid-request looks like.
+pub(crate) fn send(socket: &Path, line: &str) -> std::io::Result<Sent> {
     let mut stream = UnixStream::connect(socket)?;
     stream.write_all(line.as_bytes())?;
     stream.write_all(b"\n")?;
@@ -224,17 +239,21 @@ mod tests {
     #[test]
     fn request_line_carries_the_token_and_every_path() {
         let line = request_line(
-            9,
+            Some(9),
             &[PathBuf::from("/work/a.rs"), PathBuf::from("/work/b.rs")],
+            true,
+            false,
         );
         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["req"].as_str(), Some("open-in-term"));
-        assert_eq!(value["term"].as_u64(), Some(9));
         assert_eq!(
-            value["paths"],
-            serde_json::json!(["/work/a.rs", "/work/b.rs"]),
+            value,
+            serde_json::json!({
+                "req": "open",
+                "paths": ["/work/a.rs", "/work/b.rs"],
+                "term": 9,
+                "wait": true,
+            }),
         );
-        assert_eq!(value["wait"].as_bool(), Some(true));
     }
 
     /// Bind `socket`, then serve one connection on a thread: read the request

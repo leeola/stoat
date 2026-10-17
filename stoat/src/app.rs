@@ -8000,80 +8000,31 @@ impl Stoat {
         UpdateEffect::Redraw
     }
 
-    /// Open a temp-file editor an owned agent shelled out to, in the workspace
-    /// whose session matches the request's `uid`, and register a waiter so
-    /// closing that buffer or its pane unblocks the agent.
+    /// Open the files an owned shell or agent asked for, in the workspace whose
+    /// session matches the request's `uid`, and register waiters so closing
+    /// those buffers or their panes unblocks the caller.
     ///
-    /// Switches the active workspace to the owning session so the editor lands
-    /// beside the agent pane, splits a new pane for the file, and parks the
-    /// request's sender on the opened buffer through [`Workspace::hold_buffer`].
-    /// A switch closes the modals of the workspace it leaves and saves that
-    /// workspace first. A buffer that is already held gains a second waiter. A
-    /// file that reads on the blocking pool parks the sender on that read, which
-    /// hands it to the buffer the read installs as. Returns
-    /// [`UpdateEffect::None`] when no live workspace owns the session or the
-    /// file does not open. The dropped sender then unblocks the agent so its
-    /// `$EDITOR` invocation does not hang.
+    /// Switches the active workspace to the owning session so the files land
+    /// beside the caller. A switch closes the modals of the workspace it leaves
+    /// and saves that workspace first. A request that waits parks a clone of
+    /// its sender on each opened buffer through [`Workspace::hold_buffer`]. A
+    /// buffer that is already held gains a second waiter. A file that reads on
+    /// the blocking pool parks the sender on that read, which hands it to the
+    /// buffer the read installs as. The request's `done` then answers whether
+    /// anything is held, so a caller never waits on files that did not open.
+    /// Returns [`UpdateEffect::None`] when no live workspace owns the session
+    /// or the request names no file.
     ///
     /// An [`AgentControl::ClientGone`] drops the waiters of a command that
     /// went away, and leaves the active workspace as it is.
     pub(crate) fn handle_agent_control(&mut self, ctl: AgentControl) -> UpdateEffect {
         match ctl {
-            AgentControl::OpenEditor {
-                uid,
-                client,
-                path,
-                done,
-            } => {
-                let Some(ws_id) = self
-                    .workspaces
-                    .iter()
-                    .find(|(_, ws)| ws.uid == uid)
-                    .map(|(id, _)| id)
-                else {
-                    return UpdateEffect::None;
-                };
-                self.enter_agent_workspace(ws_id);
-
-                let executor = self.executor.clone();
-                let new_pane = {
-                    let ws = self.active_workspace_mut();
-                    let new_pane = ws.panes.split(crate::pane::Axis::Vertical);
-                    // The split copies the focused view, and an open that fails
-                    // or reads on the pool keeps that copy in a second pane.
-                    let scratch = action_handlers::scratch_editor_view(ws, executor);
-                    ws.panes.pane_mut(new_pane).view = scratch;
-                    ws.focus = FocusTarget::SplitPane;
-                    new_pane
-                };
-
-                let waiter = BridgeWaiter {
-                    client,
-                    label: "agent".to_string(),
-                    done,
-                };
-                let held = match crate::buffer_lifecycle::open_file_in_pane(
-                    self,
-                    new_pane,
-                    &path,
-                    OpenOrigin::Named,
-                ) {
-                    Some(buffer_id) => {
-                        self.active_workspace_mut().hold_buffer(buffer_id, waiter);
-                        true
-                    },
-                    None => crate::buffer_lifecycle::hold_pending_open(self, &path, waiter),
-                };
-                if !held {
-                    return UpdateEffect::None;
-                }
-                UpdateEffect::Redraw
-            },
-            AgentControl::OpenInTerm {
+            AgentControl::Open {
                 uid,
                 client,
                 term,
                 paths,
+                split,
                 hold,
                 done,
             } => {
@@ -8088,15 +8039,27 @@ impl Stoat {
                 };
                 self.enter_agent_workspace(ws_id);
 
+                let executor = self.executor.clone();
                 let target = {
                     let ws = self.active_workspace_mut();
-                    match Self::terminal_pane_for_token(ws, term) {
+                    match term.and_then(|token| Self::terminal_pane_for_token(ws, token)) {
                         Some((pane, term_id)) => {
                             // The reverse of the record `open_terminal_pane`
                             // makes, so the shell stays reachable behind the
                             // buffer now covering it.
                             ws.panes.pane_mut(pane).prev_view = Some(View::Terminal(term_id));
                             ws.panes.set_focus(pane);
+                            ws.focus = FocusTarget::SplitPane;
+                            pane
+                        },
+                        None if split => {
+                            let pane = ws.panes.split(crate::pane::Axis::Vertical);
+                            // The split copies the focused view, and an open
+                            // that fails or reads on the pool keeps that copy in
+                            // a second pane.
+                            let scratch =
+                                action_handlers::scratch_editor_view(ws, executor.clone());
+                            ws.panes.pane_mut(pane).view = scratch;
                             ws.focus = FocusTarget::SplitPane;
                             pane
                         },
@@ -8117,23 +8080,22 @@ impl Stoat {
                         OpenOrigin::Named,
                     ),
                 )];
-                let executor = self.executor.clone();
                 for path in rest {
-                    let split = {
+                    let next = {
                         let ws = self.active_workspace_mut();
-                        let split = ws.panes.split(crate::pane::Axis::Vertical);
+                        let next = ws.panes.split(crate::pane::Axis::Vertical);
                         // The split copies the focused view, and an open that
                         // fails or reads on the pool keeps that copy in a second
                         // pane.
                         let scratch = action_handlers::scratch_editor_view(ws, executor.clone());
-                        ws.panes.pane_mut(split).view = scratch;
-                        split
+                        ws.panes.pane_mut(next).view = scratch;
+                        next
                     };
                     opens.push((
                         path,
                         crate::buffer_lifecycle::open_file_in_pane(
                             self,
-                            split,
+                            next,
                             path,
                             OpenOrigin::Named,
                         ),
@@ -8146,13 +8108,16 @@ impl Stoat {
                 // editor.
                 let held = match hold {
                     Some(hold) => {
-                        let label = self
-                            .active_workspace()
-                            .terms
-                            .values()
-                            .find(|session| session.token == term)
-                            .and_then(|session| session.session.foreground_process_name())
-                            .unwrap_or_else(|| "shell".to_string());
+                        let label = match term {
+                            Some(token) => self
+                                .active_workspace()
+                                .terms
+                                .values()
+                                .find(|session| session.token == token)
+                                .and_then(|session| session.session.foreground_process_name())
+                                .unwrap_or_else(|| "shell".to_string()),
+                            None => "agent".to_string(),
+                        };
                         let mut held = false;
                         for (path, opened) in opens {
                             let waiter = BridgeWaiter {

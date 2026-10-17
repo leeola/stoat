@@ -144,8 +144,8 @@ mod tests {
             "the agent is told which session and socket own it",
         );
         assert!(
-            editor.ends_with(" editor"),
-            "the editor bridge runs this binary's editor subcommand, got {editor:?}",
+            editor.ends_with(" api open --wait --split"),
+            "the editor bridge runs this binary's api open, got {editor:?}",
         );
     }
 

@@ -467,8 +467,9 @@ fn claude_spawn_args(
 /// The `$EDITOR` command the owned agent runs to compose prompts in the IDE.
 ///
 /// Resolves the current executable so the agent invokes this same binary's
-/// `editor` subcommand even when a bare `stoat` is not on its PATH. The
-/// subcommand reads the socket from the already-injected `STOAT_AGENT_SOCK`, so
+/// `api open --wait --split` even when a bare `stoat` is not on its PATH. The
+/// command reads the socket from the already-injected `STOAT_AGENT_SOCK`, opens
+/// the file in a split beside the focused pane, and holds until it closes, so
 /// no further arguments are baked in.
 fn editor_bridge_command() -> String {
     editor_command_for(std::env::current_exe().ok().as_deref())
@@ -476,12 +477,12 @@ fn editor_bridge_command() -> String {
 
 /// Format the editor command from a resolved executable path.
 ///
-/// Falls back to a bare `stoat editor` when the path is unknown, relying on
-/// PATH resolution in that case.
+/// Falls back to a bare `stoat api open --wait --split` when the path is
+/// unknown, relying on PATH resolution in that case.
 fn editor_command_for(exe: Option<&Path>) -> String {
     match exe {
-        Some(exe) => format!("{} editor", exe.to_string_lossy()),
-        None => "stoat editor".to_string(),
+        Some(exe) => format!("{} api open --wait --split", exe.to_string_lossy()),
+        None => "stoat api open --wait --split".to_string(),
     }
 }
 
@@ -533,14 +534,20 @@ mod tests {
             WorkspaceUid(0xABCD),
             Path::new("/work"),
             None,
-            "/usr/bin/stoat editor",
+            "/usr/bin/stoat api open --wait --split",
             &[],
         );
         assert_eq!(
             args.env,
             vec![
-                ("EDITOR".to_string(), "/usr/bin/stoat editor".to_string()),
-                ("VISUAL".to_string(), "/usr/bin/stoat editor".to_string()),
+                (
+                    "EDITOR".to_string(),
+                    "/usr/bin/stoat api open --wait --split".to_string()
+                ),
+                (
+                    "VISUAL".to_string(),
+                    "/usr/bin/stoat api open --wait --split".to_string()
+                ),
             ],
         );
     }
@@ -556,7 +563,7 @@ mod tests {
             uid,
             Path::new("/work"),
             Some(Path::new("/run/agent.sock")),
-            "/usr/bin/stoat editor",
+            "/usr/bin/stoat api open --wait --split",
             &diff,
         );
         assert_eq!(args.program, "claude");
@@ -573,8 +580,14 @@ mod tests {
                     "STOAT_AGENT_SOCK".to_string(),
                     "/run/agent.sock".to_string()
                 ),
-                ("EDITOR".to_string(), "/usr/bin/stoat editor".to_string()),
-                ("VISUAL".to_string(), "/usr/bin/stoat editor".to_string()),
+                (
+                    "EDITOR".to_string(),
+                    "/usr/bin/stoat api open --wait --split".to_string()
+                ),
+                (
+                    "VISUAL".to_string(),
+                    "/usr/bin/stoat api open --wait --split".to_string()
+                ),
             ],
         );
     }
@@ -641,8 +654,8 @@ mod tests {
     fn editor_command_uses_exe_path_with_fallback() {
         assert_eq!(
             editor_command_for(Some(Path::new("/usr/bin/stoat"))),
-            "/usr/bin/stoat editor"
+            "/usr/bin/stoat api open --wait --split"
         );
-        assert_eq!(editor_command_for(None), "stoat editor");
+        assert_eq!(editor_command_for(None), "stoat api open --wait --split");
     }
 }

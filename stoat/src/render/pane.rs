@@ -1830,7 +1830,7 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_action::OpenFile;
-    use tokio::sync::mpsc;
+    use tokio::sync::{mpsc, oneshot};
 
     /// The view a terminal session shows as, so one test covers each kind of
     /// pane a session fills.
@@ -2723,12 +2723,15 @@ mod tests {
         h.fake_fs().insert_file(&path, b"draft\n");
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/bridge");
         let uid = h.stoat.active_workspace().uid;
-        let (done, _outcome) = mpsc::unbounded_channel();
-        h.stoat.handle_agent_control(AgentControl::OpenEditor {
+        let (hold, _outcome) = mpsc::unbounded_channel();
+        h.stoat.handle_agent_control(AgentControl::Open {
             uid,
             client: 0,
-            path,
-            done,
+            term: None,
+            paths: vec![path],
+            split: true,
+            hold: Some(hold),
+            done: oneshot::channel().0,
         });
         h.settle();
         dispatch(&mut h.stoat, &stoat_action::SplitRight);

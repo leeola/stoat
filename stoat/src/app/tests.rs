@@ -4265,8 +4265,8 @@ fn a_terminal_hidden_behind_a_buffer_retires_on_exit() {
         let ws = h.stoat.active_workspace_mut();
         let pane = ws.panes.focus();
         let term_id = insert_term_session(ws);
-        // An open-in-term request leaves this state. The buffer sits in
-        // front, and nothing shows the shell recorded behind it.
+        // An `open` request that names the terminal leaves this state. The
+        // buffer sits in front, and nothing shows the shell recorded behind it.
         ws.panes.pane_mut(pane).prev_view = Some(View::Terminal(term_id));
         (pane, term_id)
     };
@@ -14744,11 +14744,14 @@ fn open_agent_editor_from(
     let uid = h.stoat.active_workspace().uid;
 
     let (done_tx, done_rx) = tokio::sync::mpsc::unbounded_channel();
-    let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+    let effect = h.stoat.handle_agent_control(AgentControl::Open {
         uid,
         client,
-        path,
-        done: done_tx,
+        term: None,
+        paths: vec![path],
+        split: true,
+        hold: Some(done_tx),
+        done: oneshot::channel().0,
     });
     h.settle();
 
@@ -14822,11 +14825,14 @@ fn agent_open_editor_waits_for_a_file_read_on_the_pool() {
     let uid = h.stoat.active_workspace().uid;
 
     let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
-    let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+    let effect = h.stoat.handle_agent_control(AgentControl::Open {
         uid,
         client: 0,
-        path,
-        done: done_tx,
+        term: None,
+        paths: vec![path],
+        split: true,
+        hold: Some(done_tx),
+        done: oneshot::channel().0,
     });
     let opened = (effect, done_rx.try_recv());
 
@@ -14973,12 +14979,15 @@ fn open_agent_editor_in(h: &mut crate::test_harness::TestHarness, ws: WorkspaceI
     h.stoat.workspaces[ws].git_root = root;
     h.stoat.workspaces[ws].uid = uid;
 
-    let (done, _) = tokio::sync::mpsc::unbounded_channel();
-    let effect = h.stoat.handle_agent_control(AgentControl::OpenEditor {
+    let (hold, _) = tokio::sync::mpsc::unbounded_channel();
+    let effect = h.stoat.handle_agent_control(AgentControl::Open {
         uid,
         client: 0,
-        path,
-        done,
+        term: None,
+        paths: vec![path],
+        split: true,
+        hold: Some(hold),
+        done: oneshot::channel().0,
     });
     assert_eq!(effect, UpdateEffect::Redraw, "the request opens its file");
 }
