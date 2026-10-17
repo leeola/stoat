@@ -33,7 +33,8 @@ use lsp_types::{
     ProgressParamsValue, ProgressToken, PublishDiagnosticsClientCapabilities,
     PublishDiagnosticsParams, ReferenceClientCapabilities, ReferenceParams,
     RenameClientCapabilities, RenameFilesParams, RenameParams, SelectionRange,
-    SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
+    SelectionRangeParams, SemanticToken, SemanticTokens, SemanticTokensDelta,
+    SemanticTokensDeltaParams, SemanticTokensEdit, SemanticTokensFullDeltaResult,
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
     SemanticTokensResult, ServerCapabilities, ShowMessageParams,
     ShowMessageRequestClientCapabilities, SignatureHelp, SignatureHelpParams, TagSupport,
@@ -42,7 +43,10 @@ use lsp_types::{
     WindowClientCapabilities, WorkDoneProgress, WorkspaceClientCapabilities, WorkspaceEdit,
     WorkspaceSymbolClientCapabilities, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{
+    de::{self, DeserializeOwned},
+    Deserialize, Deserializer, Serialize,
+};
 use serde_json::{json, value::RawValue, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -607,6 +611,7 @@ impl LspHost for LocalLsp {
     ) -> io::Result<Option<SemanticTokensResult>> {
         self.request("textDocument/semanticTokens/full", params)
             .await
+            .map(|FullTokensReply(reply)| reply)
     }
     async fn semantic_tokens_full_delta(
         &self,
@@ -614,6 +619,7 @@ impl LspHost for LocalLsp {
     ) -> io::Result<Option<SemanticTokensFullDeltaResult>> {
         self.request("textDocument/semanticTokens/full/delta", params)
             .await
+            .map(|DeltaTokensReply(reply)| reply)
     }
     async fn semantic_tokens_range(
         &self,
@@ -1112,6 +1118,114 @@ where
         .map_err(invalid)
 }
 
+/// A `semanticTokens/full` or `semanticTokens/full/delta` reply, read by its
+/// field names.
+///
+/// lsp-types reads these replies through `#[serde(untagged)]` enums. Such an
+/// enum buffers the whole value and reads it again once per variant. A token
+/// array runs to hundreds of thousands of numbers, and one struct with the
+/// fields of every shape reads it once, straight off the stream.
+///
+/// [`FullTokensReply`] and [`DeltaTokensReply`] pick the shape inside the
+/// parse, so a large reply is converted on the blocking pool with the rest of
+/// [`parse_result`]'s work.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenReplyWire {
+    result_id: Option<String>,
+    #[serde(default, deserialize_with = "tokens_from_u32s")]
+    data: Option<Vec<SemanticToken>>,
+    edits: Option<Vec<SemanticTokensEdit>>,
+}
+
+/// A `semanticTokens/full` reply as lsp-types has it.
+#[derive(Deserialize)]
+#[serde(try_from = "Option<TokenReplyWire>")]
+struct FullTokensReply(Option<SemanticTokensResult>);
+
+impl TryFrom<Option<TokenReplyWire>> for FullTokensReply {
+    type Error = &'static str;
+
+    fn try_from(wire: Option<TokenReplyWire>) -> Result<Self, Self::Error> {
+        let Some(wire) = wire else {
+            return Ok(Self(None));
+        };
+        let data = wire.data.ok_or("a semantic token reply without data")?;
+        Ok(Self(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: wire.result_id,
+            data,
+        }))))
+    }
+}
+
+/// A `semanticTokens/full/delta` reply as lsp-types has it.
+///
+/// The shapes are tried in lsp-types' variant order, so `data` makes the whole
+/// set and `edits` makes a delta. A delta with no result id stays a delta,
+/// because lsp-types fills in the missing field rather than fall through to
+/// its partial delta. A delta is patched into the retained tokens, and a
+/// partial delta costs a full pull.
+#[derive(Deserialize)]
+#[serde(try_from = "Option<TokenReplyWire>")]
+struct DeltaTokensReply(Option<SemanticTokensFullDeltaResult>);
+
+impl TryFrom<Option<TokenReplyWire>> for DeltaTokensReply {
+    type Error = &'static str;
+
+    fn try_from(wire: Option<TokenReplyWire>) -> Result<Self, Self::Error> {
+        let Some(wire) = wire else {
+            return Ok(Self(None));
+        };
+        let result_id = wire.result_id;
+        let reply = match (wire.data, wire.edits) {
+            (Some(data), _) => {
+                SemanticTokensFullDeltaResult::Tokens(SemanticTokens { result_id, data })
+            },
+            (None, Some(edits)) => {
+                SemanticTokensFullDeltaResult::TokensDelta(SemanticTokensDelta { result_id, edits })
+            },
+            (None, None) => return Err("a semantic token reply with neither data nor edits"),
+        };
+        Ok(Self(Some(reply)))
+    }
+}
+
+/// Reads a flat token array as tokens of five numbers each.
+///
+/// A length that is not a multiple of five is an error, as it is in
+/// lsp-types' own parse.
+fn tokens_from_u32s<'de, D>(deserializer: D) -> Result<Option<Vec<SemanticToken>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(data) = Option::<Vec<u32>>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let (tokens, rest) = data.as_chunks::<5>();
+    if !rest.is_empty() {
+        return Err(de::Error::custom(
+            "semantic token data is not a whole number of tokens",
+        ));
+    }
+
+    Ok(Some(
+        tokens
+            .iter()
+            .map(
+                |&[delta_line, delta_start, length, token_type, token_modifiers_bitset]| {
+                    SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length,
+                        token_type,
+                        token_modifiers_bitset,
+                    }
+                },
+            )
+            .collect(),
+    ))
+}
+
 /// Classify one JSON-RPC message by its shape. An `id` without a `method` is a
 /// response to us. A `method` with an `id` is a server request. A `method`
 /// without an `id` is a notification.
@@ -1401,9 +1515,11 @@ mod tests {
     use super::{
         client_capabilities, io, mpsc, oneshot, reader_loop, reap_child, transcript_slug,
         transcript_stem, unbounded_channel, wakes_for, write_framed, writer_loop, Arc, AtomicI64,
-        AtomicUsize, Command, DiagnosticTag, Duration, Envelope, FrameDecoder, HashSet, Instant,
-        LocalLsp, Mutex, Notify, Ordering, PendingMap, Receiver, Routed, ServerCapabilities, Stdio,
-        TokioMutex, REAP_TIMEOUT, SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
+        AtomicUsize, Command, DeltaTokensReply, DeserializeOwned, DiagnosticTag, Duration,
+        Envelope, FrameDecoder, FullTokensReply, HashSet, Instant, LocalLsp, Mutex, Notify,
+        Ordering, PendingMap, Receiver, Routed, SemanticTokensFullDeltaResult,
+        SemanticTokensResult, ServerCapabilities, Stdio, TokioMutex, REAP_TIMEOUT,
+        SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
     };
     use crate::host::lsp::{IncomingRequest, LspHost, LspNotification};
     use serde_json::{json, Value};
@@ -1818,6 +1934,62 @@ mod tests {
             [io::ErrorKind::InvalidData; 2],
             "both sizes report the parse failure as invalid data",
         );
+    }
+
+    /// [`super::parse_result`] over a reply written as a `json!` literal.
+    async fn parse_reply<R: DeserializeOwned + Send + 'static>(reply: &Value) -> io::Result<R> {
+        super::parse_result(serde_json::value::to_raw_value(reply).expect("serializes")).await
+    }
+
+    /// Each shape a server sends parses through the wire struct to what
+    /// lsp-types' own parse of the same JSON gives.
+    #[tokio::test]
+    async fn token_replies_parse_to_what_lsp_types_parses() {
+        let edits = json!([
+            {"start": 5, "deleteCount": 5, "data": [1, 1, 1, 1, 0]},
+            {"start": 0, "deleteCount": 0},
+        ]);
+        let tokens = json!({"resultId": "7", "data": [0, 4, 3, 1, 0, 2, 0, 5, 2, 1]});
+        let delta = json!({"resultId": "8", "edits": edits});
+        let unnamed_delta = json!({"edits": edits});
+        let both = json!({"resultId": "9", "data": [1, 0, 2, 3, 0], "edits": edits});
+
+        for reply in [&tokens, &Value::Null] {
+            let FullTokensReply(wire) = parse_reply(reply).await.expect("parses");
+            let typed: Option<SemanticTokensResult> =
+                serde_json::from_value(reply.clone()).expect("parses");
+            assert_eq!(wire, typed, "full reply {reply}");
+        }
+        for reply in [&tokens, &delta, &unnamed_delta, &both, &Value::Null] {
+            let DeltaTokensReply(wire) = parse_reply(reply).await.expect("parses");
+            let typed: Option<SemanticTokensFullDeltaResult> =
+                serde_json::from_value(reply.clone()).expect("parses");
+            assert_eq!(wire, typed, "delta reply {reply}");
+        }
+    }
+
+    /// A token array that is not a whole number of tokens, and a reply with
+    /// neither shape's field, are protocol errors for both requests.
+    #[tokio::test]
+    async fn malformed_token_replies_are_invalid_data() {
+        let ragged = json!({"resultId": "7", "data": [0, 4, 3, 1]});
+        let shapeless = json!({"resultId": "7"});
+        let mut kinds = Vec::new();
+        for reply in [&ragged, &shapeless] {
+            kinds.push(
+                parse_reply::<FullTokensReply>(reply)
+                    .await
+                    .err()
+                    .map(|err| err.kind()),
+            );
+            kinds.push(
+                parse_reply::<DeltaTokensReply>(reply)
+                    .await
+                    .err()
+                    .map(|err| err.kind()),
+            );
+        }
+        assert_eq!(kinds, [Some(io::ErrorKind::InvalidData); 4]);
     }
 
     #[test]
