@@ -100,14 +100,12 @@ fn row_parts(row: &ReviewRow) -> (Option<&ReviewSide>, Option<&ReviewSide>, bool
 /// [`Self::initial_center_text`]. Each chunk's resolution state is then derived
 /// from the center text with [`ConflictChunk::classify`] rather than stored, so
 /// buffer edits and undo can never desync it.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct MergeDoc {
     pub(crate) rows: Vec<MergeRow>,
     pub(crate) chunks: Vec<ConflictChunk>,
 }
 
-#[allow(dead_code)]
 impl MergeDoc {
     /// Align the three stages into merge rows and carve the conflict chunks out
     /// of them.
@@ -275,7 +273,6 @@ pub(crate) struct AlignRow {
 
 /// A maximal run of adjacent conflict rows within a [`MergeDoc`]. A non-conflict
 /// row between conflicts separates one chunk from the next.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConflictChunk {
     pub(crate) row_range: Range<usize>,
@@ -289,24 +286,13 @@ pub(crate) struct ConflictChunk {
 /// The resolved center lines, plus the rows they replace. `covered` starts at
 /// the chunk's first row and may extend past it to absorb trailing content-side
 /// insertions re-indented by the same delta.
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AutoResolution {
     pub(crate) lines: Vec<String>,
     pub(crate) covered: Range<usize>,
 }
 
-#[allow(dead_code)]
 impl ConflictChunk {
-    /// The ancestor lines this chunk covers, skipping rows with no ancestor.
-    pub(crate) fn base_lines<'a>(&self, rows: &'a [MergeRow]) -> Vec<&'a str> {
-        rows[self.row_range.clone()]
-            .iter()
-            .filter_map(|r| r.base.as_ref())
-            .map(|s| s.text.as_str())
-            .collect()
-    }
-
     /// The ours-side lines this chunk covers, skipping rows ours deleted.
     pub(crate) fn ours_lines<'a>(&self, rows: &'a [MergeRow]) -> Vec<&'a str> {
         rows[self.row_range.clone()]
@@ -544,7 +530,6 @@ impl ConflictChunk {
 }
 
 /// Which sides a single conflict row contributes to the assembled resolution.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowPick {
     pub(crate) ours: bool,
@@ -552,7 +537,6 @@ pub(crate) struct RowPick {
 }
 
 /// One side of a conflict row, naming which candidate a rendered line came from.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Side {
     Ours,
@@ -568,7 +552,6 @@ enum PlanLine {
 
 /// The resolution state of a conflict chunk's center region, derived from its
 /// text against the candidate renderings.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ChunkState {
     /// Still the raw marker block.
@@ -592,7 +575,6 @@ pub(crate) enum ChunkState {
 ///
 /// An insertion emits its one present side. A row with an ancestor emits
 /// whichever side edited it, or the shared line when neither did.
-#[allow(dead_code)]
 fn auto_merge_line(row: &MergeRow) -> Option<&str> {
     match (row.base.as_ref(), row.ours.as_ref(), row.theirs.as_ref()) {
         (None, Some(side), _) | (None, None, Some(side)) => Some(side.text.as_str()),
@@ -615,7 +597,6 @@ fn side_line(row: &MergeRow, side: Side) -> Option<&str> {
 }
 
 /// Render resolved center lines as newline-terminated text.
-#[allow(dead_code)]
 fn render_lines(lines: &[String]) -> String {
     let mut out = String::new();
     for line in lines {
@@ -626,7 +607,6 @@ fn render_lines(lines: &[String]) -> String {
 }
 
 /// The side of a conflict a chunk designates as the one that only re-indented.
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 enum IndentSide {
     Ours,
@@ -634,7 +614,6 @@ enum IndentSide {
 }
 
 /// Split a row into (indent side, content side) for the designated indent side.
-#[allow(dead_code)]
 fn split_sides(row: &MergeRow, side: IndentSide) -> (Option<&ReviewSide>, Option<&ReviewSide>) {
     match side {
         IndentSide::Ours => (row.ours.as_ref(), row.theirs.as_ref()),
@@ -643,21 +622,18 @@ fn split_sides(row: &MergeRow, side: IndentSide) -> (Option<&ReviewSide>, Option
 }
 
 /// The maximal leading run of spaces and tabs in `line`.
-#[allow(dead_code)]
 fn leading_ws(line: &str) -> &str {
     let end = line.find(|c| c != ' ' && c != '\t').unwrap_or(line.len());
     &line[..end]
 }
 
 /// `line` with its leading whitespace removed.
-#[allow(dead_code)]
 fn content_after_ws(line: &str) -> &str {
     &line[leading_ws(line).len()..]
 }
 
 /// Whether the two prefixes together use both spaces and tabs, which makes a
 /// literal indent swap ambiguous without tabstop math.
-#[allow(dead_code)]
 fn mixes_tab_and_space(a: &str, b: &str) -> bool {
     let has_space = a.contains(' ') || b.contains(' ');
     let has_tab = a.contains('\t') || b.contains('\t');
@@ -667,7 +643,6 @@ fn mixes_tab_and_space(a: &str, b: &str) -> bool {
 /// The side that only re-indented base on every both-present conflict row of
 /// `chunk`. `None` when neither side qualifies or no row has both sides
 /// present.
-#[allow(dead_code)]
 fn pick_indent_side(rows: &[MergeRow], chunk: &Range<usize>) -> Option<IndentSide> {
     let both_present = rows[chunk.clone()]
         .iter()
@@ -706,7 +681,6 @@ fn pick_indent_side(rows: &[MergeRow], chunk: &Range<usize>) -> Option<IndentSid
 /// normal conflict) when no side qualifies, a content line does not sit at
 /// base's indent, a space/tab conversion is involved, or an absorbed insertion
 /// would need a non-uniform transform.
-#[allow(dead_code)]
 fn indent_auto_resolution(rows: &[MergeRow], chunk: &Range<usize>) -> Option<AutoResolution> {
     let side = pick_indent_side(rows, chunk)?;
 
@@ -875,7 +849,6 @@ mod tests {
     fn chunk_side_lines_read_each_side() {
         let merged = doc("a\nb1\nb2\nc\n", "a\nO1\nO2\nc\n", "a\nT1\nT2\nc\n");
         let chunk = &merged.chunks[0];
-        assert_eq!(chunk.base_lines(&merged.rows), ["b1", "b2"]);
         assert_eq!(chunk.ours_lines(&merged.rows), ["O1", "O2"]);
         assert_eq!(chunk.theirs_lines(&merged.rows), ["T1", "T2"]);
     }
