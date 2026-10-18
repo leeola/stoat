@@ -920,7 +920,8 @@ pub(crate) fn user_var(action: &ResolvedAction) -> Result<(String, StateValue), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run::RunId;
+    use crate::{app::DEFAULT_KEYMAP, run::RunId};
+    use std::collections::HashSet;
     use stoat_config::Value;
 
     fn field(state: &StoatKeymapState<'_>, name: &str) -> Option<String> {
@@ -1461,6 +1462,31 @@ mod tests {
                         .to_string()
                 ),
             ],
+        );
+    }
+
+    #[test]
+    fn every_builtin_field_is_documented_in_the_default_config() {
+        let start = DEFAULT_KEYMAP
+            .find("# Predicate fields:")
+            .expect("the default config lists its predicate fields");
+        let end = start
+            + DEFAULT_KEYMAP[start..]
+                .find("# Operators:")
+                .expect("the operator list follows the predicate fields");
+        let documented: HashSet<&str> = DEFAULT_KEYMAP[start..end]
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .collect();
+
+        let missing: Vec<&str> = BUILTIN_FIELDS
+            .iter()
+            .copied()
+            .filter(|field| !documented.contains(field))
+            .collect();
+        assert_eq!(
+            missing,
+            Vec::<&str>::new(),
+            "built-in fields absent from the config's predicate field list",
         );
     }
 }
