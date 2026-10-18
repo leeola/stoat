@@ -3,6 +3,7 @@ use crate::{
     action_handlers::movement,
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     debounce,
+    test_fixture::fake_term_session,
 };
 
 /// The rich review gutter engages only when every color resolves to RGB, so
@@ -67,7 +68,6 @@ fn rgb_border_theme() -> crate::theme::Theme {
 
 use crate::{
     action_handlers, app,
-    term_session::TermSession,
     test_fixture::{
         drain_apc, finder_layout, help_layout, open_with_minimap_strip, palette_sizing,
     },
@@ -1664,16 +1664,11 @@ fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
 
     // Point the focused split pane at a terminal. Its keys go to the child,
     // so the detach is dispatched rather than typed.
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
+    let (term, _) = fake_term_session(24, 80);
     let (focused, term_id, index) = {
         let ws = h.stoat.active_workspace_mut();
         let focused = ws.panes.focus();
-        let term_id = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let term_id = ws.terms.insert(term);
         ws.panes.pane_mut(focused).view = View::Terminal(term_id);
         (focused, term_id, ws.panes.pane(focused).index)
     };
@@ -1762,14 +1757,9 @@ fn a_detached_terminal_title_change_sends_nothing() {
 fn a_detached_pane_view_change_ships_a_whole_page() {
     let (mut h, mut rx, _, index) = detached_terminal_sent(b"hello");
     {
-        let session: Arc<dyn crate::host::TerminalSession> =
-            Arc::new(crate::host::FakeTerminalSession::new());
+        let (term, _) = fake_term_session(24, 80);
         let ws = h.stoat.active_workspace_mut();
-        let other = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let other = ws.terms.insert(term);
         ws.terms[other].term.feed(b"other");
         let (pane, _) = ws.panes.windowed_panes()[0];
         ws.panes.pane_mut(pane).view = View::Terminal(other);
@@ -1803,16 +1793,11 @@ fn detached_terminal_sent(
     h.type_action("SplitRight()");
     h.settle();
 
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
+    let (term, _) = fake_term_session(24, 80);
     let (term_id, index) = {
         let ws = h.stoat.active_workspace_mut();
         let focused = ws.panes.focus();
-        let term_id = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let term_id = ws.terms.insert(term);
         ws.panes.pane_mut(focused).view = View::Terminal(term_id);
         (term_id, ws.panes.pane(focused).index)
     };
@@ -1830,16 +1815,11 @@ fn terminal_in_focused_pane(
     h: &mut crate::test_harness::TestHarness,
     output: &[u8],
 ) -> (TermId, u32) {
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
+    let (term, _) = fake_term_session(24, 80);
     let (term_id, index) = {
         let ws = h.stoat.active_workspace_mut();
         let pane = ws.panes.focus();
-        let term_id = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let term_id = ws.terms.insert(term);
         ws.panes.pane_mut(pane).view = View::Terminal(term_id);
         (term_id, ws.panes.pane(pane).index)
     };
@@ -2118,14 +2098,9 @@ fn a_new_grid_sends_a_whole_page() {
 fn a_pane_that_shows_another_terminal_sends_a_whole_page() {
     let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"");
     {
-        let session: Arc<dyn crate::host::TerminalSession> =
-            Arc::new(crate::host::FakeTerminalSession::new());
+        let (term, _) = fake_term_session(24, 80);
         let ws = h.stoat.active_workspace_mut();
-        let other = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let other = ws.terms.insert(term);
         let pane = ws.panes.focus();
         ws.panes.pane_mut(pane).view = View::Terminal(other);
         let grid = ws.term_pool_grids[&term_id];

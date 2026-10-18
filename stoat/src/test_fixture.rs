@@ -14,9 +14,11 @@ use crate::{
     action_handlers,
     app::{modal_split_percent, modal_zoom_steps, ModalKind},
     editor_state::EditorId,
-    host::lsp::IncomingRequest,
+    host::{lsp::IncomingRequest, FakeTerminalSession},
     lsp::drain,
     pane::FocusTarget,
+    term_screen::TermScreen,
+    term_session::TermSession,
     test_harness::TestHarness,
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
@@ -345,4 +347,18 @@ pub(crate) fn register_capability(h: &mut TestHarness, registration: Registratio
             },
         });
     drain::drain_lsp_incoming_requests(&mut h.stoat);
+}
+
+/// A terminal session over a fake PTY, with a `rows` by `cols` screen.
+///
+/// The fake comes back beside the session, for a test that reads what the
+/// session wrote to its PTY or scripts what the PTY reports.
+pub(crate) fn fake_term_session(rows: u16, cols: u16) -> (TermSession, Arc<FakeTerminalSession>) {
+    let fake = Arc::new(FakeTerminalSession::new());
+    let session = TermSession::new(
+        TermScreen::new(rows, cols),
+        fake.clone(),
+        TermSession::next_token(),
+    );
+    (session, fake)
 }

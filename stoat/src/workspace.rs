@@ -2010,11 +2010,10 @@ mod tests {
         code_index::build::IndexUpdate,
         commit_list::CommitListId,
         editor_state::EditorId,
-        host::FakeTerminalSession,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::RunId,
-        term_screen::TermScreen,
-        term_session::{TermId, TermSession},
+        term_session::TermId,
+        test_fixture::fake_term_session,
         test_harness::TestHarness,
     };
     use ratatui::layout::Rect;
@@ -2063,11 +2062,7 @@ mod tests {
     /// Insert a session with a fake PTY into `ws`, newer than every session
     /// inserted before it.
     fn insert_session(ws: &mut Workspace) -> TermId {
-        ws.terms.insert(TermSession::new(
-            TermScreen::new(4, 10),
-            Arc::new(FakeTerminalSession::new()),
-            TermSession::next_token(),
-        ))
+        ws.terms.insert(fake_term_session(4, 10).0)
     }
 
     /// A terminal that both halves of a split show keeps the size the first

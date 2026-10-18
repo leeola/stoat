@@ -18,11 +18,11 @@ use crate::{
         walkthrough::Spotlight,
     },
     run::GridSelection,
-    term_session::{TermSelection, TermSession},
+    term_session::TermSelection,
     test_fixture::{
-        finder_layout, focused_editor_pane_area, mouse_event, open_indent_buffer,
-        open_scratch_file, open_with_minimap_strip, palette_sizing, picker_layout,
-        target_picker_rows,
+        fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
+        open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_sizing,
+        picker_layout, target_picker_rows,
     },
     test_harness::keys::{ctrl, key},
     workspace::diff::DiffBase,
@@ -3097,13 +3097,8 @@ fn agent_output_feeds_emulator() {
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
 
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
-    let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, _) = fake_term_session(24, 80);
+    let agent_id = stoat.active_workspace_mut().terms.insert(term);
     // Show the agent in the focused pane so its output marks the frame dirty.
     let pane = stoat.active_workspace().panes.focus();
     stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
@@ -3131,13 +3126,8 @@ fn agent_output_feeds_emulator() {
 fn a_retitle_on_a_hidden_terminal_marks_the_frame_dirty() {
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
-    let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, _) = fake_term_session(24, 80);
+    let agent_id = stoat.active_workspace_mut().terms.insert(term);
     let output = |stoat: &mut Stoat, data: &[u8]| {
         stoat.handle_pty_notification(PtyNotification::TermOutput {
             workspace: stoat.active_workspace,
@@ -3168,13 +3158,8 @@ fn a_retitle_on_a_hidden_terminal_marks_the_frame_dirty() {
 /// The thread ends when the caller drops the receiver, which is why nothing
 /// joins it: a send parked on a full channel has no other way out.
 fn flood_pty(stoat: &mut Stoat) {
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
-    let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, _) = fake_term_session(24, 80);
+    let agent_id = stoat.active_workspace_mut().terms.insert(term);
 
     let pane = stoat.active_workspace().panes.focus();
     stoat.active_workspace_mut().panes.pane_mut(pane).view = View::Agent(agent_id);
@@ -3291,17 +3276,8 @@ fn drain_pending_leaves_pty_output_past_its_turn_budget_queued() {
 #[test]
 fn term_pane_osc52_forwards_to_clipboard() {
     let mut h = Stoat::test();
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
-    let agent_id = h
-        .stoat
-        .active_workspace_mut()
-        .terms
-        .insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+    let (term, _) = fake_term_session(24, 80);
+    let agent_id = h.stoat.active_workspace_mut().terms.insert(term);
 
     // OSC 52 set-clipboard with the base64 of "hi", BEL-terminated.
     h.stoat
@@ -3795,13 +3771,8 @@ fn term_query_reply_writes_back_to_pty() {
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
 
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-    let agent_id = stoat.active_workspace_mut().terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, fake) = fake_term_session(24, 80);
+    let agent_id = stoat.active_workspace_mut().terms.insert(term);
 
     // A DSR cursor-position query in the PTY output must be answered back
     // to the PTY. A fresh screen reports the cursor at row 1, column 1.
@@ -3821,13 +3792,8 @@ fn layout_fits_agent_emulator_and_pty_to_pane() {
     ws.panes.split(crate::pane::Axis::Vertical);
     let focused = ws.panes.focus();
 
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-    let agent_id = ws.terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, fake) = fake_term_session(24, 80);
+    let agent_id = ws.terms.insert(term);
     ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
     let size = h.stoat.size();
@@ -3855,13 +3821,8 @@ fn closing_term_pane_kills_pty_child() {
     ws.panes.split(crate::pane::Axis::Vertical);
     let focused = ws.panes.focus();
 
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-    let agent_id = ws.terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, fake) = fake_term_session(24, 80);
+    let agent_id = ws.terms.insert(term);
     ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
@@ -3884,13 +3845,8 @@ fn closing_terminal_pane_kills_pty_child() {
     ws.panes.split(crate::pane::Axis::Vertical);
     let focused = ws.panes.focus();
 
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
-    let term_id = ws.terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let (term, fake) = fake_term_session(24, 80);
+    let term_id = ws.terms.insert(term);
     ws.panes.pane_mut(focused).view = View::Terminal(term_id);
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
@@ -3907,13 +3863,8 @@ fn closing_terminal_pane_kills_pty_child() {
 }
 
 fn insert_term_session(ws: &mut Workspace) -> TermId {
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
-    ws.terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ))
+    let (term, _) = fake_term_session(24, 80);
+    ws.terms.insert(term)
 }
 
 #[test]
@@ -4525,15 +4476,10 @@ fn stoat_with_focused_term(
     let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
     let mut stoat = Stoat::new(scheduler.executor(), Settings::default(), PathBuf::new());
 
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
-    let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
+    let (term, fake) = fake_term_session(24, 80);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
-    let term_id = ws.terms.insert(TermSession::new(
-        crate::term_screen::TermScreen::new(24, 80),
-        session,
-        TermSession::next_token(),
-    ));
+    let term_id = ws.terms.insert(term);
     ws.panes.pane_mut(focused).view = make_view(term_id);
     (stoat, term_id, fake)
 }
@@ -5609,16 +5555,11 @@ fn a_click_without_drag_leaves_no_terminal_selection() {
 fn pooled_terminal(
     h: &mut crate::test_harness::TestHarness,
 ) -> (TermId, u32, Arc<crate::host::FakeTerminalSession>) {
-    let shell = Arc::new(crate::host::FakeTerminalSession::new());
+    let (term, shell) = fake_term_session(24, 80);
     let (term_id, index) = {
         let ws = h.stoat.active_workspace_mut();
         let pane = ws.panes.focus();
-        let session: Arc<dyn crate::host::TerminalSession> = shell.clone();
-        let term_id = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let term_id = ws.terms.insert(term);
         ws.panes.pane_mut(pane).view = View::Terminal(term_id);
         (term_id, ws.panes.pane(pane).index)
     };
@@ -5842,16 +5783,11 @@ fn a_wheel_on_the_alternate_screen_sends_arrow_keys() {
 #[test]
 fn palette_over_a_terminal_routes_typing_to_the_palette() {
     let mut h = Stoat::test();
-    let fake = Arc::new(crate::host::FakeTerminalSession::new());
+    let (term, fake) = fake_term_session(24, 80);
     {
-        let session: Arc<dyn crate::host::TerminalSession> = fake.clone();
         let ws = h.stoat.active_workspace_mut();
         let pane = ws.panes.focus();
-        let term_id = ws.terms.insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let term_id = ws.terms.insert(term);
         ws.panes.pane_mut(pane).view = View::Terminal(term_id);
     }
 
@@ -8122,17 +8058,8 @@ fn window_region() -> PoolRegionCommand {
 #[test]
 fn a_terminal_pane_versions_on_everything_its_render_reads() {
     let mut h = Stoat::test();
-    let session: Arc<dyn crate::host::TerminalSession> =
-        Arc::new(crate::host::FakeTerminalSession::new());
-    let term_id = h
-        .stoat
-        .active_workspace_mut()
-        .terms
-        .insert(TermSession::new(
-            crate::term_screen::TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+    let (term, _) = fake_term_session(24, 80);
+    let term_id = h.stoat.active_workspace_mut().terms.insert(term);
 
     let view = View::Terminal(term_id);
     let region = window_region();

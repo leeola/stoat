@@ -203,17 +203,13 @@ impl TermSession {
 #[cfg(test)]
 mod tests {
     use super::{TermSelection, TermSession};
-    use crate::{host::FakeTerminalSession, term_screen::TermScreen};
-    use std::{collections::HashSet, sync::Arc};
+    use crate::test_fixture::fake_term_session;
+    use std::collections::HashSet;
 
     fn session_with(text: &[u8]) -> TermSession {
-        let mut term = TermScreen::new(4, 20);
-        term.feed(text);
-        TermSession::new(
-            term,
-            Arc::new(FakeTerminalSession::new()),
-            TermSession::next_token(),
-        )
+        let (mut session, _) = fake_term_session(4, 20);
+        session.term.feed(text);
+        session
     }
 
     fn selection(anchor: (usize, usize), head: (usize, usize)) -> TermSelection {

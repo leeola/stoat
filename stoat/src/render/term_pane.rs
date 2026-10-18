@@ -87,22 +87,18 @@ pub(crate) fn render_term_pane(
 mod tests {
     use super::render_term_pane;
     use crate::{
-        host::{FakeTerminalSession, TerminalSession},
         pane::{Axis, View},
-        term_screen::TermScreen,
-        term_session::TermSession,
+        test_fixture::fake_term_session,
         theme::Theme,
         Stoat,
     };
     use ratatui::{buffer::Buffer, layout::Rect};
-    use std::sync::Arc;
 
     /// A cell with a combining mark paints its character and the mark as one
     /// symbol, so the accent shows on screen as it does in a copy.
     #[test]
     fn a_combining_mark_paints_with_its_base() {
-        let session: Arc<dyn TerminalSession> = Arc::new(FakeTerminalSession::new());
-        let mut agent = TermSession::new(TermScreen::new(2, 4), session, TermSession::next_token());
+        let (mut agent, _) = fake_term_session(2, 4);
         agent.term.feed("e\u{301}x".as_bytes());
         let area = Rect::new(0, 0, 4, 2);
         let mut buf = Buffer::empty(area);
@@ -123,12 +119,8 @@ mod tests {
         ws.panes.split(Axis::Vertical);
         let focused = ws.panes.focus();
 
-        let session: Arc<dyn TerminalSession> = Arc::new(FakeTerminalSession::new());
-        let agent_id = ws.terms.insert(TermSession::new(
-            TermScreen::new(24, 80),
-            session,
-            TermSession::next_token(),
-        ));
+        let (term, _) = fake_term_session(24, 80);
+        let agent_id = ws.terms.insert(term);
         ws.panes.pane_mut(focused).view = View::Agent(agent_id);
 
         let size = h.stoat.size();
