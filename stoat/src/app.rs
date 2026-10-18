@@ -2402,7 +2402,7 @@ impl Stoat {
         &self,
         mode: &str,
     ) -> Vec<(&keymap::CompiledKey, &[ResolvedAction])> {
-        let state = StoatKeymapState::new(mode);
+        let state = StoatKeymapState::from_stoat(self).with_mode(mode);
         self.keymap.active_keys(&state)
     }
 

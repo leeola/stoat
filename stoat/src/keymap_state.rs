@@ -128,6 +128,18 @@ impl<'a> StoatKeymapState<'a> {
         }
     }
 
+    /// Set the `mode` predicate value on a state derived from the live app.
+    ///
+    /// The test harness's key-path search visits one chord sub-mode per level
+    /// and swaps only the mode. Every other predicate keeps its live value, so
+    /// a gated binding is reachable exactly when the test's fixture satisfies
+    /// the gate.
+    #[cfg(test)]
+    pub(crate) fn with_mode(mut self, mode: &str) -> Self {
+        self.mode_value = StateValue::String(mode.into());
+        self
+    }
+
     /// Set the `modal` predicate value on an otherwise flag-built state.
     ///
     /// Lets the hint-overlay renderer construct a state that targets a specific

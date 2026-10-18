@@ -3116,6 +3116,18 @@ mod tests {
     }
 
     #[test]
+    fn type_action_reaches_a_binding_gated_on_the_live_state() {
+        let mut h = Stoat::test();
+        h.open_side_by_side(("/pair/a.txt", "a\n"), ("/pair/b.txt", "b\n"));
+        h.type_action("DiffPair()");
+        assert_eq!(
+            focused_editor_mut(&mut h.stoat).map(|editor| editor.diff_view),
+            Some(true),
+            "space G D reaches DiffPair only under the live pair value",
+        );
+    }
+
+    #[test]
     fn new_workspace_adds_fresh_workspace_and_switches() {
         let mut h = Stoat::test();
         let original = h.stoat.active_workspace;
