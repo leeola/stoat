@@ -2,12 +2,7 @@ use crate::{
     action_handlers::movement::{self, NodeBound},
     app::{Stoat, UpdateEffect},
 };
-use std::{
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::time::Duration;
 
 /// Quiet window before a resolve request fires, so rapid Up/Down
 /// navigation coalesces to one request for the row it settles on.
@@ -83,7 +78,7 @@ pub(super) fn trigger_completion(stoat: &mut Stoat) -> UpdateEffect {
 /// so navigating past a row drops its pending resolve.
 pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
     let Some((label, raw, lsp)) = resolve_plan(stoat) else {
-        stoat.pending_completion_resolve = None;
+        stoat.pending_completion_resolve.clear();
         return;
     };
     let executor = stoat.executor.clone();
@@ -98,7 +93,7 @@ pub(crate) fn arm_completion_resolve(stoat: &mut Stoat) {
             ),
         })
     });
-    stoat.pending_completion_resolve = Some(task);
+    stoat.pending_completion_resolve.arm(task);
 }
 
 /// The `(label, raw LSP item)` to resolve for the selected row, or `None`
@@ -142,18 +137,12 @@ fn resolve_advertised(host: &std::sync::Arc<dyn crate::host::LspHost>) -> bool {
 /// its label still matches. A resolve that lands after the selection
 /// moved is discarded. Returns `true` when the popup changed.
 pub(crate) fn pump_completion_resolve(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_completion_resolve.take() else {
+    let Some(outcome) = stoat.pending_completion_resolve.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(resolved)) => apply_resolved(stoat, resolved),
-        Poll::Ready(None) => false,
-        Poll::Pending => {
-            stoat.pending_completion_resolve = Some(task);
-            false
-        },
+    match outcome {
+        Some(resolved) => apply_resolved(stoat, resolved),
+        None => false,
     }
 }
 

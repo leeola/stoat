@@ -2172,7 +2172,7 @@ pub struct Stoat {
     /// patches the resolved detail/documentation back into
     /// [`Self::pending_completion`].
     pub(crate) pending_completion_resolve:
-        Option<stoat_scheduler::Task<Option<action_handlers::completion::ResolvedCompletion>>>,
+        Pending<Option<action_handlers::completion::ResolvedCompletion>>,
 
     /// In-flight `completionItem/resolve` fired when an LSP completion is
     /// accepted, resolving its `additionalTextEdits` (imports) under a
@@ -2811,7 +2811,7 @@ impl Stoat {
             completion_generation: 0,
             pending_completion_request: Pending::default(),
             pending_narrow: None,
-            pending_completion_resolve: None,
+            pending_completion_resolve: Pending::default(),
             pending_completion_accept: StampedPending::default(),
             last_completion_signature: None,
             completion_context: None,
