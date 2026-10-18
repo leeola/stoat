@@ -660,10 +660,11 @@ mod tests {
             assert_eq!(help.scope(), HelpScope::Active);
         }
         assert_eq!(help_input_mode(h.stoat.focused_mode()), HelpInput::Insert);
-        let names = filtered_names(&h);
-        assert!(names.contains(&"Quit"));
-        assert!(names.contains(&"MoveDown"));
-        assert_eq!(names.len(), 5);
+        assert_eq!(
+            filtered_names(&h),
+            ["MoveLeft", "MoveDown", "MoveUp", "MoveRight", "Quit"],
+            "every active binding, in key order",
+        );
     }
 
     #[test]

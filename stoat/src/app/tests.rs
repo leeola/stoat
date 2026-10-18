@@ -193,7 +193,9 @@ fn window_ipc_closed_reattaches_pane() {
     stoat.handle_window_ipc(WindowIpc::Event(WindowIpcEvent::Closed { window: 3 }));
     let panes = &stoat.active_workspace().panes;
     assert_eq!(panes.pane(detached).placement, Placement::Split);
-    assert!(panes.split_pane_ids().contains(&detached));
+    let split = panes.split_pane_ids();
+    assert_eq!(split.len(), 2, "the root and the reattached pane");
+    assert!(split.contains(&detached));
 }
 
 /// Nothing may assume a stoatty is listening before the handshake says so,

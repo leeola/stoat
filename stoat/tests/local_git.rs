@@ -976,7 +976,7 @@ fn log_commits_walks_first_parent_from_head() {
     let repo = LocalGit::new().discover(tr.path()).unwrap();
     let log = repo.log_commits(None, 10);
     assert_eq!(log.len(), 3, "three commits on this branch");
-    assert!(log[0].summary.contains('c') || log[0].summary.is_empty());
+    assert_eq!(log[0].summary, "c");
     let shas: Vec<_> = log.iter().map(|c| c.sha.clone()).collect();
     let unique: BTreeSet<_> = shas.iter().collect();
     assert_eq!(unique.len(), 3, "shas must be distinct");
