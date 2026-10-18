@@ -20,37 +20,17 @@
 
 use crate::{
     emoji_expand::{is_shortcode_char, opens_a_shortcode},
-    host::{
-        lsp::{IncomingRequest, LspHost, LspNotification, LspResponseError},
-        OffsetEncoding,
-    },
+    host::{lsp::LspHost, OffsetEncoding},
     lsp::util,
 };
 use async_trait::async_trait;
 use lsp_types::{
-    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
-    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    CodeAction, CodeActionOrCommand, CodeActionParams, ColorInformation, ColorPresentation,
-    ColorPresentationParams, CompletionItem, CompletionItemKind, CompletionOptions,
-    CompletionParams, CompletionResponse, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentLink,
-    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandParams, FoldingRange, FoldingRangeParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, InitializeResult, InlayHint,
-    InlayHintParams, Location, NumberOrString, Position, PositionEncodingKind,
-    PrepareRenameResponse, ReferenceParams, RenameFilesParams, RenameParams, SelectionRange,
-    SelectionRangeParams, SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    InitializeResult, Position, PositionEncodingKind, ServerCapabilities,
     TextDocumentContentChangeEvent, TextDocumentPositionParams, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
-    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    TextDocumentSyncKind, TextEdit, Uri,
 };
-use serde_json::Value as JsonValue;
 use std::{
     collections::HashMap,
     io,
@@ -111,10 +91,6 @@ impl LspHost for EmojiLsp {
         })
     }
 
-    async fn shutdown(&self) -> io::Result<()> {
-        Ok(())
-    }
-
     async fn did_open(&self, params: DidOpenTextDocumentParams) -> io::Result<()> {
         let doc = params.text_document;
         self.docs
@@ -138,49 +114,12 @@ impl LspHost for EmojiLsp {
         Ok(())
     }
 
-    async fn did_save(&self, _params: DidSaveTextDocumentParams) -> io::Result<()> {
-        Ok(())
-    }
-
     async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()> {
         self.docs
             .lock()
             .expect("emoji docs poisoned")
             .remove(&params.text_document.uri);
         Ok(())
-    }
-
-    async fn did_rename(&self, _params: RenameFilesParams) -> io::Result<()> {
-        Ok(())
-    }
-
-    async fn did_change_watched_files(
-        &self,
-        _params: DidChangeWatchedFilesParams,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    async fn did_change_configuration(
-        &self,
-        _params: DidChangeConfigurationParams,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    async fn did_change_workspace_folders(
-        &self,
-        _params: DidChangeWorkspaceFoldersParams,
-    ) -> io::Result<()> {
-        Ok(())
-    }
-
-    async fn hover(&self, _params: HoverParams) -> io::Result<Option<Hover>> {
-        Ok(None)
-    }
-
-    async fn references(&self, _params: ReferenceParams) -> io::Result<Option<Vec<Location>>> {
-        Ok(None)
     }
 
     async fn completion(&self, params: CompletionParams) -> io::Result<Option<CompletionResponse>> {
@@ -196,265 +135,6 @@ impl LspHost for EmojiLsp {
             complete(rope, position)
         };
         Ok(Some(CompletionResponse::Array(items)))
-    }
-
-    async fn completion_resolve(&self, item: CompletionItem) -> io::Result<CompletionItem> {
-        Ok(item)
-    }
-
-    async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
-        Ok(action)
-    }
-
-    async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink> {
-        Ok(link)
-    }
-
-    async fn inlay_hint(&self, _params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>> {
-        Ok(None)
-    }
-
-    async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint> {
-        Ok(hint)
-    }
-
-    async fn rename(&self, _params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
-        Ok(None)
-    }
-
-    async fn will_rename(&self, _params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>> {
-        Ok(None)
-    }
-
-    async fn execute_command(
-        &self,
-        _params: ExecuteCommandParams,
-    ) -> io::Result<Option<JsonValue>> {
-        Ok(None)
-    }
-
-    async fn recv_notification(&self) -> Option<LspNotification> {
-        None
-    }
-
-    async fn try_recv_notification(&self) -> Option<LspNotification> {
-        None
-    }
-
-    async fn recv_incoming_request(&self) -> Option<IncomingRequest> {
-        None
-    }
-
-    async fn try_recv_incoming_request(&self) -> Option<IncomingRequest> {
-        None
-    }
-
-    // Every request below is one this server has nothing to say about.
-    // It answers completion and nothing else, which is what its
-    // capabilities already tell a client.
-
-    async fn goto_definition(
-        &self,
-        _params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>> {
-        Ok(None)
-    }
-
-    async fn goto_declaration(
-        &self,
-        _params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>> {
-        Ok(None)
-    }
-
-    async fn goto_type_definition(
-        &self,
-        _params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>> {
-        Ok(None)
-    }
-
-    async fn goto_implementation(
-        &self,
-        _params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>> {
-        Ok(None)
-    }
-
-    async fn document_highlight(
-        &self,
-        _params: DocumentHighlightParams,
-    ) -> io::Result<Option<Vec<DocumentHighlight>>> {
-        Ok(None)
-    }
-
-    async fn code_action(
-        &self,
-        _params: CodeActionParams,
-    ) -> io::Result<Option<Vec<CodeActionOrCommand>>> {
-        Ok(None)
-    }
-
-    async fn document_link(
-        &self,
-        _params: DocumentLinkParams,
-    ) -> io::Result<Option<Vec<DocumentLink>>> {
-        Ok(None)
-    }
-
-    async fn document_color(
-        &self,
-        _params: DocumentColorParams,
-    ) -> io::Result<Option<Vec<ColorInformation>>> {
-        Ok(None)
-    }
-
-    async fn color_presentation(
-        &self,
-        _params: ColorPresentationParams,
-    ) -> io::Result<Option<Vec<ColorPresentation>>> {
-        Ok(None)
-    }
-
-    async fn semantic_tokens_full(
-        &self,
-        _params: SemanticTokensParams,
-    ) -> io::Result<Option<SemanticTokensResult>> {
-        Ok(None)
-    }
-
-    async fn semantic_tokens_full_delta(
-        &self,
-        _params: SemanticTokensDeltaParams,
-    ) -> io::Result<Option<SemanticTokensFullDeltaResult>> {
-        Ok(None)
-    }
-
-    async fn semantic_tokens_range(
-        &self,
-        _params: SemanticTokensRangeParams,
-    ) -> io::Result<Option<SemanticTokensRangeResult>> {
-        Ok(None)
-    }
-
-    async fn prepare_call_hierarchy(
-        &self,
-        _params: CallHierarchyPrepareParams,
-    ) -> io::Result<Option<Vec<CallHierarchyItem>>> {
-        Ok(None)
-    }
-
-    async fn call_hierarchy_incoming_calls(
-        &self,
-        _params: CallHierarchyIncomingCallsParams,
-    ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>> {
-        Ok(None)
-    }
-
-    async fn call_hierarchy_outgoing_calls(
-        &self,
-        _params: CallHierarchyOutgoingCallsParams,
-    ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-        Ok(None)
-    }
-
-    async fn prepare_type_hierarchy(
-        &self,
-        _params: TypeHierarchyPrepareParams,
-    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
-        Ok(None)
-    }
-
-    async fn type_hierarchy_supertypes(
-        &self,
-        _params: TypeHierarchySupertypesParams,
-    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
-        Ok(None)
-    }
-
-    async fn type_hierarchy_subtypes(
-        &self,
-        _params: TypeHierarchySubtypesParams,
-    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
-        Ok(None)
-    }
-
-    async fn document_symbol(
-        &self,
-        _params: DocumentSymbolParams,
-    ) -> io::Result<Option<DocumentSymbolResponse>> {
-        Ok(None)
-    }
-
-    async fn document_diagnostic(
-        &self,
-        _params: DocumentDiagnosticParams,
-    ) -> io::Result<Option<DocumentDiagnosticReportResult>> {
-        Ok(None)
-    }
-
-    async fn folding_range(
-        &self,
-        _params: FoldingRangeParams,
-    ) -> io::Result<Option<Vec<FoldingRange>>> {
-        Ok(None)
-    }
-
-    async fn selection_range(
-        &self,
-        _params: SelectionRangeParams,
-    ) -> io::Result<Option<Vec<SelectionRange>>> {
-        Ok(None)
-    }
-
-    async fn workspace_symbol(
-        &self,
-        _params: WorkspaceSymbolParams,
-    ) -> io::Result<Option<WorkspaceSymbolResponse>> {
-        Ok(None)
-    }
-
-    async fn signature_help(
-        &self,
-        _params: SignatureHelpParams,
-    ) -> io::Result<Option<SignatureHelp>> {
-        Ok(None)
-    }
-
-    async fn range_inlay_hint(
-        &self,
-        _params: InlayHintParams,
-    ) -> io::Result<Option<Vec<InlayHint>>> {
-        Ok(None)
-    }
-
-    async fn prepare_rename(
-        &self,
-        _params: TextDocumentPositionParams,
-    ) -> io::Result<Option<PrepareRenameResponse>> {
-        Ok(None)
-    }
-
-    async fn formatting(
-        &self,
-        _params: DocumentFormattingParams,
-    ) -> io::Result<Option<Vec<TextEdit>>> {
-        Ok(None)
-    }
-
-    async fn range_formatting(
-        &self,
-        _params: DocumentRangeFormattingParams,
-    ) -> io::Result<Option<Vec<TextEdit>>> {
-        Ok(None)
-    }
-
-    async fn reply(
-        &self,
-        _id: NumberOrString,
-        _result: Result<JsonValue, LspResponseError>,
-    ) -> io::Result<()> {
-        Ok(())
     }
 }
 
