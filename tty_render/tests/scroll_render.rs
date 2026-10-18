@@ -9,21 +9,19 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{Frame, Scroll},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device},
+    test_support::{self, offscreen_target, pixel, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{Grid, Rgb, UnderlineStyle},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 #[test]
 fn grid_scroll_moves_glyph_down_without_rebuild() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     // 4 * width must be a multiple of 256 for the texture-to-buffer copy; three
@@ -35,20 +33,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 2 && cols >= 1, "grid too small: {rows}x{cols}");
@@ -120,7 +105,6 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
 fn document_scroll_shifts_the_grid_like_grid_scroll() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     let (width, height) = (128u32, cell_h * 3);
@@ -130,20 +114,7 @@ fn document_scroll_shifts_the_grid_like_grid_scroll() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 2 && cols >= 1, "grid too small: {rows}x{cols}");

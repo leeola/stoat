@@ -3,8 +3,8 @@
 //! Compiled for the crate's own unit tests, and for its integration tests
 //! through the `test-support` feature.
 
-use crate::gpu::{self, Frame, Scroll};
-use stoatty_term::term::Damage;
+use crate::gpu::{self, build_font_system, FontConfig, Frame, Renderer, Scroll};
+use stoatty_term::{grid::Rgb, term::Damage};
 use wgpu::{
     BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
     PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
@@ -124,4 +124,33 @@ pub fn still_frame<'a>(damage: &'a Damage, decoration_damage: &'a Damage) -> Fra
 pub fn pixel(shot: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
     let at = ((y * width + x) * 4) as usize;
     [shot[at], shot[at + 1], shot[at + 2]]
+}
+
+/// A renderer of `size` over JetBrains Mono at `font_size` and `scale_factor`,
+/// for an `Rgba8Unorm` target on a `surface` background.
+///
+/// The cursor is white and ligatures are on, as most renderer tests draw. A
+/// test that needs another format, cursor, or ligature setting calls
+/// [`Renderer::new`] itself.
+pub fn renderer(
+    device: &Device,
+    size: [u32; 2],
+    font_size: u32,
+    scale_factor: f32,
+    surface: Rgb,
+) -> Renderer {
+    Renderer::new(
+        device,
+        TextureFormat::Rgba8Unorm,
+        size,
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        surface,
+        Rgb::new(255, 255, 255),
+    )
 }

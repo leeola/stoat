@@ -13,9 +13,9 @@
 
 use futures::executor;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
+    gpu::Renderer,
     render::{cell_size, HostRide},
-    test_support::{require_headless_device, still_frame},
+    test_support::{self, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -58,20 +58,8 @@ fn setup(device: &Device) -> Setup {
     });
     let view = target.create_view(&TextureViewDescriptor::default());
 
-    let renderer = Renderer::new(
-        device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        Rgb::new(0, 0, 0),
-        Rgb::new(255, 255, 255),
-    );
+    let renderer =
+        test_support::renderer(device, [width, height], font_size, 1.0, Rgb::new(0, 0, 0));
 
     Setup {
         _target: target,

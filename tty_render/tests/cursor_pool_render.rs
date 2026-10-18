@@ -11,46 +11,32 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
+    gpu::Renderer,
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 #[test]
 fn cursor_draws_over_pool_and_obeys_its_scissor() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let [cell_w, cell_h] = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
     let (width, height) = (128u32, cell_h * 3);
 
     let black = Rgb::new(0, 0, 0);
-    let white = Rgb::new(255, 255, 255);
     let gray = Rgb::new(80, 80, 80);
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 2 && cols >= 6, "grid too small: {rows}x{cols}");

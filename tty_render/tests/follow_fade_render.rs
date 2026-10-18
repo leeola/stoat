@@ -11,15 +11,14 @@ use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
 };
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll, SketchReveal},
+    gpu::{Frame, Scroll, SketchReveal},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device},
+    test_support::{self, offscreen_target, pixel, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{Grid, Rgb, Sketch, TextRun},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 /// The ground beneath the backed run, which a faded rect blends into and an
 /// opaque one wipes away.
@@ -31,27 +30,14 @@ const GROUND: Rgb = Rgb { r: 0, g: 0, b: 255 };
 fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (width, height) = (256u32, (cell[1] * 10.0).round() as u32);
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        Rgb::new(0, 0, 0),
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer =
+        test_support::renderer(&device, [width, height], font_size, 1.0, Rgb::new(0, 0, 0));
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 4 && cols >= 4, "grid too small: {rows}x{cols}");

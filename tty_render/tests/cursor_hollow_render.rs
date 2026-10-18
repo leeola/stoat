@@ -8,15 +8,16 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
+    gpu::Renderer,
     render::{background::CursorFill, cell_size},
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 #[test]
 fn a_hollow_cursor_paints_its_outline_and_leaves_the_center() {
@@ -28,20 +29,8 @@ fn a_hollow_cursor_paints_its_outline_and_leaves_the_center() {
     let (width, height) = (128u32, cell_h * 3);
 
     let (target, view) = offscreen_target(&device, width, height);
-    let mut renderer = Renderer::new(
-        &device,
-        TextureFormat::Rgba8Unorm,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        Rgb::new(0, 0, 0),
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer =
+        test_support::renderer(&device, [width, height], font_size, 1.0, Rgb::new(0, 0, 0));
 
     let (rows, cols) = renderer.grid_size();
     let base = Grid::new(rows, cols);

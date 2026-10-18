@@ -9,21 +9,20 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 #[test]
 fn powerline_separator_fills_the_cell() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     // 4 * width must be a multiple of 256 for the texture-to-buffer copy.
     let (width, height) = (128u32, 64u32);
     let font_size = 30;
@@ -33,20 +32,7 @@ fn powerline_separator_fills_the_cell() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        fill,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, fill);
 
     let (rows, cols) = renderer.grid_size();
     let mut grid = Grid::new(rows, cols);

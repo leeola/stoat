@@ -8,15 +8,15 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 /// The surface (clear) color the panel is rendered over, so darkening or fill is
 /// measurable against a known non-black background.
@@ -51,7 +51,6 @@ fn render_panel(build: impl FnOnce(usize, usize) -> Panel) -> Rendered {
 fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) -> Rendered {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, scale_factor);
     let (width, height) = (256u32, (cell[1] * 8.0).round() as u32);
@@ -59,20 +58,8 @@ fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) 
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer =
+        test_support::renderer(&device, [width, height], font_size, scale_factor, surface);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 5 && cols >= 6, "grid too small: {rows}x{cols}");

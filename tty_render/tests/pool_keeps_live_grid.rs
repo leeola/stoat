@@ -11,21 +11,21 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
+    gpu::Renderer,
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 #[test]
 fn pool_composite_keeps_live_instances() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     let (width, height) = (128u32, cell_h * 3);
@@ -36,20 +36,7 @@ fn pool_composite_keeps_live_instances() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 3 && cols >= 1, "grid too small: {rows}x{cols}");
@@ -137,7 +124,6 @@ fn pool_composite_keeps_live_instances() {
 fn shift_only_composite_reuses_prior_rows() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     let (width, height) = (128u32, cell_h * 3);
@@ -149,20 +135,7 @@ fn shift_only_composite_reuses_prior_rows() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     let live = Grid::new(rows, cols);
@@ -249,7 +222,6 @@ fn shift_only_composite_reuses_prior_rows() {
 fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     let band = cell_h * 2;
@@ -263,20 +235,7 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     let live = Grid::new(rows, cols);
@@ -386,7 +345,6 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
 fn pool_grow_heals_live_instances() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     // Wide and tall enough for the pool to pack enough distinct glyphs to
@@ -398,20 +356,7 @@ fn pool_grow_heals_live_instances() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 1 && cols >= 1, "grid too small: {rows}x{cols}");
@@ -497,7 +442,6 @@ fn pool_grow_heals_live_instances() {
 fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 60;
     let cell_h = cell_size(font_size, 1.0)[1].round() as u32;
     // Large glyphs plus a full ASCII spread overflow the 256px atlas and grow it.
@@ -508,20 +452,7 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
 
     let (_target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
 
@@ -593,32 +524,17 @@ fn composite_pool_leaves_the_content_epoch_alone_across_a_grow() {
 fn a_region_sized_pool_draws_at_the_region_origin() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 30;
     let [cell_w, cell_h] = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
     let (width, height) = (128u32, cell_h * 4);
 
     let black = Rgb::new(0, 0, 0);
-    let white = Rgb::new(255, 255, 255);
     let gray = Rgb::new(80, 80, 80);
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        black,
-        white,
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, black);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 3 && cols >= 2, "grid too small: {rows}x{cols}");

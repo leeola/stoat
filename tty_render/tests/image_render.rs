@@ -8,15 +8,15 @@
 
 use std::sync::Arc;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Grid, ImageCrop, PlacedImage, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 /// A solid image of `color`, as the store would hand one over.
 fn solid(width: u32, height: u32, color: [u8; 4]) -> Arc<[u8]> {
@@ -52,7 +52,6 @@ fn placement(rgba: Arc<[u8]>, width: u32, height: u32, z: i32) -> PlacedImage {
 fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell[0], cell[1]);
@@ -61,20 +60,7 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
     let surface = Rgb::new(0, 0, 0);
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, surface);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");
@@ -147,7 +133,6 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
 fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell[0], cell[1]);
@@ -157,20 +142,7 @@ fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
     let surface = Rgb::new(128, 128, 128);
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, surface);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");
@@ -220,7 +192,6 @@ fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
 fn a_downscaled_image_averages_rather_than_aliasing() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell[0], cell[1]);
@@ -229,20 +200,7 @@ fn a_downscaled_image_averages_rather_than_aliasing() {
     let surface = Rgb::new(0, 0, 0);
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, surface);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 4 && cols >= 6, "grid too small: {rows}x{cols}");

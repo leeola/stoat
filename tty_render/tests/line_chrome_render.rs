@@ -8,21 +8,20 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        self, offscreen_target, pixel, read_back, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Border, BorderEdge, BorderStyle, Grid, Panel, PanelShadow, Rgb},
     term::Damage,
 };
-use wgpu::TextureFormat;
 
 #[test]
 fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell[0], cell[1]);
@@ -33,20 +32,7 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, surface);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 6 && cols >= 6, "grid too small: {rows}x{cols}");
@@ -113,7 +99,6 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
 fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell[0], cell[1]);
@@ -122,20 +107,7 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
     let surface = Rgb::new(0, 0, 0);
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        surface,
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer = test_support::renderer(&device, [width, height], font_size, 1.0, surface);
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 6 && cols >= 8, "grid too small: {rows}x{cols}");
@@ -201,7 +173,6 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
 fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
     let (device, queue) = require_headless_device();
 
-    let format = TextureFormat::Rgba8Unorm;
     let font_size = 24;
     let cell = cell_size(font_size, 1.0);
     let (cell_w, cell_h) = (cell[0], cell[1]);
@@ -209,20 +180,8 @@ fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
 
     let (target, view) = offscreen_target(&device, width, height);
 
-    let mut renderer = Renderer::new(
-        &device,
-        format,
-        [width, height],
-        build_font_system(),
-        FontConfig {
-            size: font_size,
-            scale_factor: 1.0,
-            family: &["JetBrains Mono".to_owned()],
-            ligatures: true,
-        },
-        Rgb::new(0, 0, 0),
-        Rgb::new(255, 255, 255),
-    );
+    let mut renderer =
+        test_support::renderer(&device, [width, height], font_size, 1.0, Rgb::new(0, 0, 0));
 
     let (rows, cols) = renderer.grid_size();
     assert!(rows >= 4 && cols >= 4, "grid too small: {rows}x{cols}");
