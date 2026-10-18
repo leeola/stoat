@@ -357,10 +357,7 @@ pub(crate) fn step_scroll_ease(
     (offset + step.copysign(remaining), false)
 }
 
-pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn align_view(editor: &mut EditorState, align: ViewAlign) -> UpdateEffect {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
 
     let display_snapshot = editor.display_map.snapshot();
@@ -1470,7 +1467,10 @@ mod tests {
             place_cursor(editor, 8, 0);
         }
 
-        align_view(&mut h.stoat, ViewAlign::Top);
+        align_view(
+            focused_editor_mut(&mut h.stoat).expect("focused editor"),
+            ViewAlign::Top,
+        );
 
         let cursor_row = focused_cursor_display_row(&mut h);
         let scroll = focused_editor_mut(&mut h.stoat)

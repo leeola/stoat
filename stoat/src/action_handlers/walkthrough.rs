@@ -281,7 +281,9 @@ pub(super) fn abandon_commit_tour(stoat: &mut Stoat) {
 fn refresh_narration(stoat: &mut Stoat) -> bool {
     let point = current_anchor(run_of(stoat)).range.start;
 
-    let Some(offset) = focused_offset_of(stoat, point) else {
+    let Some(offset) =
+        action_handlers::focused_editor_mut(stoat).map(|editor| offset_of(editor, point))
+    else {
         return false;
     };
     show_narration(stoat, offset);
@@ -679,7 +681,8 @@ fn jump_to_range(
     crate::buffer_lifecycle::open_file_in_pane(stoat, target, path, OpenOrigin::Visited);
     stoat.set_focused_mode(mode);
 
-    let offset = focused_offset_of(stoat, range.start)?;
+    let offset =
+        action_handlers::focused_editor_mut(stoat).map(|editor| offset_of(editor, range.start))?;
     let effect = action_handlers::movement::jump_to_offset(stoat, offset);
     // Landing in another file shows an editor with no earlier view to glide
     // from, so it snaps.
@@ -689,7 +692,8 @@ fn jump_to_range(
 
     Some(Landing {
         offset,
-        drifted: drifted(stoat, range, captured),
+        drifted: action_handlers::focused_editor_mut(stoat)
+            .is_some_and(|editor| drifted(editor, range, captured)),
         effect,
     })
 }
@@ -945,16 +949,13 @@ fn resolve_location_symbol(
     ws.code_graph.symbol_at(build::file_id(&rel), offset)
 }
 
-/// Byte offset of `point` in the focused buffer.
-fn focused_offset_of(stoat: &mut Stoat, point: walkthrough::Point) -> Option<usize> {
-    let editor = action_handlers::focused_editor_mut(stoat)?;
+/// The byte offset of `point` in the buffer of `editor`.
+fn offset_of(editor: &mut EditorState, point: walkthrough::Point) -> usize {
     let snapshot = editor.display_map.snapshot();
-    Some(
-        snapshot
-            .buffer_snapshot()
-            .rope()
-            .point_to_offset(rope_point(point)),
-    )
+    snapshot
+        .buffer_snapshot()
+        .rope()
+        .point_to_offset(rope_point(point))
 }
 
 /// A stored point as the rope counts them.
@@ -965,14 +966,12 @@ fn rope_point(point: walkthrough::Point) -> stoat_text::Point {
     stoat_text::Point::new(point.line.saturating_sub(1), point.col.saturating_sub(1))
 }
 
-/// Whether the focused buffer no longer holds the bytes `captured` over `range`.
+/// Whether the buffer of `editor` no longer holds the bytes `captured` over
+/// `range`.
 ///
 /// Read through [`walkthrough::snippet_for`] rather than sliced here, so a stop
 /// the player calls drifted is exactly one `stoat walkthrough check` reports.
-fn drifted(stoat: &mut Stoat, range: walkthrough::Range, captured: &str) -> bool {
-    let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
-        return false;
-    };
+fn drifted(editor: &mut EditorState, range: walkthrough::Range, captured: &str) -> bool {
     let content = editor
         .display_map
         .snapshot()

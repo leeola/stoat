@@ -4107,7 +4107,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     let count = count as usize;
     let extend = stoat.in_select_mode();
     let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
-    let origin = super::jump::live_entry(stoat);
+    let origin = focused_editor_mut(stoat).map(super::jump::live_entry);
     let current_path = stoat.focused_editor_ids().and_then(|(_, buffer_id)| {
         stoat
             .active_workspace()

@@ -928,9 +928,15 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendGotoWindowBottom => {
             view::goto_window(stoat, view::WindowAlign::Bottom, true)
         },
-        ActionKind::AlignViewTop => view::align_view(stoat, view::ViewAlign::Top),
-        ActionKind::AlignViewCenter => view::align_view(stoat, view::ViewAlign::Center),
-        ActionKind::AlignViewBottom => view::align_view(stoat, view::ViewAlign::Bottom),
+        ActionKind::AlignViewTop => with_focused_editor(stoat, |editor| {
+            view::align_view(editor, view::ViewAlign::Top)
+        }),
+        ActionKind::AlignViewCenter => with_focused_editor(stoat, |editor| {
+            view::align_view(editor, view::ViewAlign::Center)
+        }),
+        ActionKind::AlignViewBottom => with_focused_editor(stoat, |editor| {
+            view::align_view(editor, view::ViewAlign::Bottom)
+        }),
         ActionKind::ScrollUp => view::scroll_view(stoat, view::ScrollDir::Up),
         ActionKind::ScrollDown => view::scroll_view(stoat, view::ScrollDir::Down),
         ActionKind::SwitchCase => movement::switch_case(stoat),
@@ -1008,7 +1014,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             // will expose this via the action SDK; for now it resolves
             // and logs the relationship count so the action is
             // observable from tests.
-            if let Some(summary) = move_nav::current_move_summary(stoat) {
+            if let Some(summary) =
+                focused_editor_mut(stoat).and_then(move_nav::current_move_summary)
+            {
                 tracing::info!(
                     sources = summary.source_count,
                     same_side_target = ?summary.target_ref,

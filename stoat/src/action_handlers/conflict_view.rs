@@ -65,7 +65,7 @@ pub(super) fn open_conflict(stoat: &mut Stoat) {
             .path_for(buffer_id)
             .map(Path::to_path_buf)
     });
-    let origin = super::jump::live_entry(stoat);
+    let origin = focused_editor_mut(stoat).map(super::jump::live_entry);
     let git_root = stoat.active_workspace().git_root.clone();
 
     let source = ConflictSource::Discover {

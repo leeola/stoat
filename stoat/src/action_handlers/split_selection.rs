@@ -1,6 +1,7 @@
 use crate::{
-    action_handlers::search::CursorRegex,
+    action_handlers::{focused_editor_mut, search::CursorRegex},
     app::{Stoat, UpdateEffect},
+    editor_state::EditorState,
     input_view::{InputView, SubmitTarget},
 };
 use stoat_text::{next_char_boundary, Bias, Rope};
@@ -54,7 +55,11 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         return true;
     };
     match state.kind {
-        RegexSelectKind::Split => split_on_matches(stoat, &regex),
+        RegexSelectKind::Split => {
+            if let Some(editor) = focused_editor_mut(stoat) {
+                split_on_matches(editor, &regex);
+            }
+        },
         RegexSelectKind::Select => select_on_matches(stoat, &regex),
     }
     true
@@ -79,10 +84,7 @@ pub(super) fn widen_pieces(rope: &Rope, pieces: Vec<(usize, usize)>) -> Vec<(usi
 }
 
 /// Split every selection at each match, keeping the gaps between matches.
-fn split_on_matches(stoat: &mut Stoat, regex: &CursorRegex) {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return;
-    };
+fn split_on_matches(editor: &mut EditorState, regex: &CursorRegex) {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -180,10 +182,6 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
     true
-}
-
-fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut crate::editor_state::EditorState> {
-    super::focused_editor_mut(stoat)
 }
 
 #[cfg(test)]

@@ -14,7 +14,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::OpenOrigin,
     display_map::InlayKind,
-    editor_state::ScrollGlide,
+    editor_state::{EditorState, ScrollGlide},
     host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
     input_view::{InputView, SubmitTarget},
     location_picker::{location_haystack, LocationEntry, LocationPicker},
@@ -644,13 +644,12 @@ pub(crate) fn inlay_hints_trigger(stoat: &mut Stoat) {
     request_inlay_hints(stoat, INLAY_HINT_DEBOUNCE);
 }
 
-/// The focused editor's `(buffer_id, version, scroll_row, end_row)` inlay-hint
-/// dedupe key, or `None` when no editor is focused or it has no viewport.
+/// The `(buffer_id, version, scroll_row, end_row)` inlay-hint dedupe key of
+/// `editor`, or `None` when it has no viewport.
 ///
 /// Mirrors [`build_inlay_hint_request`]'s editor read without cloning the rope,
 /// so the trigger can bail before host resolution.
-fn inlay_hint_key(stoat: &mut Stoat) -> Option<(BufferId, u64, u32, u32)> {
-    let editor = crate::action_handlers::focused_editor_mut(stoat)?;
+fn inlay_hint_key(editor: &mut EditorState) -> Option<(BufferId, u64, u32, u32)> {
     let viewport = editor.viewport_rows?;
     let scroll_row = editor.scroll_row;
     let snapshot = editor.display_map.snapshot();
@@ -682,7 +681,8 @@ fn request_inlay_hints(stoat: &mut Stoat, debounce: Duration) -> bool {
     {
         return true;
     }
-    let Some(key) = inlay_hint_key(stoat) else {
+    let Some(key) = crate::action_handlers::focused_editor_mut(stoat).and_then(inlay_hint_key)
+    else {
         return true;
     };
     if stoat.last_inlay_hint_key == Some(key) {
@@ -838,16 +838,15 @@ pub(crate) fn pump_lsp_inlay_hints(stoat: &mut Stoat) -> bool {
     let Some(response) = stoat.pending_inlay_hint_request.poll() else {
         return false;
     };
-    if let Some((buffer_id, items)) = response {
-        apply_inlay_hints(stoat, buffer_id, items);
+    if let Some((buffer_id, items)) = response
+        && let Some(editor) = crate::action_handlers::focused_editor_mut(stoat)
+    {
+        apply_inlay_hints(editor, buffer_id, items);
     }
     true
 }
 
-fn apply_inlay_hints(stoat: &mut Stoat, buffer_id: BufferId, items: Vec<InlayHintItem>) {
-    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
-        return;
-    };
+fn apply_inlay_hints(editor: &mut EditorState, buffer_id: BufferId, items: Vec<InlayHintItem>) {
     if editor.buffer_id != buffer_id {
         return;
     }

@@ -549,7 +549,7 @@ fn drop_other_diff_views(ws: &mut Workspace, keep: PaneId) {
 /// - [`enter_diff_view`], the entry half, which turns the view on where the reader stands.
 /// - [`exit_diff_view`], the exit half, which other screens reuse.
 pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
-    let origin = super::jump::live_entry(stoat);
+    let origin = super::focused_editor_mut(stoat).map(super::jump::live_entry);
     if super::focused_editor_mut(stoat).is_none() {
         return;
     }

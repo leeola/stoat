@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    editor_state::EditorState,
     input_view::{InputView, SubmitTarget},
 };
 use std::ops::Range;
@@ -138,17 +139,14 @@ fn run_shell(
     Ok(LineEnding::normalize(&text).into_owned())
 }
 
-/// Text the first selection covers, or empty where no editor is focused.
+/// Text the first selection covers.
 ///
 /// Insert and append pipe nothing, so this is the selection their trailing
 /// newline is measured against. One run feeds every selection, so one of them
 /// has to set the trim, and the first in the document is the one the user
 /// reads the result from. The primary is wherever a multi-cursor gesture
 /// happened to leave it, which the output has nothing to do with.
-fn first_selection_text(stoat: &mut Stoat) -> String {
-    let Some(editor) = super::focused_editor_mut(stoat) else {
-        return String::new();
-    };
+fn first_selection_text(editor: &mut EditorState) -> String {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let Some(first) = editor.selections.all_anchors().first() else {
@@ -276,7 +274,9 @@ fn apply_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &
             return;
         },
     };
-    let Some((spans, primary_index)) = edit_spans(stoat, Shape::Replace) else {
+    let Some((spans, primary_index)) =
+        super::focused_editor_mut(stoat).map(|editor| edit_spans(editor, Shape::Replace))
+    else {
         return;
     };
     reshape(stoat, spans, outputs, primary_index);
@@ -294,8 +294,7 @@ enum Shape {
 ///
 /// Ordered by position, which is the order [`reshape`] reads them in and the
 /// order the selections already hold.
-fn edit_spans(stoat: &mut Stoat, shape: Shape) -> Option<(Vec<EditSpan>, usize)> {
-    let editor = super::focused_editor_mut(stoat)?;
+fn edit_spans(editor: &mut EditorState, shape: Shape) -> (Vec<EditSpan>, usize) {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let primary_index = editor.selections.primary_index();
@@ -328,7 +327,7 @@ fn edit_spans(stoat: &mut Stoat, shape: Shape) -> Option<(Vec<EditSpan>, usize)>
             }
         })
         .collect();
-    Some((spans, primary_index))
+    (spans, primary_index)
 }
 
 fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
@@ -355,14 +354,19 @@ fn apply_pipe_to(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd
 
 fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
-    let output = match run_shell(shell_host, cmd, "", &first_selection_text(stoat), &diff) {
+    let selected = super::focused_editor_mut(stoat)
+        .map(first_selection_text)
+        .unwrap_or_default();
+    let output = match run_shell(shell_host, cmd, "", &selected, &diff) {
         Ok(output) => output,
         Err(message) => {
             stoat.set_status(message);
             return;
         },
     };
-    let Some((spans, primary_index)) = edit_spans(stoat, Shape::Insert) else {
+    let Some((spans, primary_index)) =
+        super::focused_editor_mut(stoat).map(|editor| edit_spans(editor, Shape::Insert))
+    else {
         return;
     };
     // One run feeds every selection, so each takes a copy of the same output.
@@ -372,14 +376,19 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
 
 fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let diff = stoat.active_workspace().env.diff.clone();
-    let output = match run_shell(shell_host, cmd, "", &first_selection_text(stoat), &diff) {
+    let selected = super::focused_editor_mut(stoat)
+        .map(first_selection_text)
+        .unwrap_or_default();
+    let output = match run_shell(shell_host, cmd, "", &selected, &diff) {
         Ok(output) => output,
         Err(message) => {
             stoat.set_status(message);
             return;
         },
     };
-    let Some((spans, primary_index)) = edit_spans(stoat, Shape::Append) else {
+    let Some((spans, primary_index)) =
+        super::focused_editor_mut(stoat).map(|editor| edit_spans(editor, Shape::Append))
+    else {
         return;
     };
     let outputs = vec![output; spans.len()];

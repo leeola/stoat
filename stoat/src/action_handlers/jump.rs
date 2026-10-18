@@ -11,19 +11,18 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
+    editor_state::EditorState,
     jumplist::{ChangeLanding, JumpEntry},
     pane::{FocusTarget, PaneId, View},
     workspace::WorkspaceId,
 };
 
-/// The focused editor's current position as a [`JumpEntry`], or `None` when no
-/// editor is focused.
-pub(crate) fn live_entry(stoat: &mut Stoat) -> Option<JumpEntry> {
-    let editor = super::focused_editor_mut(stoat)?;
-    Some(JumpEntry {
+/// The current position of `editor` as a [`JumpEntry`].
+pub(crate) fn live_entry(editor: &mut EditorState) -> JumpEntry {
+    JumpEntry {
         buffer_id: editor.buffer_id,
         selections: editor.selections.all_anchors().to_vec(),
-    })
+    }
 }
 
 /// Record the focused editor's position on the focused pane's jumplist.
@@ -31,7 +30,7 @@ pub(crate) fn live_entry(stoat: &mut Stoat) -> Option<JumpEntry> {
 /// A no-op when focus is on a dock. Every jump-shaped motion routes its origin
 /// through here, and the jumplist's resolved-shape dedup absorbs doubled pushes.
 pub(crate) fn push_jump(stoat: &mut Stoat) {
-    if let Some(entry) = live_entry(stoat) {
+    if let Some(entry) = super::focused_editor_mut(stoat).map(live_entry) {
         push_entry(stoat, entry);
     }
 }
@@ -58,7 +57,7 @@ pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
 /// Runs once the walk's origin is on the jumplist, so the count covers that
 /// push and only a later jump moves past it. A no-op when focus is on a dock.
 pub(crate) fn record_change_landing(stoat: &mut Stoat) {
-    let Some(entry) = live_entry(stoat) else {
+    let Some(entry) = super::focused_editor_mut(stoat).map(live_entry) else {
         return;
     };
     let ws = stoat.active_workspace_mut();
@@ -177,7 +176,7 @@ pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(crate) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
-    let Some(live) = live_entry(stoat) else {
+    let Some(live) = super::focused_editor_mut(stoat).map(live_entry) else {
         return UpdateEffect::None;
     };
     let target = {

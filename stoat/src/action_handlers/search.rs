@@ -177,7 +177,7 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
     // Captured before InputView::create, which moves focus onto the prompt's
     // own editor. After it, both of these answer for that editor rather than
     // the pane's.
-    let origin_jump = super::jump::live_entry(stoat);
+    let origin_jump = super::focused_editor_mut(stoat).map(super::jump::live_entry);
     let origin = pane_editor(stoat).map(|editor| {
         (
             editor.selections.shared_anchors(),

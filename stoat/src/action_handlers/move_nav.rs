@@ -21,6 +21,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
     diff_map::{DiffHunkStatus, TokenDetail},
+    editor_state::EditorState,
 };
 use stoat_language::structural_diff::BufferRef;
 
@@ -57,8 +58,7 @@ pub(super) struct MoveSummary {
     pub(super) source_count: usize,
 }
 
-pub(super) fn current_move_summary(stoat: &mut Stoat) -> Option<MoveSummary> {
-    let editor = focused_editor_mut(stoat)?;
+pub(super) fn current_move_summary(editor: &mut EditorState) -> Option<MoveSummary> {
     let snapshot = editor.display_map.snapshot();
     let anchor = editor.selections.newest_anchor().start;
     let buffer_snapshot = snapshot.buffer_snapshot();
@@ -153,7 +153,7 @@ fn move_summary_from_detail(detail: &TokenDetail, hunk_line: u32) -> Option<Move
 }
 
 pub(super) fn navigate(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
-    let Some(summary) = current_move_summary(stoat) else {
+    let Some(summary) = focused_editor_mut(stoat).and_then(current_move_summary) else {
         return UpdateEffect::None;
     };
     if summary.source_refs.is_empty() && summary.target_ref.is_none() {
