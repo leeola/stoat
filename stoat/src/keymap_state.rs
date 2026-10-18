@@ -32,6 +32,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "diags",
     "has_selection",
     "modified",
+    "changes",
 ];
 
 /// The keymap predicate values that a [`Workspace`] alone decides.
@@ -103,6 +104,8 @@ pub(crate) struct StoatKeymapState<'a> {
     has_selection: StateValue,
     /// Whether the focused buffer has unsaved edits.
     modified: StateValue,
+    /// Whether the focused buffer's diff holds at least one hunk.
+    changes: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one. Borrowed from the owning [`Stoat`];
     /// `None` for the flag-built states that carry no user vars.
@@ -132,6 +135,7 @@ impl<'a> StoatKeymapState<'a> {
             diags: StateValue::Bool(false),
             has_selection: StateValue::Bool(false),
             modified: StateValue::Bool(false),
+            changes: StateValue::Bool(false),
             user_vars: None,
         }
     }
@@ -206,14 +210,15 @@ impl<'a> StoatKeymapState<'a> {
         self
     }
 
-    /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified` predicate values
-    /// from a focused-buffer derivation (see [`focus_flags`]).
+    /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified`/`changes`
+    /// predicate values from a focused-buffer derivation (see [`focus_flags`]).
     pub(crate) fn with_focus_flags(mut self, flags: FocusFlags) -> Self {
         self.lsp = StateValue::Bool(flags.lsp);
         self.lang = flags.lang.map(|l| StateValue::String(l.into()));
         self.diags = StateValue::Bool(flags.diags);
         self.has_selection = StateValue::Bool(flags.has_selection);
         self.modified = StateValue::Bool(flags.modified);
+        self.changes = StateValue::Bool(flags.changes);
         self
     }
 
@@ -251,6 +256,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "diags" => Some(&self.diags),
             "has_selection" => Some(&self.has_selection),
             "modified" => Some(&self.modified),
+            "changes" => Some(&self.changes),
             other => self.user_vars.and_then(|m| m.get(other)),
         }
     }
@@ -312,6 +318,7 @@ pub(crate) struct FocusFlags {
     diags: bool,
     has_selection: bool,
     modified: bool,
+    changes: bool,
 }
 
 /// Derive [`FocusFlags`] for the focused buffer, sharing [`resolve_focus`] with
@@ -335,17 +342,22 @@ pub(crate) fn focus_flags(
         .path_for(buffer_id)
         .is_some_and(|path| !diagnostics.get(path).is_empty());
     let has_selection = !editor.selections.newest_anchor().is_empty();
-    let modified = ws
+    let (modified, changes) = ws
         .buffers
         .get(buffer_id)
-        .and_then(|b| b.read().ok().map(|g| g.dirty))
-        .unwrap_or(false);
+        .and_then(|b| {
+            let g = b.read().ok()?;
+            let changes = g.diff_map.as_ref().is_some_and(|map| !map.is_empty());
+            Some((g.dirty, changes))
+        })
+        .unwrap_or_default();
     FocusFlags {
         lsp,
         lang,
         diags,
         has_selection,
         modified,
+        changes,
     }
 }
 
@@ -929,8 +941,12 @@ pub(crate) fn user_var(action: &ResolvedAction) -> Result<(String, StateValue), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{app::DEFAULT_KEYMAP, run::RunId};
-    use std::collections::HashSet;
+    use crate::{
+        app::DEFAULT_KEYMAP,
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
+        run::RunId,
+    };
+    use std::{collections::HashSet, iter};
     use stoat_config::Value;
 
     fn field(state: &StoatKeymapState<'_>, name: &str) -> Option<String> {
@@ -1056,6 +1072,47 @@ mod tests {
             [scratch, staged, git(&h)],
             [false, true, false].map(|on| Some(StateValue::Bool(on))),
             "a scratch root, the staged repository, then a root outside it",
+        );
+    }
+
+    /// Store one hunk in the focused buffer's diff map, anchored as a diff job
+    /// leaves it.
+    fn install_one_hunk(h: &crate::test_harness::TestHarness) {
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Added,
+            unstaged_lines: iter::once(0..1).collect(),
+            marked_rows: Vec::new(),
+            buffer_start_line: 0,
+            buffer_line_range: 0..1,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        };
+        let mut map = DiffMap::from_hunks([hunk], None);
+
+        let ws = h.stoat.active_workspace();
+        let (_, buffer_id) = resolve_focus(ws).expect("an editor has the focus");
+        let buffer = ws.buffers.get(buffer_id).expect("the focused buffer");
+        let mut guard = buffer.write().expect("buffer poisoned");
+        map.anchor_hunks(&guard.snapshot);
+        guard.diff_map = Some(map);
+    }
+
+    #[test]
+    fn changes_reads_whether_the_focused_diff_holds_a_hunk() {
+        let h = Stoat::test();
+        let changes = |h: &crate::test_harness::TestHarness| {
+            StoatKeymapState::from_stoat(&h.stoat)
+                .get("changes")
+                .cloned()
+        };
+        let scratch = changes(&h);
+
+        install_one_hunk(&h);
+        assert_eq!(
+            [scratch, changes(&h)],
+            [false, true].map(|on| Some(StateValue::Bool(on))),
+            "a scratch buffer, then one hunk in its diff",
         );
     }
 
