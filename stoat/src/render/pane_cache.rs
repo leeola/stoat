@@ -16,11 +16,12 @@
 //! and the hover cell. The goto-word labels and the pop-out cards a focused pane
 //! draws over its content are never replayed.
 //!
-//! The *status row* reads the primary cursor and the buffer's dirty flag, which
-//! is why both are here. Focused, it reads far more, from the mode label to the
-//! spinner glyph, so the key also holds a hash of the segments the row paints.
-//! The row names what waits on a held buffer, which no key part tracks, so a
-//! held buffer never replays.
+//! The *status row* is never replayed. It moves far more often than the
+//! content does. A pending count, a status message, a waiter on a held buffer,
+//! and each spinner tick move the row alone, and the spinner ticks ten times a
+//! second while a server works. So the row paints on every frame, a replay
+//! puts back the content alone, and nothing that only the row reads is in the
+//! key.
 //!
 //! The diff view's branch returns before its selection pass as well. Past what
 //! a plain pane reads, it reads the diff dials and the names on its sides bar.
@@ -32,13 +33,7 @@ use crate::{
     display_map::PaintVersion,
     editor_state::{EditorId, EditorState},
     pane::{Pane, View},
-    render::{
-        editor::editor_cursor_position,
-        pane::{diff_sides_for, pane_areas, status_segments_area, StatusRow},
-        review::DiffDials,
-        undercurl::UndercurlBatch,
-        FrameCtx,
-    },
+    render::{pane::diff_sides_for, review::DiffDials, undercurl::UndercurlBatch, FrameCtx},
 };
 use lsp_types::MessageType;
 use ratatui::{
@@ -50,12 +45,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::ApcScene;
 
-/// Everything an editor pane's paint reads that changes from one frame to the
-/// next.
+/// Everything an editor pane's content paint reads that changes from one frame
+/// to the next.
 ///
-/// Two frames whose keys are equal paint identical cells, scene bytes, and
-/// undercurl spans, which is the direction a replay needs. The converse is
-/// weaker, since several parts move on work that changed no visible cell.
+/// Two frames whose keys are equal paint identical content cells, content lane
+/// bytes, and undercurl spans, which is the direction a replay needs. The
+/// converse is weaker, since several parts move on work that changed no
+/// visible cell.
 ///
 /// Nothing here is ordered. A key is only ever compared for equality, and
 /// "later" would have no meaning across parts that count different things.
@@ -84,14 +80,6 @@ pub(crate) struct PaneCacheKey {
     /// The pane's position in the layout, which is the id its minimap strip is
     /// published under.
     pub(crate) pane_index: usize,
-    /// True when the pane's status row was widened to run under the
-    /// single-minimap band. A layout change can move this without moving the
-    /// pane's own rect.
-    pub(crate) status_widened: bool,
-    /// How much of the status row its segments hold, which a bottom-right
-    /// badge over the row shortens. A badge that comes or goes moves nothing
-    /// else here.
-    pub(crate) status_segments_width: u16,
     /// The theme and the search query, neither of which passes through a
     /// display layer.
     pub(crate) paint_generation: u64,
@@ -131,11 +119,6 @@ pub(crate) struct PaneCacheKey {
     pub(crate) minimap_content_id: u32,
     /// Whether a minimap strip is drawn at all.
     pub(crate) minimap_enabled: bool,
-    /// The primary cursor's line and column, read by the status row alone. The
-    /// content pass returns before anything that would read a selection.
-    pub(crate) cursor_pos: Option<(u32, u32)>,
-    /// The buffer's unsaved marker, read by the status row.
-    pub(crate) dirty: bool,
     /// Whether the pane holds the focus. A focused editor numbers its lines
     /// from the cursor and paints its selections, which an unfocused one skips.
     pub(crate) focused: bool,
@@ -152,21 +135,21 @@ pub(crate) struct PaneCacheKey {
     /// Whether a live scene takes the rich gutter and the cursor, which a dead
     /// one leaves to the cells.
     pub(crate) scene_live: bool,
-    /// A hash of the segments the status row paints, which every input the row
-    /// reads passes through.
-    pub(crate) status: u64,
     /// Whether the search query compiles under smart case, which decides the
     /// matches the pane paints. Read off the settings like the dim, so no
     /// generation moves with it.
     pub(crate) search_smart_case: bool,
 }
 
-/// One pane's last paint, held so a frame whose key still matches puts it
-/// back instead of producing it again.
+/// One pane's last content paint, held so a frame whose key still matches puts
+/// it back instead of producing it again.
 ///
 /// A pane paints into three channels and all three are reset per frame, so all
 /// three are captured. Cells alone would replay the grid and lose the rich
 /// gutter, the minimap strip, and the undercurls that ride beside it.
+///
+/// The status row is not held. It has a rect and a lane of its own, which the
+/// capture leaves out.
 ///
 /// The storage is reused across captures rather than rebuilt, so a pane that
 /// misses writes over what it held instead of allocating its rect again. The
@@ -176,16 +159,11 @@ pub(crate) struct PaneCacheKey {
 #[derive(Default)]
 pub(crate) struct PaneCacheEntry {
     pub(crate) key: Option<PaneCacheKey>,
-    /// The rectangles the pane painted, each with its cells row-major.
-    ///
-    /// Usually one, the pane's own rect. A pane whose status row runs on under
-    /// the single-minimap band paints past its rect on that row alone, and
-    /// taking the bounding box instead would capture and replay cells belonging
-    /// to whatever sits to its right on every other row.
-    regions: Vec<(Rect, Vec<Cell>)>,
-    /// The pane's own slice of each of its two scene lanes, by lane id. Each
-    /// slice is contiguous because a pane paints its lanes in one go.
-    scene: [(u32, Vec<u8>); 2],
+    /// The content rect the pane painted, with its cells row-major.
+    region: (Rect, Vec<Cell>),
+    /// The pane's own slice of its content lane, with the lane's id. The slice
+    /// is contiguous because no other pane writes that lane.
+    scene: (u32, Vec<u8>),
     /// The spans as the pane pushed them. Their cell records are deliberately
     /// not kept, since those are filled from the finished buffer after every
     /// pane has painted.
@@ -200,21 +178,21 @@ pub(crate) struct PaneCacheEntry {
     moved: bool,
 }
 
-/// The scene lane lengths and span count to hand
+/// The content lane's length and the span count to hand
 /// [`PaneCacheEntry::capture_into`] once the pane has painted.
 #[derive(Clone, Copy)]
 pub(crate) struct PaintMark {
-    /// Each lane the pane paints, with the lane's length before the paint.
-    lanes: [(u32, usize); 2],
+    /// The pane's content lane, with the lane's length before the paint.
+    lane: (u32, usize),
     spans: usize,
 }
 
 impl PaintMark {
-    /// Where the frame's append-only channels stood before a pane painted into
-    /// `lanes`.
-    pub(crate) fn take(scene: &ApcScene, lanes: [u32; 2], undercurls: &UndercurlBatch) -> Self {
+    /// Where the frame's append-only channels stood before a pane painted its
+    /// content into `lane`.
+    pub(crate) fn take(scene: &ApcScene, lane: u32, undercurls: &UndercurlBatch) -> Self {
         Self {
-            lanes: lanes.map(|id| (id, scene.lane_bytes(id).len())),
+            lane: (lane, scene.lane_bytes(lane).len()),
             spans: undercurls.spans().len(),
         }
     }
@@ -238,13 +216,11 @@ impl PaneCacheEntry {
     /// Every motion and keystroke moves some other part of the key.
     ///
     /// A capture writes over whatever this entry held, keeping its
-    /// allocations. The render site passes the same rects in the same order
-    /// every frame, so a region slot is matched by position and its held rect
-    /// overwritten.
+    /// allocations.
     pub(crate) fn capture_into(
         &mut self,
         key: PaneCacheKey,
-        rects: &[Rect],
+        rect: Rect,
         buf: &Buffer,
         scene: &ApcScene,
         undercurls: &UndercurlBatch,
@@ -266,26 +242,15 @@ impl PaneCacheEntry {
 
         self.key = Some(key);
 
-        let painted = rects
-            .iter()
-            .filter(|rect| rect.width > 0 && rect.height > 0);
-        let mut slots = 0;
-        for &rect in painted {
-            if slots == self.regions.len() {
-                self.regions.push((rect, Vec::new()));
-            }
-            let (held, cells) = &mut self.regions[slots];
-            *held = rect;
-            cells_into(buf, rect, cells);
-            slots += 1;
-        }
-        self.regions.truncate(slots);
+        let (held, cells) = &mut self.region;
+        *held = rect;
+        cells_into(buf, rect, cells);
 
-        for (&(id, start), (held_id, bytes)) in mark.lanes.iter().zip(&mut self.scene) {
-            *held_id = id;
-            bytes.clear();
-            bytes.extend_from_slice(&scene.lane_bytes(id)[start..]);
-        }
+        let (id, start) = mark.lane;
+        let (held_id, bytes) = &mut self.scene;
+        *held_id = id;
+        bytes.clear();
+        bytes.extend_from_slice(&scene.lane_bytes(id)[start..]);
 
         self.undercurls.clear();
         self.undercurls.extend(
@@ -296,10 +261,11 @@ impl PaneCacheEntry {
         true
     }
 
-    /// Put the recorded paint back into this frame's three channels.
+    /// Put the recorded content paint back into this frame's three channels.
     ///
-    /// Each scene slice goes back into the lane it came from, and the replay
-    /// leaves lane 0 open, as a paint at the render site does.
+    /// The scene slice goes back into the lane it came from, and the replay
+    /// leaves lane 0 open, as a paint at the render site does. The caller
+    /// paints the status row.
     ///
     /// The scene append lands nowhere while the scene is dead, which is the
     /// same place the original paint's did, so a session without a listener
@@ -313,19 +279,20 @@ impl PaneCacheEntry {
         // The held key is the last one the pane built, so a replayed frame
         // held the key still, which ends any run of moving frames.
         self.moved = false;
-        for (rect, cells) in &self.regions {
-            let width = rect.width as usize;
-            for (row, y) in (rect.top()..rect.bottom()).enumerate() {
-                let start = buf.index_of(rect.left(), y);
-                buf.content[start..start + width]
-                    .clone_from_slice(&cells[row * width..(row + 1) * width]);
-            }
+
+        let (rect, cells) = &self.region;
+        let width = rect.width as usize;
+        for (row, y) in (rect.top()..rect.bottom()).enumerate() {
+            let start = buf.index_of(rect.left(), y);
+            buf.content[start..start + width]
+                .clone_from_slice(&cells[row * width..(row + 1) * width]);
         }
-        for (id, bytes) in &self.scene {
-            scene.set_lane(*id);
-            scene.buffer().extend_from_slice(bytes);
-        }
+
+        let (id, bytes) = &self.scene;
+        scene.set_lane(*id);
+        scene.buffer().extend_from_slice(bytes);
         scene.end_lane();
+
         for &(x, y, len, color) in &self.undercurls {
             undercurls.push(x, y, len, color);
         }
@@ -338,15 +305,9 @@ impl PaneCacheEntry {
 /// the diff view. The conflict view takes its own branch out of the editor
 /// render and reads state the key does not cover, so it always paints.
 ///
-/// A buffer a command waits on always paints too. Its status row names what
-/// waits, and that name changes when the first waiter goes while no part of
-/// the key moves. A held buffer is rare and usually focused, so the paint it
-/// costs is small.
-///
 /// A focused pane under goto-word labels, the LSP status card, or the LSP
 /// error card always paints as well. The labels last a jump's few frames, and
 /// the status card turns the spinner on every tick.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_cache_key(
     pane: &Pane,
     is_focused: bool,
@@ -355,18 +316,12 @@ pub(crate) fn pane_cache_key(
     frame: FrameCtx<'_>,
     paint_generation: u64,
     scene_live: bool,
-    status_row: &StatusRow,
 ) -> Option<PaneCacheKey> {
     let View::Editor(editor_id) = &pane.view else {
         return None;
     };
     let editor = editors.get_mut(*editor_id)?;
     if editor.conflict_view.is_some() {
-        return None;
-    }
-
-    let buffer = editor.buffer_id;
-    if frame.held_buffers.iter().any(|(held, _)| *held == buffer) {
         return None;
     }
 
@@ -377,13 +332,11 @@ pub(crate) fn pane_cache_key(
         return None;
     }
 
-    let (dirty, diff_version) = {
+    let buffer = editor.buffer_id;
+    let diff_version = {
         let shared = buffers.get(buffer)?;
         let guard = shared.read().ok()?;
-        (
-            guard.dirty,
-            guard.diff_map.as_ref().map_or(0, |dm| dm.version()),
-        )
+        guard.diff_map.as_ref().map_or(0, |dm| dm.version())
     };
 
     // The dials destructure whole, so a further dial fails to compile here
@@ -411,7 +364,6 @@ pub(crate) fn pane_cache_key(
         false => ((0, 0, false, false), 0),
     };
 
-    let (_, status) = pane_areas(pane.area, frame.minimap_band);
     let minimap_content_id = frame
         .minimap_chrome
         .as_ref()
@@ -426,8 +378,6 @@ pub(crate) fn pane_cache_key(
         scroll_row: editor.scroll_row,
         area: pane.area,
         pane_index: pane.index as usize,
-        status_widened: status.width > pane.area.width,
-        status_segments_width: status_segments_area(status, frame.badge_cover).width,
         paint_generation,
         inactive_dim_bits: frame.inactive_dim.to_bits(),
         line_numbers: frame.line_numbers,
@@ -440,14 +390,11 @@ pub(crate) fn pane_cache_key(
         diff_sides,
         minimap_content_id,
         minimap_enabled: frame.minimap_enabled,
-        cursor_pos: editor_cursor_position(editor),
-        dirty,
         focused: is_focused,
         selections: editor.selections.identity(),
         insert_mode: is_focused && frame.mode == "insert",
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
-        status: status_row.hash_value(),
         search_smart_case: frame.search_smart_case,
     })
 }
@@ -484,8 +431,6 @@ mod tests {
             wrap: (None, WrapMode::EditorWidth, 100),
             area: Rect::new(0, 0, 40, 10),
             pane_index: 0,
-            status_widened: false,
-            status_segments_width: 40,
             paint_generation: 0,
             inactive_dim_bits: 0,
             line_numbers: LineNumbers::Off,
@@ -496,14 +441,11 @@ mod tests {
             diff_sides: 0,
             minimap_content_id: 0,
             minimap_enabled: false,
-            cursor_pos: Some((1, 1)),
-            dirty: false,
             focused: false,
             selections: 0,
             insert_mode: false,
             hover_cell: None,
             scene_live: false,
-            status: 0,
             search_smart_case: false,
         }
     }
@@ -517,7 +459,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 27] = [
+        let moved: [(&str, PaneCacheKey); 22] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -557,20 +499,6 @@ mod tests {
                 "pane_index",
                 PaneCacheKey {
                     pane_index: 1,
-                    ..base
-                },
-            ),
-            (
-                "status_widened",
-                PaneCacheKey {
-                    status_widened: true,
-                    ..base
-                },
-            ),
-            (
-                "status_segments_width",
-                PaneCacheKey {
-                    status_segments_width: 29,
                     ..base
                 },
             ),
@@ -645,20 +573,6 @@ mod tests {
                 },
             ),
             (
-                "cursor_pos",
-                PaneCacheKey {
-                    cursor_pos: Some((2, 1)),
-                    ..base
-                },
-            ),
-            (
-                "dirty",
-                PaneCacheKey {
-                    dirty: true,
-                    ..base
-                },
-            ),
-            (
                 "focused",
                 PaneCacheKey {
                     focused: true,
@@ -693,7 +607,6 @@ mod tests {
                     ..base
                 },
             ),
-            ("status", PaneCacheKey { status: 1, ..base }),
             (
                 "search_smart_case",
                 PaneCacheKey {

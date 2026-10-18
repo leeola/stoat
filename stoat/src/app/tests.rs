@@ -10,7 +10,7 @@ use crate::{
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
     display_map::{DisplayPoint, PaintVersion},
     editor_state::EditorState,
-    host::FsEventKind,
+    host::{FsEventKind, LspNotification},
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
     render::{
@@ -26,6 +26,7 @@ use crate::{
     workspace::diff::DiffBase,
 };
 use crossterm::event::{MouseButton, MouseEventKind};
+use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
 use ratatui::style::{Color, Modifier};
 use serde_json::Value;
 use std::{
@@ -6206,12 +6207,13 @@ fn pane_lanes(h: &mut crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// A replayed pane puts its status row and its content back into their own
-/// lanes, so stoatty still receives only the lane that changed.
+/// A replayed pane puts its content back into its content lane and paints its
+/// status row into its status lane, so stoatty still receives only the lane
+/// that changed.
 ///
-/// The test above reads the lanes end to end. A status slice replayed into
-/// the content lane beside it reads the same there, so this compares each
-/// lane by id.
+/// The test above reads the lanes end to end. A status row written into the
+/// content lane beside it reads the same there, so this compares each lane by
+/// id.
 #[test]
 fn a_replayed_pane_keeps_its_status_and_content_lanes() {
     let mut h = Stoat::test();
@@ -6303,7 +6305,7 @@ fn a_focused_pane_replays_an_unchanged_frame() {
 #[test]
 fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
     type Change = fn(&mut crate::test_harness::TestHarness);
-    let changes: [(&str, Change); 7] = [
+    let changes: [(&str, Change); 5] = [
         ("a cursor move", |h| h.type_keys("l")),
         ("an insert flip", |h| h.type_keys("i")),
         ("a hover move", |h| h.stoat.hover_cell = Some((3, 1))),
@@ -6316,12 +6318,8 @@ fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
             let buffer = editor.buffer_id;
             editor.display_map.invalidate_semantic_highlights(buffer);
         }),
-        ("a pending count", |h| h.type_keys("3")),
         ("an open LSP status card", |h| {
             h.stoat.lsp_status_pinned = true
-        }),
-        ("a status message", |h| {
-            h.stoat.pending_message = Some("saved".to_owned())
         }),
     ];
 
@@ -6341,6 +6339,100 @@ fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
             "{change} repaints the focused pane alone"
         );
     }
+}
+
+/// The bytes `pane`'s status lane held in the last frame.
+fn status_lane_bytes(h: &crate::test_harness::TestHarness, pane: PaneId) -> Vec<u8> {
+    let index = h.stoat.active_workspace().panes.pane(pane).index;
+    h.stoat.apc_scene.lane_bytes(status_lane(index)).to_vec()
+}
+
+/// Each input only the status row reads moves that row alone. The focused
+/// pane's content replays under the row, and the frame matches a repaint.
+#[test]
+fn a_status_row_change_replays_the_focused_pane_content() {
+    type Change = fn(&mut crate::test_harness::TestHarness);
+    let changes: [(&str, Change); 2] = [
+        ("a pending count", |h| h.type_keys("3")),
+        ("a status message", |h| {
+            h.stoat.pending_message = Some("saved".to_owned())
+        }),
+    ];
+
+    // Counted across the change too, since a typed key's capture paints the
+    // frame the key leaves.
+    for (change, apply) in changes {
+        let mut h = Stoat::test();
+        split_pair(&mut h);
+        let _ = h.stoat.render();
+        let focused = h.stoat.active_workspace().panes.focus();
+        let row_before = status_lane_bytes(&h, focused);
+
+        let painted_before = h.stoat.pane_paints;
+        apply(&mut h);
+        let replayed = frame_output(&mut h);
+        assert_eq!(
+            (
+                h.stoat.pane_paints - painted_before,
+                status_lane_bytes(&h, focused) != row_before
+            ),
+            (0, true),
+            "{change} moves the status row and replays both panes' content"
+        );
+
+        h.stoat.pane_cache.clear();
+        let repainted = frame_output(&mut h);
+        assert_eq!(replayed.0, repainted.0, "{change}: the cells match");
+        assert_eq!(replayed.1, repainted.1, "{change}: the scene bytes match");
+        assert_eq!(replayed.2, repainted.2, "{change}: the spans match");
+    }
+}
+
+/// A busy server's spinner sits on the focused status row, so each tick moves
+/// that row alone. The tick's frame replays the pane's content under the next
+/// glyph and matches a repaint.
+#[test]
+fn a_spinner_tick_replays_the_focused_pane_content() {
+    let mut h = Stoat::test();
+    h.stoat.stoatty = true;
+    let server = h.install_lsp_server("rust", "rust-analyzer");
+    let path = h.write_file("a.rs", "fn main() {}\n");
+    h.open_file(&path);
+    server.push_notification(LspNotification::Progress {
+        token: NumberOrString::Number(1),
+        value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
+            title: "indexing".into(),
+            cancellable: None,
+            message: None,
+            percentage: None,
+        }),
+    });
+    h.drain_lsp();
+    // The first paint installs the wrap width, which moves the paint version
+    // past the key it captured. The second captures the settled key.
+    let _ = h.stoat.render();
+    let _ = h.stoat.render();
+    let focused = h.stoat.active_workspace().panes.focus();
+    let row_before = status_lane_bytes(&h, focused);
+
+    let painted_before = h.stoat.pane_paints;
+    let tick = h.stoat.frame_tick(0.1);
+    let ticked = frame_output(&mut h);
+    assert_eq!(
+        (
+            tick,
+            h.stoat.pane_paints - painted_before,
+            status_lane_bytes(&h, focused) != row_before
+        ),
+        (UpdateEffect::Redraw, 0, true),
+        "the tick draws a frame that moves the status row and replays the content"
+    );
+
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(ticked.0, repainted.0, "the cells match");
+    assert_eq!(ticked.1, repainted.1, "the scene bytes match");
+    assert_eq!(ticked.2, repainted.2, "the undercurl spans match");
 }
 
 /// Collapsing a selection leaves the cursor where it was, so the status row
@@ -6489,12 +6581,13 @@ fn panes_on_one_buffer_both_repaint_when_a_parse_lands() {
 }
 
 /// A badge raised over an unfocused pane's status row moves that row's
-/// segments out from under the box, so the pane repaints rather than
-/// replaying a row whose segments the box now covers.
+/// segments out from under the box. The row paints on every frame, so the
+/// pane's content replays under it, and the frame matches a repaint.
 #[test]
-fn a_badge_over_an_unfocused_status_row_repaints_it() {
+fn a_badge_over_an_unfocused_status_row_replays_the_content_under_it() {
     let mut h = Stoat::test();
     split_pair(&mut h);
+    let right = h.stoat.active_workspace().panes.focus();
     h.type_action("FocusLeft()");
     let _ = h.stoat.render();
 
@@ -6506,6 +6599,7 @@ fn a_badge_over_an_unfocused_status_row_repaints_it() {
         1,
         "with nothing moved, the unfocused right pane replays",
     );
+    let row_before = status_lane_bytes(&h, right);
 
     h.stoat.active_workspace_mut().badges.insert(Badge {
         source: BadgeSource::Review,
@@ -6518,9 +6612,12 @@ fn a_badge_over_an_unfocused_status_row_repaints_it() {
     let painted_before = h.stoat.pane_paints;
     let raised = frame_output(&mut h);
     assert_eq!(
-        h.stoat.pane_paints - painted_before,
-        2,
-        "the badge over its status row repaints the unfocused pane",
+        (
+            h.stoat.pane_paints - painted_before,
+            status_lane_bytes(&h, right) != row_before
+        ),
+        (1, true),
+        "the badge moves the right pane's status row, and its content replays",
     );
 
     h.stoat.pane_cache.clear();
@@ -6806,9 +6903,9 @@ fn typing_into_a_terminal_derives_a_keymap_lookup_only_for_a_key_that_types_noth
 }
 
 /// This is the case the cache exists for. A spinner tick redraws at its own
-/// rate while nothing a pane reads has moved, so no pane paints for it, the
-/// focused one included. Only a spinner the focused status row shows moves
-/// that row, and only then does the focused pane paint.
+/// rate while nothing a pane's content reads has moved, so no pane paints for
+/// it, the focused one included. A spinner on the focused status row moves
+/// that row alone, and the row paints on every frame anyway.
 #[test]
 fn a_background_tick_paints_no_pane() {
     let mut h = Stoat::test();

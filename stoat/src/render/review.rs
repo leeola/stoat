@@ -4673,6 +4673,9 @@ mod tests {
         // `main` becomes `other`, so only that one word changed on the line.
         let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
         h.stoat.theme = Arc::new(Theme::empty());
+        // Both theme installs move the paint generation, which is what tells a
+        // replayed pane to paint under the new theme.
+        h.stoat.paint_generation += 1;
         h.snapshot();
         let buf = h.rendered_buffer();
 

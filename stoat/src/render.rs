@@ -1083,19 +1083,28 @@ pub(crate) fn frame(
             frame,
             paint_generation,
             scene.live(),
-            &status_row,
         );
         if let Some(key) = key
             && let Some(entry) = stoat.pane_cache.get_mut(&(workspace, id))
             && entry.key == Some(key)
         {
             entry.replay(buf, scene, undercurls);
+            pane::render_pane_status(
+                pane,
+                is_focused,
+                frame,
+                &mut ws.editors,
+                &status_row,
+                buf,
+                scene,
+            );
+            scene.end_lane();
             continue;
         }
 
-        let lanes = [content_lane(pane.index), status_lane(pane.index)];
-        let mark = pane_cache::PaintMark::take(scene, lanes, undercurls);
-        scene.set_lane(lanes[0]);
+        let lane = content_lane(pane.index);
+        let mark = pane_cache::PaintMark::take(scene, lane, undercurls);
+        scene.set_lane(lane);
         pane::render_pane(
             pane,
             is_focused,
@@ -1117,12 +1126,12 @@ pub(crate) fn frame(
         stoat.pane_paints += 1;
 
         if let Some(key) = key {
-            let (content, status) = pane::pane_areas(pane.area, frame.minimap_band);
+            let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
             let captured = stoat
                 .pane_cache
                 .entry((workspace, id))
                 .or_default()
-                .capture_into(key, &[content, status], buf, scene, undercurls, mark);
+                .capture_into(key, content, buf, scene, undercurls, mark);
             if captured {
                 stoat.pane_captures += 1;
             }

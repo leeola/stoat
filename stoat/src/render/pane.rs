@@ -210,19 +210,7 @@ pub(crate) fn render_pane(
 
     dim_unfocused_pane(content_area, is_focused, frame, buf);
 
-    // The status row changes with every cursor move, so it rides a lane of its
-    // own and a move leaves the content lane off the wire.
-    scene.set_lane(status_lane(pane.index));
-    render_pane_status(
-        &pane.view,
-        is_focused,
-        status_area,
-        frame,
-        editors,
-        status,
-        buf,
-        scene,
-    );
+    render_pane_status(pane, is_focused, frame, editors, status, buf, scene);
     scene.set_lane(content_lane(pane.index));
 
     // An unfocused diff view draws no cursor, so only a focused one has a line
@@ -465,9 +453,8 @@ fn diff_sides_bar_area(
 /// edge to edge. Mid-window status rows sit beside strip rows and stay
 /// pane-width.
 ///
-/// Shared with the replay cache, which has to know both rectangles to record
-/// what a pane painted, and whose key would drift from the paint if it worked
-/// the widening out for itself.
+/// Shared with the render site, which captures the content rectangle for the
+/// replay cache.
 pub(crate) fn pane_areas(pane_area: Rect, minimap_band: Option<Rect>) -> (Rect, Rect) {
     let (content_area, mut status_area) = split_pane_status(pane_area);
     if let Some(band) = minimap_band
@@ -675,17 +662,28 @@ pub(crate) fn render_pane_dividers(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_pane_status(
-    view: &View,
+/// Paint `pane`'s status row into the pane's status lane, and leave that lane
+/// open.
+///
+/// The row changes with every cursor move, so it rides a lane of its own and a
+/// move leaves the content lane off the wire.
+///
+/// The replay cache holds no status row, so a pane whose content replays
+/// paints its row through here after the replay. [`render_pane`] paints the
+/// row between the content and the cards over the content. The cards touch
+/// none of the row's cells, so a replay that paints the row last gives the
+/// same frame.
+pub(crate) fn render_pane_status(
+    pane: &Pane,
     is_focused: bool,
-    area: Rect,
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     status: &StatusRow,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
+    scene.set_lane(status_lane(pane.index));
+    let (_, area) = pane_areas(pane.area, frame.minimap_band);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -703,8 +701,8 @@ fn render_pane_status(
     }
 
     let segments = status_segments_area(area, frame.badge_cover);
-    let cache = match view {
-        View::Editor(id) => editors.get_mut(*id).map(|e| &mut e.status_scene_cache),
+    let cache = match pane.view {
+        View::Editor(id) => editors.get_mut(id).map(|e| &mut e.status_scene_cache),
         _ => None,
     };
     render_status_segments(
@@ -720,8 +718,11 @@ fn render_pane_status(
     );
 }
 
-/// The segments of one pane's status row, built once a frame so the replay
-/// cache's key and the paint read the same row.
+/// The segments of one pane's status row, built once a frame before the pane
+/// paints or replays.
+///
+/// A replay puts back the pane's content alone, so the row paints from this on
+/// every frame, and the frame reads the badge back whichever way the pane drew.
 #[derive(Default)]
 pub(crate) struct StatusRow {
     left: Vec<StatusSeg>,
@@ -729,21 +730,6 @@ pub(crate) struct StatusRow {
     /// The hover rect of the LSP badge the row shows, which the frame reads
     /// back for hit tests.
     pub(crate) badge: Option<Rect>,
-}
-
-impl StatusRow {
-    /// A hash of the segments, for a cache that replays a pane only while its
-    /// status row stands still.
-    ///
-    /// The segments and the base style decide the painted row, given its
-    /// rectangle, and the base style follows from the focus and the theme. So
-    /// the hash covers every input the row reads, the spinner glyph and the
-    /// status message included, without listing those inputs a second time.
-    pub(crate) fn hash_value(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        (&self.left, &self.right).hash(&mut hasher);
-        hasher.finish()
-    }
 }
 
 /// The status row that [`render_pane`] paints for `pane`.
@@ -784,10 +770,7 @@ pub(crate) fn status_row(
 /// row. A segment under the box is painted over, so the segments end where
 /// the box starts. When the box starts left of the row, the row holds no
 /// segments. The row's background and hairline still run the whole width.
-///
-/// Shared with the replay cache, whose key carries the width so a badge that
-/// comes or goes repaints the row.
-pub(crate) fn status_segments_area(row: Rect, cover: Option<Rect>) -> Rect {
+fn status_segments_area(row: Rect, cover: Option<Rect>) -> Rect {
     let end = row.x + row.width;
     match cover {
         Some(cover) if cover.y == row.y && cover.x < end && cover.x + cover.width > row.x => Rect {
