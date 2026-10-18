@@ -353,14 +353,7 @@ impl FileFinder {
         term_rows: Vec<TermRow>,
         finder_scopes: &BTreeMap<String, Vec<String>>,
     ) -> Self {
-        let input = InputView::create(
-            ws,
-            executor.clone(),
-            SubmitTarget::FileFinder,
-            "",
-            "insert",
-            1,
-        );
+        let input = InputView::create(ws, executor.clone(), SubmitTarget::FileFinder, "", "insert");
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = seed_paths;
         core.walk_display = seed_display;

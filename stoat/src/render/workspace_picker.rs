@@ -301,7 +301,6 @@ mod tests {
             editor_id: EditorId::default(),
             buffer_id: BufferId::new(0),
             target: SubmitTarget::WorkspacePicker,
-            max_height: 1,
         };
         WorkspacePicker::new(workspaces, active, Vec::new(), input)
     }
@@ -495,7 +494,6 @@ mod tests {
             SubmitTarget::WorkspacePicker,
             "ws01",
             "insert",
-            1,
         );
         let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
         picker.rename_start();

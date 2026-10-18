@@ -178,7 +178,7 @@ impl Help {
         ws: &mut Workspace,
         executor: Executor,
     ) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::HelpSearch, "", "insert", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::HelpSearch, "", "insert");
         let mut help = Self {
             input,
             scope: HelpScope::Active,

@@ -52,7 +52,7 @@ impl RunState {
     /// prompt. The actual [`RunId`] is resolved from pane focus at submit
     /// time, so construction does not need the key yet.
     pub fn new(cwd: PathBuf, ws: &mut Workspace, executor: Executor) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::Run, "", "insert", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::Run, "", "insert");
         Self {
             input,
             blocks: Vec::new(),
@@ -799,7 +799,6 @@ mod tests {
                 editor_id: EditorId::default(),
                 buffer_id: BufferId::new(0),
                 target: SubmitTarget::Run,
-                max_height: 1,
             },
             blocks: Vec::new(),
             scroll_offset,

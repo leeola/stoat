@@ -289,7 +289,7 @@ impl CommitPicker {
         ref_sha: String,
         now_epoch: i64,
     ) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::CommitPicker, "", "insert", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::CommitPicker, "", "insert");
         let mut picker = Self {
             now_epoch,
             role,
@@ -740,7 +740,6 @@ mod tests {
                 editor_id: EditorId::default(),
                 buffer_id: BufferId::new(0),
                 target: SubmitTarget::CommitPicker,
-                max_height: 1,
             },
             commits,
             branch_tips,

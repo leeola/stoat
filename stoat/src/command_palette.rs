@@ -536,13 +536,6 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 pub(crate) enum PaletteOutcome {
     /// Re-render but keep the palette open.
     None,
-    /// User cancelled. Currently unused because `CancelPromptInput` closes
-    /// the palette directly via `close_palette`. Retained as a shape that a
-    /// future submit path may want when a context-specific cancel becomes
-    /// distinct from a global cancel (e.g. "clear the typed argument" vs
-    /// "close the palette").
-    #[allow(dead_code)]
-    Close,
     /// An action is ready to dispatch, with any inline argument parsed into
     /// its parameter list. The third field is the canonical, re-executable
     /// command line to record in palette history.
@@ -551,7 +544,7 @@ pub(crate) enum PaletteOutcome {
 
 impl CommandPalette {
     pub fn new(ws: &mut Workspace, executor: Executor, availability: Availability) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "insert", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "insert");
         let scope = PaletteScope::Active;
         let mut filtered = Vec::new();
         let mut match_indices = Vec::new();

@@ -9327,7 +9327,6 @@ fn ctrl_c_cancels_a_rename_rather_than_quitting() {
         SubmitTarget::RenameSymbol,
         "old_name",
         "insert",
-        1,
     );
     let buffer_id = input.buffer_id;
     h.stoat.rename_input = Some(RenameInputState {

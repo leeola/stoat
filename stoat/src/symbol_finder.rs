@@ -146,7 +146,7 @@ impl SymbolFinder {
         servers: Vec<String>,
     ) -> Self {
         let preview = Preview::new(ws, executor.clone());
-        let input = InputView::create(ws, executor, SubmitTarget::SymbolFinder, "", "insert", 1);
+        let input = InputView::create(ws, executor, SubmitTarget::SymbolFinder, "", "insert");
         Self {
             input,
             scope,
@@ -861,7 +861,6 @@ mod tests {
             editor_id: EditorId::default(),
             buffer_id: BufferId::new(0),
             target: SubmitTarget::SymbolFinder,
-            max_height: 1,
         };
         let mut f = SymbolFinder {
             input,

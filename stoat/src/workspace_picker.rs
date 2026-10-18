@@ -613,7 +613,6 @@ mod tests {
             editor_id: EditorId::default(),
             buffer_id: BufferId::new(0),
             target: SubmitTarget::WorkspacePicker,
-            max_height: 1,
         }
     }
 

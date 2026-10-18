@@ -125,14 +125,7 @@ impl CodeSearchFinder {
         walked: Option<Arc<Vec<PathBuf>>>,
         walk_epoch: u64,
     ) -> Self {
-        let input = InputView::create(
-            ws,
-            executor.clone(),
-            SubmitTarget::CodeSearch,
-            "",
-            "insert",
-            1,
-        );
+        let input = InputView::create(ws, executor.clone(), SubmitTarget::CodeSearch, "", "insert");
         let preview = Preview::new(ws, executor);
         Self {
             input,

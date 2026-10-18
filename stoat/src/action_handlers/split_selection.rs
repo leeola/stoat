@@ -29,7 +29,7 @@ pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::SplitSelection, "", "insert", 1);
+    let input = InputView::create(ws, executor, SubmitTarget::SplitSelection, "", "insert");
     stoat.split_selection_input = Some(SplitSelectionInputState { input, kind });
     UpdateEffect::Redraw
 }

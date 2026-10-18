@@ -187,7 +187,7 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
 
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert", 1);
+    let input = InputView::create(ws, executor, SubmitTarget::Search, "", "insert");
     let (origin_selections, origin_view) = origin.unwrap_or((Arc::from([]), (0, 0.0)));
     stoat.search_input = Some(SearchInputState {
         input,

@@ -1433,7 +1433,6 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
                 SubmitTarget::RenameSymbol,
                 &prep.placeholder,
                 "insert",
-                1,
             );
             stoat.rename_input = Some(RenameInputState {
                 input,
@@ -2294,7 +2293,6 @@ pub(crate) fn open_location_picker(
         SubmitTarget::LocationPicker,
         "",
         "insert",
-        1,
     );
     let preview = crate::picker::Preview::new(ws, executor.clone());
     LocationPicker::new(entries, haystacks, input, preview, executor, redraw)

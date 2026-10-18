@@ -485,7 +485,6 @@ pub(super) fn open_workspace_picker_over(
             SubmitTarget::WorkspacePicker,
             "",
             "insert",
-            1,
         )
     };
     let mut picker =
@@ -835,7 +834,6 @@ mod tests {
             SubmitTarget::WorkspacePicker,
             "",
             "insert",
-            1,
         )
     }
 

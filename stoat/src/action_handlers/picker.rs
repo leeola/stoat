@@ -418,7 +418,6 @@ pub(super) fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
         crate::input_view::SubmitTarget::JumplistPicker,
         "",
         "insert",
-        1,
     );
     let preview = crate::picker::Preview::new(ws, executor.clone());
     stoat.jumplist_picker = Some(crate::jumplist_picker::JumplistPicker::from_entries(
@@ -522,7 +521,6 @@ fn build_diagnostics_picker(
         crate::input_view::SubmitTarget::DiagnosticsPicker,
         "",
         "insert",
-        1,
     );
     let preview = crate::picker::Preview::new(ws, executor.clone());
     crate::diagnostics_picker::DiagnosticsPicker::from_entries(

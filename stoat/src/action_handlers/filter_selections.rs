@@ -32,7 +32,6 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
         SubmitTarget::KeepRemoveSelections,
         "",
         "insert",
-        1,
     );
     stoat.filter_selections_input = Some(FilterSelectionsInputState { input, remove });
     UpdateEffect::Redraw

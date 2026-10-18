@@ -1,4 +1,4 @@
-use crate::host::{CommitInfo, ConflictedFile, RebaseTodo, RebaseTodoOp};
+use crate::host::{CommitInfo, ConflictedFile, RebaseTodoOp};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
@@ -105,22 +105,6 @@ impl RebaseState {
         }
         entry.op = op;
         true
-    }
-
-    /// Exports the plan as the neutral [`RebaseTodo`] shape used by
-    /// the `run_rebase` fast path and by the fake's bookkeeping.
-    /// Unused by the interactive stepper but still the right API for
-    /// external consumers.
-    #[allow(dead_code)]
-    pub(crate) fn to_git_todo(&self) -> Vec<RebaseTodo> {
-        self.todo
-            .iter()
-            .map(|e| RebaseTodo {
-                op: e.op,
-                sha: e.commit.sha.clone(),
-                message: e.commit.summary.clone(),
-            })
-            .collect()
     }
 }
 

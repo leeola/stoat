@@ -643,10 +643,6 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
 fn apply_outcome(stoat: &mut Stoat, outcome: PaletteOutcome) -> UpdateEffect {
     match outcome {
         PaletteOutcome::None => UpdateEffect::Redraw,
-        PaletteOutcome::Close => {
-            close_palette(stoat);
-            UpdateEffect::Redraw
-        },
         PaletteOutcome::Dispatch(entry, params, line) => {
             tracing::info!(
                 target: "stoat::command",

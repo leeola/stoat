@@ -189,7 +189,6 @@ pub(super) fn install_reword_pause(
         SubmitTarget::Reword,
         &original_message,
         "normal",
-        u16::MAX,
     );
 
     let Some(active) = ws.rebase_active.as_mut() else {
