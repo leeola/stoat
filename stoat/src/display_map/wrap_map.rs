@@ -1424,7 +1424,23 @@ impl WrapSnapshot {
             row_state: None,
             pending_newline: false,
             cursor: seed.cloned().unwrap_or_default(),
+            viewport_end: self.rows_end(&rows),
         }))
+    }
+
+    /// The fold offset where the tab row under `rows`'s last wrap row ends,
+    /// short of its line break.
+    fn rows_end(&self, rows: &Range<u32>) -> FoldOffset {
+        let fold = self.tab_snapshot.fold_snapshot();
+        if rows.start >= rows.end {
+            return FoldOffset(0);
+        }
+        let last = (rows.end - 1).min(self.total_rows.saturating_sub(1));
+        let tab_row = self.to_tab_point(WrapPoint::new(last, 0)).row();
+        if tab_row >= fold.line_count() {
+            return fold.len();
+        }
+        FoldOffset(fold.row_start_offset(tab_row).0 + fold.output_line_len(tab_row) as usize)
     }
 
     pub fn line_count(&self) -> u32 {
@@ -1463,21 +1479,30 @@ pub struct WrappedChunksInner<'a> {
     /// forward and each endpoint in the viewport is applied once rather than
     /// once per row below it.
     cursor: HighlightCursor,
+    /// Where the tab row under the last wrap row ends, which every stream runs
+    /// to.
+    ///
+    /// A stream that runs past its own row lets the rows below read on from
+    /// it. Opening one per row costs a transform seek, a tab expansion walk,
+    /// and a fresh chunk stack each, about a third of a pane paint.
+    viewport_end: FoldOffset,
 }
 
-/// Streaming state for one tab row, carried across every wrap row it produces.
+/// Streaming state for the tab row under the iterator, carried across every
+/// wrap row it produces and on into the tab rows below it.
 ///
-/// Holds an open [`TabChunks`] over the whole tab row plus the running display
-/// column. Chunks pulled from it are sliced to the `[target_start, target_end)`
-/// window before being yielded, and the window moves as the sub-rows advance.
+/// Holds an open [`TabChunks`] that runs to the iteration's end, plus the
+/// running display column in the current tab row. Chunks pulled from it are
+/// sliced to the `[target_start, target_end)` window before being yielded, and
+/// the window moves as the rows advance.
 ///
-/// It is the tab row rather than the wrap row that owns this, because a wrapped
-/// line's sub-rows read one continuous run of the same text. Reopening the
-/// stream per sub-row would re-read the row from column zero once per sub-row.
+/// The stream outlives a wrap row because a wrapped line's sub-rows read one
+/// continuous run of the same text, and the line break at a tab row's end
+/// leaves the stream where the next tab row starts.
 struct RowChunksState<'a> {
     tab_chunks: TabChunks<'a>,
-    /// Tab row the stream covers, so the next wrap row can tell whether it
-    /// continues this run or starts a new one.
+    /// Tab row the stream sits in, which decides whether the next wrap row
+    /// reads on from the stream or opens one of its own.
     tab_row: u32,
     column: u32,
     target_start: u32,
@@ -1486,11 +1511,16 @@ struct RowChunksState<'a> {
     /// Synthetic leading spaces yielded before this continuation row's text, so
     /// its columns line up with the parent's indent. Zero on a primary row.
     indent: u32,
-    /// The part of the last chunk that fell past this sub-row's window.
+    /// The part of the last chunk that fell past this sub-row's window or its
+    /// line break.
     ///
-    /// The window can end mid-chunk, and those bytes open the next sub-row. Held
-    /// here so the stream does not have to be rewound to recover them.
+    /// A window that ends mid-chunk leaves bytes that open the next sub-row,
+    /// and a line break mid-chunk leaves bytes that open the next tab row.
+    /// Held here so the stream does not have to be rewound to recover them.
     carried: Option<Chunk<'a>>,
+    /// Whether the stream passed this tab row's line break, which leaves it at
+    /// the start of the next tab row.
+    line_ended: bool,
 }
 
 impl<'a> Iterator for WrapChunks<'a> {
@@ -1560,12 +1590,14 @@ impl<'a> WrappedChunksInner<'a> {
         }
     }
 
-    /// Move to the next wrap row, keeping the tab stream when it is a further
-    /// sub-row of the same tab row.
+    /// Move to the next wrap row, keeping the tab stream when it already sits
+    /// where that row opens.
     ///
-    /// The sub-rows of one wrapped line read one continuous run, so the stream
-    /// is already sitting where the next window opens. Dropping it would mean
-    /// re-reading the row from column zero.
+    /// It does for a further sub-row of the same tab row, because the sub-rows
+    /// of one wrapped line read one continuous run. It does for the first
+    /// sub-row of the next tab row once the stream passed the line break
+    /// between them. A reopened stream costs a transform seek and a fresh chunk
+    /// stack.
     fn advance_row(&mut self) {
         self.current_row += 1;
         if self.current_row >= self.rows.end {
@@ -1582,6 +1614,16 @@ impl<'a> WrappedChunksInner<'a> {
                 state.indent = window.indent;
                 state.done = false;
             },
+            Some((tab_row, window)) if self.continues_line(tab_row) => {
+                let state = self.row_state.as_mut().expect("checked by continues_line");
+                state.tab_row = tab_row;
+                state.column = 0;
+                state.target_start = window.target_start;
+                state.target_end = window.target_end;
+                state.indent = window.indent;
+                state.done = false;
+                state.line_ended = false;
+            },
             _ => self.row_state = None,
         }
     }
@@ -1590,6 +1632,20 @@ impl<'a> WrappedChunksInner<'a> {
         self.row_state
             .as_ref()
             .is_some_and(|state| state.tab_row == tab_row)
+    }
+
+    /// Whether the stream reads on into `tab_row`, the next wrap row's tab
+    /// row.
+    ///
+    /// It does when the stream passed the line break before `tab_row`. The
+    /// stream then sits at the row's column zero, which is where a fresh stream
+    /// for the row's first sub-row opens. A fold on the row does not change
+    /// that, because the fold layer's row arithmetic requires that no
+    /// placeholder hold a line break.
+    fn continues_line(&self, tab_row: u32) -> bool {
+        self.row_state
+            .as_ref()
+            .is_some_and(|state| state.line_ended && state.tab_row + 1 == tab_row)
     }
 
     /// The column window and indent wrap row `wrap_row` occupies, with the tab
@@ -1624,7 +1680,6 @@ impl<'a> WrappedChunksInner<'a> {
             return None;
         }
         let row_start = fold.row_start_offset(tab_row);
-        let row_end = FoldOffset(row_start.0 + fold.output_line_len(tab_row) as usize);
 
         // A sub-row deep in a wrapped line starts where it starts. Opening at
         // the tab row's column zero would leave the window's own offset for
@@ -1656,7 +1711,7 @@ impl<'a> WrappedChunksInner<'a> {
         // have it re-walk every endpoint the rows above it already walked.
         self.cursor.advance_to(start_offset.0, &self.endpoints);
         let tab_chunks = tab_snapshot.chunks_seeded(
-            start_offset..row_end,
+            start_offset..self.viewport_end,
             start_column,
             self.endpoints.clone(),
             Some(&self.cursor),
@@ -1671,6 +1726,7 @@ impl<'a> WrappedChunksInner<'a> {
             done: false,
             indent: window.indent,
             carried: None,
+            line_ended: false,
         })
     }
 }
@@ -1686,7 +1742,8 @@ struct RowWindow {
 /// Slice `chunk` to the display-column window described by `state`. Returns
 /// `None` if the chunk falls entirely outside the window. Updates
 /// `state.column` to reflect the column past the consumed input and sets
-/// `state.done` once the window has been exceeded.
+/// `state.done` once the window has been exceeded or the row's line break
+/// reached.
 fn slice_chunk_to_window<'a>(
     chunk: Chunk<'a>,
     state: &mut RowChunksState<'a>,
@@ -1698,6 +1755,24 @@ fn slice_chunk_to_window<'a>(
     let mut byte_end = text.len();
 
     for (byte_idx, ch) in text.char_indices() {
+        // The stream runs on past this tab row, and its line break is where
+        // the row ends. The iterator's own separator stands in for the break,
+        // so the break is dropped and what follows it opens the next row.
+        if ch == '\n' {
+            byte_end = byte_idx;
+            state.done = true;
+            state.line_ended = true;
+            let rest = byte_idx + 1;
+            state.carried = (rest < text.len()).then(|| Chunk {
+                text: match &chunk.text {
+                    Cow::Borrowed(s) => Cow::Borrowed(&s[rest..]),
+                    Cow::Owned(s) => Cow::Owned(s[rest..].to_string()),
+                },
+                ..chunk.clone()
+            });
+            break;
+        }
+
         // Tab chunks are pre-expanded to ASCII spaces, so each char is one
         // display column wide. Non-tab chunks use the global width table.
         let char_width = if chunk.is_tab {
@@ -1818,21 +1893,26 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         display_map::{
             fold_map::{FoldMap, FoldPlaceholder},
-            highlights::HighlightEndpoints,
+            highlights::{
+                create_highlight_endpoints, AnchorResolver, HighlightEndpoints, HighlightKey,
+                HighlightLayer, HighlightStyle,
+            },
             inlay_map::InlayMap,
-            sampler,
+            sampler::{self, Sampler},
             tab_map::{self, TabMap, TabPoint},
         },
         multi_buffer::MultiBuffer,
     };
+    use ratatui::style::Color;
     use std::{
+        collections::HashMap,
         ops::Range,
         sync::{Arc, RwLock},
     };
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{
         patch::{Edit, Patch},
-        Bias, Point,
+        Anchor, Bias, Point,
     };
 
     fn test_executor() -> Executor {
@@ -3080,6 +3160,96 @@ mod tests {
                 got, expected,
                 "char {idx}: got {got:?}, expected {expected:?}"
             );
+        }
+    }
+
+    /// Spans over a few stretches of `snap`'s buffer drawn from `sampler`, each
+    /// in a color of its own.
+    fn random_endpoints(
+        sampler: &mut Sampler,
+        snap: &super::WrapSnapshot,
+    ) -> Arc<HighlightEndpoints> {
+        let rope = snap
+            .tab_snapshot
+            .fold_snapshot()
+            .inlay_snapshot()
+            .buffer_snapshot()
+            .rope()
+            .clone();
+        let len = rope.len() as u32;
+        let offset = |sampler: &mut Sampler| {
+            rope.clip_offset(sampler.below(len + 1) as usize, Bias::Left) as u32
+        };
+        let anchor = |offset: u32| Anchor {
+            timestamp: 0,
+            offset,
+            bias: Bias::Left,
+            buffer_id: None,
+        };
+
+        let mut spans = HashMap::new();
+        for slot in 0..1 + sampler.below(3) {
+            let (a, b) = (offset(sampler), offset(sampler));
+            let style = HighlightStyle {
+                foreground: Some(Color::Indexed(slot as u8)),
+                ..Default::default()
+            };
+            spans.insert(
+                HighlightKey::new(HighlightLayer::SyntaxToken, slot),
+                Arc::new((style, vec![anchor(a.min(b))..anchor(a.max(b))])),
+            );
+        }
+
+        let resolve = |a: &Anchor| a.offset as usize;
+        let resolve_batch = |a: &[Anchor]| a.iter().map(resolve).collect::<Vec<usize>>();
+        HighlightEndpoints::shared(create_highlight_endpoints(
+            &(0..len as usize),
+            &Arc::new(spans),
+            None,
+            None,
+            &AnchorResolver {
+                one: &resolve,
+                many: &resolve_batch,
+            },
+        ))
+    }
+
+    /// Streaming a run of rows yields what streaming each row alone does,
+    /// joined by the row breaks, in text and in style, from every start row.
+    ///
+    /// A stream reads on from one tab row into the next, so a row's chunks come
+    /// from wherever the row above left the stream, not from a stream of its
+    /// own. Tabs, inlays that split a row, folds, and wraps are where the two
+    /// part ways if anything does. A break's own style paints nothing, so the
+    /// comparison leaves it out.
+    #[test]
+    fn a_run_of_rows_streams_what_each_row_streams_alone() {
+        for seed in 0..256 {
+            let (mut sampler, snap) = sampler::random_wrap_stack(seed);
+            let endpoints = random_endpoints(&mut sampler, &snap);
+            let styled = |rows: Range<u32>| -> Vec<(char, Option<Color>)> {
+                snap.chunks(rows, endpoints.clone())
+                    .flat_map(|chunk| {
+                        let color = chunk.highlight_style.as_ref().and_then(|s| s.foreground);
+                        chunk
+                            .text
+                            .chars()
+                            .map(|ch| (ch, color.filter(|_| ch != '\n')))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            };
+
+            let rows = snap.line_count();
+            let alone: Vec<Vec<(char, Option<Color>)>> =
+                (0..rows).map(|row| styled(row..row + 1)).collect();
+            for start in 0..rows {
+                assert_eq!(
+                    styled(start..rows),
+                    alone[start as usize..].join(&('\n', None)),
+                    "seed {seed}, rows {start}..{rows}",
+                );
+            }
         }
     }
 
