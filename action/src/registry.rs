@@ -801,12 +801,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleBlockComments::DEF, |_| {
         Ok(Box::new(ToggleBlockComments))
     });
-    add(ToggleLineComments::DEF, |_| {
-        Ok(Box::new(ToggleLineComments))
-    });
-    add(ToggleBlockComments::DEF, |_| {
-        Ok(Box::new(ToggleBlockComments))
-    });
     add(ToggleSyntaxHighlight::DEF, |_| {
         Ok(Box::new(ToggleSyntaxHighlight))
     });
