@@ -1630,26 +1630,45 @@ pub(super) fn split_selection_on_newline(editor: &mut EditorState) -> UpdateEffe
 }
 
 pub(super) fn switch_case(stoat: &mut Stoat) -> UpdateEffect {
-    transform_primary_selection(stoat, toggle_case)
+    redraw_if(transform_selections(stoat, |text| Some(toggle_case(text))))
 }
 
 pub(super) fn switch_to_uppercase(stoat: &mut Stoat) -> UpdateEffect {
-    transform_primary_selection(stoat, str::to_uppercase)
+    redraw_if(transform_selections(stoat, |text| {
+        Some(text.to_uppercase())
+    }))
 }
 
 pub(super) fn switch_to_lowercase(stoat: &mut Stoat) -> UpdateEffect {
-    transform_primary_selection(stoat, str::to_lowercase)
+    redraw_if(transform_selections(stoat, |text| {
+        Some(text.to_lowercase())
+    }))
 }
 
-fn transform_primary_selection<F>(stoat: &mut Stoat, transform: F) -> UpdateEffect
+/// [`UpdateEffect::Redraw`] when an edit landed, [`UpdateEffect::None`] when
+/// none did.
+fn redraw_if(changed: bool) -> UpdateEffect {
+    if changed {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
+/// Replace the text of every selection with what `transform` makes of it, and
+/// report whether any selection changed.
+///
+/// A selection whose text `transform` declines, or leaves as it was, keeps its
+/// place. Each changed selection then covers its replacement.
+fn transform_selections<F>(stoat: &mut Stoat, transform: F) -> bool
 where
-    F: Fn(&str) -> String,
+    F: Fn(&str) -> Option<String>,
 {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
         View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+        _ => return false,
     };
 
     let (buffer_id, mut edits) = {
@@ -1665,7 +1684,7 @@ where
                 let s = buffer_snapshot.resolve_anchor(&sel.start);
                 let e = buffer_snapshot.resolve_anchor(&sel.end);
                 let text = buffer_snapshot.rope().slice(s..e).to_string();
-                let new_text = transform(&text);
+                let new_text = transform(&text)?;
                 if new_text == text {
                     return None;
                 }
@@ -1676,7 +1695,7 @@ where
     };
 
     if edits.is_empty() {
-        return UpdateEffect::None;
+        return false;
     }
 
     edits.sort_by_key(|(_, s, _, _)| *s);
@@ -1705,7 +1724,7 @@ where
         }
         new
     });
-    UpdateEffect::Redraw
+    true
 }
 
 /// Where each edit's replacement text ended up, keyed by the selection that
@@ -1740,71 +1759,15 @@ pub(super) fn decrement(stoat: &mut Stoat) -> UpdateEffect {
 
 fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
     let in_select = stoat.in_select_mode();
-    let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
-    };
-
-    let (buffer_id, mut edits) = {
-        let editor = ws.editors.get_mut(editor_id).expect("editor");
-        let buffer_id = editor.buffer_id;
-        let display_snapshot = editor.display_map.snapshot();
-        let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let rope = buffer_snapshot.rope();
-        // The selection's own text is the number. A selection covering anything
-        // else spells no integer and stays where it is, so the arithmetic
-        // follows what the reader picked out rather than an invisible scan.
-        let edits: Vec<(usize, usize, usize, String)> = editor
-            .selections
-            .all_anchors()
-            .iter()
-            .filter_map(|sel| {
-                let start = buffer_snapshot.resolve_anchor(&sel.start);
-                let end = buffer_snapshot.resolve_anchor(&sel.end);
-                let text = rope.slice(start..end).to_string();
-                let new_text = integer_increment(&text, delta)
-                    .or_else(|| date_time_increment(&text, delta))?;
-                if new_text == text {
-                    return None;
-                }
-                Some((sel.id, start, end, new_text))
-            })
-            .collect();
-        (buffer_id, edits)
-    };
-
-    if edits.is_empty() {
+    // The selection's own text is the number. A selection covering anything
+    // else spells no integer and stays where it is, so the arithmetic
+    // follows what the reader picked out rather than an invisible scan.
+    let changed = transform_selections(stoat, |text| {
+        integer_increment(text, delta).or_else(|| date_time_increment(text, delta))
+    });
+    if !changed {
         return UpdateEffect::None;
     }
-
-    edits.sort_by_key(|(_, s, _, _)| *s);
-
-    {
-        let buffer = ws.buffers.get(buffer_id).expect("buffer");
-        let mut guard = buffer.write().expect("poisoned");
-        let batch: Vec<(Range<usize>, &str)> = edits
-            .iter()
-            .rev()
-            .map(|(_, s, e, new_text)| (*s..*e, new_text.as_str()))
-            .collect();
-        guard.edit_batch(&batch);
-    }
-
-    let edited_ranges = shifted_edit_ranges(&edits);
-
-    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    let new_display = editor.display_map.snapshot();
-    let new_buf = new_display.buffer_snapshot();
-    editor.selections.transform(new_buf, |sel| {
-        let mut new = sel.clone();
-        if let Some((s, e)) = edited_ranges.get(&sel.id) {
-            new.start = new_buf.anchor_at(*s, Bias::Left);
-            new.end = new_buf.anchor_at(*e, Bias::Right);
-        }
-        new
-    });
 
     // The span the reader picked out is what the arithmetic consumed, so once
     // an edit lands the selection has served its purpose and select mode ends.
