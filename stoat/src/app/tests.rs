@@ -24,7 +24,10 @@ use crate::{
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_sizing,
         picker_layout, target_picker_rows,
     },
-    test_harness::keys::{ctrl, key},
+    test_harness::{
+        keys::{ctrl, key},
+        stoat_rooted,
+    },
     workspace::diff::DiffBase,
 };
 use crossterm::event::{MouseButton, MouseEventKind};
@@ -40,13 +43,7 @@ use stoatty_protocol::command::{self, PoolKind, PoolRegionCommand};
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 fn stoat_with_detached_pane(window: u32) -> (Stoat, PaneId) {
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, _) = stoat_rooted("/repo");
     let ws = stoat.active_workspace_mut();
     let detached = ws.panes.split(crate::pane::Axis::Vertical);
     assert!(ws.panes.detach(detached, window));
@@ -2145,13 +2142,7 @@ fn glide_tick_snaps_a_gap_wider_than_three_viewports() {
 
 #[test]
 fn cold_build_shard_merges_into_the_workspace_graph() {
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, _) = stoat_rooted("/repo");
 
     let workspace = stoat.active_workspace;
     let shard = codegraph::FileShard {
@@ -2191,13 +2182,7 @@ fn cold_build_shard_merges_into_the_workspace_graph() {
 fn non_repo_root_skips_the_index_build() {
     use crate::host::{FakeFs, FakeGit};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/scratch"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/scratch");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/scratch/a.rs", "fn foo() {}\n");
@@ -2255,13 +2240,7 @@ fn index_build_watches_the_repo_root_off_the_render_thread() {
 fn a_persistence_disabled_index_build_still_watches_the_repo_root() {
     use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
@@ -2286,13 +2265,7 @@ fn a_persistence_disabled_index_build_still_watches_the_repo_root() {
 fn a_root_below_the_repository_watches_the_whole_working_tree() {
     use crate::host::{FakeFs, FakeFsWatcher, FakeGit};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo/sub"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo/sub");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/sub/a.rs", "");
@@ -2343,13 +2316,7 @@ fn batched_reindex_drain_cross_links_like_sequential() {
     let callee = codegraph::SymbolKey([2u8; 16]);
 
     let callees_after = |drain_between: bool| -> Vec<codegraph::SymbolKey> {
-        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-        let mut stoat = Stoat::new(
-            scheduler.executor(),
-            Settings::default(),
-            PathBuf::from("/repo"),
-        );
-        stoat.persistence_disabled = true;
+        let (mut stoat, _) = stoat_rooted("/repo");
         let workspace = stoat.active_workspace;
 
         let symbol = |key, file, name: &str| codegraph::Symbol {
@@ -2453,13 +2420,7 @@ fn an_index_turn_ends_on_either_bound() {
 
 #[test]
 fn a_capped_drain_leaves_the_remainder_for_the_next_tick() {
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, _) = stoat_rooted("/repo");
     let workspace = stoat.active_workspace;
 
     let total = INDEX_DRAIN_CAP + 1;
@@ -2495,13 +2456,7 @@ fn a_capped_drain_leaves_the_remainder_for_the_next_tick() {
 
 #[test]
 fn reindex_replaces_a_files_symbols_in_the_graph() {
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, _) = stoat_rooted("/repo");
     let workspace = stoat.active_workspace;
     let file = codegraph::FileId(7);
 
@@ -2564,13 +2519,7 @@ fn reindex_replaces_a_files_symbols_in_the_graph() {
 fn external_change_reindexes_and_remove_evicts() {
     use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
@@ -2657,13 +2606,7 @@ fn workspace_watches_cover_the_source_tree_and_the_git_refs() {
 fn a_directory_created_after_startup_gets_its_own_watch() {
     use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, _) = stoat_rooted("/repo");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn a() {}\n");
@@ -2701,13 +2644,7 @@ fn a_directory_created_after_startup_gets_its_own_watch() {
 fn an_external_change_reads_the_file_once() {
     use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
@@ -2789,13 +2726,7 @@ fn an_external_change_reads_the_file_once() {
 fn a_burst_of_external_changes_shares_one_debounce_window() {
     use crate::host::{FakeFs, FakeFsWatcher, FsEventKind};
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo");
 
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn foo() {}\n");
@@ -2850,13 +2781,7 @@ fn a_burst_of_external_changes_shares_one_debounce_window() {
 fn editing_a_buffer_live_reindexes_a_new_calls_edge() {
     use crate::host::FakeFs;
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo");
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn caller() {}\nfn callee() {}\n");
     stoat.set_fs_host(fs);
@@ -3025,13 +2950,7 @@ fn a_save_reindexes_with_persist_where_an_edit_does_not() {
 fn two_parses_inside_the_debounce_window_extract_once() {
     use crate::host::FakeFs;
 
-    let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
-    let mut stoat = Stoat::new(
-        scheduler.executor(),
-        Settings::default(),
-        PathBuf::from("/repo"),
-    );
-    stoat.persistence_disabled = true;
+    let (mut stoat, scheduler) = stoat_rooted("/repo");
     let fs = Arc::new(FakeFs::new());
     fs.insert_file("/repo/src/a.rs", "fn caller() {}\n");
     stoat.set_fs_host(fs);

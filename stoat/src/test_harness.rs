@@ -91,6 +91,23 @@ pub(crate) fn stoat() -> Stoat {
     stoat
 }
 
+/// A bare [`Stoat`] rooted at `git_root`, with persistence off, beside the
+/// scheduler that runs its tasks.
+///
+/// For the tests that drive background work such as an index build by hand,
+/// through `run_until_parked` and `advance_clock`. It sends no resize, unlike
+/// [`stoat`].
+pub(crate) fn stoat_rooted(git_root: &str) -> (Stoat, Arc<TestScheduler>) {
+    let scheduler = Arc::new(TestScheduler::new());
+    let mut stoat = Stoat::new(
+        scheduler.executor(),
+        Settings::default(),
+        std::path::PathBuf::from(git_root),
+    );
+    stoat.persistence_disabled = true;
+    (stoat, scheduler)
+}
+
 /// `bytes` as one gzip member, for a test that opens a compressed file.
 pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
