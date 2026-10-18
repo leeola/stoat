@@ -656,22 +656,16 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
 mod tests {
     use crate::{
         host::{ClipboardHost, ClipboardKind},
+        test_fixture::open_scratch_at,
         test_harness::{keys, TestHarness},
     };
     use crossterm::event::{Event, KeyCode};
     use std::path::PathBuf;
-    use stoat_action::{self as action, OpenFile};
+    use stoat_action as action;
     use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
     fn seed(h: &mut TestHarness, contents: &str) -> PathBuf {
-        let root = PathBuf::from("/yank-test");
-        let path = root.join("buf.txt");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-        h.settle();
-        path
+        open_scratch_at(h, "/yank-test/buf.txt", contents)
     }
 
     /// Install `ranges` as the whole selection set, each `(start, end,

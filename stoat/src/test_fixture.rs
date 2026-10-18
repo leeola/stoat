@@ -103,10 +103,20 @@ pub(crate) fn open_with_minimap_strip(h: &mut TestHarness) -> EditorId {
 /// Open a buffer holding `contents`, for a test that needs a file on screen
 /// rather than a particular one. Returns the path it was written to.
 pub(crate) fn open_scratch_file(h: &mut TestHarness, contents: &str) -> PathBuf {
-    let path = PathBuf::from("/ws/buf.txt");
+    open_scratch_at(h, "/ws/buf.txt", contents)
+}
+
+/// Open a buffer holding `contents` at `path`, with the workspace rooted at
+/// the path's parent. Returns the path.
+///
+/// For a test whose subject depends on the file's name, such as a language
+/// picked by its extension, or a snapshot that shows the path.
+pub(crate) fn open_scratch_at(h: &mut TestHarness, path: &str, contents: &str) -> PathBuf {
+    let path = PathBuf::from(path);
     h.fake_fs()
         .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-    h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
+    h.stoat.active_workspace_mut().git_root =
+        path.parent().expect("path has a parent").to_path_buf();
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
     h.settle();
     path

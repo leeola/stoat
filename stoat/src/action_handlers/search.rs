@@ -805,19 +805,12 @@ pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<Cu
 #[cfg(test)]
 mod tests {
     use super::SearchDirection;
-    use crate::test_harness::TestHarness;
+    use crate::{test_fixture::open_scratch_at, test_harness::TestHarness};
     use std::path::PathBuf;
-    use stoat_action::{self as action, OpenFile};
+    use stoat_action as action;
 
     fn seed(h: &mut TestHarness, contents: &str) -> PathBuf {
-        let root = PathBuf::from("/search-test");
-        let path = root.join("buf.txt");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-        h.settle();
-        path
+        open_scratch_at(h, "/search-test/buf.txt", contents)
     }
 
     /// A match the scan reached without wrapping.

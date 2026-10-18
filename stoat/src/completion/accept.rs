@@ -351,20 +351,15 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         completion::{anchor_range_in_focused, CompletionItem, CompletionPopup, CompletionSource},
+        test_fixture::open_scratch_at,
         test_harness::TestHarness,
     };
     use std::{ops::Range, path::PathBuf};
-    use stoat_action::{AcceptCompletion, OpenFile};
+    use stoat_action::AcceptCompletion;
     use stoat_text::Anchor;
 
     fn open_scratch(h: &mut TestHarness, contents: &str) -> PathBuf {
-        let path = PathBuf::from("/ws/buf.rs");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
-        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-        h.settle();
-        path
+        open_scratch_at(h, "/ws/buf.rs", contents)
     }
 
     fn cursor_offset(h: &mut TestHarness) -> usize {

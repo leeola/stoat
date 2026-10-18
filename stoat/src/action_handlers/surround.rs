@@ -1002,20 +1002,14 @@ mod tests {
             focused_editor_mut,
             movement::{MAX_PAIR_SCAN, PAIR_SCAN_WINDOW_BYTES},
         },
+        test_fixture::open_scratch_at,
         test_harness::TestHarness,
     };
     use std::path::PathBuf;
-    use stoat_action::{self as action, OpenFile};
+    use stoat_action as action;
 
     fn seed(h: &mut TestHarness, contents: &str) -> PathBuf {
-        let root = PathBuf::from("/surround-test");
-        let path = root.join("buf.txt");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-        h.settle();
-        path
+        open_scratch_at(h, "/surround-test/buf.txt", contents)
     }
 
     /// `(` then `filler` then `)`, with the cursor just inside each delimiter,
@@ -1855,12 +1849,7 @@ mod tests {
     }
 
     fn seed_rs(h: &mut TestHarness, contents: &str) -> PathBuf {
-        let root = PathBuf::from("/surround-test");
-        let path = root.join("main.rs");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        let path = open_scratch_at(h, "/surround-test/main.rs", contents);
         h.stoat.drive_background();
         let _ = h.stoat.render();
         h.settle();

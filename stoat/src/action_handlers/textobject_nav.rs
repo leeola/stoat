@@ -344,20 +344,18 @@ fn press_entry<T>(
 
 #[cfg(test)]
 mod tests {
-    use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+    use crate::{
+        action_handlers::focused_editor_mut, test_fixture::open_scratch_at,
+        test_harness::TestHarness,
+    };
     use std::path::PathBuf;
     use stoat_action::{
         GotoNextClass, GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParameter,
-        GotoNextTest, GotoNextXmlElement, GotoPrevClass, GotoPrevFunction, OpenFile,
+        GotoNextTest, GotoNextXmlElement, GotoPrevClass, GotoPrevFunction,
     };
 
     fn seed(h: &mut TestHarness, name: &str, contents: &str) -> PathBuf {
-        let root = PathBuf::from("/textobject-nav-test");
-        let path = root.join(name);
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        let path = open_scratch_at(h, &format!("/textobject-nav-test/{name}"), contents);
         h.stoat.drive_background();
         let _ = h.stoat.render();
         h.settle();

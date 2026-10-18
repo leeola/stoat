@@ -634,19 +634,15 @@ fn find_word_boundary(rope: &Rope, mut pos: usize, forward: bool, long: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
+    use crate::{
+        action_handlers::focused_editor_mut, test_fixture::open_scratch_at,
+        test_harness::TestHarness,
+    };
     use std::path::PathBuf;
-    use stoat_action::{self as action, OpenFile};
+    use stoat_action as action;
 
     fn seed(h: &mut TestHarness, name: &str, contents: &str) -> PathBuf {
-        let root = PathBuf::from("/textobject-test");
-        let path = root.join(name);
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-        h.settle();
-        path
+        open_scratch_at(h, &format!("/textobject-test/{name}"), contents)
     }
 
     fn primary_range(h: &mut TestHarness) -> (usize, usize) {

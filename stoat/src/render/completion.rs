@@ -382,20 +382,9 @@ mod tests {
     use crate::{
         apc_emit,
         completion::{CompletionItem, CompletionPopup, CompletionSource},
+        test_fixture::open_scratch_file,
         test_harness::TestHarness,
     };
-    use std::path::PathBuf;
-    use stoat_action as action;
-
-    fn open_scratch(h: &mut TestHarness, contents: &str) -> PathBuf {
-        let path = PathBuf::from("/ws/buf.txt");
-        h.fake_fs()
-            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-        h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
-        crate::action_handlers::dispatch(&mut h.stoat, &action::OpenFile { path: path.clone() });
-        h.settle();
-        path
-    }
 
     fn make_item(label: &str) -> CompletionItem {
         CompletionItem {
@@ -419,7 +408,7 @@ mod tests {
     #[test]
     fn a_frame_lays_the_popup_out_once() {
         let mut h = TestHarness::with_size(40, 24);
-        let _path = open_scratch(&mut h, "");
+        let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.stoat.pending_completion = Some(CompletionPopup::showing(vec![
             make_item("alpha"),
@@ -459,7 +448,7 @@ mod tests {
     #[test]
     fn the_popup_opens_below_the_cursor_when_either_side_would_fit() {
         let mut h = TestHarness::with_size(40, 24);
-        let _path = open_scratch(&mut h, &"line\n".repeat(20));
+        let _path = open_scratch_file(&mut h, &"line\n".repeat(20));
         h.type_keys("i");
         // Row 10 of a 20-line buffer on a 24-row terminal, so a four-row popup
         // has room on either side and only the preference decides.
@@ -486,7 +475,7 @@ mod tests {
     #[test]
     fn snapshot_popup_basic_three_items_selected_middle() {
         let mut h = TestHarness::with_size(40, 12);
-        let _path = open_scratch(&mut h, "");
+        let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         h.stoat.pending_completion = Some(CompletionPopup {
             selected_idx: 1,
@@ -504,7 +493,7 @@ mod tests {
     #[test]
     fn snapshot_popup_shows_detail_footer_for_selected_row() {
         let mut h = TestHarness::with_size(40, 12);
-        let _path = open_scratch(&mut h, "");
+        let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         let mut foo = make_item("foo");
         foo.detail = Some("fn foo() -> u32".into());
@@ -516,7 +505,7 @@ mod tests {
     #[test]
     fn snapshot_popup_scrolls_when_selected_past_window() {
         let mut h = TestHarness::with_size(40, 16);
-        let _path = open_scratch(&mut h, "");
+        let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         let items: Vec<CompletionItem> = (0..15)
             .map(|i| make_item(&format!("item_{i:02}")))
@@ -531,7 +520,7 @@ mod tests {
     #[test]
     fn snapshot_popup_highlights_matched_chars() {
         let mut h = TestHarness::with_size(40, 12);
-        let _path = open_scratch(&mut h, "pri");
+        let _path = open_scratch_file(&mut h, "pri");
         h.type_keys("A");
         h.stoat.pending_completion = Some(CompletionPopup {
             selected_idx: 0,
@@ -549,7 +538,7 @@ mod tests {
     #[test]
     fn no_popup_state_renders_no_paint_block() {
         let mut h = TestHarness::with_size(40, 6);
-        let _path = open_scratch(&mut h, "");
+        let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
         assert!(h.stoat.pending_completion.is_none());
         h.assert_snapshot("snapshot_completion_popup_absent");

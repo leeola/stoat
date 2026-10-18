@@ -15,11 +15,11 @@
 #![cfg(test)]
 
 use crate::{
-    action_handlers::dispatch, completion::request::COMPLETION_DEBOUNCE, test_harness::TestHarness,
+    completion::request::COMPLETION_DEBOUNCE, test_fixture::open_scratch_at,
+    test_harness::TestHarness,
 };
 use lsp_types::{CompletionOptions, ServerCapabilities};
 use std::path::PathBuf;
-use stoat_action::OpenFile;
 
 fn enable_lsp_completion(h: &TestHarness) {
     h.fake_lsp().set_capabilities(ServerCapabilities {
@@ -29,13 +29,7 @@ fn enable_lsp_completion(h: &TestHarness) {
 }
 
 fn open_scratch(h: &mut TestHarness, contents: &str) -> PathBuf {
-    let path = PathBuf::from("/ws/buf.rs");
-    h.fake_fs()
-        .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
-    h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
-    dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
-    h.settle();
-    path
+    open_scratch_at(h, "/ws/buf.rs", contents)
 }
 
 #[test]
