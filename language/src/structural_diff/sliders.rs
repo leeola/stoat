@@ -73,7 +73,7 @@ pub fn fix_all_sliders(
     side: Side,
 ) {
     // FIXME: Nested sliders take no per-language inner-versus-outer delimiter preference
-    let changed = changed_below(arena, root, changes);
+    let changed = changed_below(arena, changes);
     let mut slides = Vec::new();
     for _ in 0..2 {
         fix_sliders_recursive(arena, root, changes, &changed, &mut slides);
@@ -81,7 +81,7 @@ pub fn fix_all_sliders(
     repoint_pairs(pairs, side, &slides);
 }
 
-/// Each node under `root` that is not `Unchanged` or has such a node below it,
+/// Each node of `arena` that is not `Unchanged` or has such a node below it,
 /// as flags indexed by [`SyntaxId`].
 ///
 /// A list that is `Unchanged` all the way down holds no run to slide. The
@@ -90,28 +90,25 @@ pub fn fix_all_sliders(
 /// all the way down holds no slide either. Every run in it starts at its first
 /// child, which has no node before it to trade places with. A flag that
 /// outlives the change under it costs only a scan.
-fn changed_below(arena: &SyntaxArena, root: SyntaxId, changes: &ChangeMap) -> Vec<bool> {
+fn changed_below(arena: &SyntaxArena, changes: &ChangeMap) -> Vec<bool> {
     let mut changed = vec![false; arena.len()];
-    flag_changed(arena, root, changes, &mut changed);
-    changed
-}
-
-/// Flag `id` and every node under it in `changed`, and return the flag of
-/// `id`.
-fn flag_changed(
-    arena: &SyntaxArena,
-    id: SyntaxId,
-    changes: &ChangeMap,
-    changed: &mut [bool],
-) -> bool {
-    let mut below = changes.get(id) != ChangeKind::Unchanged;
-    if let Syntax::List(list) = arena.get(id) {
-        for &child in &list.children {
-            below |= flag_changed(arena, child, changes, changed);
-        }
+    // One forward pass is enough, because every child sits at a lower index
+    // than its parent (see `SyntaxArena::alloc`). A walk from the root costs
+    // about twice as much on a tree the size of app.rs.
+    for index in 0..arena.len() {
+        let id = SyntaxId(index);
+        let children: &[SyntaxId] = match arena.get(id) {
+            Syntax::List(list) => &list.children,
+            Syntax::Atom(_) => &[],
+        };
+        debug_assert!(
+            children.iter().all(|child| child.0 < index),
+            "list {index} holds a child allocated after it",
+        );
+        changed[index] = changes.get(id) != ChangeKind::Unchanged
+            || children.iter().any(|child| changed[child.0]);
     }
-    changed[id.0] = below;
-    below
+    changed
 }
 
 fn fix_sliders_recursive(

@@ -139,6 +139,11 @@ impl SyntaxArena {
     }
 
     /// Move `node` into the arena and return its [`SyntaxId`].
+    ///
+    /// Allocate a list after its children, as [`super::lower_tree`] does. Its
+    /// content id needs theirs anyway. [`Self::subtree_counts`] and the slider
+    /// pass's change flags each fill a table indexed by [`SyntaxId`] in one
+    /// forward pass, which needs every child at a lower index than its parent.
     pub fn alloc(&mut self, node: Syntax) -> SyntaxId {
         let id = SyntaxId(self.nodes.len());
         self.nodes.push(node);
