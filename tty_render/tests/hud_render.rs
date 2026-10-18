@@ -12,7 +12,7 @@ use std::time::Duration;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     perf::{FrameSample, FrameStats, Percentiles},
-    test_support::require_headless_device,
+    test_support::{require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -81,21 +81,7 @@ fn hud_composites_over_a_frame_off_screen() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
 
     // Bars spanning all three budget bands plus an empty series (panel and

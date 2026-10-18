@@ -3,7 +3,8 @@
 //! Compiled for the crate's own unit tests, and for its integration tests
 //! through the `test-support` feature.
 
-use crate::gpu;
+use crate::gpu::{self, Frame, Scroll};
+use stoatty_term::term::Damage;
 use wgpu::{
     BufferDescriptor, BufferUsages, CommandEncoderDescriptor, Device, Extent3d, MapMode, Origin3d,
     PollType, Queue, TexelCopyBufferInfo, TexelCopyBufferLayout, TexelCopyTextureInfo, Texture,
@@ -96,4 +97,24 @@ pub fn read_back(
         .poll(PollType::wait_indefinitely())
         .expect("poll readback");
     buffer.slice(..).get_mapped_range().to_vec()
+}
+
+/// A frame with no cursor, scroll, or sketch reveals, which rebuilds the rows
+/// `damage` names and repaints the decorations `decoration_damage` names.
+pub fn still_frame<'a>(damage: &'a Damage, decoration_damage: &'a Damage) -> Frame<'a> {
+    Frame {
+        cursor: None,
+        cursor_corners: None,
+        scroll: Scroll {
+            grid: 0.0,
+            document: 0.0,
+            scrollback: 0.0,
+            region: 0.0,
+            popovers: &[],
+        },
+        damage,
+        decoration_damage,
+        scrolled_rows: 0,
+        sketch_reveals: &[],
+    }
 }

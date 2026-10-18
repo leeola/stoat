@@ -10,9 +10,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, HostRide, PoolComposite, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, HostRide, PoolComposite, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Polyline, Rgb, TextRun},
@@ -131,22 +131,13 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
     ]);
 
     let pixels = {
-        let frame = Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        };
-        renderer.render_into(&device, &queue, &view, &grid, frame);
+        renderer.render_into(
+            &device,
+            &queue,
+            &view,
+            &grid,
+            still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
+        );
         read_back(&device, &queue, &target, width, height)
     };
 
@@ -307,21 +298,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
             &queue,
             &view,
             &live,
-            Frame {
-                cursor: None,
-                cursor_corners: None,
-                scroll: Scroll {
-                    grid: 0.0,
-                    document: 0.0,
-                    scrollback: 0.0,
-                    region: 0.0,
-                    popovers: &[],
-                },
-                damage: &Damage::Full,
-                decoration_damage: &Damage::Partial(Vec::new()),
-                scrolled_rows: 0,
-                sketch_reveals: &[],
-            },
+            still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
         );
     };
 
@@ -517,21 +494,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
         &pools,
         &[],
     );
@@ -668,21 +631,7 @@ fn a_box_riding_a_pool_stops_occluding_it() {
         &queue,
         &view,
         &live,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
         &pools,
         &[HostRide {
             host,

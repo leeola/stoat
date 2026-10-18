@@ -8,9 +8,9 @@
 
 use std::sync::Arc;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, ImageCrop, PlacedImage, Rgb},
@@ -96,21 +96,7 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
             &queue,
             &view,
             &grid,
-            Frame {
-                cursor: None,
-                cursor_corners: None,
-                scroll: Scroll {
-                    grid: 0.0,
-                    document: 0.0,
-                    scrollback: 0.0,
-                    region: 0.0,
-                    popovers: &[],
-                },
-                damage: &Damage::Full,
-                decoration_damage: &Damage::Partial(Vec::new()),
-                scrolled_rows: 0,
-                sketch_reveals: &[],
-            },
+            still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
         );
         read_back(&device, &queue, &target, width, height)
     };
@@ -212,21 +198,7 @@ fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
     let pixels = read_back(&device, &queue, &target, width, height);
 
@@ -304,21 +276,7 @@ fn a_downscaled_image_averages_rather_than_aliasing() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
     let pixels = read_back(&device, &queue, &target, width, height);
 

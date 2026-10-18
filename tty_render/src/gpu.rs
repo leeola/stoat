@@ -2461,10 +2461,10 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 mod tests {
     use super::{
         build_font_system, clamp_scissor, covered_rects, needs_configure, surface_formats,
-        CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame, PoolComposite,
-        Renderer, Scroll, SharedFonts, SurfaceConfiguration, TextureFormat, MAX_COVERED,
+        CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, PoolComposite, Renderer,
+        SharedFonts, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
-    use crate::test_support::{read_back, require_headless_device};
+    use crate::test_support::{read_back, require_headless_device, still_frame};
     use std::iter;
     use stoatty_term::{
         grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
@@ -2571,21 +2571,7 @@ mod tests {
         let white_pool = filled(white);
 
         let no_decoration = Damage::Partial(Vec::new());
-        let frame = Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &no_decoration,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        };
+        let frame = still_frame(&Damage::Full, &no_decoration);
 
         // The two pools take the lower bands, leaving the top one to the live grid.
         let pools = [
@@ -2753,21 +2739,7 @@ mod tests {
         }
 
         let no_decoration = Damage::Partial(Vec::new());
-        let frame = Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &no_decoration,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        };
+        let frame = still_frame(&Damage::Full, &no_decoration);
 
         // Covers the middle band, which the panel's left edge runs through.
         let scissor = [0, cell_h, width, cell_h * 2];
@@ -3110,25 +3082,6 @@ mod tests {
         );
         renderer.record_into(device, queue, &view);
         read_back(device, queue, target, TARGET_WIDTH, TARGET_HEIGHT)
-    }
-
-    /// A frame with no cursor, scroll, or marks, rebuilding what `damage` names.
-    fn still_frame<'a>(damage: &'a Damage, decoration_damage: &'a Damage) -> Frame<'a> {
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage,
-            decoration_damage,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        }
     }
 
     /// The RGB of the pixel at `x`, `y` in a [`TARGET_WIDTH`]-wide readback.

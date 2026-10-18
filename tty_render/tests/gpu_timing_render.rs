@@ -13,7 +13,7 @@
 use std::time::Duration;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
-    test_support::require_headless_device,
+    test_support::{require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -75,27 +75,7 @@ fn timestamp_queries_yield_a_nonzero_gpu_duration() {
     // handful of frames, forcing each frame's map to complete, until one lands.
     let mut gpu = None;
     for _ in 0..16 {
-        renderer.render_into(
-            &device,
-            &queue,
-            &view,
-            &grid,
-            Frame {
-                cursor: None,
-                cursor_corners: None,
-                scroll: Scroll {
-                    grid: 0.0,
-                    document: 0.0,
-                    scrollback: 0.0,
-                    region: 0.0,
-                    popovers: &[],
-                },
-                damage: &full,
-                decoration_damage: &empty,
-                scrolled_rows: 0,
-                sketch_reveals: &[],
-            },
-        );
+        renderer.render_into(&device, &queue, &view, &grid, still_frame(&full, &empty));
         let _ = device.poll(PollType::wait_indefinitely());
         if let Some(duration) = renderer.take_gpu_time() {
             gpu = Some(duration);

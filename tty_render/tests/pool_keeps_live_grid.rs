@@ -11,9 +11,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -69,21 +69,7 @@ fn pool_composite_keeps_live_instances() {
     }
 
     let no_decoration = Damage::Partial(Vec::new());
-    let frame = |damage| Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage,
-        decoration_damage: &no_decoration,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    };
+    let frame = |damage| still_frame(damage, &no_decoration);
 
     // A full live frame establishes the cached instances.
     renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
@@ -195,21 +181,7 @@ fn shift_only_composite_reuses_prior_rows() {
     let white_pool = filled(white);
 
     let no_decoration = Damage::Partial(Vec::new());
-    let frame = |damage| Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage,
-        decoration_damage: &no_decoration,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    };
+    let frame = |damage| still_frame(damage, &no_decoration);
     let full_surface = [0, 0, width, height];
 
     // Build the composite instances from the gray pool.
@@ -325,21 +297,7 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     let blue_pool = filled(blue);
 
     let no_decoration = Damage::Partial(Vec::new());
-    let frame = |damage| Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage,
-        decoration_damage: &no_decoration,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    };
+    let frame = |damage| still_frame(damage, &no_decoration);
 
     // Each pool owns a horizontal band, so a read-back tells them apart. The ids
     // are unordered and non-contiguous, as pane and modal ids are.
@@ -480,21 +438,7 @@ fn pool_grow_heals_live_instances() {
     }
 
     let no_decoration = Damage::Partial(Vec::new());
-    let frame = |damage| Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage,
-        decoration_damage: &no_decoration,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    };
+    let frame = |damage| still_frame(damage, &no_decoration);
 
     renderer.render_into(&device, &queue, &view, &live, frame(&Damage::Full));
     let base = read_back(&device, &queue, &target, width, height);
@@ -696,21 +640,7 @@ fn a_region_sized_pool_draws_at_the_region_origin() {
         &queue,
         &view,
         &live,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &no_decoration,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &no_decoration),
     );
 
     renderer.composite_pool(

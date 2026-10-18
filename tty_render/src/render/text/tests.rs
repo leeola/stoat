@@ -10,7 +10,7 @@ use super::{
 use crate::{
     atlas::{AtlasKind, GlyphInfo},
     render::{row_uploads, CellMetrics, Frame, HostRide, PoolOccluders, Scroll, SketchReveal},
-    test_support::require_headless_device,
+    test_support::{require_headless_device, still_frame},
 };
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
@@ -1737,21 +1737,7 @@ fn a_patched_region_frame_matches_one_built_from_scratch() {
         grid
     };
     fn frame(damage: &Damage) -> Frame<'_> {
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage,
-            decoration_damage: damage,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        }
+        still_frame(damage, damage)
     }
 
     // A full frame, then one row changed and only that row damaged.
@@ -2057,21 +2043,7 @@ fn only_the_grid_rows_buffers_carry_a_rotation() {
         &queue,
         &grid,
         [640.0, 480.0],
-        &Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Full,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        &still_frame(&Damage::Full, &Damage::Full),
         &[],
         &[],
         &[],
@@ -2115,19 +2087,8 @@ fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
     };
     fn frame(damage: &Damage, scrolled_rows: isize) -> Frame<'_> {
         Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage,
-            decoration_damage: damage,
             scrolled_rows,
-            sketch_reveals: &[],
+            ..still_frame(damage, damage)
         }
     }
 
@@ -2211,21 +2172,7 @@ fn chrome_grid(text_runs: Vec<TextRun>, overlays: Vec<Overlay>) -> Grid {
 
 /// An idle whole-screen frame over a four-row grid.
 fn chrome_frame() -> Frame<'static> {
-    Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage: &Damage::Full,
-        decoration_damage: &Damage::Full,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    }
+    still_frame(&Damage::Full, &Damage::Full)
 }
 
 fn chrome_run(text: &str) -> TextRun {
@@ -2728,21 +2675,8 @@ fn a_second_grid_holding_the_same_popover_count_is_not_the_first() {
 fn only_a_moved_region_rectangle_resplits_the_rows() {
     let (device, queue, mut pass) = headless_text_pass();
     let resolution = [640.0, 480.0];
-    let frame = Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage: &Damage::Partial(vec![None; 4]),
-        decoration_damage: &Damage::Partial(vec![None; 4]),
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    };
+    let clean = Damage::Partial(vec![None; 4]);
+    let frame = still_frame(&clean, &clean);
     let build = |region: ScrollRegion| {
         let mut grid = Grid::new(4, 20);
         for row in 0..4 {
@@ -2839,19 +2773,8 @@ fn a_rotated_frame_matches_one_built_from_scratch() {
     }
     fn frame(damage: &Damage, scrolled_rows: isize) -> Frame<'_> {
         Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage,
-            decoration_damage: damage,
             scrolled_rows,
-            sketch_reveals: &[],
+            ..still_frame(damage, damage)
         }
     }
 
@@ -3692,21 +3615,9 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
     let resolution = [640.0, 480.0];
     let idle = Damage::Partial(vec![None; 6]);
     fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers,
-            },
-            damage: idle,
-            decoration_damage: idle,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        }
+        let mut frame = still_frame(idle, idle);
+        frame.scroll.popovers = popovers;
+        frame
     }
 
     pass.prepare(
@@ -3823,21 +3734,9 @@ fn an_overlay_taller_than_its_box_builds_only_the_visible_window() {
     let resolution = [640.0, 480.0];
     let idle = Damage::Partial(vec![None; 40]);
     fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers,
-            },
-            damage: idle,
-            decoration_damage: idle,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        }
+        let mut frame = still_frame(idle, idle);
+        frame.scroll.popovers = popovers;
+        frame
     }
 
     // One grid across the three builds. A fresh one per call would start its
@@ -3920,21 +3819,9 @@ fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
     let resolution = [640.0, 480.0];
     let idle = Damage::Partial(vec![None; 6]);
     fn frame<'a>(idle: &'a Damage, popovers: &'a [f32]) -> Frame<'a> {
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers,
-            },
-            damage: idle,
-            decoration_damage: idle,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        }
+        let mut frame = still_frame(idle, idle);
+        frame.scroll.popovers = popovers;
+        frame
     }
     let tops = |pass: &TextPass| {
         pass.overlay_instance_scratch
@@ -4081,21 +3968,7 @@ fn prepare_skips_unchanged_grid() {
     let resolution = [1280.0, 800.0];
     let full_damage = Damage::Full;
     let idle_damage = Damage::Partial(vec![None; rows]);
-    let frame = |damage| Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage,
-        decoration_damage: &idle_damage,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    };
+    let frame = |damage| still_frame(damage, &idle_damage);
 
     // Warm the cache and atlas.
     pass.prepare(

@@ -8,9 +8,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Border, BorderEdge, BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -76,21 +76,7 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
@@ -187,21 +173,7 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
@@ -280,21 +252,7 @@ fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);

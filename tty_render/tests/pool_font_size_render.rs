@@ -9,9 +9,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, PoolComposite, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, PoolComposite, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Panel, PanelShadow, Polyline, Rgb, TextRun},
@@ -94,7 +94,7 @@ fn drawn_pool_cells(dim: f32) -> Vec<((u8, u8, u8), Rgb)> {
         &queue,
         &view,
         &live,
-        still(&full, &none),
+        still_frame(&full, &none),
         &[PoolComposite {
             id: 0,
             grid: &pool,
@@ -201,7 +201,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
     }]);
 
     let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
-    renderer.render_into(&device, &queue, &view, &live, still(&full, &none));
+    renderer.render_into(&device, &queue, &view, &live, still_frame(&full, &none));
     renderer.composite_pool(
         &device,
         &queue,
@@ -264,25 +264,6 @@ fn renderer(device: &Device) -> Renderer {
 /// The whole-pixel cell of `font_size` at scale 1.
 fn cells(font_size: u32) -> [u32; 2] {
     cell_size(font_size, 1.0).map(|side| side.round() as u32)
-}
-
-/// A frame with no cursor and no scroll.
-fn still<'a>(damage: &'a Damage, decoration_damage: &'a Damage) -> Frame<'a> {
-    Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage,
-        decoration_damage,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    }
 }
 
 fn pixel(pixels: &[u8], x: u32, y: u32) -> (u8, u8, u8) {

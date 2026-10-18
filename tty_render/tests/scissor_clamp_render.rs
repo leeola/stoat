@@ -13,9 +13,9 @@
 
 use futures::executor;
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::{cell_size, HostRide},
-    test_support::require_headless_device,
+    test_support::{require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -82,25 +82,6 @@ fn setup(device: &Device) -> Setup {
     }
 }
 
-/// A frame with no cursor, no scroll, and the whole grid damaged.
-fn still_frame(no_decoration: &Damage) -> Frame<'_> {
-    Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage: &Damage::Full,
-        decoration_damage: no_decoration,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    }
-}
-
 #[test]
 fn oversized_scissors_are_clamped_not_validated() {
     let (device, queue) = require_headless_device();
@@ -125,7 +106,13 @@ fn oversized_scissors_are_clamped_not_validated() {
 
     let scope = device.push_error_scope(ErrorFilter::Validation);
 
-    renderer.render_into(&device, &queue, &view, &base, still_frame(&no_decoration));
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &base,
+        still_frame(&Damage::Full, &no_decoration),
+    );
     renderer.composite_pool(
         &device,
         &queue,
@@ -206,7 +193,7 @@ fn an_oversized_riding_scissor_is_clamped_not_validated() {
         &queue,
         &view,
         &grid,
-        still_frame(&no_decoration),
+        still_frame(&Damage::Full, &no_decoration),
         &[],
         &[ride],
     );

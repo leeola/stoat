@@ -8,9 +8,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
@@ -91,21 +91,7 @@ fn render_scene(scale_factor: f32, build: impl FnOnce(&mut Grid, usize, usize)) 
         &queue,
         &view,
         &grid,
-        Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &Damage::Partial(Vec::new()),
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        },
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);

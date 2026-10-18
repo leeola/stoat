@@ -11,9 +11,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -70,21 +70,7 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
     let corners = [[0.0, 1.0], [1.0, 1.0], [0.0, 2.0], [1.0, 2.0]];
 
     let render = |renderer: &mut Renderer, cursor: Option<[[f32; 2]; 4]>, scissor| {
-        let plain = Frame {
-            cursor: None,
-            cursor_corners: None,
-            scroll: Scroll {
-                grid: 0.0,
-                document: 0.0,
-                scrollback: 0.0,
-                region: 0.0,
-                popovers: &[],
-            },
-            damage: &Damage::Full,
-            decoration_damage: &no_decoration,
-            scrolled_rows: 0,
-            sketch_reveals: &[],
-        };
+        let plain = still_frame(&Damage::Full, &no_decoration);
         renderer.render_into(&device, &queue, &view, &base, plain);
         renderer.composite_pool(
             &device,

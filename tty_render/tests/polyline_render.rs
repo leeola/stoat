@@ -8,9 +8,9 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use stoatty_render::{
-    gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
+    gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Polyline, Rgb},
@@ -237,8 +237,13 @@ impl Harness {
     }
 
     fn render_live(&mut self, grid: &Grid) -> Vec<u8> {
-        self.renderer
-            .render_into(&self.device, &self.queue, &self.view, grid, plain_frame());
+        self.renderer.render_into(
+            &self.device,
+            &self.queue,
+            &self.view,
+            grid,
+            still_frame(&FULL_DAMAGE, &NO_DECORATION),
+        );
         read_back(
             &self.device,
             &self.queue,
@@ -250,8 +255,13 @@ impl Harness {
 
     fn render_pool(&mut self, base: &Grid, pool: &Grid, shift: f32) -> Vec<u8> {
         let full = [0, 0, self.width, self.height];
-        self.renderer
-            .render_into(&self.device, &self.queue, &self.view, base, plain_frame());
+        self.renderer.render_into(
+            &self.device,
+            &self.queue,
+            &self.view,
+            base,
+            still_frame(&FULL_DAMAGE, &NO_DECORATION),
+        );
         self.renderer.composite_pool(
             &self.device,
             &self.queue,
@@ -286,22 +296,3 @@ impl Harness {
 
 static FULL_DAMAGE: Damage = Damage::Full;
 static NO_DECORATION: Damage = Damage::Partial(Vec::new());
-
-/// A frame with no cursor and no scroll, which is all these draws need.
-fn plain_frame() -> Frame<'static> {
-    Frame {
-        cursor: None,
-        cursor_corners: None,
-        scroll: Scroll {
-            grid: 0.0,
-            document: 0.0,
-            scrollback: 0.0,
-            region: 0.0,
-            popovers: &[],
-        },
-        damage: &FULL_DAMAGE,
-        decoration_damage: &NO_DECORATION,
-        scrolled_rows: 0,
-        sketch_reveals: &[],
-    }
-}
