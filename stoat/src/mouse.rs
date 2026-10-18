@@ -1129,7 +1129,7 @@ fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<
         MouseEventKind::Down(button) => {
             if !inside {
                 stoat.pending_hover = None;
-                stoat.pending_hover_request = None;
+                stoat.pending_hover_request.clear();
                 return None;
             }
             if button != MouseButton::Left {
@@ -2121,7 +2121,7 @@ pub(crate) fn focus_at(stoat: &mut Stoat, column: u16, row: u16) {
     };
     if changed {
         stoat.pending_hover = None;
-        stoat.pending_hover_request = None;
+        stoat.pending_hover_request.clear();
     }
     let ws = stoat.active_workspace_mut();
     match hit {

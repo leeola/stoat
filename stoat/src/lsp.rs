@@ -72,7 +72,7 @@ pub(crate) fn lsp_pending_label(stoat: &Stoat) -> Option<&'static str> {
     }
 
     [
-        ("hover", stoat.pending_hover_request.is_some()),
+        ("hover", stoat.pending_hover_request.is_pending()),
         ("code actions", stoat.pending_code_action_request.is_some()),
         (
             "code action",

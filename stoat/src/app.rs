@@ -2006,8 +2006,7 @@ pub struct Stoat {
     /// [`action_handlers::pump_lsp_hover`] at the top of each render
     /// tick, which resolves the [`HoverOutcome`] into a popup or an
     /// honest status message.
-    pub(crate) pending_hover_request:
-        Option<stoat_scheduler::Task<crate::lsp::hover::HoverOutcome>>,
+    pub(crate) pending_hover_request: Pending<crate::lsp::hover::HoverOutcome>,
 
     /// Hover popup content waiting to be painted. Set by
     /// [`action_handlers::pump_lsp_hover`] when a hover response lands.
@@ -2026,7 +2025,7 @@ pub struct Stoat {
     /// character and polled by
     /// [`crate::lsp::signature_help::pump_lsp_signature_help`].
     pub(crate) pending_signature_help_request:
-        Option<stoat_scheduler::Task<Option<crate::lsp::signature_help::SignatureHelpPopup>>>,
+        Pending<Option<crate::lsp::signature_help::SignatureHelpPopup>>,
 
     /// Single-slot debounce window for the signature-help request.
     ///
@@ -2790,9 +2789,9 @@ impl Stoat {
             lsp_server_list: crate::render::LspServerList::default(),
             lsp_message: None,
             pending_lsp_jump: None,
-            pending_hover_request: None,
+            pending_hover_request: Pending::default(),
             pending_hover: None,
-            pending_signature_help_request: None,
+            pending_signature_help_request: Pending::default(),
             pending_signature_help_timer: None,
             signature_help_tx,
             signature_help_rx,
@@ -5511,7 +5510,7 @@ impl Stoat {
             }
             if self.pending_hover.is_some() {
                 self.pending_hover = None;
-                self.pending_hover_request = None;
+                self.pending_hover_request.clear();
                 return UpdateEffect::Redraw;
             }
             if let Some(agent_id) = self.term_input_target() {
@@ -5837,7 +5836,7 @@ impl Stoat {
                 .is_some_and(|popup| popup.pinned);
             if !pinned || matches!(key.code, KeyCode::Esc) {
                 self.pending_hover = None;
-                self.pending_hover_request = None;
+                self.pending_hover_request.clear();
             }
             if matches!(key.code, KeyCode::Esc) {
                 return UpdateEffect::Redraw;
@@ -6164,7 +6163,7 @@ impl Stoat {
         // dispatched.
         if dismisses_pinned {
             self.pending_hover = None;
-            self.pending_hover_request = None;
+            self.pending_hover_request.clear();
         }
         // A switch into a primary mode ends the command a count prefixed, as
         // an action does. A chord mode keeps the count, because the key after
@@ -6183,7 +6182,7 @@ impl Stoat {
                 if stale && !popup.is_some_and(|popup| popup.pinned) {
                     self.pending_hover = None;
                 }
-                self.pending_hover_request = None;
+                self.pending_hover_request.clear();
             }
             if !dispatched_code_action {
                 self.pending_code_action_picker = None;
@@ -8328,7 +8327,7 @@ impl Stoat {
             keymap_state::close_topmost_modal(self);
         }
         self.pending_hover = None;
-        self.pending_hover_request = None;
+        self.pending_hover_request.clear();
         self.editor_drag = None;
         self.terminal_drag = None;
 

@@ -187,7 +187,7 @@ pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
         .is_some_and(|popup| popup.pinned)
     {
         stoat.pending_hover = None;
-        stoat.pending_hover_request = None;
+        stoat.pending_hover_request.clear();
         return UpdateEffect::Redraw;
     }
 

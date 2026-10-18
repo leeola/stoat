@@ -41,10 +41,6 @@ impl<T> Pending<T> {
     }
 
     /// Whether a request is out.
-    ///
-    /// Only tests ask. Production code reads the answer through [`Self::poll`],
-    /// which reports the same thing and hands over the value.
-    #[cfg(test)]
     pub(crate) fn is_pending(&self) -> bool {
         self.0.is_some()
     }

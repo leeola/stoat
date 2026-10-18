@@ -7788,7 +7788,7 @@ fn a_press_outside_the_hover_closes_it_and_still_lands() {
             .update(mouse_event(MouseEventKind::Down(button), 2, 0));
 
         assert!(
-            h.stoat.pending_hover.is_none() && h.stoat.pending_hover_request.is_none(),
+            h.stoat.pending_hover.is_none() && !h.stoat.pending_hover_request.is_pending(),
             "{button:?} outside the popup closes it and its in-flight request"
         );
         assert_eq!(
@@ -14919,7 +14919,10 @@ fn right_click_requests_hover_at_the_clicked_cell() {
         (6, 7),
         "hover reads the cursor, which the click moved to the clicked cell"
     );
-    assert!(h.stoat.pending_hover_request.is_some(), "hover requested");
+    assert!(
+        h.stoat.pending_hover_request.is_pending(),
+        "hover requested"
+    );
     assert!(
         h.stoat.editor_drag.is_none(),
         "a right click is not a selection gesture"

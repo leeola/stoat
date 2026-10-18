@@ -23,12 +23,7 @@ use lsp_types::{
     TextDocumentPositionParams,
 };
 use ratatui::style::Style;
-use std::{
-    future::Future,
-    path::Path,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::path::Path;
 
 /// Hover response carried from the spawned task to [`pump_lsp_hover`].
 ///
@@ -171,7 +166,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
             })
         }
     });
-    stoat.pending_hover_request = Some(task);
+    stoat.pending_hover_request.arm(task);
     UpdateEffect::None
 }
 
@@ -238,16 +233,15 @@ pub(crate) fn merge_hovers(sections: Vec<(String, String, bool)>) -> (String, bo
 /// and apply the [`HoverOutcome`].
 ///
 /// `Content` writes the popup to [`Stoat::pending_hover`]. `Empty` and `Failed`
-/// clear it and set an honest status message. `Pending` puts the task back.
+/// clear it and set an honest status message. A request still running stays in
+/// its slot.
 /// Returns true when state changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_hover_request.take() else {
+    let Some(outcome) = stoat.pending_hover_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(HoverOutcome::Content(response)) => {
+    match outcome {
+        HoverOutcome::Content(response) => {
             tracing::debug!(target: "stoat::lsp", outcome = "content", "hover landed");
             // Drop a response whose editor lost focus while the request was in
             // flight, so the popup never anchors against a pane that did not
@@ -272,7 +266,7 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             ));
             true
         },
-        Poll::Ready(HoverOutcome::Empty) => {
+        HoverOutcome::Empty => {
             tracing::debug!(target: "stoat::lsp", outcome = "empty", "hover landed");
             // A busy server is still worth naming, so an empty result during
             // work-done progress reports which operation is running. The
@@ -292,15 +286,11 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             stoat.pending_hover = None;
             true
         },
-        Poll::Ready(HoverOutcome::Failed) => {
+        HoverOutcome::Failed => {
             tracing::debug!(target: "stoat::lsp", outcome = "failed", "hover landed");
             session::set_lsp_status(stoat, "lsp: hover request failed".to_string());
             stoat.pending_hover = None;
             true
-        },
-        Poll::Pending => {
-            stoat.pending_hover_request = Some(task);
-            false
         },
     }
 }
@@ -622,7 +612,7 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         assert!(
-            h.stoat.pending_hover_request.is_some(),
+            h.stoat.pending_hover_request.is_pending(),
             "the delayed hover request stays in flight",
         );
 
@@ -759,7 +749,7 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         assert!(h.stoat.pending_hover.is_none());
-        assert!(h.stoat.pending_hover_request.is_none());
+        assert!(!h.stoat.pending_hover_request.is_pending());
     }
 
     #[test]
@@ -773,7 +763,7 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         assert!(h.stoat.pending_hover.is_none());
-        assert!(h.stoat.pending_hover_request.is_none());
+        assert!(!h.stoat.pending_hover_request.is_pending());
     }
 
     #[test]
@@ -812,7 +802,7 @@ mod tests {
 
         h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
         assert!(h.stoat.pending_hover.is_none());
-        assert!(h.stoat.pending_hover_request.is_none());
+        assert!(!h.stoat.pending_hover_request.is_pending());
     }
 
     #[test]

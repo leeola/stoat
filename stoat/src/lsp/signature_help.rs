@@ -12,18 +12,11 @@ use crate::{
     action_handlers, app::Stoat, buffer::BufferId, completion, editor_state::EditorState,
     host::LanguageServerFeature, lsp::util, pane::View,
 };
-use futures::task::noop_waker;
 use lsp_types::{
     Documentation, ParameterLabel, SignatureHelp, SignatureHelpParams, SignatureInformation,
     TextDocumentIdentifier, TextDocumentPositionParams,
 };
-use std::{
-    future::Future,
-    path::Path,
-    pin::Pin,
-    task::{Context, Poll},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 use stoat_text::Rope;
 
 /// Quiet window from the most recent trigger character before the request goes
@@ -64,7 +57,7 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
     };
     if !in_insert_editor || stoat.pending_completion.is_some() {
         stoat.pending_signature_help = None;
-        stoat.pending_signature_help_request = None;
+        stoat.pending_signature_help_request.clear();
         stoat.last_signature_help_key = None;
         return;
     }
@@ -216,7 +209,7 @@ pub(crate) fn request_signature_help(stoat: &mut Stoat) {
             },
         }
     });
-    stoat.pending_signature_help_request = Some(task);
+    stoat.pending_signature_help_request.arm(task);
 }
 
 /// Reduce an LSP [`SignatureHelp`] to the active signature's paintable state:
@@ -278,21 +271,11 @@ fn documentation_first_line(doc: Documentation) -> Option<String> {
 /// ([`Stoat::pending_signature_help_request`]) and apply the result to
 /// [`Stoat::pending_signature_help`]. Returns true when state changed.
 pub(crate) fn pump_lsp_signature_help(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_signature_help_request.take() else {
+    let Some(popup) = stoat.pending_signature_help_request.poll() else {
         return false;
     };
-    let waker = noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(popup) => {
-            stoat.pending_signature_help = popup;
-            true
-        },
-        Poll::Pending => {
-            stoat.pending_signature_help_request = Some(task);
-            false
-        },
-    }
+    stoat.pending_signature_help = popup;
+    true
 }
 
 #[cfg(test)]
