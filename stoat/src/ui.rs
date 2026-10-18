@@ -14,6 +14,8 @@
 //! Neither thread does any of the editor's work, so terminal IO latency is
 //! independent of main-thread workload as well.
 
+mod flush;
+
 use crate::{
     render::undercurl::UndercurlStamp,
     ssh::{PassthroughSlot, SlotState, UiControl},
@@ -26,6 +28,7 @@ use crossterm::{
     execute, queue,
     terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen},
 };
+use flush::ShownFrame;
 use futures::FutureExt;
 use ratatui::{buffer::Buffer, DefaultTerminal};
 #[cfg(feature = "perf")]
@@ -238,6 +241,9 @@ async fn run(
     // writes nothing. Lives here rather than beside the paint because only this
     // thread knows which frames reached the terminal.
     let mut stamp = UndercurlStamp::default();
+    // What the terminal shows, cell for cell, so a frame writes only the cells
+    // it changed.
+    let mut shown = ShownFrame::default();
 
     // UI-thread-local input-to-flush latency, logged periodically. The main
     // thread keeps its own PerfStats, so this needs no cross-thread channel.
@@ -274,7 +280,7 @@ async fn run(
                         if mouse_captured {
                             execute!(io::stdout(), EnableMouseCapture)?;
                         }
-                        repaint_all(terminal)?;
+                        shown.repaint_all(terminal)?;
                         stamp = UndercurlStamp::default();
                     },
                 }
@@ -286,7 +292,7 @@ async fn run(
                 }
                 // Open a synchronized update so the cell diff, undercurl re-stamp,
                 // and APC batch below commit as one frame. Queued rather than
-                // flushed, so ratatui's draw flush carries it ahead of the cell
+                // flushed, so the frame's own flush carries it ahead of the cell
                 // diff in the same write.
                 queue!(io::stdout(), BeginSynchronizedUpdate)?;
                 // Clone the latest frame's Arc out of the watch and drop the
@@ -310,17 +316,7 @@ async fn run(
                 };
                 let undercurl = match framed {
                     Some((buffer, cursor, undercurl)) => {
-                        terminal.draw(|f| {
-                            let dst = f.buffer_mut();
-                            if dst.area == buffer.area {
-                                dst.content.clone_from(&buffer.content);
-                            } else {
-                                copy_clamped(dst, &buffer);
-                            }
-                            if let Some((col, row)) = cursor {
-                                f.set_cursor_position((col, row));
-                            }
-                        })?;
+                        shown.flush(terminal, &buffer, cursor)?;
                         // Drop the Arc before draining APC so the main thread's
                         // recycle can reclaim this buffer's allocation via
                         // Arc::try_unwrap instead of falling back to a fresh one.
@@ -374,19 +370,6 @@ async fn run(
     log_input_latency(&ui_perf);
 
     Ok(())
-}
-
-/// Clear the screen and have the next frame paint every cell.
-///
-/// A resize to the size the terminal already has does both, without the
-/// cursor-position query that [`ratatui::Terminal::clear`] sends to restore the
-/// cursor. The query goes out while the input thread runs its handshake against
-/// a terminal that just attached. The two readers of fd 0 then take each other's
-/// replies. A terminal that answers no query makes the clear time out, and the
-/// error ends this thread.
-fn repaint_all(terminal: &mut DefaultTerminal) -> io::Result<()> {
-    let size = terminal.size()?;
-    terminal.resize(size.into())
 }
 
 /// Announce this editor to the terminal and report whether a stoatty answered.
@@ -824,29 +807,6 @@ fn supersede_stale_fills(queued: &mut Vec<Vec<u8>>) {
         at += 1;
         !superseded[at - 1]
     });
-}
-
-/// Copy `src` into `dst` over their overlapping top-left region, leaving `dst`'s
-/// area unchanged.
-///
-/// `dst` is the terminal's buffer, sized by ratatui's autoresize to the live
-/// terminal dimensions; `src` is the frame the main thread rendered, which can
-/// lag a frame during a resize and still carry the previous dimensions. The two
-/// must never be reconciled by resizing `dst`: ratatui flushes by diffing `dst`
-/// against its sibling buffer (also held at the live size), and a differing
-/// origin or width there panics. Copying only the intersection keeps that diff
-/// valid; any uncovered margin stays blank for the one frame until the main
-/// thread re-renders at the new size.
-fn copy_clamped(dst: &mut Buffer, src: &Buffer) {
-    dst.reset();
-
-    let cols = dst.area.width.min(src.area.width);
-    let rows = dst.area.height.min(src.area.height);
-    for y in 0..rows {
-        for x in 0..cols {
-            dst[(x, y)] = src[(x, y)].clone();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1351,26 +1311,6 @@ mod tests {
             ],
             "what was typed at the probe goes first, then the new size",
         );
-    }
-
-    #[test]
-    fn copy_clamped_keeps_dst_area_and_copies_overlap_when_src_is_larger() {
-        let src = Buffer::with_lines(["abc", "def"]);
-        let mut dst = Buffer::with_lines(["ZZ"]);
-
-        copy_clamped(&mut dst, &src);
-
-        assert_eq!(dst, Buffer::with_lines(["ab"]));
-    }
-
-    #[test]
-    fn copy_clamped_clears_stale_margin_when_src_is_smaller() {
-        let src = Buffer::with_lines(["xy"]);
-        let mut dst = Buffer::with_lines(["ZZZ", "ZZZ"]);
-
-        copy_clamped(&mut dst, &src);
-
-        assert_eq!(dst, Buffer::with_lines(["xy ", "   "]));
     }
 
     /// The winsize gives the text area and the grid it holds, so a cell is the
