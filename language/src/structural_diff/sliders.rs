@@ -45,7 +45,16 @@ use super::{
     unchanged::{mark_subtree, ChangeKind, ChangeMap},
     Side,
 };
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+#[cfg(test)]
+thread_local! {
+    /// Each list whose children this thread's slider passes scanned, in scan
+    /// order, which shows a test the lists a pass skipped.
+    static SCANNED: RefCell<Vec<SyntaxId>> = const { RefCell::new(Vec::new()) };
+}
 
 /// Run two passes of slider correction over the entire tree rooted at
 /// `root`, updating `changes` in place.
@@ -53,6 +62,9 @@ use std::collections::HashMap;
 /// `pairs` holds the whole-subtree matches of both sides, and `side` names the
 /// component that indexes `arena`. A pair whose node slides out of an
 /// unchanged run moves to the node that takes its place.
+///
+/// The passes scan only the lists that hold a change somewhere below them, so
+/// their cost follows the size of the edit rather than the size of the file.
 pub fn fix_all_sliders(
     arena: &SyntaxArena,
     root: SyntaxId,
@@ -61,23 +73,63 @@ pub fn fix_all_sliders(
     side: Side,
 ) {
     // FIXME: Nested sliders take no per-language inner-versus-outer delimiter preference
+    let changed = changed_below(arena, root, changes);
     let mut slides = Vec::new();
     for _ in 0..2 {
-        fix_sliders_recursive(arena, root, changes, &mut slides);
+        fix_sliders_recursive(arena, root, changes, &changed, &mut slides);
     }
     repoint_pairs(pairs, side, &slides);
+}
+
+/// Each node under `root` that is not `Unchanged` or has such a node below it,
+/// as flags indexed by [`SyntaxId`].
+///
+/// A list that is `Unchanged` all the way down holds no run to slide. The
+/// flags stay true to that through both passes, because a slide turns only an
+/// unflagged subtree `Pending` all the way down, and a list that is `Pending`
+/// all the way down holds no slide either. Every run in it starts at its first
+/// child, which has no node before it to trade places with. A flag that
+/// outlives the change under it costs only a scan.
+fn changed_below(arena: &SyntaxArena, root: SyntaxId, changes: &ChangeMap) -> Vec<bool> {
+    let mut changed = vec![false; arena.len()];
+    flag_changed(arena, root, changes, &mut changed);
+    changed
+}
+
+/// Flag `id` and every node under it in `changed`, and return the flag of
+/// `id`.
+fn flag_changed(
+    arena: &SyntaxArena,
+    id: SyntaxId,
+    changes: &ChangeMap,
+    changed: &mut [bool],
+) -> bool {
+    let mut below = changes.get(id) != ChangeKind::Unchanged;
+    if let Syntax::List(list) = arena.get(id) {
+        for &child in &list.children {
+            below |= flag_changed(arena, child, changes, changed);
+        }
+    }
+    changed[id.0] = below;
+    below
 }
 
 fn fix_sliders_recursive(
     arena: &SyntaxArena,
     id: SyntaxId,
     changes: &mut ChangeMap,
+    changed: &[bool],
     slides: &mut Vec<(SyntaxId, SyntaxId)>,
 ) {
+    if !changed[id.0] {
+        return;
+    }
     if let Syntax::List(list) = arena.get(id) {
+        #[cfg(test)]
+        SCANNED.with_borrow_mut(|scanned| scanned.push(id));
         slide_within_children(arena, &list.children, changes, slides);
         for child in &list.children {
-            fix_sliders_recursive(arena, *child, changes, slides);
+            fix_sliders_recursive(arena, *child, changes, changed, slides);
         }
     }
 }
@@ -418,5 +470,146 @@ mod tests {
                 "node {node} as {kind:?}"
             );
         }
+    }
+
+    /// The passes slide what passes that scan every list slide, over random
+    /// trees, in tags and in the pairs they move.
+    #[test]
+    fn the_flagged_passes_slide_what_a_full_scan_slides() {
+        let mut state = 1;
+        let mut cases_that_slid = 0;
+        for case in 0..2000 {
+            let mut arena = SyntaxArena::default();
+            let mut changes = ChangeMap::new();
+            let root = random_tree(&mut state, &mut arena, &mut changes, 4, None);
+            let ids: Vec<SyntaxId> = (0..arena.len()).map(SyntaxId).collect();
+            let tags =
+                |changes: &ChangeMap| ids.iter().map(|&id| changes.get(id)).collect::<Vec<_>>();
+            let before = tags(&changes);
+            let mut pairs: Vec<_> = ids
+                .iter()
+                .map(|&id| (SyntaxId(id.0 + 100_000), id))
+                .collect();
+            let (mut scanned_changes, mut scanned_pairs) = (changes.clone(), pairs.clone());
+
+            fix_all_sliders(&arena, root, &mut changes, &mut pairs, Side::Rhs);
+            fix_all_sliders_scanning_every_list(
+                &arena,
+                root,
+                &mut scanned_changes,
+                &mut scanned_pairs,
+                Side::Rhs,
+            );
+
+            assert_eq!(tags(&changes), tags(&scanned_changes), "case {case} tags");
+            assert_eq!(pairs, scanned_pairs, "case {case} pairs");
+            cases_that_slid += usize::from(tags(&changes) != before);
+        }
+        assert!(cases_that_slid >= 100, "{cases_that_slid} cases slid");
+    }
+
+    /// One pending atom deep under unchanged lists has each pass scan the lists
+    /// above it, and no other list.
+    #[test]
+    fn a_pass_scans_only_the_lists_above_a_change() {
+        let mut arena = SyntaxArena::default();
+        let pairs = [0; 4].map(|_| mk_pair(&mut arena)[0]);
+        let [inner, _, pending] = mk_pair(&mut arena);
+        let list = |arena: &mut SyntaxArena, children: Vec<SyntaxId>| {
+            let cids: Vec<_> = children
+                .iter()
+                .map(|&id| arena.get(id).content_id())
+                .collect();
+            mk_list(arena, "block", children, &cids)
+        };
+        let left = list(&mut arena, vec![pairs[0], pairs[1]]);
+        let middle = list(&mut arena, vec![inner, pairs[2]]);
+        let right = list(&mut arena, vec![pairs[3]]);
+        let root = list(&mut arena, vec![left, middle, right]);
+        let mut changes = ChangeMap::new();
+        for id in (0..arena.len()).map(SyntaxId) {
+            changes.mark(id, U);
+        }
+        changes.mark(pending, N);
+
+        SCANNED.with_borrow_mut(Vec::clear);
+        fix_all_sliders(&arena, root, &mut changes, &mut [], Side::Rhs);
+
+        assert_eq!(SCANNED.take(), [root, middle, inner, root, middle, inner]);
+    }
+
+    /// Two slider passes that scan every list of the tree.
+    fn fix_all_sliders_scanning_every_list(
+        arena: &SyntaxArena,
+        root: SyntaxId,
+        changes: &mut ChangeMap,
+        pairs: &mut [(SyntaxId, SyntaxId)],
+        side: Side,
+    ) {
+        let mut slides = Vec::new();
+        for _ in 0..2 {
+            scan_every_list(arena, root, changes, &mut slides);
+        }
+        repoint_pairs(pairs, side, &slides);
+    }
+
+    fn scan_every_list(
+        arena: &SyntaxArena,
+        id: SyntaxId,
+        changes: &mut ChangeMap,
+        slides: &mut Vec<(SyntaxId, SyntaxId)>,
+    ) {
+        if let Syntax::List(list) = arena.get(id) {
+            slide_within_children(arena, &list.children, changes, slides);
+            for child in &list.children {
+                scan_every_list(arena, *child, changes, slides);
+            }
+        }
+    }
+
+    /// A random tree `depth` levels deep, its root tagged `inherited` three
+    /// times in four.
+    ///
+    /// Each node mostly keeps its parent's tag, so whole subtrees share one tag
+    /// the way the diff leaves them, and two contents make equal neighbors
+    /// common enough for slides.
+    fn random_tree(
+        state: &mut u64,
+        arena: &mut SyntaxArena,
+        changes: &mut ChangeMap,
+        depth: u32,
+        inherited: Option<ChangeKind>,
+    ) -> SyntaxId {
+        let kind = match inherited {
+            Some(kind) if !lcg(state).is_multiple_of(4) => kind,
+            _ => match lcg(state) % 8 {
+                0..=1 => N,
+                2 => ChangeKind::Moved,
+                _ => U,
+            },
+        };
+        let id = if depth == 0 || lcg(state).is_multiple_of(3) {
+            mk_atom(arena, "ident", ["a", "b"][(lcg(state) % 2) as usize])
+        } else {
+            let children: Vec<_> = (0..lcg(state) % 5)
+                .map(|_| random_tree(state, arena, changes, depth - 1, Some(kind)))
+                .collect();
+            let cids: Vec<_> = children
+                .iter()
+                .map(|&id| arena.get(id).content_id())
+                .collect();
+            mk_list(arena, "list", children, &cids)
+        };
+        changes.mark(id, kind);
+        id
+    }
+
+    /// A deterministic pseudo-random walk, so the trees above cover shapes
+    /// nobody hand-picked while staying reproducible.
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
     }
 }
