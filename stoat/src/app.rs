@@ -4449,13 +4449,9 @@ impl Stoat {
     /// watched costs nothing. A root outside a repository gets no watch, for
     /// the reason [`Self::start_index_build`] gives.
     pub(crate) fn watch_active_root(&mut self) -> bool {
-        let root = self.active_workspace().git_root.clone();
-        let Some(repo) = self.git_host.discover(&root) else {
-            self.active_workspace_mut().repo_root = None;
+        let Some(tree) = self.resolve_repo_root() else {
             return false;
         };
-        let tree = repo_tree_root(&root, repo.workdir().as_deref());
-        self.active_workspace_mut().repo_root = Some(tree.clone());
         if !self.watched_roots.insert(tree.clone()) {
             return true;
         }
@@ -4470,6 +4466,37 @@ impl Stoat {
             })
             .detach();
         true
+    }
+
+    /// Resolves [`Workspace::repo_root`] again when the active workspace's root
+    /// moved since the last resolution.
+    ///
+    /// [`Self::update`] runs it for each event, and an unchanged root costs one
+    /// path comparison.
+    fn sync_repo_root(&mut self) {
+        let ws = self.active_workspace();
+        if ws.repo_root_for.as_deref() == Some(ws.git_root.as_path()) {
+            return;
+        }
+        self.resolve_repo_root();
+    }
+
+    /// Records the working tree root of the repository that holds the active
+    /// workspace's root as [`Workspace::repo_root`], and returns it.
+    ///
+    /// `None` when the root is in no repository. Either way the root counts as
+    /// resolved, so [`Self::sync_repo_root`] skips it until it moves.
+    fn resolve_repo_root(&mut self) -> Option<PathBuf> {
+        let root = self.active_workspace().git_root.clone();
+        let tree = self
+            .git_host
+            .discover(&root)
+            .map(|repo| repo_tree_root(&root, repo.workdir().as_deref()));
+
+        let ws = self.active_workspace_mut();
+        ws.repo_root = tree.clone();
+        ws.repo_root_for = Some(root);
+        tree
     }
 
     /// Kick off a background cold build of the active workspace's code index.
@@ -5215,6 +5242,7 @@ impl Stoat {
             return UpdateEffect::None;
         }
 
+        self.sync_repo_root();
         debounce::drain_fs_watch_events(self);
         self.drain_external();
         let focus_before = self.focus_before_change();
@@ -9293,6 +9321,7 @@ async fn connect_window_ipc(path: PathBuf, tx: UnboundedSender<WindowIpc>) {
 /// modules, and this keeps painting outside the run loop a test-only ability.
 #[cfg(test)]
 pub(crate) fn paint_frame(stoat: &mut Stoat, buf: &mut Buffer) {
+    stoat.sync_repo_root();
     stoat.paint_into(buf, None);
 }
 

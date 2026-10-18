@@ -24,6 +24,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "scope",
     "rebase_exec",
     "pair",
+    "git",
     "token",
     "token_known",
     "lsp",
@@ -45,6 +46,9 @@ pub(crate) struct Flags {
     pub(crate) rebase_exec: bool,
     /// Whether the split panes hold a file pair. See [`Workspace::pair_panes`].
     pub(crate) pair: bool,
+    /// Whether the workspace root is inside a git repository. See
+    /// [`Workspace::repo_root`].
+    pub(crate) git: bool,
 }
 
 impl Flags {
@@ -52,6 +56,7 @@ impl Flags {
         Self {
             rebase_exec: ws.rebase_active.is_some(),
             pair: ws.pair_panes().is_some(),
+            git: ws.repo_root.is_some(),
         }
     }
 }
@@ -62,6 +67,8 @@ pub(crate) struct StoatKeymapState<'a> {
     /// Whether the split panes hold two different files, which is what a pair
     /// diff compares.
     pair: StateValue,
+    /// Whether the workspace root is inside a git repository.
+    git: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -113,6 +120,7 @@ impl<'a> StoatKeymapState<'a> {
             mode_value: StateValue::String(mode.into()),
             rebase_exec: StateValue::Bool(flags.rebase_exec),
             pair: StateValue::Bool(flags.pair),
+            git: StateValue::Bool(flags.git),
             pane: None,
             view: None,
             modal: None,
@@ -231,6 +239,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "mode" => Some(&self.mode_value),
             "rebase_exec" => Some(&self.rebase_exec),
             "pair" => Some(&self.pair),
+            "git" => Some(&self.git),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -1025,6 +1034,29 @@ mod tests {
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
         assert_eq!(paths(&h), expected, "focus does not reorder the pair");
+    }
+
+    /// The `git` predicate as the keymap reads it.
+    fn git(h: &crate::test_harness::TestHarness) -> Option<StateValue> {
+        StoatKeymapState::from_stoat(&h.stoat).get("git").cloned()
+    }
+
+    #[test]
+    fn git_reads_whether_the_root_is_in_a_repository() {
+        let mut h = Stoat::test();
+        let scratch = git(&h);
+
+        h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
+        h.type_keys("escape");
+        let staged = git(&h);
+
+        h.stoat.active_workspace_mut().git_root = "/elsewhere".into();
+        h.type_keys("escape");
+        assert_eq!(
+            [scratch, staged, git(&h)],
+            [false, true, false].map(|on| Some(StateValue::Bool(on))),
+            "a scratch root, the staged repository, then a root outside it",
+        );
     }
 
     fn open_foo_bar(h: &mut crate::test_harness::TestHarness) -> BufferId {

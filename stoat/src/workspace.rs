@@ -167,6 +167,13 @@ pub struct Workspace {
     /// and the follow of external writes read this root. The finder and the
     /// code index stay on `git_root`.
     pub(crate) repo_root: Option<PathBuf>,
+    /// The [`Self::git_root`] that [`Self::repo_root`] was resolved for, or
+    /// `None` before the first resolution.
+    ///
+    /// When `git_root` differs from it, the next input event resolves
+    /// `repo_root` again. The `git` keymap predicate reads `repo_root`, so it
+    /// follows a root that was assigned without a resolution.
+    pub(crate) repo_root_for: Option<PathBuf>,
     /// The workspace's resolved project environment, loaded from direnv.
     pub(crate) env: crate::project_env::WorkspaceEnv,
     /// Whether the background diff-cache warm has run for this workspace's
@@ -479,6 +486,7 @@ impl Workspace {
             git_root,
             last_active: executor.system_now(),
             repo_root: None,
+            repo_root_for: None,
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
             restored_in_background: false,

@@ -1933,6 +1933,7 @@ mod tests {
             let ws = h.stoat.active_workspace_mut();
             ws.git_root = PathBuf::from("/repo/sub");
             ws.repo_root = Some(PathBuf::from("/repo"));
+            ws.repo_root_for = Some(ws.git_root.clone());
         }
         watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
         h.advance_clock(FS_WATCH_DEBOUNCE);

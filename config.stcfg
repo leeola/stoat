@@ -356,6 +356,7 @@ on init {
 #   has_selection  the newest selection is non-empty
 #   modified       the buffer has unsaved edits
 #   pair           exactly two split panes show two different files
+#   git            the workspace root is inside a git repository
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when

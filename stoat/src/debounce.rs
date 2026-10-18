@@ -2033,5 +2033,6 @@ mod tests {
         let ws = h.stoat.active_workspace_mut();
         ws.git_root = PathBuf::from("/repo/src");
         ws.repo_root = Some(PathBuf::from("/repo"));
+        ws.repo_root_for = Some(ws.git_root.clone());
     }
 }
