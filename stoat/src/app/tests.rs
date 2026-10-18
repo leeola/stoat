@@ -23,6 +23,7 @@ use crate::{
         finder_layout, focused_editor_pane_area, mouse_event, open_indent_buffer,
         open_scratch_file, open_with_minimap_strip, palette_sizing,
     },
+    test_harness::keys::{ctrl, key},
     workspace::diff::DiffBase,
 };
 use crossterm::event::{MouseButton, MouseEventKind};
@@ -4540,14 +4541,6 @@ fn stoat_with_focused_agent() -> (Stoat, TermId, Arc<crate::host::FakeTerminalSe
     stoat_with_focused_term(View::Agent)
 }
 
-fn bare(code: KeyCode) -> KeyEvent {
-    KeyEvent::new(code, KeyModifiers::NONE)
-}
-
-fn ctrl(c: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
-}
-
 fn compile_keymap(src: &str) -> Keymap {
     let (config, errors) = stoat_config::parse(src);
     assert!(errors.is_empty(), "parse errors: {errors:?}");
@@ -4568,11 +4561,11 @@ fn set_var_gates_a_binding() {
     h.stoat.hints_cache = None;
 
     // `j` is inert until `x` sets the variable.
-    h.stoat.handle_key(bare(KeyCode::Char('j')));
+    h.stoat.handle_key(key(KeyCode::Char('j')));
     assert!(!h.stoat.user_vars.contains_key("pressed"));
 
-    h.stoat.handle_key(bare(KeyCode::Char('x')));
-    h.stoat.handle_key(bare(KeyCode::Char('j')));
+    h.stoat.handle_key(key(KeyCode::Char('x')));
+    h.stoat.handle_key(key(KeyCode::Char('j')));
     assert_eq!(
         h.stoat.user_vars.get("pressed"),
         Some(&StateValue::String("yes".into()))
@@ -4585,7 +4578,7 @@ fn set_var_collision_with_builtin_is_ignored() {
     h.stoat.keymap = compile_keymap("on key { x -> SetVar(mode, hacked); }");
     h.stoat.hints_cache = None;
 
-    h.stoat.handle_key(bare(KeyCode::Char('x')));
+    h.stoat.handle_key(key(KeyCode::Char('x')));
     assert!(!h.stoat.user_vars.contains_key("mode"));
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
@@ -4717,7 +4710,7 @@ fn shift_page_up_in_a_terminal_pane_walks_a_viewport_of_history() {
     assert_eq!(offset(&stoat), 0, "a page down returns to the live screen");
 
     stoat.handle_key(shift(KeyCode::PageUp));
-    stoat.handle_key(bare(KeyCode::Char('x')));
+    stoat.handle_key(key(KeyCode::Char('x')));
     assert_eq!(
         (offset(&stoat), fake.sent_bytes()),
         (0, vec![b"x".to_vec()]),
@@ -4747,7 +4740,7 @@ fn select_mode_auto_shows_no_hints_box() {
         rows.iter().map(|row| row.keys.clone()).collect()
     };
 
-    h.stoat.handle_key(bare(KeyCode::Char('v')));
+    h.stoat.handle_key(key(KeyCode::Char('v')));
     assert_eq!(h.stoat.focused_mode(), "select");
     h.stoat.paint_into(&mut buf, None);
     assert!(
@@ -4766,7 +4759,7 @@ fn select_mode_auto_shows_no_hints_box() {
     );
 
     h.stoat.key_hints_visible = false;
-    h.stoat.handle_key(bare(KeyCode::Char('z')));
+    h.stoat.handle_key(key(KeyCode::Char('z')));
     assert_eq!(h.stoat.focused_mode(), "select_z");
     h.stoat.paint_into(&mut buf, None);
     let mut keys = hint_keys(&h.stoat);
@@ -4926,11 +4919,11 @@ fn focused_term_pane_routes_keys_to_pty() {
     let (mut stoat, _id, fake) = stoat_with_focused_agent();
 
     assert_eq!(
-        stoat.handle_key(bare(KeyCode::Char('h'))),
+        stoat.handle_key(key(KeyCode::Char('h'))),
         UpdateEffect::None
     );
-    stoat.handle_key(bare(KeyCode::Char('i')));
-    stoat.handle_key(bare(KeyCode::Enter));
+    stoat.handle_key(key(KeyCode::Char('i')));
+    stoat.handle_key(key(KeyCode::Enter));
     stoat.handle_key(ctrl('d'));
     stoat.handle_key(ctrl('w'));
 
@@ -4955,9 +4948,9 @@ fn focused_term_pane_routes_keys_to_pty() {
 fn focused_terminal_pane_routes_keys_to_pty() {
     let (mut stoat, _id, fake) = stoat_with_focused_term(View::Terminal);
 
-    stoat.handle_key(bare(KeyCode::Char('l')));
-    stoat.handle_key(bare(KeyCode::Char('s')));
-    stoat.handle_key(bare(KeyCode::Enter));
+    stoat.handle_key(key(KeyCode::Char('l')));
+    stoat.handle_key(key(KeyCode::Char('s')));
+    stoat.handle_key(key(KeyCode::Enter));
 
     assert_eq!(
         fake.sent_bytes(),
@@ -4972,7 +4965,7 @@ fn focused_terminal_pane_routes_keys_to_pty() {
 fn a_terminal_pane_sends_keys_as_its_child_asked() {
     let (mut stoat, term_id, fake) = stoat_with_focused_term(View::Terminal);
 
-    stoat.handle_key(bare(KeyCode::PageDown));
+    stoat.handle_key(key(KeyCode::PageDown));
     stoat
         .active_workspace_mut()
         .terms
@@ -4980,7 +4973,7 @@ fn a_terminal_pane_sends_keys_as_its_child_asked() {
         .expect("the pane's session")
         .term
         .feed(b"\x1b[?1h");
-    stoat.handle_key(bare(KeyCode::Up));
+    stoat.handle_key(key(KeyCode::Up));
 
     assert_eq!(
         fake.sent_bytes(),
@@ -5019,7 +5012,7 @@ fn ctrl_a_in_a_terminal_enters_the_prefix_and_sends_nothing() {
 fn a_terminal_sends_the_keys_that_normal_mode_binds_to_its_child() {
     let (mut stoat, _id, fake) = stoat_with_focused_term(View::Terminal);
 
-    stoat.handle_key(bare(KeyCode::Tab));
+    stoat.handle_key(key(KeyCode::Tab));
     stoat.handle_key(ctrl('u'));
     stoat.handle_key(ctrl('s'));
 
@@ -5036,8 +5029,8 @@ fn ctrl_a_escape_returns_a_terminal_to_rest() {
         let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
 
         stoat.handle_key(ctrl('a'));
-        stoat.handle_key(bare(KeyCode::Esc));
-        stoat.handle_key(bare(KeyCode::Char('x')));
+        stoat.handle_key(key(KeyCode::Esc));
+        stoat.handle_key(key(KeyCode::Char('x')));
 
         assert_eq!(
             (stoat.focused_mode(), fake.sent_bytes()),
@@ -5066,7 +5059,7 @@ fn ctrl_a_ctrl_a_from_a_terminal_toggles_the_tab_and_back() {
 
     h.stoat.update(Event::Key(ctrl('a')));
     h.stoat.update(Event::Key(ctrl('a')));
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert_eq!(
         (
             h.stoat.active_workspace().active_tab,
@@ -5082,7 +5075,7 @@ fn the_quit_prompt_keeps_the_keys_from_the_terminal_behind_it() {
     let (mut stoat, _id, fake) = stoat_with_focused_term(View::Terminal);
     stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], Path::new("/")));
 
-    stoat.handle_key(bare(KeyCode::Char('x')));
+    stoat.handle_key(key(KeyCode::Char('x')));
 
     assert!(
         fake.sent_bytes().is_empty(),
@@ -5095,7 +5088,7 @@ fn escape_in_a_terminal_or_agent_pane_reaches_the_child() {
     for make_view in [View::Terminal, View::Agent] {
         let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
 
-        let effect = stoat.handle_key(bare(KeyCode::Esc));
+        let effect = stoat.handle_key(key(KeyCode::Esc));
 
         assert_eq!(
             (effect, stoat.focused_mode().to_string(), fake.sent_bytes()),
@@ -5135,7 +5128,7 @@ fn a_terminal_opens_with_its_keys_on_the_child() {
         "an opened terminal rests in normal mode",
     );
 
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert_eq!(
         h.fake_terminal().sent_bytes(),
         vec![b"x".to_vec()],
@@ -5150,7 +5143,7 @@ fn a_terminal_takes_keys_again_when_focus_returns() {
     assert_eq!(term_mode(&h.stoat, term_pane), "normal");
 
     h.type_action("FocusRight()");
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
 
     assert_eq!(
         (
@@ -5225,7 +5218,7 @@ fn ctrl_a_ctrl_e_and_a_digit_pick_a_pane_from_a_terminal() {
         "Ctrl-a Ctrl-e shows the pane numbers from a terminal",
     );
 
-    h.stoat.update(Event::Key(bare(KeyCode::Char('1'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('1'))));
     assert_eq!(
         (
             h.stoat.active_workspace().panes.focus(),
@@ -5237,7 +5230,7 @@ fn ctrl_a_ctrl_e_and_a_digit_pick_a_pane_from_a_terminal() {
     );
 
     h.type_action("FocusRight()");
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert_eq!(
         h.fake_terminal().sent_bytes(),
         vec![b"x".to_vec()],
@@ -5330,7 +5323,7 @@ fn ctrl_a_h_from_a_terminal_focuses_the_editor_and_rests_the_terminal() {
     h.type_action("FocusRight()");
 
     h.stoat.update(Event::Key(ctrl('a')));
-    h.stoat.update(Event::Key(bare(KeyCode::Char('h'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('h'))));
     assert_eq!(
         (
             h.stoat.active_workspace().panes.focus(),
@@ -5343,7 +5336,7 @@ fn ctrl_a_h_from_a_terminal_focuses_the_editor_and_rests_the_terminal() {
 
     h.stoat.update(Event::Key(ctrl('a')));
     h.stoat.update(Event::Key(ctrl('w')));
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert_eq!(
         (
             h.stoat.active_workspace().panes.focus(),
@@ -5361,8 +5354,8 @@ fn ctrl_a_e_x_from_a_terminal_closes_its_pane() {
     h.type_action("FocusRight()");
 
     h.stoat.update(Event::Key(ctrl('a')));
-    h.stoat.update(Event::Key(bare(KeyCode::Char('e'))));
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('e'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
 
     let ws = h.stoat.active_workspace();
     assert_eq!(
@@ -5512,7 +5505,7 @@ fn a_terminal_drag_hides_the_child_cursor() {
     let during = h.stoat.render()[(5, 0)]
         .modifier
         .contains(Modifier::REVERSED);
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     let after = h.stoat.render()[(5, 0)]
         .modifier
         .contains(Modifier::REVERSED);
@@ -5577,7 +5570,7 @@ fn a_keystroke_clears_the_terminal_selection() {
         .selection
         .is_some());
 
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert!(
         h.stoat.active_workspace().terms[term_id]
             .selection
@@ -5868,7 +5861,7 @@ fn palette_over_a_terminal_routes_typing_to_the_palette() {
     );
 
     for ch in "qui".chars() {
-        h.stoat.update(Event::Key(bare(KeyCode::Char(ch))));
+        h.stoat.update(Event::Key(key(KeyCode::Char(ch))));
     }
 
     let text = {
@@ -5885,9 +5878,9 @@ fn palette_over_a_terminal_routes_typing_to_the_palette() {
         "the terminal PTY receives nothing while the palette owns typing",
     );
 
-    h.stoat.update(Event::Key(bare(KeyCode::Esc)));
+    h.stoat.update(Event::Key(key(KeyCode::Esc)));
     assert!(h.stoat.command_palette.is_none(), "Esc closes the palette");
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert_eq!(
         fake.sent_bytes(),
         vec![b"x".to_vec()],
@@ -5919,7 +5912,7 @@ fn a_respawned_focused_terminal_takes_keys() {
         h.stoat.active_workspace().terms.contains_key(new_id),
         "respawned session is live",
     );
-    h.stoat.update(Event::Key(bare(KeyCode::Char('x'))));
+    h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert_eq!(
         h.fake_terminal().sent_bytes(),
         vec![b"x".to_vec()],
@@ -5932,7 +5925,7 @@ fn a_pane_in_a_chord_mode_sends_no_key_to_its_child() {
     let (mut stoat, _id, fake) = stoat_with_focused_agent();
     stoat.set_focused_mode("space_pane_display".to_string());
 
-    stoat.handle_key(bare(KeyCode::Char('x')));
+    stoat.handle_key(key(KeyCode::Char('x')));
 
     assert!(
         fake.sent_bytes().is_empty(),
@@ -5947,7 +5940,7 @@ fn agent_input_requires_agent_focus() {
     let focused = ws.panes.focus();
     ws.panes.pane_mut(focused).view = View::Label("scratch".to_string());
 
-    stoat.handle_key(bare(KeyCode::Char('x')));
+    stoat.handle_key(key(KeyCode::Char('x')));
 
     assert!(
         fake.sent_bytes().is_empty(),
@@ -7028,10 +7021,10 @@ fn typing_into_a_terminal_derives_a_keymap_lookup_only_for_a_key_that_types_noth
     let (mut stoat, _id, _fake) = stoat_with_focused_term(View::Terminal);
 
     let before = stoat.keymap_lookups.get();
-    stoat.handle_key(bare(KeyCode::Char('a')));
+    stoat.handle_key(key(KeyCode::Char('a')));
     stoat.handle_key(KeyEvent::new(KeyCode::Char('B'), KeyModifiers::SHIFT));
     let typed = stoat.keymap_lookups.get();
-    stoat.handle_key(bare(KeyCode::Enter));
+    stoat.handle_key(key(KeyCode::Enter));
 
     assert_eq!(
         (typed - before, stoat.keymap_lookups.get() - typed),
@@ -9447,10 +9440,6 @@ fn editor_enter_is_unbound_so_it_inserts() {
     );
 }
 
-fn ctrl_c() -> KeyEvent {
-    KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
-}
-
 /// Ctrl-C is unbound outside a run pane, so a modal missing from the close
 /// cascade falls through to the quit that ends the session.
 #[test]
@@ -9459,7 +9448,7 @@ fn ctrl_c_closes_code_search_rather_than_quitting() {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCodeSearch);
     assert!(h.stoat.code_search.is_some(), "the modal opened");
 
-    let effect = h.stoat.handle_key(ctrl_c());
+    let effect = h.stoat.handle_key(ctrl('c'));
 
     assert!(
         !matches!(effect, UpdateEffect::Quit),
@@ -9481,7 +9470,7 @@ fn ctrl_c_disposes_the_workspace_pickers_input() {
         "which took an editor for its input"
     );
 
-    h.stoat.handle_key(ctrl_c());
+    h.stoat.handle_key(ctrl('c'));
 
     assert!(h.stoat.workspace_picker.is_none(), "the picker closed");
     assert_eq!(
@@ -9520,7 +9509,7 @@ fn ctrl_c_cancels_a_rename_rather_than_quitting() {
         buffer_id,
     });
 
-    let effect = h.stoat.handle_key(ctrl_c());
+    let effect = h.stoat.handle_key(ctrl('c'));
 
     assert!(
         !matches!(effect, UpdateEffect::Quit),
@@ -9540,7 +9529,7 @@ fn ctrl_c_cancels_the_search_input_rather_than_quitting() {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSearchInput);
     assert!(h.stoat.search_input.is_some(), "the input opened");
 
-    let effect = h.stoat.handle_key(ctrl_c());
+    let effect = h.stoat.handle_key(ctrl('c'));
 
     assert!(
         !matches!(effect, UpdateEffect::Quit),
@@ -9564,16 +9553,12 @@ fn ctrl_c_with_no_modal_open_still_quits() {
         ws.panes.pane_mut(focused).view = View::Label("nothing".into());
     }
 
-    assert!(matches!(h.stoat.handle_key(ctrl_c()), UpdateEffect::Quit));
+    assert!(matches!(h.stoat.handle_key(ctrl('c')), UpdateEffect::Quit));
 }
 
 fn resolves(h: &crate::test_harness::TestHarness, key: &KeyEvent) -> bool {
     let state = StoatKeymapState::from_stoat(&h.stoat);
     h.stoat.keymap.lookup(&state, key).is_some()
-}
-
-fn space() -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty())
 }
 
 /// A normal-mode modal binds only the keys it handles, so the editor's own
@@ -9586,7 +9571,10 @@ fn normal_mode_bindings_stop_at_the_location_picker() {
 
     let mut h = Stoat::test();
     let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-    assert!(resolves(&h, &space()), "Space starts a chord in the editor");
+    assert!(
+        resolves(&h, &key(KeyCode::Char(' '))),
+        "Space starts a chord in the editor"
+    );
     assert!(resolves(&h, &ctrl_d), "and Ctrl-d scrolls it");
 
     h.stoat.location_picker = Some(action_handlers::lsp::open_location_picker(
@@ -9602,7 +9590,7 @@ fn normal_mode_bindings_stop_at_the_location_picker() {
     ));
 
     assert!(
-        !resolves(&h, &space()),
+        !resolves(&h, &key(KeyCode::Char(' '))),
         "Space starts no chord over the picker"
     );
 
@@ -9628,7 +9616,7 @@ fn space_chord_never_starts_over_the_quit_confirm() {
     h.stoat.quit_all_confirm = Some(QuitAllConfirm::new(&[], Path::new("/")));
 
     assert!(
-        !resolves(&h, &space()),
+        !resolves(&h, &key(KeyCode::Char(' '))),
         "without a chord start, `space a s` cannot split behind the prompt"
     );
     assert_eq!(
