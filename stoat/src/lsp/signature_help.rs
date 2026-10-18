@@ -9,8 +9,8 @@
 //! collects the reply, both of them background work the user never asks for.
 
 use crate::{
-    action_handlers, app::Stoat, buffer::BufferId, completion, host::LanguageServerFeature,
-    lsp::util, pane::View,
+    action_handlers, app::Stoat, buffer::BufferId, completion, editor_state::EditorState,
+    host::LanguageServerFeature, lsp::util, pane::View,
 };
 use futures::task::noop_waker;
 use lsp_types::{
@@ -69,7 +69,9 @@ pub(crate) fn signature_help_trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let Some((buffer_id, version, rope, cursor_offset)) = focused_edit_snapshot(stoat) else {
+    let Some((buffer_id, version, rope, cursor_offset)) =
+        action_handlers::focused_editor_mut(stoat).map(edit_snapshot)
+    else {
         return;
     };
     if stoat.last_signature_help_key == Some((buffer_id, version)) {
@@ -130,21 +132,19 @@ fn arm_signature_help_debounce(stoat: &mut Stoat) {
     stoat.pending_signature_help_timer = Some(task);
 }
 
-/// The focused editor's `(buffer_id, version, rope, cursor_offset)`, or `None`
-/// when the focused pane is not an editor.
-fn focused_edit_snapshot(stoat: &mut Stoat) -> Option<(BufferId, u64, Rope, usize)> {
-    let editor = action_handlers::focused_editor_mut(stoat)?;
+/// The `(buffer_id, version, rope, cursor_offset)` of `editor`.
+fn edit_snapshot(editor: &mut EditorState) -> (BufferId, u64, Rope, usize) {
     let buf_snap = editor.display_map.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
     let tail_off = buf_snap.resolve_anchor(&sel.tail());
     let head_off = buf_snap.resolve_anchor(&sel.head());
     let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
-    Some((
+    (
         editor.buffer_id,
         buf_snap.version(),
         buf_snap.rope().clone(),
         offset,
-    ))
+    )
 }
 
 /// Issue a `textDocument/signatureHelp` request for the focused editor's primary

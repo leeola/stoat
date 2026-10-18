@@ -14,6 +14,7 @@ use crate::{
     app::Stoat,
     buffer::BufferId,
     display_map::{syntax_theme, HighlightKey, HighlightLayer, HighlightStyle},
+    editor_state::EditorState,
     host::{LanguageServerFeature, OffsetEncoding},
     lsp::util,
     theme::scope,
@@ -34,19 +35,18 @@ const DOCUMENT_HIGHLIGHT_DEBOUNCE: Duration = Duration::from_millis(200);
 /// whether the server marked it a write.
 pub(crate) type DocumentHighlightResponse = (BufferId, Vec<(std::ops::Range<usize>, bool)>);
 
-/// The focused editor's `(buffer_id, version, cursor_offset)` document-highlight
-/// dedupe key, or `None` when no editor is focused.
+/// The `(buffer_id, version, cursor_offset)` document-highlight dedupe key of
+/// `editor`.
 ///
 /// Mirrors [`build_document_highlight_request`]'s editor read without cloning
 /// the rope, so the trigger can bail before host resolution.
-fn document_highlight_key(stoat: &mut Stoat) -> Option<(BufferId, u64, usize)> {
-    let editor = action_handlers::focused_editor_mut(stoat)?;
+fn document_highlight_key(editor: &mut EditorState) -> (BufferId, u64, usize) {
     let buf_snap = editor.display_map.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
     let tail_off = buf_snap.resolve_anchor(&sel.tail());
     let head_off = buf_snap.resolve_anchor(&sel.head());
     let offset = stoat_text::cursor_offset(buf_snap.rope(), tail_off, head_off);
-    Some((editor.buffer_id, buf_snap.version(), offset))
+    (editor.buffer_id, buf_snap.version(), offset)
 }
 
 /// Highlight the occurrences of the symbol under the focused editor's cursor when
@@ -59,7 +59,9 @@ fn document_highlight_key(stoat: &mut Stoat) -> Option<(BufferId, u64, usize)> {
 pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
     if stoat.focused_mode() != "normal" {
         if stoat.last_document_highlight_key.is_some() {
-            clear_document_highlights(stoat);
+            if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
+                clear_document_highlights(editor);
+            }
             stoat.last_document_highlight_key = None;
             stoat.pending_document_highlight_request.clear();
         }
@@ -69,7 +71,7 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
-    let Some(key) = document_highlight_key(stoat) else {
+    let Some(key) = action_handlers::focused_editor_mut(stoat).map(document_highlight_key) else {
         return;
     };
     if stoat.last_document_highlight_key == Some(key) {
@@ -93,7 +95,9 @@ pub(crate) fn document_highlight_trigger(stoat: &mut Stoat) {
     };
 
     stoat.last_document_highlight_key = Some((buffer_id, version, offset));
-    clear_document_highlights(stoat);
+    if let Some(editor) = action_handlers::focused_editor_mut(stoat) {
+        clear_document_highlights(editor);
+    }
 
     let executor = stoat.executor.clone();
     let task = stoat.spawn_woken(async move {
@@ -236,11 +240,8 @@ fn apply_document_highlights(
     }
 }
 
-/// Remove the read and write document-highlight ranges from the focused editor.
-fn clear_document_highlights(stoat: &mut Stoat) {
-    let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
-        return;
-    };
+/// Remove the read and write document-highlight ranges from `editor`.
+fn clear_document_highlights(editor: &mut EditorState) {
     editor
         .display_map
         .clear_highlights(HighlightKey::layer(HighlightLayer::DocumentHighlightRead));

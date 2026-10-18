@@ -9,8 +9,8 @@
 //! collects the reply, both of them background work the user never asks for.
 
 use crate::{
-    action_handlers, app::Stoat, buffer::BufferId, display_map::FoldingRanges, lsp, lsp::hosts,
-    multi_buffer::MultiBufferSnapshot,
+    action_handlers, app::Stoat, buffer::BufferId, display_map::FoldingRanges,
+    editor_state::EditorState, lsp, lsp::hosts, multi_buffer::MultiBufferSnapshot,
 };
 use lsp_types::{FoldingRange, FoldingRangeParams, TextDocumentIdentifier};
 use std::{path::Path, time::Duration};
@@ -148,16 +148,15 @@ pub(crate) fn pump_lsp_folding_ranges(stoat: &mut Stoat) -> bool {
     let Some(outcome) = stoat.pending_folding_ranges.poll() else {
         return false;
     };
-    if let Some((buffer_id, ranges)) = outcome {
-        apply_folding_ranges(stoat, buffer_id, ranges);
+    if let Some((buffer_id, ranges)) = outcome
+        && let Some(editor) = action_handlers::focused_editor_mut(stoat)
+    {
+        apply_folding_ranges(editor, buffer_id, ranges);
     }
     true
 }
 
-fn apply_folding_ranges(stoat: &mut Stoat, buffer_id: BufferId, ranges: FoldingRanges) {
-    let Some(editor) = action_handlers::focused_editor_mut(stoat) else {
-        return;
-    };
+fn apply_folding_ranges(editor: &mut EditorState, buffer_id: BufferId, ranges: FoldingRanges) {
     if editor.buffer_id != buffer_id {
         return;
     }
