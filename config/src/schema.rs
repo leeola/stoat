@@ -239,6 +239,18 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "none",
         },
         SettingDef {
+            path: &[Lit("ssh"), Lit("program")],
+            shape: ValueShape::String,
+            doc: "Path to the stoat binary that :ssh and :mosh run on the remote host.",
+            default: "stoat",
+        },
+        SettingDef {
+            path: &[Lit("mosh"), Lit("server")],
+            shape: ValueShape::String,
+            doc: "mosh-server binary on the remote host, passed to mosh as --server.",
+            default: "mosh-server",
+        },
+        SettingDef {
             path: &[Lit("lsp"), Lit("server"), Wildcard("language")],
             shape: ValueShape::StringArray,
             doc: "Per-language language-server command override, an argv keyed by \
