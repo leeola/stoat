@@ -228,7 +228,7 @@ fn walkthrough_fixture_plays_its_whole_tour() {
                     WALKTHROUGH_TIMEOUT,
                 )
                 .await
-                .unwrap_or_else(|_| panic!("stop {step} lands on {landing:?}"));
+                .unwrap_or_else(|err| panic!("stop {step} lands on {landing:?}: {err}"));
             assert!(
                 !frame.contains("drifted"),
                 "stop {step} still covers what it captured, got frame:\n{frame}",
@@ -279,7 +279,8 @@ fn walkthrough_fixture_plays_its_whole_tour() {
 /// drift.
 #[test]
 fn walkthrough_commits_fixture_checks_each_commit_out() {
-    let (_dir, root, mut harness) = fixture_harness("walkthrough-commits");
+    let (_dir, root, harness) = fixture_harness("walkthrough-commits");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     let tour = store::load(&LocalFs, &root, "tour").expect("the fixture commits its tour");
     let first = tour.stops[0]
         .commit
@@ -315,8 +316,8 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
 
         // Two stops share each commit, so the steps alternate between a
         // checkout and a jump within the tree already checked out. The mode's
-        // key-hint overlay covers each line past its first seventeen columns,
-        // so every landing text sits at the start of its line.
+        // key-hint overlay covers the right end of each line, so every landing
+        // text sits at the start of its line.
         for (step, landing) in [
             (2, "fn apply("),
             (3, "\"verbose\""),
@@ -331,7 +332,7 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
                     WALKTHROUGH_TIMEOUT,
                 )
                 .await
-                .unwrap_or_else(|_| panic!("stop {step} lands on {landing:?}"));
+                .unwrap_or_else(|err| panic!("stop {step} lands on {landing:?}: {err}"));
             assert!(
                 !frame.contains("drifted"),
                 "stop {step} reads what it captured, got frame:\n{frame}",
@@ -370,9 +371,11 @@ fn head_of(root: &Path) -> String {
 ///
 /// The message gets only the width that the other status bar segments and the
 /// tour badge leave. At 80 columns, how much of it survives changes from run to
-/// run. The workspace name is random. A language server's diagnostic counts and
-/// a drifted fixture's repo segment come and go on their own schedule, and
-/// either sometimes stays until after the message expires.
+/// run. The workspace name is random. A language server's spinner and
+/// diagnostic counts, the diff spinner, and a drifted fixture's repo segment
+/// come and go on their own schedule, and any of them sometimes stays until
+/// after the message expires. A checkout restarts the server's work and the
+/// diff warm, so a tour over commits meets them at each checkout.
 const WIDE_COLS: u16 = 200;
 
 /// Drift is only ever reported against what is on screen, so the status line

@@ -87,9 +87,14 @@ pub enum HarnessError {
         location: snafu::Location,
     },
 
-    #[snafu(display("timed out after {timeout:?} waiting for a matching frame"))]
+    /// The last frame the wait read goes along, since the screen at the
+    /// deadline is what tells a late frame from one that never came.
+    #[snafu(display(
+        "timed out after {timeout:?} waiting for a matching frame, last frame:\n{last_frame}"
+    ))]
     FrameTimeout {
         timeout: Duration,
+        last_frame: String,
         #[snafu(implicit)]
         location: snafu::Location,
     },
@@ -331,7 +336,14 @@ impl Handle {
             match time::timeout_at(deadline, self.render_rx.changed()).await {
                 Ok(Ok(())) => {},
                 Ok(Err(_)) => return RenderClosedSnafu.fail(),
-                Err(_) => return FrameTimeoutSnafu { timeout }.fail(),
+                Err(_) => {
+                    let last_frame = self.current_frame_text().unwrap_or_default();
+                    return FrameTimeoutSnafu {
+                        timeout,
+                        last_frame,
+                    }
+                    .fail();
+                },
             }
         }
     }
