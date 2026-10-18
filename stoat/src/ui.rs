@@ -42,6 +42,8 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(feature = "perf")]
+use stoat_scheduler::Executor;
 use stoatty_protocol::{
     command::{self, HelloCommand},
     detect,
@@ -135,6 +137,10 @@ pub struct UiChannels {
     pub slot: Arc<PassthroughSlot>,
     /// What to do with the screen while a remote session owns it.
     pub ui_rx: UnboundedReceiver<UiControl>,
+    /// The executor whose clock stamps [`RenderFrame::input_time`], so the
+    /// input-to-flush span ends on the clock it starts on.
+    #[cfg(feature = "perf")]
+    pub clock: Executor,
 }
 
 pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHandle<io::Result<()>> {
@@ -176,6 +182,8 @@ async fn run(
         cell_pixels_tx,
         slot,
         ui_rx,
+        #[cfg(feature = "perf")]
+        clock,
     } = channels;
     // Started before the size is read, so a resize at any later point leaves
     // its byte for the input thread, one during the handshake included.
@@ -344,7 +352,7 @@ async fn run(
                 // The frame's bytes are out, so stop the input-to-flush clock.
                 #[cfg(feature = "perf")]
                 if let Some(started) = input_time {
-                    ui_perf.record_input_to_flush(started.elapsed());
+                    ui_perf.record_input_to_flush(clock.now().duration_since(started));
                     recorded_frames += 1;
                     if recorded_frames.is_multiple_of(PERF_LOG_INTERVAL) {
                         log_input_latency(&ui_perf);

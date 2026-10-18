@@ -390,6 +390,13 @@ fn run_tui(
     // would hold the event channel open past a natural shutdown.
     let driver_tx = inputs.is_some().then(|| event_tx.clone());
 
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .whatever_context("build tokio runtime")?;
+    let scheduler = Arc::new(TokioScheduler::new(rt.handle().clone()));
+    let executor = scheduler.executor();
+
     let ui_handle = stoat::ui::spawn(
         stoat::ui::UiChannels {
             event_tx,
@@ -399,16 +406,11 @@ fn run_tui(
             cell_pixels_tx,
             slot: passthrough_slot.clone(),
             ui_rx,
+            #[cfg(feature = "perf")]
+            clock: executor.clone(),
         },
         mouse_captured,
     );
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .whatever_context("build tokio runtime")?;
-    let scheduler = Arc::new(TokioScheduler::new(rt.handle().clone()));
-    let executor = scheduler.executor();
 
     let cli_settings = Settings {
         text_proto_log,
