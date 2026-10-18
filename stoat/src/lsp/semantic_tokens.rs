@@ -105,7 +105,7 @@ pub(crate) fn semantic_tokens_trigger(stoat: &mut Stoat) {
     let Some((_, buffer_id)) = stoat.focused_editor_ids() else {
         return;
     };
-    let Some(version) = lsp::focused_buffer_version(stoat) else {
+    let Some(version) = action_handlers::focused_editor_mut(stoat).map(lsp::buffer_version) else {
         return;
     };
     if stoat.last_semantic_tokens_key == Some((buffer_id, version)) {

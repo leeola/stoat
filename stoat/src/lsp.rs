@@ -1,4 +1,4 @@
-use crate::{action_handlers, app::Stoat};
+use crate::{action_handlers, app::Stoat, editor_state::EditorState};
 
 pub(crate) mod document_highlight;
 pub(crate) mod drain;
@@ -50,14 +50,12 @@ impl LspSymbolKind {
     }
 }
 
-/// The focused editor's current buffer-snapshot version, or `None` on a review
-/// view or absent editor.
+/// The current buffer-snapshot version of `editor`.
 ///
 /// Lets a trigger check its `(buffer_id, version)` dedupe key without the rope
 /// clone its request builder does.
-pub(crate) fn focused_buffer_version(stoat: &mut Stoat) -> Option<u64> {
-    let editor = action_handlers::focused_editor_mut(stoat)?;
-    Some(editor.display_map.buffer_snapshot().version())
+pub(crate) fn buffer_version(editor: &mut EditorState) -> u64 {
+    editor.display_map.buffer_snapshot().version()
 }
 
 /// The label for the highest-priority explicit LSP request in flight, or

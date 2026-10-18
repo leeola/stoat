@@ -1,6 +1,6 @@
 use super::{split_selection, surround, view, LastMotion};
 use crate::{
-    action_handlers::{focused_editor_mut, input_target_editor_mut},
+    action_handlers::{focused_editor_mut, input_target_editor_mut, with_focused_editor},
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
     diff_map,
@@ -1080,7 +1080,7 @@ pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count();
     super::jump::push_jump(stoat);
     if let Some(count) = count {
-        return goto_line_row(stoat, count, extend);
+        return with_focused_editor(stoat, |editor| goto_line_row(editor, count, extend));
     }
 
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -3761,9 +3761,11 @@ pub(crate) fn execute_find(
         count,
         extend,
     });
-    move_to_motion_range(stoat, extend, |rope, cursor| {
-        let target = find_target(rope, cursor, kind, ch, count)?;
-        Some(landing_range(rope, cursor, target))
+    with_focused_editor(stoat, |editor| {
+        move_to_motion_range(editor, extend, |rope, cursor| {
+            let target = find_target(rope, cursor, kind, ch, count)?;
+            Some(landing_range(rope, cursor, target))
+        })
     })
 }
 
@@ -3784,9 +3786,11 @@ pub(crate) fn execute_find_line_ending(
         count,
         extend,
     });
-    move_to_motion_range(stoat, extend, |rope, cursor| {
-        let target = line_ending_target(rope, cursor, kind, count)?;
-        Some(landing_range(rope, cursor, target))
+    with_focused_editor(stoat, |editor| {
+        move_to_motion_range(editor, extend, |rope, cursor| {
+            let target = line_ending_target(rope, cursor, kind, count)?;
+            Some(landing_range(rope, cursor, target))
+        })
     })
 }
 
@@ -3839,13 +3843,10 @@ pub(super) fn extend_span(
 /// Extending ignores the anchor and holds the one the selection already has,
 /// which is what makes a run of these grow one selection rather than restart it.
 fn move_to_motion_range(
-    stoat: &mut Stoat,
+    editor: &mut EditorState,
     extend: bool,
     range_of: impl Fn(&Rope, usize) -> Option<(usize, usize)>,
 ) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -5103,9 +5104,11 @@ pub(crate) fn goto_paragraph_impl(
     count: u32,
 ) -> UpdateEffect {
     stoat.last_motion = Some(LastMotion::Paragraph { dir, count, extend });
-    move_to_motion_range(stoat, extend, |rope, cursor| {
-        let mut blanks = BlankRows::new(rope);
-        Some(paragraph_range(rope, &mut blanks, cursor, dir, count))
+    with_focused_editor(stoat, |editor| {
+        move_to_motion_range(editor, extend, |rope, cursor| {
+            let mut blanks = BlankRows::new(rope);
+            Some(paragraph_range(rope, &mut blanks, cursor, dir, count))
+        })
     })
 }
 
@@ -5574,10 +5577,7 @@ fn last_addressable_row(rope: &Rope) -> u32 {
 ///
 /// Pushes no jump. The keys that reach a numbered line differ over what they do
 /// without a count, so each pushes its own before it gets here.
-fn goto_line_row(stoat: &mut Stoat, count: u32, extend: bool) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+fn goto_line_row(editor: &mut EditorState, count: u32, extend: bool) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -5608,7 +5608,7 @@ pub(super) fn goto_line_number(stoat: &mut Stoat, extend: bool) -> UpdateEffect 
         return UpdateEffect::None;
     };
     super::jump::push_jump(stoat);
-    goto_line_row(stoat, count, extend)
+    with_focused_editor(stoat, |editor| goto_line_row(editor, count, extend))
 }
 
 pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
@@ -5666,13 +5666,17 @@ pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Land every selection as a 1-wide block cursor on `offset`. Returns
-/// `UpdateEffect::None` when there is no focused editor or `offset`
-/// is past the end of the focused buffer.
+/// Land every selection of the focused editor as a 1-wide block cursor on
+/// `offset`, for a caller that holds no editor.
+///
+/// Returns [`UpdateEffect::None`] when no editor has focus.
 pub(crate) fn jump_to_offset(stoat: &mut Stoat, offset: usize) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+    with_focused_editor(stoat, |editor| jump_editor_to_offset(editor, offset))
+}
+
+/// Land every selection of `editor` as a 1-wide block cursor on `offset`,
+/// clamped to the end of the buffer.
+fn jump_editor_to_offset(editor: &mut EditorState, offset: usize) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
