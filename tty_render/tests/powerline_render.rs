@@ -11,7 +11,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -64,8 +64,8 @@ fn powerline_separator_fills_the_cell() {
 
     let pixels = read_back(&device, &queue, &target, width, height);
     let texel = |x: u32, y: u32| {
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
     };
     let is_arrow = |(r, _, b): (u8, u8, u8)| r > 160 && b < 100;
     let is_fill = |(r, _, b): (u8, u8, u8)| b > 160 && r < 100;

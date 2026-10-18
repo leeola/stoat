@@ -13,7 +13,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -99,10 +99,7 @@ fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
-    let px = |x: u32, y: u32| -> [u8; 3] {
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
-    };
+    let px = |x: u32, y: u32| -> [u8; 3] { pixel(&pixels, width, x, y) };
 
     let x0 = (gcol as f32 * cell_w).floor() as u32;
     let x1 = ((gcol as f32 + 1.0) * cell_w).ceil() as u32;

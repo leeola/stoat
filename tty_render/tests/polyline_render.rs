@@ -10,7 +10,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Panel, PanelShadow, Polyline, Rgb},
@@ -289,8 +289,8 @@ impl Harness {
 
     /// The color at physical pixel (`x`, `y`).
     fn pixel(&self, pixels: &[u8], x: u32, y: u32) -> (u8, u8, u8) {
-        let i = ((y * self.width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(pixels, self.width, x, y);
+        (r, g, b)
     }
 }
 

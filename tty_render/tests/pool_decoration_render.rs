@@ -11,7 +11,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Bar, Grid, Rgb, TextRun},
@@ -114,8 +114,8 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
     let cell = |pixels: &[u8], row: u32, col: u32| -> (u8, u8, u8) {
         let x = col * cell_w + cell_w / 2;
         let y = row * cell_h + cell_h / 2;
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(pixels, width, x, y);
+        (r, g, b)
     };
     let rgb = |c: Rgb| (c.r, c.g, c.b);
 

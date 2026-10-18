@@ -118,3 +118,10 @@ pub fn still_frame<'a>(damage: &'a Damage, decoration_damage: &'a Damage) -> Fra
         sketch_reveals: &[],
     }
 }
+
+/// The RGB of the pixel at `x`, `y` in a [`read_back`] of a `width`-wide
+/// target.
+pub fn pixel(shot: &[u8], width: u32, x: u32, y: u32) -> [u8; 3] {
+    let at = ((y * width + x) * 4) as usize;
+    [shot[at], shot[at + 1], shot[at + 2]]
+}

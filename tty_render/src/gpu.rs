@@ -2464,7 +2464,7 @@ mod tests {
         CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, PoolComposite, Renderer,
         SharedFonts, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
-    use crate::test_support::{read_back, require_headless_device, still_frame};
+    use crate::test_support::{pixel, read_back, require_headless_device, still_frame};
     use std::iter;
     use stoatty_term::{
         grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
@@ -2830,7 +2830,8 @@ mod tests {
         let shot = draw_pooled(&device, &queue, &mut renderer, &target, &live, &pools);
 
         let [w, h] = CELL;
-        let center = |row: u32, col: u32| pixel(&shot, col * w + w / 2, row * h + h / 2);
+        let center =
+            |row: u32, col: u32| pixel(&shot, TARGET_WIDTH, col * w + w / 2, row * h + h / 2);
         assert_eq!(
             (center(1, 2), center(0, 5)),
             ([0, 160, 0], [80, 80, 80]),
@@ -2906,7 +2907,7 @@ mod tests {
                 ..whole_pool(&pool)
             }];
             let shot = draw_pooled(&device, &queue, &mut renderer, &target, &live, &pools);
-            pixel(&shot, CELL[0] / 2, CELL[1] / 2)
+            pixel(&shot, TARGET_WIDTH, CELL[0] / 2, CELL[1] / 2)
         };
         assert_eq!(
             [corner(false), corner(true)],
@@ -2948,7 +2949,7 @@ mod tests {
         let shot = draw_pooled(&device, &queue, &mut renderer, &target, &live, &pools);
 
         let [w, h] = CELL;
-        let center = |row: u32| pixel(&shot, w / 2, row * h + h / 2);
+        let center = |row: u32| pixel(&shot, TARGET_WIDTH, w / 2, row * h + h / 2);
         assert_eq!(
             ([center(1), center(2)], inked(&shot, 2, 1, [80, 80, 80])),
             ([[240, 240, 240], [80, 80, 80]], true),
@@ -3084,18 +3085,12 @@ mod tests {
         read_back(device, queue, target, TARGET_WIDTH, TARGET_HEIGHT)
     }
 
-    /// The RGB of the pixel at `x`, `y` in a [`TARGET_WIDTH`]-wide readback.
-    fn pixel(shot: &[u8], x: u32, y: u32) -> [u8; 3] {
-        let at = ((y * TARGET_WIDTH + x) * 4) as usize;
-        [shot[at], shot[at + 1], shot[at + 2]]
-    }
-
     /// Whether any pixel of the cell at `row` and `col` differs from `ground`.
     fn inked(shot: &[u8], row: u32, col: u32, ground: [u8; 3]) -> bool {
         let [w, h] = CELL;
         (row * h..(row + 1) * h)
             .flat_map(|y| (col * w..(col + 1) * w).map(move |x| (x, y)))
-            .any(|(x, y)| pixel(shot, x, y) != ground)
+            .any(|(x, y)| pixel(shot, TARGET_WIDTH, x, y) != ground)
     }
 
     /// Reconfiguring reallocates the swapchain, and a window manager repeats

@@ -12,7 +12,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, HostRide, PoolComposite, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Polyline, Rgb, TextRun},
@@ -145,8 +145,8 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
     let cell = |row: u32, col: u32| -> (u8, u8, u8) {
         let x = col * cell_w + cell_w / 2;
         let y = row * cell_h + cell_h / 2;
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
     };
     let rgb = |c: Rgb| (c.r, c.g, c.b);
 
@@ -168,8 +168,8 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
     let body = |row: u32, col: u32| -> (u8, u8, u8) {
         let x = col * cell_w + cell_w / 2;
         let y = row * cell_h + cell_h / 2 - (0.6 * icon_r) as u32;
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
     };
 
     assert_eq!(body(3, 0), rgb(icon_color), "icon paints outside the box");
@@ -196,8 +196,8 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
     let cell_top = 3.0 * cell_h as f32;
     let lit: Vec<u32> = (3 * cell_h..4 * cell_h)
         .filter(|&y| {
-            let i = ((y * width + cell_w / 2) * 4) as usize;
-            (pixels[i], pixels[i + 1], pixels[i + 2]) != rgb(modal_bg)
+            let [r, g, b] = pixel(&pixels, width, cell_w / 2, y);
+            (r, g, b) != rgb(modal_bg)
         })
         .collect();
 
@@ -305,8 +305,8 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
     let cell = |pixels: &[u8], row: u32, col: u32| -> (u8, u8, u8) {
         let x = col * cell_w + cell_w / 2;
         let y = row * cell_h + cell_h / 2;
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(pixels, width, x, y);
+        (r, g, b)
     };
     let rgb = |c: Rgb| (c.r, c.g, c.b);
 
@@ -503,8 +503,8 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
     let cell = |row: u32, col: u32| -> (u8, u8, u8) {
         let x = col * cell_w + cell_w / 2;
         let y = row * cell_h + cell_h / 2;
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
     };
     let rgb = |c: Rgb| (c.r, c.g, c.b);
 
@@ -644,8 +644,8 @@ fn a_box_riding_a_pool_stops_occluding_it() {
     let cell = |row: u32, col: u32| -> (u8, u8, u8) {
         let x = col * cell_w + cell_w / 2;
         let y = row * cell_h + cell_h / 2;
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
     };
     let rgb = |c: Rgb| (c.r, c.g, c.b);
 

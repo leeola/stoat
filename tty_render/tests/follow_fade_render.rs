@@ -13,7 +13,7 @@ use stoatty_protocol::command::{
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll, SketchReveal},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{Grid, Rgb, Sketch, TextRun},
@@ -132,8 +132,7 @@ fn a_followed_run_is_clear_early_and_painted_once_its_mark_is_drawn() {
     // A texel through the middle of the second run's background rect.
     let bg_texel = |pixels: &[u8]| {
         let (x, y) = ((cell[0] * 0.5) as u32, (cell[1] * 5.5) as u32);
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
+        pixel(pixels, width, x, y)
     };
 
     // The mark is a fifth drawn, well short of where the fade starts.

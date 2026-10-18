@@ -10,7 +10,7 @@ use std::sync::Arc;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, ImageCrop, PlacedImage, Rgb},
@@ -109,10 +109,7 @@ fn a_placement_paints_its_rect_and_its_z_orders_it_against_the_glyphs() {
     let glyph_x = (1.5 * cell_w) as u32;
     let glyph_y = (1.5 * cell_h) as u32;
 
-    let at = |pixels: &[u8], x: u32, y: u32| -> [u8; 3] {
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
-    };
+    let at = |pixels: &[u8], x: u32, y: u32| -> [u8; 3] { pixel(pixels, width, x, y) };
 
     let over = render(0);
     assert_eq!(
@@ -205,8 +202,7 @@ fn a_scaled_image_keeps_its_color_against_its_transparent_edge() {
     // The placement covers 3 by 2 cells from (1, 1), so its center samples the
     // four texels evenly: a quarter of the red and a quarter of the alpha.
     let (x, y) = ((2.5 * cell_w) as u32, (2.0 * cell_h) as u32);
-    let i = ((y * width + x) * 4) as usize;
-    let [red, green] = [pixels[i], pixels[i + 1]];
+    let [red, green, _] = pixel(&pixels, width, x, y);
 
     assert!(
         red > 128 && green < 128,
@@ -286,11 +282,8 @@ fn a_downscaled_image_averages_rather_than_aliasing() {
     // the patch runs between black and white. A level near the drawn size is
     // flat grey at every phase.
     let patch: Vec<u8> = ((cell_h as u32 + 2)..(2.0 * cell_h) as u32 - 1)
-        .flat_map(|y| {
-            ((cell_w as u32 + 2)..(2.0 * cell_w) as u32 - 1)
-                .map(move |x| ((y * width + x) * 4) as usize)
-        })
-        .map(|i| pixels[i])
+        .flat_map(|y| ((cell_w as u32 + 2)..(2.0 * cell_w) as u32 - 1).map(move |x| (x, y)))
+        .map(|(x, y)| pixel(&pixels, width, x, y)[0])
         .collect();
 
     let (low, high) = (

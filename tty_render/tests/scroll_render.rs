@@ -11,7 +11,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{Grid, Rgb, UnderlineStyle},
@@ -92,8 +92,7 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
         let mut count = 0usize;
         for y in (band * cell_h)..((band + 1) * cell_h) {
             for x in 0..width {
-                let i = ((y * width + x) * 4) as usize;
-                let (r, g, b) = (pixels[i] as u32, pixels[i + 1] as u32, pixels[i + 2] as u32);
+                let [r, g, b] = pixel(pixels, width, x, y).map(u32::from);
                 if r + g + b > 120 {
                     count += 1;
                 }
@@ -183,8 +182,7 @@ fn document_scroll_shifts_the_grid_like_grid_scroll() {
         let mut count = 0usize;
         for y in (band * cell_h)..((band + 1) * cell_h) {
             for x in 0..width {
-                let i = ((y * width + x) * 4) as usize;
-                let (r, g, b) = (pixels[i] as u32, pixels[i + 1] as u32, pixels[i + 2] as u32);
+                let [r, g, b] = pixel(pixels, width, x, y).map(u32::from);
                 if r + g + b > 120 {
                     count += 1;
                 }

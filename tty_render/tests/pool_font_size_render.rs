@@ -11,7 +11,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, PoolComposite, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Panel, PanelShadow, Polyline, Rgb, TextRun},
@@ -45,7 +45,7 @@ fn a_pool_at_its_own_font_size_lays_its_cells_out_at_that_size() {
 fn a_dimmed_pool_reads_faded_toward_the_clear() {
     let off_by_more_than_rounding: Vec<_> = drawn_pool_cells(0.5)
         .into_iter()
-        .filter(|&((r, g, b), held)| {
+        .filter(|&([r, g, b], held)| {
             let far = |drawn: u8, color: u8| drawn.abs_diff(color / 2) > 1;
             far(r, held.r) || far(g, held.g) || far(b, held.b)
         })
@@ -65,7 +65,7 @@ fn a_dimmed_pool_reads_faded_toward_the_clear() {
 /// Each cell's background holds its color, and each odd column also draws a
 /// full block glyph of that color over it. A glyph that misses the fade then
 /// reads its full color, so the fade of both passes shows.
-fn drawn_pool_cells(dim: f32) -> Vec<((u8, u8, u8), Rgb)> {
+fn drawn_pool_cells(dim: f32) -> Vec<([u8; 3], Rgb)> {
     let (device, queue) = require_headless_device();
     let (target, view) = offscreen_target(&device, WIDTH, HEIGHT);
     let mut renderer = renderer(&device);
@@ -116,7 +116,7 @@ fn drawn_pool_cells(dim: f32) -> Vec<((u8, u8, u8), Rgb)> {
     let at = |row: u32, col: u32| {
         let x = left * live_w + col * pool_w + pool_w / 2;
         let y = top * live_h + row * pool_h + pool_h / 2;
-        pixel(&pixels, x, y)
+        pixel(&pixels, WIDTH, x, y)
     };
     (0..rows)
         .flat_map(|row| (0..cols).map(move |col| (row, col)))
@@ -235,7 +235,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         });
         assert_eq!(
             (0..cols)
-                .map(|col| pixel(&pixels, center_x(col), y))
+                .map(|col| pixel(&pixels, WIDTH, center_x(col), y))
                 .collect::<Vec<_>>(),
             expected.collect::<Vec<_>>(),
             "the {what} hides under the box where it sits on the live grid",
@@ -266,11 +266,6 @@ fn cells(font_size: u32) -> [u32; 2] {
     cell_size(font_size, 1.0).map(|side| side.round() as u32)
 }
 
-fn pixel(pixels: &[u8], x: u32, y: u32) -> (u8, u8, u8) {
-    let i = ((y * WIDTH + x) * 4) as usize;
-    (pixels[i], pixels[i + 1], pixels[i + 2])
-}
-
-fn rgb(color: Rgb) -> (u8, u8, u8) {
-    (color.r, color.g, color.b)
+fn rgb(color: Rgb) -> [u8; 3] {
+    [color.r, color.g, color.b]
 }

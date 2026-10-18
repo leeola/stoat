@@ -10,7 +10,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Border, BorderEdge, BorderStyle, Grid, Panel, PanelShadow, Rgb},
@@ -80,10 +80,7 @@ fn a_cell_border_draws_over_the_block_glyph_filling_its_cell() {
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
-    let px = |x: u32, y: u32| -> [u8; 3] {
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
-    };
+    let px = |x: u32, y: u32| -> [u8; 3] { pixel(&pixels, width, x, y) };
 
     let x0 = (gcol as f32 * cell_w).floor() as u32;
     let x1 = ((gcol as f32 + 1.0) * cell_w).ceil() as u32;
@@ -177,10 +174,7 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
     );
 
     let pixels = read_back(&device, &queue, &target, width, height);
-    let at = |x: u32, y: u32| -> [u8; 3] {
-        let i = ((y * width + x) * 4) as usize;
-        [pixels[i], pixels[i + 1], pixels[i + 2]]
-    };
+    let at = |x: u32, y: u32| -> [u8; 3] { pixel(&pixels, width, x, y) };
 
     // The panel's left edge, at the boundary between the two block glyphs.
     let edge_x = (3.0 * cell_w).round() as u32;
@@ -264,7 +258,7 @@ fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
     let join_x = (x0 + radius) as u32 - 1;
     let ink = |x: u32| -> u32 {
         (y0 as u32..(y0 + cell_h) as u32)
-            .map(|y| u32::from(pixels[((y * width + x) * 4) as usize]))
+            .map(|y| u32::from(pixel(&pixels, width, x, y)[0]))
             .sum()
     };
 

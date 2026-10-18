@@ -10,7 +10,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::{background::CursorFill, cell_size},
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -57,8 +57,10 @@ fn a_hollow_cursor_paints_its_outline_and_leaves_the_center() {
         read_back(&device, &queue, &target, width, height)
     };
     let brightness = |pixels: &[u8], (x, y): (u32, u32)| {
-        let i = ((y * width + x) * 4) as usize;
-        pixels[i..i + 3].iter().map(|&c| u32::from(c)).sum::<u32>()
+        pixel(pixels, width, x, y)
+            .iter()
+            .map(|&c| u32::from(c))
+            .sum::<u32>()
     };
     let center = (cell_w / 2, cell_h + cell_h / 2);
     let edge = (0, cell_h);

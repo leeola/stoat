@@ -10,7 +10,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{BorderStyle, Grid, Overlay, Panel, PanelShadow, Rgb},
@@ -34,8 +34,7 @@ struct Rendered {
 
 impl Rendered {
     fn px(&self, x: u32, y: u32) -> [u8; 3] {
-        let i = ((y * self.width + x) * 4) as usize;
-        [self.pixels[i], self.pixels[i + 1], self.pixels[i + 2]]
+        pixel(&self.pixels, self.width, x, y)
     }
 }
 

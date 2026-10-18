@@ -13,7 +13,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -97,8 +97,10 @@ fn cursor_draws_over_pool_and_obeys_its_scissor() {
         let mut sum = 0u64;
         for y in cell_h..(cell_h * 2) {
             for x in (col * cell_w)..((col + 1) * cell_w) {
-                let i = ((y * width + x) * 4) as usize;
-                sum += pixels[i] as u64 + pixels[i + 1] as u64 + pixels[i + 2] as u64;
+                sum += pixel(pixels, width, x, y)
+                    .iter()
+                    .map(|&c| u64::from(c))
+                    .sum::<u64>();
             }
         }
         sum

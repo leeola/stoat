@@ -13,7 +13,7 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device, still_frame},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
 };
 use stoatty_term::{
     grid::{Grid, Rgb},
@@ -102,8 +102,7 @@ fn pool_composite_keeps_live_instances() {
         let mut count = 0usize;
         for y in (band * cell_h)..((band + 1) * cell_h) {
             for x in 0..width {
-                let i = ((y * width + x) * 4) as usize;
-                let (r, g, b) = (pixels[i] as u32, pixels[i + 1] as u32, pixels[i + 2] as u32);
+                let [r, g, b] = pixel(pixels, width, x, y).map(u32::from);
                 if r + g + b > 120 {
                     count += 1;
                 }
@@ -225,8 +224,7 @@ fn shift_only_composite_reuses_prior_rows() {
     );
     let reused = read_back(&device, &queue, &target, width, height);
 
-    let center = (((cell_h + cell_h / 2) * width + width / 2) * 4) as usize;
-    let (r, g, b) = (reused[center], reused[center + 1], reused[center + 2]);
+    let [r, g, b] = pixel(&reused, width, width / 2, cell_h + cell_h / 2);
     assert!(
         r < 160 && g < 160 && b < 160,
         "a shift-only reuse must redraw the prior gray pool, not the white grid it was handed: got ({r},{g},{b})"
@@ -336,9 +334,9 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     composite(&mut renderer, &blue_pool, bands[2], true, blue_id, 2);
 
     let idle = Damage::Partial(vec![None; rows]);
-    let pixel = |shot: &[u8], y: u32| {
-        let at = ((y * width + width / 2) * 4) as usize;
-        (shot[at], shot[at + 1], shot[at + 2])
+    let mid_pixel = |shot: &[u8], y: u32| {
+        let [r, g, b] = pixel(shot, width, width / 2, y);
+        (r, g, b)
     };
     let is_gray = |(r, g, b): (u8, u8, u8)| (20..160).contains(&r) && g == r && b == r;
     let is_white = |(r, g, b): (u8, u8, u8)| r > 200 && g > 200 && b > 200;
@@ -352,9 +350,9 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     composite(&mut renderer, &gray_pool, bands[2], false, blue_id, 2);
     let held = read_back(&device, &queue, &target, width, height);
     let shape = (
-        pixel(&held, band / 2),
-        pixel(&held, band + band / 2),
-        pixel(&held, band * 2 + band / 2),
+        mid_pixel(&held, band / 2),
+        mid_pixel(&held, band + band / 2),
+        mid_pixel(&held, band * 2 + band / 2),
     );
     assert!(
         is_gray(shape.0) && is_white(shape.1) && is_blue(shape.2),
@@ -368,8 +366,8 @@ fn pools_reusing_prior_rows_keep_their_own_as_the_frame_changes_shape() {
     composite(&mut renderer, &blue_pool, bands[2], false, blue_id, 1);
     let shifted = read_back(&device, &queue, &target, width, height);
     let survivors = (
-        pixel(&shifted, band + band / 2),
-        pixel(&shifted, band * 2 + band / 2),
+        mid_pixel(&shifted, band + band / 2),
+        mid_pixel(&shifted, band * 2 + band / 2),
     );
     assert!(
         is_white(survivors.0) && is_blue(survivors.1),
@@ -469,8 +467,7 @@ fn pool_grow_heals_live_instances() {
         let mut count = 0usize;
         for y in (band * cell_h)..((band + 1) * cell_h) {
             for x in 0..width {
-                let i = ((y * width + x) * 4) as usize;
-                let (r, g, b) = (pixels[i] as u32, pixels[i + 1] as u32, pixels[i + 2] as u32);
+                let [r, g, b] = pixel(pixels, width, x, y).map(u32::from);
                 if r + g + b > 120 {
                     count += 1;
                 }
@@ -663,8 +660,8 @@ fn a_region_sized_pool_draws_at_the_region_origin() {
 
     let at = |row: u32, col: u32| {
         let (x, y) = (col * cell_w + cell_w / 2, row * cell_h + cell_h / 2);
-        let i = ((y * width + x) * 4) as usize;
-        (pixels[i], pixels[i + 1], pixels[i + 2])
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
     };
 
     assert_eq!(

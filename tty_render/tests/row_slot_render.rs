@@ -17,7 +17,7 @@ use std::ops::Range;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     render::cell_size,
-    test_support::{offscreen_target, read_back, require_headless_device},
+    test_support::{offscreen_target, pixel, read_back, require_headless_device},
 };
 use stoatty_term::{
     grid::{whole_row, Grid, Overlay, Rgb, TextRun, UnderlineStyle},
@@ -556,12 +556,8 @@ impl Harness {
         columns: Range<u32>,
         rows_of: impl Fn(Range<u32>) -> Range<u32>,
     ) -> Vec<u32> {
-        let near = |i: usize| {
-            let channels = [
-                (pixels[i], color.r),
-                (pixels[i + 1], color.g),
-                (pixels[i + 2], color.b),
-            ];
+        let near = |[r, g, b]: [u8; 3]| {
+            let channels = [(r, color.r), (g, color.g), (b, color.b)];
             channels.iter().all(|(got, want)| got.abs_diff(*want) <= 6)
         };
 
@@ -569,11 +565,8 @@ impl Harness {
             .filter(|row| {
                 let band = (row * self.cell_h)..((row + 1) * self.cell_h).min(self.height);
                 rows_of(band)
-                    .flat_map(|y| {
-                        columns
-                            .clone()
-                            .map(move |x| ((y * self.width + x) * 4) as usize)
-                    })
+                    .flat_map(|y| columns.clone().map(move |x| (x, y)))
+                    .map(|(x, y)| pixel(pixels, self.width, x, y))
                     .any(near)
             })
             .collect()
