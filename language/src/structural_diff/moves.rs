@@ -547,24 +547,8 @@ fn atom_leaf_count(arena: &SyntaxArena, id: SyntaxId) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        parse,
-        structural_diff::{lower_tree, mark_unchanged, PreprocessResult},
-        LanguageRegistry,
-    };
+    use crate::structural_diff::{lower_rust, mark_unchanged, PreprocessResult};
     use std::ops::Range;
-
-    fn rust_lang() -> std::sync::Arc<crate::Language> {
-        LanguageRegistry::standard()
-            .for_path(std::path::Path::new("a.rs"))
-            .unwrap()
-    }
-
-    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
-        let lang = rust_lang();
-        let tree = parse(&lang, source, None).unwrap();
-        lower_tree(&tree, std::sync::Arc::from(source))
-    }
 
     fn full_byte_range(arena: &SyntaxArena, id: SyntaxId) -> Range<usize> {
         match arena.get(id) {
@@ -598,8 +582,8 @@ mod tests {
         PreprocessResult,
         Vec<MoveRecord>,
     ) {
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
         let mut preprocess = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
         let records = find_moves(
             &lhs_arena,
@@ -913,7 +897,7 @@ mod tests {
         for record in &records {
             assert!(
                 record.lhs_sources.iter().all(|id| atom_leaf_count(
-                    &lower(lhs).0, // not ideal but acceptable for a negative assert
+                    &lower_rust(lhs).0, // not ideal but acceptable for a negative assert
                     *id
                 ) >= MIN_LEAVES),
                 "no move record may cover a sub-MIN_LEAVES atom; got {record:?}"
@@ -1064,13 +1048,23 @@ mod tests {
         let rhs_b = "fn stays_b() { call_b(); }\n\
                      fn relocated() { let x = 1; let y = 2; let z = 3; }";
 
-        let (lhs_arena_a, _) = lower(lhs_a);
-        let (rhs_arena_a, _) = lower(rhs_a);
-        let (lhs_arena_b, _) = lower(lhs_b);
-        let (rhs_arena_b, _) = lower(rhs_b);
+        let (lhs_arena_a, _) = lower_rust(lhs_a);
+        let (rhs_arena_a, _) = lower_rust(rhs_a);
+        let (lhs_arena_b, _) = lower_rust(lhs_b);
+        let (rhs_arena_b, _) = lower_rust(rhs_b);
 
-        let mut pre_a = mark_unchanged(&lhs_arena_a, lower(lhs_a).1, &rhs_arena_a, lower(rhs_a).1);
-        let mut pre_b = mark_unchanged(&lhs_arena_b, lower(lhs_b).1, &rhs_arena_b, lower(rhs_b).1);
+        let mut pre_a = mark_unchanged(
+            &lhs_arena_a,
+            lower_rust(lhs_a).1,
+            &rhs_arena_a,
+            lower_rust(rhs_a).1,
+        );
+        let mut pre_b = mark_unchanged(
+            &lhs_arena_b,
+            lower_rust(lhs_b).1,
+            &rhs_arena_b,
+            lower_rust(rhs_b).1,
+        );
 
         let cs_records = {
             let mut input = [
@@ -1136,8 +1130,8 @@ mod tests {
         let mut rhs_arenas: Vec<SyntaxArena> = Vec::new();
         let mut roots: Vec<(SyntaxId, SyntaxId)> = Vec::new();
         for &(lhs, rhs) in pairs {
-            let (la, lr) = lower(lhs);
-            let (ra, rr) = lower(rhs);
+            let (la, lr) = lower_rust(lhs);
+            let (ra, rr) = lower_rust(rhs);
             lhs_arenas.push(la);
             rhs_arenas.push(ra);
             roots.push((lr, rr));
@@ -1329,8 +1323,8 @@ mod tests {
         let rhs = "fn beta() { let p = 10; let q = 20; let r = 30; }\n\
                    fn alpha() { let x = 1; let y = 2; let z = 3; }";
 
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
 
         let mut pre_wrapper = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
         let wrapper_records = find_moves(

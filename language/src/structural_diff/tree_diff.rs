@@ -1242,6 +1242,7 @@ mod tests {
     use super::*;
     use crate::{
         structural_diff::{self, lower::LOWERINGS},
+        test_util::rust_lang,
         LanguageRegistry,
     };
     use std::cell::Cell;
@@ -1249,12 +1250,6 @@ mod tests {
     const TEST_MODS: &str = "#[cfg(test)]\nmod a;\n#[cfg(test)]\nmod b;\n#[cfg(test)]\nmod d;\n";
     const TEST_MODS_WITH_C: &str =
         "#[cfg(test)]\nmod a;\n#[cfg(test)]\nmod b;\n#[cfg(test)]\nmod c;\n#[cfg(test)]\nmod d;\n";
-
-    fn rust_lang() -> Arc<Language> {
-        LanguageRegistry::standard()
-            .for_path(std::path::Path::new("a.rs"))
-            .unwrap()
-    }
 
     fn yaml_lang() -> Arc<Language> {
         LanguageRegistry::standard()

@@ -42,6 +42,8 @@ mod stack;
 mod tree_diff;
 mod unchanged;
 
+#[cfg(test)]
+use crate::{parse, test_util::rust_lang};
 pub use arena::{Atom, List, Syntax, SyntaxArena, SyntaxId};
 pub use content_id::ContentId;
 pub use line_diff::{align_lines, diff_lines};
@@ -273,4 +275,13 @@ pub fn diff_with_language_or_lines(
         Some(result) => result,
         None => diff_lines(lhs, rhs),
     }
+}
+
+/// `source` parsed as Rust and lowered into an arena, with the root it lowered
+/// to.
+#[cfg(test)]
+fn lower_rust(source: &str) -> (SyntaxArena, SyntaxId) {
+    let lang = rust_lang();
+    let tree = parse(&lang, source, None).unwrap();
+    lower_tree(&tree, Arc::from(source))
 }

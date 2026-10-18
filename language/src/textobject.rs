@@ -444,30 +444,14 @@ mod tests {
         collect_capture_ranges, collect_capture_starts, collect_unions, find_smallest_capture_at,
         find_smallest_capture_scanning, ObjectWindow,
     };
-    use crate::{Language, LanguageRegistry};
+    use crate::test_util::{lang, parse};
     use std::{
         cmp::Reverse,
         collections::HashMap,
         ops::{ControlFlow, Range},
-        sync::Arc,
     };
     use stoat_text::Rope;
-    use tree_sitter::{Parser, Query, QueryCursorOptions, QueryCursorState, Tree};
-
-    fn lang(name: &str) -> Arc<Language> {
-        LanguageRegistry::standard()
-            .languages()
-            .iter()
-            .find(|l| l.name == name)
-            .cloned()
-            .expect("language registered")
-    }
-
-    fn parse(lang: &Language, src: &str) -> Tree {
-        let mut parser = Parser::new();
-        parser.set_language(&lang.grammar).expect("grammar");
-        parser.parse(src, None).expect("parse")
-    }
+    use tree_sitter::{Query, QueryCursorOptions, QueryCursorState};
 
     /// Functions inside impl blocks and beside them, so a cursor in any one of
     /// them has matches above it, below it, and enclosing it. The restriction

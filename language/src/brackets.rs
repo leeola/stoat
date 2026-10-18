@@ -260,25 +260,8 @@ fn single_char(node: &Node<'_>, rope: &Rope) -> Option<(usize, char)> {
 #[cfg(test)]
 mod tests {
     use super::{matching_bracket, matching_bracket_from_tree};
-    use crate::{Language, LanguageRegistry};
-    use std::sync::Arc;
+    use crate::test_util::{lang, parse};
     use stoat_text::Rope;
-    use tree_sitter::{Parser, Tree};
-
-    fn lang(name: &str) -> Arc<Language> {
-        LanguageRegistry::standard()
-            .languages()
-            .iter()
-            .find(|l| l.name == name)
-            .cloned()
-            .expect("language registered")
-    }
-
-    fn parse(lang: &Language, src: &str) -> Tree {
-        let mut parser = Parser::new();
-        parser.set_language(&lang.grammar).expect("grammar");
-        parser.parse(src, None).expect("parse")
-    }
 
     fn match_at(name: &str, src: &str, offset: usize) -> Option<usize> {
         let lang = lang(name);

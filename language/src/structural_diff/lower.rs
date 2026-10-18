@@ -174,13 +174,7 @@ const BRACKET_PAIRS: [(&str, &str); 4] = [("(", ")"), ("[", "]"), ("{", "}"), ("
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse, LanguageRegistry};
-
-    fn rust_lang() -> Arc<crate::Language> {
-        LanguageRegistry::standard()
-            .for_path(std::path::Path::new("a.rs"))
-            .unwrap()
-    }
+    use crate::{parse, test_util::rust_lang};
 
     #[test]
     fn lower_simple_function() {

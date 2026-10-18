@@ -844,20 +844,8 @@ impl LcsPairSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{parse, structural_diff::lower_tree, LanguageRegistry};
+    use crate::structural_diff::lower_rust;
     use std::ops::Range;
-
-    fn rust_lang() -> std::sync::Arc<crate::Language> {
-        LanguageRegistry::standard()
-            .for_path(std::path::Path::new("a.rs"))
-            .unwrap()
-    }
-
-    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
-        let lang = rust_lang();
-        let tree = parse(&lang, source, None).unwrap();
-        lower_tree(&tree, std::sync::Arc::from(source))
-    }
 
     fn count_unchanged(arena: &SyntaxArena, root: SyntaxId, changes: &ChangeMap) -> usize {
         let mut stack = vec![root];
@@ -888,8 +876,8 @@ mod tests {
     #[test]
     fn identical_inputs_mark_every_node_unchanged() {
         let source = "fn main() { let x = 1; }";
-        let (lhs_arena, lhs_root) = lower(source);
-        let (rhs_arena, rhs_root) = lower(source);
+        let (lhs_arena, lhs_root) = lower_rust(source);
+        let (rhs_arena, rhs_root) = lower_rust(source);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
         let lhs_total = count_total(&lhs_arena, lhs_root);
         let rhs_total = count_total(&rhs_arena, rhs_root);
@@ -908,8 +896,8 @@ mod tests {
         // The first function is identical; the second is novel.
         let lhs = "fn main() { let x = 1; }";
         let rhs = "fn main() { let x = 1; }\nfn extra() {}";
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
         // The lhs side has a single top-level function; it must be
@@ -1073,8 +1061,8 @@ mod tests {
     #[test]
     fn a_large_run_pairs_its_members_by_shared_content() {
         let (lhs, rhs) = method_beside_new_module();
-        let (lhs_arena, lhs_root) = lower(&lhs);
-        let (rhs_arena, rhs_root) = lower(&rhs);
+        let (lhs_arena, lhs_root) = lower_rust(&lhs);
+        let (rhs_arena, rhs_root) = lower_rust(&rhs);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
         let keep = |arena: &SyntaxArena, source: &str, changes: &ChangeMap| {
@@ -1158,8 +1146,8 @@ mod tests {
     #[test]
     fn a_lone_member_against_several_skips_the_pairing() {
         let (lhs, rhs) = method_beside_new_module();
-        let (lhs_arena, lhs_root) = lower(&lhs);
-        let (rhs_arena, rhs_root) = lower(&rhs);
+        let (lhs_arena, lhs_root) = lower_rust(&lhs);
+        let (rhs_arena, rhs_root) = lower_rust(&rhs);
         let lhs_run = list_children(&lhs_arena, lhs_root);
         let rhs_run = list_children(&rhs_arena, rhs_root);
         let facts = ArenaFacts::default();
@@ -1189,8 +1177,8 @@ mod tests {
     /// The pairs that [`pair_by_shared_content`] finds between the top-level
     /// items of `lhs` and `rhs`.
     fn content_pairs(lhs: &str, rhs: &str) -> Vec<(usize, usize)> {
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
         let lhs_run = list_children(&lhs_arena, lhs_root);
         let rhs_run = list_children(&rhs_arena, rhs_root);
         pair_by_shared_content(
@@ -1228,8 +1216,8 @@ mod tests {
     /// The sections that [`mark_unchanged`] leaves for `lhs` against `rhs`, as
     /// the texts of their members.
     fn section_texts<'a>(lhs: &'a str, rhs: &'a str) -> Vec<(Vec<&'a str>, Vec<&'a str>)> {
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
         let texts = |arena: &SyntaxArena, source: &'a str, ids: &[SyntaxId]| -> Vec<&'a str> {
@@ -1261,8 +1249,8 @@ mod tests {
         // tagged unchanged. The root source_file is always pending.
         let lhs = "fn alpha() {}";
         let rhs = "fn beta() {}";
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
         let result = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
         assert_eq!(result.lhs_changes.get(lhs_root), ChangeKind::Pending);
         assert_eq!(result.rhs_changes.get(rhs_root), ChangeKind::Pending);

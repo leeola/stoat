@@ -436,25 +436,9 @@ mod tests {
         suggested_indent, suggested_indent_from, suggested_indent_scanning, suggested_window,
         IndentQueries,
     };
-    use crate::{Language, LanguageRegistry};
-    use std::sync::Arc;
+    use crate::test_util::{lang, parse};
     use stoat_text::Rope;
-    use tree_sitter::{Parser, Query, Tree};
-
-    fn lang(name: &str) -> Arc<Language> {
-        LanguageRegistry::standard()
-            .languages()
-            .iter()
-            .find(|l| l.name == name)
-            .cloned()
-            .expect("language registered")
-    }
-
-    fn parse(lang: &Language, src: &str) -> Tree {
-        let mut parser = Parser::new();
-        parser.set_language(&lang.grammar).expect("grammar");
-        parser.parse(src, None).expect("parse")
-    }
+    use tree_sitter::Query;
 
     fn newline_at(name: &str, src: &str, cursor: usize) -> String {
         newline_at_unit(name, src, cursor, "\t")

@@ -550,24 +550,7 @@ pub fn populate_change_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        parse,
-        structural_diff::{lower_tree, ChangeMap},
-        LanguageRegistry,
-    };
-    use std::sync::Arc;
-
-    fn rust_lang() -> Arc<crate::Language> {
-        LanguageRegistry::standard()
-            .for_path(std::path::Path::new("a.rs"))
-            .unwrap()
-    }
-
-    fn lower(source: &str) -> (SyntaxArena, SyntaxId) {
-        let lang = rust_lang();
-        let tree = parse(&lang, source, None).unwrap();
-        lower_tree(&tree, Arc::from(source))
-    }
+    use crate::structural_diff::{lower_rust, ChangeMap};
 
     /// Expand a fresh single-vertex arena and return the kinds of edge it
     /// generates, exercising [`expand`] the way the search loop does.
@@ -672,8 +655,8 @@ mod tests {
     #[test]
     fn identical_inputs_emit_unchanged_path() {
         let source = "fn main() {}";
-        let (lhs_arena, lhs_root) = lower(source);
-        let (rhs_arena, rhs_root) = lower(source);
+        let (lhs_arena, lhs_root) = lower_rust(source);
+        let (rhs_arena, rhs_root) = lower_rust(source);
         let outcome = shortest_path(
             &lhs_arena,
             &rhs_arena,
@@ -696,8 +679,8 @@ mod tests {
     fn distinct_inputs_emit_novel_path() {
         let lhs = "fn alpha() {}";
         let rhs = "fn beta() {}";
-        let (lhs_arena, lhs_root) = lower(lhs);
-        let (rhs_arena, rhs_root) = lower(rhs);
+        let (lhs_arena, lhs_root) = lower_rust(lhs);
+        let (rhs_arena, rhs_root) = lower_rust(rhs);
         let outcome = shortest_path(
             &lhs_arena,
             &rhs_arena,
@@ -722,8 +705,8 @@ mod tests {
     #[test]
     fn populate_change_map_marks_unchanged_for_identical_inputs() {
         let source = "fn main() { let x = 1; }";
-        let (lhs_arena, lhs_root) = lower(source);
-        let (rhs_arena, rhs_root) = lower(source);
+        let (lhs_arena, lhs_root) = lower_rust(source);
+        let (rhs_arena, rhs_root) = lower_rust(source);
         let outcome = shortest_path(
             &lhs_arena,
             &rhs_arena,

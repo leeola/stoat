@@ -1611,13 +1611,7 @@ fn stoat_to_ts(p: stoat_text::Point) -> tree_sitter::Point {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{edit_tree, parse_rope, LanguageRegistry};
-
-    fn rust_lang() -> Arc<Language> {
-        LanguageRegistry::standard()
-            .for_path(std::path::Path::new("a.rs"))
-            .unwrap()
-    }
+    use crate::{edit_tree, parse_rope, test_util::rust_lang, LanguageRegistry};
 
     fn markdown_lang() -> Arc<Language> {
         LanguageRegistry::standard()

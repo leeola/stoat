@@ -7,6 +7,8 @@ pub mod language;
 pub mod structural_diff;
 pub mod symbols;
 pub mod syntax_map;
+#[cfg(test)]
+pub(crate) mod test_util;
 pub mod textobject;
 
 pub use brackets::{matching_bracket, matching_bracket_from_tree};
