@@ -21,7 +21,8 @@ use crate::{
     term_session::{TermSelection, TermSession},
     test_fixture::{
         finder_layout, focused_editor_pane_area, mouse_event, open_indent_buffer,
-        open_scratch_file, open_with_minimap_strip, palette_sizing,
+        open_scratch_file, open_with_minimap_strip, palette_sizing, picker_layout,
+        target_picker_rows,
     },
     test_harness::keys::{ctrl, key},
     workspace::diff::DiffBase,
@@ -13890,17 +13891,6 @@ fn open_location_picker(h: &mut crate::test_harness::TestHarness, count: usize) 
     path
 }
 
-/// The location picker's inner rows rect for the harness' screen size.
-fn location_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
-    crate::render::picker::target_picker_layout(
-        h.stoat.size(),
-        modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::LocationPicker),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::LocationPicker),
-    )
-    .expect("picker laid out")
-    .list
-}
-
 /// The picker prompts like every other target list, so typing narrows the
 /// candidates rather than reaching the buffer behind it.
 #[test]
@@ -14001,7 +13991,7 @@ fn escape_closes_the_location_picker_and_disposes_it() {
 fn location_picker_click_selects_the_clicked_row() {
     let mut h = Stoat::test();
     open_location_picker(&mut h, 4);
-    let rows = location_picker_rows(&h);
+    let rows = target_picker_rows(&h, ModalKind::LocationPicker);
 
     h.stoat.update(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
@@ -14021,7 +14011,7 @@ fn location_picker_click_selects_the_clicked_row() {
 fn location_picker_click_on_the_selected_row_jumps() {
     let mut h = Stoat::test();
     let path = open_location_picker(&mut h, 4);
-    let rows = location_picker_rows(&h);
+    let rows = target_picker_rows(&h, ModalKind::LocationPicker);
 
     h.stoat.update(mouse_event(
         MouseEventKind::Down(MouseButton::Left),
@@ -14075,7 +14065,7 @@ fn location_picker_wheel_moves_the_selection() {
 fn location_picker_click_outside_is_swallowed() {
     let mut h = Stoat::test();
     open_location_picker(&mut h, 4);
-    let rows = location_picker_rows(&h);
+    let rows = target_picker_rows(&h, ModalKind::LocationPicker);
     let before = focused_primary_offsets(&mut h);
 
     h.stoat.update(mouse_event(
@@ -14114,7 +14104,7 @@ fn location_picker_renders_a_selection_past_the_visible_rows() {
 
     // Rows are read individually rather than by scanning the whole frame.
     // The key hints overlay paints across the right end of the bottom rows.
-    let rows = location_picker_rows(&h);
+    let rows = target_picker_rows(&h, ModalKind::LocationPicker);
     let row_text = |row: u16| -> String {
         let buf = h.rendered_buffer();
         (rows.x..rows.x + rows.width)
@@ -14179,17 +14169,6 @@ fn open_diagnostics_picker(h: &mut crate::test_harness::TestHarness, count: u32)
     );
     h.snapshot();
     path
-}
-
-/// The diagnostics picker's inner rows rect for the harness' screen size.
-fn diagnostics_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
-    crate::render::picker::target_picker_layout(
-        h.stoat.size(),
-        modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::DiagnosticsPicker),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::DiagnosticsPicker),
-    )
-    .expect("picker laid out")
-    .list
 }
 
 /// The picker prompts like every other target list, so typing narrows the
@@ -14353,7 +14332,7 @@ fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
 
     // Rows are read individually rather than by scanning the whole frame.
     // The key hints overlay paints across the right end of the bottom rows.
-    let rows = diagnostics_picker_rows(&h);
+    let rows = target_picker_rows(&h, ModalKind::DiagnosticsPicker);
     let row_text = |row: u16| -> String {
         let buf = h.rendered_buffer();
         (rows.x..rows.x + rows.width)
@@ -14407,16 +14386,6 @@ fn open_jumplist_picker(h: &mut crate::test_harness::TestHarness, count: usize) 
     path
 }
 
-/// The jumplist picker's inner rows rect for the harness' screen size.
-fn jumplist_picker_rows(h: &crate::test_harness::TestHarness) -> Rect {
-    crate::render::picker::target_picker_layout(
-        h.stoat.size(),
-        modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::JumplistPicker),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::JumplistPicker),
-    )
-    .expect("picker laid out")
-    .list
-}
 /// The picker prompts like every other target list, so typing narrows the
 /// jumps rather than reaching the buffer behind it.
 #[test]
@@ -14631,7 +14600,7 @@ fn jumplist_picker_renders_a_selection_past_the_visible_rows() {
     let mut h = crate::test_harness::TestHarness::with_size(120, 26);
     open_jumplist_picker(&mut h, 40);
 
-    let rows = jumplist_picker_rows(&h);
+    let rows = target_picker_rows(&h, ModalKind::JumplistPicker);
     let entries = h
         .stoat
         .jumplist_picker
@@ -14692,13 +14661,7 @@ fn the_jumplist_box_paints_nothing_outside_itself() {
     let mut h = crate::test_harness::TestHarness::with_size(120, 26);
     open_jumplist_picker(&mut h, 40);
 
-    let modal = crate::render::picker::target_picker_layout(
-        h.stoat.size(),
-        modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::JumplistPicker),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::JumplistPicker),
-    )
-    .expect("picker laid out")
-    .modal;
+    let modal = picker_layout(&h, ModalKind::JumplistPicker).modal;
 
     let before = h.rendered_buffer().clone();
     h.stoat
@@ -14767,14 +14730,9 @@ fn a_wheel_over_the_diagnostics_preview_scrolls_it() {
     h.stoat.drive_background();
     h.snapshot();
 
-    let preview = crate::render::picker::target_picker_layout(
-        h.stoat.size(),
-        modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::DiagnosticsPicker),
-        modal_split_percent(&h.stoat.modal_split, ModalKind::DiagnosticsPicker),
-    )
-    .expect("picker laid out")
-    .preview
-    .expect("the terminal is wide enough for a preview");
+    let preview = picker_layout(&h, ModalKind::DiagnosticsPicker)
+        .preview
+        .expect("the terminal is wide enough for a preview");
 
     let scroll = |h: &crate::test_harness::TestHarness| {
         let editor = h

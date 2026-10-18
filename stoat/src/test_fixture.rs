@@ -72,6 +72,25 @@ pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::Find
     .expect("the finder fits the test terminal")
 }
 
+/// The layout of the open target picker of `kind`, sized from the same zoom
+/// and split the renderer reads, so a test rect matches the painted one.
+pub(crate) fn picker_layout(
+    h: &TestHarness,
+    kind: ModalKind,
+) -> crate::render::picker::PickerLayout {
+    crate::render::picker::target_picker_layout(
+        h.stoat.size(),
+        modal_zoom_steps(&h.stoat.modal_zoom, kind),
+        modal_split_percent(&h.stoat.modal_split, kind),
+    )
+    .expect("picker laid out")
+}
+
+/// The list rows of the open target picker of `kind`.
+pub(crate) fn target_picker_rows(h: &TestHarness, kind: ModalKind) -> Rect {
+    picker_layout(h, kind).list
+}
+
 /// Drain every APC batch currently queued on `rx` into one decoded command
 /// list. A plain editor pane fills its pages asynchronously, so one
 /// `emit_smooth_scroll` pushes the region/scroll batch plus a fill batch per
