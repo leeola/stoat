@@ -497,6 +497,15 @@ const STATUS_MESSAGE_TTL: std::time::Duration = std::time::Duration::from_secs(4
 /// from the nearest line.
 const SESSION_SNAPSHOT_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long a root found in no repository waits before an event looks for one
+/// again.
+///
+/// Nothing watches a root outside a repository. A repository that `git init`
+/// makes under a running session's root therefore reaches the `git` keymap
+/// predicate only through a look. The wait bounds the ancestor walk of a look
+/// to one per interval while the reader types outside a repository.
+const REPO_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
 /// Shortest gap between two wheel notches that both run a keymap binding.
 ///
 /// A trackpad flick emits a stream of per-line reports far faster than this,
@@ -4469,13 +4478,18 @@ impl Stoat {
     }
 
     /// Resolves [`Workspace::repo_root`] again when the active workspace's root
-    /// moved since the last resolution.
+    /// moved since the last resolution, or when a miss is [`REPO_RETRY`] old.
     ///
-    /// [`Self::update`] runs it for each event, and an unchanged root costs one
-    /// path comparison.
+    /// [`Self::update`] runs it for each event. An unchanged root inside a
+    /// repository costs one path comparison.
     fn sync_repo_root(&mut self) {
         let ws = self.active_workspace();
-        if ws.repo_root_for.as_deref() == Some(ws.git_root.as_path()) {
+        let resolved = ws.repo_root_for.as_deref() == Some(ws.git_root.as_path());
+        let fresh = ws.repo_root.is_some()
+            || ws
+                .repo_root_at
+                .is_some_and(|at| self.executor.now().duration_since(at) < REPO_RETRY);
+        if resolved && fresh {
             return;
         }
         self.resolve_repo_root();
@@ -4485,7 +4499,8 @@ impl Stoat {
     /// workspace's root as [`Workspace::repo_root`], and returns it.
     ///
     /// `None` when the root is in no repository. Either way the root counts as
-    /// resolved, so [`Self::sync_repo_root`] skips it until it moves.
+    /// resolved. [`Self::sync_repo_root`] skips it until it moves, or for a miss
+    /// until [`REPO_RETRY`] passes.
     fn resolve_repo_root(&mut self) -> Option<PathBuf> {
         let root = self.active_workspace().git_root.clone();
         let tree = self
@@ -4493,9 +4508,11 @@ impl Stoat {
             .discover(&root)
             .map(|repo| repo_tree_root(&root, repo.workdir().as_deref()));
 
+        let now = self.executor.now();
         let ws = self.active_workspace_mut();
         ws.repo_root = tree.clone();
         ws.repo_root_for = Some(root);
+        ws.repo_root_at = Some(now);
         tree
     }
 

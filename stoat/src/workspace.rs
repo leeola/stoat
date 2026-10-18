@@ -174,6 +174,13 @@ pub struct Workspace {
     /// `repo_root` again. The `git` keymap predicate reads `repo_root`, so it
     /// follows a root that was assigned without a resolution.
     pub(crate) repo_root_for: Option<PathBuf>,
+    /// The executor instant of the last resolution of [`Self::repo_root`], or
+    /// `None` before the first one.
+    ///
+    /// A miss older than the retry interval resolves again on the next input
+    /// event, so a repository made under the root after the miss still binds
+    /// the git keys.
+    pub(crate) repo_root_at: Option<Instant>,
     /// The workspace's resolved project environment, loaded from direnv.
     pub(crate) env: crate::project_env::WorkspaceEnv,
     /// Whether the background diff-cache warm has run for this workspace's
@@ -487,6 +494,7 @@ impl Workspace {
             last_active: executor.system_now(),
             repo_root: None,
             repo_root_for: None,
+            repo_root_at: None,
             env: crate::project_env::WorkspaceEnv::default(),
             diff_warmed: false,
             restored_in_background: false,

@@ -13,6 +13,7 @@ use crate::{
     host::{FsEventKind, LspNotification},
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
+    keymap::KeymapState,
     render::{
         content_lane, hints::HintRow, pane::pane_areas, review::DiffDials, status_lane,
         walkthrough::Spotlight,
@@ -2308,6 +2309,27 @@ fn the_repository_root_keeps_the_workspace_roots_spelling() {
         .map(|&(_, _, tree)| PathBuf::from(tree))
         .collect();
     assert_eq!(roots, expected);
+}
+
+#[test]
+fn a_repository_made_under_the_root_binds_git_after_the_retry() {
+    let mut h = Stoat::test();
+    let git = |h: &crate::test_harness::TestHarness| {
+        StoatKeymapState::from_stoat(&h.stoat).get("git").cloned()
+    };
+    let root = h.stoat.active_workspace().git_root.clone();
+    h.fake_git().add_repo(root);
+
+    h.type_keys("escape");
+    let at_once = git(&h);
+
+    h.advance_clock(REPO_RETRY);
+    h.type_keys("escape");
+    assert_eq!(
+        [at_once, git(&h)],
+        [false, true].map(|on| Some(StateValue::Bool(on))),
+        "the harness looked before the repository existed, and a key after the retry finds it",
+    );
 }
 
 #[test]
