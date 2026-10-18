@@ -343,6 +343,8 @@ mod tests {
             Some("a\nB\nc\nD\ne\nF\ng\n"),
             Some("a\nX\nc\nY\ne\nZ\ng\n"),
         );
+        // The harness resolved its root before the repository was seeded.
+        h.stoat.watch_active_root();
     }
 
     /// Seed three conflicted files, each a single chunk, so a count of two from

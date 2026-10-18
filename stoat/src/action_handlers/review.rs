@@ -4169,6 +4169,10 @@ mod tests {
     fn space_capital_g_s_stages_the_hunk_from_a_plain_editor() {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 2);
+        // The stage keys bind once the diff holds a hunk, as it does a moment
+        // after a file opens.
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        h.settle_diff_map(buffer_id);
 
         h.type_keys("space G s");
 
@@ -4193,6 +4197,8 @@ mod tests {
         let workdir = PathBuf::from("/work");
         h.stage_index_scenario(&workdir, &[("a.rs", SHIFT_HEAD, index, SHIFT_BUFFER)]);
         h.open_file(&workdir.join("a.rs"));
+        let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        h.settle_diff_map(buffer_id);
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 7);
         h.type_keys(keys);

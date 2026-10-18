@@ -1207,6 +1207,14 @@ mod tests {
             self.values.insert(key.to_string(), val);
             self
         }
+
+        /// A state in `mode` with the workspace root inside a git repository,
+        /// where the default config binds its git arms.
+        fn in_repo(mode: &str) -> Self {
+            Self::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("git", StateValue::Bool(true))
+        }
     }
 
     impl KeymapState for TestState {
@@ -2334,9 +2342,9 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
-        let git = TestState::new().set("mode", StateValue::String("space_git".into()));
-        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+        let goto = TestState::in_repo("space_goto");
+        let git = TestState::in_repo("space_git");
+        let normal = TestState::in_repo("normal");
         let bound = |state: &TestState, button| {
             keymap
                 .lookup_side_button(state, button, KeyModifiers::NONE)
@@ -2605,7 +2613,7 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let space = TestState::in_repo("space");
         let to_review = keymap
             .lookup(&space, &key_event(KeyCode::Char('R'), KeyModifiers::NONE))
             .expect("R is bound in space mode");
@@ -2615,7 +2623,7 @@ mod tests {
             "space R reaches the mode itself, with no one-shot layer between",
         );
 
-        let review = TestState::new().set("mode", StateValue::String("review".into()));
+        let review = TestState::in_repo("review");
         let pressed =
             |key| action_names(keymap.lookup(&review, &key_event(key, KeyModifiers::NONE)));
         assert_eq!(
@@ -2649,7 +2657,7 @@ mod tests {
     fn the_review_mode_walks_from_the_side_buttons_and_alt_wheel() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let review = TestState::new().set("mode", StateValue::String("review".into()));
+        let review = TestState::in_repo("review");
         let button =
             |button| action_names(keymap.lookup_side_button(&review, button, KeyModifiers::NONE));
         let notch = |dir| action_names(keymap.lookup_wheel(&review, dir, KeyModifiers::ALT));
@@ -3298,7 +3306,7 @@ mod tests {
         assert_eq!(to_git[0].name, "SetMode");
         assert_eq!(to_git[0].args[0].value, Value::Ident("space_git".into()));
 
-        let space_git = TestState::new().set("mode", StateValue::String("space_git".into()));
+        let space_git = TestState::in_repo("space_git").set("changes", StateValue::Bool(true));
         let g = keymap
             .lookup(
                 &space_git,
@@ -3374,7 +3382,7 @@ mod tests {
         assert_eq!(to_goto[0].name, "SetMode");
         assert_eq!(to_goto[0].args[0].value, Value::Ident("space_goto".into()));
 
-        let space_goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
+        let space_goto = TestState::in_repo("space_goto");
         let g = keymap
             .lookup(
                 &space_goto,
@@ -3489,7 +3497,7 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let space_git = TestState::new().set("mode", StateValue::String("space_git".into()));
+        let space_git = TestState::in_repo("space_git");
         for (key, action) in [('f', "FollowChanges"), ('R', "LiveReload")] {
             let bound = keymap
                 .lookup(

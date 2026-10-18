@@ -2313,6 +2313,49 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The text of each row the `space G` box lists.
+    fn git_chord_rows(h: &mut TestHarness) -> Vec<String> {
+        h.type_keys("space G");
+        h.render_composited();
+        let rows = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the git chord laid out its box")
+            .rows
+            .iter()
+            .map(|row| row.action.clone())
+            .collect();
+        h.type_keys("escape");
+        rows
+    }
+
+    #[test]
+    fn the_git_chord_box_lists_git_rows_only_inside_a_repository() {
+        let mut h = TestHarness::with_size(150, 50);
+        let scratch = git_chord_rows(&mut h);
+
+        h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
+        h.type_keys("escape");
+        let staged = git_chord_rows(&mut h);
+
+        let listed = |rows: &[String], names: &[&str]| -> Vec<bool> {
+            names
+                .iter()
+                .map(|name| rows.iter().any(|row| row == short_desc(name)))
+                .collect()
+        };
+        assert_eq!(
+            (
+                listed(&scratch, &["ReloadAll", "LiveReload", "ChangeWalkWrap"]),
+                listed(&scratch, &["GitLs", "ToggleStageHunk", "GotoNextChange"]),
+                listed(&staged, &["GitLs"]),
+            ),
+            (vec![true; 3], vec![false; 3], vec![true]),
+            "a scratch root lists only the ungated rows, and a repository brings GitLs back",
+        );
+    }
+
     #[test]
     fn space_lsp_box_shows_all_rows_without_an_index() {
         let mut h = TestHarness::with_size(150, 50);

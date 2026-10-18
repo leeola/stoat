@@ -4487,6 +4487,8 @@ fn the_git_chord_marks_its_toggles() {
     // snapshot does not show, so the glyph checks run on the fallback frame.
     let mut h = Stoat::test();
     h.stoat.stoatty = false;
+    // The follow toggle binds only inside a repository.
+    h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
     h.type_keys("space G");
     assert!(
         h.rendered_text().contains("f\u{25ab}  follow every change"),

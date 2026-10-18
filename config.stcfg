@@ -668,8 +668,15 @@ on key {
         Escape -> SetMode(normal);
         Space -> [AddNewlineBelow(), SetMode(normal)];
         D -> [GotoLastDiagnostic(), SetMode(normal)];
-        G -> [GotoLastChange(), SetMode(normal)];
-        g -> [GotoNextChange(), SetMode(normal)];
+
+        changes {
+            G -> [GotoLastChange(), SetMode(normal)];
+        }
+
+        git || changes {
+            g -> [GotoNextChange(), SetMode(normal)];
+        }
+
         p -> [GotoNextParagraph(), SetMode(normal)];
         d -> [GotoNextDiagnostic(), SetMode(normal)];
         f -> [GotoNextFunction(), SetMode(normal)];
@@ -684,8 +691,15 @@ on key {
         Escape -> SetMode(normal);
         Space -> [AddNewlineAbove(), SetMode(normal)];
         D -> [GotoFirstDiagnostic(), SetMode(normal)];
-        G -> [GotoFirstChange(), SetMode(normal)];
-        g -> [GotoPrevChange(), SetMode(normal)];
+
+        changes {
+            G -> [GotoFirstChange(), SetMode(normal)];
+        }
+
+        git || changes {
+            g -> [GotoPrevChange(), SetMode(normal)];
+        }
+
         p -> [GotoPrevParagraph(), SetMode(normal)];
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
         f -> [GotoPrevFunction(), SetMode(normal)];
@@ -703,8 +717,15 @@ on key {
         Escape -> SetMode(select);
         Space -> [AddNewlineBelow(), SetMode(select)];
         D -> [GotoLastDiagnostic(), SetMode(select)];
-        G -> [GotoLastChange(), SetMode(select)];
-        g -> [GotoNextChange(), SetMode(select)];
+
+        changes {
+            G -> [GotoLastChange(), SetMode(select)];
+        }
+
+        git || changes {
+            g -> [GotoNextChange(), SetMode(select)];
+        }
+
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
         d -> [GotoNextDiagnostic(), SetMode(select)];
         f -> [GotoNextFunction(), SetMode(select)];
@@ -719,8 +740,15 @@ on key {
         Escape -> SetMode(select);
         Space -> [AddNewlineAbove(), SetMode(select)];
         D -> [GotoFirstDiagnostic(), SetMode(select)];
-        G -> [GotoFirstChange(), SetMode(select)];
-        g -> [GotoPrevChange(), SetMode(select)];
+
+        changes {
+            G -> [GotoFirstChange(), SetMode(select)];
+        }
+
+        git || changes {
+            g -> [GotoPrevChange(), SetMode(select)];
+        }
+
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
         d -> [GotoPrevDiagnostic(), SetMode(select)];
         f -> [GotoPrevFunction(), SetMode(select)];
@@ -1204,8 +1232,12 @@ on key {
         g -> SetMode(space_goto);
         G -> SetMode(space_git);
         W -> SetMode(walkthrough);
-        R -> SetMode(review);
-        d -> [Diff(), SetMode(normal)];
+
+        git || changes {
+            R -> SetMode(review);
+            d -> [Diff(), SetMode(normal)];
+        }
+
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
@@ -1244,10 +1276,13 @@ on key {
         Escape -> SetMode(normal);
         g -> PinMode();
         a -> [GotoLastAccessed(), SetMode(normal)];
-        n -> [GotoNextChange(), SetMode(normal)];
-        p -> [GotoPrevChange(), SetMode(normal)];
-        MouseForward -> [GotoPrevChange(), SetMode(normal)];
-        MouseBack -> [GotoNextChange(), SetMode(normal)];
+
+        git || changes {
+            n -> [GotoNextChange(), SetMode(normal)];
+            p -> [GotoPrevChange(), SetMode(normal)];
+            MouseForward -> [GotoPrevChange(), SetMode(normal)];
+            MouseBack -> [GotoNextChange(), SetMode(normal)];
+        }
     }
     # The git chord. Only a binding changes the mode, never the action it runs,
     # so this chord releases after one key purely because each of its arms
@@ -1285,32 +1320,47 @@ on key {
     # a pinned chord walks changes from the mouse exactly as the keys do. The
     # forward button sits above the back button, so the upper button walks up
     # to the earlier change and the lower button walks down to the later one.
+    #
+    # The git arms bind only inside a repository, and the walk arms only with a
+    # change to reach.
     mode == space_git {
         Escape -> SetMode(normal);
         G -> PinMode();
-        d -> [Diff(), SetMode(normal)];
-        i -> [DiffAgainstIndex(), SetMode(normal)];
-        h -> [DiffAgainstHead(), SetMode(normal)];
-        b -> [DiffBaseToggle(), SetMode(normal)];
-        c -> [ChangeWalkWrap(), SetMode(normal)];
-        e -> [SetMode(normal), DiffBaseEdit()];
+
+        git || changes {
+            d -> [Diff(), SetMode(normal)];
+            n -> [GotoNextChange(), SetMode(normal)];
+            p -> [GotoPrevChange(), SetMode(normal)];
+            MouseForward -> [GotoPrevChange(), SetMode(normal)];
+            MouseBack -> [GotoNextChange(), SetMode(normal)];
+        }
+
+        git {
+            i -> [DiffAgainstIndex(), SetMode(normal)];
+            h -> [DiffAgainstHead(), SetMode(normal)];
+            b -> [DiffBaseToggle(), SetMode(normal)];
+            e -> [SetMode(normal), DiffBaseEdit()];
+            f -> [FollowChanges(), SetMode(normal)];
+            l -> GitLs();
+        }
+
+        git && changes {
+            s -> [ToggleStageHunk(), SetMode(normal)];
+            S -> [ToggleStageLine(), SetMode(normal)];
+        }
+
+        view == diff {
+            m -> [JumpToMoveSource(), SetMode(normal)];
+            M -> [JumpToMoveTarget(), SetMode(normal)];
+        }
 
         pair {
             D -> [SetMode(normal), DiffPair()];
         }
 
-        s -> [ToggleStageHunk(), SetMode(normal)];
-        S -> [ToggleStageLine(), SetMode(normal)];
-        n -> [GotoNextChange(), SetMode(normal)];
-        p -> [GotoPrevChange(), SetMode(normal)];
-        MouseForward -> [GotoPrevChange(), SetMode(normal)];
-        MouseBack -> [GotoNextChange(), SetMode(normal)];
+        c -> [ChangeWalkWrap(), SetMode(normal)];
         r -> [ReloadAll(), SetMode(normal)];
-        f -> [FollowChanges(), SetMode(normal)];
         R -> [LiveReload(), SetMode(normal)];
-        m -> [JumpToMoveSource(), SetMode(normal)];
-        M -> [JumpToMoveTarget(), SetMode(normal)];
-        l -> GitLs();
     }
     # Reading a tour is a run of steps rather than one, so `space W` holds this
     # mode instead of running a single arm. n and p walk the stops and a and A
@@ -1346,15 +1396,18 @@ on key {
     # what holds the mode, and Escape leaves it.
     mode == review {
         Escape -> SetMode(normal);
-        d -> Diff();
-        n -> GotoNextChange();
-        p -> GotoPrevChange();
         c -> ChangeWalkWrap();
         b -> DiffBaseToggle();
-        MouseBack -> DiffBack();
-        MouseForward -> DiffForward();
-        Alt-WheelDown -> GotoNextChange();
-        Alt-WheelUp -> GotoPrevChange();
+
+        git || changes {
+            d -> Diff();
+            n -> GotoNextChange();
+            p -> GotoPrevChange();
+            MouseBack -> DiffBack();
+            MouseForward -> DiffForward();
+            Alt-WheelDown -> GotoNextChange();
+            Alt-WheelUp -> GotoPrevChange();
+        }
     }
     mode == space_lsp {
         Escape -> SetMode(normal);
@@ -1398,8 +1451,11 @@ on key {
         !token_known || token == function {
             c -> [GotoCaller(), SetMode(normal)];
             C -> [GotoCallee(), SetMode(normal)];
-            u -> [GotoDiffCallerUp(), SetMode(normal)];
-            o -> [GotoDiffCalleeDown(), SetMode(normal)];
+
+            git {
+                u -> [GotoDiffCallerUp(), SetMode(normal)];
+                o -> [GotoDiffCalleeDown(), SetMode(normal)];
+            }
         }
     }
     mode == space_workspace {
