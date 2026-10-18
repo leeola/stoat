@@ -233,6 +233,11 @@ impl LanguageServerFeature {
     }
 }
 
+/// The editor's connection to one language server.
+///
+/// Every method but [`Self::capabilities`] has a default that answers the way a
+/// server with no features does, so an in-process server implements only the
+/// methods it serves.
 #[async_trait]
 pub trait LspHost: Send + Sync {
     /// Capabilities the server reported in its `InitializeResult`.
@@ -366,238 +371,6 @@ pub trait LspHost: Send + Sync {
     }
 
     // Lifecycle
-    async fn initialize(&self, root_uri: Option<Uri>) -> io::Result<InitializeResult>;
-    async fn shutdown(&self) -> io::Result<()>;
-
-    // Document sync
-    async fn did_open(&self, params: DidOpenTextDocumentParams) -> io::Result<()>;
-    async fn did_change(&self, params: DidChangeTextDocumentParams) -> io::Result<()>;
-    async fn did_save(&self, params: DidSaveTextDocumentParams) -> io::Result<()>;
-    async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()>;
-    async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()>;
-    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams)
-        -> io::Result<()>;
-    async fn did_change_configuration(
-        &self,
-        params: DidChangeConfigurationParams,
-    ) -> io::Result<()>;
-    async fn did_change_workspace_folders(
-        &self,
-        params: DidChangeWorkspaceFoldersParams,
-    ) -> io::Result<()>;
-
-    // Navigation
-    async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>>;
-    async fn goto_definition(
-        &self,
-        params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>>;
-    async fn goto_declaration(
-        &self,
-        params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>>;
-    async fn goto_type_definition(
-        &self,
-        params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>>;
-    async fn goto_implementation(
-        &self,
-        params: GotoDefinitionParams,
-    ) -> io::Result<Option<GotoDefinitionResponse>>;
-    async fn references(&self, params: ReferenceParams) -> io::Result<Option<Vec<Location>>>;
-    async fn document_highlight(
-        &self,
-        params: DocumentHighlightParams,
-    ) -> io::Result<Option<Vec<DocumentHighlight>>>;
-
-    // Completion
-    async fn completion(&self, params: CompletionParams) -> io::Result<Option<CompletionResponse>>;
-    async fn completion_resolve(&self, item: CompletionItem) -> io::Result<CompletionItem>;
-
-    // Code intelligence
-    async fn code_action(
-        &self,
-        params: CodeActionParams,
-    ) -> io::Result<Option<Vec<CodeActionOrCommand>>>;
-    async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction>;
-    async fn document_link(
-        &self,
-        params: DocumentLinkParams,
-    ) -> io::Result<Option<Vec<DocumentLink>>>;
-    async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink>;
-    async fn document_color(
-        &self,
-        params: DocumentColorParams,
-    ) -> io::Result<Option<Vec<ColorInformation>>>;
-    async fn color_presentation(
-        &self,
-        params: ColorPresentationParams,
-    ) -> io::Result<Option<Vec<ColorPresentation>>>;
-    async fn semantic_tokens_full(
-        &self,
-        params: SemanticTokensParams,
-    ) -> io::Result<Option<SemanticTokensResult>>;
-    /// The tokens that changed since the result named by
-    /// `params.previous_result_id`, for a server advertising `full.delta`.
-    ///
-    /// A server may answer with the whole set instead, which the reply's variant
-    /// says, so a caller has to handle both. Only worth asking when a previous
-    /// result id is in hand, since a delta against nothing is a full pull with
-    /// extra steps.
-    async fn semantic_tokens_full_delta(
-        &self,
-        params: SemanticTokensDeltaParams,
-    ) -> io::Result<Option<SemanticTokensFullDeltaResult>>;
-    async fn semantic_tokens_range(
-        &self,
-        params: SemanticTokensRangeParams,
-    ) -> io::Result<Option<SemanticTokensRangeResult>>;
-    async fn prepare_call_hierarchy(
-        &self,
-        params: CallHierarchyPrepareParams,
-    ) -> io::Result<Option<Vec<CallHierarchyItem>>>;
-    async fn call_hierarchy_incoming_calls(
-        &self,
-        params: CallHierarchyIncomingCallsParams,
-    ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>>;
-    async fn call_hierarchy_outgoing_calls(
-        &self,
-        params: CallHierarchyOutgoingCallsParams,
-    ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>>;
-    async fn prepare_type_hierarchy(
-        &self,
-        params: TypeHierarchyPrepareParams,
-    ) -> io::Result<Option<Vec<TypeHierarchyItem>>>;
-    async fn type_hierarchy_supertypes(
-        &self,
-        params: TypeHierarchySupertypesParams,
-    ) -> io::Result<Option<Vec<TypeHierarchyItem>>>;
-    async fn type_hierarchy_subtypes(
-        &self,
-        params: TypeHierarchySubtypesParams,
-    ) -> io::Result<Option<Vec<TypeHierarchyItem>>>;
-    async fn document_symbol(
-        &self,
-        params: DocumentSymbolParams,
-    ) -> io::Result<Option<DocumentSymbolResponse>>;
-    async fn document_diagnostic(
-        &self,
-        params: DocumentDiagnosticParams,
-    ) -> io::Result<Option<DocumentDiagnosticReportResult>>;
-    async fn folding_range(
-        &self,
-        params: FoldingRangeParams,
-    ) -> io::Result<Option<Vec<FoldingRange>>>;
-    async fn selection_range(
-        &self,
-        params: SelectionRangeParams,
-    ) -> io::Result<Option<Vec<SelectionRange>>>;
-    async fn workspace_symbol(
-        &self,
-        params: WorkspaceSymbolParams,
-    ) -> io::Result<Option<WorkspaceSymbolResponse>>;
-    async fn signature_help(
-        &self,
-        params: SignatureHelpParams,
-    ) -> io::Result<Option<SignatureHelp>>;
-    /// `textDocument/inlayHint` request for an arbitrary range
-    /// (typically the full document). Use [`Self::range_inlay_hint`]
-    /// when the range is the editor's current viewport, so the server
-    /// load is bounded to visible rows; the LSP wire method is the
-    /// same in both cases.
-    async fn inlay_hint(&self, params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>>;
-    async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint>;
-
-    /// Viewport-bounded variant of [`Self::inlay_hint`]. The LSP
-    /// wire method (`textDocument/inlayHint`) is identical, but the
-    /// range carried in `params` is the editor's currently visible
-    /// region. Splitting the trait surface lets callers signal load-
-    /// bounding intent and lets test fakes program separate
-    /// responses for full-document and viewport requests.
-    async fn range_inlay_hint(&self, params: InlayHintParams)
-        -> io::Result<Option<Vec<InlayHint>>>;
-
-    // Editing
-    async fn prepare_rename(
-        &self,
-        params: TextDocumentPositionParams,
-    ) -> io::Result<Option<PrepareRenameResponse>>;
-    async fn rename(&self, params: RenameParams) -> io::Result<Option<WorkspaceEdit>>;
-    async fn formatting(
-        &self,
-        params: DocumentFormattingParams,
-    ) -> io::Result<Option<Vec<TextEdit>>>;
-    async fn range_formatting(
-        &self,
-        params: DocumentRangeFormattingParams,
-    ) -> io::Result<Option<Vec<TextEdit>>>;
-    async fn will_rename(&self, params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>>;
-    async fn execute_command(&self, params: ExecuteCommandParams) -> io::Result<Option<Value>>;
-
-    // Server-pushed notifications
-
-    /// Wait for the next server-pushed notification. Returns `None`
-    /// when the underlying channel is closed (server gone, no further
-    /// notifications possible). Use [`Self::try_recv_notification`]
-    /// for a non-blocking peek.
-    async fn recv_notification(&self) -> Option<LspNotification>;
-
-    /// Non-blocking variant of [`Self::recv_notification`]. Returns
-    /// `None` immediately when no notification is queued or the
-    /// channel is closed.
-    async fn try_recv_notification(&self) -> Option<LspNotification>;
-
-    // Server-initiated requests
-
-    /// Wait for the next server-initiated [`IncomingRequest`]. Each
-    /// returned request *must* be answered with [`Self::reply`]
-    /// quoting the same id; the server blocks until a response
-    /// arrives. Distinct channel from [`Self::recv_notification`]
-    /// because notifications and requests are different LSP message
-    /// types. `None` means the channel is closed (server gone, no
-    /// further requests possible).
-    async fn recv_incoming_request(&self) -> Option<IncomingRequest>;
-
-    /// Non-blocking variant of [`Self::recv_incoming_request`].
-    /// Returns `None` immediately when no request is queued or the
-    /// channel is closed.
-    async fn try_recv_incoming_request(&self) -> Option<IncomingRequest>;
-
-    /// Send the response for an [`IncomingRequest`]. `id` echoes the
-    /// id from the request so the server can correlate; `result` is
-    /// `Ok(value)` for success or `Err(error)` for an error envelope.
-    /// The caller is responsible for serializing typed responses
-    /// (`serde_json::to_value`); the trait stays method-agnostic so
-    /// new request methods do not require a new trait method per
-    /// type.
-    async fn reply(
-        &self,
-        id: NumberOrString,
-        result: Result<Value, LspResponseError>,
-    ) -> io::Result<()>;
-}
-
-/// Default [`LspHost`] used when no language server is configured.
-/// Every method returns the empty / no-op success response so action
-/// handlers can call into the host unconditionally without branching
-/// on "is a real server installed". Replaced by `LocalLsp` once the
-/// production stdio transport lands; the test harness installs
-/// [`crate::host::FakeLsp`] in its place.
-pub struct NoopLsp;
-
-static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
-    LazyLock::new(|| Arc::new(ServerCapabilities::default()));
-
-#[async_trait]
-impl LspHost for NoopLsp {
-    fn capabilities(&self) -> Arc<ServerCapabilities> {
-        NOOP_CAPABILITIES.clone()
-    }
-
-    fn is_noop(&self) -> bool {
-        true
-    }
-
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities::default(),
@@ -609,6 +382,7 @@ impl LspHost for NoopLsp {
         Ok(())
     }
 
+    // Document sync
     async fn did_open(&self, _params: DidOpenTextDocumentParams) -> io::Result<()> {
         Ok(())
     }
@@ -650,6 +424,7 @@ impl LspHost for NoopLsp {
         Ok(())
     }
 
+    // Navigation
     async fn hover(&self, _params: HoverParams) -> io::Result<Option<Hover>> {
         Ok(None)
     }
@@ -693,6 +468,7 @@ impl LspHost for NoopLsp {
         Ok(None)
     }
 
+    // Completion
     async fn completion(
         &self,
         _params: CompletionParams,
@@ -704,6 +480,7 @@ impl LspHost for NoopLsp {
         Ok(item)
     }
 
+    // Code intelligence
     async fn code_action(
         &self,
         _params: CodeActionParams,
@@ -747,6 +524,13 @@ impl LspHost for NoopLsp {
         Ok(None)
     }
 
+    /// The tokens that changed since the result that the request's
+    /// `previous_result_id` names, for a server advertising `full.delta`.
+    ///
+    /// A server may answer with the whole set instead, which the reply's variant
+    /// says, so a caller has to handle both. Only worth asking when a previous
+    /// result id is in hand, since a delta against nothing is a full pull with
+    /// extra steps.
     async fn semantic_tokens_full_delta(
         &self,
         _params: SemanticTokensDeltaParams,
@@ -845,6 +629,11 @@ impl LspHost for NoopLsp {
         Ok(None)
     }
 
+    /// `textDocument/inlayHint` request for an arbitrary range
+    /// (typically the full document). Use [`Self::range_inlay_hint`]
+    /// when the range is the editor's current viewport, so the server
+    /// load is bounded to visible rows; the LSP wire method is the
+    /// same in both cases.
     async fn inlay_hint(&self, _params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>> {
         Ok(None)
     }
@@ -853,6 +642,12 @@ impl LspHost for NoopLsp {
         Ok(hint)
     }
 
+    /// Viewport-bounded variant of [`Self::inlay_hint`]. The LSP
+    /// wire method (`textDocument/inlayHint`) is identical, but the
+    /// request's range is the editor's currently visible
+    /// region. Splitting the trait surface lets callers signal load-
+    /// bounding intent and lets test fakes program separate
+    /// responses for full-document and viewport requests.
     async fn range_inlay_hint(
         &self,
         _params: InlayHintParams,
@@ -860,6 +655,7 @@ impl LspHost for NoopLsp {
         Ok(None)
     }
 
+    // Editing
     async fn prepare_rename(
         &self,
         _params: TextDocumentPositionParams,
@@ -893,27 +689,78 @@ impl LspHost for NoopLsp {
         Ok(None)
     }
 
+    // Server-pushed notifications
+
+    /// Wait for the next server-pushed notification. Returns `None`
+    /// when the underlying channel is closed (server gone, no further
+    /// notifications possible). Use [`Self::try_recv_notification`]
+    /// for a non-blocking peek.
     async fn recv_notification(&self) -> Option<LspNotification> {
         None
     }
 
+    /// Non-blocking variant of [`Self::recv_notification`]. Returns
+    /// `None` immediately when no notification is queued or the
+    /// channel is closed.
     async fn try_recv_notification(&self) -> Option<LspNotification> {
         None
     }
 
+    // Server-initiated requests
+
+    /// Wait for the next server-initiated [`IncomingRequest`]. Each
+    /// returned request *must* be answered with [`Self::reply`]
+    /// quoting the same id; the server blocks until a response
+    /// arrives. Distinct channel from [`Self::recv_notification`]
+    /// because notifications and requests are different LSP message
+    /// types. `None` means the channel is closed (server gone, no
+    /// further requests possible).
     async fn recv_incoming_request(&self) -> Option<IncomingRequest> {
         None
     }
 
+    /// Non-blocking variant of [`Self::recv_incoming_request`].
+    /// Returns `None` immediately when no request is queued or the
+    /// channel is closed.
     async fn try_recv_incoming_request(&self) -> Option<IncomingRequest> {
         None
     }
 
+    /// Send the response for an [`IncomingRequest`].
+    ///
+    /// The response quotes the request's id, which the server matches it
+    /// by, and carries `Ok(value)` for success or `Err(error)` for an
+    /// error envelope.
+    /// The caller is responsible for serializing typed responses
+    /// (`serde_json::to_value`); the trait stays method-agnostic so
+    /// new request methods do not require a new trait method per
+    /// type.
     async fn reply(
         &self,
         _id: NumberOrString,
         _result: Result<Value, LspResponseError>,
     ) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// The [`LspHost`] installed when no language server is configured.
+///
+/// It answers every method with the trait's defaults, so an action handler
+/// calls into the host whether or not a real server is there. A spawned server
+/// replaces it, and the test harness installs [`crate::host::FakeLsp`] in its
+/// place.
+pub struct NoopLsp;
+
+static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
+    LazyLock::new(|| Arc::new(ServerCapabilities::default()));
+
+impl LspHost for NoopLsp {
+    fn capabilities(&self) -> Arc<ServerCapabilities> {
+        NOOP_CAPABILITIES.clone()
+    }
+
+    fn is_noop(&self) -> bool {
+        true
     }
 }
