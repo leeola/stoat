@@ -189,7 +189,8 @@ fn fixture_harness(name: &str) -> (TempDir, PathBuf, LiveHarness) {
 /// player says so in the status line rather than by failing.
 #[test]
 fn walkthrough_fixture_plays_its_whole_tour() {
-    let (_dir, _root, mut harness) = fixture_harness("walkthrough");
+    let (_dir, _root, harness) = fixture_harness("walkthrough");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     harness.run(|mut handle| async move {
         handle
             .send_keys(":walkthrough tour<Enter>")
@@ -249,10 +250,9 @@ fn walkthrough_fixture_plays_its_whole_tour() {
                 .await
                 .unwrap_or_else(|_| panic!("annotation {at} of 5 is reached"));
         }
-        // Read off the status line rather than the buffer. The mode's key-hint
-        // overlay covers most of the width, so the annotated line itself is
-        // truncated on screen while the status still names both the file the
-        // jump opened and which annotation it landed on.
+        // Read off the status line rather than the buffer. The status names both
+        // the file the jump opened and which annotation it landed on, which the
+        // annotated line's own text does not.
         let frame = handle
             .await_frame(
                 |text| text.contains("src/server.rs") && text.contains("a11 5/5"),
