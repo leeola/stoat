@@ -2157,8 +2157,7 @@ pub struct Stoat {
     /// debounce timer or downstream LSP request can land. Polled by
     /// [`crate::completion::request::pump`] each render tick, which resolves
     /// its outcome against [`Self::pending_completion`].
-    pub(crate) pending_completion_request:
-        Option<stoat_scheduler::Task<crate::completion::request::RequestOutcome>>,
+    pub(crate) pending_completion_request: Pending<crate::completion::request::RequestOutcome>,
 
     /// The question an in-flight narrow was armed with.
     ///
@@ -2810,7 +2809,7 @@ impl Stoat {
             quit_requested: false,
             pending_completion: None,
             completion_generation: 0,
-            pending_completion_request: None,
+            pending_completion_request: Pending::default(),
             pending_narrow: None,
             pending_completion_resolve: None,
             pending_completion_accept: StampedPending::default(),

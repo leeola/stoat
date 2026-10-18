@@ -126,7 +126,7 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         None
     };
 
-    stoat.pending_completion_request = None;
+    stoat.pending_completion_request.clear();
     crate::completion::request::record_dismiss(stoat);
     stoat.active_snippet = active_snippet;
 
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "foobar");
         assert_eq!(cursor_offset(&mut h), 6);
         assert!(h.stoat.pending_completion.is_none());
-        assert!(h.stoat.pending_completion_request.is_none());
+        assert!(!h.stoat.pending_completion_request.is_pending());
     }
 
     #[test]

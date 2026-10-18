@@ -43,12 +43,9 @@ use lsp_types::{
     WorkDoneProgressParams,
 };
 use std::{
-    future::Future,
     ops::Range,
     path::{Path, PathBuf},
-    pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
     time::Duration,
 };
 use stoat_scheduler::Task;
@@ -164,7 +161,7 @@ pub(crate) fn record_dismiss(stoat: &mut Stoat) {
 /// popup.
 pub(crate) fn trigger(stoat: &mut Stoat) {
     if !insert_mode_in_editor_pane(stoat) {
-        stoat.pending_completion_request = None;
+        stoat.pending_completion_request.clear();
         stoat.pending_completion = None;
         stoat.last_completion_signature = None;
         stoat.active_snippet = None;
@@ -245,7 +242,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
                 }
             },
             Refine::Done(popup) => {
-                stoat.pending_completion_request = None;
+                stoat.pending_completion_request.clear();
                 install_popup(stoat, popup);
                 return;
             },
@@ -268,7 +265,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         sources.insert(at, CompletionSource::Lsp);
     }
     if sources.is_empty() {
-        stoat.pending_completion_request = None;
+        stoat.pending_completion_request.clear();
         stoat.pending_completion = None;
         return;
     }
@@ -314,7 +311,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         is_trigger_char,
         pending_change,
     ));
-    stoat.pending_completion_request = Some(task);
+    stoat.pending_completion_request.arm(task);
 }
 
 /// Whether the cursor has left the span `popup` was filtered for.
@@ -505,7 +502,7 @@ fn arm_narrow(stoat: &mut Stoat, owned: &ContextOwned) {
             generation,
         }
     });
-    stoat.pending_completion_request = Some(task);
+    stoat.pending_completion_request.arm(task);
     stoat.pending_narrow = Some(NarrowRequest {
         prefix,
         prefix_range,
@@ -624,7 +621,7 @@ fn ask_again(
         });
         let (items, matches) = narrowed.unwrap_or_else(|| (Arc::from([]), Vec::new()));
 
-        stoat.pending_completion_request = None;
+        stoat.pending_completion_request.clear();
         install_popup(
             stoat,
             CompletionPopup {
@@ -723,7 +720,7 @@ fn ask_again(
             generation,
         })
     });
-    stoat.pending_completion_request = Some(task);
+    stoat.pending_completion_request.arm(task);
 }
 
 /// Install `popup` as the current one, or clear the popup when it came out
@@ -858,7 +855,7 @@ pub(crate) fn settle_pending_narrow(stoat: &mut Stoat) {
 
     // The armed task answers the same question, so its answer is redundant now
     // and its generation stamp no longer matches whatever installs below.
-    stoat.pending_completion_request = None;
+    stoat.pending_completion_request.clear();
 
     install_popup(
         stoat,
@@ -900,18 +897,10 @@ fn resolve_outcome(stoat: &mut Stoat, outcome: RequestOutcome) -> bool {
 /// the popup state changed, mirroring the convention used by the
 /// other LSP pumps so the render loop can drive both for free.
 pub(crate) fn pump(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_completion_request.take() else {
+    let Some(outcome) = stoat.pending_completion_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(outcome) => resolve_outcome(stoat, outcome),
-        Poll::Pending => {
-            stoat.pending_completion_request = Some(task);
-            false
-        },
-    }
+    resolve_outcome(stoat, outcome)
 }
 
 struct EditorSnapshot {
@@ -1970,7 +1959,7 @@ mod harness_tests {
         h.type_keys("escape escape");
         assert_eq!(h.stoat.focused_mode(), "normal");
         assert!(h.stoat.pending_completion.is_none());
-        assert!(h.stoat.pending_completion_request.is_none());
+        assert!(!h.stoat.pending_completion_request.is_pending());
         assert!(h.stoat.last_completion_signature.is_none());
     }
 
@@ -2020,7 +2009,7 @@ mod harness_tests {
             h.stoat.pending_completion.is_none(),
             "one escape closes the popup"
         );
-        assert!(h.stoat.pending_completion_request.is_none());
+        assert!(!h.stoat.pending_completion_request.is_pending());
         assert_eq!(
             h.stoat.focused_mode(),
             "normal",
@@ -2030,7 +2019,7 @@ mod harness_tests {
         h.type_keys("i");
         h.type_text("x");
         assert!(
-            h.stoat.pending_completion_request.is_some(),
+            h.stoat.pending_completion_request.is_pending(),
             "typing after re-entering insert arms a fresh request",
         );
     }
@@ -2494,7 +2483,7 @@ mod harness_tests {
 
         type_unrendered(&mut h, "b");
         assert!(
-            h.stoat.pending_completion_request.is_some(),
+            h.stoat.pending_completion_request.is_pending(),
             "the narrow is in flight",
         );
 
@@ -2532,7 +2521,7 @@ mod harness_tests {
 
         type_unrendered(&mut h, "bar");
         assert!(
-            h.stoat.pending_completion_request.is_some(),
+            h.stoat.pending_completion_request.is_pending(),
             "the narrow is in flight when Tab arrives",
         );
 
@@ -2796,7 +2785,7 @@ mod harness_tests {
         h.advance_clock(COMPLETION_DEBOUNCE);
         h.type_text("b");
         assert!(
-            h.stoat.pending_completion_request.is_some(),
+            h.stoat.pending_completion_request.is_pending(),
             "the re-ask is in flight when Tab arrives",
         );
 
