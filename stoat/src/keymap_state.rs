@@ -104,7 +104,9 @@ pub(crate) struct StoatKeymapState<'a> {
     has_selection: StateValue,
     /// Whether the focused buffer has unsaved edits.
     modified: StateValue,
-    /// Whether the focused buffer's diff holds at least one hunk.
+    /// Whether the focused buffer's diff holds at least one hunk, staged or
+    /// not. A hunk already in the index counts, so the stage toggle stays bound
+    /// to take it back out.
     changes: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one. Borrowed from the owning [`Stoat`];
@@ -347,7 +349,10 @@ pub(crate) fn focus_flags(
         .get(buffer_id)
         .and_then(|b| {
             let g = b.read().ok()?;
-            let changes = g.diff_map.as_ref().is_some_and(|map| !map.is_empty());
+            let changes = g
+                .diff_map
+                .as_ref()
+                .is_some_and(|map| map.staged_counts() != (0, 0));
             Some((g.dirty, changes))
         })
         .unwrap_or_default();
@@ -943,7 +948,7 @@ mod tests {
     use super::*;
     use crate::{
         app::DEFAULT_KEYMAP,
-        diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, StagedMark},
         run::RunId,
     };
     use std::{collections::HashSet, iter};
@@ -1075,21 +1080,9 @@ mod tests {
         );
     }
 
-    /// Store one hunk in the focused buffer's diff map, anchored as a diff job
-    /// leaves it.
-    fn install_one_hunk(h: &crate::test_harness::TestHarness) {
-        let hunk = DiffHunk {
-            status: DiffHunkStatus::Added,
-            unstaged_lines: iter::once(0..1).collect(),
-            marked_rows: Vec::new(),
-            buffer_start_line: 0,
-            buffer_line_range: 0..1,
-            base_byte_range: 0..0,
-            anchor_range: None,
-            token_detail: None,
-        };
-        let mut map = DiffMap::from_hunks([hunk], None);
-
+    /// Store `map` as the focused buffer's diff, anchored as a diff job leaves
+    /// it.
+    fn install_diff_map(h: &crate::test_harness::TestHarness, mut map: DiffMap) {
         let ws = h.stoat.active_workspace();
         let (_, buffer_id) = resolve_focus(ws).expect("an editor has the focus");
         let buffer = ws.buffers.get(buffer_id).expect("the focused buffer");
@@ -1108,11 +1101,29 @@ mod tests {
         };
         let scratch = changes(&h);
 
-        install_one_hunk(&h);
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Added,
+            unstaged_lines: iter::once(0..1).collect(),
+            marked_rows: Vec::new(),
+            buffer_start_line: 0,
+            buffer_line_range: 0..1,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        };
+        install_diff_map(&h, DiffMap::from_hunks([hunk], None));
+        let unstaged = changes(&h);
+
+        let mut staged = DiffMap::default();
+        staged.set_staged_marks(vec![StagedMark {
+            status: DiffHunkStatus::Added,
+            base_lines: 0..1,
+        }]);
+        install_diff_map(&h, staged);
         assert_eq!(
-            [scratch, changes(&h)],
-            [false, true].map(|on| Some(StateValue::Bool(on))),
-            "a scratch buffer, then one hunk in its diff",
+            [scratch, unstaged, changes(&h)],
+            [false, true, true].map(|on| Some(StateValue::Bool(on))),
+            "a scratch buffer, then an unstaged hunk, then a staged hunk alone",
         );
     }
 

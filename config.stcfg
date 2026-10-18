@@ -355,7 +355,8 @@ on init {
 #   diags          the focused buffer has published diagnostics
 #   has_selection  the newest selection is non-empty
 #   modified       the buffer has unsaved edits
-#   changes        the focused buffer's diff holds at least one hunk
+#   changes        the focused buffer's diff holds at least one hunk, staged
+#                  or not
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #
