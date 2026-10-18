@@ -33,18 +33,27 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "modified",
 ];
 
-/// The hand-set booleans a keymap state carries besides the derived
-/// `mode`/`pane`/`view`/`modal` predicates.
+/// The keymap predicate values that a [`Workspace`] alone decides.
 ///
-/// Passed to [`StoatKeymapState::with_flags`] so callers that cannot run the
-/// full [`StoatKeymapState::from_stoat`] derivation (e.g. while holding a
-/// workspace borrow) still set the fields they need without those predicates
-/// rippling through the signature.
+/// [`Self::from_workspace`] is their one derivation, so the hint box and the
+/// key dispatch agree on every value. The hint-overlay renderer holds a
+/// mutable workspace borrow while [`StoatKeymapState::from_stoat`] reads the
+/// whole [`Stoat`], so the renderer passes these to
+/// [`StoatKeymapState::with_flags`].
 #[derive(Default, Hash)]
 pub(crate) struct Flags {
     pub(crate) rebase_exec: bool,
     /// Whether the split panes hold a file pair. See [`Workspace::pair_panes`].
     pub(crate) pair: bool,
+}
+
+impl Flags {
+    pub(crate) fn from_workspace(ws: &Workspace) -> Self {
+        Self {
+            rebase_exec: ws.rebase_active.is_some(),
+            pair: ws.pair_panes().is_some(),
+        }
+    }
 }
 
 pub(crate) struct StoatKeymapState<'a> {
@@ -190,10 +199,7 @@ impl<'a> StoatKeymapState<'a> {
 
     pub(crate) fn from_stoat(stoat: &'a Stoat) -> Self {
         let ws = stoat.active_workspace();
-        let flags = Flags {
-            rebase_exec: ws.rebase_active.is_some(),
-            pair: ws.pair_panes().is_some(),
-        };
+        let flags = Flags::from_workspace(ws);
         Self {
             pane: pane_predicate(ws).map(|s| StateValue::String(s.into())),
             view: view_predicate(ws).map(|s| StateValue::String(s.into())),

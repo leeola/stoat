@@ -1649,13 +1649,7 @@ pub(crate) fn frame(
         // the auto-shown hint box would only stack an eleven-row overlay over
         // them. The guard above keeps it suppressed even when the `?` key-hints
         // toggle is on.
-        //
-        // `from_stoat` would take a whole `&Stoat`, but `ws` already holds a
-        // mutable borrow of the active workspace, so read the flags directly.
-        let flags = Flags {
-            rebase_exec: ws.rebase_active.is_some(),
-            pair: ws.pair_panes().is_some(),
-        };
+        let flags = Flags::from_workspace(ws);
         let pane = pane_predicate(ws);
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
