@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use stoatty_protocol::command::SketchShape;
 use stoatty_term::{
-    grid::{Grid, Panel, Sketch},
+    grid::{Grid, Panel, Rgb, Sketch},
     term::Damage,
 };
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
@@ -515,6 +515,16 @@ impl GridVersion {
 /// implies the instance count changed.
 pub(crate) fn upload_needed<T: PartialEq>(built: &[T], last: &[T]) -> bool {
     built != last
+}
+
+/// `color` with each channel scaled into `0.0..=1.0`, the form the passes
+/// upload to their shaders.
+pub(crate) fn rgb_f32(color: Rgb) -> [f32; 3] {
+    [
+        color.r as f32 / 255.0,
+        color.g as f32 / 255.0,
+        color.b as f32 / 255.0,
+    ]
 }
 
 /// Whether `globals` differs from the value last written to a uniform buffer, and

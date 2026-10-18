@@ -8,12 +8,12 @@
 //! grid it sits on, so bars track font zoom.
 
 use crate::render::{
-    globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
+    globals_offset, rgb_f32, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
     PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
-use stoatty_term::grid::{Bar, Rgb};
+use stoatty_term::grid::Bar;
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
@@ -530,14 +530,6 @@ fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
         color: rgb_f32(bar.color),
         seq: bar.seq,
     }));
-}
-
-fn rgb_f32(color: Rgb) -> [f32; 3] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-    ]
 }
 
 #[cfg(test)]

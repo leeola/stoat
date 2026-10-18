@@ -8,10 +8,10 @@
 //! This is the compositing layer for popovers and completion menus; the region
 //! is the box itself, with any text inside it drawn separately.
 
-use crate::render::CellMetrics;
+use crate::render::{rgb_f32, CellMetrics};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
-use stoatty_term::grid::{Grid, Overlay, Rgb};
+use stoatty_term::grid::{Grid, Overlay};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
@@ -298,14 +298,6 @@ fn build_overlay_instances_into(
             (overlay.offset[1] as f32 * scale_factor).round(),
         ],
     }));
-}
-
-fn rgb_f32(color: Rgb) -> [f32; 3] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-    ]
 }
 
 #[cfg(test)]

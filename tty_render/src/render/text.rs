@@ -11,8 +11,8 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        exposed_rows, globals_offset, globals_slot_index, row_len, row_uploads, CellMetrics,
-        CompositeSlot, CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder,
+        exposed_rows, globals_offset, globals_slot_index, rgb_f32, row_len, row_uploads,
+        CellMetrics, CompositeSlot, CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder,
         OccluderBuffer, PoolOccluders, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
         MAX_COMPOSITE_POOLS,
     },
@@ -4861,14 +4861,6 @@ fn pack_dim(dim: [f32; 2]) -> [u16; 2] {
             .clamp(0.0, u16::MAX as f32) as u16
     };
     [quantize(dim[0]), quantize(dim[1])]
-}
-
-fn rgb_f32(color: Rgb) -> [f32; 3] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-    ]
 }
 
 /// Scale a glyph's quad down into `box_size` and center it there, or leave it

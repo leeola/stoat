@@ -5,10 +5,10 @@
 //! z-order. Icons are not cell attributes: like overlays they float over the
 //! grid, so this pass runs after the overlays and alpha-blends its shapes on top.
 
-use crate::render::{CellMetrics, Occluder};
+use crate::render::{rgb_f32, CellMetrics, Occluder};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
-use stoatty_term::grid::{Icon, IconKind, Rgb};
+use stoatty_term::grid::{Icon, IconKind};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -376,14 +376,6 @@ fn kind_code(kind: IconKind) -> u32 {
         IconKind::Warning => KIND_WARNING,
         IconKind::Info => KIND_INFO,
     }
-}
-
-fn rgb_f32(color: Rgb) -> [f32; 3] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-    ]
 }
 
 #[cfg(test)]

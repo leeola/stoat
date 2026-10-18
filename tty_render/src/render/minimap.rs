@@ -10,7 +10,7 @@
 //! ([`minimap_top`], [`thumb_geometry`], [`build_strip`]) is unit-tested without a
 //! GPU.
 
-use crate::render::{CellMetrics, GridVersion, Occluder};
+use crate::render::{rgb_f32, CellMetrics, GridVersion, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Grid, LineSummary, Minimap, MinimapStrip, MinimapView, Rgb, Rgba};
 use wgpu::{
@@ -694,12 +694,8 @@ fn rgb_weighted_f32(color: Rgb, weight: u8) -> [f32; 4] {
 }
 
 fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-        1.0,
-    ]
+    let [r, g, b] = rgb_f32(color);
+    [r, g, b, 1.0]
 }
 
 #[cfg(test)]

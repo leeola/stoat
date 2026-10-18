@@ -9,11 +9,11 @@
 //! after the grid text. Glyph ink that reaches a cell edge would otherwise break
 //! the APC line it sits inside.
 
-use crate::render::{row_len, row_uploads, CellMetrics};
+use crate::render::{rgb_f32, row_len, row_uploads, CellMetrics};
 use bytemuck::{Pod, Zeroable};
 use std::{mem, ops::Range};
 use stoatty_term::{
-    grid::{Border, BorderStyle, Borders, Grid, Rgb},
+    grid::{Border, BorderStyle, Borders, Grid},
     term::Damage,
 };
 use wgpu::{
@@ -442,14 +442,6 @@ fn style_flag(style: BorderStyle) -> u32 {
         BorderStyle::Double => STYLE_DOUBLE,
         BorderStyle::Rounded => STYLE_ROUNDED,
     }
-}
-
-fn rgb_f32(color: Rgb) -> [f32; 3] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-    ]
 }
 
 #[cfg(test)]

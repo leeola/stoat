@@ -12,10 +12,10 @@
 //! edge would break the line around it. The stroke records after the text, and
 //! in a frame compositing pools after those composites too.
 
-use crate::render::{CellMetrics, HostRide};
+use crate::render::{rgb_f32, CellMetrics, HostRide};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
-use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
+use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -486,14 +486,6 @@ fn style_code(style: BorderStyle) -> u32 {
         BorderStyle::Double => 2,
         BorderStyle::Rounded => 3,
     }
-}
-
-fn rgb_f32(color: Rgb) -> [f32; 3] {
-    [
-        color.r as f32 / 255.0,
-        color.g as f32 / 255.0,
-        color.b as f32 / 255.0,
-    ]
 }
 
 #[cfg(test)]
