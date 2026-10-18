@@ -95,11 +95,17 @@ fn every_setter_moves_the_settings_generation() {
 
     let channel =
         super::highlights::BufferSemanticTokens::new(tokens.clone(), interner.clone(), |_| 0);
-    dm.set_semantic_token_channel(buffer_id, channel);
+    dm.set_semantic_token_channel(buffer_id, channel, true);
     assert_moved_once(&dm, &mut seen, "set_semantic_token_channel");
 
-    dm.set_lsp_token_channel(buffer_id, dm.batched_token_channel(tokens, interner));
+    dm.set_lsp_token_channel(
+        buffer_id,
+        dm.batched_token_channel(tokens, interner.clone()),
+    );
     assert_moved_once(&dm, &mut seen, "set_lsp_token_channel");
+
+    dm.swap_style_interner(&interner);
+    assert_moved_once(&dm, &mut seen, "swap_style_interner");
 
     dm.invalidate_semantic_highlights(buffer_id);
     assert_moved_once(&dm, &mut seen, "invalidate_semantic_highlights");
@@ -148,6 +154,23 @@ fn a_setter_handed_what_it_holds_moves_nothing() {
         dm.settings_generation, settled,
         "a second round of the same values changed nothing",
     );
+}
+
+/// A token install its caller marks as restyling nothing moves no
+/// generation, so a pane replays and an endpoint cache stays built across a
+/// parse that landed the tokens already on screen.
+#[test]
+fn an_install_that_restyles_nothing_moves_no_paint_version() {
+    let mut dm = create_display_map("alpha\nbeta\ngamma\n");
+    let (tokens, interner) = one_token(&dm);
+    let buffer_id = BufferId::new(0);
+    dm.set_semantic_token_highlights(buffer_id, tokens.clone(), interner.clone());
+    let before = dm.snapshot().paint_version();
+
+    let channel = super::highlights::BufferSemanticTokens::new(tokens, interner, |_| 0);
+    dm.set_semantic_token_channel(buffer_id, channel, false);
+
+    assert_eq!(dm.snapshot().paint_version(), before);
 }
 
 /// Two snapshots with nothing between them share a paint version.

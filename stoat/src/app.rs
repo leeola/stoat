@@ -55,7 +55,7 @@ use crate::{
     term_session::{TermId, TermLocation},
     theme_pool::{ThemePool, VscodeSource},
     ui::RenderFrame,
-    workspace::{BridgeWaiter, Workspace, WorkspaceId, WorkspaceUid},
+    workspace::{BridgeWaiter, ParseRestyle, Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
 };
 use crossterm::event::{
@@ -1211,6 +1211,13 @@ pub struct Stoat {
     /// did not change, so waking through [`Self::redraw_notify`] repaints every
     /// pane and re-emits every decoration stream for nothing.
     pub(crate) drain_notify: Arc<tokio::sync::Notify>,
+    /// The wake-up for a finished syntax parse.
+    ///
+    /// [`Self::run`] installs the landed tokens on it and paints only when they
+    /// restyle what a pane or a minimap strip shows. A keystroke inside a
+    /// comment parses to the tokens already on screen, and a wake through
+    /// [`Self::redraw_notify`] repaints every pane on the buffer for nothing.
+    pub(crate) parse_notify: Arc<tokio::sync::Notify>,
     /// Notified once to make [`Self::run`] quit at the next loop turn,
     /// regardless of editor state. The `--timeout` self-driver uses it to
     /// auto-close a scripted session after a fixed delay. A notification
@@ -2626,6 +2633,7 @@ impl Stoat {
             _index_build_task: None,
             redraw_notify,
             drain_notify,
+            parse_notify: Arc::new(tokio::sync::Notify::new()),
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             #[cfg(feature = "perf")]
             perf: crate::perf::PerfStats::default(),
@@ -4039,6 +4047,16 @@ impl Stoat {
                     }
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
+                // A parse landing has tokens to install and nothing to show for
+                // them unless they restyle what is on screen, so the frame is
+                // earned, as on the drain arm below.
+                _ = self.parse_notify.notified() => {
+                    if self.drive_parse_jobs() {
+                        UpdateEffect::Redraw
+                    } else {
+                        UpdateEffect::None
+                    }
+                }
                 // A drain wake has work to land and nothing to show for it
                 // unless the drain says otherwise, so the frame is earned
                 // rather than assumed.
@@ -8695,7 +8713,11 @@ impl Stoat {
     /// after the old one completes. Anchors in the result are computed using
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
-    fn drive_parse_jobs(&mut self) {
+    ///
+    /// Returns whether an installed parse earned a frame. It does when its
+    /// tokens restyled a row an editor shows, or any row of a buffer with a
+    /// minimap strip, since the strip shows the whole file.
+    fn drive_parse_jobs(&mut self) -> bool {
         let retention = self
             .settings
             .highlight_retention
@@ -8707,6 +8729,7 @@ impl Stoat {
                 executor,
                 syntax_styles,
                 redraw_notify,
+                parse_notify,
                 index_update_tx,
                 ..
             } = self;
@@ -8714,6 +8737,7 @@ impl Stoat {
                 executor,
                 syntax_styles,
                 redraw_notify,
+                parse_notify,
                 index_update_tx,
                 retention,
             )
@@ -8724,11 +8748,19 @@ impl Stoat {
         // no strip yet needs nothing, since a strip's initial build reads
         // whatever tokens are current by the time it runs.
         let ws_id = self.active_workspace;
-        for (buffer_id, rows) in installed {
-            if let Some(content) = self.minimap_content.get_mut(&(ws_id, buffer_id)) {
-                content.note_syntax_rows(rows);
+        let mut earned = false;
+        for landing in installed {
+            let strip = self.minimap_content.get_mut(&(ws_id, landing.buffer_id));
+            earned |= match landing.restyle {
+                ParseRestyle::Unchanged => false,
+                ParseRestyle::Offscreen => strip.is_some(),
+                ParseRestyle::Onscreen => true,
+            };
+            if let Some(content) = strip {
+                content.note_syntax_rows(landing.changed_rows);
             }
         }
+        earned
     }
 
     /// Populate the active workspace's visible git-tracked buffers' diff maps.

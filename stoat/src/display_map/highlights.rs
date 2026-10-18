@@ -764,8 +764,10 @@ impl RowHighlightCursor {
 /// `settings` is the display map's settings generation. The highlight setters
 /// install through `Arc::make_mut`, which allocates only while a second
 /// reference exists, so an install that finds none mutates in place and leaves
-/// every pointer equal to what the cache stored. The generation moves on each
-/// install whatever the refcount did.
+/// every pointer equal to what the cache stored. Every install moves the
+/// generation, whatever the refcount did, except a tree-sitter install that
+/// paints exactly what was installed. That one moves nothing, and the cache
+/// outlives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HighlightVersions {
     pub buffer: u64,
@@ -782,31 +784,51 @@ const MAX_PAD: usize = 16 * 1024;
 pub struct CachedHighlightEndpoints {
     pub(super) versions: HighlightVersions,
     text_ptr: usize,
-    semantic_ptr: Option<usize>,
     lsp_ptr: Option<usize>,
     /// The bytes the endpoints cover. They hold the range the endpoints were
     /// built for and, when a scroll built them, a pad past each end.
     range: Range<usize>,
     endpoints: Arc<HighlightEndpoints>,
+    /// Whether the window holds a highlight whose range an edit emptied, which
+    /// a build skips and a carry drops.
+    ///
+    /// An undo that brings the text back resolves that highlight's anchors to
+    /// a range again, with no pair for it in the window. A rebuild is what
+    /// brings the pair back, and the next tree-sitter install rebuilds unless
+    /// it paints exactly what was installed. See [`Self::forget_if_collapsed`].
+    collapsed: bool,
 }
 
 impl CachedHighlightEndpoints {
     /// Whether the endpoints came from these versions and highlight sets.
+    ///
+    /// The tree-sitter channels are checked by the settings generation in
+    /// `versions` alone, so an install that moves no generation keeps the
+    /// cache although it swapped the channel's `Arc`.
     fn current(
         &self,
         versions: HighlightVersions,
         highlights: &TextHighlights,
-        semantic: Option<&SemanticTokensHighlights>,
         lsp: Option<&SemanticTokensHighlights>,
     ) -> bool {
         self.versions == versions
             && self.text_ptr == Arc::as_ptr(highlights) as usize
-            && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
             && self.lsp_ptr == lsp.map(|s| Arc::as_ptr(s) as usize)
     }
 
     pub fn endpoints(&self) -> &[HighlightEndpoint] {
         &self.endpoints
+    }
+
+    /// Drop `cache` when its window holds a highlight an edit emptied.
+    ///
+    /// Call this before a tree-sitter install that moves no generation. Such
+    /// an install keeps the cache, and a collapsed window then misses the pair
+    /// for any text an undo brings back until something else rebuilds it.
+    pub fn forget_if_collapsed(cache: &mut Option<Self>) {
+        if cache.as_ref().is_some_and(|cached| cached.collapsed) {
+            *cache = None;
+        }
     }
 }
 
@@ -862,7 +884,7 @@ pub fn create_highlight_endpoints_cached(
 
     let current = cache
         .as_ref()
-        .filter(|cached| cached.current(versions, highlights, semantic_highlights, lsp_highlights));
+        .filter(|cached| cached.current(versions, highlights, lsp_highlights));
     if let Some(cached) = current
         && cached.range.start <= range.start
         && range.end <= cached.range.end
@@ -879,7 +901,7 @@ pub fn create_highlight_endpoints_cached(
         },
         false => range.clone(),
     };
-    let endpoints = create_highlight_endpoints(
+    let (endpoints, collapsed) = build_highlight_endpoints(
         &window,
         highlights,
         semantic_highlights,
@@ -890,10 +912,10 @@ pub fn create_highlight_endpoints_cached(
     *cache = Some(CachedHighlightEndpoints {
         versions,
         text_ptr: Arc::as_ptr(highlights) as usize,
-        semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
         lsp_ptr: lsp_highlights.map(|s| Arc::as_ptr(s) as usize),
         range: window,
         endpoints: arc.clone(),
+        collapsed,
     });
     arc
 }
@@ -908,8 +930,9 @@ pub fn create_highlight_endpoints_cached(
 ///
 /// Text that an undo brings back holds the anchors it had before its removal.
 /// A pair that left the window when the text went does not come back with it,
-/// so it paints unstyled until the next parse installs a token set and the
-/// window is built again.
+/// so it paints unstyled until the window is built again. The carry marks such
+/// a cache collapsed, and the next tree-sitter install drops a collapsed cache
+/// whatever that install restyled.
 fn carry_cache(
     cache: &mut Option<CachedHighlightEndpoints>,
     versions: HighlightVersions,
@@ -929,7 +952,6 @@ fn carry_cache(
                 ..versions
             },
             highlights,
-            semantic,
             lsp,
         );
     // A text highlight on a token layer has a slot that names no token.
@@ -948,7 +970,9 @@ fn carry_cache(
     if !(only_the_buffer_moved && slots_name_tokens && inside_or_apart) {
         return;
     }
-    let Some(endpoints) = carry_endpoints(&cached.endpoints, edits, semantic, lsp, resolver) else {
+    let Some((endpoints, emptied)) =
+        carry_endpoints(&cached.endpoints, edits, semantic, lsp, resolver)
+    else {
         return;
     };
 
@@ -957,10 +981,12 @@ fn carry_cache(
     cached.versions = versions;
     cached.range = bounds[0]..bounds[1];
     cached.endpoints = HighlightEndpoints::shared(endpoints);
+    cached.collapsed |= emptied;
 }
 
-/// `endpoints` as they lie after `edits`, or `None` when an edit touches an
-/// endpoint whose anchor no token names.
+/// `endpoints` as they lie after `edits`, and whether the edits emptied a
+/// pair, or `None` when an edit touches an endpoint whose anchor no token
+/// names.
 ///
 /// An endpoint that no edit touches shifts by the edits before it. One that an
 /// edit touches is resolved from its anchor, because its bias decides which
@@ -973,7 +999,7 @@ fn carry_endpoints(
     semantic: Option<&SemanticTokensHighlights>,
     lsp: Option<&SemanticTokensHighlights>,
     resolver: &AnchorResolver<'_>,
-) -> Option<Vec<HighlightEndpoint>> {
+) -> Option<(Vec<HighlightEndpoint>, bool)> {
     let mut offsets: Vec<usize> = endpoints.iter().map(|endpoint| endpoint.offset).collect();
     let mut flags = vec![false; offsets.len()];
     fold_map::carry_offsets(&mut offsets, &mut flags, edits);
@@ -1024,7 +1050,7 @@ fn carry_endpoints(
     } else {
         carried.sort();
     }
-    Some(carried)
+    Some((carried, !emptied.is_empty()))
 }
 
 /// The anchor `endpoint` was resolved from, when its slot names one.
@@ -1071,7 +1097,27 @@ pub fn create_highlight_endpoints(
     lsp_highlights: Option<&SemanticTokensHighlights>,
     resolver: &AnchorResolver<'_>,
 ) -> Vec<HighlightEndpoint> {
+    build_highlight_endpoints(
+        range,
+        highlights,
+        semantic_highlights,
+        lsp_highlights,
+        resolver,
+    )
+    .0
+}
+
+/// [`create_highlight_endpoints`], and whether the build skipped a highlight
+/// whose range resolved empty, which the cache records as collapsed.
+fn build_highlight_endpoints(
+    range: &Range<usize>,
+    highlights: &TextHighlights,
+    semantic_highlights: Option<&SemanticTokensHighlights>,
+    lsp_highlights: Option<&SemanticTokensHighlights>,
+    resolver: &AnchorResolver<'_>,
+) -> (Vec<HighlightEndpoint>, bool) {
     let mut endpoints = Vec::new();
+    let mut collapsed = false;
 
     for (&key, hl) in highlights.iter() {
         let style = &hl.0;
@@ -1094,6 +1140,7 @@ pub fn create_highlight_endpoints(
         let bounded = &ranges[start_ix..end_ix];
         for (s, e) in resolve_pairs(bounded.iter().map(|r| (&r.start, &r.end)), resolver) {
             if s == e {
+                collapsed = true;
                 continue;
             }
             endpoints.push(HighlightEndpoint {
@@ -1112,7 +1159,7 @@ pub fn create_highlight_endpoints(
     }
 
     if let Some(semantic) = semantic_highlights {
-        push_semantic_endpoints(
+        collapsed |= push_semantic_endpoints(
             &mut endpoints,
             semantic,
             HighlightLayer::SemanticToken,
@@ -1124,7 +1171,7 @@ pub fn create_highlight_endpoints(
     // LSP semantic tokens ride a higher layer than the tree-sitter tokens above,
     // so their styles merge on top of the syntactic baseline per slot.
     if let Some(lsp) = lsp_highlights {
-        push_semantic_endpoints(
+        collapsed |= push_semantic_endpoints(
             &mut endpoints,
             lsp,
             HighlightLayer::LspSemanticToken,
@@ -1134,7 +1181,7 @@ pub fn create_highlight_endpoints(
     }
 
     endpoints.sort();
-    endpoints
+    (endpoints, collapsed)
 }
 
 /// Resolve both ends of each range, in order.
@@ -1164,13 +1211,16 @@ fn resolve_pairs<'a>(
 /// skipped without resolving them. Each token keeps a unique slot so nested
 /// captures (e.g. an escape inside a string) occupy distinct entries of the
 /// merger's active map.
+///
+/// Returns whether the walk skipped a token whose range resolved empty.
 fn push_semantic_endpoints(
     endpoints: &mut Vec<HighlightEndpoint>,
     semantic: &SemanticTokensHighlights,
     layer: HighlightLayer,
     range: &Range<usize>,
     resolver: &AnchorResolver<'_>,
-) {
+) -> bool {
+    let mut collapsed = false;
     for channel in semantic.values() {
         let bounds = channel.overlap_bounds(range, resolver.one);
         let lo = bounds.start;
@@ -1183,6 +1233,7 @@ fn push_semantic_endpoints(
 
         for (offset, (token, (s, e))) in tokens.iter().zip(resolved).enumerate() {
             if s == e {
+                collapsed = true;
                 continue;
             }
             if e <= range.start {
@@ -1203,6 +1254,7 @@ fn push_semantic_endpoints(
             });
         }
     }
+    collapsed
 }
 
 /// Iterate text chunks with merged highlight styles applied.
@@ -2856,6 +2908,52 @@ mod tests {
                 (true, fixture.fresh()),
                 "an insertion at the window's start",
             );
+        }
+
+        /// The tree-sitter channels are checked by generation, so an install
+        /// that swaps in an equal channel without moving one keeps the cache.
+        #[test]
+        fn an_equal_channel_under_the_same_generation_keeps_the_cache() {
+            let mut fixture = Fixture::new();
+            let mut cache = built(&fixture);
+            fixture.semantic = Arc::new((*fixture.semantic).clone());
+
+            assert!(!fixture.ask(&mut cache), "no bounds search, so no build");
+        }
+
+        /// A carry that empties a pair marks the cache, and only a marked
+        /// cache goes before an install that keeps the cache.
+        #[test]
+        fn only_a_carry_that_empties_a_pair_forgets_the_cache() {
+            let alpha = TEXT.find("alpha").expect("fixture");
+            let plus = TEXT.find('+').expect("fixture");
+            let kept: Vec<bool> = [(alpha + 2..alpha + 2, "xy"), (plus..plus + 1, "")]
+                .into_iter()
+                .map(|(range, text)| {
+                    let fixture = Fixture::new();
+                    let mut cache = built(&fixture);
+                    fixture.edit_and_carry(&mut cache, range, text, "the edit carries");
+                    CachedHighlightEndpoints::forget_if_collapsed(&mut cache);
+                    cache.is_some()
+                })
+                .collect();
+            assert_eq!(kept, [true, false], "an insertion, then a deleted token");
+        }
+
+        /// A build that skips a token an edit emptied marks the cache as well.
+        #[test]
+        fn a_build_over_an_emptied_token_forgets_the_cache() {
+            let fixture = Fixture::new();
+            let plus = TEXT.find('+').expect("fixture");
+            fixture
+                .shared
+                .write()
+                .expect("poisoned")
+                .edit(plus..plus + 1, "");
+            let mut cache = built(&fixture);
+            CachedHighlightEndpoints::forget_if_collapsed(&mut cache);
+
+            assert!(cache.is_none());
         }
     }
 }

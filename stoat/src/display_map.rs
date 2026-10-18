@@ -549,7 +549,7 @@ impl DisplayMap {
         interner: Arc<HighlightStyleInterner>,
     ) {
         let channel = self.batched_token_channel(tokens, interner);
-        self.set_semantic_token_channel(buffer_id, channel);
+        self.set_semantic_token_channel(buffer_id, channel, true);
     }
 
     /// Build a token channel, resolving every token end in one batch.
@@ -576,14 +576,23 @@ impl DisplayMap {
     /// value into every editor viewing it, rather than having each editor
     /// rebuild it from the token list. Building it costs a resolve per token,
     /// so the rebuild was paid once per editor per keystroke.
+    ///
+    /// `restyled` false is the caller's word that `channel` paints exactly what
+    /// the installed channel paints and indexes every token the same way. The
+    /// install then moves nothing a cache compares, so the paint version and
+    /// each editor's [`CachedHighlightEndpoints`] stay as they are, and only
+    /// the snapshot's highlights switch to the new channel.
     pub fn set_semantic_token_channel(
         &mut self,
         buffer_id: BufferId,
         channel: BufferSemanticTokens,
+        restyled: bool,
     ) {
         Arc::make_mut(&mut self.semantic_token_highlights).insert(buffer_id, channel);
         self.highlights_dirty = true;
-        self.settings_generation += 1;
+        if restyled {
+            self.settings_generation += 1;
+        }
     }
 
     pub fn invalidate_semantic_highlights(&mut self, buffer_id: BufferId) {
@@ -613,13 +622,10 @@ impl DisplayMap {
     /// token paints as without changing which scope it names. This recolors
     /// tokens already on screen with no reparse and no fresh LSP request.
     ///
-    /// The channel maps are rebuilt into new [`Arc`]s rather than mutated in
-    /// place, because [`CachedHighlightEndpoints`] validates by `Arc` pointer
-    /// and bakes a resolved style into each endpoint. `Arc::make_mut` would
-    /// only change that pointer while a second reference happens to exist, so
-    /// it would leave the cache serving the previous theme's colors whenever it
-    /// did not. Allocating unconditionally does not depend on a refcount that
-    /// nothing here guarantees.
+    /// The swap moves the settings generation, because
+    /// [`CachedHighlightEndpoints`] bakes a resolved style into each endpoint
+    /// and checks the tree-sitter channels against that generation alone, not
+    /// their `Arc` pointer.
     pub fn swap_style_interner(&mut self, interner: &Arc<HighlightStyleInterner>) {
         let reintern = |channels: &SemanticTokensHighlights| -> SemanticTokensHighlights {
             Arc::new(
@@ -633,6 +639,7 @@ impl DisplayMap {
         self.semantic_token_highlights = reintern(&self.semantic_token_highlights);
         self.lsp_token_highlights = reintern(&self.lsp_token_highlights);
         self.highlights_dirty = true;
+        self.settings_generation += 1;
     }
 
     pub fn highlight_inlays(

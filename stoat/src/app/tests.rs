@@ -6580,6 +6580,144 @@ fn panes_on_one_buffer_both_repaint_when_a_parse_lands() {
     );
 }
 
+/// A Rust file taller than the screen whose first line is a comment, with
+/// `keys` typed and then an `x` sent straight to the session, so its parse is
+/// still to run. The frame the `x` leaves is painted.
+///
+/// `minimap` false turns the minimap off before the first frame, so no strip
+/// shows the buffer.
+fn typed_into_comment(keys: &str, minimap: bool) -> crate::test_harness::TestHarness {
+    let mut h = Stoat::test();
+    h.stoat.minimap_override = Some(minimap);
+    let text = format!("// alpha beta\n{}", "fn a() {}\n".repeat(60));
+    let path = h.write_file("a.rs", &text);
+    h.open_file(&path);
+    h.settle();
+    h.type_keys(keys);
+    let _ = h.stoat.update(Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    )));
+    let _ = h.stoat.render();
+    h
+}
+
+/// Spawn the parse the `x` left behind and run it, so its landing waits to be
+/// installed.
+fn finish_parse(h: &mut crate::test_harness::TestHarness) {
+    h.stoat.drive_parse_jobs();
+    h.settle();
+}
+
+/// The address of the endpoint list the focused editor's highlight cache
+/// holds.
+fn cached_endpoints(h: &mut crate::test_harness::TestHarness) -> Option<usize> {
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .and_then(|editor| editor.highlight_endpoint_cache.as_ref())
+        .map(|cache| cache.endpoints().as_ptr() as usize)
+}
+
+/// A landing earns a frame only when it restyles what shows. A character
+/// typed inside a comment grows the comment's token across it, and the screen
+/// already shows it styled. One typed at the comment's end sits past the
+/// token until the parse lands, so its row restyles. Scrolled out of view,
+/// that row earns a frame only through a minimap strip, which shows the
+/// whole file.
+#[test]
+fn a_parse_landing_earns_a_frame_only_when_it_restyles_what_shows() {
+    let earned: Vec<bool> = [
+        ("l l l i", false, false),
+        ("A", false, false),
+        ("A", false, true),
+        ("A", true, true),
+    ]
+    .into_iter()
+    .map(|(keys, minimap, scrolled)| {
+        let mut h = typed_into_comment(keys, minimap);
+        if scrolled {
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("an editor")
+                .scroll_row = 30;
+            let _ = h.stoat.render();
+        }
+        finish_parse(&mut h);
+        h.stoat.drive_parse_jobs()
+    })
+    .collect();
+    assert_eq!(
+        earned,
+        [false, true, false, true],
+        "inside the comment, at its end, then its end scrolled away without and with a strip",
+    );
+}
+
+/// A landing that restyles nothing moves no generation, so the paint after it
+/// reuses the endpoints the keystroke's frame carried instead of building them
+/// again.
+#[test]
+fn a_parse_that_restyles_nothing_keeps_the_endpoint_cache() {
+    let mut h = typed_into_comment("l l l i", true);
+    let carried = cached_endpoints(&mut h);
+    finish_parse(&mut h);
+    h.stoat.drive_parse_jobs();
+    let _ = h.stoat.render();
+    assert_eq!(
+        (carried.is_some(), cached_endpoints(&mut h)),
+        (true, carried),
+        "the frame after the landing serves the carried endpoints",
+    );
+}
+
+/// The parse wake installs a landing and paints only a landing that earned a
+/// frame.
+#[test]
+fn a_parse_wake_paints_only_an_earned_landing() {
+    let published: Vec<bool> = ["l l l i", "A"]
+        .into_iter()
+        .map(|keys| {
+            let mut h = typed_into_comment(keys, true);
+            finish_parse(&mut h);
+            published_on_parse_wake(&mut h)
+        })
+        .collect();
+    assert_eq!(
+        published,
+        [false, true],
+        "inside the comment, then at its end"
+    );
+}
+
+/// Run the loop on the wake a finished parse left, then quit, and report
+/// whether it published a frame.
+///
+/// Wakes other work left are taken first, so the parse wake is the only one
+/// the loop sees before the quit.
+fn published_on_parse_wake(h: &mut crate::test_harness::TestHarness) -> bool {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        for notify in [&h.stoat.redraw_notify, &h.stoat.drain_notify] {
+            let _ = tokio::time::timeout(std::time::Duration::ZERO, notify.notified()).await;
+        }
+        h.stoat.shutdown_handle().notify_one();
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let (render_tx, render_rx) = watch::channel(None);
+        let _keep = event_tx;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            h.stoat.run(event_rx, render_tx),
+        )
+        .await
+        .expect("run should quit")
+        .expect("run ok");
+
+        render_rx.borrow().is_some()
+    })
+}
+
 /// A badge raised over an unfocused pane's status row moves that row's
 /// segments out from under the box. The row paints on every frame, so the
 /// pane's content replays under it, and the frame matches a repaint.

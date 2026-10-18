@@ -19,7 +19,7 @@ use crate::{
     commit_list::{CommitListId, CommitListSnap, CommitListState},
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
-    display_map::syntax_theme::SyntaxStyles,
+    display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
     host::GitHost,
     input_history::InputHistory,
@@ -411,6 +411,30 @@ struct ParseJob {
     /// blocking pool, so the drop takes only the channel the result would come
     /// back on. See [`Workspace::cancel_parse_job`].
     cancel: Arc<AtomicBool>,
+}
+
+/// One parse that [`Workspace::drive_parse_jobs`] installed.
+pub(crate) struct ParseLanding {
+    pub(crate) buffer_id: BufferId,
+    /// The rows the parse changed, its edit's rows included, or `None` where
+    /// that is unknown. A per-row consumer such as the minimap strip recolors
+    /// these.
+    pub(crate) changed_rows: Option<Range<u32>>,
+    pub(crate) restyle: ParseRestyle,
+}
+
+/// What an installed parse changed on screen, which decides whether its
+/// landing earns a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParseRestyle {
+    /// The new tokens paint exactly what the installed ones painted.
+    Unchanged,
+    /// The tokens restyled rows, and no editor that shows the buffer has one
+    /// of them in its viewport.
+    Offscreen,
+    /// The tokens restyled a row in an editor's viewport, or which rows they
+    /// restyled is unknown.
+    Onscreen,
 }
 
 /// A one-pane tree showing a fresh scratch buffer, the shape a workspace and
@@ -1326,7 +1350,7 @@ impl Workspace {
         if let Some(channel) = self.buffers.tokens_for(buffer_id) {
             editor
                 .display_map
-                .set_semantic_token_channel(buffer_id, channel.clone());
+                .set_semantic_token_channel(buffer_id, channel.clone(), true);
         }
         if let Some(retained) = self.buffers.lsp_tokens_for(buffer_id)
             && retained.version == current_version
@@ -1348,24 +1372,28 @@ impl Workspace {
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
     ///
-    /// Returns each buffer whose tokens were installed, paired with the rows
-    /// the parse changed, or `None` where that is unknown. Callers holding
-    /// per-buffer views of the tokens use it to bound their own re-coloring;
-    /// [`crate::minimap::MinimapContent::note_syntax_rows`] is the one that
-    /// does today.
+    /// Returns each parse installed, with the rows it changed and what it
+    /// restyled on screen. Callers holding per-buffer views of the tokens use
+    /// the rows to bound their own re-coloring, as
+    /// [`crate::minimap::MinimapContent::note_syntax_rows`] does, and the
+    /// restyle to decide whether the landing earns a frame.
+    ///
+    /// A spawned job wakes the loop through `parse_notify` when it finishes,
+    /// and the loop installs it without a frame unless it earns one.
     pub(crate) fn drive_parse_jobs(
         &mut self,
         executor: &Executor,
         syntax_styles: &SyntaxStyles,
         redraw_notify: &Arc<Notify>,
+        parse_notify: &Arc<Notify>,
         index_update_tx: &UnboundedSender<IndexUpdate>,
         retention: usize,
-    ) -> Vec<(BufferId, Option<Range<u32>>)> {
+    ) -> Vec<ParseLanding> {
         // Ahead of this pass's parses, so a buffer that has gone quiet is
         // extracted before anything arms its timer again.
         self.drain_index_debounce(executor, index_update_tx, redraw_notify);
 
-        let mut installed: Vec<(BufferId, Option<Range<u32>>)> = Vec::new();
+        let mut installed: Vec<ParseLanding> = Vec::new();
         let waker = futures::task::noop_waker();
         let mut completed: Vec<ParseJobOutput> = Vec::new();
         self.parse_jobs.retain(|_, job| {
@@ -1485,7 +1513,7 @@ impl Workspace {
                     )
                 }
             });
-            let task = executor.spawn_with_redraw(redraw_notify.clone(), parse);
+            let task = executor.spawn_with_redraw(parse_notify.clone(), parse);
             self.parse_jobs.insert(buffer_id, ParseJob { task, cancel });
         }
 
@@ -1529,9 +1557,28 @@ impl Workspace {
         out: ParseJobOutput,
         executor: &Executor,
         redraw_notify: &Arc<Notify>,
-        installed: &mut Vec<(BufferId, Option<Range<u32>>)>,
+        installed: &mut Vec<ParseLanding>,
     ) {
-        installed.push((out.buffer_id, out.changed_token_rows.clone()));
+        // A narrowed walk's tokens describe the viewport alone, so its landing
+        // counts as an on-screen restyle whatever its rows say.
+        let restyled = out.captured.is_some()
+            || out
+                .restyled_rows
+                .as_ref()
+                .is_none_or(|rows| !rows.is_empty());
+        let restyle = match restyled {
+            true => self.restyle_reach(
+                out.buffer_id,
+                out.syntax.version,
+                out.restyled_rows.clone().filter(|_| out.captured.is_none()),
+            ),
+            false => ParseRestyle::Unchanged,
+        };
+        installed.push(ParseLanding {
+            buffer_id: out.buffer_id,
+            changed_rows: out.changed_token_rows.clone(),
+            restyle,
+        });
         self.buffers
             .store_parse(out.buffer_id, out.syntax, out.syntax_map);
 
@@ -1551,12 +1598,66 @@ impl Workspace {
             .store_tokens(out.buffer_id, out.token_channel.clone());
         for editor in self.editors.values_mut() {
             if editor.buffer_id == out.buffer_id {
-                editor
-                    .display_map
-                    .set_semantic_token_channel(out.buffer_id, out.token_channel.clone());
+                if !restyled {
+                    CachedHighlightEndpoints::forget_if_collapsed(
+                        &mut editor.highlight_endpoint_cache,
+                    );
+                }
+                editor.display_map.set_semantic_token_channel(
+                    out.buffer_id,
+                    out.token_channel.clone(),
+                    restyled,
+                );
             }
         }
         self.arm_index_debounce(executor, redraw_notify, out.buffer_id);
+    }
+
+    /// Whether a restyle of `rows` in `buffer_id`, from a parse of its text at
+    /// `version`, reaches a row an editor's viewport shows.
+    ///
+    /// Unknown rows count as on screen, and so do rows of a buffer edited since
+    /// the parse started, whose row numbers no longer place them. A viewport
+    /// whose edge falls on a block row has no buffer row there to compare, and
+    /// it counts as on screen too.
+    fn restyle_reach(
+        &mut self,
+        buffer_id: BufferId,
+        version: u64,
+        rows: Option<Range<u32>>,
+    ) -> ParseRestyle {
+        let Some(rows) = rows else {
+            return ParseRestyle::Onscreen;
+        };
+        let current = self
+            .buffers
+            .get(buffer_id)
+            .map(|shared| shared.read().expect("buffer poisoned").snapshot.version);
+        if current != Some(version) {
+            return ParseRestyle::Onscreen;
+        }
+
+        for editor in self.editors.values_mut() {
+            if editor.buffer_id != buffer_id {
+                continue;
+            }
+            let Some(height) = editor.viewport_rows else {
+                continue;
+            };
+            let snapshot = editor.display_map.snapshot();
+            let last = editor
+                .scroll_row
+                .saturating_add(height.saturating_sub(1))
+                .min(snapshot.max_point().row);
+            let shown = snapshot
+                .display_to_buffer(DisplayPoint::new(editor.scroll_row, 0))
+                .zip(snapshot.display_to_buffer(DisplayPoint::new(last, 0)));
+            match shown {
+                Some((top, bottom)) if rows.start > bottom.row || rows.end <= top.row => {},
+                _ => return ParseRestyle::Onscreen,
+            }
+        }
+        ParseRestyle::Offscreen
     }
 
     /// The display rows an editor is currently showing of `buffer_id`.

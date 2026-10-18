@@ -30,7 +30,7 @@ use std::{
 use stoat_language::{
     self as language, HighlightId, Language, SyntaxMapCapture, SyntaxSnapshot, SyntaxState,
 };
-use stoat_text::{patch::Patch, Bias, Rope};
+use stoat_text::{patch::Patch, Anchor, Bias, Rope};
 
 /// Result of a successful background parse, ready to be installed on the
 /// foreground thread.
@@ -65,6 +65,16 @@ pub(crate) struct ParseJobOutput {
     /// Lets a consumer holding per-row derived state, currently the minimap
     /// strip, recolor only what moved instead of the whole file per keystroke.
     pub(crate) changed_token_rows: Option<Range<u32>>,
+    /// Buffer rows whose painted styling this parse changes, against the
+    /// tokens the display shows until it lands, or `None` when the parse has
+    /// nothing to compare against and every row counts as changed.
+    ///
+    /// `Some(0..0)` means the new tokens paint exactly what the installed ones
+    /// paint, so the landing needs no frame and no cache needs rebuilding.
+    /// Unlike [`Self::changed_token_rows`], an edited row whose styling held
+    /// is left out, because this compares against the installed tokens where
+    /// the display draws them.
+    pub(crate) restyled_rows: Option<Range<u32>>,
 }
 
 /// Whether a caller's cancel flag is set.
@@ -284,6 +294,17 @@ pub(crate) fn parse_buffer_step(
         (_, None) => None,
     };
 
+    // A carried token keeps its anchors in the new channel, so on the recapture
+    // path a restyle, if any, is among the replaced tokens. The full walk has no
+    // such split, and its changed rows stand in, edit cover included, so it
+    // always counts as a restyle.
+    let restyled_rows = match (&recaptured, prior_token_anchors) {
+        (Some(recaptured), Some(prior)) => {
+            Some(recaptured.restyled_rows(prior, &snapshot, &new_rope))
+        },
+        _ => changed_token_rows.clone(),
+    };
+
     Some(ParseJobOutput {
         buffer_id,
         syntax: SyntaxState {
@@ -296,6 +317,7 @@ pub(crate) fn parse_buffer_step(
         captured,
         token_spans: Arc::from(styled),
         changed_token_rows,
+        restyled_rows,
     })
 }
 
@@ -429,6 +451,70 @@ impl Recaptured {
         mint_run(&mut runs, at..self.spans.len());
 
         BufferSemanticTokens::from_runs(runs, interner)
+    }
+
+    /// The buffer rows where these tokens paint differently from `prior`, the
+    /// channel the display draws until they land, in `snapshot`'s text.
+    ///
+    /// The display draws `prior`'s tokens where their anchors resolve, so the
+    /// fresh tokens are compared against that and not against the
+    /// patch-carried spans [`changed_token_rows`] reads. The two disagree where
+    /// an insertion lands on a token's end. The end anchor stays before the new
+    /// text, while the carry moves the end past it, so typing at the end of a
+    /// word restyles the word.
+    ///
+    /// `0..0` means every replaced token resolves to exactly the fresh token at
+    /// its position, empty ones included. The new channel then indexes each
+    /// token as `prior` did, which a cache keyed by token index relies on.
+    fn restyled_rows(
+        &self,
+        prior: &BufferSemanticTokens,
+        snapshot: &TextBufferSnapshot,
+        rope: &Rope,
+    ) -> Range<u32> {
+        // Every prior token is either carried or replaced, so the replaced ones
+        // are the prior indices between the carried runs.
+        let mut gaps = Vec::new();
+        let mut at = 0;
+        for run in &self.carried {
+            gaps.push(at..run.prior.start);
+            at = run.prior.end;
+        }
+        gaps.push(at..prior.len());
+
+        let replaced: Vec<&SemanticTokenHighlight> =
+            gaps.into_iter().flat_map(|gap| prior.range(gap)).collect();
+        let anchors: Vec<Anchor> = replaced
+            .iter()
+            .flat_map(|token| [token.range.start, token.range.end])
+            .collect();
+        let offsets = snapshot.resolve_anchors_batch(&anchors);
+        let (pairs, _) = offsets.as_chunks::<2>();
+        let shown: Vec<(Range<usize>, HighlightStyleId)> = replaced
+            .iter()
+            .zip(pairs)
+            .map(|(token, &[start, end])| (start..end, token.style))
+            .collect();
+
+        let fresh = &self.fresh;
+        let head = shown
+            .iter()
+            .zip(fresh)
+            .take_while(|(shown, fresh)| shown == fresh)
+            .count();
+        let tail = shown[head..]
+            .iter()
+            .rev()
+            .zip(fresh[head..].iter().rev())
+            .take_while(|(shown, fresh)| shown == fresh)
+            .count();
+
+        shown[head..shown.len() - tail]
+            .iter()
+            .chain(&fresh[head..fresh.len() - tail])
+            .map(|(range, _)| range.clone())
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+            .map_or(0..0, |span| span_rows(span, rope))
     }
 }
 
@@ -835,18 +921,19 @@ fn changed_token_rows(
         cover(edit.new.clone());
     }
 
-    match span {
-        Some(span) => {
-            // Spans are half-open, so the last row they occupy holds `end - 1`.
-            // Converting `end` itself would pull in the following row every
-            // time a span stops at a line break.
-            let last = span.end.max(span.start + 1) - 1;
-            let start = rope.offset_to_point(span.start.min(rope.len())).row;
-            let end = rope.offset_to_point(last.min(rope.len())).row;
-            start..end + 1
-        },
-        None => 0..0,
-    }
+    span.map_or(0..0, |span| span_rows(span, rope))
+}
+
+/// The buffer rows byte span `span` occupies in `rope`.
+///
+/// Spans are half-open, so the last row they occupy holds `end - 1`. Converting
+/// `end` itself pulls in the following row every time a span stops at a line
+/// break.
+fn span_rows(span: Range<usize>, rope: &Rope) -> Range<u32> {
+    let last = span.end.max(span.start + 1) - 1;
+    let start = rope.offset_to_point(span.start.min(rope.len())).row;
+    let end = rope.offset_to_point(last.min(rope.len())).row;
+    start..end + 1
 }
 
 #[cfg(test)]
@@ -1664,14 +1751,14 @@ mod tests {
         );
     }
 
-    /// Parse `original`, apply one edit, parse again carrying the first
-    /// parse's spans forward, and return the second parse's changed rows.
-    fn changed_rows_after_edit(
+    /// Parse `original`, apply one edit, and return the parse that carries the
+    /// first parse's spans and anchors across it.
+    fn parse_after_edit(
         path: &str,
         original: &str,
         edit_at: usize,
         inserted: &str,
-    ) -> Option<Range<u32>> {
+    ) -> ParseJobOutput {
         let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
         let registry = LanguageRegistry::standard();
         install_highlight_maps(&registry, &styles);
@@ -1713,7 +1800,6 @@ mod tests {
             None,
         )
         .expect("second parse should succeed")
-        .changed_token_rows
     }
 
     /// The minimap recolors the rows a parse reports, so a keystroke that
@@ -1727,7 +1813,8 @@ mod tests {
             .map(|(i, _)| i + 1)
             .unwrap();
 
-        let rows = changed_rows_after_edit("a.rs", &original, row_20, "let x = 1;\n")
+        let rows = parse_after_edit("a.rs", &original, row_20, "let x = 1;\n")
+            .changed_token_rows
             .expect("a second parse with prior spans reports its rows");
         assert_eq!(
             rows,
@@ -1748,12 +1835,51 @@ mod tests {
             .map(|(i, _)| i + 1)
             .unwrap();
 
-        let rows = changed_rows_after_edit("a.rs", &original, row_20, "\n")
+        let rows = parse_after_edit("a.rs", &original, row_20, "\n")
+            .changed_token_rows
             .expect("a second parse with prior spans reports its rows");
         assert_eq!(
             rows,
             20..21,
             "a blank line adds no tokens, so only the row it split is suspect",
+        );
+    }
+
+    /// Where `inserted` goes into `original` at the end of `before`, the rows the
+    /// parse that carries across it restyles.
+    fn restyled_rows_after(original: &str, before: &str, inserted: &str) -> Option<Range<u32>> {
+        let at = original.find(before).expect("the text holds the anchor") + before.len();
+        parse_after_edit("a.rs", original, at, inserted).restyled_rows
+    }
+
+    /// A character typed inside a comment grows the comment token across it,
+    /// and the installed token's end anchor sits past the insertion, so the
+    /// display already draws it styled. The landing restyles nothing.
+    #[test]
+    fn typing_inside_a_comment_restyles_nothing() {
+        assert_eq!(
+            restyled_rows_after("fn a() {}\n// alpha beta\nfn b() {}\n", "// alpha", "x"),
+            Some(0..0),
+        );
+    }
+
+    /// A character typed at a comment's end lies past the installed token's
+    /// end anchor, so the display draws it unstyled until the parse lands. A
+    /// patch carry calls that token unchanged, and the landing has to paint.
+    #[test]
+    fn typing_at_a_comments_end_restyles_its_row() {
+        assert_eq!(
+            restyled_rows_after("fn a() {}\n// alpha\nfn b() {}\n", "// alpha", "x"),
+            Some(1..2),
+        );
+    }
+
+    /// A keyword that stops being one changes what its row paints.
+    #[test]
+    fn a_keyword_lost_restyles_its_row() {
+        assert_eq!(
+            restyled_rows_after("fn a() {}\nfn b() {}\n", "}\nfn", "x"),
+            Some(1..2),
         );
     }
 
