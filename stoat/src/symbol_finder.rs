@@ -533,8 +533,8 @@ pub(crate) fn symbol_finder_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
 /// Close the symbol finder, disposing its input editor and dropping any
 /// in-flight document or workspace request so a late response is discarded.
 pub(crate) fn close_symbol_finder(stoat: &mut Stoat) {
-    stoat.pending_symbol_picker_request = None;
-    stoat.pending_workspace_symbol_request = None;
+    stoat.pending_symbol_picker_request.clear();
+    stoat.pending_workspace_symbol_request.clear();
     if let Some(finder) = stoat.symbol_finder.take() {
         finder.dispose(stoat.active_workspace_mut());
     }

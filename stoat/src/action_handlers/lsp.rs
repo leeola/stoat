@@ -1030,7 +1030,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
             },
         }
     });
-    stoat.pending_code_action_request = Some(task);
+    stoat.pending_code_action_request.arm(task);
     stoat.pending_code_action_picker = Some(CodeActionPicker {
         entries: Vec::new(),
         anchor_offset,
@@ -1051,13 +1051,11 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
 /// resolve trigger. Clears the picker when no actionable entries
 /// remain.
 pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_code_action_request.take() else {
+    let Some(outcome) = stoat.pending_code_action_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(actions)) => {
+    match outcome {
+        Some(actions) => {
             let server = stoat
                 .pending_code_action_picker
                 .as_ref()
@@ -1111,7 +1109,7 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
             }
             true
         },
-        Poll::Ready(None) => {
+        None => {
             tracing::debug!(target: "stoat::lsp", count = 0, "code actions landed");
             crate::lsp::session::set_lsp_status(
                 stoat,
@@ -1119,10 +1117,6 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
             );
             stoat.pending_code_action_picker = None;
             true
-        },
-        Poll::Pending => {
-            stoat.pending_code_action_request = Some(task);
-            false
         },
     }
 }
@@ -1406,7 +1400,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
             buffer_id,
         })
     });
-    stoat.pending_prepare_rename = Some(task);
+    stoat.pending_prepare_rename.arm(task);
     UpdateEffect::None
 }
 
@@ -1415,13 +1409,11 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
 /// in insert mode so typing routes through `handle_insert_key` into the
 /// modal's [`InputView`].
 pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_prepare_rename.take() else {
+    let Some(outcome) = stoat.pending_prepare_rename.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(Some(prep)) => {
+    match outcome {
+        Some(prep) => {
             let anchor_offset = {
                 let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
                     return true;
@@ -1453,11 +1445,7 @@ pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
             });
             true
         },
-        Poll::Ready(None) => true,
-        Poll::Pending => {
-            stoat.pending_prepare_rename = Some(task);
-            false
-        },
+        None => true,
     }
 }
 
@@ -1628,7 +1616,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         }
         entries
     });
-    stoat.pending_symbol_picker_request = Some(task);
+    stoat.pending_symbol_picker_request.arm(task);
     stoat.set_focused_mode("normal".into());
     let executor = stoat.executor.clone();
     let finder = {
@@ -1653,24 +1641,14 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
 /// only installs the result. An empty result keeps the modal open over an empty
 /// list, matching finder behavior.
 pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_symbol_picker_request.take() else {
+    let Some(entries) = stoat.pending_symbol_picker_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(entries) => {
-            let query = symbol_finder_query(stoat);
-            if let Some(finder) = stoat.symbol_finder.as_mut() {
-                finder.set_entries(entries, &query);
-            }
-            true
-        },
-        Poll::Pending => {
-            stoat.pending_symbol_picker_request = Some(task);
-            false
-        },
+    let query = symbol_finder_query(stoat);
+    if let Some(finder) = stoat.symbol_finder.as_mut() {
+        finder.set_entries(entries, &query);
     }
+    true
 }
 
 /// The text currently typed into the symbol finder's input, or empty when no
@@ -1703,14 +1681,14 @@ pub(crate) fn sync_symbol_finder(stoat: &mut Stoat) {
     };
 
     if reissue {
-        let in_flight = stoat.pending_workspace_symbol_request.is_some();
+        let in_flight = stoat.pending_workspace_symbol_request.is_pending();
         if let Some(finder) = stoat.symbol_finder.as_mut() {
             finder.last_query = query.clone();
             finder.query_dirty = in_flight;
         }
         if !in_flight {
             let task = spawn_workspace_symbol_request(stoat, &servers, buffer_id, query.clone());
-            stoat.pending_workspace_symbol_request = Some(task);
+            stoat.pending_workspace_symbol_request.arm(task);
         }
     }
 
@@ -1908,7 +1886,7 @@ pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let task = spawn_workspace_symbol_request(stoat, &servers, buffer_id, String::new());
-    stoat.pending_workspace_symbol_request = Some(task);
+    stoat.pending_workspace_symbol_request.arm(task);
     stoat.set_focused_mode("normal".into());
 
     let executor = stoat.executor.clone();
@@ -1985,38 +1963,28 @@ fn spawn_workspace_symbol_request(
 /// The request task converts and concatenates each server's response, so this
 /// only installs the result. Drops the picker when no server returned an entry.
 pub(crate) fn pump_lsp_workspace_symbol(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_workspace_symbol_request.take() else {
+    let Some(entries) = stoat.pending_workspace_symbol_request.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(entries) => {
-            let Some(finder) = stoat.symbol_finder.as_ref() else {
-                return true;
-            };
-            let dirty = finder.query_dirty;
-            let servers = finder.servers.clone();
-            let buffer_id = finder.buffer_id;
-            let query = finder.input.text(stoat.active_workspace());
+    let Some(finder) = stoat.symbol_finder.as_ref() else {
+        return true;
+    };
+    let dirty = finder.query_dirty;
+    let servers = finder.servers.clone();
+    let buffer_id = finder.buffer_id;
+    let query = finder.input.text(stoat.active_workspace());
 
-            let finder_entries: Vec<SymbolFinderEntry> =
-                entries.into_iter().map(workspace_finder_entry).collect();
-            if let Some(finder) = stoat.symbol_finder.as_mut() {
-                finder.set_entries(finder_entries, &query);
-                finder.query_dirty = false;
-            }
-            if dirty {
-                let task = spawn_workspace_symbol_request(stoat, &servers, buffer_id, query);
-                stoat.pending_workspace_symbol_request = Some(task);
-            }
-            true
-        },
-        Poll::Pending => {
-            stoat.pending_workspace_symbol_request = Some(task);
-            false
-        },
+    let finder_entries: Vec<SymbolFinderEntry> =
+        entries.into_iter().map(workspace_finder_entry).collect();
+    if let Some(finder) = stoat.symbol_finder.as_mut() {
+        finder.set_entries(finder_entries, &query);
+        finder.query_dirty = false;
     }
+    if dirty {
+        let task = spawn_workspace_symbol_request(stoat, &servers, buffer_id, query);
+        stoat.pending_workspace_symbol_request.arm(task);
+    }
+    true
 }
 
 fn workspace_symbol_entries(

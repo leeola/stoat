@@ -73,19 +73,22 @@ pub(crate) fn lsp_pending_label(stoat: &Stoat) -> Option<&'static str> {
 
     [
         ("hover", stoat.pending_hover_request.is_pending()),
-        ("code actions", stoat.pending_code_action_request.is_some()),
+        (
+            "code actions",
+            stoat.pending_code_action_request.is_pending(),
+        ),
         (
             "code action",
             stoat.pending_code_action_resolve.is_pending(),
         ),
         (
             "rename",
-            stoat.pending_prepare_rename.is_some() || stoat.pending_rename.is_pending(),
+            stoat.pending_prepare_rename.is_pending() || stoat.pending_rename.is_pending(),
         ),
-        ("symbols", stoat.pending_symbol_picker_request.is_some()),
+        ("symbols", stoat.pending_symbol_picker_request.is_pending()),
         (
             "workspace symbols",
-            stoat.pending_workspace_symbol_request.is_some(),
+            stoat.pending_workspace_symbol_request.is_pending(),
         ),
         (
             "format",

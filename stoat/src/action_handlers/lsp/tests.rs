@@ -1143,7 +1143,7 @@ fn in_flight_code_action_shows_a_status_segment() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
     h.settle();
     assert!(
-        h.stoat.pending_code_action_request.is_some(),
+        h.stoat.pending_code_action_request.is_pending(),
         "the delayed code-action request stays in flight",
     );
 
@@ -1670,7 +1670,7 @@ fn code_action_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
     h.settle();
     assert!(h.stoat.pending_code_action_picker.is_none());
-    assert!(h.stoat.pending_code_action_request.is_none());
+    assert!(!h.stoat.pending_code_action_request.is_pending());
 }
 
 #[test]
@@ -1682,7 +1682,7 @@ fn code_action_no_response_clears_picker() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
     h.settle();
     assert!(h.stoat.pending_code_action_picker.is_none());
-    assert!(h.stoat.pending_code_action_request.is_none());
+    assert!(!h.stoat.pending_code_action_request.is_pending());
 }
 
 #[test]
@@ -2075,7 +2075,7 @@ fn rename_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
     h.settle();
     assert!(h.stoat.rename_input.is_none());
-    assert!(h.stoat.pending_prepare_rename.is_none());
+    assert!(!h.stoat.pending_prepare_rename.is_pending());
 }
 
 #[test]
@@ -2457,7 +2457,7 @@ fn symbol_picker_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
     h.settle();
     assert!(h.stoat.symbol_finder.is_none());
-    assert!(h.stoat.pending_symbol_picker_request.is_none());
+    assert!(!h.stoat.pending_symbol_picker_request.is_pending());
 }
 
 #[test]
@@ -3053,7 +3053,7 @@ fn workspace_symbol_coalesces_mid_flight_query_edits() {
     );
     assert_eq!(finder.last_query, "ab", "the latest text is remembered");
     assert!(
-        h.stoat.pending_workspace_symbol_request.is_some(),
+        h.stoat.pending_workspace_symbol_request.is_pending(),
         "only the one in-flight request exists; no second fired mid-flight",
     );
 }

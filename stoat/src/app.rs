@@ -2052,8 +2052,7 @@ pub struct Stoat {
     /// Polled by [`action_handlers::lsp::pump_lsp_code_actions`] each
     /// render tick; on `Ready(Some)` populates
     /// [`Self::pending_code_action_picker`].
-    pub(crate) pending_code_action_request:
-        Option<stoat_scheduler::Task<Option<Vec<lsp_types::CodeActionOrCommand>>>>,
+    pub(crate) pending_code_action_request: Pending<Option<Vec<lsp_types::CodeActionOrCommand>>>,
 
     /// Selectable code-action picker waiting for the user to choose
     /// (number keys 1-9) or cancel (Escape / any other action).
@@ -2069,8 +2068,7 @@ pub struct Stoat {
     /// In-flight `textDocument/prepareRename` request. On response,
     /// [`action_handlers::lsp::pump_lsp_prepare_rename`] opens
     /// [`Self::rename_input`] seeded with the symbol placeholder.
-    pub(crate) pending_prepare_rename:
-        Option<stoat_scheduler::Task<Option<action_handlers::lsp::RenamePrep>>>,
+    pub(crate) pending_prepare_rename: Pending<Option<action_handlers::lsp::RenamePrep>>,
 
     /// One-line input modal for entering a new symbol name. Created
     /// by the prepare-rename pump after a successful prepare response;
@@ -2088,8 +2086,7 @@ pub struct Stoat {
     /// In-flight `textDocument/documentSymbol` request. Polled by
     /// [`action_handlers::lsp::pump_lsp_symbol_picker`], which installs the
     /// entries into [`Self::symbol_finder`] on response.
-    pub(crate) pending_symbol_picker_request:
-        Option<stoat_scheduler::Task<Vec<crate::symbol_finder::SymbolFinderEntry>>>,
+    pub(crate) pending_symbol_picker_request: Pending<Vec<crate::symbol_finder::SymbolFinderEntry>>,
 
     /// Selectable code-graph navigation picker waiting for the user to
     /// choose a symbol to jump to (number keys 1-9) or cancel.
@@ -2100,7 +2097,7 @@ pub struct Stoat {
     /// [`action_handlers::lsp::pump_lsp_workspace_symbol`], which installs the
     /// merged entries into the finder.
     pub(crate) pending_workspace_symbol_request:
-        Option<stoat_scheduler::Task<Vec<action_handlers::lsp::WorkspaceSymbolEntry>>>,
+        Pending<Vec<action_handlers::lsp::WorkspaceSymbolEntry>>,
 
     /// In-flight `textDocument/rangeFormatting` request triggered by
     /// `FormatSelections`. Polled by
@@ -2797,15 +2794,15 @@ impl Stoat {
             signature_help_rx,
             pending_signature_help: None,
             last_signature_help_key: None,
-            pending_code_action_request: None,
+            pending_code_action_request: Pending::default(),
             pending_code_action_picker: None,
             pending_code_action_resolve: StampedPending::default(),
-            pending_prepare_rename: None,
+            pending_prepare_rename: Pending::default(),
             rename_input: None,
             pending_rename: StampedPending::default(),
-            pending_symbol_picker_request: None,
+            pending_symbol_picker_request: Pending::default(),
             pending_symbol_picker: None,
-            pending_workspace_symbol_request: None,
+            pending_workspace_symbol_request: Pending::default(),
             pending_format_request: StampedPending::default(),
             pending_format_on_save: Vec::new(),
             pending_saves: Vec::new(),
@@ -5712,11 +5709,11 @@ impl Stoat {
             }
             if matches!(key.code, KeyCode::Esc) {
                 self.pending_code_action_picker = None;
-                self.pending_code_action_request = None;
+                self.pending_code_action_request.clear();
                 return UpdateEffect::Redraw;
             }
             self.pending_code_action_picker = None;
-            self.pending_code_action_request = None;
+            self.pending_code_action_request.clear();
         }
 
         if takes_pending && self.pending_symbol_picker.is_some() {
@@ -5777,11 +5774,11 @@ impl Stoat {
             }
             if matches!(key.code, KeyCode::Esc) {
                 self.pending_symbol_picker = None;
-                self.pending_symbol_picker_request = None;
+                self.pending_symbol_picker_request.clear();
                 return UpdateEffect::Redraw;
             }
             self.pending_symbol_picker = None;
-            self.pending_symbol_picker_request = None;
+            self.pending_symbol_picker_request.clear();
         }
 
         // A hover popup consumes half-page scroll keys and auto-closes on any
@@ -6186,14 +6183,14 @@ impl Stoat {
             }
             if !dispatched_code_action {
                 self.pending_code_action_picker = None;
-                self.pending_code_action_request = None;
+                self.pending_code_action_request.clear();
             }
             if !dispatched_rename_symbol {
-                self.pending_prepare_rename = None;
+                self.pending_prepare_rename.clear();
             }
             if !dispatched_symbol_picker {
                 self.pending_symbol_picker = None;
-                self.pending_symbol_picker_request = None;
+                self.pending_symbol_picker_request.clear();
             }
         }
         effect
