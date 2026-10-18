@@ -188,14 +188,6 @@ mod tests {
     };
     use stoat_action::{SmartTab, TriggerCompletion};
 
-    fn buffer_text(h: &Stoat, path: &std::path::Path) -> String {
-        let ws = h.active_workspace();
-        let buf_id = ws.buffers.id_for_path(path).expect("buffer");
-        let buffer = ws.buffers.get(buf_id).expect("buffer entry");
-        let guard = buffer.read().expect("poisoned");
-        guard.rope().to_string()
-    }
-
     #[test]
     fn smart_tab_inserts_indent_unit_at_indent_position() {
         let mut h = Stoat::test();
@@ -204,7 +196,7 @@ mod tests {
         h.open_file(&path);
         h.type_keys("l l i");
         dispatch(&mut h.stoat, &SmartTab);
-        assert_eq!(buffer_text(&h.stoat, &path), "    abc\n");
+        assert_eq!(h.buffer_text_at(&path), "    abc\n");
     }
 
     #[test]
@@ -218,7 +210,7 @@ mod tests {
         h.type_keys("j j l l l l l l i");
         dispatch(&mut h.stoat, &SmartTab);
         assert_eq!(
-            buffer_text(&h.stoat, &path),
+            h.buffer_text_at(&path),
             "a\n    b\n          c\n",
             "column 6 reaches the stop at 8, so two spaces and not four",
         );
@@ -232,7 +224,7 @@ mod tests {
         h.type_keys("l i");
         dispatch(&mut h.stoat, &SmartTab);
         assert_eq!(
-            buffer_text(&h.stoat, &path),
+            h.buffer_text_at(&path),
             "\t\ta\n\t\tb\n",
             "a tab is a tab stop wherever it lands, so it is never trimmed",
         );
@@ -246,7 +238,7 @@ mod tests {
         h.type_keys("l l l i");
         dispatch(&mut h.stoat, &SmartTab);
         assert_eq!(
-            buffer_text(&h.stoat, &path),
+            h.buffer_text_at(&path),
             "abc\n",
             "mid-line the key is a motion, so it leaves the text alone",
         );
@@ -266,7 +258,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &SmartTab);
         assert_eq!(
-            buffer_text(&h.stoat, &path),
+            h.buffer_text_at(&path),
             "fn f() {\n  ab\n xcd\n}\n",
             "no cursor indents, not even the one sitting in an indent",
         );
@@ -285,7 +277,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &SmartTab);
         assert_eq!(
-            buffer_text(&h.stoat, &path),
+            h.buffer_text_at(&path),
             "    ab\n    cd\n",
             "every cursor sits after whitespace, so every one indents",
         );
@@ -315,7 +307,7 @@ mod tests {
         });
         dispatch(&mut h.stoat, &SmartTab);
         assert!(h.stoat.pending_completion.is_none());
-        assert_eq!(buffer_text(&h.stoat, &path), "foo\n");
+        assert_eq!(h.buffer_text_at(&path), "foo\n");
     }
 
     #[test]

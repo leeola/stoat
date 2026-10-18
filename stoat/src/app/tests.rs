@@ -7264,21 +7264,6 @@ fn snapshot_space_mode() {
     h.assert_snapshot("space_mode");
 }
 
-fn focused_buffer_string(h: &crate::test_harness::TestHarness) -> String {
-    let ws = h.stoat.active_workspace();
-    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
-        panic!("focused pane is not an editor");
-    };
-    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
-    ws.buffers
-        .get(buffer_id)
-        .expect("buffer")
-        .read()
-        .expect("poisoned")
-        .rope()
-        .to_string()
-}
-
 fn focused_buffer_version(h: &crate::test_harness::TestHarness) -> u64 {
     let ws = h.stoat.active_workspace();
     let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
@@ -7315,10 +7300,10 @@ fn a_paste_lands_as_one_edit_every_cursor_shares() {
         before + 2,
         "one record per cursor, not one per cursor per pasted character",
     );
-    assert_eq!(focused_buffer_string(&h), "X\nYa\nX\nYb\n");
+    assert_eq!(h.focused_buffer_text(), "X\nYa\nX\nYb\n");
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_string(&h), "a\nb\n", "and one thing to undo",);
+    assert_eq!(h.focused_buffer_text(), "a\nb\n", "and one thing to undo",);
 }
 
 /// The characters of a paste are text, never keys. Pasting in normal mode
@@ -7332,7 +7317,7 @@ fn a_normal_mode_paste_inserts_rather_than_running_its_characters() {
 
     h.stoat.update(Event::Paste("dd".to_string()));
 
-    assert_eq!(focused_buffer_string(&h), "ddkeep\n");
+    assert_eq!(h.focused_buffer_text(), "ddkeep\n");
     assert_eq!(
         h.stoat.focused_mode(),
         "normal",
@@ -7355,7 +7340,7 @@ fn a_paste_with_a_modal_open_lands_in_its_input() {
     let finder = h.stoat.file_finder.as_ref().expect("finder open");
     assert_eq!(finder.input.text(ws), "note");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "keep\n",
         "and the buffer behind it is untouched",
     );
@@ -7491,7 +7476,7 @@ fn enter_after_open_brace_auto_indents() {
     h.type_keys("A");
     h.type_keys("enter");
     h.settle();
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\t\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\t\n}\n");
 }
 
 /// A buffer written in spaces indents by its own unit, not by a tab.
@@ -7509,7 +7494,7 @@ fn enter_indents_a_space_buffer_by_its_own_unit() {
     h.type_keys("enter");
     h.settle();
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "{\n  \"a\": {\n    \n  }\n}\n",
         "the opener's row is indented two, so the new line is indented four",
     );
@@ -7523,7 +7508,7 @@ fn open_below_indents_a_space_buffer_by_its_own_unit() {
     h.type_keys("j");
     h.type_keys("o");
     h.type_text("1");
-    assert_eq!(focused_buffer_string(&h), "{\n  \"a\": {\n    1\n  }\n}\n");
+    assert_eq!(h.focused_buffer_text(), "{\n  \"a\": {\n    1\n  }\n}\n");
 }
 
 /// Opening a line above reads the indents query too, so the two directions
@@ -7543,7 +7528,7 @@ fn open_above_indents_by_the_query_like_open_below() {
         }
         h.type_keys(dir_key);
         h.type_text("x");
-        focused_buffer_string(&h)
+        h.focused_buffer_text()
     };
 
     assert_eq!(
@@ -7568,7 +7553,7 @@ fn shift_i_indents_a_space_buffer_by_its_own_unit() {
     h.type_keys("j");
     h.type_keys("I");
     h.type_text("1");
-    assert_eq!(focused_buffer_string(&h), "{\n  \"a\": {\n    1\n  }\n}\n");
+    assert_eq!(h.focused_buffer_text(), "{\n  \"a\": {\n    1\n  }\n}\n");
 }
 
 #[test]
@@ -7578,7 +7563,7 @@ fn enter_plaintext_copies_leading_whitespace() {
     h.type_keys("A");
     h.type_keys("enter");
     h.settle();
-    assert_eq!(focused_buffer_string(&h), "\thello\n\t\n");
+    assert_eq!(h.focused_buffer_text(), "\thello\n\t\n");
 }
 
 #[test]
@@ -7589,7 +7574,7 @@ fn enter_indents_each_cursor_by_its_own_line() {
     h.type_keys("A");
     h.type_keys("enter");
     h.settle();
-    assert_eq!(focused_buffer_string(&h), "\tfoo\n\t\nbar\n\n");
+    assert_eq!(h.focused_buffer_text(), "\tfoo\n\t\nbar\n\n");
 }
 
 #[test]
@@ -7603,7 +7588,7 @@ fn each_cursor_lands_after_its_own_continuation() {
     // continuations differing in length so a uniform shift misplaces one.
     h.type_keys("x");
     h.settle();
-    assert_eq!(focused_buffer_string(&h), "\tfoo\n\tx\nbar\nx\n");
+    assert_eq!(h.focused_buffer_text(), "\tfoo\n\tx\nbar\nx\n");
 }
 
 #[test]
@@ -7614,7 +7599,7 @@ fn enter_continues_a_comment_only_on_the_comment_line() {
     h.type_keys("A");
     h.type_keys("enter");
     h.settle();
-    assert_eq!(focused_buffer_string(&h), "let a = 1;\n\n// note\n// \n");
+    assert_eq!(h.focused_buffer_text(), "let a = 1;\n\n// note\n// \n");
 }
 
 /// Lay out a hover of `num_lines` lines each `line_width` wide in a
@@ -11241,14 +11226,6 @@ fn osc52_emit_skipped_locally() {
     assert!(h.fake_clipboard().osc52_emits().is_empty());
 }
 
-fn buffer_text(h: &crate::test_harness::TestHarness, path: &Path) -> String {
-    let ws = h.stoat.active_workspace();
-    let id = ws.buffers.id_for_path(path).expect("buffer registered");
-    let buf = ws.buffers.get(id).expect("buffer present");
-    let guard = buf.read().expect("buffer lock");
-    guard.rope().to_string()
-}
-
 fn select_forward(h: &mut crate::test_harness::TestHarness, start: usize, end: usize) {
     let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
     let (start, end) = {
@@ -11290,7 +11267,7 @@ fn driven_input_sequence_types_text_into_the_buffer() {
         }
     }
 
-    assert_eq!(buffer_text(&h, &path), "foo");
+    assert_eq!(h.buffer_text_at(&path), "foo");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -11413,9 +11390,9 @@ fn ctrl_w_in_insert_mode_deletes_previous_word() {
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("foo bar baz");
     h.type_keys("ctrl-w");
-    assert_eq!(buffer_text(&h, &path), "foo bar ");
+    assert_eq!(h.buffer_text_at(&path), "foo bar ");
     h.type_keys("ctrl-w");
-    assert_eq!(buffer_text(&h, &path), "foo ");
+    assert_eq!(h.buffer_text_at(&path), "foo ");
 }
 
 #[test]
@@ -11424,7 +11401,7 @@ fn ctrl_w_at_buffer_start_is_noop() {
     let path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_keys("ctrl-w");
-    assert_eq!(buffer_text(&h, &path), "");
+    assert_eq!(h.buffer_text_at(&path), "");
 }
 
 #[test]
@@ -11434,7 +11411,7 @@ fn alt_backspace_in_insert_mode_deletes_previous_word() {
     h.type_keys("i");
     h.type_text("alpha beta gamma");
     h.type_keys("alt-backspace");
-    assert_eq!(buffer_text(&h, &path), "alpha beta ");
+    assert_eq!(h.buffer_text_at(&path), "alpha beta ");
 }
 
 #[test]
@@ -11444,9 +11421,9 @@ fn backspace_in_insert_mode_deletes_previous_char() {
     h.type_keys("i");
     h.type_text("abc");
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "ab");
+    assert_eq!(h.buffer_text_at(&path), "ab");
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "a");
+    assert_eq!(h.buffer_text_at(&path), "a");
 }
 
 #[test]
@@ -11457,7 +11434,7 @@ fn end_in_insert_mode_lands_past_the_last_character() {
     h.type_keys("end");
     h.type_text("X");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "abcX\ndef\n",
         "the caret appends after the last character, not before it",
     );
@@ -11470,7 +11447,7 @@ fn home_in_insert_mode_lands_at_column_zero() {
     h.type_keys("l l i");
     h.type_keys("home");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "Xabc\ndef\n");
+    assert_eq!(h.buffer_text_at(&path), "Xabc\ndef\n");
 }
 
 #[test]
@@ -11581,11 +11558,11 @@ fn typing_open_paren_inserts_the_pair() {
     let path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_text("(");
-    assert_eq!(buffer_text(&h, &path), "()");
+    assert_eq!(h.buffer_text_at(&path), "()");
 
     h.type_text("x");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "(x)",
         "the cursor is left between the halves",
     );
@@ -11598,7 +11575,7 @@ fn pair_not_inserted_before_a_word_char() {
     h.type_keys("i");
     h.type_text("(");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "(word",
         "a closer here would trap the word inside the pair",
     );
@@ -11613,13 +11590,13 @@ fn typing_the_closer_skips_over_it() {
     h.type_keys("l i");
     h.type_text(")");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "()",
         "the typed closer is the one already there"
     );
 
     h.type_text("x");
-    assert_eq!(buffer_text(&h, &path), "()x", "and the cursor is past it");
+    assert_eq!(h.buffer_text_at(&path), "()x", "and the cursor is past it");
 }
 
 #[test]
@@ -11629,14 +11606,14 @@ fn quote_pair_requires_non_word_on_both_sides() {
     h.type_keys("i");
     h.type_text("don't");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "don't",
         "an apostrophe after a letter closes nothing",
     );
 
     h.type_text(" 'a");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "don't 'a'",
         "after a space it pairs, and the letter lands inside",
     );
@@ -11651,7 +11628,7 @@ fn backspace_between_a_pair_deletes_both() {
     h.type_keys("l l i");
     h.type_keys("backspace");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "ab",
         "the closer leaves with the opener"
     );
@@ -11664,7 +11641,7 @@ fn multi_cursor_pairs_land_per_cursor() {
     h.type_keys("C");
     h.type_keys("i");
     h.type_text("(");
-    assert_eq!(buffer_text(&h, &path), "()\n()\n");
+    assert_eq!(h.buffer_text_at(&path), "()\n()\n");
     assert_eq!(
         h.head_offsets(),
         vec![1, 4],
@@ -11679,7 +11656,7 @@ fn a_closing_colon_swaps_its_shortcode_for_the_emoji() {
     h.type_keys("i");
     h.type_text("hi :smile:");
 
-    assert_eq!(buffer_text(&h, &path), "hi \u{1f604}");
+    assert_eq!(h.buffer_text_at(&path), "hi \u{1f604}");
     assert_eq!(
         h.head_offsets(),
         vec!["hi \u{1f604}".len()],
@@ -11694,14 +11671,14 @@ fn a_colon_with_no_shortcode_to_close_is_typed_as_written() {
     h.type_keys("i");
     h.type_text("use std::mem");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "use std::mem",
         "a path is untouched"
     );
 
     h.type_text(" x:y: :notaname:");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "use std::mem x:y: :notaname:",
         "a colon after a letter and an unknown name both type as written",
     );
@@ -11714,7 +11691,7 @@ fn a_multi_codepoint_emoji_lands_whole_with_the_cursor_past_it() {
     h.type_keys("i");
     h.type_text(":+1:");
 
-    let text = buffer_text(&h, &path);
+    let text = h.buffer_text_at(&path);
     assert_eq!(text, "\u{1f44d}");
     assert_eq!(h.head_offsets(), vec![text.len()]);
 }
@@ -11730,7 +11707,7 @@ fn a_swap_and_a_plain_colon_land_together_across_cursors() {
     insert_cursor_at(&mut h, 10);
     h.type_text(":");
 
-    assert_eq!(buffer_text(&h, &path), "\u{1f604}\nstd:\n");
+    assert_eq!(h.buffer_text_at(&path), "\u{1f604}\nstd:\n");
 }
 
 #[test]
@@ -11741,7 +11718,7 @@ fn emoji_expansion_off_types_every_colon_as_written() {
     h.type_keys("i");
     h.type_text(":smile:");
 
-    assert_eq!(buffer_text(&h, &path), ":smile:");
+    assert_eq!(h.buffer_text_at(&path), ":smile:");
 }
 
 #[test]
@@ -11751,11 +11728,11 @@ fn auto_pairs_off_types_every_character_as_written() {
     let path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_text("(");
-    assert_eq!(buffer_text(&h, &path), "(");
+    assert_eq!(h.buffer_text_at(&path), "(");
 
     h.type_keys("backspace");
     h.type_text("'");
-    assert_eq!(buffer_text(&h, &path), "'", "quotes are left alone too");
+    assert_eq!(h.buffer_text_at(&path), "'", "quotes are left alone too");
 }
 
 #[test]
@@ -11764,7 +11741,7 @@ fn backspace_at_buffer_start_in_insert_mode_is_noop() {
     let path = open_scratch_file(&mut h, "");
     h.type_keys("i");
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "");
+    assert_eq!(h.buffer_text_at(&path), "");
 }
 
 #[test]
@@ -11773,9 +11750,9 @@ fn delete_in_insert_mode_deletes_next_char() {
     let path = open_scratch_file(&mut h, "abcdef");
     h.type_keys("l l i");
     h.type_keys("delete");
-    assert_eq!(buffer_text(&h, &path), "abdef");
+    assert_eq!(h.buffer_text_at(&path), "abdef");
     h.type_keys("delete");
-    assert_eq!(buffer_text(&h, &path), "abef");
+    assert_eq!(h.buffer_text_at(&path), "abef");
 }
 
 /// A father-mother-daughter ZWJ sequence. Three 4-byte emoji joined by two
@@ -11790,7 +11767,7 @@ fn backspace_in_insert_mode_removes_a_whole_cluster() {
     h.type_text("xe\u{301}");
     h.type_keys("backspace");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "x",
         "the combining acute leaves with the e it sits on",
     );
@@ -11803,7 +11780,7 @@ fn delete_in_insert_mode_removes_a_whole_cluster() {
     h.type_keys("l i");
     h.type_keys("delete");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "ab",
         "the whole joined sequence goes, not its first emoji",
     );
@@ -11820,7 +11797,7 @@ fn a_word_motion_selects_whole_clusters() {
     let path = open_scratch_file(&mut h, "cafe\u{301} bar");
     h.type_keys("w d");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         " bar",
         "the accent leaves with the e it sits on",
     );
@@ -11839,7 +11816,7 @@ fn goto_line_end_lands_on_a_whole_final_character() {
         let path = open_scratch_file(&mut h, source);
         h.type_keys("g l d");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             remaining,
             "the whole last character goes, from {source:?}",
         );
@@ -11856,7 +11833,7 @@ fn replace_gives_one_character_per_character() {
         let path = open_scratch_file(&mut h, source);
         h.type_keys("r x");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "xb",
             "one x for the character replaced, from {source:?}",
         );
@@ -11872,7 +11849,7 @@ fn replace_gives_one_character_for_each_one_selected() {
     let mut h = Stoat::test();
     let path = open_scratch_file(&mut h, "e\u{301}a\u{302}i\u{303}\n");
     h.type_keys("x r z");
-    assert_eq!(buffer_text(&h, &path), "zzzz", "one z per character");
+    assert_eq!(h.buffer_text_at(&path), "zzzz", "one z per character");
 }
 
 /// The block cursor sits on a cluster start at every step of an `l`/`h`
@@ -11926,7 +11903,7 @@ fn delete_at_buffer_end_in_insert_mode_is_noop() {
     h.type_keys("A");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_keys("delete");
-    assert_eq!(buffer_text(&h, &path), "abc");
+    assert_eq!(h.buffer_text_at(&path), "abc");
 }
 
 #[test]
@@ -11937,7 +11914,7 @@ fn backspace_applies_at_every_cursor() {
     h.type_keys("C");
     h.type_keys("i");
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "a\nb\n");
+    assert_eq!(h.buffer_text_at(&path), "a\nb\n");
     assert_eq!(h.head_offsets(), vec![0, 2]);
     // The sorted heads above are the same set however the cursors are
     // permuted, so only a named cursor shows each landed at its own delete.
@@ -11951,7 +11928,7 @@ fn delete_applies_at_every_cursor() {
     h.type_keys("C");
     h.type_keys("i");
     h.type_keys("delete");
-    assert_eq!(buffer_text(&h, &path), "x\nx\n");
+    assert_eq!(h.buffer_text_at(&path), "x\nx\n");
     assert_eq!(h.head_offsets(), vec![0, 2]);
 }
 
@@ -11963,7 +11940,7 @@ fn alt_backspace_applies_at_every_cursor() {
     h.type_keys("C");
     h.type_keys("a");
     h.type_keys("alt-backspace");
-    assert_eq!(buffer_text(&h, &path), "\n\n");
+    assert_eq!(h.buffer_text_at(&path), "\n\n");
     assert_eq!(h.head_offsets(), vec![0, 1]);
 }
 
@@ -11975,7 +11952,7 @@ fn alt_backspace_merges_overlapping_word_deletes() {
     insert_cursor_at(&mut h, 4);
     h.type_keys("i");
     h.type_keys("alt-backspace");
-    assert_eq!(buffer_text(&h, &path), "o\n");
+    assert_eq!(h.buffer_text_at(&path), "o\n");
     assert_eq!(h.head_offsets(), vec![0]);
 }
 
@@ -11992,7 +11969,7 @@ fn a_word_delete_forward_keeps_a_combining_mark_with_its_base() {
     h.type_keys("i");
     h.type_keys("alt-d");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         " bar",
         "the acute goes with the e it sits on, not onto the space",
     );
@@ -12012,7 +11989,7 @@ fn a_word_delete_backward_keeps_a_combining_mark_with_its_base() {
     h.type_keys("A");
     h.type_keys("alt-backspace");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "caf",
         "the accented e goes whole rather than leaving a bare e behind",
     );
@@ -12025,12 +12002,16 @@ fn ctrl_u_kills_to_first_non_whitespace_then_line_start() {
     h.type_keys("A");
     h.type_keys("ctrl-u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "  ",
         "first kill preserves the indent"
     );
     h.type_keys("ctrl-u");
-    assert_eq!(buffer_text(&h, &path), "", "second kill removes the indent");
+    assert_eq!(
+        h.buffer_text_at(&path),
+        "",
+        "second kill removes the indent"
+    );
 }
 
 #[test]
@@ -12039,7 +12020,7 @@ fn ctrl_u_inside_indent_kills_to_line_start() {
     let path = open_scratch_file(&mut h, "  foo");
     h.type_keys("l i");
     h.type_keys("ctrl-u");
-    assert_eq!(buffer_text(&h, &path), " foo");
+    assert_eq!(h.buffer_text_at(&path), " foo");
 }
 
 #[test]
@@ -12048,7 +12029,7 @@ fn ctrl_u_at_line_start_joins_previous_line() {
     let path = open_scratch_file(&mut h, "ab\ncd");
     h.type_keys("j i");
     h.type_keys("ctrl-u");
-    assert_eq!(buffer_text(&h, &path), "abcd");
+    assert_eq!(h.buffer_text_at(&path), "abcd");
 }
 
 #[test]
@@ -12057,7 +12038,7 @@ fn ctrl_u_at_buffer_start_is_noop() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("i");
     h.type_keys("ctrl-u");
-    assert_eq!(buffer_text(&h, &path), "abc");
+    assert_eq!(h.buffer_text_at(&path), "abc");
 }
 
 #[test]
@@ -12066,7 +12047,7 @@ fn ctrl_k_kills_to_line_end() {
     let path = open_scratch_file(&mut h, "ab cd\nxy");
     h.type_keys("l l i");
     h.type_keys("ctrl-k");
-    assert_eq!(buffer_text(&h, &path), "ab\nxy");
+    assert_eq!(h.buffer_text_at(&path), "ab\nxy");
 }
 
 #[test]
@@ -12075,7 +12056,7 @@ fn ctrl_k_at_line_end_deletes_line_separator() {
     let path = open_scratch_file(&mut h, "ab\ncd");
     h.type_keys("A");
     h.type_keys("ctrl-k");
-    assert_eq!(buffer_text(&h, &path), "abcd");
+    assert_eq!(h.buffer_text_at(&path), "abcd");
 }
 
 #[test]
@@ -12084,7 +12065,7 @@ fn ctrl_k_at_buffer_end_is_noop() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("A");
     h.type_keys("ctrl-k");
-    assert_eq!(buffer_text(&h, &path), "abc");
+    assert_eq!(h.buffer_text_at(&path), "abc");
 }
 
 #[test]
@@ -12094,7 +12075,7 @@ fn ctrl_k_applies_at_every_cursor() {
     h.type_keys("C");
     h.type_keys("i");
     h.type_keys("ctrl-k");
-    assert_eq!(buffer_text(&h, &path), "\n\n");
+    assert_eq!(h.buffer_text_at(&path), "\n\n");
     assert_eq!(h.head_offsets(), vec![0, 1]);
 }
 
@@ -12104,9 +12085,9 @@ fn alt_d_deletes_next_word() {
     let path = open_scratch_file(&mut h, "foo bar");
     h.type_keys("i");
     h.type_keys("alt-d");
-    assert_eq!(buffer_text(&h, &path), " bar");
+    assert_eq!(h.buffer_text_at(&path), " bar");
     h.type_keys("alt-d");
-    assert_eq!(buffer_text(&h, &path), "");
+    assert_eq!(h.buffer_text_at(&path), "");
 }
 
 #[test]
@@ -12115,7 +12096,7 @@ fn alt_d_at_buffer_end_is_noop() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("A");
     h.type_keys("alt-d");
-    assert_eq!(buffer_text(&h, &path), "abc");
+    assert_eq!(h.buffer_text_at(&path), "abc");
 }
 
 /// Alt-Delete is the forward alias of Alt-Backspace, so it takes the whole
@@ -12126,7 +12107,7 @@ fn alt_delete_deletes_word_forward() {
     let path = open_scratch_file(&mut h, "foo bar");
     h.type_keys("i");
     h.type_keys("alt-delete");
-    assert_eq!(buffer_text(&h, &path), " bar");
+    assert_eq!(h.buffer_text_at(&path), " bar");
 }
 
 #[test]
@@ -12135,7 +12116,7 @@ fn bare_delete_still_deletes_one_char() {
     let path = open_scratch_file(&mut h, "foo bar");
     h.type_keys("i");
     h.type_keys("delete");
-    assert_eq!(buffer_text(&h, &path), "oo bar");
+    assert_eq!(h.buffer_text_at(&path), "oo bar");
 }
 
 #[test]
@@ -12144,7 +12125,7 @@ fn ctrl_h_deletes_previous_char() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("A");
     h.type_keys("ctrl-h");
-    assert_eq!(buffer_text(&h, &path), "ab");
+    assert_eq!(h.buffer_text_at(&path), "ab");
 }
 
 #[test]
@@ -12153,7 +12134,7 @@ fn ctrl_d_deletes_next_char() {
     let path = open_scratch_file(&mut h, "abcdef");
     h.type_keys("l l i");
     h.type_keys("ctrl-d");
-    assert_eq!(buffer_text(&h, &path), "abdef");
+    assert_eq!(h.buffer_text_at(&path), "abdef");
 }
 
 #[test]
@@ -12162,7 +12143,7 @@ fn ctrl_j_inserts_newline_with_continued_indent() {
     let path = open_scratch_file(&mut h, "  ab");
     h.type_keys("A");
     h.type_keys("ctrl-j");
-    assert_eq!(buffer_text(&h, &path), "  ab\n  ");
+    assert_eq!(h.buffer_text_at(&path), "  ab\n  ");
 }
 
 #[test]
@@ -12172,16 +12153,16 @@ fn insert_session_undoes_and_redoes_as_one_step() {
     h.type_keys("i");
     h.type_text("hello");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "hello");
+    assert_eq!(h.buffer_text_at(&path), "hello");
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "",
         "one undo clears the whole insert session"
     );
     h.type_keys("U");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "hello",
         "one redo restores the whole session"
     );
@@ -12203,11 +12184,11 @@ fn change_selection_and_typing_undo_as_one_step() {
     h.type_keys("c");
     h.type_text("X");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "Xbar\n");
+    assert_eq!(h.buffer_text_at(&path), "Xbar\n");
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "foo bar\n",
         "one undo takes back the change and the typing together",
     );
@@ -12218,7 +12199,7 @@ fn change_selection_and_typing_undo_as_one_step() {
     );
 
     h.type_keys("U");
-    assert_eq!(buffer_text(&h, &path), "Xbar\n", "one redo puts both back");
+    assert_eq!(h.buffer_text_at(&path), "Xbar\n", "one redo puts both back");
 }
 
 /// A server edit inside an insert session is its own step, and the typing
@@ -12252,18 +12233,18 @@ fn a_server_edit_mid_session_leaves_the_typing_after_it_one_step() {
 
     h.type_text("BC");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "SABCfoo\n");
+    assert_eq!(h.buffer_text_at(&path), "SABCfoo\n");
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "SAfoo\n",
         "one undo takes back every key typed after the server edit",
     );
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "Afoo\n",
         "and the next takes back the server's edit on its own",
     );
@@ -12277,17 +12258,17 @@ fn open_below_and_typing_undo_as_one_step() {
     h.type_keys("o");
     h.type_text("bar");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "foo\nbar\n");
+    assert_eq!(h.buffer_text_at(&path), "foo\nbar\n");
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "foo\n",
         "the opened line goes with the text typed into it",
     );
 
     h.type_keys("U");
-    assert_eq!(buffer_text(&h, &path), "foo\nbar\n");
+    assert_eq!(h.buffer_text_at(&path), "foo\nbar\n");
 }
 
 #[test]
@@ -12299,16 +12280,16 @@ fn a_mid_session_motion_keeps_the_insert_session_one_undo_step() {
     h.type_keys("left");
     h.type_text("x");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "abxc");
+    assert_eq!(h.buffer_text_at(&path), "abxc");
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "",
         "one undo reverts the whole session despite the mid-session motion"
     );
     h.type_keys("U");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "abxc",
         "one redo restores the whole session"
     );
@@ -12325,7 +12306,7 @@ fn a_mid_session_dispatched_action_joins_the_insert_session() {
     h.type_keys("esc");
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "",
         "a mid-session dispatched action leaves the session's single undo step intact"
     );
@@ -12339,10 +12320,10 @@ fn delete_undoes_both_cursors_and_restores_selections() {
     h.type_keys("C");
     let before = h.head_offsets();
     h.type_keys("d");
-    assert_eq!(buffer_text(&h, &path), "a\na\n");
+    assert_eq!(h.buffer_text_at(&path), "a\na\n");
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "ab\nab\n",
         "one undo restores both cursors' deletions"
     );
@@ -12366,11 +12347,11 @@ fn an_insert_session_undoes_and_redoes_at_every_cursor() {
     h.type_keys("i");
     h.type_text("XY");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "aXYb\naXYb\n");
+    assert_eq!(h.buffer_text_at(&path), "aXYb\naXYb\n");
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "ab\nab\n",
         "one undo reverts the session at both cursors",
     );
@@ -12378,7 +12359,7 @@ fn an_insert_session_undoes_and_redoes_at_every_cursor() {
 
     h.type_keys("shift-U");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "aXYb\naXYb\n",
         "one redo reapplies the session at both cursors",
     );
@@ -12393,16 +12374,16 @@ fn ctrl_s_splits_the_insert_session_into_two_undo_steps() {
     h.type_keys("ctrl-s");
     h.type_text("world");
     h.type_keys("esc");
-    assert_eq!(buffer_text(&h, &path), "helloworld");
+    assert_eq!(h.buffer_text_at(&path), "helloworld");
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "hello",
         "the first undo reverts only the post-checkpoint edits"
     );
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "",
         "the second undo reverts the pre-checkpoint edits"
     );
@@ -12423,21 +12404,25 @@ fn a_normal_mode_checkpoint_leaves_later_edits_undoable() {
 
     h.type_keys("ctrl-s");
     h.type_keys("d");
-    assert_eq!(buffer_text(&h, &path), "bcdef\n", "d deletes one character");
+    assert_eq!(
+        h.buffer_text_at(&path),
+        "bcdef\n",
+        "d deletes one character"
+    );
     h.type_keys("u");
-    assert_eq!(buffer_text(&h, &path), "abcdef\n", "and undoes");
+    assert_eq!(h.buffer_text_at(&path), "abcdef\n", "and undoes");
 
     // A second edit, since x is ExtendLineBelow here and would not make one.
     h.type_keys("d");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "bcdef\n",
         "the post-undo edit lands"
     );
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "abcdef\n",
         "the edit made after the undo undoes on its own",
     );
@@ -12458,11 +12443,11 @@ fn edits_after_a_normal_mode_checkpoint_undo_separately() {
     h.type_keys("ctrl-s");
     h.type_keys("d");
     h.type_keys("d");
-    assert_eq!(buffer_text(&h, &path), "cdef\n", "two characters deleted");
+    assert_eq!(h.buffer_text_at(&path), "cdef\n", "two characters deleted");
 
     h.type_keys("u");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "bcdef\n",
         "one undo reverts only the second delete",
     );
@@ -12475,7 +12460,7 @@ fn insert_types_at_every_cursor() {
     h.type_keys("C");
     h.type_keys("i");
     h.type_text("XY");
-    assert_eq!(buffer_text(&h, &path), "XYaa\nXYbb\n");
+    assert_eq!(h.buffer_text_at(&path), "XYaa\nXYbb\n");
     assert_eq!(h.head_offsets(), vec![2, 7]);
 }
 
@@ -12494,7 +12479,7 @@ fn same_line_cursors_each_land_after_their_own_insert() {
     insert_cursor_at(&mut h, 2);
     h.type_keys("i");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "aXbXc");
+    assert_eq!(h.buffer_text_at(&path), "aXbXc");
     assert_eq!(
         h.head_offsets(),
         vec![2, 4],
@@ -12543,7 +12528,7 @@ fn adjacent_cursors_backspacing_merge_into_one() {
     insert_cursor_at(&mut h, 2);
     h.type_keys("i");
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "cd", "both leading characters go");
+    assert_eq!(h.buffer_text_at(&path), "cd", "both leading characters go");
     assert_eq!(
         h.head_offsets(),
         vec![0],
@@ -12557,7 +12542,7 @@ fn insert_single_cursor_advances_past_text() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("i");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "Xabc");
+    assert_eq!(h.buffer_text_at(&path), "Xabc");
     assert_eq!(h.head_offsets(), vec![1]);
 }
 
@@ -12568,7 +12553,7 @@ fn insert_with_forward_selection_types_at_block_cursor() {
     select_forward(&mut h, 0, 3);
     h.stoat.transition_mode("insert".to_string());
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "abXcdef");
+    assert_eq!(h.buffer_text_at(&path), "abXcdef");
 }
 
 #[test]
@@ -12578,7 +12563,7 @@ fn backspace_with_forward_selection_acts_at_block_cursor() {
     select_forward(&mut h, 0, 3);
     h.stoat.transition_mode("insert".to_string());
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "acdef");
+    assert_eq!(h.buffer_text_at(&path), "acdef");
 }
 
 #[test]
@@ -12589,7 +12574,7 @@ fn enter_in_insert_mode_inserts_newline_in_file_buffer() {
     h.type_text("abc");
     h.type_keys("enter");
     h.type_text("xyz");
-    assert_eq!(buffer_text(&h, &path), "abc\nxyz");
+    assert_eq!(h.buffer_text_at(&path), "abc\nxyz");
 }
 
 #[test]
@@ -12600,7 +12585,7 @@ fn enter_after_trailing_spaces_trims_them() {
     h.type_text("foo   ");
     h.type_keys("enter");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "foo\n",
         "the line the break leaves behind keeps no trailing whitespace",
     );
@@ -12613,14 +12598,14 @@ fn enter_inside_leading_indent_pushes_the_line_down() {
     h.type_keys("l l i");
     h.type_keys("enter");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "\n    foo\n",
         "the whole line moves down with its indent rather than splitting",
     );
 
     h.type_text("X");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "\n  X  foo\n",
         "the cursor keeps its column on the line it followed down",
     );
@@ -12633,7 +12618,7 @@ fn append_advances_one_char_then_inserts() {
     h.type_keys("a");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "aXbc\n");
+    assert_eq!(h.buffer_text_at(&path), "aXbc\n");
 }
 
 #[test]
@@ -12644,7 +12629,7 @@ fn shift_i_jumps_to_first_nonwhitespace_then_inserts() {
     h.type_keys("I");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "    Xcode\n");
+    assert_eq!(h.buffer_text_at(&path), "    Xcode\n");
 }
 
 #[test]
@@ -12654,7 +12639,7 @@ fn shift_a_jumps_to_line_end_then_inserts() {
     h.type_keys("A");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("Z");
-    assert_eq!(buffer_text(&h, &path), "abcZ\nxyz\n");
+    assert_eq!(h.buffer_text_at(&path), "abcZ\nxyz\n");
 }
 
 #[test]
@@ -12665,7 +12650,7 @@ fn shift_i_on_empty_line_auto_indents() {
     h.type_keys("I");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("x");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\tx\n}\n");
 }
 
 /// Each cursor lands past every indent inserted ahead of it, not only its
@@ -12687,7 +12672,7 @@ fn shift_i_at_nested_blank_lines_lands_each_past_the_indents_ahead() {
     h.type_keys("I");
     h.type_text("x");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "fn a() {\n\tx\n\txif b {\n\t\tx\n\t}\n}\n",
         "every cursor types where it landed, none inside another's indent",
     );
@@ -12702,7 +12687,7 @@ fn shift_i_on_whitespace_line_falls_back_to_line_start() {
     h.type_keys("I");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "abc\nX    \ndef\n");
+    assert_eq!(h.buffer_text_at(&path), "abc\nX    \ndef\n");
 }
 
 #[test]
@@ -12713,7 +12698,7 @@ fn shift_a_on_empty_line_auto_indents() {
     h.type_keys("A");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("x");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\tx\n}\n");
 }
 
 #[test]
@@ -12723,7 +12708,7 @@ fn open_below_then_escape_strips_untouched_auto_indent() {
     h.type_keys("o");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\n}\n");
 }
 
 /// One edit covers every stripped line, so a second cursor's line has to
@@ -12742,14 +12727,14 @@ fn open_below_at_three_cursors_then_escape_strips_every_indent() {
 
     h.type_keys("o");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "fn a() {\n\tx\n\t\n\ty\n\t\n\tz\n\t\n}\n",
         "every opened line carries the indent while insert mode is open",
     );
 
     h.type_keys("escape");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "fn a() {\n\tx\n\n\ty\n\n\tz\n\n}\n",
         "and every one loses it again untouched",
     );
@@ -12762,7 +12747,7 @@ fn open_below_then_type_then_escape_keeps_indent() {
     h.type_keys("o");
     h.type_text("x");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\tx\n}\n");
 }
 
 #[test]
@@ -12772,7 +12757,7 @@ fn shift_i_on_empty_line_then_escape_strips_indent() {
     h.type_keys("j");
     h.type_keys("I");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\n}\n");
 }
 
 #[test]
@@ -12782,7 +12767,7 @@ fn shift_a_on_empty_line_then_escape_strips_indent() {
     h.type_keys("j");
     h.type_keys("A");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\n}\n");
     assert_eq!(h.selection_spans(), vec![(9, 10, false)]);
 }
 
@@ -12793,7 +12778,7 @@ fn insert_on_whitespace_line_then_escape_keeps_whitespace() {
     h.type_keys("j");
     h.type_keys("i");
     h.type_keys("escape");
-    assert_eq!(buffer_text(&h, &path), "abc\n    \ndef\n");
+    assert_eq!(h.buffer_text_at(&path), "abc\n    \ndef\n");
 }
 
 #[test]
@@ -12802,7 +12787,7 @@ fn count_open_below_opens_that_many_lines() {
     open_indent_buffer(&mut h, "a.rs", b"fn a() {\n}\n");
     h.type_keys("3 o");
     h.type_text("x");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n\tx\n\tx\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\tx\n\tx\n\tx\n}\n");
 }
 
 #[test]
@@ -12813,7 +12798,7 @@ fn open_below_opens_per_selection_without_row_dedup() {
     h.type_keys("o");
     assert_eq!(h.selection_spans().len(), 2);
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "abcdef\nX\nX\n");
+    assert_eq!(h.buffer_text_at(&path), "abcdef\nX\nX\n");
 }
 
 #[test]
@@ -12822,7 +12807,7 @@ fn open_below_continues_line_comment() {
     open_indent_buffer(&mut h, "a.rs", b"// foo\n");
     h.type_keys("o");
     h.type_text("bar");
-    assert_eq!(focused_buffer_string(&h), "// foo\n// bar\n");
+    assert_eq!(h.focused_buffer_text(), "// foo\n// bar\n");
 }
 
 #[test]
@@ -12831,7 +12816,7 @@ fn open_above_continues_line_comment() {
     open_indent_buffer(&mut h, "a.rs", b"// foo\n");
     h.type_keys("O");
     h.type_text("bar");
-    assert_eq!(focused_buffer_string(&h), "// bar\n// foo\n");
+    assert_eq!(h.focused_buffer_text(), "// bar\n// foo\n");
 }
 
 /// Changing a commented line opens a bare one, where o and O continue the
@@ -12848,7 +12833,7 @@ fn change_opens_a_line_without_continuing_the_comment() {
     h.type_keys("x");
     h.type_keys("c");
     h.type_text("baz");
-    assert_eq!(focused_buffer_string(&h), "baz\n// bar\n");
+    assert_eq!(h.focused_buffer_text(), "baz\n// bar\n");
 }
 
 #[test]
@@ -12858,7 +12843,7 @@ fn insert_enter_continues_line_comment() {
     h.type_keys("A");
     h.type_keys("enter");
     h.type_text("bar");
-    assert_eq!(focused_buffer_string(&h), "// foo\n// bar\n");
+    assert_eq!(h.focused_buffer_text(), "// foo\n// bar\n");
 }
 
 #[test]
@@ -12868,7 +12853,7 @@ fn insert_enter_continues_doc_comment_token() {
     h.type_keys("A");
     h.type_keys("enter");
     h.type_text("bar");
-    assert_eq!(focused_buffer_string(&h), "/// foo\n/// bar\n");
+    assert_eq!(h.focused_buffer_text(), "/// foo\n/// bar\n");
 }
 
 #[test]
@@ -12878,7 +12863,7 @@ fn insert_enter_continues_inner_doc_comment_token() {
     h.type_keys("A");
     h.type_keys("enter");
     h.type_text("bar");
-    assert_eq!(focused_buffer_string(&h), "//! foo\n//! bar\n");
+    assert_eq!(h.focused_buffer_text(), "//! foo\n//! bar\n");
 }
 
 #[test]
@@ -12887,7 +12872,7 @@ fn insert_enter_before_the_comment_token_carries_no_token() {
     open_indent_buffer(&mut h, "a.rs", b"// foo\n");
     h.type_keys("i");
     h.type_keys("enter");
-    assert_eq!(focused_buffer_string(&h), "\n// foo\n");
+    assert_eq!(h.focused_buffer_text(), "\n// foo\n");
 }
 
 #[test]
@@ -12897,14 +12882,14 @@ fn enter_between_braces_opens_an_indented_line() {
     h.type_keys("l l l l l l l l i");
     h.type_keys("enter");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "fn f() {\n\t\n}\n",
         "the braces part onto their own lines with a line between them",
     );
 
     h.type_text("x");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "fn f() {\n\tx\n}\n",
         "and the cursor is on that line, one level in",
     );
@@ -12917,7 +12902,7 @@ fn insert_enter_inside_a_comment_indent_carries_no_token() {
     h.type_keys("l l i");
     h.type_keys("enter");
     assert_eq!(
-        focused_buffer_string(&h),
+        h.focused_buffer_text(),
         "\n    // foo\n",
         "the indent moves down whole, carrying neither a token nor a re-indent",
     );
@@ -12929,7 +12914,7 @@ fn open_below_continues_doc_comment_token() {
     open_indent_buffer(&mut h, "a.rs", b"/// foo\n");
     h.type_keys("o");
     h.type_text("bar");
-    assert_eq!(focused_buffer_string(&h), "/// foo\n/// bar\n");
+    assert_eq!(h.focused_buffer_text(), "/// foo\n/// bar\n");
 }
 
 #[test]
@@ -12939,7 +12924,7 @@ fn open_below_inserts_blank_line_after_current_row() {
     h.type_keys("o");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "abc\nX\ndef\n");
+    assert_eq!(h.buffer_text_at(&path), "abc\nX\ndef\n");
 }
 
 #[test]
@@ -12949,7 +12934,7 @@ fn open_below_after_open_brace_auto_indents() {
     h.type_keys("o");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("x");
-    assert_eq!(focused_buffer_string(&h), "fn a() {\n\tx\n}\n");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\tx\n}\n");
 }
 
 #[test]
@@ -12961,7 +12946,7 @@ fn open_above_inserts_blank_line_before_current_row() {
     h.type_keys("O");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("Y");
-    assert_eq!(buffer_text(&h, &path), "abc\nY\n\ndef\n");
+    assert_eq!(h.buffer_text_at(&path), "abc\nY\n\ndef\n");
 }
 
 #[test]
@@ -12970,7 +12955,7 @@ fn open_below_at_last_line_appends_at_eof() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("o");
     h.type_text("X");
-    assert_eq!(buffer_text(&h, &path), "abc\nX");
+    assert_eq!(h.buffer_text_at(&path), "abc\nX");
 }
 
 #[test]
@@ -12979,7 +12964,7 @@ fn open_above_at_first_line_inserts_at_offset_zero() {
     let path = open_scratch_file(&mut h, "abc\n");
     h.type_keys("O");
     h.type_text("Z");
-    assert_eq!(buffer_text(&h, &path), "Z\nabc\n");
+    assert_eq!(h.buffer_text_at(&path), "Z\nabc\n");
 }
 
 #[test]
@@ -12990,7 +12975,7 @@ fn change_selection_deletes_then_enters_insert() {
     h.type_keys("c");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_text("XYZ");
-    assert_eq!(buffer_text(&h, &path), "XYZef");
+    assert_eq!(h.buffer_text_at(&path), "XYZef");
 }
 
 /// Alt-c is change, not delete, so it opens the replacement line.
@@ -13005,7 +12990,7 @@ fn a_no_yank_change_of_whole_lines_opens_a_line_to_type_on() {
     h.type_keys("x");
     h.type_keys("alt-c");
     h.type_text("Z");
-    assert_eq!(buffer_text(&h, &path), "Z\nbbb\n");
+    assert_eq!(h.buffer_text_at(&path), "Z\nbbb\n");
 }
 
 /// Alt-c keeps the deleted text out of every register, the way Alt-d does.
@@ -13032,7 +13017,7 @@ fn replace_char_replaces_each_char_in_selection() {
     h.type_keys("v l l l");
     h.type_keys("r");
     h.type_keys("X");
-    assert_eq!(buffer_text(&h, &path), "XXXXef");
+    assert_eq!(h.buffer_text_at(&path), "XXXXef");
     assert_eq!(
         h.stoat.focused_mode(),
         "normal",
@@ -13054,7 +13039,7 @@ fn a_cancelled_replace_char_keeps_select_mode() {
     h.type_keys("escape");
     assert!(!h.stoat.pending_replace, "chord dropped");
     assert_eq!(h.stoat.focused_mode(), "select");
-    assert_eq!(buffer_text(&h, &path), "abcdef");
+    assert_eq!(h.buffer_text_at(&path), "abcdef");
 }
 
 #[test]
@@ -13063,7 +13048,7 @@ fn replace_char_on_bare_cursor_replaces_char() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("r");
     h.type_keys("X");
-    assert_eq!(buffer_text(&h, &path), "Xbc");
+    assert_eq!(h.buffer_text_at(&path), "Xbc");
     assert_eq!(h.stoat.focused_mode(), "normal");
     assert!(!h.stoat.pending_replace);
 }
@@ -13076,7 +13061,7 @@ fn replace_char_with_enter_inserts_line_ending() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("r");
     h.type_keys("enter");
-    assert_eq!(buffer_text(&h, &path), "\nbc");
+    assert_eq!(h.buffer_text_at(&path), "\nbc");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -13086,7 +13071,7 @@ fn replace_char_with_tab_inserts_tab() {
     let path = open_scratch_file(&mut h, "abc");
     h.type_keys("r");
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "\tbc");
+    assert_eq!(h.buffer_text_at(&path), "\tbc");
 }
 
 /// The replacement repeats once per character covered, so a run becomes a
@@ -13098,7 +13083,7 @@ fn replace_char_with_enter_repeats_over_the_selection() {
     h.type_keys("v l l");
     h.type_keys("r");
     h.type_keys("enter");
-    assert_eq!(buffer_text(&h, &path), "\n\n\ndef");
+    assert_eq!(h.buffer_text_at(&path), "\n\n\ndef");
 }
 
 #[test]
@@ -13108,7 +13093,7 @@ fn replace_char_with_multibyte_input_grows_buffer() {
     h.type_keys("v l l");
     h.type_keys("r");
     h.type_text("é");
-    assert_eq!(buffer_text(&h, &path), "ééé");
+    assert_eq!(h.buffer_text_at(&path), "ééé");
 }
 
 #[test]
@@ -13117,7 +13102,7 @@ fn tab_at_line_start_inserts_tab() {
     let path = open_scratch_file(&mut h, "abc\n");
     h.type_keys("i");
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "\tabc\n");
+    assert_eq!(h.buffer_text_at(&path), "\tabc\n");
 }
 
 #[test]
@@ -13127,7 +13112,7 @@ fn i_on_selection_inserts_before_it() {
     h.type_keys("%");
     h.type_keys("i");
     h.type_keys("X");
-    assert_eq!(buffer_text(&h, &path), "Xfoo\n");
+    assert_eq!(h.buffer_text_at(&path), "Xfoo\n");
 }
 
 /// A leaves the cursor where the insert ended, past the last typed
@@ -13143,7 +13128,7 @@ fn shift_a_then_escape_rests_past_the_last_typed_char() {
     h.type_keys("A");
     h.type_keys("X");
     h.type_keys("escape");
-    assert_eq!(buffer_text(&h, &path), "abcX\n");
+    assert_eq!(h.buffer_text_at(&path), "abcX\n");
     assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
 }
 
@@ -13154,7 +13139,7 @@ fn tab_after_whitespace_inserts_indent_unit() {
     let path = open_scratch_file(&mut h, "  abc\n");
     h.type_keys("l l i");
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "    abc\n");
+    assert_eq!(h.buffer_text_at(&path), "    abc\n");
 }
 
 #[test]
@@ -13163,7 +13148,7 @@ fn tab_after_nonwhitespace_is_noop() {
     let path = open_scratch_file(&mut h, "abc\n");
     h.type_keys("l l l i");
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "abc\n");
+    assert_eq!(h.buffer_text_at(&path), "abc\n");
 }
 
 #[test]
@@ -13172,7 +13157,7 @@ fn backtab_inserts_indent_unit_unconditionally() {
     let path = open_scratch_file(&mut h, "abc\n");
     h.type_keys("l l i");
     h.type_keys("backtab");
-    assert_eq!(buffer_text(&h, &path), "ab\tc\n");
+    assert_eq!(h.buffer_text_at(&path), "ab\tc\n");
 }
 
 #[test]
@@ -13182,7 +13167,7 @@ fn backspace_on_leading_indent_removes_one_width() {
     let path = open_scratch_file(&mut h, "    abc\n");
     h.type_keys("l l l l i");
     h.type_keys("backspace");
-    assert_eq!(buffer_text(&h, &path), "abc\n");
+    assert_eq!(h.buffer_text_at(&path), "abc\n");
 }
 
 #[test]
@@ -13238,7 +13223,7 @@ fn tab_with_no_popup_smart_indents_after_whitespace() {
     h.type_keys("l l i");
     assert!(h.stoat.pending_completion.is_none());
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "    abc\n");
+    assert_eq!(h.buffer_text_at(&path), "    abc\n");
 }
 
 #[test]
@@ -13267,7 +13252,7 @@ fn tab_with_popup_open_invokes_acceptance() {
 
     h.type_keys("tab");
 
-    assert_eq!(buffer_text(&h, &path), "foobar");
+    assert_eq!(h.buffer_text_at(&path), "foobar");
     assert!(h.stoat.pending_completion.is_none());
 }
 
@@ -13380,13 +13365,13 @@ fn snippet_tabstop_wins_mid_line_only() {
         }])
     });
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "name(arg)");
+    assert_eq!(h.buffer_text_at(&path), "name(arg)");
     assert!(h.stoat.active_snippet.is_some(), "a snippet is in flight");
 
     h.type_keys("home");
     h.type_keys("tab");
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "\tname(arg)",
         "in an indent the key indents, snippet or no snippet",
     );
@@ -13428,7 +13413,7 @@ fn tab_advances_active_snippet_to_next_tabstop() {
         }])
     });
     h.type_keys("tab");
-    assert_eq!(buffer_text(&h, &path), "name(arg)");
+    assert_eq!(h.buffer_text_at(&path), "name(arg)");
     let (start, end) = focused_primary_offsets(&mut h);
     assert_eq!((start, end), (0, 4), "first tabstop");
     assert!(h.stoat.active_snippet.is_some());
@@ -15357,7 +15342,7 @@ fn keys_type_into_the_focused_buffer() {
         (
             effect,
             replies.try_recv().expect("a keys reply"),
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             h.stoat.focused_mode(),
         ),
         (

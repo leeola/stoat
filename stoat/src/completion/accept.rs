@@ -367,14 +367,6 @@ mod tests {
         path
     }
 
-    fn buffer_text(h: &TestHarness, path: &Path) -> String {
-        let ws = h.stoat.active_workspace();
-        let id = ws.buffers.id_for_path(path).expect("buffer registered");
-        let buf = ws.buffers.get(id).expect("buffer present");
-        let guard = buf.read().expect("buffer lock");
-        guard.rope().to_string()
-    }
-
     fn cursor_offset(h: &mut TestHarness) -> usize {
         let ws = h.stoat.active_workspace_mut();
         let FocusTarget::SplitPane = ws.focus else {
@@ -427,7 +419,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "foobar");
+        assert_eq!(h.buffer_text_at(&path), "foobar");
         assert_eq!(cursor_offset(&mut h), 6);
         assert!(h.stoat.pending_completion.is_none());
         assert!(!h.stoat.pending_completion_request.is_pending());
@@ -455,7 +447,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "println!(\"\")");
+        assert_eq!(h.buffer_text_at(&path), "println!(\"\")");
         assert_eq!(cursor_offset(&mut h), "println!(\"\")".len());
     }
 
@@ -499,7 +491,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "foobar");
+        assert_eq!(h.buffer_text_at(&path), "foobar");
     }
 
     #[test]
@@ -512,7 +504,7 @@ mod tests {
         let effect = dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(effect, UpdateEffect::None);
-        assert_eq!(buffer_text(&h, &path), "abc");
+        assert_eq!(h.buffer_text_at(&path), "abc");
     }
 
     #[test]
@@ -537,7 +529,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "println!(msg)");
+        assert_eq!(h.buffer_text_at(&path), "println!(msg)");
         let ws = h.stoat.active_workspace_mut();
         let FocusTarget::SplitPane = ws.focus else {
             panic!("not split");
@@ -581,7 +573,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "println!()");
+        assert_eq!(h.buffer_text_at(&path), "println!()");
         assert!(h.stoat.active_snippet.is_none());
     }
 
@@ -607,7 +599,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "x = ");
+        assert_eq!(h.buffer_text_at(&path), "x = ");
         let ws = h.stoat.active_workspace_mut();
         let FocusTarget::SplitPane = ws.focus else {
             panic!("not split");
@@ -646,7 +638,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "foobar");
+        assert_eq!(h.buffer_text_at(&path), "foobar");
         assert!(h.stoat.active_snippet.is_none());
     }
 
@@ -707,14 +699,14 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "barbaz",
             "the main edit lands at once"
         );
         h.settle();
 
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "use foo;\nbarbaz",
             "the resolved import is applied above the completion",
         );
@@ -749,7 +741,7 @@ mod tests {
         h.settle();
 
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "xbarbaz",
             "an import landed against text it was not resolved for"
         );
@@ -773,7 +765,7 @@ mod tests {
         // The resolve is delayed past the 300ms timeout, which fires first.
         h.advance_clock(Duration::from_millis(300));
 
-        assert_eq!(buffer_text(&h, &path), "barbaz");
+        assert_eq!(h.buffer_text_at(&path), "barbaz");
     }
 
     #[test]
@@ -799,7 +791,7 @@ mod tests {
 
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "foobar");
+        assert_eq!(h.buffer_text_at(&path), "foobar");
         assert!(
             !h.stoat.pending_completion_accept.is_pending(),
             "a word accept issues no resolve",
@@ -833,7 +825,7 @@ mod tests {
         h.type_keys("backspace");
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "foobaréxx");
+        assert_eq!(h.buffer_text_at(&path), "foobaréxx");
     }
 
     /// The refine path carries an item across a keystroke rather than fetching
@@ -864,7 +856,7 @@ mod tests {
         h.type_text("n");
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "println!()");
+        assert_eq!(h.buffer_text_at(&path), "println!()");
     }
 
     /// The same rule through the real pipeline, where the word source mints the
@@ -893,7 +885,7 @@ mod tests {
         h.type_text("o");
         dispatch(&mut h.stoat, &AcceptCompletion);
 
-        assert_eq!(buffer_text(&h, &path), "foobar\nfoobar");
+        assert_eq!(h.buffer_text_at(&path), "foobar\nfoobar");
     }
 
     /// The other cursor typed the same prefix, so it takes the newest cursor's
@@ -911,7 +903,7 @@ mod tests {
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(
-            (buffer_text(&h, &path), cursor_offsets(&mut h)),
+            (h.buffer_text_at(&path), cursor_offsets(&mut h)),
             ("foobar\nfoobar\nfoobar\n".to_string(), vec![13, 20]),
         );
     }
@@ -929,7 +921,7 @@ mod tests {
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(
-            (buffer_text(&h, &path), cursor_offsets(&mut h)),
+            (h.buffer_text_at(&path), cursor_offsets(&mut h)),
             ("ab foobar\nfoobar\n".to_string(), vec![9, 16]),
         );
     }
@@ -947,7 +939,7 @@ mod tests {
         dispatch(&mut h.stoat, &AcceptCompletion);
 
         assert_eq!(
-            (buffer_text(&h, &path), cursor_offsets(&mut h)),
+            (h.buffer_text_at(&path), cursor_offsets(&mut h)),
             ("foobar\nfoobar\n".to_string(), vec![6, 13]),
         );
     }
@@ -975,7 +967,7 @@ mod tests {
         install_popup(&mut h, items, 3..5);
 
         dispatch(&mut h.stoat, &AcceptCompletion);
-        let expanded = (buffer_text(&h, &path), selection_spans(&mut h));
+        let expanded = (h.buffer_text_at(&path), selection_spans(&mut h));
         h.type_keys("tab");
 
         assert_eq!(

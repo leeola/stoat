@@ -924,6 +924,21 @@ impl TestHarness {
         editor::primary_head_offset(&mut self.stoat)
     }
 
+    /// Text of buffer `id` in the active workspace.
+    pub(crate) fn buffer_text(&self, id: BufferId) -> String {
+        editor::buffer_text(&self.stoat, id)
+    }
+
+    /// Text of the buffer open at `path` in the active workspace.
+    pub(crate) fn buffer_text_at(&self, path: &std::path::Path) -> String {
+        editor::buffer_text_at(&self.stoat, path)
+    }
+
+    /// Text of the focused editor's buffer.
+    pub(crate) fn focused_buffer_text(&mut self) -> String {
+        editor::focused_buffer_text(&mut self.stoat)
+    }
+
     /// Display-grid `(row, column)` for each selection's head in the
     /// focused editor.
     pub(crate) fn cursor_display_positions(&mut self) -> Vec<(u32, u32)> {

@@ -1640,23 +1640,6 @@ fn command_only_action(title: &str) -> lsp_types::CodeActionOrCommand {
     })
 }
 
-fn buffer_text(h: &TestHarness, path: &Path) -> String {
-    let buffer_id = h
-        .stoat
-        .active_workspace()
-        .buffers
-        .id_for_path(path)
-        .expect("buffer for path");
-    let buffer = h
-        .stoat
-        .active_workspace()
-        .buffers
-        .get(buffer_id)
-        .expect("buffer");
-    let guard = buffer.read().expect("buffer lock");
-    guard.rope().to_string()
-}
-
 #[test]
 fn code_action_unsupported_capability_is_noop() {
     let mut h = TestHarness::with_size(80, 24);
@@ -1795,7 +1778,7 @@ fn code_action_navigates_with_jk_and_picks_with_enter() {
 
     h.type_keys("enter");
     assert!(h.stoat.pending_code_action_picker.is_none());
-    assert_eq!(buffer_text(&h, &path), "// 11\nabc\n");
+    assert_eq!(h.buffer_text_at(&path), "// 11\nabc\n");
 }
 
 /// The guard reads keys ahead of the keymap and closes on anything it does
@@ -1865,7 +1848,7 @@ fn code_action_pick_one_applies_edit() {
     h.type_keys("1");
     h.settle();
     assert!(h.stoat.pending_code_action_picker.is_none());
-    assert_eq!(buffer_text(&h, &path), "// hi\nabc\n");
+    assert_eq!(h.buffer_text_at(&path), "// hi\nabc\n");
 }
 
 /// The server measured a direct action's edit against the text it was sent.
@@ -1895,7 +1878,7 @@ fn a_direct_code_action_is_skipped_when_the_buffer_moved() {
     crate::action_handlers::lsp::pick_code_action(&mut h.stoat, 0);
 
     assert_eq!(
-        (buffer_text(&h, &path), h.stoat.pending_message.as_deref()),
+        (h.buffer_text_at(&path), h.stoat.pending_message.as_deref()),
         (
             "xabc\n".to_string(),
             Some("lsp: code action skipped, buffer changed")
@@ -2199,7 +2182,7 @@ fn rename_submit_applies_workspace_edit() {
     crate::action_handlers::lsp::rename_input_submit(&mut h.stoat);
     h.settle();
     assert!(h.stoat.rename_input.is_none());
-    assert_eq!(buffer_text(&h, &path), "fn bar() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn bar() {}\n");
 }
 
 /// The rename lands in a background pump, outside the input loop that arms
@@ -2289,7 +2272,7 @@ fn a_rename_reply_is_dropped_when_the_buffer_moved_under_it() {
     edit_focused_buffer_directly(&mut h, "x");
     h.settle();
 
-    assert_eq!(buffer_text(&h, &path), "xfn foo() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "xfn foo() {}\n");
     assert_eq!(
         h.stoat.pending_message.as_deref(),
         Some("lsp: rename skipped, buffer changed"),
@@ -2319,7 +2302,7 @@ fn rename_cancel_discards_modal() {
     let cancelled = crate::action_handlers::lsp::rename_input_cancel(&mut h.stoat);
     assert!(cancelled);
     assert!(h.stoat.rename_input.is_none());
-    assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn foo() {}\n");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -3234,7 +3217,7 @@ fn format_unsupported_capability_is_noop() {
     );
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn  foo (){}\n");
 }
 
 #[test]
@@ -3246,7 +3229,7 @@ fn format_no_response_is_noop() {
     open_buffer(&mut h, path.clone());
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn  foo (){}\n");
 }
 
 #[test]
@@ -3262,7 +3245,7 @@ fn format_applies_returned_edits() {
     );
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn foo() {}\n");
 }
 
 #[test]
@@ -3278,7 +3261,7 @@ fn format_equals_keystroke_triggers() {
     );
     h.type_keys("=");
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn foo() {}\n");
 }
 
 #[test]
@@ -3294,7 +3277,7 @@ fn format_document_applies_returned_edits() {
     );
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn foo() {}\n");
 }
 
 #[test]
@@ -3327,7 +3310,7 @@ fn a_format_reply_is_dropped_when_the_buffer_moved_under_it() {
     h.settle();
 
     assert_eq!(
-        buffer_text(&h, &path),
+        h.buffer_text_at(&path),
         "xfn  foo (){}\n",
         "the reply was applied to text the server never saw"
     );
@@ -3500,7 +3483,7 @@ fn format_document_unsupported_capability_is_noop() {
     );
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Format);
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn  foo (){}\n");
     assert_eq!(
         h.stoat.pending_message.as_deref(),
         Some("lsp: server does not support format"),
@@ -3520,7 +3503,7 @@ fn space_l_f_formats_document() {
     );
     h.type_keys("space l f");
     h.settle();
-    assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    assert_eq!(h.buffer_text_at(&path), "fn foo() {}\n");
 }
 
 fn enable_inlay_hints(h: &TestHarness) {

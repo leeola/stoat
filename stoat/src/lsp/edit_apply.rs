@@ -485,18 +485,6 @@ mod tests {
         workspace.buffers.open(path, text);
     }
 
-    fn buffer_text(h: &TestHarness, path: &Path) -> String {
-        let id = h
-            .stoat
-            .active_workspace()
-            .buffers
-            .id_for_path(path)
-            .expect("buffer open");
-        let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
-        let guard = buffer.read().expect("buffer poisoned");
-        guard.rope().to_string()
-    }
-
     #[test]
     fn applies_changes_map_to_open_buffer() {
         let mut h = TestHarness::with_size(80, 24);
@@ -512,7 +500,7 @@ mod tests {
         let outcome =
             apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
         assert_eq!(outcome.buffers_edited.len(), 1);
-        assert_eq!(buffer_text(&h, &path), "aXe\n");
+        assert_eq!(h.buffer_text_at(&path), "aXe\n");
     }
 
     #[test]
@@ -529,7 +517,7 @@ mod tests {
             change_annotations: None,
         };
         apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
-        assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
+        assert_eq!(h.buffer_text_at(&path), "aBcdEf\n");
     }
 
     /// Apply `edits` to `path` through the changes map, which is the carrier
@@ -586,13 +574,13 @@ mod tests {
             &path,
             vec![text_edit(0, 1, 2, "B"), text_edit(0, 4, 5, "E")],
         );
-        assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
+        assert_eq!(h.buffer_text_at(&path), "aBcdEf\n");
 
         undo(&mut h, &path);
-        assert_eq!(buffer_text(&h, &path), "abcdef\n");
+        assert_eq!(h.buffer_text_at(&path), "abcdef\n");
 
         redo(&mut h, &path);
-        assert_eq!(buffer_text(&h, &path), "aBcdEf\n");
+        assert_eq!(h.buffer_text_at(&path), "aBcdEf\n");
     }
 
     /// A rename spanning files is one step per file, since undo is per buffer
@@ -621,13 +609,13 @@ mod tests {
             change_annotations: None,
         };
         apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
-        assert_eq!(buffer_text(&h, &a), "aBcdEf\n");
-        assert_eq!(buffer_text(&h, &b), "uVwxYz\n");
+        assert_eq!(h.buffer_text_at(&a), "aBcdEf\n");
+        assert_eq!(h.buffer_text_at(&b), "uVwxYz\n");
 
         undo(&mut h, &a);
-        assert_eq!(buffer_text(&h, &a), "abcdef\n");
+        assert_eq!(h.buffer_text_at(&a), "abcdef\n");
         assert_eq!(
-            buffer_text(&h, &b),
+            h.buffer_text_at(&b),
             "uVwxYz\n",
             "the other file is untouched"
         );
@@ -650,7 +638,7 @@ mod tests {
         );
 
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "use a;\nuse b;\nfn main() {}\n",
             "the second insert landed ahead of the first"
         );
@@ -669,7 +657,7 @@ mod tests {
         );
 
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "XYdef\n",
             "the replace was measured against text the insert had already moved"
         );
@@ -691,7 +679,7 @@ mod tests {
         );
 
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "XYdef\n",
             "the insert landed inside the span the replace then consumed"
         );
@@ -714,10 +702,10 @@ mod tests {
             &path,
             vec![text_edit(0, 3, 3, "X"), text_edit(0, 1, 3, "Y")],
         );
-        assert_eq!(buffer_text(&h, &path), "aYXdef\n");
+        assert_eq!(h.buffer_text_at(&path), "aYXdef\n");
 
         undo(&mut h, &path);
-        assert_eq!(buffer_text(&h, &path), "abcdef\n", "one undo step");
+        assert_eq!(h.buffer_text_at(&path), "abcdef\n", "one undo step");
     }
 
     /// Replaces and an insert touching one of them land as the server listed
@@ -738,10 +726,10 @@ mod tests {
                 text_edit(0, 6, 8, "C"),
             ],
         );
-        assert_eq!(buffer_text(&h, &path), "AcBXfCij\n");
+        assert_eq!(h.buffer_text_at(&path), "AcBXfCij\n");
 
         undo(&mut h, &path);
-        assert_eq!(buffer_text(&h, &path), "abcdefghij\n", "one undo step");
+        assert_eq!(h.buffer_text_at(&path), "abcdefghij\n", "one undo step");
     }
 
     /// A set holding an insert at a replace's start still lands whole, in one
@@ -766,10 +754,10 @@ mod tests {
                 text_edit(0, 2, 4, "W"),
             ],
         );
-        assert_eq!(buffer_text(&h, &path), "XYWZef\n");
+        assert_eq!(h.buffer_text_at(&path), "XYWZef\n");
 
         undo(&mut h, &path);
-        assert_eq!(buffer_text(&h, &path), "abcdef\n", "one undo step");
+        assert_eq!(h.buffer_text_at(&path), "abcdef\n", "one undo step");
     }
 
     #[test]
@@ -790,7 +778,7 @@ mod tests {
             change_annotations: None,
         };
         apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
-        assert_eq!(buffer_text(&h, &path), "Xabc\n");
+        assert_eq!(h.buffer_text_at(&path), "Xabc\n");
     }
 
     /// `edit` as a single versioned document change over `path`.
@@ -829,7 +817,7 @@ mod tests {
         apply_workspace_edit(&mut h.stoat, edit_at_char_one(&path), OffsetEncoding::Utf8)
             .expect("apply");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "X\u{e9}ab\n",
             "utf-8 char 1 falls inside the character and clips back to its start"
         );
@@ -839,7 +827,7 @@ mod tests {
         apply_workspace_edit(&mut h.stoat, edit_at_char_one(&path), OffsetEncoding::Utf16)
             .expect("apply");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "\u{e9}Xab\n",
             "utf-16 char 1 is past the whole character, at byte 2"
         );
@@ -864,7 +852,7 @@ mod tests {
             OffsetEncoding::Utf16,
         )
         .expect("apply");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
         assert_eq!(outcome.buffers_stale, vec![id]);
         assert!(outcome.buffers_edited.is_empty());
     }
@@ -888,7 +876,7 @@ mod tests {
             OffsetEncoding::Utf16,
         )
         .expect("apply");
-        assert_eq!(buffer_text(&h, &path), "Xabc\n");
+        assert_eq!(h.buffer_text_at(&path), "Xabc\n");
         assert_eq!(outcome.buffers_edited, vec![id]);
         assert!(outcome.buffers_stale.is_empty());
     }
@@ -918,7 +906,7 @@ mod tests {
             .buffers
             .id_for_path(&path)
             .is_some());
-        assert_eq!(buffer_text(&h, &path), "hello!\n");
+        assert_eq!(h.buffer_text_at(&path), "hello!\n");
     }
 
     /// An edit into a closed CRLF file opens it the way an ordinary open does.
@@ -956,7 +944,7 @@ mod tests {
             (
                 opens,
                 h.stoat.lsp_opened.contains(&id),
-                buffer_text(&h, &path),
+                h.buffer_text_at(&path),
                 h.stoat.active_workspace().buffers.line_ending(id),
             ),
             (
@@ -1139,7 +1127,7 @@ mod tests {
         apply_workspace_edit(&mut h.stoat, edit, OffsetEncoding::Utf16).expect("apply");
 
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abc\nd\ne\n",
             "the server's terminators arrive as the buffer's own",
         );

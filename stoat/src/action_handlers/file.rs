@@ -1087,19 +1087,6 @@ mod tests {
         buffer.write().expect("poisoned").edit(0..0, text);
     }
 
-    fn buffer_text(h: &TestHarness, id: BufferId) -> String {
-        h.stoat
-            .active_workspace()
-            .buffers
-            .get(id)
-            .expect("buffer")
-            .read()
-            .expect("poisoned")
-            .snapshot
-            .visible_text
-            .to_string()
-    }
-
     #[test]
     fn open_config_seeds_a_layering_stub_when_missing() {
         let mut h = TestHarness::with_size(80, 10);
@@ -1116,7 +1103,7 @@ mod tests {
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .buffer_id;
-        assert_eq!(buffer_text(&h, buffer_id), crate::app::USER_CONFIG_SEED);
+        assert_eq!(h.buffer_text(buffer_id), crate::app::USER_CONFIG_SEED);
     }
 
     #[test]
@@ -1141,7 +1128,7 @@ mod tests {
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .buffer_id;
-        assert_eq!(buffer_text(&h, buffer_id), custom);
+        assert_eq!(h.buffer_text(buffer_id), custom);
     }
 
     /// Stoat's own target seeds the stub, since a copy of the shipped config
@@ -1199,10 +1186,7 @@ mod tests {
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .buffer_id;
-        assert_eq!(
-            buffer_text(&h, buffer_id),
-            crate::app::DEFAULT_STOATTY_CONFIG
-        );
+        assert_eq!(h.buffer_text(buffer_id), crate::app::DEFAULT_STOATTY_CONFIG);
     }
 
     #[test]
@@ -1653,7 +1637,7 @@ mod tests {
             .expect("editor")
             .buffer_id;
         assert_eq!(
-            buffer_text(&h, buffer_id),
+            h.buffer_text(buffer_id),
             "// typed\nfn  main (){}\n",
             "the stale format must not rewrite what the user typed",
         );

@@ -1,12 +1,16 @@
 use crate::{
     action_handlers,
     app::Stoat,
+    buffer::BufferId,
     editor_state::{EditorId, EditorState},
     pane::PaneId,
     selection::SelectionsCollection,
     View,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_text::{cursor_offset, Point};
 
 /// Append `text` at offset 0 in the focused editor's buffer, then re-seed the
@@ -138,6 +142,43 @@ pub(crate) fn primary_head_offset(stoat: &mut Stoat) -> usize {
         buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().tail()),
         buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head()),
     )
+}
+
+/// Text of buffer `id` in the active workspace. Panics if the workspace holds
+/// no such buffer.
+pub(crate) fn buffer_text(stoat: &Stoat, id: BufferId) -> String {
+    stoat
+        .active_workspace()
+        .buffers
+        .get(id)
+        .expect("buffer present")
+        .read()
+        .expect("buffer poisoned")
+        .rope()
+        .to_string()
+}
+
+/// Text of the buffer open at `path` in the active workspace. Panics if no
+/// buffer holds that path.
+pub(crate) fn buffer_text_at(stoat: &Stoat, path: &Path) -> String {
+    let id = stoat
+        .active_workspace()
+        .buffers
+        .id_for_path(path)
+        .expect("buffer registered for the path");
+    buffer_text(stoat, id)
+}
+
+/// Text of the focused editor's buffer, read through its display map. Panics
+/// if focus is not on an editor.
+pub(crate) fn focused_buffer_text(stoat: &mut Stoat) -> String {
+    let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
+    editor
+        .display_map
+        .snapshot()
+        .buffer_snapshot()
+        .rope()
+        .to_string()
 }
 
 /// `scroll_row` for every editor in the active workspace, in `editors`

@@ -488,16 +488,6 @@ mod tests {
             .cloned()
     }
 
-    fn buffer_text(h: &mut TestHarness) -> String {
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        editor
-            .display_map
-            .snapshot()
-            .buffer_snapshot()
-            .rope()
-            .to_string()
-    }
-
     /// Unstaging takes the hunk out of the commit and leaves it on disk, which
     /// is what turns a change the commit owned into an unstaged one.
     #[test]
@@ -508,7 +498,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
         h.settle();
 
-        let text = buffer_text(&mut h);
+        let text = h.focused_buffer_text();
         assert_eq!(
             (committed(&h), text),
             (Some("a\nb\nc\n".to_string()), "a\nb\nX\n".to_string()),

@@ -674,14 +674,6 @@ mod tests {
         path
     }
 
-    fn buffer_text(h: &TestHarness, path: &std::path::Path) -> String {
-        let ws = h.stoat.active_workspace();
-        let id = ws.buffers.id_for_path(path).expect("buffer registered");
-        let buf = ws.buffers.get(id).expect("buffer present");
-        let guard = buf.read().expect("buffer lock");
-        guard.rope().to_string()
-    }
-
     /// Install `ranges` as the whole selection set, each `(start, end,
     /// reversed)`.
     fn set_selections(h: &mut TestHarness, ranges: &[(usize, usize, bool)]) {
@@ -818,7 +810,7 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "ab cd\none\ntwo\n",
             "the first selection's fragment precedes the second's",
         );
@@ -859,7 +851,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabc\n");
         assert_eq!(cursor_offset(&mut h), 5);
     }
 
@@ -871,7 +863,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
-        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabc\n");
         assert_eq!(cursor_offset(&mut h), 2);
     }
 
@@ -880,7 +872,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -892,7 +884,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("h");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "ababcc\n");
+        assert_eq!(h.buffer_text_at(&path), "ababcc\n");
     }
 
     #[test]
@@ -903,7 +895,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabc\n");
         assert_eq!(h.selection_spans(), vec![(3, 6, false)]);
     }
 
@@ -916,7 +908,7 @@ mod tests {
         h.type_keys("escape");
         h.stoat.pending_count = Some(3);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcabcabcabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabcabcabc\n");
         assert_eq!(h.selection_spans(), vec![(3, 12, false)]);
     }
 
@@ -943,7 +935,7 @@ mod tests {
         h.type_keys("y");
         h.type_keys("escape");
         h.type_keys("p");
-        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabc\n");
     }
 
     /// Yank returns to normal mode, so the register is filled in one select
@@ -961,7 +953,7 @@ mod tests {
 
         h.type_keys("p");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abcabcdef\n",
             "the yanked text lands after the selection"
         );
@@ -976,7 +968,7 @@ mod tests {
         h.type_keys("y");
         h.type_keys("escape");
         h.type_keys("P");
-        assert_eq!(buffer_text(&h, &path), "abcabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabc\n");
     }
 
     fn make_two_selections(h: &mut TestHarness) {
@@ -1050,7 +1042,7 @@ mod tests {
         let path = seed(&mut h, "abc\n");
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
-        assert_eq!(buffer_text(&h, &path), "\n");
+        assert_eq!(h.buffer_text_at(&path), "\n");
         let stored = h
             .stoat
             .registers
@@ -1059,7 +1051,7 @@ mod tests {
         assert_eq!(stored, Some("abc".to_string()));
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1073,7 +1065,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" _");
         crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelection);
-        assert_eq!(buffer_text(&h, &path), "\n");
+        assert_eq!(h.buffer_text_at(&path), "\n");
         let stored = h
             .stoat
             .registers
@@ -1091,7 +1083,7 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["keep".to_string()]);
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::DeleteSelectionNoYank);
-        assert_eq!(buffer_text(&h, &path), "\n");
+        assert_eq!(h.buffer_text_at(&path), "\n");
         let stored = h
             .stoat
             .registers
@@ -1107,7 +1099,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendLineBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ChangeSelection);
-        assert_eq!(buffer_text(&h, &path), "    a\n    \n    c\n");
+        assert_eq!(h.buffer_text_at(&path), "    a\n    \n    c\n");
     }
 
     #[test]
@@ -1116,7 +1108,7 @@ mod tests {
         let path = seed(&mut h, "abcdef\n");
         h.type_keys("v l l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::ChangeSelection);
-        assert_eq!(buffer_text(&h, &path), "ef\n");
+        assert_eq!(h.buffer_text_at(&path), "ef\n");
     }
 
     #[test]
@@ -1124,7 +1116,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abcdef\n");
         h.type_keys("v l l d");
-        assert_eq!(buffer_text(&h, &path), "def\n");
+        assert_eq!(h.buffer_text_at(&path), "def\n");
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -1143,14 +1135,14 @@ mod tests {
             let path = seed(&mut h, "abc");
             h.type_keys("l v l d");
             assert_eq!(
-                buffer_text(&h, &path),
+                h.buffer_text_at(&path),
                 "a",
                 "the delete empties the line's tail"
             );
             assert_eq!(cursor_offset(&mut h), 1, "the cursor rests on the end");
 
             h.type_keys(keys);
-            buffer_text(&h, &path)
+            h.buffer_text_at(&path)
         };
 
         assert_eq!(
@@ -1175,7 +1167,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "X\nY\nZ\nX\n");
+        assert_eq!(h.buffer_text_at(&path), "X\nY\nZ\nX\n");
     }
 
     /// Pasting a line below the last line of a buffer with no final newline
@@ -1194,7 +1186,7 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abc\ndefX\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\ndefX\n");
     }
 
     /// A buffer that does end in a newline already has the row to paste into,
@@ -1212,7 +1204,7 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["X\n".to_string()]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abc\nX\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\nX\n");
     }
 
     /// A paste answers on a buffer whose last character is multibyte.
@@ -1233,7 +1225,7 @@ mod tests {
             crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
         }
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "caféx");
+        assert_eq!(h.buffer_text_at(&path), "caféx");
     }
 
     #[test]
@@ -1246,7 +1238,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
-        assert_eq!(buffer_text(&h, &path), "X\nY\nX\nZ\n");
+        assert_eq!(h.buffer_text_at(&path), "X\nY\nX\nZ\n");
     }
 
     #[test]
@@ -1256,7 +1248,7 @@ mod tests {
         make_two_selections(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcabc\ndefdef\n");
+        assert_eq!(h.buffer_text_at(&path), "abcabc\ndefdef\n");
     }
 
     #[test]
@@ -1268,7 +1260,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abab\ncdab\nefab\n");
+        assert_eq!(h.buffer_text_at(&path), "abab\ncdab\nefab\n");
     }
 
     #[test]
@@ -1281,7 +1273,7 @@ mod tests {
             vec!["A".to_string(), "B".to_string()],
         );
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcA\ndefB\n");
+        assert_eq!(h.buffer_text_at(&path), "abcA\ndefB\n");
     }
 
     #[test]
@@ -1293,7 +1285,7 @@ mod tests {
             .registers
             .write(crate::register::Register::Unnamed, vec!["A".to_string()]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcA\ndefA\n");
+        assert_eq!(h.buffer_text_at(&path), "abcA\ndefA\n");
     }
 
     #[test]
@@ -1306,7 +1298,7 @@ mod tests {
             vec!["x\ny".to_string(), "z".to_string()],
         );
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abcx\ny\ndefz\n");
+        assert_eq!(h.buffer_text_at(&path), "abcx\ny\ndefz\n");
     }
 
     #[test]
@@ -1329,7 +1321,7 @@ mod tests {
         h.type_keys("space \" y");
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
         assert_eq!(h.stoat.focused_mode(), "normal");
-        assert_eq!(buffer_text(&h, &path), "abcdef\n", "a yank edits nothing");
+        assert_eq!(h.buffer_text_at(&path), "abcdef\n", "a yank edits nothing");
     }
 
     #[test]
@@ -1402,7 +1394,7 @@ mod tests {
             .unwrap();
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
-        assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+        assert_eq!(h.buffer_text_at(&path), "abcxyz\n");
     }
 
     /// Clipboard text arrives normalized, so a CRLF clipboard cannot put a
@@ -1423,9 +1415,9 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
         assert!(
-            !buffer_text(&h, &path).contains('\r'),
+            !h.buffer_text_at(&path).contains('\r'),
             "no carriage return reaches the buffer, got {:?}",
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
         );
     }
 
@@ -1441,9 +1433,9 @@ mod tests {
         h.type_keys("\" + p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert!(
-            !buffer_text(&h, &path).contains('\r'),
+            !h.buffer_text_at(&path).contains('\r'),
             "no carriage return reaches the buffer, got {:?}",
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
         );
     }
 
@@ -1466,7 +1458,7 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abc\nX\ndef\nY",
             "both fragments land at a line start, including the one with no newline",
         );
@@ -1481,7 +1473,7 @@ mod tests {
             .unwrap();
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardBefore);
-        assert_eq!(buffer_text(&h, &path), "xyzabc\n");
+        assert_eq!(h.buffer_text_at(&path), "xyzabc\n");
     }
 
     #[test]
@@ -1489,7 +1481,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1558,7 +1550,7 @@ mod tests {
         h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("\" a p");
-        assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+        assert_eq!(h.buffer_text_at(&path), "abcxyz\n");
     }
 
     /// A register that holds something derived refuses a write, and says so
@@ -1692,7 +1684,7 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         h.type_keys("\" 1 p");
-        assert_eq!(buffer_text(&h, &path), "abc\ndefabc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\ndefabc\n");
     }
 
     /// Punctuation the special chars do not claim names a register too.
@@ -1765,7 +1757,7 @@ mod tests {
         h.type_keys("a");
         h.type_keys("Ctrl-r");
         h.type_keys("a");
-        assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+        assert_eq!(h.buffer_text_at(&path), "axyzbc\n");
     }
 
     #[test]
@@ -1778,7 +1770,7 @@ mod tests {
         h.type_keys("a");
         h.type_keys("Ctrl-r");
         h.type_keys("\"");
-        assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+        assert_eq!(h.buffer_text_at(&path), "axyzbc\n");
     }
 
     #[test]
@@ -1794,7 +1786,7 @@ mod tests {
         h.type_keys("Ctrl-r");
         h.type_keys("\"");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "Axy\nBzw\n",
             "every cursor received the whole register joined together"
         );
@@ -1812,7 +1804,7 @@ mod tests {
         h.type_keys("i");
         h.type_keys("Ctrl-r");
         h.type_keys("\"");
-        assert_eq!(buffer_text(&h, &path), "Axy\nBzw\nBuv\n");
+        assert_eq!(h.buffer_text_at(&path), "Axy\nBzw\nBuv\n");
     }
 
     #[test]
@@ -1822,7 +1814,7 @@ mod tests {
         h.type_keys("a");
         h.type_keys("Ctrl-r");
         h.type_keys("a");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
         assert!(!h.stoat.pending_insert_register);
     }
 
@@ -1838,7 +1830,7 @@ mod tests {
         h.type_keys("Ctrl-r");
         h.type_keys("escape");
         assert!(!h.stoat.pending_insert_register);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1867,7 +1859,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" + p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+        assert_eq!(h.buffer_text_at(&path), "axyzbc\n");
     }
 
     /// The display server serves two selections at once, and a yank into one
@@ -1901,7 +1893,7 @@ mod tests {
 
         h.type_keys("\" + p");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abc defabc\n",
             "pasting plus brings back what plus holds, not the star yank that followed it",
         );
@@ -1933,7 +1925,7 @@ mod tests {
 
         h.type_keys("\" + p");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abcabc\ndefdef\n",
             "so each selection pastes its own fragment, not the joined blob",
         );
@@ -1989,7 +1981,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" / p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "aneedlebc\n");
+        assert_eq!(h.buffer_text_at(&path), "aneedlebc\n");
     }
 
     #[test]
@@ -2000,7 +1992,7 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("\" / p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -2012,7 +2004,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         h.type_keys("\" . p");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abab\ncdcd\n",
             "each selection received its own text, not the other's",
         );
@@ -2025,7 +2017,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "x\n");
         h.type_keys("\" % p");
-        assert_eq!(buffer_text(&h, &path), "xbuf.txt\n");
+        assert_eq!(h.buffer_text_at(&path), "xbuf.txt\n");
     }
 
     /// A buffer with no path names itself the way the status row does.
@@ -2072,7 +2064,7 @@ mod tests {
 
         h.type_keys("\" : p");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "xnewer\n",
             "one cursor takes the first fragment, which is the line just run",
         );
@@ -2117,7 +2109,7 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         h.type_keys("\" . R");
-        assert_eq!(buffer_text(&h, &path), "ab\ncd\n");
+        assert_eq!(h.buffer_text_at(&path), "ab\ncd\n");
     }
 
     #[test]
@@ -2127,7 +2119,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         h.type_keys("\" # p");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
-        let text = buffer_text(&h, &path);
+        let text = h.buffer_text_at(&path);
         assert!(text.contains('1'), "expected '1' in {text:?}");
         assert!(text.contains('2'), "expected '2' in {text:?}");
     }
@@ -2141,7 +2133,7 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "xyz\n");
+        assert_eq!(h.buffer_text_at(&path), "xyz\n");
         assert_eq!(h.selection_spans(), vec![(0, 3, false)]);
     }
 
@@ -2166,7 +2158,7 @@ mod tests {
         );
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "xyz\n");
+        assert_eq!(h.buffer_text_at(&path), "xyz\n");
         assert_eq!(h.selection_spans(), vec![(0, 3, true)]);
     }
 
@@ -2176,7 +2168,7 @@ mod tests {
         let path = seed(&mut h, "abc\n");
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     /// A replace covering no text has nothing to replace, so it must not insert
@@ -2192,7 +2184,11 @@ mod tests {
         h.type_keys("escape");
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "", "nothing was covered to replace");
+        assert_eq!(
+            h.buffer_text_at(&path),
+            "",
+            "nothing was covered to replace"
+        );
     }
 
     /// A collapsed selection consumes no fragment, so the ones after it are not
@@ -2213,7 +2209,7 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "\nX\n",
             "the first selection is emptied"
         );
@@ -2229,7 +2225,7 @@ mod tests {
         );
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "\nP\n",
             "the live selection takes the first fragment and the collapsed one takes none",
         );
@@ -2245,7 +2241,7 @@ mod tests {
             vec!["A".to_string(), "B".to_string()],
         );
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "A\nB\n");
+        assert_eq!(h.buffer_text_at(&path), "A\nB\n");
     }
 
     #[test]
@@ -2257,7 +2253,7 @@ mod tests {
             .registers
             .write(crate::register::Register::Unnamed, vec!["A".to_string()]);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "A\nA\n");
+        assert_eq!(h.buffer_text_at(&path), "A\nA\n");
     }
 
     #[test]
@@ -2270,7 +2266,7 @@ mod tests {
         h.type_keys("v l l");
         h.stoat.pending_count = Some(3);
         crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithYanked);
-        assert_eq!(buffer_text(&h, &path), "xxx\n");
+        assert_eq!(h.buffer_text_at(&path), "xxx\n");
     }
 
     #[test]
@@ -2281,7 +2277,7 @@ mod tests {
             .registers
             .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
         h.type_keys("R");
-        assert_eq!(buffer_text(&h, &path), "xyzbc\n");
+        assert_eq!(h.buffer_text_at(&path), "xyzbc\n");
     }
 
     /// The clipboard menu's R is the clipboard twin of the normal-mode R, so
@@ -2306,7 +2302,7 @@ mod tests {
         h.type_keys("v l l escape");
         h.type_keys("space \" R");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "xyz\n",
             "the clipboard text replaced the selection, not the unnamed register's",
         );
@@ -2323,7 +2319,7 @@ mod tests {
             .write(crate::register::Register::Unnamed, vec!["xyz".to_string()]);
         h.type_keys("v l l");
         h.type_keys("R");
-        assert_eq!(buffer_text(&h, &path), "xyz\n");
+        assert_eq!(h.buffer_text_at(&path), "xyz\n");
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 }

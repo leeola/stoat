@@ -1821,7 +1821,7 @@ fn open_line_opens_from_the_end_each_direction_moves_away_from() {
         }
         h.type_keys(dir_key);
         h.type_text("X");
-        buffer_string(&mut h)
+        h.focused_buffer_text()
     };
 
     assert_eq!(
@@ -1907,12 +1907,6 @@ fn ensure_selections_forward_orients_every_selection() {
     assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
 }
 
-fn buffer_string(h: &mut TestHarness) -> String {
-    let editor = focused_editor_mut(&mut h.stoat).expect("editor");
-    let snapshot = editor.display_map.snapshot();
-    snapshot.buffer_snapshot().rope().to_string()
-}
-
 fn set_three_single_char_selections(h: &mut TestHarness) {
     set_selections(h, &[(0, 1), (1, 2), (2, 3)]);
 }
@@ -1956,7 +1950,7 @@ fn incrementing_several_cursors_leaves_each_over_its_own_number() {
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
 
-    assert_eq!(buffer_string(&mut h), "10 10 10\n");
+    assert_eq!(h.focused_buffer_text(), "10 10 10\n");
     assert_eq!(
         h.selection_spans(),
         vec![(0, 2, false), (3, 5, false), (6, 8, false)],
@@ -1974,7 +1968,7 @@ fn uppercasing_several_cursors_leaves_each_over_its_own_word() {
 
     dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
 
-    assert_eq!(buffer_string(&mut h), "FI FI\n");
+    assert_eq!(h.focused_buffer_text(), "FI FI\n");
     assert_eq!(h.selection_spans(), vec![(0, 2, false), (3, 5, false)]);
 }
 
@@ -1985,9 +1979,9 @@ fn rotate_selection_contents_forward_and_back() {
     h.open_file(&path);
     set_three_single_char_selections(&mut h);
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
-    assert_eq!(buffer_string(&mut h), "cab\n");
+    assert_eq!(h.focused_buffer_text(), "cab\n");
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
-    assert_eq!(buffer_string(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -1997,7 +1991,7 @@ fn rotate_selection_contents_backward_shifts_left() {
     h.open_file(&path);
     set_three_single_char_selections(&mut h);
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
-    assert_eq!(buffer_string(&mut h), "bca\n");
+    assert_eq!(h.focused_buffer_text(), "bca\n");
 }
 
 /// A count is a rotation distance, not a group size.
@@ -2016,7 +2010,7 @@ fn rotating_contents_by_a_count_moves_each_fragment_that_far() {
 
     h.stoat.pending_count = Some(2);
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
-    assert_eq!(buffer_string(&mut h), "bca\n");
+    assert_eq!(h.focused_buffer_text(), "bca\n");
     assert_eq!(
         h.selection_spans(),
         vec![(0, 1, false), (1, 2, false), (2, 3, false)],
@@ -2025,7 +2019,7 @@ fn rotating_contents_by_a_count_moves_each_fragment_that_far() {
     h.stoat.pending_count = Some(3);
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
     assert_eq!(
-        buffer_string(&mut h),
+        h.focused_buffer_text(),
         "bca\n",
         "a count equal to the selection count is a whole turn",
     );
@@ -2045,7 +2039,7 @@ fn rotating_contents_forward_carries_the_primary_with_its_text() {
     set_selections(&mut h, &[(2, 3), (1, 2), (0, 1)]);
 
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsForward);
-    assert_eq!(buffer_string(&mut h), "cab\n");
+    assert_eq!(h.focused_buffer_text(), "cab\n");
 
     dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
     assert_eq!(
@@ -2064,7 +2058,7 @@ fn rotating_contents_backward_carries_the_primary_with_its_text() {
     set_three_single_char_selections(&mut h);
 
     dispatch(&mut h.stoat, &stoat_action::RotateSelectionContentsBackward);
-    assert_eq!(buffer_string(&mut h), "bca\n");
+    assert_eq!(h.focused_buffer_text(), "bca\n");
 
     dispatch(&mut h.stoat, &stoat_action::KeepPrimarySelection);
     assert_eq!(
@@ -2081,7 +2075,7 @@ fn join_selections_space_joins_two_lines_and_selects_space() {
     h.open_file(&path);
     set_range(&mut h, 0, 5);
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_eq!(h.focused_buffer_text(), "ab cd\n");
     assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
@@ -2100,7 +2094,7 @@ fn joined_spaces_survive_removing_the_primary_selection() {
     h.open_file(&path);
     set_range(&mut h, 0, 7);
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "a b c d\n");
+    assert_eq!(h.focused_buffer_text(), "a b c d\n");
     assert_eq!(
         h.selection_spans().len(),
         3,
@@ -2194,7 +2188,7 @@ fn join_selections_space_single_line_joins_with_next() {
     h.open_file(&path);
     set_range(&mut h, 0, 1);
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_eq!(h.focused_buffer_text(), "ab cd\n");
     assert_eq!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
@@ -2205,7 +2199,7 @@ fn join_selections_drops_second_comment_token() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "// foo bar\n");
+    assert_eq!(h.focused_buffer_text(), "// foo bar\n");
 }
 
 #[test]
@@ -2215,7 +2209,7 @@ fn join_selections_drops_the_second_doc_comment_token_whole() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "/// foo bar\n");
+    assert_eq!(h.focused_buffer_text(), "/// foo bar\n");
 }
 
 #[test]
@@ -2225,7 +2219,7 @@ fn join_selections_keeps_a_token_the_running_one_does_not_match() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "// foo /// bar\n");
+    assert_eq!(h.focused_buffer_text(), "// foo /// bar\n");
 }
 
 #[test]
@@ -2235,7 +2229,7 @@ fn join_selections_joins_without_selecting_the_space() {
     h.open_file(&path);
     set_range(&mut h, 0, 5);
     dispatch(&mut h.stoat, &stoat_action::JoinSelections);
-    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_eq!(h.focused_buffer_text(), "ab cd\n");
     assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
@@ -2249,7 +2243,7 @@ fn join_selections_across_three_lines_joins_each_in_turn() {
     h.open_file(&path);
     set_range(&mut h, 0, 8);
     dispatch(&mut h.stoat, &stoat_action::JoinSelectionsSpace);
-    assert_eq!(buffer_string(&mut h), "ab cd ef\n");
+    assert_eq!(h.focused_buffer_text(), "ab cd ef\n");
 }
 
 /// The join leaves the primary on the first space it inserted, so the next
@@ -2290,7 +2284,7 @@ fn alt_j_joins_selections() {
     h.open_file(&path);
     set_range(&mut h, 0, 5);
     h.type_keys("Alt-j");
-    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_eq!(h.focused_buffer_text(), "ab cd\n");
     assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
@@ -2302,7 +2296,7 @@ fn alt_j_joins_selections_in_select_mode() {
     h.type_keys("v");
     set_range(&mut h, 0, 5);
     h.type_keys("Alt-j");
-    assert_eq!(buffer_string(&mut h), "ab cd\n");
+    assert_eq!(h.focused_buffer_text(), "ab cd\n");
     assert_ne!(h.selection_spans(), vec![(2, 3, false)]);
 }
 
@@ -2490,11 +2484,11 @@ fn append_at_an_unterminated_end_opens_a_line() {
     set_range(&mut h, 0, 3);
 
     h.type_keys("a");
-    assert_eq!(buffer_string(&mut h), "abc\n", "the room is made first");
+    assert_eq!(h.focused_buffer_text(), "abc\n", "the room is made first");
 
     h.type_keys("X");
     assert_eq!(
-        buffer_string(&mut h),
+        h.focused_buffer_text(),
         "abcX\n",
         "and the typing lands after the selection, not past the new line ending",
     );
@@ -4156,19 +4150,6 @@ fn trim_that_spares_the_primary_leaves_it_alone() {
     );
 }
 
-fn focused_buffer_text(h: &mut TestHarness) -> String {
-    let ws = h.stoat.active_workspace();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        crate::pane::View::Editor(id) => id,
-        _ => panic!("focused pane is not an editor"),
-    };
-    let buffer_id = ws.editors[editor_id].buffer_id;
-    let buffer = ws.buffers.get(buffer_id).expect("buffer");
-    let guard = buffer.read().expect("poisoned");
-    guard.rope().to_string()
-}
-
 #[test]
 fn switch_case_uppercases_lowercase_selection() {
     let mut h = TestHarness::with_size(20, 5);
@@ -4176,7 +4157,7 @@ fn switch_case_uppercases_lowercase_selection() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "HELLO\n");
+    assert_eq!(h.focused_buffer_text(), "HELLO\n");
 }
 
 #[test]
@@ -4186,7 +4167,7 @@ fn switch_case_lowercases_uppercase_selection() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    assert_eq!(h.focused_buffer_text(), "hello\n");
 }
 
 #[test]
@@ -4196,7 +4177,7 @@ fn switch_case_toggles_mixed_case() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "hELLO wORLD\n");
+    assert_eq!(h.focused_buffer_text(), "hELLO wORLD\n");
 }
 
 #[test]
@@ -4206,7 +4187,7 @@ fn switch_case_passes_through_non_letters() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "ABC 123!\n");
+    assert_eq!(h.focused_buffer_text(), "ABC 123!\n");
 }
 
 /// The selection is the number. Nothing scans the line for one nearby, so
@@ -4219,7 +4200,7 @@ fn increment_reads_the_selections_own_fragment() {
     set_selections(&mut h, &[(8, 10)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 43\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 43\n");
     assert_eq!(
         h.selection_spans(),
         vec![(8, 10, false)],
@@ -4237,7 +4218,7 @@ fn increment_on_part_of_a_number_reads_only_that_part() {
     set_selections(&mut h, &[(8, 9)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 52\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 52\n");
 }
 
 #[test]
@@ -4248,7 +4229,7 @@ fn increment_off_a_number_is_a_no_op() {
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "let x = 42\n",
         "the cursor sits on l, which spells no integer",
     );
@@ -4262,7 +4243,7 @@ fn increment_over_a_word_is_a_no_op() {
     set_selections(&mut h, &[(0, 3)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "abc\n42\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n42\n");
 }
 
 /// Radix literals reach the same arithmetic decimals do. The formats each
@@ -4275,7 +4256,7 @@ fn increment_reads_a_radix_literal_the_selection_covers() {
     set_selections(&mut h, &[(8, 12)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0x10\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 0x10\n");
 }
 
 /// A selection spelling no integer keeps its place while its neighbours
@@ -4288,7 +4269,7 @@ fn increment_keeps_a_selection_that_spells_no_integer() {
     set_selections(&mut h, &[(0, 2), (3, 5), (6, 8)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "100 zz 100\n");
+    assert_eq!(h.focused_buffer_text(), "100 zz 100\n");
     assert_eq!(
         h.selection_spans(),
         vec![(0, 3, false), (4, 6, false), (7, 10, false)],
@@ -4306,7 +4287,7 @@ fn increment_moves_a_selected_date_by_a_day() {
     set_selections(&mut h, &[(4, 14)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "due 2021-03-01 ok\n");
+    assert_eq!(h.focused_buffer_text(), "due 2021-03-01 ok\n");
 }
 
 /// A bare time counts in minutes rather than days, and wraps at midnight
@@ -4319,7 +4300,7 @@ fn decrement_wraps_a_selected_time_at_midnight() {
     set_selections(&mut h, &[(3, 8)]);
 
     dispatch(&mut h.stoat, &stoat_action::Decrement);
-    assert_eq!(focused_buffer_text(&mut h), "at 23:59\n");
+    assert_eq!(h.focused_buffer_text(), "at 23:59\n");
 }
 
 /// The integer arithmetic goes first, so a plain number never reaches the
@@ -4332,7 +4313,7 @@ fn increment_reads_a_bare_number_as_a_number() {
     set_selections(&mut h, &[(0, 4)]);
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "2022\n");
+    assert_eq!(h.focused_buffer_text(), "2022\n");
 }
 
 #[test]
@@ -4344,7 +4325,7 @@ fn increment_leaves_select_mode_once_an_edit_lands() {
     assert_eq!(h.stoat.focused_mode(), "select");
 
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "43\n");
+    assert_eq!(h.focused_buffer_text(), "43\n");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -4366,7 +4347,7 @@ fn count_prefix_increment_adds_count() {
     h.open_file(&path);
     set_selections(&mut h, &[(8, 10)]);
     h.type_keys("5 plus");
-    assert_eq!(focused_buffer_text(&mut h), "let x = 15\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 15\n");
 }
 
 #[test]
@@ -4376,7 +4357,7 @@ fn count_prefix_decrement_subtracts_count() {
     h.open_file(&path);
     set_selections(&mut h, &[(8, 10)]);
     h.type_keys("3 minus");
-    assert_eq!(focused_buffer_text(&mut h), "let x = 7\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 7\n");
 }
 
 #[test]
@@ -4386,7 +4367,7 @@ fn count_prefix_increment_hex_uses_count() {
     h.open_file(&path);
     set_selections(&mut h, &[(8, 12)]);
     h.type_keys("4 plus");
-    assert_eq!(focused_buffer_text(&mut h), "let x = 0x14\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 0x14\n");
 }
 
 #[test]
@@ -4491,7 +4472,7 @@ fn select_mode_indent_indents_selection_lines() {
     h.open_file(&path);
     h.type_keys("v j l");
     h.type_keys(">");
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n\tdef\n");
 }
 
 #[test]
@@ -4501,7 +4482,7 @@ fn select_mode_delete_removes_selection() {
     h.open_file(&path);
     h.type_keys("v l l l");
     h.type_keys("d");
-    assert_eq!(focused_buffer_text(&mut h), "ef\n");
+    assert_eq!(h.focused_buffer_text(), "ef\n");
 }
 
 #[test]
@@ -4510,7 +4491,7 @@ fn repeated_delete_walks_forward_through_line() {
     let path = h.write_file("s.txt", "abcdef\n");
     h.open_file(&path);
     h.type_keys("d d");
-    assert_eq!(focused_buffer_text(&mut h), "cdef\n");
+    assert_eq!(h.focused_buffer_text(), "cdef\n");
 }
 
 /// Deleting the last character leaves the cursor on the buffer end, where it
@@ -4524,7 +4505,7 @@ fn delete_at_the_buffer_end_stops_after_the_last_character() {
     let path = h.write_file("s.txt", "abc");
     h.open_file(&path);
     h.type_keys("l l d d");
-    assert_eq!(focused_buffer_text(&mut h), "ab");
+    assert_eq!(h.focused_buffer_text(), "ab");
 }
 
 #[test]
@@ -4534,7 +4515,7 @@ fn multi_cursor_delete_rewidens_every_cursor() {
     h.open_file(&path);
     h.type_keys("shift-C");
     h.type_keys("d");
-    assert_eq!(focused_buffer_text(&mut h), "bc\nef\n");
+    assert_eq!(h.focused_buffer_text(), "bc\nef\n");
     assert_eq!(h.selection_spans(), vec![(0, 1, false), (3, 4, false)]);
 }
 
@@ -4545,7 +4526,7 @@ fn select_mode_tilde_switches_case() {
     h.open_file(&path);
     h.type_keys("v l l l");
     h.type_keys("~");
-    assert_eq!(focused_buffer_text(&mut h), "ABCDef\n");
+    assert_eq!(h.focused_buffer_text(), "ABCDef\n");
     assert_eq!(
         h.stoat.focused_mode(),
         "normal",
@@ -4561,7 +4542,7 @@ fn select_mode_indent_returns_to_normal() {
     h.type_keys("v l l");
 
     h.type_keys(">");
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -4572,9 +4553,9 @@ fn select_mode_undo_reverts_prior_edit() {
     h.open_file(&path);
     h.type_keys("v l l l");
     h.type_keys("d");
-    assert_eq!(focused_buffer_text(&mut h), "ef\n");
+    assert_eq!(h.focused_buffer_text(), "ef\n");
     h.type_keys("u");
-    assert_eq!(focused_buffer_text(&mut h), "abcdef\n");
+    assert_eq!(h.focused_buffer_text(), "abcdef\n");
 }
 
 #[test]
@@ -4867,7 +4848,7 @@ fn dfx_deletes_from_cursor_through_target() {
     h.open_file(&path);
     h.type_keys("f o");
     h.type_keys("d");
-    assert_eq!(focused_buffer_text(&mut h), " world\n");
+    assert_eq!(h.focused_buffer_text(), " world\n");
 }
 
 #[test]
@@ -4877,7 +4858,7 @@ fn dt_deletes_up_to_but_not_the_target() {
     h.open_file(&path);
     h.type_keys("t o");
     h.type_keys("d");
-    assert_eq!(focused_buffer_text(&mut h), "o world\n");
+    assert_eq!(h.focused_buffer_text(), "o world\n");
 }
 
 #[test]
@@ -5200,7 +5181,7 @@ fn switch_case_on_bare_cursor_toggles_char() {
     let path = h.write_file("s.txt", "abc\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "Abc\n");
+    assert_eq!(h.focused_buffer_text(), "Abc\n");
 }
 
 #[test]
@@ -5210,7 +5191,7 @@ fn switch_to_uppercase_lower_selection() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
-    assert_eq!(focused_buffer_text(&mut h), "HELLO\n");
+    assert_eq!(h.focused_buffer_text(), "HELLO\n");
 }
 
 #[test]
@@ -5220,7 +5201,7 @@ fn switch_to_uppercase_mixed_selection_is_idempotent_for_uppers() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchToUppercase);
-    assert_eq!(focused_buffer_text(&mut h), "HELLO WORLD!\n");
+    assert_eq!(h.focused_buffer_text(), "HELLO WORLD!\n");
 }
 
 #[test]
@@ -5230,7 +5211,7 @@ fn switch_to_lowercase_upper_selection() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchToLowercase);
-    assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    assert_eq!(h.focused_buffer_text(), "hello\n");
 }
 
 #[test]
@@ -5240,7 +5221,7 @@ fn switch_to_lowercase_mixed_selection_is_idempotent_for_lowers() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchToLowercase);
-    assert_eq!(focused_buffer_text(&mut h), "hello world!\n");
+    assert_eq!(h.focused_buffer_text(), "hello world!\n");
 }
 
 /// A selection with no newline to split on is still rebuilt, so it picks up
@@ -5272,7 +5253,7 @@ fn switch_case_applies_to_each_split_cursor_range() {
     h.open_file(&path);
     h.type_keys("% alt-s");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "ABC\nDEF\nGHI\n");
+    assert_eq!(h.focused_buffer_text(), "ABC\nDEF\nGHI\n");
 }
 
 #[test]
@@ -5282,7 +5263,7 @@ fn increment_applies_to_each_split_cursor_range() {
     h.open_file(&path);
     h.type_keys("2 shift-C");
     dispatch(&mut h.stoat, &stoat_action::Increment);
-    assert_eq!(focused_buffer_text(&mut h), "2\n3\n4\n");
+    assert_eq!(h.focused_buffer_text(), "2\n3\n4\n");
 }
 
 #[test]
@@ -5292,7 +5273,7 @@ fn delete_selection_removes_full_selection() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
-    assert_eq!(focused_buffer_text(&mut h), "");
+    assert_eq!(h.focused_buffer_text(), "");
 }
 
 #[test]
@@ -5301,7 +5282,7 @@ fn delete_selection_on_bare_cursor_deletes_char() {
     let path = h.write_file("s.txt", "hello\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
-    assert_eq!(focused_buffer_text(&mut h), "ello\n");
+    assert_eq!(h.focused_buffer_text(), "ello\n");
 }
 
 #[test]
@@ -5311,7 +5292,7 @@ fn delete_selection_removes_each_split_cursor_range() {
     h.open_file(&path);
     h.type_keys("% alt-s");
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
-    assert_eq!(focused_buffer_text(&mut h), "\n\n\n");
+    assert_eq!(h.focused_buffer_text(), "\n\n\n");
 }
 
 #[test]
@@ -5320,7 +5301,7 @@ fn toggle_comments_rust_single_line_inserts_prefix() {
     let path = h.write_file("s.rs", "let x = 42;\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
+    assert_eq!(h.focused_buffer_text(), "// let x = 42;\n");
 }
 
 /// The block key wraps each row, even in a language whose default is lines.
@@ -5336,7 +5317,7 @@ fn toggle_block_comments_wraps_selection() {
     h.type_keys("v j");
     dispatch(&mut h.stoat, &stoat_action::ToggleBlockComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "/* let x = 1; */\n/* let y = 2; */\n",
     );
 }
@@ -5351,7 +5332,7 @@ fn toggle_comments_uncomments_a_block_commented_rust_line() {
     h.open_file(&path);
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 1;\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 1;\n");
 }
 
 /// Rust has both kinds, and the plain key picks lines. The block key is how a
@@ -5363,7 +5344,7 @@ fn toggle_comments_prefers_line_tokens_where_a_language_has_both() {
     h.open_file(&path);
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "// let x = 1;\n");
+    assert_eq!(h.focused_buffer_text(), "// let x = 1;\n");
 }
 
 /// A fenced block comments under its own grammar, not the file's.
@@ -5382,7 +5363,7 @@ fn toggle_comments_reads_the_injected_layers_tokens() {
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
 
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "```rust\n// let x = 1;\n```\n",
         "the fenced row takes rust's token and the fence rows stay as they were",
     );
@@ -5398,7 +5379,7 @@ fn toggle_line_comments_ignores_a_block_commented_row() {
 
     dispatch(&mut h.stoat, &stoat_action::ToggleLineComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// /* let x = 1; */\n",
         "the block comment is text like any other to the line key",
     );
@@ -5419,7 +5400,7 @@ fn toggle_comments_mixed_margins_round_trip() {
     h.type_keys("v j");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         " a\nb\n",
         "no space after the second token, so neither row gives one up",
     );
@@ -5435,14 +5416,14 @@ fn toggle_comments_rust_doc_comment_round_trips() {
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "docs\n",
         "the row's own token comes off whole",
     );
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// docs\n",
         "commenting writes the ordinary token, not the doc one",
     );
@@ -5457,7 +5438,7 @@ fn toggle_comments_rust_inner_doc_comment_round_trips() {
     h.open_file(&path);
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "module docs\n");
+    assert_eq!(h.focused_buffer_text(), "module docs\n");
 }
 
 /// Each row gives up the token it carries, which is the same rule the removal
@@ -5470,7 +5451,7 @@ fn toggle_comments_rust_mixed_tokens_each_row_loses_its_own() {
 
     h.type_keys("v j j");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "plain\ndocs\ninner\n");
+    assert_eq!(h.focused_buffer_text(), "plain\ndocs\ninner\n");
 }
 
 /// The handler and its tests predate any key reaching them, so the binding is
@@ -5483,11 +5464,11 @@ fn toggle_comments_via_ctrl_c_binding() {
     h.open_file(&path);
 
     h.type_keys("ctrl-c");
-    assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
+    assert_eq!(h.focused_buffer_text(), "// let x = 42;\n");
 
     h.type_keys("ctrl-c");
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "let x = 42;\n",
         "the same key toggles back",
     );
@@ -5503,7 +5484,7 @@ fn toggle_comments_from_select_mode_returns_to_normal() {
 
     h.type_keys("v l l");
     h.type_keys("ctrl-c");
-    assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
+    assert_eq!(h.focused_buffer_text(), "// let x = 42;\n");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -5514,7 +5495,7 @@ fn toggle_comments_rust_round_trip() {
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "let x = 42;\n");
+    assert_eq!(h.focused_buffer_text(), "let x = 42;\n");
 }
 
 /// Every prefix lands at the shallowest row's indent, so the block's own
@@ -5530,7 +5511,7 @@ fn toggle_comments_rust_multi_line_selection() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// fn main() {\n//     let x = 42;\n// }\n",
         "prefix added at the shared column, indentation kept after it"
     );
@@ -5538,7 +5519,7 @@ fn toggle_comments_rust_multi_line_selection() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "fn main() {\n    let x = 42;\n}\n",
         "the round trip restores the original indentation"
     );
@@ -5552,7 +5533,7 @@ fn toggle_comments_rust_skips_whitespace_only_lines() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// abc\n   \n// xyz\n",
         "blank line in the middle stays uncommented"
     );
@@ -5571,7 +5552,7 @@ fn toggle_comments_rust_mixed_block_comments_all_then_uncomments_all() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// // abc\n// xyz\n",
         "the one uncommented row commits the set to being commented"
     );
@@ -5579,7 +5560,7 @@ fn toggle_comments_rust_mixed_block_comments_all_then_uncomments_all() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// abc\nxyz\n",
         "now that every row is commented the set uncomments"
     );
@@ -5595,7 +5576,7 @@ fn toggle_comments_rust_uncomment_skips_whitespace_only_lines() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "abc\n   \nxyz\n",
         "the blank line neither blocks the uncomment nor gets edited"
     );
@@ -5647,7 +5628,7 @@ fn toggle_comments_rust_two_selections_reaching_a_row_comment_it_once() {
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "// aaa\n// bbb\nccc\n",
         "the shared row takes one prefix, not one per selection"
     );
@@ -5660,7 +5641,7 @@ fn toggle_comments_rust_removes_prefix_without_trailing_space() {
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "abc\n",
         "no-space branch must strip only the prefix, not eat `a`"
     );
@@ -5672,7 +5653,7 @@ fn toggle_comments_toml_uses_hash() {
     let path = h.write_file("s.toml", "key = 1\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
-    assert_eq!(focused_buffer_text(&mut h), "# key = 1\n");
+    assert_eq!(h.focused_buffer_text(), "# key = 1\n");
 }
 
 #[test]
@@ -5683,14 +5664,14 @@ fn toggle_comments_json_uses_block_tokens() {
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "/* {} */\n",
         "json has no line tokens, so the block pair is what it comments with",
     );
 
     dispatch(&mut h.stoat, &stoat_action::ToggleComments);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "{}\n",
         "and the same key undoes it"
     );
@@ -5702,7 +5683,7 @@ fn indent_selection_inserts_tab_at_cursor_line() {
     let path = h.write_file("s.txt", "abc\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n");
 }
 
 #[test]
@@ -5712,7 +5693,7 @@ fn indent_selection_indents_every_covered_line() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n\tghi\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n\tdef\n\tghi\n");
 }
 
 #[test]
@@ -5721,7 +5702,7 @@ fn unindent_selection_removes_leading_tab() {
     let path = h.write_file("s.txt", "\tabc\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -5731,7 +5712,7 @@ fn indent_selection_uses_space_indent_style() {
     let path = h.write_file("s.txt", "a\n  b\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "  a\n  b\n");
+    assert_eq!(h.focused_buffer_text(), "  a\n  b\n");
 }
 
 /// A line off the indent stops gains only what reaches the next one, so a
@@ -5744,11 +5725,11 @@ fn indent_selection_aligns_a_misaligned_space_indent() {
     h.open_file(&path);
     h.type_keys("2 j");
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "a\n    b\n    c\n");
+    assert_eq!(h.focused_buffer_text(), "a\n    b\n    c\n");
 
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "a\n    b\n        c\n",
         "an aligned line gains a whole unit"
     );
@@ -5764,7 +5745,7 @@ fn indent_selection_with_tabs_ignores_the_leading_spaces() {
     h.open_file(&path);
     h.type_keys("2 j");
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "\ta\n\t\tb\n\t   c\n");
+    assert_eq!(h.focused_buffer_text(), "\ta\n\t\tb\n\t   c\n");
 }
 
 /// A space style gives a tab-led line a whole unit, since a tab is one
@@ -5778,7 +5759,7 @@ fn indent_selection_gives_a_tab_led_row_a_whole_space_unit() {
     h.open_file(&path);
     h.type_keys("2 j");
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "a\n    b\n    \tc\n");
+    assert_eq!(h.focused_buffer_text(), "a\n    b\n    \tc\n");
 }
 
 /// A count multiplies the whole units and the alignment is taken once, so the
@@ -5792,7 +5773,7 @@ fn count_prefix_indent_selection_aligns_once() {
     h.stoat.pending_count = Some(3);
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "a\n    b\n            c\n",
         "three units less the one space of drift, landing on 12"
     );
@@ -5805,7 +5786,7 @@ fn indent_selection_skips_blank_lines() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n\n\tdef\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n\n\tdef\n");
 }
 
 #[test]
@@ -5814,7 +5795,7 @@ fn unindent_selection_removes_one_space_indent_width() {
     let path = h.write_file("s.txt", "  a\n  b\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "a\n  b\n");
+    assert_eq!(h.focused_buffer_text(), "a\n  b\n");
 }
 
 #[test]
@@ -5823,7 +5804,7 @@ fn unindent_selection_no_leading_whitespace_is_noop() {
     let path = h.write_file("s.txt", "abc\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::UnindentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -5832,7 +5813,7 @@ fn count_prefix_indent_inserts_n_tabs() {
     let path = h.write_file("s.txt", "abc\n");
     h.open_file(&path);
     h.type_keys("3 >");
-    assert_eq!(focused_buffer_text(&mut h), "\t\t\tabc\n");
+    assert_eq!(h.focused_buffer_text(), "\t\t\tabc\n");
 }
 
 #[test]
@@ -5841,7 +5822,7 @@ fn count_prefix_unindent_removes_n_tabs() {
     let path = h.write_file("s.txt", "\t\t\tabc\n");
     h.open_file(&path);
     h.type_keys("2 <");
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n");
 }
 
 #[test]
@@ -5850,7 +5831,7 @@ fn count_prefix_unindent_removes_n_space_groups() {
     let path = h.write_file("s.txt", "        abc\n");
     h.open_file(&path);
     h.type_keys("2 <");
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -5859,7 +5840,7 @@ fn count_prefix_unindent_clamps_at_available_indent() {
     let path = h.write_file("s.txt", "\tabc\n");
     h.open_file(&path);
     h.type_keys("9 <");
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 /// The harness cursor helper leaves exactly one selection, so a test reads the
@@ -5888,7 +5869,7 @@ fn indent_selection_dedupes_lines_across_multi_cursors() {
     h.open_file(&path);
     h.type_keys("% alt-s");
     dispatch(&mut h.stoat, &stoat_action::IndentSelection);
-    assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n\tghi\n");
+    assert_eq!(h.focused_buffer_text(), "\tabc\n\tdef\n\tghi\n");
 }
 
 #[test]
@@ -5898,7 +5879,7 @@ fn align_selections_pads_shorter_lines_to_match_longest_head() {
     h.open_file(&path);
     h.type_keys("% alt-s");
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
-    assert_eq!(focused_buffer_text(&mut h), "  abc\ndefgh\n   ij\n");
+    assert_eq!(h.focused_buffer_text(), "  abc\ndefgh\n   ij\n");
 }
 
 #[test]
@@ -5915,7 +5896,7 @@ fn align_from_select_mode_returns_to_normal() {
         "normal",
         "align exits select mode like Helix"
     );
-    assert_eq!(focused_buffer_text(&mut h), "  abc\ndefgh\n   ij\n");
+    assert_eq!(h.focused_buffer_text(), "  abc\ndefgh\n   ij\n");
 }
 
 /// Every other align fixture has one cursor per row, which is one rank and one
@@ -5934,7 +5915,7 @@ fn align_selections_aligns_a_second_column_after_the_first() {
 
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "a  =b =c\nddd=ee=f\n",
         "both columns line up, the second measured after the first padded",
     );
@@ -5959,7 +5940,7 @@ fn align_selections_measures_past_a_soft_wrap() {
 
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "aaaaaaaaaaaaaaaaaaaa=1\nbb                  =2\n",
         "the short line pads out to the long line's column",
     );
@@ -5985,7 +5966,7 @@ fn align_selections_ranks_two_heads_split_by_a_wrap() {
 
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "a  =aaaaaaaaaaaaaaaa=b\nccc=ccc             =d\n",
         "the second column lines up across the wrap",
     );
@@ -5997,9 +5978,9 @@ fn align_selections_already_aligned_is_noop() {
     let path = h.write_file("s.txt", "abc\ndef\nghi\n");
     h.open_file(&path);
     h.type_keys("% alt-s");
-    let before = focused_buffer_text(&mut h);
+    let before = h.focused_buffer_text();
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
-    assert_eq!(focused_buffer_text(&mut h), before);
+    assert_eq!(h.focused_buffer_text(), before);
 }
 
 #[test]
@@ -6008,9 +5989,9 @@ fn align_selections_single_selection_is_noop() {
     let path = h.write_file("s.txt", "hello\n");
     h.open_file(&path);
     h.type_keys("%");
-    let before = focused_buffer_text(&mut h);
+    let before = h.focused_buffer_text();
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
-    assert_eq!(focused_buffer_text(&mut h), before);
+    assert_eq!(h.focused_buffer_text(), before);
 }
 
 /// A selection spanning two rows abandons the align, and says so.
@@ -6024,9 +6005,9 @@ fn align_selections_skips_multi_line_selection() {
     let path = h.write_file("s.txt", "abc\ndefgh\nij\n");
     h.open_file(&path);
     h.type_keys("%");
-    let before = focused_buffer_text(&mut h);
+    let before = h.focused_buffer_text();
     dispatch(&mut h.stoat, &stoat_action::AlignSelections);
-    assert_eq!(focused_buffer_text(&mut h), before);
+    assert_eq!(h.focused_buffer_text(), before);
     assert_eq!(
         h.stoat.pending_message.as_deref(),
         Some("align cannot work with multi line selections"),
@@ -6054,7 +6035,7 @@ fn deleting_overlapping_selections_spares_the_text_outside_them() {
 
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "c\n",
         "deleting the overlap twice consumed a character no selection covered"
     );
@@ -6067,9 +6048,9 @@ fn undo_after_single_edit_restores_text() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
-    assert_eq!(focused_buffer_text(&mut h), "");
+    assert_eq!(h.focused_buffer_text(), "");
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    assert_eq!(h.focused_buffer_text(), "hello\n");
 }
 
 #[test]
@@ -6081,11 +6062,11 @@ fn undo_consecutive_walks_history_back_to_origin() {
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+    assert_eq!(h.focused_buffer_text(), "ABC\n");
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 /// A state undone away from and left behind by a later edit is still reachable,
@@ -6103,23 +6084,19 @@ fn earlier_reaches_a_state_on_the_abandoned_branch() {
     h.type_keys("i");
     h.type_text("A");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_text(&mut h), "Ax\n");
+    assert_eq!(h.focused_buffer_text(), "Ax\n");
 
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "x\n");
+    assert_eq!(h.focused_buffer_text(), "x\n");
 
     h.type_keys("i");
     h.type_text("B");
     h.type_keys("escape");
-    assert_eq!(
-        focused_buffer_text(&mut h),
-        "Bx\n",
-        "B is on its own branch"
-    );
+    assert_eq!(h.focused_buffer_text(), "Bx\n", "B is on its own branch");
 
     dispatch(&mut h.stoat, &stoat_action::Undo);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "x\n",
         "undo reaches the state B was made from, and stops there",
     );
@@ -6129,14 +6106,14 @@ fn earlier_reaches_a_state_on_the_abandoned_branch() {
     // A on the branch it displaced.
     dispatch(&mut h.stoat, &stoat_action::Earlier);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "Ax\n",
         "the abandoned branch is reached, which undo cannot return to",
     );
 
     dispatch(&mut h.stoat, &stoat_action::Earlier);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "x\n",
         "and the next reaches the state before A",
     );
@@ -6144,7 +6121,7 @@ fn earlier_reaches_a_state_on_the_abandoned_branch() {
     dispatch(&mut h.stoat, &stoat_action::Later);
     dispatch(&mut h.stoat, &stoat_action::Later);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "Bx\n",
         "walking forward returns along the B branch",
     );
@@ -6175,7 +6152,7 @@ fn earlier_stops_at_the_file_it_loaded() {
     }
 
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "x\n",
         "the walk bottoms out on the file rather than on the empty buffer",
     );
@@ -6210,11 +6187,11 @@ fn count_prefix_earlier_walks_back_n_steps() {
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+    assert_eq!(h.focused_buffer_text(), "ABC\n");
 
     h.stoat.pending_count = Some(3);
     dispatch(&mut h.stoat, &stoat_action::Earlier);
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -6223,9 +6200,9 @@ fn undo_past_end_of_history_is_noop() {
     let path = h.write_file("s.txt", "stays\n");
     h.open_file(&path);
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    let after_initial_undo = focused_buffer_text(&mut h);
+    let after_initial_undo = h.focused_buffer_text();
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), after_initial_undo);
+    assert_eq!(h.focused_buffer_text(), after_initial_undo);
 }
 
 #[test]
@@ -6235,11 +6212,11 @@ fn redo_after_undo_restores_edit() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
-    assert_eq!(focused_buffer_text(&mut h), "");
+    assert_eq!(h.focused_buffer_text(), "");
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "hello\n");
+    assert_eq!(h.focused_buffer_text(), "hello\n");
     dispatch(&mut h.stoat, &stoat_action::Redo);
-    assert_eq!(focused_buffer_text(&mut h), "");
+    assert_eq!(h.focused_buffer_text(), "");
 }
 
 /// An empty buffer holds one collapsed selection, because `min_width_1` has
@@ -6252,12 +6229,12 @@ fn deleting_a_collapsed_selection_keeps_the_redo() {
     h.open_file(&path);
     h.type_keys("i h e l l o escape");
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "", "undo empties the buffer");
+    assert_eq!(h.focused_buffer_text(), "", "undo empties the buffer");
 
     dispatch(&mut h.stoat, &stoat_action::DeleteSelection);
     dispatch(&mut h.stoat, &stoat_action::Redo);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "hello",
         "the redo outlives the delete"
     );
@@ -6272,14 +6249,14 @@ fn replacing_a_collapsed_selection_keeps_the_redo() {
     h.open_file(&path);
     h.type_keys("i h e l l o escape");
     dispatch(&mut h.stoat, &stoat_action::Undo);
-    assert_eq!(focused_buffer_text(&mut h), "", "undo empties the buffer");
+    assert_eq!(h.focused_buffer_text(), "", "undo empties the buffer");
 
     h.type_keys("r x");
-    assert_eq!(focused_buffer_text(&mut h), "", "nothing to replace");
+    assert_eq!(h.focused_buffer_text(), "", "nothing to replace");
 
     dispatch(&mut h.stoat, &stoat_action::Redo);
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         "hello",
         "the redo outlives the replace"
     );
@@ -6290,9 +6267,9 @@ fn redo_with_empty_redo_stack_is_noop() {
     let mut h = TestHarness::with_size(20, 5);
     let path = h.write_file("s.txt", "hello\n");
     h.open_file(&path);
-    let before = focused_buffer_text(&mut h);
+    let before = h.focused_buffer_text();
     dispatch(&mut h.stoat, &stoat_action::Redo);
-    assert_eq!(focused_buffer_text(&mut h), before);
+    assert_eq!(h.focused_buffer_text(), before);
 }
 
 #[test]
@@ -6306,9 +6283,9 @@ fn count_prefix_undo_walks_back_n_steps() {
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+    assert_eq!(h.focused_buffer_text(), "ABC\n");
     h.type_keys("3 u");
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -6323,9 +6300,9 @@ fn count_prefix_redo_walks_forward_n_steps() {
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
     h.type_keys("3 u");
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
     h.type_keys("3 U");
-    assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+    assert_eq!(h.focused_buffer_text(), "ABC\n");
 }
 
 #[test]
@@ -6335,11 +6312,11 @@ fn count_prefix_undo_redo_round_trip_with_huge_count() {
     h.open_file(&path);
     h.type_keys("%");
     dispatch(&mut h.stoat, &stoat_action::SwitchCase);
-    let after_edit = focused_buffer_text(&mut h);
+    let after_edit = h.focused_buffer_text();
     h.type_keys("9 9 u");
     h.type_keys("9 9 U");
     assert_eq!(
-        focused_buffer_text(&mut h),
+        h.focused_buffer_text(),
         after_edit,
         "huge undo + huge redo should round-trip back to post-edit state"
     );
@@ -7798,7 +7775,7 @@ fn add_newline_below_leaves_the_selection_where_it_was() {
     let before = h.selection_spans();
 
     dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
-    assert_eq!(focused_buffer_text(&mut h), "aa\nbb\n\ncc\n");
+    assert_eq!(h.focused_buffer_text(), "aa\nbb\n\ncc\n");
     assert_eq!(h.selection_spans(), before, "the selection did not move");
 }
 
@@ -7812,7 +7789,7 @@ fn add_newline_above_inserts_before_the_first_line() {
     h.type_keys("j");
 
     dispatch(&mut h.stoat, &stoat_action::AddNewlineAbove);
-    assert_eq!(focused_buffer_text(&mut h), "aa\n\nbb\ncc\n");
+    assert_eq!(h.focused_buffer_text(), "aa\n\nbb\ncc\n");
     assert_eq!(
         h.selection_spans(),
         vec![(4, 5, false)],
@@ -7832,14 +7809,14 @@ fn a_line_selection_keeps_off_the_blank_lines_around_it() {
 
     dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
     assert_eq!(
-        (focused_buffer_text(&mut h), h.selection_spans()),
+        (h.focused_buffer_text(), h.selection_spans()),
         ("aa\nbb\n\ncc\n".to_string(), vec![(3, 6, false)]),
         "the blank line below stays out of the selection",
     );
 
     dispatch(&mut h.stoat, &stoat_action::AddNewlineAbove);
     assert_eq!(
-        (focused_buffer_text(&mut h), h.selection_spans()),
+        (h.focused_buffer_text(), h.selection_spans()),
         ("aa\n\nbb\n\ncc\n".to_string(), vec![(4, 7, false)]),
         "the blank line above stays out of it too",
     );
@@ -7854,7 +7831,7 @@ fn count_prefix_add_newline_below_inserts_that_many() {
 
     h.stoat.pending_count = Some(3);
     dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
-    assert_eq!(focused_buffer_text(&mut h), "aa\n\n\n\nbb\n");
+    assert_eq!(h.focused_buffer_text(), "aa\n\n\n\nbb\n");
 }
 
 /// Two selections on one line each ask for their own line, and both arrive.
@@ -7867,7 +7844,7 @@ fn two_selections_on_one_line_add_two_lines() {
     seed_two_cursors_on_row_zero(&mut h);
 
     dispatch(&mut h.stoat, &stoat_action::AddNewlineBelow);
-    assert_eq!(focused_buffer_text(&mut h), "abcd\n\n\nzz\n");
+    assert_eq!(h.focused_buffer_text(), "abcd\n\n\nzz\n");
 }
 
 /// Two cursors on row zero, at columns 0 and 2.
@@ -7896,7 +7873,7 @@ fn goto_last_modification_returns_to_the_edit_end() {
     h.type_keys("l l l i");
     h.type_text("XY");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_text(&mut h), "abcXYdefghij\n");
+    assert_eq!(h.focused_buffer_text(), "abcXYdefghij\n");
 
     h.type_keys("g k");
     assert_eq!(h.primary_head_offset(), 0, "test setup: away from the edit");
@@ -7922,7 +7899,7 @@ fn goto_last_modification_walks_back_with_undo() {
     h.type_keys("5 l i");
     h.type_text("Y");
     h.type_keys("escape");
-    assert_eq!(focused_buffer_text(&mut h), "XabcdeYfghij\n");
+    assert_eq!(h.focused_buffer_text(), "XabcdeYfghij\n");
 
     dispatch(&mut h.stoat, &stoat_action::Undo);
     h.type_keys("g k");
@@ -9695,11 +9672,11 @@ fn a_replace_over_two_cursors_undoes_in_one_step() {
     dispatch(&mut h.stoat, &AddSelectionBelow);
     let before = h.selection_spans();
     h.type_keys("r x");
-    assert_eq!(focused_buffer_text(&mut h), "xb\nxd\n");
+    assert_eq!(h.focused_buffer_text(), "xb\nxd\n");
 
     dispatch(&mut h.stoat, &stoat_action::Undo);
     assert_eq!(
-        (focused_buffer_text(&mut h), h.selection_spans()),
+        (h.focused_buffer_text(), h.selection_spans()),
         ("ab\ncd\n".to_string(), before),
         "one undo takes back both replacements and restores both cursors"
     );
@@ -9721,7 +9698,7 @@ fn cancelling_the_replace_chord_leaves_the_key_hints_alone() {
     h.type_keys("escape");
     assert!(!h.stoat.pending_replace, "chord dropped");
     assert!(h.stoat.key_hints_visible, "and the hints are untouched");
-    assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    assert_eq!(h.focused_buffer_text(), "abc\n");
 }
 
 #[test]
@@ -9758,7 +9735,7 @@ fn select_mode_i_enters_insert_before_the_selection() {
     );
 
     h.type_keys("X");
-    assert_eq!(focused_buffer_text(&mut h), "Xabcdef\n");
+    assert_eq!(h.focused_buffer_text(), "Xabcdef\n");
 }
 
 #[test]
@@ -9771,7 +9748,7 @@ fn select_mode_o_opens_below_and_enters_insert() {
     h.type_keys("o");
     assert_eq!(h.stoat.focused_mode(), "insert");
     h.type_keys("X");
-    assert_eq!(focused_buffer_text(&mut h), "abc\nX\ndef\n");
+    assert_eq!(h.focused_buffer_text(), "abc\nX\ndef\n");
 }
 
 /// Punctuation splits a short word and not a long one, so the two disagree
@@ -9844,7 +9821,7 @@ fn select_mode_plus_increments_and_returns_to_normal() {
     h.type_keys("v l");
 
     h.type_keys("+");
-    assert_eq!(focused_buffer_text(&mut h), "43\n");
+    assert_eq!(h.focused_buffer_text(), "43\n");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -9857,7 +9834,7 @@ fn select_mode_minus_decrements_and_returns_to_normal() {
 
     // Spelled out, since the harness reads a bare `-` as the chord separator.
     h.type_keys("minus");
-    assert_eq!(focused_buffer_text(&mut h), "41\n");
+    assert_eq!(h.focused_buffer_text(), "41\n");
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -9871,7 +9848,7 @@ fn select_mode_plus_over_no_number_holds_select_mode() {
     h.type_keys("v l");
 
     h.type_keys("+");
-    assert_eq!(focused_buffer_text(&mut h), "zz\n");
+    assert_eq!(h.focused_buffer_text(), "zz\n");
     assert_eq!(h.stoat.focused_mode(), "select");
 }
 

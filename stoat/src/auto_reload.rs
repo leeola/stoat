@@ -1337,11 +1337,7 @@ mod tests {
         h.fake_fs().insert_file(&path, NOT_UTF8);
         pump_poll(&mut h);
 
-        assert_eq!(
-            buffer_text(&h, id),
-            "line1\n",
-            "the buffer keeps what it had"
-        );
+        assert_eq!(h.buffer_text(id), "line1\n", "the buffer keeps what it had");
         let message = h.stoat.pending_message.as_deref().unwrap_or("");
         assert!(
             message.contains("log.txt") && message.contains("utf-8"),
@@ -1371,7 +1367,7 @@ mod tests {
         pump_poll(&mut h);
 
         assert_eq!(
-            (buffer_text(&h, id), h.stoat.pending_message.clone()),
+            (h.buffer_text(id), h.stoat.pending_message.clone()),
             ("line1\nline2\n".to_string(), None)
         );
     }
@@ -1398,19 +1394,6 @@ mod tests {
             .set_auto_reload(id, AutoReloadMode::Tail);
         ensure_auto_reload_poll(&mut h.stoat);
         (path, id)
-    }
-
-    fn buffer_text(h: &TestHarness, id: BufferId) -> String {
-        h.stoat
-            .active_workspace()
-            .buffers
-            .get(id)
-            .expect("buffer")
-            .read()
-            .expect("poisoned")
-            .snapshot
-            .visible_text
-            .to_string()
     }
 
     fn focused_cursor_row(h: &mut TestHarness) -> u32 {
@@ -1445,7 +1428,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"line1\nline2\n");
 
         assert!(pump_poll(&mut h), "the reload asks for a repaint");
-        assert_eq!(buffer_text(&h, id), "line1\nline2\n");
+        assert_eq!(h.buffer_text(id), "line1\nline2\n");
         assert!(
             !pump_poll(&mut h),
             "the poll after the reload lands asks for no repaint",
@@ -1461,7 +1444,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"line1\nline2\n");
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), "line1\nline2\n");
+        assert_eq!(h.buffer_text(id), "line1\nline2\n");
         assert!(
             !editor::focused_dirty(&h.stoat),
             "a reloaded buffer stays clean"
@@ -1493,7 +1476,7 @@ mod tests {
 
         let texts = [launch, other].map(|ws| {
             h.set_active_workspace(ws);
-            buffer_text(&h, id)
+            h.buffer_text(id)
         });
         assert_eq!(texts, ["line1\nline2\n", "other\nmore\n"]);
     }
@@ -1515,7 +1498,7 @@ mod tests {
         pump_poll(&mut h);
 
         assert_eq!(
-            (h.stoat.auto_reload_poll.is_some(), buffer_text(&h, id)),
+            (h.stoat.auto_reload_poll.is_some(), h.buffer_text(id)),
             (true, "line1\nline2\n".to_owned()),
             "the follow outlives a poll spent in another workspace",
         );
@@ -1547,7 +1530,7 @@ mod tests {
         assert_eq!(
             (
                 focused_editor_mut(&mut h.stoat).expect("editor").buffer_id,
-                buffer_text(&h, id),
+                h.buffer_text(id),
             ),
             (shown, "line1\nline2\n".to_owned()),
             "the read edits the followed buffer and leaves the pane on its file",
@@ -1567,7 +1550,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"line1\r\nline2\r\n");
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), "line1\nline2\n");
+        assert_eq!(h.buffer_text(id), "line1\nline2\n");
     }
 
     #[test]
@@ -1583,7 +1566,7 @@ mod tests {
         h.fake_fs().insert_file(&path, appended.as_bytes());
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), appended);
+        assert_eq!(h.buffer_text(id), appended);
         assert!(
             !editor::focused_dirty(&h.stoat),
             "a chunk-boundary append stays clean"
@@ -1605,7 +1588,7 @@ mod tests {
         pump_poll(&mut h);
 
         assert_eq!(
-            buffer_text(&h, id).into_bytes(),
+            h.buffer_text(id).into_bytes(),
             changed,
             "a mid-chunk change replaces the buffer"
         );
@@ -1629,7 +1612,7 @@ mod tests {
         pump_poll(&mut h);
 
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "xline1\n",
             "a dirty buffer keeps its in-memory edits"
         );
@@ -1655,7 +1638,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"aaa\nbbb\nccc\nddd\n");
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), "aaa\nbbb\nccc\nddd\n");
+        assert_eq!(h.buffer_text(id), "aaa\nbbb\nccc\nddd\n");
         assert_eq!(
             focused_cursor_row(&mut h),
             4,
@@ -1726,7 +1709,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"l0\nCHANGED\nl2\nl3\nl4\n");
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), "l0\nCHANGED\nl2\nl3\nl4\n");
+        assert_eq!(h.buffer_text(id), "l0\nCHANGED\nl2\nl3\nl4\n");
         assert_eq!(anchored_rows(&mut h, id), (3, 3, 3));
     }
 
@@ -1741,7 +1724,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"l0\nCHANGED\nl2\nl3\nl4\n");
         reload_focused(&mut h.stoat, false);
 
-        assert_eq!(buffer_text(&h, id), "l0\nCHANGED\nl2\nl3\nl4\n");
+        assert_eq!(h.buffer_text(id), "l0\nCHANGED\nl2\nl3\nl4\n");
         assert_eq!(anchored_rows(&mut h, id), (3, 3, 3));
     }
 
@@ -1776,7 +1759,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"a\nb\nCHANGED\nd\n");
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), "a\nb\nCHANGED\nd\n");
+        assert_eq!(h.buffer_text(id), "a\nb\nCHANGED\nd\n");
         assert_eq!(
             focused_cursor_row(&mut h),
             2,
@@ -1802,7 +1785,7 @@ mod tests {
         h.fake_fs().insert_file(&path, b"a\nb\nc\nd\n");
         pump_poll(&mut h);
 
-        assert_eq!(buffer_text(&h, id), "a\nb\nc\nd\n");
+        assert_eq!(h.buffer_text(id), "a\nb\nc\nd\n");
         assert_eq!(
             focused_cursor_row(&mut h),
             2,
@@ -1919,7 +1902,7 @@ mod tests {
         assert!(!follow_change_now(&mut h.stoat, Path::new("/repo/a.rs")));
         h.settle();
         assert_eq!(
-            (landing(&mut h), buffer_text(&h, a)),
+            (landing(&mut h), h.buffer_text(a)),
             (
                 (PathBuf::from("/repo/b.rs"), false, 0),
                 "xa\nB\nc\n".to_string()
@@ -2096,8 +2079,8 @@ mod tests {
         assert_eq!(
             (
                 landing(&mut h),
-                buffer_text(&h, a),
-                buffer_text(&h, b),
+                h.buffer_text(a),
+                h.buffer_text(b),
                 editor::focused_dirty(&h.stoat)
             ),
             (
@@ -2125,7 +2108,7 @@ mod tests {
         h.advance_clock(FS_WATCH_DEBOUNCE);
 
         assert_eq!(
-            (buffer_text(&h, id), focused_cursor_row(&mut h)),
+            (h.buffer_text(id), focused_cursor_row(&mut h)),
             ("aaa\nbbb\nccc\nddd\n".to_string(), 2),
             "a live reload leaves a last-line cursor where it was, unlike a tail",
         );
@@ -2147,7 +2130,7 @@ mod tests {
         h.advance_clock(FS_WATCH_DEBOUNCE);
 
         assert_eq!(
-            buffer_text(&h, a),
+            h.buffer_text(a),
             "xa\nB\nc\n",
             "the unsaved edit survives the write"
         );
@@ -2196,7 +2179,7 @@ mod tests {
 
         h.advance_clock(FS_WATCH_DEBOUNCE);
         assert_eq!(
-            (buffer_text(&h, a), h.stoat.live_reload_pending.is_empty()),
+            (h.buffer_text(a), h.stoat.live_reload_pending.is_empty()),
             ("a\nB\nD\n".to_string(), true),
             "the next window reads the second write",
         );
@@ -2214,7 +2197,7 @@ mod tests {
         h.advance_clock(FS_WATCH_DEBOUNCE);
 
         assert_eq!(
-            (landing(&mut h), buffer_text(&h, a)),
+            (landing(&mut h), h.buffer_text(a)),
             (
                 (PathBuf::from("/repo/b.rs"), true, 2),
                 "a\nB\nC\n".to_string()
@@ -2250,7 +2233,7 @@ mod tests {
 
         h.advance_clock(FS_WATCH_DEBOUNCE);
         assert_eq!(
-            buffer_text(&h, a),
+            h.buffer_text(a),
             "a\nB\nc\n",
             "no buffer reloads after the reader stops it"
         );
@@ -2272,7 +2255,7 @@ mod tests {
         pump_poll(&mut h);
 
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "line1\n",
             "an unflagged buffer is never reloaded"
         );
@@ -2450,7 +2433,7 @@ mod tests {
         let effect = reload_focused(&mut h.stoat, false);
 
         assert_eq!(effect, UpdateEffect::Redraw);
-        assert_eq!(buffer_text(&h, id), "new\n");
+        assert_eq!(h.buffer_text(id), "new\n");
         assert!(
             !editor::focused_dirty(&h.stoat),
             "a reloaded buffer is clean"
@@ -2472,7 +2455,7 @@ mod tests {
             .insert_file(root.join("a.txt.gz"), test_harness::gzip(b"new\n"));
         reload_focused(&mut h.stoat, false);
 
-        assert_eq!(buffer_text(&h, id), "new\n");
+        assert_eq!(h.buffer_text(id), "new\n");
     }
 
     #[test]
@@ -2487,7 +2470,7 @@ mod tests {
             h.stoat.pending_message.as_deref(),
             Some("already up to date")
         );
-        assert_eq!(buffer_text(&h, id), "same\n");
+        assert_eq!(h.buffer_text(id), "same\n");
     }
 
     #[test]
@@ -2504,7 +2487,7 @@ mod tests {
             Some("unsaved changes; :reload! discards them"),
         );
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "edited disk\n",
             "the unsaved edits survive"
         );
@@ -2521,7 +2504,7 @@ mod tests {
         let effect = reload_focused(&mut h.stoat, true);
 
         assert_eq!(effect, UpdateEffect::Redraw);
-        assert_eq!(buffer_text(&h, id), "changed\n");
+        assert_eq!(h.buffer_text(id), "changed\n");
         assert!(
             !editor::focused_dirty(&h.stoat),
             "the forced reload clears the dirty flag"
@@ -2543,7 +2526,7 @@ mod tests {
             Some("file no longer exists on disk"),
         );
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "content\n",
             "the buffer keeps its content"
         );
@@ -2590,18 +2573,14 @@ mod tests {
         let effect = reload_all(&mut h.stoat, false);
 
         assert_eq!(effect, UpdateEffect::Redraw);
+        assert_eq!(h.buffer_text(clean_id), "AAA\n", "the clean buffer reloads");
         assert_eq!(
-            buffer_text(&h, clean_id),
-            "AAA\n",
-            "the clean buffer reloads"
-        );
-        assert_eq!(
-            buffer_text(&h, dirty_id),
+            h.buffer_text(dirty_id),
             "edited bbb\n",
             "the dirty buffer keeps its edits",
         );
         assert_eq!(
-            buffer_text(&h, gone_id),
+            h.buffer_text(gone_id),
             "ccc\n",
             "the missing buffer keeps its content",
         );
@@ -2628,7 +2607,7 @@ mod tests {
 
         assert_eq!(effect, UpdateEffect::Redraw);
         assert_eq!(
-            buffer_text(&h, dirty_id),
+            h.buffer_text(dirty_id),
             "BBB\n",
             "the forced reload replaces the dirty buffer",
         );
@@ -2637,7 +2616,7 @@ mod tests {
             "the forced reload clears the dirty flag",
         );
         assert_eq!(
-            buffer_text(&h, gone_id),
+            h.buffer_text(gone_id),
             "ccc\n",
             "the missing buffer keeps its content",
         );
@@ -2659,7 +2638,7 @@ mod tests {
 
         assert_eq!(
             (
-                buffer_text(&h, id),
+                h.buffer_text(id),
                 buffer_dirty(&h, id),
                 h.stoat.pending_message.as_deref()
             ),
@@ -2695,7 +2674,7 @@ mod tests {
         h.type_keys("space r");
 
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "after\n",
             "space r reloads the buffer from disk",
         );
@@ -2809,7 +2788,7 @@ mod tests {
         h.settle();
 
         let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
-        assert_eq!(buffer_text(&h, id), "one\ntwo\nthree\n");
+        assert_eq!(h.buffer_text(id), "one\ntwo\nthree\n");
     }
 
     #[test]
@@ -2939,7 +2918,7 @@ mod tests {
             "the result answers a buffer that has since moved",
         );
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "typed\nline1\n",
             "so the edit stands and the file's line never landed",
         );
@@ -2955,7 +2934,7 @@ mod tests {
             .mark_clean();
         assert!(pump_poll(&mut h), "the poll after it reloads for real");
         assert_eq!(
-            buffer_text(&h, id),
+            h.buffer_text(id),
             "line1\nline2\n",
             "and the file replaces what the buffer held",
         );

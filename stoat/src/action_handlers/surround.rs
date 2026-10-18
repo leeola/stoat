@@ -1018,14 +1018,6 @@ mod tests {
         path
     }
 
-    fn buffer_text(h: &TestHarness, path: &std::path::Path) -> String {
-        let ws = h.stoat.active_workspace();
-        let id = ws.buffers.id_for_path(path).expect("buffer registered");
-        let buf = ws.buffers.get(id).expect("buffer present");
-        let guard = buf.read().expect("buffer lock");
-        guard.rope().to_string()
-    }
-
     fn cursor_offset(h: &mut TestHarness) -> usize {
         let editor = focused_editor_mut(&mut h.stoat).expect("editor");
         let snapshot = editor.display_map.snapshot();
@@ -1382,7 +1374,7 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
         assert!(!h.stoat.pending_surround_add);
     }
 
@@ -1393,7 +1385,7 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys(">");
-        assert_eq!(buffer_text(&h, &path), "<abc>\n");
+        assert_eq!(h.buffer_text_at(&path), "<abc>\n");
     }
 
     #[test]
@@ -1403,7 +1395,7 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("\"");
-        assert_eq!(buffer_text(&h, &path), "\"abc\"\n");
+        assert_eq!(h.buffer_text_at(&path), "\"abc\"\n");
     }
 
     #[test]
@@ -1413,7 +1405,7 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("*");
-        assert_eq!(buffer_text(&h, &path), "*abc*\n");
+        assert_eq!(h.buffer_text_at(&path), "*abc*\n");
     }
 
     #[test]
@@ -1422,7 +1414,7 @@ mod tests {
         let path = seed(&mut h, "abc\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
-        assert_eq!(buffer_text(&h, &path), "(a)bc\n");
+        assert_eq!(h.buffer_text_at(&path), "(a)bc\n");
         assert_eq!(
             cursor_offset(&mut h),
             2,
@@ -1440,7 +1432,7 @@ mod tests {
         assert!(h.stoat.pending_surround_add);
         h.type_keys("escape");
         assert!(!h.stoat.pending_surround_add);
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1450,7 +1442,7 @@ mod tests {
         h.type_keys("v l l");
         h.type_keys("escape");
         h.type_keys("m s [");
-        assert_eq!(buffer_text(&h, &path), "[abc]\n");
+        assert_eq!(h.buffer_text_at(&path), "[abc]\n");
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -1598,7 +1590,7 @@ mod tests {
         let path = seed(&mut h, "(abc)\n");
         h.type_keys("l l");
         h.type_keys("m r ( [");
-        assert_eq!(buffer_text(&h, &path), "[abc]\n");
+        assert_eq!(h.buffer_text_at(&path), "[abc]\n");
         assert_eq!(h.stoat.focused_mode(), "normal");
         assert_eq!(h.stoat.pending_surround_replace, SurroundReplaceStage::Idle,);
     }
@@ -1609,7 +1601,7 @@ mod tests {
         let path = seed(&mut h, "\"abc\"\n");
         h.type_keys("l l");
         h.type_keys("m r \" '");
-        assert_eq!(buffer_text(&h, &path), "'abc'\n");
+        assert_eq!(h.buffer_text_at(&path), "'abc'\n");
     }
 
     #[test]
@@ -1618,7 +1610,7 @@ mod tests {
         let path = seed(&mut h, "abc\n");
         h.type_keys("l");
         h.type_keys("m r ( [");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1627,7 +1619,7 @@ mod tests {
         let path = seed(&mut h, "(abc)\n");
         h.type_keys("l l");
         h.type_keys("m d (");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
         assert!(!h.stoat.pending_surround_delete);
     }
 
@@ -1652,7 +1644,7 @@ mod tests {
 
         h.type_keys("m d (");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "abc\n",
             "the outer close was edited at an offset the inner delete had moved"
         );
@@ -1666,7 +1658,7 @@ mod tests {
 
         h.type_keys("2 m d (");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "(abc)\n",
             "the count reached past the nearest pair"
         );
@@ -1679,7 +1671,7 @@ mod tests {
         h.type_keys("l l l");
 
         h.type_keys("2 m r ( [");
-        assert_eq!(buffer_text(&h, &path), "[(abc)]\n");
+        assert_eq!(h.buffer_text_at(&path), "[(abc)]\n");
     }
 
     /// The nearest pair and the one around it are different types, so the count
@@ -1692,7 +1684,7 @@ mod tests {
 
         h.type_keys("2 m d m");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "[abc]\n",
             "the parens went, the brackets stayed"
         );
@@ -1705,7 +1697,7 @@ mod tests {
         h.type_keys("l l");
 
         h.type_keys("3 m d (");
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("no surround pair around one of the cursors"),
@@ -1722,7 +1714,7 @@ mod tests {
 
         h.type_keys("2 m d (");
         h.type_keys("m d (");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1732,7 +1724,7 @@ mod tests {
         nested_pairs_with_a_cursor_in_each(&mut h);
 
         h.type_keys("m r ( [");
-        assert_eq!(buffer_text(&h, &path), "[a[b]c]\n");
+        assert_eq!(h.buffer_text_at(&path), "[a[b]c]\n");
     }
 
     /// Either end of a bracket names the whole bracket, so the closing quote
@@ -1744,7 +1736,7 @@ mod tests {
         h.type_keys("l l");
 
         h.type_keys("m d \u{2018}");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1764,7 +1756,7 @@ mod tests {
 
         // Two bytes replacing one, so every offset after the first edit moves.
         h.type_keys("m r ( \u{ab}");
-        assert_eq!(buffer_text(&h, &path), "\u{ab}a\u{ab}b\u{bb}c\u{bb}\n");
+        assert_eq!(h.buffer_text_at(&path), "\u{ab}a\u{ab}b\u{bb}c\u{bb}\n");
     }
 
     #[test]
@@ -1777,7 +1769,7 @@ mod tests {
 
         h.type_keys("m d \"");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "\"a\"b\"\n",
             "neither cursor edits, since the pairs overlap",
         );
@@ -1798,7 +1790,7 @@ mod tests {
 
         h.type_keys("m d (");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "(a)\nbcd\n",
             "the first cursor's pair survives because the second has none",
         );
@@ -1814,7 +1806,7 @@ mod tests {
         let path = seed(&mut h, "\"abc\"\n");
         h.type_keys("l l");
         h.type_keys("m d \"");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1822,7 +1814,7 @@ mod tests {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abc\n");
         h.type_keys("m d (");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -1836,7 +1828,7 @@ mod tests {
         );
         h.type_keys("escape");
         assert_eq!(h.stoat.pending_surround_replace, SurroundReplaceStage::Idle,);
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
     }
 
     #[test]
@@ -1847,7 +1839,7 @@ mod tests {
         assert!(h.stoat.pending_surround_delete);
         h.type_keys("escape");
         assert!(!h.stoat.pending_surround_delete);
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
     }
 
     /// The key that cancels the chord reaches nothing else.
@@ -1871,7 +1863,7 @@ mod tests {
             h.stoat.key_hints_visible,
             "normal mode binds Escape to dismissing the hints, which this press never reached"
         );
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
     }
 
     fn seed_rs(h: &mut TestHarness, contents: &str) -> PathBuf {
@@ -1898,7 +1890,7 @@ mod tests {
         let cursor = src.find("outer").expect("cursor target");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m d (");
-        assert_eq!(buffer_text(&h, &path), "let _ = \"outer (inner)\";\n");
+        assert_eq!(h.buffer_text_at(&path), "let _ = \"outer (inner)\";\n");
     }
 
     /// The chord that names a pair type reads the text alone, so a delimiter
@@ -1913,7 +1905,7 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
 
         h.type_keys("m d (");
-        assert_eq!(buffer_text(&h, &path), "let s = \"a inner b\";\n");
+        assert_eq!(h.buffer_text_at(&path), "let s = \"a inner b\";\n");
     }
 
     #[test]
@@ -1925,7 +1917,7 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m r ( [");
         assert_eq!(
-            buffer_text(&h, &path),
+            h.buffer_text_at(&path),
             "fn f() { /* (foo) */ let x = [bar]; }\n",
         );
     }
@@ -1938,7 +1930,7 @@ mod tests {
         let cursor = src.find('"').expect("opening quote present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m d \"");
-        assert_eq!(buffer_text(&h, &path), "let s = abc;\n");
+        assert_eq!(h.buffer_text_at(&path), "let s = abc;\n");
     }
 
     #[test]
@@ -1949,7 +1941,7 @@ mod tests {
         let cursor = src.rfind('"').expect("closing quote present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m d \"");
-        assert_eq!(buffer_text(&h, &path), "let s = abc;\n");
+        assert_eq!(h.buffer_text_at(&path), "let s = abc;\n");
     }
 
     #[test]
@@ -1960,7 +1952,7 @@ mod tests {
         let cursor = src.find('"').expect("opening quote present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m r \" '");
-        assert_eq!(buffer_text(&h, &path), "let s = 'abc';\n");
+        assert_eq!(h.buffer_text_at(&path), "let s = 'abc';\n");
     }
 
     /// A char literal is quoted the same way a string is, so a cursor on its
@@ -1977,7 +1969,7 @@ mod tests {
         let cursor = src.find('\'').expect("opening quote present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m d '");
-        assert_eq!(buffer_text(&h, &path), "let c = x;\n");
+        assert_eq!(h.buffer_text_at(&path), "let c = x;\n");
     }
 
     /// A quote with no literal around it resolves to nothing, rather than to
@@ -1994,7 +1986,7 @@ mod tests {
         let cursor = src.find('\'').expect("apostrophe present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m d '");
-        assert_eq!(buffer_text(&h, &path), src, "nothing is deleted");
+        assert_eq!(h.buffer_text_at(&path), src, "nothing is deleted");
     }
 
     /// A prefixed literal opens with its prefix, not its quote, so a rule
@@ -2007,7 +1999,7 @@ mod tests {
         let cursor = src.find('"').expect("opening quote present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m d \"");
-        assert_eq!(buffer_text(&h, &path), "let s = rabc;\n");
+        assert_eq!(h.buffer_text_at(&path), "let s = rabc;\n");
     }
 
     #[test]
@@ -2040,7 +2032,7 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
         assert_eq!(
             primary_range(&mut h),
             (0, 5),
@@ -2058,7 +2050,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("enter");
 
-        assert_eq!(buffer_text(&h, &path), "\nabc\n\n");
+        assert_eq!(h.buffer_text_at(&path), "\nabc\n\n");
         assert!(!h.stoat.pending_surround_add, "the chord is spent");
     }
 
@@ -2074,7 +2066,7 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
         h.type_keys("(");
-        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(h.buffer_text_at(&path), "(abc)\n");
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -2084,7 +2076,7 @@ mod tests {
         let path = seed(&mut h, "(abc)\n");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m r ( [");
-        assert_eq!(buffer_text(&h, &path), "[abc]\n");
+        assert_eq!(h.buffer_text_at(&path), "[abc]\n");
         assert_eq!(cursor_offset(&mut h), 2);
     }
 
@@ -2094,7 +2086,7 @@ mod tests {
         let path = seed(&mut h, "(abc)\n");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m d (");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
         assert_eq!(cursor_offset(&mut h), 1);
     }
 
@@ -2104,7 +2096,7 @@ mod tests {
         let path = seed(&mut h, "\"abc\"\n");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m r \" '");
-        assert_eq!(buffer_text(&h, &path), "'abc'\n");
+        assert_eq!(h.buffer_text_at(&path), "'abc'\n");
         assert_eq!(cursor_offset(&mut h), 2);
     }
 
@@ -2114,7 +2106,7 @@ mod tests {
         let path = seed(&mut h, "(abc)\n");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m d m");
-        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(h.buffer_text_at(&path), "abc\n");
     }
 
     #[test]
@@ -2125,6 +2117,6 @@ mod tests {
         let cursor = src.find('x').expect("target present");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
         h.type_keys("m r m ]");
-        assert_eq!(buffer_text(&h, &path), "[[x]]\n");
+        assert_eq!(h.buffer_text_at(&path), "[[x]]\n");
     }
 }

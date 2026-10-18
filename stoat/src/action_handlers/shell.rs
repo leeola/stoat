@@ -493,12 +493,6 @@ mod tests {
             });
     }
 
-    fn buffer_text(h: &mut TestHarness) -> String {
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        snapshot.buffer_snapshot().rope().to_string()
-    }
-
     /// Piping several selections leaves pieces that are distinct, so removing
     /// the primary one removes one of them.
     ///
@@ -586,7 +580,7 @@ mod tests {
         h.type_text("crlf");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         assert_eq!(
-            (buffer_text(&mut h), h.selection_spans()),
+            (h.focused_buffer_text(), h.selection_spans()),
             ("X\nY X\nY".to_string(), vec![(0, 3, false), (4, 7, false)]),
             "each piece is three bytes once its CRLF is LF",
         );
@@ -609,7 +603,7 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellPipe);
         h.type_text("tr a-z A-Z");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(buffer_text(&mut h), "HELLO world");
+        assert_eq!(h.focused_buffer_text(), "HELLO world");
     }
 
     #[test]
@@ -621,7 +615,7 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellPipeTo);
         h.type_text("ignored");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(buffer_text(&mut h), "hello");
+        assert_eq!(h.focused_buffer_text(), "hello");
         assert_eq!(fake.invocations().len(), 1);
         assert_eq!(fake.invocations()[0].stdin, b"hello");
     }
@@ -643,7 +637,7 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellInsertOutput);
         h.type_text("date");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(buffer_text(&mut h), "xMon Jan 1y");
+        assert_eq!(h.focused_buffer_text(), "xMon Jan 1y");
     }
 
     /// One run feeds every selection, and the first selection in the document
@@ -672,7 +666,7 @@ mod tests {
         h.type_text("echo hi");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
-        assert_eq!(buffer_text(&mut h), "hifoo\nhibar\n");
+        assert_eq!(h.focused_buffer_text(), "hifoo\nhibar\n");
     }
 
     /// Insert writes at each selection's start, so a forward selection gets the
@@ -695,7 +689,7 @@ mod tests {
         h.type_text("date");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
-        assert_eq!(buffer_text(&mut h), "DATEhello world");
+        assert_eq!(h.focused_buffer_text(), "DATEhello world");
     }
 
     /// Each selection ends up over the output it produced, which is what leaves
@@ -771,7 +765,11 @@ mod tests {
         h.type_text("true");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
-        assert_eq!(buffer_text(&mut h), "hello world", "nothing was written");
+        assert_eq!(
+            h.focused_buffer_text(),
+            "hello world",
+            "nothing was written"
+        );
         assert_eq!(
             editor::selection_spans(&mut h.stoat),
             vec![(0, 0, false)],
@@ -802,7 +800,7 @@ mod tests {
         h.type_text("tag");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
-        assert_eq!(buffer_text(&mut h), "T T");
+        assert_eq!(h.focused_buffer_text(), "T T");
         let primary_start = {
             let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
             let snapshot = editor.display_map.snapshot();
@@ -832,7 +830,7 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellAppendOutput);
         h.type_text("date");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(buffer_text(&mut h), "helloMon Jan 1 world");
+        assert_eq!(h.focused_buffer_text(), "helloMon Jan 1 world");
     }
 
     #[test]
@@ -918,7 +916,7 @@ mod tests {
         h.type_text("false");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
-        assert_eq!(buffer_text(&mut h), "hello", "no edit landed");
+        assert_eq!(h.focused_buffer_text(), "hello", "no edit landed");
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("Shell command failed: status 3"),
@@ -946,7 +944,7 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
         assert_eq!(
-            buffer_text(&mut h),
+            h.focused_buffer_text(),
             "err",
             "stderr wins over stdout, and a non-zero exit carrying it is no failure",
         );
@@ -973,7 +971,7 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
         assert_eq!(
-            buffer_text(&mut h),
+            h.focused_buffer_text(),
             "5",
             "the carriage return goes with the newline it preceded",
         );
@@ -1118,11 +1116,11 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellPipe);
         h.type_text("tag");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(buffer_text(&mut h), "X X", "both selections were piped");
+        assert_eq!(h.focused_buffer_text(), "X X", "both selections were piped");
 
         dispatch(&mut h.stoat, &action::Undo);
         assert_eq!(
-            buffer_text(&mut h),
+            h.focused_buffer_text(),
             "aa bb",
             "one undo takes the whole edit, not one selection's worth",
         );
@@ -1133,7 +1131,7 @@ mod tests {
         );
 
         dispatch(&mut h.stoat, &action::Redo);
-        assert_eq!(buffer_text(&mut h), "X X");
+        assert_eq!(h.focused_buffer_text(), "X X");
         assert_eq!(
             editor::selection_spans(&mut h.stoat),
             vec![(0, 1, false), (2, 3, false)],
@@ -1204,7 +1202,7 @@ mod tests {
         h.type_text("tr a-z A-Z");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
 
-        assert_eq!(buffer_text(&mut h), "HELLO");
+        assert_eq!(h.focused_buffer_text(), "HELLO");
         assert_eq!(h.stoat.focused_mode(), "select");
     }
 
@@ -1216,7 +1214,7 @@ mod tests {
         select_range(&mut h, 0, 5);
         dispatch(&mut h.stoat, &action::ShellPipe);
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(buffer_text(&mut h), "hello");
+        assert_eq!(h.focused_buffer_text(), "hello");
         assert!(h.stoat.shell_input.is_none());
     }
 
@@ -1229,7 +1227,7 @@ mod tests {
         dispatch(&mut h.stoat, &action::ShellPipe);
         h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
         assert!(h.stoat.shell_input.is_none());
-        assert_eq!(buffer_text(&mut h), "hello");
+        assert_eq!(h.focused_buffer_text(), "hello");
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 }
