@@ -6124,6 +6124,17 @@ fn a_landed_blank_job_behind_a_running_one_is_taken() {
 /// against a repainted one.
 type FrameOutput = (Buffer, Vec<u8>, Vec<(u16, u16, u16, [u8; 3])>);
 
+/// Move the hover cell, which only the focused pane reads, so the next frame
+/// paints that pane while an unfocused one replays.
+///
+/// The harness paints the frame each key leaves, and a focused pane replays
+/// when nothing it reads moved. A test of a frame that mixes a painted pane
+/// with a replayed one moves the hover to get the painted one.
+fn repaint_focused_pane(h: &mut crate::test_harness::TestHarness) {
+    let next = h.stoat.hover_cell.map_or((1, 1), |(x, y)| (x + 1, y));
+    h.stoat.hover_cell = Some(next);
+}
+
 fn frame_output(h: &mut crate::test_harness::TestHarness) -> FrameOutput {
     let buf = h.stoat.render();
     let scene = h.stoat.apc_scene.all_bytes();
@@ -6154,6 +6165,7 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
     h.type_text("X");
     h.settle();
 
+    repaint_focused_pane(&mut h);
     let painted_before = h.stoat.pane_paints;
     let replayed = frame_output(&mut h);
     assert_eq!(
@@ -6209,6 +6221,7 @@ fn a_replayed_pane_keeps_its_status_and_content_lanes() {
     h.type_text("X");
     h.settle();
 
+    repaint_focused_pane(&mut h);
     let painted_before = h.stoat.pane_paints;
     let replayed = pane_lanes(&mut h);
     assert_eq!(
@@ -6267,6 +6280,214 @@ fn a_pane_status_lane_holds_its_status_row_alone() {
     }
 }
 
+/// A focused pane whose inputs stand still replays as an unfocused one does,
+/// so a frame drawn for anything else, such as a modal keystroke, skips its
+/// paint.
+#[test]
+fn a_focused_pane_replays_an_unchanged_frame() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let _ = h.stoat.render();
+
+    let painted_before = h.stoat.pane_paints;
+    let _ = h.stoat.render();
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        0,
+        "both panes replay, the focused one included"
+    );
+}
+
+/// Each input only a focused pane reads repaints that pane, and the
+/// unfocused pane beside it still replays.
+#[test]
+fn a_focused_pane_repaints_when_an_input_it_reads_moves() {
+    type Change = fn(&mut crate::test_harness::TestHarness);
+    let changes: [(&str, Change); 7] = [
+        ("a cursor move", |h| h.type_keys("l")),
+        ("an insert flip", |h| h.type_keys("i")),
+        ("a hover move", |h| h.stoat.hover_cell = Some((3, 1))),
+        ("a token channel change", |h| {
+            let ws = h.stoat.active_workspace_mut();
+            let View::Editor(id) = ws.panes.pane(ws.panes.focus()).view else {
+                panic!("the focused pane shows an editor");
+            };
+            let editor = &mut ws.editors[id];
+            let buffer = editor.buffer_id;
+            editor.display_map.invalidate_semantic_highlights(buffer);
+        }),
+        ("a pending count", |h| h.type_keys("3")),
+        ("an open LSP status card", |h| {
+            h.stoat.lsp_status_pinned = true
+        }),
+        ("a status message", |h| {
+            h.stoat.pending_message = Some("saved".to_owned())
+        }),
+    ];
+
+    // Counted across the change too, since a typed key's capture paints the
+    // frame the key leaves.
+    for (change, apply) in changes {
+        let mut h = Stoat::test();
+        split_pair(&mut h);
+        let _ = h.stoat.render();
+
+        let painted_before = h.stoat.pane_paints;
+        apply(&mut h);
+        let _ = h.stoat.render();
+        assert_eq!(
+            h.stoat.pane_paints - painted_before,
+            1,
+            "{change} repaints the focused pane alone"
+        );
+    }
+}
+
+/// Collapsing a selection leaves the cursor where it was, so the status row
+/// reads the same while the selection's highlight goes. Only the selection set
+/// tells the two frames apart.
+#[test]
+fn a_collapsed_selection_repaints_the_focused_pane() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    h.type_keys("w");
+    let _ = h.stoat.render();
+
+    let painted_before = h.stoat.pane_paints;
+    h.type_keys(";");
+    let _ = h.stoat.render();
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        1,
+        "the collapse repaints the focused pane"
+    );
+}
+
+/// A held motion key moves the focused pane's key on every frame, so a
+/// capture there never replays. The pane captures the run's first frame
+/// alone. Once its key holds, it captures again and goes back to replaying.
+///
+/// Each key goes straight to the session with one frame after it, as a held
+/// key arrives. The harness paints a second frame per key, which holds the
+/// key still and ends the run.
+#[test]
+fn a_run_of_motion_frames_captures_the_focused_pane_once() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let _ = h.stoat.render();
+
+    let captured_before = h.stoat.pane_captures;
+    for _ in 0..3 {
+        let _ = h.stoat.update(Event::Key(KeyEvent::new(
+            KeyCode::Char('l'),
+            KeyModifiers::NONE,
+        )));
+        let _ = h.stoat.render();
+    }
+    assert_eq!(
+        h.stoat.pane_captures - captured_before,
+        1,
+        "three moving frames capture once"
+    );
+
+    let held: Vec<(u64, u64)> = (0..2)
+        .map(|_| {
+            let (paints, captures) = (h.stoat.pane_paints, h.stoat.pane_captures);
+            let _ = h.stoat.render();
+            (
+                h.stoat.pane_paints - paints,
+                h.stoat.pane_captures - captures,
+            )
+        })
+        .collect();
+    assert_eq!(
+        held,
+        [(1, 1), (0, 0)],
+        "the first held frame paints and captures, and the next replays"
+    );
+}
+
+/// A skipped capture drops the paint the entry held, so a replay only ever
+/// puts back the pane's last paint. A key that comes back to the value an
+/// earlier frame captured repaints.
+#[test]
+fn a_key_that_comes_back_after_a_skipped_capture_repaints() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let _ = h.stoat.render();
+
+    let paints: Vec<u64> = [(3, 1), (4, 1), (3, 1)]
+        .into_iter()
+        .map(|cell| {
+            h.stoat.hover_cell = Some(cell);
+            frame_paints(&mut h)
+        })
+        .collect();
+    assert_eq!(
+        paints,
+        [1, 1, 1],
+        "the third frame repaints the key the first frame captured"
+    );
+}
+
+/// The handshake answers after the first frames, so a scene goes live under
+/// panes that painted their gutters into the cells. Both repaint to take the
+/// rich gutter.
+#[test]
+fn a_scene_going_live_repaints_every_pane() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    h.stoat.stoatty = false;
+    let _ = h.stoat.render();
+    let _ = h.stoat.render();
+
+    h.stoat.stoatty = true;
+    let painted_before = h.stoat.pane_paints;
+    let _ = h.stoat.render();
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        2,
+        "both panes trade the cell gutter for the rich one"
+    );
+}
+
+/// A parse installs its token channel into every editor on the buffer, so
+/// the unfocused pane repaints with the new colors rather than replaying the
+/// old ones.
+#[test]
+fn panes_on_one_buffer_both_repaint_when_a_parse_lands() {
+    let mut h = Stoat::test();
+    h.stoat.stoatty = true;
+    h.resize(120, 16);
+    let path = h.write_file("a.rs", "fn main() {}\n");
+    h.open_file(&path);
+    h.type_action("SplitRight()");
+    h.settle();
+    let _ = h.stoat.render();
+
+    h.type_keys("i");
+    // Sent straight to the session. The harness's per-key capture drives the
+    // pumps, which lands the parse in the same step as the edit.
+    let _ = h.stoat.update(Event::Key(KeyEvent::new(
+        KeyCode::Char('x'),
+        KeyModifiers::NONE,
+    )));
+    let _ = h.stoat.render();
+
+    // The background drive spawns the parse and installs it once the settle
+    // between the two passes has run it.
+    h.stoat.drive_background();
+    h.settle();
+    h.stoat.drive_background();
+    let painted_before = h.stoat.pane_paints;
+    let _ = h.stoat.render();
+    assert_eq!(
+        h.stoat.pane_paints - painted_before,
+        2,
+        "the landed parse restyles both panes on the buffer"
+    );
+}
+
 /// A badge raised over an unfocused pane's status row moves that row's
 /// segments out from under the box, so the pane repaints rather than
 /// replaying a row whose segments the box now covers.
@@ -6277,6 +6498,7 @@ fn a_badge_over_an_unfocused_status_row_repaints_it() {
     h.type_action("FocusLeft()");
     let _ = h.stoat.render();
 
+    repaint_focused_pane(&mut h);
     let painted_before = h.stoat.pane_paints;
     let _ = h.stoat.render();
     assert_eq!(
@@ -6292,6 +6514,7 @@ fn a_badge_over_an_unfocused_status_row_repaints_it() {
         label: "reviewing 1/3".to_owned(),
         detail: None,
     });
+    repaint_focused_pane(&mut h);
     let painted_before = h.stoat.pane_paints;
     let raised = frame_output(&mut h);
     assert_eq!(
@@ -6360,6 +6583,7 @@ fn a_replayed_diff_pane_paints_what_repainting_it_would() {
     h.type_text("X");
     h.settle();
 
+    repaint_focused_pane(&mut h);
     let painted_before = h.stoat.pane_paints;
     let replayed = frame_output(&mut h);
     assert_eq!(
@@ -6398,8 +6622,10 @@ fn a_dial_turn_repaints_an_unfocused_diff_pane() {
     let paints: Vec<(u64, u64)> = turns
         .into_iter()
         .map(|turn| {
+            repaint_focused_pane(&mut h);
             let held = frame_paints(&mut h);
             turn(&mut h.stoat);
+            repaint_focused_pane(&mut h);
             (held, frame_paints(&mut h))
         })
         .collect();
@@ -6423,6 +6649,7 @@ fn a_dial_turn_repaints_an_unfocused_diff_pane() {
 fn a_renamed_side_repaints_an_unfocused_diff_pane() {
     let mut h = Stoat::test();
     diff_pair(&mut h);
+    repaint_focused_pane(&mut h);
     assert_eq!(
         frame_paints(&mut h),
         1,
@@ -6432,6 +6659,7 @@ fn a_renamed_side_repaints_an_unfocused_diff_pane() {
     h.stoat
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::named("main", "0123456789abcdef".into())));
+    repaint_focused_pane(&mut h);
     assert_eq!(
         frame_paints(&mut h),
         2,
@@ -6446,8 +6674,6 @@ fn frame_paints(h: &mut crate::test_harness::TestHarness) -> u64 {
     h.stoat.pane_paints - before
 }
 
-/// A frame driven by background activity alone paints only the focused
-/// pane.
 /// The key guards used to resolve the mode once each, and resolving it
 /// walks the modal stack and clones a pane-tree view. Reading it once for
 /// the whole chain took a movement key from twenty-two resolutions to nine.
@@ -6580,12 +6806,11 @@ fn typing_into_a_terminal_derives_a_keymap_lookup_only_for_a_key_that_types_noth
 }
 
 /// This is the case the cache exists for. A spinner tick redraws at its own
-/// rate while nothing a pane reads has moved, and every visible pane used to
-/// repaint in full for it. The focused one still paints, since its
-/// selections and cursor are outside the key, so the saving is every pane
-/// but that one.
+/// rate while nothing a pane reads has moved, so no pane paints for it, the
+/// focused one included. Only a spinner the focused status row shows moves
+/// that row, and only then does the focused pane paint.
 #[test]
-fn a_background_tick_paints_only_the_focused_pane() {
+fn a_background_tick_paints_no_pane() {
     let mut h = Stoat::test();
     split_pair(&mut h);
 
@@ -6595,8 +6820,8 @@ fn a_background_tick_paints_only_the_focused_pane() {
 
     assert_eq!(
         h.stoat.pane_paints - before,
-        1,
-        "the spinner moved nothing the unfocused pane reads",
+        0,
+        "the spinner moved nothing either pane reads",
     );
 }
 

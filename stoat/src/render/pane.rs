@@ -62,7 +62,7 @@ pub(crate) fn render_pane(
     buf: &mut Buffer,
     scene: &mut ApcScene,
     undercurls: &mut UndercurlBatch,
-    badge_rect: &mut Option<Rect>,
+    status: &StatusRow,
 ) {
     let theme = frame.theme;
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
@@ -219,9 +219,7 @@ pub(crate) fn render_pane(
         status_area,
         frame,
         editors,
-        buffers,
-        terms,
-        badge_rect,
+        status,
         buf,
         scene,
     );
@@ -684,9 +682,7 @@ fn render_pane_status(
     area: Rect,
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
-    buffers: &BufferRegistry,
-    terms: &SlotMap<TermId, TermSession>,
-    badge_rect: &mut Option<Rect>,
+    status: &StatusRow,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
@@ -707,17 +703,78 @@ fn render_pane_status(
     }
 
     let segments = status_segments_area(area, frame.badge_cover);
-    let (left, right) = status_segments(
-        view, is_focused, segments, frame, editors, buffers, terms, badge_rect,
-    );
-
     let cache = match view {
         View::Editor(id) => editors.get_mut(*id).map(|e| &mut e.status_scene_cache),
         _ => None,
     };
     render_status_segments(
-        area, segments, base_style, frame, &left, &right, buf, scene, cache,
+        area,
+        segments,
+        base_style,
+        frame,
+        &status.left,
+        &status.right,
+        buf,
+        scene,
+        cache,
     );
+}
+
+/// The segments of one pane's status row, built once a frame so the replay
+/// cache's key and the paint read the same row.
+#[derive(Default)]
+pub(crate) struct StatusRow {
+    left: Vec<StatusSeg>,
+    right: Vec<StatusSeg>,
+    /// The hover rect of the LSP badge the row shows, which the frame reads
+    /// back for hit tests.
+    pub(crate) badge: Option<Rect>,
+}
+
+impl StatusRow {
+    /// A hash of the segments, for a cache that replays a pane only while its
+    /// status row stands still.
+    ///
+    /// The segments and the base style decide the painted row, given its
+    /// rectangle, and the base style follows from the focus and the theme. So
+    /// the hash covers every input the row reads, the spinner glyph and the
+    /// status message included, without listing those inputs a second time.
+    pub(crate) fn hash_value(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        (&self.left, &self.right).hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+/// The status row that [`render_pane`] paints for `pane`.
+///
+/// Empty for a commits view, which paints a status row of its own, and for a
+/// pane with no room for the row.
+pub(crate) fn status_row(
+    pane: &Pane,
+    is_focused: bool,
+    frame: FrameCtx<'_>,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    terms: &SlotMap<TermId, TermSession>,
+) -> StatusRow {
+    let (_, area) = pane_areas(pane.area, frame.minimap_band);
+    if area.width == 0 || area.height == 0 || matches!(pane.view, View::Commits(_)) {
+        return StatusRow::default();
+    }
+
+    let mut badge = None;
+    let (left, right) = status_segments(
+        &pane.view,
+        is_focused,
+        status_segments_area(area, frame.badge_cover),
+        frame,
+        editors,
+        buffers,
+        terms,
+        &mut badge,
+    );
+    StatusRow { left, right, badge }
 }
 
 /// The part of status row `row` that holds its segments, left of any badge
@@ -757,7 +814,7 @@ pub(crate) struct PaneStatusCells {
 
 /// Assemble a detached pane's status bar for [`paint_pane_status_cells`].
 ///
-/// Shares [`status_segments`] with [`render_pane_status`], adding the numeric
+/// Shares [`status_segments`] with [`status_row`], adding the numeric
 /// pane badge that only a detached pane needs, since the primary scene's digit
 /// popover does not reach its window. The badge paints in the focused bar's
 /// style on either bar, so its digit reads against its box.
@@ -2162,6 +2219,31 @@ mod tests {
         assert!(
             bar.contains("RA") && bar.contains("SS"),
             "each running server gets its own badge:\n{bar}"
+        );
+    }
+
+    /// The badge's hover rect comes from the status row, which a replayed
+    /// focused pane still builds, so a hover over the badge still finds it.
+    #[test]
+    fn a_replayed_focused_pane_keeps_the_lsp_badge_rect() {
+        let mut h = Stoat::test();
+        let fake = h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        mark_busy(&mut h, &fake);
+        // The first paint installs the wrap width, which moves the paint
+        // version past the key it captured. The second captures the settled
+        // key.
+        let _ = h.stoat.render();
+        let _ = h.stoat.render();
+        let badge = h.stoat.lsp_badge_rect;
+        assert!(badge.is_some(), "the busy server raises the badge");
+
+        let painted_before = h.stoat.pane_paints;
+        let _ = h.stoat.render();
+        assert_eq!(
+            (h.stoat.pane_paints - painted_before, h.stoat.lsp_badge_rect),
+            (0, badge),
+            "the replayed pane hands back the badge rect"
         );
     }
 

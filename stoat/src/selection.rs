@@ -1,9 +1,18 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use stoat_text::{
     next_char_boundaries_batch, next_char_boundary, Anchor, Bias, Rope, Selection, SelectionGoal,
 };
+
+/// The generation the next installed selection set takes.
+///
+/// One counter for the whole process, so no two sets ever share a generation,
+/// even across an undo that restores a clone and then diverges from it.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(from = "SelectionsCollectionWire")]
@@ -25,6 +34,12 @@ pub(crate) struct SelectionsCollection {
     /// than repeated on every read. Only [`Self::install`] writes it, which is
     /// what keeps it true.
     newest: usize,
+    /// The generation [`Self::install`] gave this set, which
+    /// [`Self::identity`] reports.
+    ///
+    /// Left out of the session file, since a restored set takes a fresh one.
+    #[serde(skip)]
+    generation: u64,
 }
 
 impl SelectionsCollection {
@@ -40,6 +55,7 @@ impl SelectionsCollection {
             next_selection_id: 1,
             disjoint: Arc::from([default]),
             newest: 0,
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -52,10 +68,21 @@ impl SelectionsCollection {
     fn install(&mut self, disjoint: Arc<[Selection<Anchor>]>) {
         self.newest = newest_index(&disjoint);
         self.disjoint = disjoint;
+        self.generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn all_anchors(&self) -> &[Selection<Anchor>] {
         &self.disjoint
+    }
+
+    /// A number that names this selection set and no other.
+    ///
+    /// Two collections that report the same identity hold the same selections,
+    /// because each install takes a fresh one and a clone keeps the set it was
+    /// cloned with. A cache that keys a paint on the selections compares this
+    /// instead of the list.
+    pub(crate) fn identity(&self) -> u64 {
+        self.generation
     }
 
     /// Hand the primary to the leftmost selection.

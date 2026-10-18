@@ -2287,7 +2287,7 @@ pub struct Stoat {
     /// of whether the theme itself moved and is hashed into the pooled page
     /// versions.
     pub(crate) paint_generation: u64,
-    /// Each unfocused editor pane's last paint, replayed while its key holds.
+    /// Each editor pane's last paint, replayed while its key holds.
     ///
     /// Keyed by pane so a split's panes cache independently, and by workspace
     /// because a pane key comes from a per-workspace map: two workspaces can
@@ -2297,7 +2297,7 @@ pub struct Stoat {
     /// Swept after every paint down to the panes the active workspace holds. A
     /// pane id never returns, so an entry left behind would hold one pane's
     /// cells for the process. A switch back to another workspace repaints its
-    /// unfocused panes once.
+    /// panes once.
     pub(crate) pane_cache: std::collections::HashMap<(WorkspaceId, PaneId), PaneCacheEntry>,
     /// How many panes this session has actually painted, as opposed to
     /// replayed.
@@ -2306,6 +2306,11 @@ pub struct Stoat {
     /// leaves no trace in the frame it skipped. Counting is what lets a test
     /// say the skip occurred rather than that the output happened to match.
     pub(crate) pane_paints: u64,
+    /// How many pane paints this session captured for a later replay.
+    ///
+    /// A pane skips the capture through a run of frames that move its key, and
+    /// a copy that does not happen leaves no trace either.
+    pub(crate) pane_captures: u64,
     /// How many key presses derived a keymap lookup.
     ///
     /// Whether a press consults the keymap is otherwise invisible, since the
@@ -2822,6 +2827,7 @@ impl Stoat {
             paint_generation: 0,
             pane_cache: std::collections::HashMap::new(),
             pane_paints: 0,
+            pane_captures: 0,
             #[cfg(test)]
             keymap_lookups: std::cell::Cell::new(0),
             #[cfg(test)]

@@ -1,5 +1,5 @@
-//! What an unfocused editor pane's paint depends on, gathered so a frame can
-//! ask whether it may replay the last one.
+//! What an editor pane's paint depends on, gathered so a frame decides whether
+//! to replay the last one.
 //!
 //! Every visible pane is repainted in full on each redraw, and an unfocused one
 //! additionally pays an O(cells) dim blend. Background activity therefore
@@ -7,14 +7,20 @@
 //! ticks. Replaying the previous paint instead needs a key that is equal only
 //! when the paint would be identical, which is what [`PaneCacheKey`] is.
 //!
-//! The set comes from reading `render_pane` and `render_editor_with_overlay`
-//! for the unfocused editor case. `is_focused` reaches exactly two places in
-//! the editor render, relative line numbering and an early return before the
-//! selection and cursor pass. So an unfocused pane's *content* reads no
-//! selections, no cursor, and not the editor mode. Its *status row* does read
-//! the primary cursor and the buffer's dirty flag, which is why both are here.
-//! The row also names what waits on a held buffer, which no key part tracks, so
-//! a held buffer never replays.
+//! The set comes from reading `render_pane` and `render_editor_with_overlay`.
+//! `is_focused` reaches exactly two places in the editor render, relative line
+//! numbering and an early return before the selection and cursor pass. So an
+//! unfocused pane's *content* reads no selections, no cursor, and not the
+//! editor mode. A focused pane's content reads all three, and the cell under
+//! the mouse, so the key holds the focus, the selection set, the insert flag,
+//! and the hover cell. The goto-word labels and the pop-out cards a focused pane
+//! draws over its content are never replayed.
+//!
+//! The *status row* reads the primary cursor and the buffer's dirty flag, which
+//! is why both are here. Focused, it reads far more, from the mode label to the
+//! spinner glyph, so the key also holds a hash of the segments the row paints.
+//! The row names what waits on a held buffer, which no key part tracks, so a
+//! held buffer never replays.
 //!
 //! The diff view's branch returns before its selection pass as well. Past what
 //! a plain pane reads, it reads the diff dials and the names on its sides bar.
@@ -28,12 +34,13 @@ use crate::{
     pane::{Pane, View},
     render::{
         editor::editor_cursor_position,
-        pane::{diff_sides_for, pane_areas, status_segments_area},
+        pane::{diff_sides_for, pane_areas, status_segments_area, StatusRow},
         review::DiffDials,
         undercurl::UndercurlBatch,
         FrameCtx,
     },
 };
+use lsp_types::MessageType;
 use ratatui::{
     buffer::{Buffer, Cell},
     layout::Rect,
@@ -43,8 +50,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::ApcScene;
 
-/// Everything an unfocused editor pane's paint reads that can change between
-/// two frames.
+/// Everything an editor pane's paint reads that changes from one frame to the
+/// next.
 ///
 /// Two frames whose keys are equal paint identical cells, scene bytes, and
 /// undercurl spans, which is the direction a replay needs. The converse is
@@ -129,10 +136,33 @@ pub(crate) struct PaneCacheKey {
     pub(crate) cursor_pos: Option<(u32, u32)>,
     /// The buffer's unsaved marker, read by the status row.
     pub(crate) dirty: bool,
+    /// Whether the pane holds the focus. A focused editor numbers its lines
+    /// from the cursor and paints its selections, which an unfocused one skips.
+    pub(crate) focused: bool,
+    /// The selection set the pane paints, by its identity. The cursor and
+    /// every selection move with it.
+    pub(crate) selections: u64,
+    /// Whether a focused pane is in insert mode, where relative numbering
+    /// gives way to absolute numbers. `false` for an unfocused pane, which
+    /// numbers its lines absolutely in any mode.
+    pub(crate) insert_mode: bool,
+    /// The cell under the mouse, which a focused pane highlights. `None` for an
+    /// unfocused pane, which paints no hover.
+    pub(crate) hover_cell: Option<(u16, u16)>,
+    /// Whether a live scene takes the rich gutter and the cursor, which a dead
+    /// one leaves to the cells.
+    pub(crate) scene_live: bool,
+    /// A hash of the segments the status row paints, which every input the row
+    /// reads passes through.
+    pub(crate) status: u64,
+    /// Whether the search query compiles under smart case, which decides the
+    /// matches the pane paints. Read off the settings like the dim, so no
+    /// generation moves with it.
+    pub(crate) search_smart_case: bool,
 }
 
-/// One unfocused pane's last paint, held so a frame whose key still matches can
-/// put it back instead of producing it again.
+/// One pane's last paint, held so a frame whose key still matches puts it
+/// back instead of producing it again.
 ///
 /// A pane paints into three channels and all three are reset per frame, so all
 /// three are captured. Cells alone would replay the grid and lose the rich
@@ -141,7 +171,7 @@ pub(crate) struct PaneCacheKey {
 /// The storage is reused across captures rather than rebuilt, so a pane that
 /// misses writes over what it held instead of allocating its rect again. The
 /// render site therefore takes the entry out of the map before it knows
-/// whether this frame captures anything, which is why `key` is `None` until a
+/// whether this frame captures anything, which is why `key` is `None` while no
 /// capture fills it.
 #[derive(Default)]
 pub(crate) struct PaneCacheEntry {
@@ -160,6 +190,14 @@ pub(crate) struct PaneCacheEntry {
     /// not kept, since those are filled from the finished buffer after every
     /// pane has painted.
     undercurls: Vec<(u16, u16, u16, [u8; 3])>,
+    /// The last key a frame built for the pane, and whether it differed from
+    /// the key before it.
+    ///
+    /// Two moves in a row mark a run of frames that moves the key on every
+    /// frame, such as a held motion key, where a capture never replays. See
+    /// [`Self::capture_into`].
+    seen: Option<PaneCacheKey>,
+    moved: bool,
 }
 
 /// The scene lane lengths and span count to hand
@@ -184,11 +222,25 @@ impl PaintMark {
 
 impl PaneCacheEntry {
     /// Record what the pane just painted, given where the channels stood before
-    /// it started.
+    /// it started, and return whether it did.
     ///
-    /// Writes over whatever this entry held, keeping its allocations. The
-    /// render site passes the same rects in the same order every frame, so a
-    /// region slot is matched by position and its held rect overwritten.
+    /// While the user holds a motion key or types, the focused pane's key moves
+    /// on every frame. So does the key of every pane that shows the edited
+    /// buffer. Such a pane repaints on each frame, and no frame replays the
+    /// capture of the frame before it. A paint whose key moved on this frame
+    /// and on the frame before it therefore skips the capture and drops what
+    /// the entry held. A run of such frames pays for one capture, on its first
+    /// frame. The first frame after the run whose key holds captures again.
+    ///
+    /// A move of the paint version alone is not a move. A paint moves its own
+    /// paint version when it installs a wrap width or a diff pairing, so the
+    /// frame after a width change moves that part with no input behind it.
+    /// Every motion and keystroke moves some other part of the key.
+    ///
+    /// A capture writes over whatever this entry held, keeping its
+    /// allocations. The render site passes the same rects in the same order
+    /// every frame, so a region slot is matched by position and its held rect
+    /// overwritten.
     pub(crate) fn capture_into(
         &mut self,
         key: PaneCacheKey,
@@ -197,7 +249,21 @@ impl PaneCacheEntry {
         scene: &ApcScene,
         undercurls: &UndercurlBatch,
         mark: PaintMark,
-    ) {
+    ) -> bool {
+        let moved = self.seen.is_none_or(|seen| {
+            seen != PaneCacheKey {
+                paint_version: seen.paint_version,
+                ..key
+            }
+        });
+        let in_run = moved && self.moved;
+        self.seen = Some(key);
+        self.moved = moved;
+        if in_run {
+            self.key = None;
+            return false;
+        }
+
         self.key = Some(key);
 
         let painted = rects
@@ -227,6 +293,7 @@ impl PaneCacheEntry {
                 .iter()
                 .map(|span| (span.x, span.y, span.len, span.color)),
         );
+        true
     }
 
     /// Put the recorded paint back into this frame's three channels.
@@ -238,11 +305,14 @@ impl PaneCacheEntry {
     /// same place the original paint's did, so a session without a listener
     /// replays exactly what it painted.
     pub(crate) fn replay(
-        &self,
+        &mut self,
         buf: &mut Buffer,
         scene: &mut ApcScene,
         undercurls: &mut UndercurlBatch,
     ) {
+        // The held key is the last one the pane built, so a replayed frame
+        // held the key still, which ends any run of moving frames.
+        self.moved = false;
         for (rect, cells) in &self.regions {
             let width = rect.width as usize;
             for (row, y) in (rect.top()..rect.bottom()).enumerate() {
@@ -264,20 +334,28 @@ impl PaneCacheEntry {
 
 /// The key for `pane`, or `None` when the pane is not one this cache covers.
 ///
-/// An editor pane qualifies, whether it shows a document or the diff view. The
-/// conflict view takes its own branch out of the editor render and reads state
-/// the key does not cover, so it always paints.
+/// An editor pane qualifies, focused or not, whether it shows a document or
+/// the diff view. The conflict view takes its own branch out of the editor
+/// render and reads state the key does not cover, so it always paints.
 ///
 /// A buffer a command waits on always paints too. Its status row names what
 /// waits, and that name changes when the first waiter goes while no part of
 /// the key moves. A held buffer is rare and usually focused, so the paint it
 /// costs is small.
+///
+/// A focused pane under goto-word labels, the LSP status card, or the LSP
+/// error card always paints as well. The labels last a jump's few frames, and
+/// the status card turns the spinner on every tick.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_cache_key(
     pane: &Pane,
+    is_focused: bool,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     frame: FrameCtx<'_>,
     paint_generation: u64,
+    scene_live: bool,
+    status_row: &StatusRow,
 ) -> Option<PaneCacheKey> {
     let View::Editor(editor_id) = &pane.view else {
         return None;
@@ -289,6 +367,13 @@ pub(crate) fn pane_cache_key(
 
     let buffer = editor.buffer_id;
     if frame.held_buffers.iter().any(|(held, _)| *held == buffer) {
+        return None;
+    }
+
+    let error_card = frame
+        .lsp_message
+        .is_some_and(|(typ, _)| typ == MessageType::ERROR);
+    if is_focused && (frame.goto_word_labels.is_some() || frame.lsp_status_open || error_card) {
         return None;
     }
 
@@ -357,6 +442,13 @@ pub(crate) fn pane_cache_key(
         minimap_enabled: frame.minimap_enabled,
         cursor_pos: editor_cursor_position(editor),
         dirty,
+        focused: is_focused,
+        selections: editor.selections.identity(),
+        insert_mode: is_focused && frame.mode == "insert",
+        hover_cell: frame.hover_cell.filter(|_| is_focused),
+        scene_live,
+        status: status_row.hash_value(),
+        search_smart_case: frame.search_smart_case,
     })
 }
 
@@ -406,6 +498,13 @@ mod tests {
             minimap_enabled: false,
             cursor_pos: Some((1, 1)),
             dirty: false,
+            focused: false,
+            selections: 0,
+            insert_mode: false,
+            hover_cell: None,
+            scene_live: false,
+            status: 0,
+            search_smart_case: false,
         }
     }
 
@@ -418,7 +517,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 20] = [
+        let moved: [(&str, PaneCacheKey); 27] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -556,6 +655,49 @@ mod tests {
                 "dirty",
                 PaneCacheKey {
                     dirty: true,
+                    ..base
+                },
+            ),
+            (
+                "focused",
+                PaneCacheKey {
+                    focused: true,
+                    ..base
+                },
+            ),
+            (
+                "selections",
+                PaneCacheKey {
+                    selections: 1,
+                    ..base
+                },
+            ),
+            (
+                "insert_mode",
+                PaneCacheKey {
+                    insert_mode: true,
+                    ..base
+                },
+            ),
+            (
+                "hover_cell",
+                PaneCacheKey {
+                    hover_cell: Some((1, 1)),
+                    ..base
+                },
+            ),
+            (
+                "scene_live",
+                PaneCacheKey {
+                    scene_live: true,
+                    ..base
+                },
+            ),
+            ("status", PaneCacheKey { status: 1, ..base }),
+            (
+                "search_smart_case",
+                PaneCacheKey {
+                    search_smart_case: true,
                     ..base
                 },
             ),

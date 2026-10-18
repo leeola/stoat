@@ -1061,22 +1061,32 @@ pub(crate) fn frame(
             continue;
         }
 
-        // Only an unfocused editor pane is replayable. A focused one paints the
-        // selections and cursor the key says nothing about, and a run, terminal
-        // or label pane reads state this never audited.
-        let key = (!is_focused)
-            .then(|| {
-                pane_cache::pane_cache_key(
-                    pane,
-                    &mut ws.editors,
-                    &ws.buffers,
-                    frame,
-                    paint_generation,
-                )
-            })
-            .flatten();
+        let status_row = pane::status_row(
+            pane,
+            is_focused,
+            frame,
+            &mut ws.editors,
+            &ws.buffers,
+            &ws.terms,
+        );
+        if status_row.badge.is_some() {
+            lsp_badge_rect = status_row.badge;
+        }
+
+        // Only an editor pane is replayable. A run, terminal or label pane reads
+        // state this never audited.
+        let key = pane_cache::pane_cache_key(
+            pane,
+            is_focused,
+            &mut ws.editors,
+            &ws.buffers,
+            frame,
+            paint_generation,
+            scene.live(),
+            &status_row,
+        );
         if let Some(key) = key
-            && let Some(entry) = stoat.pane_cache.get(&(workspace, id))
+            && let Some(entry) = stoat.pane_cache.get_mut(&(workspace, id))
             && entry.key == Some(key)
         {
             entry.replay(buf, scene, undercurls);
@@ -1101,18 +1111,21 @@ pub(crate) fn frame(
             buf,
             scene,
             undercurls,
-            &mut lsp_badge_rect,
+            &status_row,
         );
         scene.end_lane();
         stoat.pane_paints += 1;
 
         if let Some(key) = key {
             let (content, status) = pane::pane_areas(pane.area, frame.minimap_band);
-            stoat
+            let captured = stoat
                 .pane_cache
                 .entry((workspace, id))
                 .or_default()
                 .capture_into(key, &[content, status], buf, scene, undercurls, mark);
+            if captured {
+                stoat.pane_captures += 1;
+            }
         }
     }
     scene.set_lane(OVERLAY_LANE);

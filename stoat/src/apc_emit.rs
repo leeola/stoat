@@ -468,8 +468,17 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             {
                 let mut scene = ApcScene::new();
                 let mut undercurls = UndercurlBatch::default();
+                let pane = ws.panes.pane(pane_id);
+                let status_row = crate::render::pane::status_row(
+                    pane,
+                    is_focused,
+                    frame,
+                    &mut ws.editors,
+                    &ws.buffers,
+                    &ws.terms,
+                );
                 crate::render::pane::render_pane(
-                    ws.panes.pane(pane_id),
+                    pane,
                     is_focused,
                     crate::render::PaneCtx {
                         editors: &mut ws.editors,
@@ -483,7 +492,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                     &mut buf,
                     &mut scene,
                     &mut undercurls,
-                    &mut None,
+                    &status_row,
                 );
             }
 
