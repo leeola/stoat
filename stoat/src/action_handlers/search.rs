@@ -820,18 +820,6 @@ mod tests {
         path
     }
 
-    fn cursor_offset(h: &mut TestHarness) -> usize {
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        stoat_text::cursor_offset(
-            buf_snap.rope(),
-            buf_snap.resolve_anchor(&sel.tail()),
-            buf_snap.resolve_anchor(&sel.head()),
-        )
-    }
-
     /// A match the scan reached without wrapping.
     fn hit(start: usize, end: usize) -> Option<super::Hit> {
         Some(super::Hit {
@@ -1594,13 +1582,13 @@ mod tests {
     fn an_uncompilable_pattern_still_stores_its_query() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
 
         h.type_keys("/");
         h.type_text("[");
         h.type_keys("enter");
 
-        assert_eq!(cursor_offset(&mut h), before, "no match, so no jump");
+        assert_eq!(h.primary_head_offset(), before, "no match, so no jump");
         assert_eq!(
             h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
             Some("["),
@@ -1659,11 +1647,11 @@ mod tests {
     fn no_match_leaves_cursor_unchanged() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         h.type_keys("/");
         h.type_text("zzz");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
         assert_eq!(
             h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
             Some("zzz"),
@@ -1674,10 +1662,10 @@ mod tests {
     fn empty_submit_does_not_store_last_search() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         h.type_keys("/");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
         assert!(h.stoat.last_search.is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
@@ -1686,11 +1674,11 @@ mod tests {
     fn escape_cancels_without_jump() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def abc\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         h.type_keys("/");
         h.type_text("abc");
         h.type_keys("escape");
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
         assert!(h.stoat.last_search.is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
@@ -2011,9 +1999,9 @@ mod tests {
     fn search_next_without_prior_search_is_noop() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     #[test]
@@ -2050,11 +2038,11 @@ mod tests {
     fn invalid_regex_is_noop() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         h.type_keys("/");
         h.type_text("[unclosed");
         h.type_keys("enter");
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     #[test]

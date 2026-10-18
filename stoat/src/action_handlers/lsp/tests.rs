@@ -144,7 +144,7 @@ fn goto_definition_routes_to_a_secondary_when_the_primary_lacks_it() {
     h.settle();
 
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         8,
         "the capable secondary served goto-definition"
     );
@@ -221,7 +221,7 @@ fn goto_definition_dedups_a_shared_location() {
         h.stoat.location_picker.is_none(),
         "identical answers dedup to a single direct jump"
     );
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
 }
 
 #[test]
@@ -237,7 +237,7 @@ fn goto_definition_survives_a_failing_server() {
 
     assert!(h.stoat.location_picker.is_none());
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         8,
         "the healthy server's answer lands despite the peer erroring"
     );
@@ -320,18 +320,6 @@ fn drive_background_applies_pushed_diagnostics() {
     assert_eq!(h.stoat.diagnostics.get(&path), &[diag(0, 0, "boom")]);
 }
 
-fn cursor_offset(h: &mut TestHarness) -> usize {
-    let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-    let snapshot = editor.display_map.snapshot();
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let sel = editor.selections.newest_anchor();
-    stoat_text::cursor_offset(
-        buffer_snapshot.rope(),
-        buffer_snapshot.resolve_anchor(&sel.tail()),
-        buffer_snapshot.resolve_anchor(&sel.head()),
-    )
-}
-
 #[test]
 fn goto_next_diagnostic_jumps_forward() {
     let mut h = TestHarness::with_size(80, 24);
@@ -340,7 +328,7 @@ fn goto_next_diagnostic_jumps_forward() {
     open_buffer(&mut h, path.clone());
     h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 4);
+    assert_eq!(h.primary_head_offset(), 4);
 }
 
 /// The ends of the list are taken whatever the cursor is near, so a cursor
@@ -353,14 +341,14 @@ fn goto_first_diagnostic_reaches_back_past_the_cursor() {
     open_buffer(&mut h, path.clone());
     h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoLastDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 8, "test setup: on the last");
+    assert_eq!(h.primary_head_offset(), 8, "test setup: on the last");
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoFirstDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 4);
+    assert_eq!(h.primary_head_offset(), 4);
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         8,
         "the origin went on the jumplist before the landing",
     );
@@ -379,17 +367,21 @@ fn goto_first_diagnostic_with_none_pushes_no_jump() {
     h.type_keys("l");
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
     h.type_keys("l l");
-    assert_eq!(cursor_offset(&mut h), 3, "test setup: away from the entry");
+    assert_eq!(
+        h.primary_head_offset(),
+        3,
+        "test setup: away from the entry"
+    );
 
     assert_eq!(
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoFirstDiagnostic),
         crate::app::UpdateEffect::None,
     );
-    assert_eq!(cursor_offset(&mut h), 3, "the cursor stayed put");
+    assert_eq!(h.primary_head_offset(), 3, "the cursor stayed put");
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         1,
         "the jump back reaches the earlier entry, so the no-op pushed none",
     );
@@ -403,9 +395,9 @@ fn goto_next_diagnostic_steps_through_each() {
     open_buffer(&mut h, path.clone());
     h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 4);
+    assert_eq!(h.primary_head_offset(), 4);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
 }
 
 #[test]
@@ -451,10 +443,10 @@ fn goto_diagnostic_converts_each_servers_position_with_its_encoding() {
     );
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 2, "ra's utf-8 column lands on x");
+    assert_eq!(h.primary_head_offset(), 2, "ra's utf-8 column lands on x");
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         6,
         "clippy's utf-16 column lands on y"
     );
@@ -469,7 +461,7 @@ fn goto_next_diagnostic_no_op_after_last() {
     h.seed_diagnostics(path, vec![diag(0, 0, "only")]);
     crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 11);
+    assert_eq!(h.primary_head_offset(), 11);
 }
 
 #[test]
@@ -481,9 +473,9 @@ fn goto_prev_diagnostic_jumps_backward() {
     h.seed_diagnostics(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
     crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
 }
 
 #[test]
@@ -494,7 +486,7 @@ fn goto_prev_diagnostic_no_op_before_first() {
     open_buffer(&mut h, path.clone());
     h.seed_diagnostics(path, vec![diag(2, 0, "only")]);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
 }
 
 #[test]
@@ -512,7 +504,7 @@ fn diagnostics_picker_enter_jumps_focused_cursor() {
     h.stoat.update(Event::Key(keys::key(KeyCode::Down)));
     h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
     assert!(h.stoat.diagnostics_picker.is_none());
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
 }
 
 #[test]
@@ -524,11 +516,11 @@ fn diagnostics_picker_esc_closes_without_jumping() {
     let path = root.join("a.rs");
     open_buffer(&mut h, path.clone());
     h.seed_diagnostics(path, vec![diag(1, 0, "first")]);
-    let before = cursor_offset(&mut h);
+    let before = h.primary_head_offset();
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenDiagnosticsPicker);
     h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
     assert!(h.stoat.diagnostics_picker.is_none());
-    assert_eq!(cursor_offset(&mut h), before);
+    assert_eq!(h.primary_head_offset(), before);
 }
 
 #[test]
@@ -542,7 +534,7 @@ fn a_diagnostics_select_takes_the_row_its_query_names() {
 
     type_and_enter_in_one_burst(&mut h, "second");
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         8,
         "the jump lands on the one diagnostic the query matches"
     );
@@ -554,9 +546,9 @@ fn goto_diagnostic_no_op_with_empty_diagnostics() {
     let root = seed(&mut h, &[("a.rs", "abc\n")]);
     open_buffer(&mut h, root.join("a.rs"));
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
 }
 
 #[test]
@@ -567,7 +559,7 @@ fn space_l_w_jumps_to_next_diagnostic() {
     open_buffer(&mut h, path.clone());
     h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
     h.type_keys("space l w");
-    assert_eq!(cursor_offset(&mut h), 4);
+    assert_eq!(h.primary_head_offset(), 4);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -578,7 +570,7 @@ fn space_l_w_with_no_diagnostic_returns_to_normal() {
     open_buffer(&mut h, root.join("a.rs"));
     h.type_keys("space l w");
     assert_eq!(
-        (cursor_offset(&mut h), h.stoat.focused_mode()),
+        (h.primary_head_offset(), h.stoat.focused_mode()),
         (0, "normal"),
         "the step finds nothing to move to and still leaves the space mode"
     );
@@ -642,10 +634,10 @@ fn goto_next_diagnostic_pushes_a_jump() {
     crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 10, "the span's last cell");
+    assert_eq!(h.primary_head_offset(), 10, "the span's last cell");
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
-    assert_eq!(cursor_offset(&mut h), 2);
+    assert_eq!(h.primary_head_offset(), 2);
 }
 
 /// Alt-. after a diagnostic jump repeats the jump, not the find before it.
@@ -658,13 +650,13 @@ fn repeat_last_motion_replays_a_diagnostic_jump() {
     h.seed_diagnostics(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
 
     h.type_keys("f b");
-    assert_eq!(cursor_offset(&mut h), 1, "the find lands first");
+    assert_eq!(h.primary_head_offset(), 1, "the find lands first");
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
-    assert_eq!(cursor_offset(&mut h), 4);
+    assert_eq!(h.primary_head_offset(), 4);
 
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         8,
         "the second diagnostic, where replaying the find would hold",
     );
@@ -679,7 +671,7 @@ fn space_l_shift_w_jumps_to_prev_diagnostic() {
     h.seed_diagnostics(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
     crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
     h.type_keys("space l shift-w");
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -737,7 +729,7 @@ fn goto_definition_jumps_within_same_file() {
         h.stoat.location_picker.is_none(),
         "single target skips picker"
     );
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(focused_buffer_path(&h), path);
 }
 
@@ -762,7 +754,7 @@ fn goto_definition_over_a_link_lands_on_the_name() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
     h.settle();
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         20,
         "the cursor lands on the name, below the docs"
     );
@@ -832,7 +824,7 @@ fn goto_declaration_jumps_within_same_file() {
         .set_declaration(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDeclaration);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(focused_buffer_path(&h), path);
 }
 
@@ -846,7 +838,7 @@ fn goto_declaration_unsupported_capability_is_noop() {
         .set_declaration(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDeclaration);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
@@ -861,7 +853,7 @@ fn space_l_shift_j_jumps_to_declaration() {
         .set_declaration(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     h.type_keys("space l J");
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -905,7 +897,7 @@ fn goto_definition_multiple_targets_opens_picker() {
 
     assert!(h.stoat.location_picker.is_none());
     assert_eq!(focused_buffer_path(&h), lib_path);
-    assert_eq!(cursor_offset(&mut h), 15);
+    assert_eq!(h.primary_head_offset(), 15);
 }
 
 /// The goto leader keys share one jump path, and the fake server seeds several
@@ -972,7 +964,7 @@ fn a_location_select_takes_the_row_its_query_names() {
     type_and_enter_in_one_burst(&mut h, "three");
     h.settle();
     assert_eq!(
-        (focused_buffer_path(&h), cursor_offset(&mut h)),
+        (focused_buffer_path(&h), h.primary_head_offset()),
         (lib_path, 27),
         "the jump lands on the one target the query matches"
     );
@@ -1003,7 +995,7 @@ fn goto_definition_opens_target_file() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
     h.settle();
     assert_eq!(focused_buffer_path(&h), lib_path);
-    assert_eq!(cursor_offset(&mut h), 15);
+    assert_eq!(h.primary_head_offset(), 15);
 }
 
 /// The buffer holds LF text, so a target in a CRLF file lands where the
@@ -1083,7 +1075,7 @@ fn a_workspace_symbol_in_a_large_file_lands_on_the_target() {
     h.settle();
 
     assert_eq!(
-        (focused_buffer_path(&h), cursor_offset(&mut h)),
+        (focused_buffer_path(&h), h.primary_head_offset()),
         (root.join("big.rs"), 3)
     );
 }
@@ -1110,7 +1102,7 @@ fn goto_definition_in(
     );
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
     h.settle();
-    (focused_buffer_path(h), cursor_offset(h))
+    (focused_buffer_path(h), h.primary_head_offset())
 }
 
 #[test]
@@ -1122,7 +1114,7 @@ fn goto_definition_no_result_is_noop() {
     open_buffer(&mut h, path.clone());
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert_eq!(focused_buffer_path(&h), path);
     assert_eq!(
         h.stoat.pending_message.as_deref(),
@@ -1184,7 +1176,7 @@ fn goto_definition_unsupported_capability_is_noop() {
         .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
@@ -1211,7 +1203,7 @@ fn goto_references_multiple_opens_picker() {
     h.settle();
 
     assert!(h.stoat.location_picker.is_none());
-    assert_eq!(cursor_offset(&mut h), 4);
+    assert_eq!(h.primary_head_offset(), 4);
 }
 
 /// The test counts reads before the pumps run, because the picker's preview
@@ -1305,7 +1297,7 @@ fn goto_references_unsupported_uses_code_graph() {
     assert!(h.stoat.location_picker.is_none(), "LSP path is gated off");
     assert!(h.stoat.pending_lsp_jump.label().is_none());
     assert_eq!(
-        cursor_offset(&mut h),
+        h.primary_head_offset(),
         0,
         "code-graph fallback no-ops on empty graph"
     );
@@ -1322,7 +1314,7 @@ fn space_l_j_jumps_to_definition() {
         .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     h.type_keys("space l j");
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -1345,7 +1337,7 @@ fn goto_type_definition_jumps_within_same_file() {
         .set_type_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(focused_buffer_path(&h), path);
 }
 
@@ -1374,7 +1366,7 @@ fn goto_type_definition_opens_target_file() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
     h.settle();
     assert_eq!(focused_buffer_path(&h), types_path);
-    assert_eq!(cursor_offset(&mut h), 19);
+    assert_eq!(h.primary_head_offset(), 19);
 }
 
 #[test]
@@ -1386,7 +1378,7 @@ fn goto_type_definition_no_result_is_noop() {
     open_buffer(&mut h, path.clone());
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert_eq!(focused_buffer_path(&h), path);
 }
 
@@ -1405,7 +1397,7 @@ fn goto_type_definition_unsupported_capability_is_noop() {
         .set_type_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
@@ -1420,7 +1412,7 @@ fn space_l_k_jumps_to_type_definition() {
         .set_type_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     h.type_keys("space l k");
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -1443,7 +1435,7 @@ fn goto_implementation_jumps_within_same_file() {
         .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(focused_buffer_path(&h), path);
 }
 
@@ -1472,7 +1464,7 @@ fn goto_implementation_opens_target_file() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
     h.settle();
     assert_eq!(focused_buffer_path(&h), impl_path);
-    assert_eq!(cursor_offset(&mut h), 23);
+    assert_eq!(h.primary_head_offset(), 23);
 }
 
 #[test]
@@ -1484,7 +1476,7 @@ fn goto_implementation_no_result_is_noop() {
     open_buffer(&mut h, path.clone());
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert_eq!(focused_buffer_path(&h), path);
 }
 
@@ -1503,7 +1495,7 @@ fn goto_implementation_unsupported_capability_is_noop() {
         .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 0);
+    assert_eq!(h.primary_head_offset(), 0);
     assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
@@ -1518,7 +1510,7 @@ fn space_l_t_jumps_to_implementation() {
         .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     h.type_keys("space l t");
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -1533,7 +1525,7 @@ fn g_s_jumps_to_implementation() {
         .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
     h.type_keys("g s");
     h.settle();
-    assert_eq!(cursor_offset(&mut h), 8);
+    assert_eq!(h.primary_head_offset(), 8);
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
@@ -2541,7 +2533,7 @@ fn symbol_picker_pick_jumps_to_offset() {
     h.type_keys("down");
     h.type_keys("enter");
     assert!(h.stoat.symbol_finder.is_none());
-    assert_eq!(cursor_offset(&mut h), 15);
+    assert_eq!(h.primary_head_offset(), 15);
 }
 
 #[test]
@@ -2590,7 +2582,7 @@ fn symbol_picker_navigates_with_arrows_and_picks_with_enter() {
 
     h.type_keys("enter");
     assert!(h.stoat.symbol_finder.is_none());
-    assert_eq!(cursor_offset(&mut h), 11 * 10 + 3);
+    assert_eq!(h.primary_head_offset(), 11 * 10 + 3);
 }
 
 #[test]
@@ -3078,7 +3070,7 @@ fn workspace_symbol_pick_opens_target_file() {
         .expect("buffer path")
         .to_path_buf();
     assert_eq!(path, lib);
-    assert_eq!(cursor_offset(&mut h), 3);
+    assert_eq!(h.primary_head_offset(), 3);
 }
 
 #[test]
@@ -3127,7 +3119,7 @@ fn workspace_symbol_navigates_with_arrows_and_picks_with_enter() {
     let buffer_id = ws.editors.get(eid).expect("editor").buffer_id;
     let path = ws.buffers.path_for(buffer_id).expect("path").to_path_buf();
     assert_eq!(path, root.join("f11.rs"));
-    assert_eq!(cursor_offset(&mut h), 3);
+    assert_eq!(h.primary_head_offset(), 3);
 }
 
 #[test]

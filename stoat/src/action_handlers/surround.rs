@@ -1018,18 +1018,6 @@ mod tests {
         path
     }
 
-    fn cursor_offset(h: &mut TestHarness) -> usize {
-        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        stoat_text::cursor_offset(
-            buf_snap.rope(),
-            buf_snap.resolve_anchor(&sel.tail()),
-            buf_snap.resolve_anchor(&sel.head()),
-        )
-    }
-
     /// `(` then `filler` then `)`, with the cursor just inside each delimiter,
     /// so each walk has the whole filler to cross before reaching its partner.
     fn spaced_pair(filler: usize) -> (Rope, usize) {
@@ -1416,7 +1404,7 @@ mod tests {
         h.type_keys("(");
         assert_eq!(h.buffer_text_at(&path), "(a)bc\n");
         assert_eq!(
-            cursor_offset(&mut h),
+            h.primary_head_offset(),
             2,
             "the selection covers the pair, so the cursor rests on the closer",
         );
@@ -2077,7 +2065,7 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m r ( [");
         assert_eq!(h.buffer_text_at(&path), "[abc]\n");
-        assert_eq!(cursor_offset(&mut h), 2);
+        assert_eq!(h.primary_head_offset(), 2);
     }
 
     #[test]
@@ -2087,7 +2075,7 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m d (");
         assert_eq!(h.buffer_text_at(&path), "abc\n");
-        assert_eq!(cursor_offset(&mut h), 1);
+        assert_eq!(h.primary_head_offset(), 1);
     }
 
     #[test]
@@ -2097,7 +2085,7 @@ mod tests {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
         h.type_keys("m r \" '");
         assert_eq!(h.buffer_text_at(&path), "'abc'\n");
-        assert_eq!(cursor_offset(&mut h), 2);
+        assert_eq!(h.primary_head_offset(), 2);
     }
 
     #[test]

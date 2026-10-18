@@ -181,18 +181,6 @@ mod tests {
         path
     }
 
-    fn cursor_offset(h: &mut TestHarness) -> usize {
-        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        stoat_text::cursor_offset(
-            buf_snap.rope(),
-            buf_snap.resolve_anchor(&sel.tail()),
-            buf_snap.resolve_anchor(&sel.head()),
-        )
-    }
-
     fn focused_path(h: &TestHarness) -> PathBuf {
         let ws = h.stoat.active_workspace();
         let pane = ws.panes.pane(ws.panes.focus());
@@ -224,16 +212,16 @@ mod tests {
         seed(&mut h, "abc\ndef\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
         h.type_keys("a");
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoFileStart);
-        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(h.primary_head_offset(), 0);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMark);
         h.type_keys("a");
-        assert_eq!(cursor_offset(&mut h), 4);
+        assert_eq!(h.primary_head_offset(), 4);
         assert!(h.stoat.pending_mark.is_none());
     }
 
@@ -243,16 +231,16 @@ mod tests {
         seed(&mut h, "abc\ndef\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
         h.type_keys("a");
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoFileStart);
-        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(h.primary_head_offset(), 0);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
         h.type_keys("a");
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
         assert!(h.stoat.pending_mark.is_none());
     }
 
@@ -260,10 +248,10 @@ mod tests {
     fn goto_mark_unset_is_noop() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMark);
         h.type_keys("z");
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
         assert!(h.stoat.pending_mark.is_none());
     }
 
@@ -284,7 +272,7 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
         h.type_keys("A");
 
@@ -295,7 +283,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
         h.type_keys("A");
         assert_eq!(focused_path(&h), a);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
     }
 
     #[test]
@@ -311,12 +299,12 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: b.clone() });
         h.settle();
         assert_eq!(focused_path(&h), b);
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMark);
         h.type_keys("a");
         assert_eq!(focused_path(&h), b);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     /// An uppercase mark moves with the text like a lowercase one, for as long
@@ -332,7 +320,7 @@ mod tests {
         seed(&mut h, "abc\ndef\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
         h.type_keys("A");
@@ -341,7 +329,7 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
         h.type_keys("A");
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.primary_head_offset(), 8);
     }
 
     /// Coming back to a marked file from another one lands on the marked text,
@@ -353,7 +341,7 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
         crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
         h.type_keys("A");
 
@@ -366,7 +354,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
         h.type_keys("A");
         assert_eq!(focused_path(&h), a);
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.primary_head_offset(), 8);
     }
 
     #[test]
@@ -375,7 +363,7 @@ mod tests {
         seed(&mut h, "abc\ndef\n");
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
         crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
         h.type_keys("a");
@@ -384,6 +372,6 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
         h.type_keys("a");
-        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.primary_head_offset(), 8);
     }
 }

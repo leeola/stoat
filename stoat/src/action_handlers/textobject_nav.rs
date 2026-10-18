@@ -367,18 +367,6 @@ mod tests {
         path
     }
 
-    fn cursor_offset(h: &mut TestHarness) -> usize {
-        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        stoat_text::cursor_offset(
-            buf_snap.rope(),
-            buf_snap.resolve_anchor(&sel.tail()),
-            buf_snap.resolve_anchor(&sel.head()),
-        )
-    }
-
     fn jump(h: &mut TestHarness, offset: usize) {
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, offset);
     }
@@ -419,13 +407,13 @@ mod tests {
         seed(&mut h, "main.rs", src);
         h.settle();
         jump(&mut h, 3);
-        let origin = cursor_offset(&mut h);
+        let origin = h.primary_head_offset();
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
-        assert_ne!(cursor_offset(&mut h), origin, "the motion moved");
+        assert_ne!(h.primary_head_offset(), origin, "the motion moved");
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
-        assert_eq!(cursor_offset(&mut h), origin);
+        assert_eq!(h.primary_head_offset(), origin);
     }
 
     /// In select mode the motion grows the selection out to the object rather
@@ -500,10 +488,10 @@ mod tests {
         seed(&mut h, "main.rs", src);
         h.settle();
         jump(&mut h, 0);
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextXmlElement);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     /// The whole menu is reachable from select mode, and a motion reached that
@@ -726,10 +714,10 @@ mod tests {
         h.settle();
         jump(&mut h, 0);
 
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
         assert_eq!(
-            cursor_offset(&mut h),
+            h.primary_head_offset(),
             before,
             "the last function is refused"
         );
@@ -750,10 +738,10 @@ mod tests {
         h.settle();
         jump(&mut h, 0);
 
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
         assert_eq!(
-            cursor_offset(&mut h),
+            h.primary_head_offset(),
             before,
             "the inner function does not replace the refused outer one",
         );
@@ -767,9 +755,9 @@ mod tests {
         h.settle();
         let after_last = src.len() - 1;
         jump(&mut h, after_last);
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     #[test]
@@ -780,10 +768,10 @@ mod tests {
         h.settle();
         jump(&mut h, src.len());
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevFunction);
-        let last = cursor_offset(&mut h);
+        let last = h.primary_head_offset();
         assert_eq!(&src[last..last + 9], "fn gamma(");
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevFunction);
-        let mid = cursor_offset(&mut h);
+        let mid = h.primary_head_offset();
         assert_eq!(&src[mid..mid + 8], "fn beta(");
     }
 
@@ -794,9 +782,9 @@ mod tests {
         seed(&mut h, "main.rs", src);
         h.settle();
         jump(&mut h, 0);
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevFunction);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     #[test]
@@ -822,10 +810,10 @@ mod tests {
         h.settle();
         jump(&mut h, src.len());
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevClass);
-        let last = cursor_offset(&mut h);
+        let last = h.primary_head_offset();
         assert!(src[last..].starts_with("impl Foo"), "{}", &src[last..]);
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevClass);
-        let mid = cursor_offset(&mut h);
+        let mid = h.primary_head_offset();
         assert!(src[mid..].starts_with("enum Bar"), "{}", &src[mid..]);
     }
 
@@ -836,11 +824,11 @@ mod tests {
         seed(&mut h, "data.json", src);
         h.settle();
         jump(&mut h, 0);
-        let before = cursor_offset(&mut h);
+        let before = h.primary_head_offset();
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
         crate::action_handlers::dispatch(&mut h.stoat, &GotoPrevClass);
-        assert_eq!(cursor_offset(&mut h), before);
+        assert_eq!(h.primary_head_offset(), before);
     }
 
     #[test]
@@ -863,7 +851,7 @@ mod tests {
         h.settle();
         jump(&mut h, src.len());
         h.type_keys("[ t");
-        let off = cursor_offset(&mut h);
+        let off = h.primary_head_offset();
         assert!(src[off..].starts_with("struct Bar"), "{}", &src[off..]);
         assert_eq!(h.stoat.focused_mode(), "normal");
     }

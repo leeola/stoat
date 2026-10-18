@@ -694,18 +694,6 @@ mod tests {
         editor.selections.replace_with(built, buf);
     }
 
-    fn cursor_offset(h: &mut TestHarness) -> usize {
-        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        stoat_text::cursor_offset(
-            buf_snap.rope(),
-            buf_snap.resolve_anchor(&sel.tail()),
-            buf_snap.resolve_anchor(&sel.head()),
-        )
-    }
-
     /// Delete yanks what it removes, so deleting nothing must not reach the
     /// register at all. On an empty buffer the sole selection is collapsed and
     /// yields one empty fragment, which is not the same as having something to
@@ -852,7 +840,7 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(h.buffer_text_at(&path), "abcabc\n");
-        assert_eq!(cursor_offset(&mut h), 5);
+        assert_eq!(h.primary_head_offset(), 5);
     }
 
     #[test]
@@ -864,7 +852,7 @@ mod tests {
         h.type_keys("escape");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteBefore);
         assert_eq!(h.buffer_text_at(&path), "abcabc\n");
-        assert_eq!(cursor_offset(&mut h), 2);
+        assert_eq!(h.primary_head_offset(), 2);
     }
 
     #[test]
@@ -1139,7 +1127,7 @@ mod tests {
                 "a",
                 "the delete empties the line's tail"
             );
-            assert_eq!(cursor_offset(&mut h), 1, "the cursor rests on the end");
+            assert_eq!(h.primary_head_offset(), 1, "the cursor rests on the end");
 
             h.type_keys(keys);
             h.buffer_text_at(&path)
