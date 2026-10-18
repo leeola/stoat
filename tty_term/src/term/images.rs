@@ -713,20 +713,15 @@ fn inline_cells(
     let natural_w = image.width.div_ceil(cell_w).max(1) as usize;
     let natural_h = image.height.div_ceil(cell_h).max(1) as usize;
 
-    let resolve = |dimension: Dimension, per_cell: u32, span: usize, natural: usize| match dimension
-    {
+    let resolve = |dimension: Dimension, per_cell: u32, span: usize| match dimension {
         Dimension::Auto => None,
         Dimension::Cells(cells) => Some((cells as usize).max(1)),
         Dimension::Pixels(pixels) => Some((pixels.div_ceil(per_cell).max(1)) as usize),
         Dimension::Percent(percent) => (span > 0).then_some((span * percent as usize / 100).max(1)),
-        // A percent of nothing, and a natural size is the better answer than
-        // none.
-        #[allow(unreachable_patterns)]
-        _ => Some(natural),
     };
 
-    let stated_w = resolve(file.width, cell_w, screen_cols, natural_w);
-    let stated_h = resolve(file.height, cell_h, screen_rows, natural_h);
+    let stated_w = resolve(file.width, cell_w, screen_cols);
+    let stated_h = resolve(file.height, cell_h, screen_rows);
 
     // Aspect is a ratio of pixels, and a cell is not square, so deriving one
     // side from the other goes through pixels rather than cell counts. Doing it

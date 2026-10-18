@@ -2520,6 +2520,7 @@ impl Terminal {
     /// commits, a resize empties the window). Paired with the composed top row,
     /// it lets a caller easing this pool sub-cell skip recomposing a frame whose
     /// version and top both held steady, since only the sub-cell fraction moved.
+    #[cfg(test)]
     pub fn pool_content_version(&self, id: u32) -> Option<u64> {
         Some(self.pools.get(&id)?.content_version)
     }

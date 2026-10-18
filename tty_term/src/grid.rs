@@ -720,16 +720,6 @@ impl Grid {
         self.sketches_epoch += 1;
     }
 
-    /// The mark list, for a caller rewriting it from another grid's. See
-    /// [`Self::text_runs_mut`].
-    ///
-    /// Moves [`Self::sketches_epoch`] on the way out, for the reason
-    /// [`Self::text_runs_mut`] moves its own.
-    pub fn sketches_mut(&mut self) -> &mut Vec<Sketch> {
-        self.sketches_epoch += 1;
-        &mut self.sketches
-    }
-
     /// Copy `rows` rows of `src` in at (`top`, `left`), replacing whatever
     /// decorations this grid held with `src`'s, shifted to land there.
     ///
