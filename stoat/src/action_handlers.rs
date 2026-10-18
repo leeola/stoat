@@ -500,7 +500,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ToggleStageLine => review::stage_line(stoat, review::HunkStage::Toggle),
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
-        ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),
+        ActionKind::SplitSelectionOnNewline => {
+            with_focused_editor(stoat, movement::split_selection_on_newline)
+        },
         ActionKind::SplitSelection => {
             split_selection::open(stoat, split_selection::RegexSelectKind::Split)
         },
@@ -650,8 +652,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::GotoLineStart => movement::goto_line_start(stoat, false),
         ActionKind::GotoLineEnd => movement::goto_line_end(stoat, false),
-        ActionKind::GotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, false),
-        ActionKind::EnterInsertMode => movement::enter_insert_mode(stoat),
+        ActionKind::GotoFirstNonwhitespace => with_focused_editor(stoat, |editor| {
+            movement::goto_first_nonwhitespace(editor, false)
+        }),
+        ActionKind::EnterInsertMode => with_focused_editor(stoat, movement::enter_insert_mode),
         ActionKind::AppendMode => movement::append_mode(stoat),
         ActionKind::InsertAtLineEnd => movement::insert_at_line_end(stoat),
         ActionKind::InsertAtLineStart => movement::insert_at_line_start(stoat),
@@ -912,7 +916,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoLastModification => movement::goto_last_modification(stoat),
         ActionKind::AddNewlineBelow => movement::add_newline_below(stoat),
         ActionKind::AddNewlineAbove => movement::add_newline_above(stoat),
-        ActionKind::ExtendGotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, true),
+        ActionKind::ExtendGotoFirstNonwhitespace => with_focused_editor(stoat, |editor| {
+            movement::goto_first_nonwhitespace(editor, true)
+        }),
         ActionKind::ExtendGotoFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendGotoLastLine => movement::goto_last_line(stoat, true),
         ActionKind::ExtendGotoWindowTop => view::goto_window(stoat, view::WindowAlign::Top, true),
@@ -934,17 +940,27 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendToLineEnd => movement::goto_line_end(stoat, true),
         ActionKind::ExtendToFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendGotoLineNumber => movement::goto_line_number(stoat, true),
-        ActionKind::CollapseSelection => movement::collapse_selection(stoat),
-        ActionKind::FlipSelections => movement::flip_selections(stoat),
-        ActionKind::EnsureSelectionsForward => movement::ensure_selections_forward(stoat),
-        ActionKind::SelectAll => movement::select_all(stoat),
+        ActionKind::CollapseSelection => with_focused_editor(stoat, movement::collapse_selection),
+        ActionKind::FlipSelections => with_focused_editor(stoat, movement::flip_selections),
+        ActionKind::EnsureSelectionsForward => {
+            with_focused_editor(stoat, movement::ensure_selections_forward)
+        },
+        ActionKind::SelectAll => with_focused_editor(stoat, movement::select_all),
         ActionKind::ExtendLineBelow => movement::extend_line_below(stoat),
-        ActionKind::ExtendToLineBounds => movement::extend_to_line_bounds(stoat),
-        ActionKind::ShrinkToLineBounds => movement::shrink_to_line_bounds(stoat),
-        ActionKind::KeepPrimarySelection => movement::keep_primary_selection(stoat),
+        ActionKind::ExtendToLineBounds => {
+            with_focused_editor(stoat, movement::extend_to_line_bounds)
+        },
+        ActionKind::ShrinkToLineBounds => {
+            with_focused_editor(stoat, movement::shrink_to_line_bounds)
+        },
+        ActionKind::KeepPrimarySelection => {
+            with_focused_editor(stoat, movement::keep_primary_selection)
+        },
         ActionKind::RemovePrimarySelection => movement::remove_primary_selection(stoat),
-        ActionKind::MergeSelections => movement::merge_selections(stoat),
-        ActionKind::MergeConsecutiveSelections => movement::merge_consecutive_selections(stoat),
+        ActionKind::MergeSelections => with_focused_editor(stoat, movement::merge_selections),
+        ActionKind::MergeConsecutiveSelections => {
+            with_focused_editor(stoat, movement::merge_consecutive_selections)
+        },
         ActionKind::RotateSelectionsForward => movement::rotate_selections_forward(stoat),
         ActionKind::RotateSelectionsBackward => movement::rotate_selections_backward(stoat),
         ActionKind::RotateSelectionContentsForward => {
@@ -955,7 +971,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::JoinSelections => movement::join_selections(stoat),
         ActionKind::JoinSelectionsSpace => movement::join_selections_space(stoat),
-        ActionKind::TrimSelections => movement::trim_selections(stoat),
+        ActionKind::TrimSelections => with_focused_editor(stoat, movement::trim_selections),
         ActionKind::OpenRun => run::open_run(stoat),
         ActionKind::SpawnClaude => agent::spawn_claude_pane(stoat),
         ActionKind::Terminal => terminal::open_terminal_pane(stoat),
@@ -1525,6 +1541,22 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     match view {
         View::Editor(id) => ws.editors.get_mut(id),
         _ => None,
+    }
+}
+
+/// Run `f` on the focused editor, or answer [`UpdateEffect::None`] when no
+/// editor has focus.
+///
+/// A handler that reads only the focused editor takes it as its argument and
+/// is wired through here, so a unit test drives it on an [`EditorState`]
+/// without a [`Stoat`].
+pub(crate) fn with_focused_editor(
+    stoat: &mut Stoat,
+    f: impl FnOnce(&mut EditorState) -> UpdateEffect,
+) -> UpdateEffect {
+    match focused_editor_mut(stoat) {
+        Some(editor) => f(editor),
+        None => UpdateEffect::None,
     }
 }
 

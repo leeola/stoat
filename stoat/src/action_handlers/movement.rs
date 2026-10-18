@@ -674,10 +674,7 @@ where
 /// [`cursor_offset`] resolve to the selection start, so typing inserts before a
 /// multi-char selection rather than near its end. A bare cursor's span is
 /// unchanged and its cursor cell stays put, so this is a no-op there.
-pub(super) fn enter_insert_mode(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn enter_insert_mode(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     editor.selections.transform(buffer_snapshot, |sel| {
@@ -999,10 +996,7 @@ fn goto_line_boundary(stoat: &mut Stoat, boundary: LineBoundary, extend: bool) -
     UpdateEffect::Redraw
 }
 
-pub(super) fn goto_first_nonwhitespace(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn goto_first_nonwhitespace(editor: &mut EditorState, extend: bool) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -1106,10 +1100,7 @@ pub(super) fn goto_file_start(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
 /// motion that set it, so that `j` through a short line returns to the column
 /// it started from. A collapse ends that run, because the user places a cursor
 /// rather than travels down a column.
-pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn collapse_selection(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -1125,10 +1116,7 @@ pub(super) fn collapse_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn flip_selections(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     editor.selections.transform(buffer_snapshot, |sel| {
@@ -1141,10 +1129,7 @@ pub(super) fn flip_selections(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn ensure_selections_forward(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn ensure_selections_forward(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     editor.selections.transform(buffer_snapshot, |sel| {
@@ -1595,10 +1580,7 @@ struct RankedEntry {
     rank: usize,
 }
 
-pub(super) fn split_selection_on_newline(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn split_selection_on_newline(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -2887,10 +2869,7 @@ fn toggle_case(s: &str) -> String {
         .collect()
 }
 
-pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn select_all(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let end_offset = buffer_snapshot.rope().len();
@@ -2957,10 +2936,7 @@ pub(super) fn extend_line_below(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn extend_to_line_bounds(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn extend_to_line_bounds(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -2975,10 +2951,7 @@ pub(super) fn extend_to_line_bounds(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn shrink_to_line_bounds(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn shrink_to_line_bounds(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
@@ -3060,26 +3033,17 @@ fn line_bound_selection(
     anchor_selection(resolved, buffer)
 }
 
-pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn keep_primary_selection(editor: &mut EditorState) -> UpdateEffect {
     editor.selections.keep_primary();
     UpdateEffect::Redraw
 }
 
-pub(super) fn merge_selections(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn merge_selections(editor: &mut EditorState) -> UpdateEffect {
     editor.selections.merge_all();
     UpdateEffect::Redraw
 }
 
-pub(super) fn merge_consecutive_selections(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn merge_consecutive_selections(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     editor
         .selections
@@ -3116,10 +3080,7 @@ pub(super) fn rotate_selections_backward(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn trim_selections(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(editor) = focused_editor_mut(stoat) else {
-        return UpdateEffect::None;
-    };
+pub(super) fn trim_selections(editor: &mut EditorState) -> UpdateEffect {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
