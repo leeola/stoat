@@ -1,11 +1,3 @@
-// Consumers of this module (`rename_symbol`, `code_action.apply`,
-// completion items with multi-edit `text_edits`, the
-// `workspace/applyEdit` reply path) do not exist yet; the trait
-// surface and FakeLsp infrastructure below land in this commit
-// and the consumers wire in as they are built. `#[allow(dead_code)]`
-// covers the gap until the first caller arrives.
-#![allow(dead_code)]
-
 //! Apply an LSP [`WorkspaceEdit`] to stoat's buffer state plus the
 //! filesystem (via [`crate::host::FsHost`]).
 //!

@@ -35,7 +35,6 @@ pub(crate) struct CommitPickerLayout {
     /// The commit table's column labels, above the rows they name. Reserved
     /// here and painted when the rows become a table, so the rects below it
     /// settle once rather than shifting a row later.
-    #[allow(dead_code)]
     pub(crate) header: Rect,
     /// The node graph, left of the table and spanning the same rows. `None`
     /// when the list is filtered or has no lanes to draw.

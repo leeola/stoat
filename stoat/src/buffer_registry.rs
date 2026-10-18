@@ -118,7 +118,6 @@ pub(crate) enum ReadOnly {
     Compressed,
 }
 
-#[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
     path: Option<PathBuf>,
@@ -910,15 +909,6 @@ impl BufferRegistry {
         }
     }
 
-    /// Drop any cached diff for `id`. Call when the buffer's base
-    /// text changes or when the buffer is closed.
-    #[allow(dead_code)]
-    pub(crate) fn invalidate_diff(&mut self, id: BufferId) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.diff = None;
-        }
-    }
-
     /// A snapshot of the buffers `keep` accepts.
     ///
     /// Each entry carries a [`BufferHistory`] whose replay reconstructs the
@@ -1067,7 +1057,6 @@ pub(crate) struct BufferEntrySnap {
 /// the buffer registry and to populate
 /// [`stoat_language::structural_diff::BufferRef::fingerprint`] for
 /// cross-file move detection in the structural diff pipeline.
-#[allow(dead_code)]
 pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
     blake3::hash(text.as_bytes()).into()
 }
@@ -1432,16 +1421,6 @@ mod tests {
         let fp2 = fingerprint_bytes("two");
         reg.store_diff(id, 1, fp1, Arc::new(DiffResult::default()));
         assert!(reg.cached_diff(id, 1, fp2).is_none());
-    }
-
-    #[test]
-    fn diff_cache_invalidate_clears_entry() {
-        let mut reg = BufferRegistry::new();
-        let (id, _) = reg.new_scratch();
-        let fp = fingerprint_bytes("x");
-        reg.store_diff(id, 1, fp, Arc::new(DiffResult::default()));
-        reg.invalidate_diff(id);
-        assert!(reg.cached_diff(id, 1, fp).is_none());
     }
 
     #[test]
