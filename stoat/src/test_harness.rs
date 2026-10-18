@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub(crate) mod apc;
 pub(crate) mod editor;
 pub(crate) mod keys;
@@ -58,7 +56,6 @@ const SETTLE_MAX_PASSES: usize = 1000;
 
 pub struct TestHarness {
     pub(crate) stoat: Stoat,
-    #[allow(dead_code)]
     scheduler: Arc<TestScheduler>,
     pub(crate) fake_fs: Arc<crate::host::FakeFs>,
     pub(crate) fake_fs_watcher: Arc<crate::host::FakeFsWatcher>,
@@ -938,24 +935,6 @@ impl TestHarness {
         editor::editor_scroll_rows(&self.stoat)
     }
 
-    /// First split-pane that holds an editor view. Panics if none.
-    pub(crate) fn editor_pane(&self) -> crate::pane::PaneId {
-        editor::editor_pane(&self.stoat)
-    }
-
-    /// `EditorId` held by `pane`. Panics if the pane is not an editor.
-    pub(crate) fn editor_id_in_pane(
-        &self,
-        pane: crate::pane::PaneId,
-    ) -> crate::editor_state::EditorId {
-        editor::editor_id_in_pane(&self.stoat, pane)
-    }
-
-    /// `scroll_row` for a specific editor in the active workspace.
-    pub(crate) fn editor_scroll_row(&self, editor_id: crate::editor_state::EditorId) -> u32 {
-        editor::editor_scroll_row(&self.stoat, editor_id)
-    }
-
     /// Render one frame and composite its APC scene into the returned buffer, so
     /// rich chrome shows up in the same cells the fallback paints.
     ///
@@ -1300,14 +1279,6 @@ fn key_description(event: &KeyEvent) -> String {
     parts.push(key_name);
     parts.join("-")
 }
-
-/// Two hunks separated by unchanged context; cursor defaults to the
-/// first chunk. Verifies the cyan current-chunk gutter and the
-/// default progress footer.
-pub(crate) const REVIEW_TWO_HUNK_BASE: &str =
-    "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\n";
-pub(crate) const REVIEW_TWO_HUNK_BUFFER: &str =
-    "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nT\n";
 
 #[cfg(test)]
 mod tests {

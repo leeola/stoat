@@ -151,18 +151,6 @@ pub(crate) fn editor_scroll_rows(stoat: &Stoat) -> Vec<u32> {
         .collect()
 }
 
-/// First split-pane in the active workspace whose view is an editor.
-/// Panics if no editor pane exists.
-pub(crate) fn editor_pane(stoat: &Stoat) -> PaneId {
-    stoat
-        .active_workspace()
-        .panes
-        .split_panes()
-        .find(|(_, p)| matches!(p.view, View::Editor(_)))
-        .map(|(pid, _)| pid)
-        .expect("active workspace has no editor pane")
-}
-
 /// `EditorId` held by `pane`. Panics if the pane is not an editor.
 pub(crate) fn editor_id_in_pane(stoat: &Stoat, pane: PaneId) -> EditorId {
     match stoat.active_workspace().panes.pane(pane).view {
