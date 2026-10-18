@@ -31,7 +31,6 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Instant,
 };
 use stoat_language::{
     edit_tree, enclosing_symbol_item, extract_references, extract_symbols, grammar_yields_symbols,
@@ -144,8 +143,9 @@ pub(crate) fn build_index(
         redraw,
         drain,
     } = handles;
+    let clock = executor.clone();
     executor.spawn_blocking(move || {
-        let started = Instant::now();
+        let started = clock.now();
         let known: HashMap<String, [u8; 32]> = index_dir
             .as_deref()
             .and_then(|dir| store::read_manifest(dir, fs.as_ref()).ok())
@@ -276,7 +276,7 @@ pub(crate) fn build_index(
         tracing::info!(
             target: "stoat::code_index",
             files = file_count,
-            elapsed_ms = started.elapsed().as_millis() as u64,
+            elapsed_ms = clock.now().duration_since(started).as_millis() as u64,
             "index build complete",
         );
     })

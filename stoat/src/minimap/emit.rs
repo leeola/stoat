@@ -47,6 +47,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         workspaces,
         minimap_content,
         minimap_next_content_id,
+        executor,
         ..
     } = stoat;
     let ws = &workspaces[ws_id];
@@ -61,6 +62,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
         if let Entry::Vacant(slot) = minimap_content.entry((ws_id, editor.buffer_id)) {
             slot.insert(crate::minimap::MinimapContent::new(
                 *minimap_next_content_id,
+                executor.clone(),
             ));
             *minimap_next_content_id += 1;
         }
@@ -543,10 +545,11 @@ mod tests {
     use crate::{
         action_handlers, apc_emit,
         display_map::highlights::{HighlightStyleId, HighlightStyleInterner},
+        minimap::SYNC_SLICE,
         test_fixture::{drain_apc, focused_editor_pane_area},
     };
     use ratatui::layout::Rect;
-    use std::{path::PathBuf, sync::Arc};
+    use std::{path::PathBuf, sync::Arc, time::Duration};
     use stoat_action::OpenFile;
     use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -585,23 +588,34 @@ mod tests {
         );
     }
 
+    /// Give every strip a zero budget, so each sync covers one slice per stage.
+    ///
+    /// The harness clock moves only when a test moves it, so the default budget
+    /// never ends a sync. A test that needs a file to take several syncs sets
+    /// this after the render that creates the strip.
+    fn one_slice_per_sync(stoat: &mut Stoat) {
+        for content in stoat.minimap_content.values_mut() {
+            content.budget = Duration::ZERO;
+        }
+    }
+
     /// The rows a parse reports have to reach the strip that paints them.
     ///
-    /// Splices cannot show this. A sweep queues nothing for a row whose
+    /// Splices do not show this. A sweep queues nothing for a row whose
     /// summary is unchanged, so a scoped sweep and a full one emit the same
     /// frames and differ only in how many rows they re-summarize. What the
-    /// scope does change is whether the sweep finishes inside one sync. A file
-    /// of enough rows outruns one sync's budget, which the strip reports as
-    /// still pending.
+    /// scope does change is whether the sweep finishes inside one sync. At one
+    /// slice per sync, a full sweep of a file of several slices outruns one
+    /// sync, which the strip reports as still pending.
     #[test]
     fn an_edit_sweeps_without_spilling_past_one_sync() {
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        // Enough rows that a full sweep outruns the sync budget several times
-        // over, which the last leg asserts rather than assumes.
-        let total = 20000usize;
+        // Several slices, so a full sweep outruns one sync, which the last leg
+        // asserts rather than assumes.
+        let total = 4 * SYNC_SLICE as usize;
         let body: String = vec!["fn a() {}"; total].join("\n");
         let root = PathBuf::from("/minimap");
         let path = root.join("big.rs");
@@ -613,6 +627,7 @@ mod tests {
 
         let _ = h.stoat.render();
         apc_emit::emit_apc_scene(&mut h.stoat);
+        one_slice_per_sync(&mut h.stoat);
         for _ in 0..400 {
             emit_minimap(&mut h.stoat);
             if !h.stoat.minimap_build_pending {
@@ -743,9 +758,8 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        // Far more rows than one sync's budget reaches, so the build fills over
-        // several.
-        let total = 120_000usize;
+        // Three slices, so the build fills over three syncs at one slice each.
+        let total = 3 * SYNC_SLICE as usize;
         let body: String = vec!["ln"; total].join("\n");
         let root = PathBuf::from("/minimap");
         let path = root.join("big.txt");
@@ -757,6 +771,7 @@ mod tests {
 
         let _ = h.stoat.render();
         apc_emit::emit_apc_scene(&mut h.stoat);
+        one_slice_per_sync(&mut h.stoat);
         emit_minimap(&mut h.stoat);
         assert!(
             h.stoat.minimap_build_pending,

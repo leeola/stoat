@@ -31,9 +31,6 @@ type GitStart = Box<dyn FnOnce(&mut Stoat) -> Option<GitWork>>;
 pub(crate) struct GitJob {
     label: &'static str,
     key: Option<GitJobKey>,
-    /// When the job was built. [`enqueue`] rebuilds each job it queues, so for
-    /// a queued job this is when it entered the queue.
-    queued: Instant,
     start: GitStart,
 }
 
@@ -55,7 +52,6 @@ impl GitJob {
         Self {
             label,
             key,
-            queued: Instant::now(),
             start: Box::new(start),
         }
     }
@@ -74,7 +70,7 @@ pub(crate) enum GitJobKey {
 /// The git writes the loop started, held in press order until each one lands.
 #[derive(Default)]
 pub(crate) struct GitJobs {
-    queue: VecDeque<GitJob>,
+    queue: VecDeque<QueuedGitJob>,
     running: Option<RunningGitJob>,
 }
 
@@ -84,13 +80,20 @@ impl GitJobs {
         self.running
             .as_ref()
             .is_some_and(|job| job.key == Some(key))
-            || self.queue.iter().any(|job| job.key == Some(key))
+            || self.queue.iter().any(|queued| queued.job.key == Some(key))
     }
 
     /// Drop every queued job with `key`. A running one still lands.
     pub(crate) fn drop_queued(&mut self, key: GitJobKey) {
-        self.queue.retain(|job| job.key != Some(key));
+        self.queue.retain(|queued| queued.job.key != Some(key));
     }
+}
+
+/// A job that waits in the queue for its turn.
+struct QueuedGitJob {
+    job: GitJob,
+    /// When the job entered the queue, which starts its wait.
+    queued: Instant,
 }
 
 /// The job whose work is out on the pool.
@@ -116,9 +119,7 @@ struct RunningGitJob {
 /// write completes and the landing does nothing.
 pub(crate) fn enqueue(stoat: &mut Stoat, job: GitJob) {
     let workspace = stoat.active_workspace;
-    let GitJob {
-        label, key, start, ..
-    } = job;
+    let GitJob { label, key, start } = job;
     let job = GitJob::new(label, key, move |stoat: &mut Stoat| {
         let work = stoat.in_workspace(workspace, start).flatten()?;
         Some(Box::new(move || {
@@ -128,9 +129,13 @@ pub(crate) fn enqueue(stoat: &mut Stoat, job: GitJob) {
             }) as GitLanding
         }) as GitWork)
     });
+    let job = QueuedGitJob {
+        job,
+        queued: stoat.executor.now(),
+    };
 
     let queue = &mut stoat.git_jobs.queue;
-    match key.and_then(|key| queue.iter_mut().find(|queued| queued.key == Some(key))) {
+    match key.and_then(|key| queue.iter_mut().find(|queued| queued.job.key == Some(key))) {
         Some(queued) => {
             *queued = job;
             tracing::debug!(target: "stoat::git", label, ?key, "git job replaced a queued job");
@@ -169,7 +174,7 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
         target: "stoat::git",
         label = running.label,
         queued_ms = running.started.duration_since(running.queued).as_millis() as u64,
-        work_ms = running.started.elapsed().as_millis() as u64,
+        work_ms = stoat.executor.now().duration_since(running.started).as_millis() as u64,
         "git job landed"
     );
 
@@ -186,7 +191,7 @@ pub(crate) fn pump(stoat: &mut Stoat) -> bool {
 /// Start queued jobs until one hands work to the pool or the queue is empty.
 fn start_next(stoat: &mut Stoat) {
     while stoat.git_jobs.running.is_none() {
-        let Some(job) = stoat.git_jobs.queue.pop_front() else {
+        let Some(QueuedGitJob { job, queued }) = stoat.git_jobs.queue.pop_front() else {
             return;
         };
         let Some(work) = (job.start)(stoat) else {
@@ -208,8 +213,8 @@ fn start_next(stoat: &mut Stoat) {
         stoat.git_jobs.running = Some(RunningGitJob {
             label: job.label,
             key: job.key,
-            queued: job.queued,
-            started: Instant::now(),
+            queued,
+            started: stoat.executor.now(),
             rx,
             _task: task,
         });

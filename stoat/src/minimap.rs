@@ -11,12 +11,9 @@ use crate::{
     theme::{scope, Theme},
 };
 use ratatui::style::Color;
-use std::{
-    collections::HashMap,
-    ops::Range,
-    time::{Duration, Instant},
-};
+use std::{collections::HashMap, ops::Range, time::Duration};
 use stoat_language::HighlightId;
+use stoat_scheduler::Executor;
 use stoat_text::{
     patch::{Edit, Patch},
     Rope,
@@ -332,6 +329,9 @@ pub struct MinimapContent {
     /// Time one [`Self::sync`] spends on chunked work before it leaves the rest
     /// for the next one. [`Self::new`] takes [`SYNC_BUDGET`].
     budget: Duration,
+    /// The executor whose clock measures [`Self::budget`], so a test scheduler
+    /// decides when the budget ends a sync.
+    executor: Executor,
     lines: Vec<LineRuns>,
     /// The built rows carrying a mark and the edge-lane class each carries,
     /// ascending by row. A row absent from it is unmarked.
@@ -399,16 +399,17 @@ pub struct MinimapContent {
 }
 
 impl MinimapContent {
-    pub fn new(content_id: u32) -> MinimapContent {
-        MinimapContent::with_budget(content_id, SYNC_BUDGET)
+    pub fn new(content_id: u32, executor: Executor) -> MinimapContent {
+        MinimapContent::with_budget(content_id, executor, SYNC_BUDGET)
     }
 
     /// A content that spends `budget` per [`Self::sync`] in place of
-    /// [`SYNC_BUDGET`], so a caller can pin how far one call reaches.
-    fn with_budget(content_id: u32, budget: Duration) -> MinimapContent {
+    /// [`SYNC_BUDGET`], so a caller pins how far one call reaches.
+    fn with_budget(content_id: u32, executor: Executor, budget: Duration) -> MinimapContent {
         MinimapContent {
             content_id,
             budget,
+            executor,
             lines: Vec::new(),
             edges: Vec::new(),
             synced_version: 0,
@@ -499,7 +500,7 @@ impl MinimapContent {
             return;
         }
 
-        let started = Instant::now();
+        let started = self.executor.now();
         let total = line_count(new_rope);
         if total as usize > MAX_LINES {
             self.disabled = true;
@@ -545,7 +546,7 @@ impl MinimapContent {
             self.lines.extend(lines);
             self.built_upto = end;
 
-            if started.elapsed() >= self.budget {
+            if self.executor.now().duration_since(started) >= self.budget {
                 break;
             }
         }
@@ -646,7 +647,7 @@ impl MinimapContent {
                 };
                 self.resync_slice(new_rope, slice, &tokens_for);
 
-                if started.elapsed() >= self.budget {
+                if self.executor.now().duration_since(started) >= self.budget {
                     break;
                 }
             }
@@ -681,7 +682,7 @@ impl MinimapContent {
                 self.resync_edges(new_rope, &tokens_for, &marks, from..to);
                 from = to;
 
-                if from >= end || started.elapsed() >= self.budget {
+                if from >= end || self.executor.now().duration_since(started) >= self.budget {
                     break;
                 }
             }
@@ -1412,9 +1413,10 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 mod tests {
     use super::{
         summarize_line, EdgeSource, LineRuns, LineToken, MinimapContent, Run, Splice, SyncVersions,
-        MAX_LINES, MAX_RUNS, SYNC_SLICE,
+        MAX_LINES, MAX_RUNS, SYNC_BUDGET, SYNC_SLICE,
     };
-    use std::{cell::RefCell, collections::HashMap, ops::Range, time::Duration};
+    use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
+    use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{
         patch::{Edit, Patch},
         Rope,
@@ -1422,6 +1424,11 @@ mod tests {
 
     fn rope(text: &str) -> Rope {
         Rope::from(text)
+    }
+
+    /// An executor on a test clock, which moves only when a test moves it.
+    fn test_executor() -> Executor {
+        Executor::new(Arc::new(TestScheduler::new()))
     }
 
     fn no_tokens(_: Range<u32>) -> HashMap<u32, Vec<LineToken>> {
@@ -1621,7 +1628,7 @@ mod tests {
         // Two slices, so the sync that carries the edit also finishes the build.
         let total = 2 * SYNC_SLICE as usize;
         let before = rope(&vec!["line"; total].join("\n"));
-        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
 
         // One slice, leaving the cursor at SYNC_SLICE with the tail unbuilt.
         content.sync(
@@ -1687,7 +1694,7 @@ mod tests {
         // Two slices, so the sync that carries the edit also finishes the build.
         let total = 2 * SYNC_SLICE as usize;
         let before = rope(&vec!["line"; total].join("\n"));
-        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
 
         content.sync(
             &before,
@@ -1739,7 +1746,7 @@ mod tests {
     #[test]
     fn a_later_edit_in_one_patch_lands_on_the_moved_row() {
         let before = rope("alpha\nbravo\ncharlie\ndelta");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &before,
             1,
@@ -1784,7 +1791,7 @@ mod tests {
     #[test]
     fn single_line_edit_queues_one_one_line_splice() {
         let before = rope("alpha\nbeta\ngamma\n");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &before,
             1,
@@ -1821,7 +1828,7 @@ mod tests {
         };
 
         let before = rope("a\nb\nc\nd\ne\nf\n");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
 
         // The initial build queries exactly the rows it fills.
         content.sync(
@@ -1857,7 +1864,7 @@ mod tests {
     #[test]
     fn newline_insertion_inserts_one_more_than_removed() {
         let before = rope("alpha\nbeta\ngamma\n");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &before,
             1,
@@ -1960,7 +1967,7 @@ mod tests {
         edits: &[(Range<usize>, &str)],
     ) -> (MinimapContent, Vec<LineRuns>, Vec<LineRuns>) {
         let tokens = color(3);
-        let mut content = MinimapContent::with_budget(1, budget);
+        let mut content = MinimapContent::with_budget(1, test_executor(), budget);
         let mut terminal = Vec::new();
         content.sync(
             &rope(before),
@@ -1988,7 +1995,7 @@ mod tests {
             replay(&mut terminal, content.take_queued());
         }
 
-        let mut fresh = MinimapContent::with_budget(1, Duration::MAX);
+        let mut fresh = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
         fresh.sync(
             &after,
             1,
@@ -2042,7 +2049,7 @@ mod tests {
             *queries.borrow_mut() += 1;
             colored(rows)
         };
-        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
         let before = rope(&before);
         loop {
             content.sync(
@@ -2122,7 +2129,7 @@ mod tests {
     #[test]
     fn multi_line_replace_removes_the_old_span() {
         let before = rope("a\nb\nc\nd\ne\n");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &before,
             1,
@@ -2155,7 +2162,7 @@ mod tests {
         // last line.
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
 
         content.sync(
             &rope,
@@ -2220,7 +2227,7 @@ mod tests {
     fn a_wide_budget_carries_every_stage_past_one_slice() {
         let total = SYNC_SLICE + SYNC_SLICE / 2;
         let rope = rope(&vec!["line"; total as usize].join("\n"));
-        let mut content = MinimapContent::with_budget(1, Duration::MAX);
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
 
         content.sync(
             &rope,
@@ -2267,13 +2274,40 @@ mod tests {
         assert!(!content.build_pending(), "with no stage left owing rows");
     }
 
+    /// A sync measures its budget on the executor's clock. On a still clock, the
+    /// budget never ends a sync. A clock that moves past the budget during a
+    /// slice stops the sync at the end of that slice.
+    #[test]
+    fn the_budget_runs_on_the_executor_clock() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let rope = rope(&vec!["line"; 2 * SYNC_SLICE as usize].join("\n"));
+        let built_in_one_sync = |step: Duration| {
+            let mut content = MinimapContent::new(1, scheduler.executor());
+            let tokens = |_: Range<u32>| {
+                scheduler.advance_clock(step);
+                HashMap::new()
+            };
+            content.sync(&rope, 1, &Patch::empty(), versions(0, 0), tokens, no_edges);
+            content.lines.len() as u32
+        };
+
+        assert_eq!(
+            (
+                built_in_one_sync(Duration::ZERO),
+                built_in_one_sync(SYNC_BUDGET)
+            ),
+            (2 * SYNC_SLICE, SYNC_SLICE),
+            "rows one sync builds on a still clock and on a clock past the budget"
+        );
+    }
+
     /// A monochrome strip of a slice and a half, at a budget too small to reach
     /// a second slice, so every stage of a later sync covers exactly one.
     fn built_recolor_fixture() -> (Rope, MinimapContent) {
         let total = SYNC_SLICE + SYNC_SLICE / 2;
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::with_budget(1, Duration::ZERO);
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
         // Build the whole file monochrome over two syncs (syntax 0 sweeps nothing).
         content.sync(
             &rope,
@@ -2318,7 +2352,7 @@ mod tests {
     /// content starts out owing a full sweep it has not yet been asked for.
     fn small_recolor_fixture(lines: u32) -> (Rope, MinimapContent) {
         let rope = rope(&vec!["line"; lines as usize].join("\n"));
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &rope,
             1,
@@ -2820,7 +2854,7 @@ mod tests {
     #[test]
     fn build_carries_each_line_edge() {
         let text = rope("alpha\nbravo");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         let edge_of = |row: u32| (row == 1).then_some(40);
 
         content.sync(
@@ -3015,7 +3049,7 @@ mod tests {
         let total = 6u32;
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &rope,
             1,
@@ -3045,7 +3079,7 @@ mod tests {
         let total = 10u32;
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &rope,
             1,
@@ -3165,7 +3199,7 @@ mod tests {
         let rows = 40u32;
         let text: String = vec!["line"; rows as usize].join("\n");
         let rope = rope(&text);
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &rope,
             1,
@@ -3236,7 +3270,7 @@ mod tests {
     #[test]
     fn an_edge_resync_that_changes_nothing_fetches_no_tokens() {
         let text = rope("alpha\nbravo\ncharlie");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &text,
             1,
@@ -3272,7 +3306,7 @@ mod tests {
     #[test]
     fn a_sync_with_nothing_to_do_consults_no_edge_source() {
         let text = rope("alpha\nbravo\ncharlie");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &text,
             1,
@@ -3301,7 +3335,7 @@ mod tests {
     #[test]
     fn an_edge_resync_fetches_only_the_changed_rows() {
         let text = rope("alpha\nbravo\ncharlie\ndelta\necho");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         content.sync(
             &text,
             1,
@@ -3340,7 +3374,7 @@ mod tests {
     fn an_edge_resync_asks_only_about_markable_rows() {
         let total = 4000u32;
         let text = rope(&vec!["line"; total as usize].join("\n"));
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
 
         let asked = RefCell::new(Vec::new());
         let marked = [1000u32, 1001, 1002];
@@ -3372,7 +3406,7 @@ mod tests {
     #[test]
     fn an_edit_slides_the_marks_below_it() {
         let before = rope("alpha\nbravo\ncharlie\ndelta");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
 
         content.sync(
@@ -3432,7 +3466,7 @@ mod tests {
     #[test]
     fn an_edit_drops_the_marks_of_the_rows_it_deletes() {
         let before = rope("alpha\nbravo\ncharlie");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
 
         content.sync(
@@ -3483,7 +3517,7 @@ mod tests {
     #[test]
     fn a_mark_the_source_drops_is_cleared() {
         let text = rope("alpha\nbravo\ncharlie");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
 
         content.sync(
@@ -3531,7 +3565,7 @@ mod tests {
     #[test]
     fn decoration_change_splices_only_the_marked_line() {
         let text = rope("alpha\nbravo\ncharlie");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
 
         content.sync(
             &text,
@@ -3568,7 +3602,7 @@ mod tests {
     #[test]
     fn syntax_change_resummarizes_content() {
         let text = rope("alpha\nbeta");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
 
         // Build with line 0 colored class 5 across the whole word.
         let colored = |rows: Range<u32>| {
@@ -3609,7 +3643,7 @@ mod tests {
     #[test]
     fn a_recolor_sweep_keeps_the_marks_without_asking_for_them() {
         let text = rope("alpha\nbravo");
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
         let source = RecordingEdges {
             marked: &[1],
@@ -3679,7 +3713,7 @@ mod tests {
     fn oversized_buffer_disables_and_queues_nothing() {
         let text: String = (0..MAX_LINES + 1).map(|_| "x\n").collect();
         let rope = rope(&text);
-        let mut content = MinimapContent::new(1);
+        let mut content = MinimapContent::new(1, test_executor());
 
         content.sync(
             &rope,
