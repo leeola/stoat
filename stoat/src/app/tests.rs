@@ -5993,26 +5993,8 @@ fn split_pair(h: &mut crate::test_harness::TestHarness) {
 fn publish_one_diagnostic(h: &mut crate::test_harness::TestHarness, path: &std::path::Path) {
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range as LspRange};
 
-    let snapshot = {
-        let ws = h.stoat.active_workspace();
-        let id = ws.buffers.id_for_path(path).expect("buffer registered");
-        ws.buffers
-            .get(id)
-            .expect("buffer")
-            .read()
-            .expect("poisoned")
-            .snapshot
-            .clone()
-    };
-    let anchors = crate::diagnostics::PublishedSpan {
-        anchors: Some((
-            snapshot.anchors_at_batch(&[0], Bias::Right)[0],
-            snapshot.anchors_at_batch(&[5], Bias::Left)[0],
-        )),
-    };
-    h.stoat.diagnostics.replace_from_server(
-        path.to_path_buf(),
-        "test".into(),
+    h.seed_diagnostics(
+        path,
         vec![Diagnostic {
             range: LspRange {
                 start: Position {
@@ -6028,7 +6010,6 @@ fn publish_one_diagnostic(h: &mut crate::test_harness::TestHarness, path: &std::
             message: String::new(),
             ..Default::default()
         }],
-        vec![anchors],
     );
 }
 
@@ -9940,23 +9921,7 @@ fn open_two_change_diff(h: &mut crate::test_harness::TestHarness) {
 /// file has no repository to diff again, so a test that reopens the view puts
 /// the map back first.
 fn install_two_change_map(h: &mut crate::test_harness::TestHarness) {
-    let base = "keep\nold\nmid\nmid\nmid\nold2\ntail\n";
-    let text = "keep\nnew\nmid\nmid\nmid\nnew2\ntail\n";
-    let buffer_id = {
-        let ws = h.stoat.active_workspace();
-        match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => ws.editors[id].buffer_id,
-            _ => panic!("focused pane is not an editor"),
-        }
-    };
-    let dm = crate::diff_map::DiffMap::from_structural_changes(
-        stoat_language::structural_diff::diff(base, text),
-        Arc::new(base.to_string()),
-        text,
-    );
-    h.stoat
-        .active_workspace_mut()
-        .install_test_diff_map(buffer_id, dm);
+    h.seed_current_diff_map("keep\nold\nmid\nmid\nmid\nold2\ntail\n");
 }
 
 fn focused_cursor_row(stoat: &mut Stoat) -> u32 {
@@ -10020,23 +9985,7 @@ fn opening_diff_view_keeps_a_cursor_that_sits_on_a_change() {
 /// `toggle_diff_view` finds a ready map and skips the on-demand compute.
 fn open_scratch_with_diff(h: &mut crate::test_harness::TestHarness) {
     open_scratch_file(h, "keep\nnew\ntail\n");
-    let buffer_id = {
-        let ws = h.stoat.active_workspace();
-        match ws.panes.pane(ws.panes.focus()).view {
-            View::Editor(id) => ws.editors[id].buffer_id,
-            _ => panic!("focused pane is not an editor"),
-        }
-    };
-    let base = "keep\nold\ntail\n";
-    let text = "keep\nnew\ntail\n";
-    let dm = crate::diff_map::DiffMap::from_structural_changes(
-        stoat_language::structural_diff::diff(base, text),
-        Arc::new(base.to_string()),
-        text,
-    );
-    h.stoat
-        .active_workspace_mut()
-        .install_test_diff_map(buffer_id, dm);
+    h.seed_current_diff_map("keep\nold\ntail\n");
 }
 
 #[test]
