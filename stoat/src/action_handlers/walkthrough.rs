@@ -995,6 +995,8 @@ mod tests {
         code_index::{build, nav},
         git_jobs,
         host::FakeFs,
+        keymap::{KeymapState, StateValue},
+        keymap_state::StoatKeymapState,
         render::hover::HoverFrame,
         review_walk::ReturnRef,
         test_harness::TestHarness,
@@ -1790,6 +1792,27 @@ mod tests {
             serde_json::to_string(&walkthrough).expect("serialize"),
         );
         h
+    }
+
+    #[test]
+    fn walkthrough_reads_whether_a_tour_is_open() {
+        let mut h = harness_with_tour();
+        let open_tour = |h: &TestHarness| {
+            StoatKeymapState::from_stoat(&h.stoat)
+                .get("walkthrough")
+                .cloned()
+        };
+        let before = open_tour(&h);
+
+        open(&mut h.stoat, "tour");
+        let during = open_tour(&h);
+
+        done(&mut h.stoat);
+        assert_eq!(
+            [before, during, open_tour(&h)],
+            [false, true, false].map(|on| Some(StateValue::Bool(on))),
+            "no tour, then the tour open, then the tour done",
+        );
     }
 
     /// The narration shares the hover popup, which any key takes down, and the

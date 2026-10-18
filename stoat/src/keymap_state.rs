@@ -25,6 +25,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "rebase_exec",
     "pair",
     "git",
+    "walkthrough",
     "token",
     "token_known",
     "lsp",
@@ -50,6 +51,8 @@ pub(crate) struct Flags {
     /// Whether the workspace root is inside a git repository. See
     /// [`Workspace::repo_root`].
     pub(crate) git: bool,
+    /// Whether a walkthrough tour is open. See [`Workspace::walkthrough`].
+    pub(crate) walkthrough: bool,
 }
 
 impl Flags {
@@ -58,6 +61,7 @@ impl Flags {
             rebase_exec: ws.rebase_active.is_some(),
             pair: ws.pair_panes().is_some(),
             git: ws.repo_root.is_some(),
+            walkthrough: ws.walkthrough.is_some(),
         }
     }
 }
@@ -70,6 +74,8 @@ pub(crate) struct StoatKeymapState<'a> {
     pair: StateValue,
     /// Whether the workspace root is inside a git repository.
     git: StateValue,
+    /// Whether a walkthrough tour is open.
+    walkthrough: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -126,6 +132,7 @@ impl<'a> StoatKeymapState<'a> {
             rebase_exec: StateValue::Bool(flags.rebase_exec),
             pair: StateValue::Bool(flags.pair),
             git: StateValue::Bool(flags.git),
+            walkthrough: StateValue::Bool(flags.walkthrough),
             pane: None,
             view: None,
             modal: None,
@@ -247,6 +254,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "rebase_exec" => Some(&self.rebase_exec),
             "pair" => Some(&self.pair),
             "git" => Some(&self.git),
+            "walkthrough" => Some(&self.walkthrough),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
