@@ -3963,13 +3963,14 @@ impl Stoat {
                     let Some(event) = event else { break };
                     #[cfg(feature = "perf")]
                     {
-                        t_event = Some(std::time::Instant::now());
+                        t_event = Some(self.executor.now());
                     }
                     #[cfg(feature = "perf")]
-                    let started = std::time::Instant::now();
+                    let started = self.executor.now();
                     let effect = self.update(event);
                     #[cfg(feature = "perf")]
-                    self.perf.record_update(started.elapsed());
+                    self.perf
+                        .record_update(self.executor.now().duration_since(started));
                     effect
                 }
                 // Second, ahead of every channel arm. A biased select returns at
@@ -3985,7 +3986,7 @@ impl Stoat {
                 // no other arm is ready.
                 _ = frame_timer.tick(), if timer_armed => {
                     timer_won = true;
-                    let now = std::time::Instant::now();
+                    let now = self.executor.now();
                     let dt = last_tick
                         .map(|prev| (now - prev).as_secs_f32().min(MAX_FRAME_DT))
                         .unwrap_or_else(|| SCROLL_FRAME.as_secs_f32());
@@ -3997,7 +3998,7 @@ impl Stoat {
                     // refill inside emit_smooth_scroll. Otherwise a refill's
                     // render time inflates the following step into a visible
                     // multi-row jump instead of smooth motion.
-                    last_tick = Some(std::time::Instant::now());
+                    last_tick = Some(self.executor.now());
                     effect
                 }
                 // The spawn waits for the input thread to confirm it stopped
@@ -4132,10 +4133,11 @@ impl Stoat {
                             },
                         };
                         #[cfg(feature = "perf")]
-                        let painted = std::time::Instant::now();
+                        let painted = self.executor.now();
                         self.paint_into(&mut b, blank.as_ref());
                         #[cfg(feature = "perf")]
-                        self.perf.record_paint(painted.elapsed());
+                        self.perf
+                            .record_paint(self.executor.now().duration_since(painted));
                         let undercurl = undercurl::build(&b, self.pending_undercurls.spans());
                         (Arc::new(b), undercurl)
                     };
@@ -4169,7 +4171,8 @@ impl Stoat {
                     }
                     #[cfg(feature = "perf")]
                     if let Some(started) = t_event {
-                        self.perf.record_input_to_publish(started.elapsed());
+                        self.perf
+                            .record_input_to_publish(self.executor.now().duration_since(started));
                     }
                     apc_emit::emit_apc_scene(self);
                     crate::image_emit::emit_images(self);
@@ -4598,7 +4601,7 @@ impl Stoat {
     /// The re-resolution after the loop is outside both bounds. It runs once
     /// and has to see every update the loop merged.
     pub(crate) fn drain_index_updates(&mut self) {
-        let started = std::time::Instant::now();
+        let started = self.executor.now();
         let mut resolve_pending: std::collections::HashSet<WorkspaceId> =
             std::collections::HashSet::new();
         let mut completed: std::collections::HashSet<WorkspaceId> =
@@ -4691,7 +4694,7 @@ impl Stoat {
                 },
             }
 
-            if index_turn_spent(drained, started.elapsed()) {
+            if index_turn_spent(drained, self.executor.now().duration_since(started)) {
                 // The remainder merges on the next turn, and merging it shows
                 // nothing, so the wake asks for the turn and not for a frame.
                 self.drain_notify.notify_one();
@@ -4744,7 +4747,7 @@ impl Stoat {
             }
         }
 
-        let elapsed = started.elapsed();
+        let elapsed = self.executor.now().duration_since(started);
         if drained > 0 && elapsed > SLOW_DRAIN_THRESHOLD {
             tracing::warn!(
                 target: "stoat::app",
@@ -4823,7 +4826,7 @@ impl Stoat {
             &*self.fs_host,
             &[state_dir, socket_dir],
             &workspaces_dir,
-            std::time::SystemTime::now(),
+            self.executor.system_now(),
             retention,
             keep,
             socket_is_live,

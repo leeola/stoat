@@ -134,6 +134,14 @@ fn open_commit_picker(
         }
     });
 
+    // Ages are measured against the moment the picker opened, so they hold
+    // still while the user scrolls rather than drifting under them.
+    let now_epoch = stoat
+        .executor
+        .system_now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0);
     let executor = stoat.executor.clone();
     let mut picker = CommitPicker::new(
         stoat.active_workspace_mut(),
@@ -142,12 +150,7 @@ fn open_commit_picker(
         workdir,
         repo.clone(),
         ref_sha,
-        // Ages are measured against the moment the picker opened, so they hold
-        // still while the user scrolls rather than drifting under them.
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_secs() as i64)
-            .unwrap_or(0),
+        now_epoch,
     );
     picker.scope_label = scope_label;
     picker.pending_commits = Some(task);

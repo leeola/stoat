@@ -715,7 +715,7 @@ fn arm_pending_save(stoat: &mut Stoat, buffer_id: BufferId, path: &Path) {
     let target = path.to_path_buf();
     let (tx, rx) = mpsc::channel();
     let bytes = rope.len();
-    let started = Instant::now();
+    let started = stoat.executor.now();
 
     let task = {
         let target = target.clone();
@@ -816,7 +816,7 @@ fn finish_pending_save(stoat: &mut Stoat, pending: &PendingSave) {
         target: "stoat::file",
         path = %pending.path.display(),
         bytes = pending.bytes,
-        ms = pending.started.elapsed().as_millis() as u64,
+        ms = stoat.executor.now().duration_since(pending.started).as_millis() as u64,
         held,
         "saved buffer"
     );

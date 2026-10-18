@@ -869,7 +869,7 @@ impl DiffState {
                 tracing::info!(
                     target: "stoat::diff",
                     path = %out.path.display(),
-                    ms = started.elapsed().as_millis() as u64,
+                    ms = executor.now().duration_since(started).as_millis() as u64,
                     "diff job landed after its base moved"
                 );
             }
@@ -1004,7 +1004,7 @@ impl DiffState {
                     task,
                     superseded: false,
                     base_moved,
-                    started: Instant::now(),
+                    started: executor.now(),
                 },
             );
         }
@@ -2081,7 +2081,6 @@ mod tests {
         ops::Range,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
-        time::Instant,
     };
     use stoat_action::{DiffAgainstIndex, StageHunk};
     use stoat_language::{parse, structural_diff::TreeCache, Language, LanguageRegistry};
@@ -3549,7 +3548,7 @@ mod tests {
             task: h.stoat.executor.spawn(future::pending()),
             superseded: false,
             base_moved: false,
-            started: Instant::now(),
+            started: h.stoat.executor.now(),
         }
     }
 
