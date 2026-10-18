@@ -13,27 +13,13 @@ use std::{
     sync::{Arc, RwLock},
     time::SystemTime,
 };
-use stoat_language::{
-    drop_syntax_in_background, structural_diff::DiffResult, Language, SyntaxMap, SyntaxState,
-};
+use stoat_language::{drop_syntax_in_background, Language, SyntaxMap, SyntaxState};
 use stoat_text::{Anchor, LineEnding, Rope};
 
 /// Anchored, start-sorted LSP symbol kinds for one buffer, keyed by span. Built
 /// from a semantic-tokens response and queried by offset via
 /// [`BufferRegistry::lsp_symbol_kind_at`].
 pub(crate) type LspSymbolKindIndex = Arc<[(Range<Anchor>, LspSymbolKind)]>;
-
-/// Memoized [`DiffResult`] for a `(buffer, base_text)` pair. Cached
-/// on [`BufferRegistry`] so repeat review-view renders and consumer
-/// queries do not rerun the full structural-diff pipeline. Keyed
-/// on the buffer version that was diffed and a blake3 fingerprint
-/// of the base text: if either changes, the cache entry is stale.
-#[derive(Clone)]
-pub(crate) struct CachedDiff {
-    pub buffer_version: u64,
-    pub base_fingerprint: [u8; 32],
-    pub result: Arc<DiffResult>,
-}
 
 /// What an LSP semantic-tokens response leaves behind for a buffer.
 ///
@@ -163,7 +149,6 @@ struct BufferEntry {
     /// so without the stream there is nothing to apply it to and the next pull
     /// has to ask for the whole file again.
     lsp_token_source: Option<(Option<String>, Arc<[SemanticToken]>)>,
-    diff: Option<CachedDiff>,
     /// Marks this buffer as a transient preview surface (e.g. the
     /// file finder's preview pane). The parse pipeline pulls these
     /// into its visibility set even when the buffer is not in a
@@ -284,7 +269,6 @@ impl BufferRegistry {
                 lsp_tokens: None,
                 lsp_token_source: None,
                 lsp_symbol_kinds: None,
-                diff: None,
                 preview,
                 origin: OpenOrigin::Visited,
                 disk_mtime: None,
@@ -339,7 +323,6 @@ impl BufferRegistry {
                 lsp_tokens: None,
                 lsp_token_source: None,
                 lsp_symbol_kinds: None,
-                diff: None,
                 preview: false,
                 origin: OpenOrigin::Visited,
                 disk_mtime: None,
@@ -869,46 +852,6 @@ impl BufferRegistry {
         self.buffers.get_mut(&id)?.token_spans.take()
     }
 
-    /// Return a cached [`DiffResult`] for `(buffer, base_text)` if one
-    /// was stored against the current buffer version and base
-    /// fingerprint; otherwise `None`. Callers recompute and cache via
-    /// [`Self::store_diff`] on miss.
-    #[allow(dead_code)]
-    pub(crate) fn cached_diff(
-        &self,
-        id: BufferId,
-        buffer_version: u64,
-        base_fingerprint: [u8; 32],
-    ) -> Option<Arc<DiffResult>> {
-        let entry = self.buffers.get(&id)?.diff.as_ref()?;
-        if entry.buffer_version == buffer_version && entry.base_fingerprint == base_fingerprint {
-            Some(entry.result.clone())
-        } else {
-            None
-        }
-    }
-
-    /// Store a newly-computed [`DiffResult`] for `id`. Supersedes any
-    /// prior cache entry regardless of version/fingerprint; callers
-    /// that want stale detection should check [`Self::cached_diff`]
-    /// before recomputing.
-    #[allow(dead_code)]
-    pub(crate) fn store_diff(
-        &mut self,
-        id: BufferId,
-        buffer_version: u64,
-        base_fingerprint: [u8; 32],
-        result: Arc<DiffResult>,
-    ) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.diff = Some(CachedDiff {
-                buffer_version,
-                base_fingerprint,
-                result,
-            });
-        }
-    }
-
     /// A snapshot of the buffers `keep` accepts.
     ///
     /// Each entry carries a [`BufferHistory`] whose replay reconstructs the
@@ -1000,7 +943,6 @@ impl BufferRegistry {
                     lsp_tokens: None,
                     lsp_token_source: None,
                     lsp_symbol_kinds: None,
-                    diff: None,
                     preview: false,
                     origin: OpenOrigin::Named,
                     disk_mtime: entry.disk_mtime,
@@ -1053,10 +995,12 @@ pub(crate) struct BufferEntrySnap {
     pub read_only: Option<ReadOnly>,
 }
 
-/// 32-byte blake3 hash of `text`. Used both to key [`CachedDiff`] in
-/// the buffer registry and to populate
-/// [`stoat_language::structural_diff::BufferRef::fingerprint`] for
-/// cross-file move detection in the structural diff pipeline.
+/// 32-byte blake3 hash of `text`.
+///
+/// A caller keeps the hash in place of the text when it only compares texts,
+/// for example in a memo key or a stored content hash. The hash also fills
+/// [`BufferRef::fingerprint`](stoat_language::structural_diff::BufferRef::fingerprint),
+/// which identifies the source file of a cross-file move.
 pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
     blake3::hash(text.as_bytes()).into()
 }
@@ -1391,36 +1335,6 @@ mod tests {
         let mut reg = BufferRegistry::new();
         let (id, _) = reg.open(Path::new("/foo/bar.rs"), "");
         assert_eq!(reg.path_for(id), Some(Path::new("/foo/bar.rs")));
-    }
-
-    #[test]
-    fn diff_cache_hits_on_matching_version_and_fingerprint() {
-        let mut reg = BufferRegistry::new();
-        let (id, _) = reg.new_scratch();
-        let result = Arc::new(DiffResult::default());
-        let fp = fingerprint_bytes("base text");
-        reg.store_diff(id, 7, fp, result.clone());
-        let hit = reg.cached_diff(id, 7, fp).expect("cache hit");
-        assert!(Arc::ptr_eq(&hit, &result));
-    }
-
-    #[test]
-    fn diff_cache_miss_on_version_change() {
-        let mut reg = BufferRegistry::new();
-        let (id, _) = reg.new_scratch();
-        let fp = fingerprint_bytes("base");
-        reg.store_diff(id, 1, fp, Arc::new(DiffResult::default()));
-        assert!(reg.cached_diff(id, 2, fp).is_none());
-    }
-
-    #[test]
-    fn diff_cache_miss_on_fingerprint_change() {
-        let mut reg = BufferRegistry::new();
-        let (id, _) = reg.new_scratch();
-        let fp1 = fingerprint_bytes("one");
-        let fp2 = fingerprint_bytes("two");
-        reg.store_diff(id, 1, fp1, Arc::new(DiffResult::default()));
-        assert!(reg.cached_diff(id, 1, fp2).is_none());
     }
 
     #[test]
