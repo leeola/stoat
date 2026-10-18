@@ -7,6 +7,7 @@ use crate::{
     },
     debounce,
     file_finder::FinderPathCache,
+    host::FsHost,
     input_history::InputHistory,
     pane::View,
     picker::PreviewSource,
@@ -20,7 +21,10 @@ use std::{
 };
 use stoat_action::OpenFile;
 use stoat_scheduler::Task;
-use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
+use tokio::sync::{
+    mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender},
+    Notify,
+};
 
 /// An in-flight code-search scan streaming match batches from the blocking pool.
 ///
@@ -400,45 +404,10 @@ pub(crate) fn spawn_code_search(
                             }
                         }
 
-                        // Recorded per batch rather than per path, so the shared
-                        // set is touched once by a thread that saw an overlaid
-                        // file and not at all by one that did not.
-                        if !overlaid.is_empty() {
-                            overlaid_seen
-                                .lock()
-                                .expect("overlaid set poisoned")
-                                .extend(overlaid);
-                        }
-
-                        if !matches.is_empty() {
-                            if tx.send(matches).is_err() {
-                                return ControlFlow::Break(());
-                            }
-                            redraw_notify.notify_one();
-                        } else if tx.is_closed() {
-                            return ControlFlow::Break(());
-                        }
-                        ControlFlow::Continue(())
+                        flush_batch(matches, overlaid, &overlaid_seen, &tx, &redraw_notify)
                     };
 
-                    match walked.get() {
-                        Some(paths) => scan_paths_parallel(paths, &scan_batch),
-                        None => {
-                            let recorder = Mutex::new(WalkRecorder::new());
-                            fs_host.walk_workspace_files_parallel(&git_root, &|batch| {
-                                let flow = scan_batch(&batch);
-                                recorder
-                                    .lock()
-                                    .expect("walk recorder poisoned")
-                                    .record(batch, flow);
-                                flow
-                            });
-                            recorder
-                                .into_inner()
-                                .expect("walk recorder poisoned")
-                                .publish(&walked);
-                        },
-                    }
+                    scan_walk(&*fs_host, &git_root, &walked, &scan_batch);
                 }
 
                 let overlaid_seen = overlaid_seen.into_inner().expect("overlaid set poisoned");
@@ -504,45 +473,10 @@ pub(crate) fn spawn_code_search(
                             }
                         }
 
-                        // Recorded per batch rather than per path, so the shared
-                        // set is touched once by a thread that saw an overlaid
-                        // file and not at all by one that did not.
-                        if !overlaid.is_empty() {
-                            overlaid_seen
-                                .lock()
-                                .expect("overlaid set poisoned")
-                                .extend(overlaid);
-                        }
-
-                        if !matches.is_empty() {
-                            if tx.send(matches).is_err() {
-                                return ControlFlow::Break(());
-                            }
-                            redraw_notify.notify_one();
-                        } else if tx.is_closed() {
-                            return ControlFlow::Break(());
-                        }
-                        ControlFlow::Continue(())
+                        flush_batch(matches, overlaid, &overlaid_seen, &tx, &redraw_notify)
                     };
 
-                    match walked.get() {
-                        Some(paths) => scan_paths_parallel(paths, &scan_batch),
-                        None => {
-                            let recorder = Mutex::new(WalkRecorder::new());
-                            fs_host.walk_workspace_files_parallel(&git_root, &|batch| {
-                                let flow = scan_batch(&batch);
-                                recorder
-                                    .lock()
-                                    .expect("walk recorder poisoned")
-                                    .record(batch, flow);
-                                flow
-                            });
-                            recorder
-                                .into_inner()
-                                .expect("walk recorder poisoned")
-                                .publish(&walked);
-                        },
-                    }
+                    scan_walk(&*fs_host, &git_root, &walked, &scan_batch);
                 }
 
                 let overlaid_seen = overlaid_seen.into_inner().expect("overlaid set poisoned");
@@ -565,6 +499,71 @@ pub(crate) fn spawn_code_search(
         },
     };
     Some(PendingCodeSearch { rx, _task: task })
+}
+
+/// Run `scan_batch` on the workspace files under `git_root`.
+///
+/// The paths that an earlier scan in the session published into `walked` stand
+/// in for the tree. Without them, the scan walks the tree. A walk that reaches
+/// its end publishes its paths into `walked` for the scans after it.
+fn scan_walk(
+    fs_host: &dyn FsHost,
+    git_root: &Path,
+    walked: &OnceLock<Arc<Vec<PathBuf>>>,
+    scan_batch: &(dyn Fn(&[PathBuf]) -> ControlFlow<()> + Sync),
+) {
+    match walked.get() {
+        Some(paths) => scan_paths_parallel(paths, scan_batch),
+        None => {
+            let recorder = Mutex::new(WalkRecorder::new());
+            fs_host.walk_workspace_files_parallel(git_root, &|batch| {
+                let flow = scan_batch(&batch);
+                recorder
+                    .lock()
+                    .expect("walk recorder poisoned")
+                    .record(batch, flow);
+                flow
+            });
+            recorder
+                .into_inner()
+                .expect("walk recorder poisoned")
+                .publish(walked);
+        },
+    }
+}
+
+/// Send a batch's matches to the modal and add its overlaid paths to
+/// `overlaid_seen`.
+///
+/// Returns [`ControlFlow::Break`] when the receiver of `tx` is gone. A batch
+/// without matches checks too, so a walk through files that do not match still
+/// stops.
+fn flush_batch(
+    matches: Vec<SearchMatch>,
+    overlaid: Vec<PathBuf>,
+    overlaid_seen: &Mutex<HashSet<PathBuf>>,
+    tx: &UnboundedSender<Vec<SearchMatch>>,
+    redraw_notify: &Notify,
+) -> ControlFlow<()> {
+    // Recorded per batch rather than per path, so the shared set is touched
+    // once by a thread that saw an overlaid file and not at all by one that
+    // did not.
+    if !overlaid.is_empty() {
+        overlaid_seen
+            .lock()
+            .expect("overlaid set poisoned")
+            .extend(overlaid);
+    }
+
+    if !matches.is_empty() {
+        if tx.send(matches).is_err() {
+            return ControlFlow::Break(());
+        }
+        redraw_notify.notify_one();
+    } else if tx.is_closed() {
+        return ControlFlow::Break(());
+    }
+    ControlFlow::Continue(())
 }
 
 /// Drain streamed code-search batches into the open finder, capped at
