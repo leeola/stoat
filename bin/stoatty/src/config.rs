@@ -285,9 +285,11 @@ pub struct ThemeColors {
     pub bright_white: Option<HexColor>,
 }
 
-/// An `#rrggbb` color from the config, parsed to an [`Rgb`] on deserialize.
+/// A hex color from the config, parsed to an [`Rgb`] on deserialize.
 ///
-/// A string that is not a six-digit hex color with a leading `#` is a
+/// It reads every form [`Rgba::parse`] reads: `#rgb`, `#rgba`, `#rrggbb`, and
+/// `#rrggbbaa`, the same forms a VS Code theme writes. The palette is opaque,
+/// so an alpha channel is dropped. A string in none of these forms is a
 /// deserialize error rather than a silently dropped value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HexColor(pub Rgb);
@@ -298,23 +300,10 @@ impl<'de> Deserialize<'de> for HexColor {
         D: Deserializer<'de>,
     {
         let raw = String::deserialize(deserializer)?;
-        parse_hex(&raw)
-            .map(HexColor)
+        Rgba::parse(&raw)
+            .map(|c| HexColor(Rgb::new(c.r, c.g, c.b)))
             .ok_or_else(|| D::Error::custom(format!("invalid hex color: {raw}")))
     }
-}
-
-/// Parse a `#rrggbb` hex color, or `None` if it is malformed.
-fn parse_hex(raw: &str) -> Option<Rgb> {
-    let digits = raw.strip_prefix('#')?;
-    if digits.len() != 6 {
-        return None;
-    }
-
-    let r = u8::from_str_radix(&digits[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&digits[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&digits[4..6], 16).ok()?;
-    Some(Rgb::new(r, g, b))
 }
 
 /// An error loading the stoatty configuration.
@@ -492,7 +481,7 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 mod tests {
     use super::{
         embedded_default, merge_tables, parse_vscode_themes, settle, Config, CursorAnimation,
-        ShellConfig, DEFAULT_CONFIG,
+        HexColor, ShellConfig, DEFAULT_CONFIG,
     };
     use stoatty_term::{grid::Rgb, theme::Theme};
     use vscode_theme::builtin_sources;
@@ -787,6 +776,21 @@ mod tests {
             themes.keys().collect::<Vec<_>>(),
             ["good"],
             "one bad file does not take the rest down with it"
+        );
+    }
+
+    #[test]
+    fn a_hex_color_reads_short_and_alpha_forms_and_drops_the_alpha() {
+        let parse = |raw: &str| {
+            toml::Value::String(raw.to_owned())
+                .try_into::<HexColor>()
+                .ok()
+        };
+        let orange = Some(HexColor(Rgb::new(255, 136, 0)));
+
+        assert_eq!(
+            ["#f80", "#f80c", "#ff8800", "#ff8800cc", "ff8800", "#ff880"].map(parse),
+            [orange, orange, orange, orange, None, None],
         );
     }
 }
