@@ -311,51 +311,6 @@ impl EditorState {
         }
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn from_multi_buffer(
-        buffer_id: BufferId,
-        multi_buffer: MultiBuffer,
-        executor: Executor,
-        redraw: Arc<Notify>,
-    ) -> Self {
-        let mut selections = SelectionsCollection::new();
-        selections.seed_cursor(&multi_buffer.snapshot());
-        Self {
-            buffer_id,
-            mode: "normal".into(),
-            pinned: false,
-            display_map: DisplayMap::new(multi_buffer, executor, redraw),
-            scroll_row: 0,
-            scroll_frac: 0.0,
-            scroll_offset: 0.0,
-            scroll_glide: ScrollGlide::None,
-            pool_current_line: None,
-            viewport_rows: None,
-            wrap_override: None,
-            diff_view: false,
-            conflict_view: None,
-            selections,
-            move_source_cursor: None,
-            expansion_history: Vec::new(),
-            expansion_tip: None,
-            search_match_cache: None,
-            highlight_endpoint_cache: None,
-            diff_row_cache: None,
-            status_filename: None,
-            diagnostic_rows_cache: None,
-            hint_inlay_ids: Vec::new(),
-            gutter_severity_cache: None,
-            gutter_geometry_cache: None,
-            status_scene_cache: Default::default(),
-            diagnostic_span_cache: None,
-            diagnostic_paint_scratch: Default::default(),
-            gutter_width: 0,
-            minimap_rect: None,
-            text_rect: None,
-            cursor_screen_cell: None,
-        }
-    }
-
     /// Toggle the side-by-side diff view. Enabling it also turns on the display
     /// map's deleted-block splicing, so the base text of removed and modified
     /// hunks aligns as block rows in the left column. Disabling it turns the

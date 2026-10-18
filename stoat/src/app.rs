@@ -8791,7 +8791,7 @@ impl Stoat {
     /// which snapshots the returned buffer. The event loop instead recycles a
     /// buffer across frames via [`Self::paint_into`], so this is otherwise
     /// unused.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn render(&mut self) -> Buffer {
         let mut buf = Buffer::empty(self.size);
         self.paint_into(&mut buf, None);
@@ -8983,32 +8983,6 @@ impl Stoat {
     /// diagnostics picker) that need to move the cursor without
     /// touching jumplist state.
     pub(crate) fn collapse_focused_cursor_to(&mut self, offset: usize) {
-        let ws = self.active_workspace_mut();
-        let editor_id = match ws.focus {
-            FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {
-                View::Editor(id) => id,
-                _ => return,
-            },
-            FocusTarget::Dock(_) => return,
-        };
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        editor.selections.transform(buf_snap, |s| {
-            crate::selection::land_block_cursor(
-                s.id,
-                offset,
-                SelectionGoal::None,
-                buf_snap.rope(),
-                buf_snap,
-            )
-        });
-    }
-
-    pub(crate) fn jump_focused_to_match_offset(&mut self, offset: usize) {
         let ws = self.active_workspace_mut();
         let editor_id = match ws.focus {
             FocusTarget::SplitPane => match ws.panes.pane(ws.panes.focus()).view {

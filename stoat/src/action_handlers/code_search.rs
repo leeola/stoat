@@ -146,7 +146,7 @@ pub(crate) fn code_search_select(stoat: &mut Stoat) -> bool {
                 path: path.to_path_buf(),
             },
         );
-        stoat.jump_focused_to_match_offset(offset);
+        stoat.collapse_focused_cursor_to(offset);
     }
     true
 }
