@@ -121,6 +121,50 @@ impl<T> StampedPending<T> {
     }
 }
 
+/// The slot an in-flight request occupies, carrying a label that names the
+/// request while it is out.
+///
+/// The status segment names the request a slow server is still answering, so
+/// the label stays readable for as long as the task runs, and comes back with
+/// the value when it lands.
+pub(crate) struct LabeledPending<T> {
+    /// The label of the request last armed. Read only while its task is out
+    /// or alongside its value, so a stale label never shows.
+    label: &'static str,
+    task: Pending<T>,
+}
+
+impl<T> Default for LabeledPending<T> {
+    fn default() -> Self {
+        LabeledPending {
+            label: "",
+            task: Pending::default(),
+        }
+    }
+}
+
+impl<T> LabeledPending<T> {
+    /// Put `task` in the slot under `label`, dropping whatever the slot held.
+    pub(crate) fn arm(&mut self, label: &'static str, task: Task<T>) {
+        self.label = label;
+        self.task.arm(task);
+    }
+
+    /// The label of the request that is out, or `None` when none is.
+    pub(crate) fn label(&self) -> Option<&'static str> {
+        self.task.is_pending().then_some(self.label)
+    }
+
+    /// Take the request's label and value once it resolves, leaving the slot
+    /// empty. See [`Pending::poll`] for what `None` covers.
+    pub(crate) fn poll(&mut self) -> Option<(&'static str, T)>
+    where
+        T: Unpin,
+    {
+        self.task.poll().map(|value| (self.label, value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +261,38 @@ mod tests {
         slot.clear();
         assert!(!slot.is_pending(), "clearing empties the slot");
         assert_eq!(slot.poll(), None, "so its answer never arrives");
+    }
+
+    #[test]
+    fn a_labeled_request_names_itself_until_it_lands() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let mut slot = LabeledPending::default();
+        assert_eq!(slot.label(), None, "a fresh slot names no request");
+
+        let timer = executor.timer(std::time::Duration::from_millis(50));
+        slot.arm(
+            "definition",
+            executor.spawn(async move {
+                timer.await;
+                7u8
+            }),
+        );
+        scheduler.run_until_parked();
+        assert_eq!(slot.poll(), None, "a request still running answers nothing");
+        assert_eq!(
+            slot.label(),
+            Some("definition"),
+            "and names itself while out"
+        );
+
+        scheduler.advance_clock(std::time::Duration::from_millis(50));
+        scheduler.run_until_parked();
+        assert_eq!(
+            slot.poll(),
+            Some(("definition", 7)),
+            "the label comes back with the value"
+        );
+        assert_eq!(slot.label(), None, "and an empty slot names nothing");
     }
 }

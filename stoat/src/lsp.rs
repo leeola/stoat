@@ -67,7 +67,7 @@ pub(crate) fn buffer_version(editor: &mut EditorState) -> u64 {
 /// excluded because they fire on every edit and scroll and would flash the
 /// segment constantly.
 pub(crate) fn lsp_pending_label(stoat: &Stoat) -> Option<&'static str> {
-    if let Some((label, _)) = &stoat.pending_lsp_jump {
+    if let Some(label) = stoat.pending_lsp_jump.label() {
         return Some(label);
     }
 

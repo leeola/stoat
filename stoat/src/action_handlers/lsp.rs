@@ -303,7 +303,7 @@ pub(crate) fn goto_references(stoat: &mut Stoat) -> UpdateEffect {
             })
             .await
     });
-    stoat.pending_lsp_jump = Some(("references", task));
+    stoat.pending_lsp_jump.arm("references", task);
     UpdateEffect::None
 }
 
@@ -459,7 +459,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
             })
             .await
     });
-    stoat.pending_lsp_jump = Some((kind.status_label(), task));
+    stoat.pending_lsp_jump.arm(kind.status_label(), task);
     UpdateEffect::None
 }
 
@@ -2305,40 +2305,30 @@ pub(crate) fn open_location_picker(
 /// "lsp: no {label} found" in the status bar, naming the jump kind. One
 /// jumps to it directly via [`apply_jump`]. Two or more
 /// open a [`LocationPicker`] in [`Stoat::location_picker`] so the user
-/// chooses. On `Pending` puts the task back. Returns true when state
-/// changed so the caller can request a redraw.
+/// chooses. A request still running stays in its slot. Returns true when
+/// state changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
-    let Some((label, mut task)) = stoat.pending_lsp_jump.take() else {
+    let Some((label, mut entries)) = stoat.pending_lsp_jump.poll() else {
         return false;
     };
-    let waker = futures::task::noop_waker();
-    let mut cx = Context::from_waker(&waker);
-    match Pin::new(&mut task).poll(&mut cx) {
-        Poll::Ready(mut entries) => {
-            tracing::info!(
-                target: "stoat::lsp",
-                kind = label,
-                results = entries.len(),
-                landing = entries.first().map(|entry| field::display(entry.path.display())),
-                "lsp jump result"
-            );
-            match entries.len() {
-                0 => crate::lsp::session::set_lsp_status(stoat, format!("lsp: no {label} found")),
-                1 => {
-                    let entry = entries.remove(0);
-                    apply_jump(stoat, &entry.path, entry.offset, entry.block);
-                },
-                _ => {
-                    stoat.location_picker = Some(open_location_picker(stoat, entries));
-                },
-            }
-            true
+    tracing::info!(
+        target: "stoat::lsp",
+        kind = label,
+        results = entries.len(),
+        landing = entries.first().map(|entry| field::display(entry.path.display())),
+        "lsp jump result"
+    );
+    match entries.len() {
+        0 => crate::lsp::session::set_lsp_status(stoat, format!("lsp: no {label} found")),
+        1 => {
+            let entry = entries.remove(0);
+            apply_jump(stoat, &entry.path, entry.offset, entry.block);
         },
-        Poll::Pending => {
-            stoat.pending_lsp_jump = Some((label, task));
-            false
+        _ => {
+            stoat.location_picker = Some(open_location_picker(stoat, entries));
         },
     }
+    true
 }
 
 /// Open `path` in the focused pane and collapse every selection onto

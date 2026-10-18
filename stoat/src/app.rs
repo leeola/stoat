@@ -30,7 +30,7 @@ use crate::{
         resolve_action, ActiveModal, StoatKeymapState,
     },
     lsp::{
-        pending::{Pending, StampedPending},
+        pending::{LabeledPending, Pending, StampedPending},
         watched_files::FileWatchers,
     },
     minimap::emit::{self},
@@ -1995,10 +1995,7 @@ pub struct Stoat {
     /// file in the focused pane (when cross-file) and jumps the primary
     /// cursor. A zero-result `Ready` reports "lsp: no {label} found" in
     /// the status bar instead of dropping silently.
-    pub(crate) pending_lsp_jump: Option<(
-        &'static str,
-        stoat_scheduler::Task<Vec<crate::location_picker::LocationEntry>>,
-    )>,
+    pub(crate) pending_lsp_jump: LabeledPending<Vec<crate::location_picker::LocationEntry>>,
 
     /// In-flight `textDocument/hover` request. Replacing the entry
     /// drops the prior task, cancelling its spawned future before the
@@ -2784,7 +2781,7 @@ impl Stoat {
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
             lsp_server_list: crate::render::LspServerList::default(),
             lsp_message: None,
-            pending_lsp_jump: None,
+            pending_lsp_jump: LabeledPending::default(),
             pending_hover_request: Pending::default(),
             pending_hover: None,
             pending_signature_help_request: Pending::default(),

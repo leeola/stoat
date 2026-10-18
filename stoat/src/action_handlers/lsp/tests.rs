@@ -847,7 +847,7 @@ fn goto_declaration_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDeclaration);
     h.settle();
     assert_eq!(cursor_offset(&mut h), 0);
-    assert!(h.stoat.pending_lsp_jump.is_none());
+    assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
 #[test]
@@ -1185,7 +1185,7 @@ fn goto_definition_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
     h.settle();
     assert_eq!(cursor_offset(&mut h), 0);
-    assert!(h.stoat.pending_lsp_jump.is_none());
+    assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
 #[test]
@@ -1303,7 +1303,7 @@ fn goto_references_unsupported_uses_code_graph() {
     h.settle();
 
     assert!(h.stoat.location_picker.is_none(), "LSP path is gated off");
-    assert!(h.stoat.pending_lsp_jump.is_none());
+    assert!(h.stoat.pending_lsp_jump.label().is_none());
     assert_eq!(
         cursor_offset(&mut h),
         0,
@@ -1406,7 +1406,7 @@ fn goto_type_definition_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
     h.settle();
     assert_eq!(cursor_offset(&mut h), 0);
-    assert!(h.stoat.pending_lsp_jump.is_none());
+    assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
 #[test]
@@ -1504,7 +1504,7 @@ fn goto_implementation_unsupported_capability_is_noop() {
     crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
     h.settle();
     assert_eq!(cursor_offset(&mut h), 0);
-    assert!(h.stoat.pending_lsp_jump.is_none());
+    assert!(h.stoat.pending_lsp_jump.label().is_none());
 }
 
 #[test]
