@@ -17,7 +17,6 @@ use stoat_text::{Anchor, BufferId};
 /// Owns the swapped-in center editor and the original editor displaced from the
 /// pane, so closing the view restores the plain file. Held as
 /// [`crate::workspace::Workspace::conflict`] while the `:conflict` view is open.
-#[allow(dead_code)]
 pub(crate) struct ConflictSession {
     /// Repository work directory the conflicted paths sit under.
     pub(crate) workdir: PathBuf,
@@ -59,7 +58,6 @@ pub(crate) struct ConflictSession {
 }
 
 /// The in-progress resolution of one conflicted file.
-#[allow(dead_code)]
 pub(crate) struct FileResolveState {
     /// Absolute path of the conflicted file.
     pub(crate) path: PathBuf,
@@ -81,7 +79,6 @@ pub(crate) struct FileResolveState {
 /// (which only receives the focused editor) can build its column display list
 /// from `doc` each frame. `file_index`/`file_count`/`rel_path` feed the hints
 /// footer. Refreshed alongside the session when a pick reassembles a region.
-#[allow(dead_code)]
 #[derive(Clone)]
 pub(crate) struct ConflictViewState {
     pub(crate) doc: MergeDoc,

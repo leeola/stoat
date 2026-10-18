@@ -60,9 +60,6 @@ use stoatty_protocol::command::{encode_fill_decorations_scope, encode_fill_scope
 /// ascending-id z-order, so these higher ids always composite above the
 /// split-pane editors beneath them. Each surface's emit consumes its id from
 /// here as it lands.
-// Reserved allocation table: the per-surface ids are consumed by the
-// per-surface emit items as they land, so they read as unused until then.
-#[allow(dead_code)]
 pub(crate) mod non_pane_pool {
     use stoatty_protocol::command::NON_PANE_POOL_BASE;
 
@@ -79,7 +76,10 @@ pub(crate) mod non_pane_pool {
     pub(crate) const COMPLETION: u32 = BASE + 3;
     pub(crate) const HELP_LIST: u32 = BASE + 4;
     pub(crate) const HELP_DETAIL: u32 = BASE + 5;
+    // No surface emit reads these two reserved ids.
+    #[allow(dead_code)]
     pub(crate) const SYMBOL: u32 = BASE + 6;
+    #[allow(dead_code)]
     pub(crate) const WORKSPACE_SYMBOL: u32 = BASE + 7;
     pub(crate) const HOVER: u32 = BASE + 8;
     pub(crate) const COMMIT_PICKER_LIST: u32 = BASE + 9;

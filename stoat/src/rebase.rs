@@ -134,7 +134,6 @@ pub(crate) struct ActiveRebase {
     /// Original base the plan stacks onto; retained for diagnostics
     /// and potential recovery even though the stepper reads from
     /// `current_head` after the first entry lands.
-    #[allow(dead_code)]
     pub onto: String,
     pub remaining: VecDeque<RebaseEntry>,
     /// The commit at the tip of the rebase-so-far.
@@ -173,10 +172,7 @@ pub(crate) enum RebasePause {
     /// Waiting for the user to modify the picked commit (typically via
     /// review-mode hunk removal). The review's current source sha at
     /// `RebaseContinue` time becomes the new `current_head`.
-    Edit {
-        #[allow(dead_code)]
-        cherry_picked_commit: String,
-    },
+    Edit { cherry_picked_commit: String },
     /// Waiting for per-file conflict resolutions.
     Conflict {
         source_sha: String,
@@ -198,7 +194,6 @@ pub(crate) enum RebasePause {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub(crate) enum ConflictResolution {
     TakeOurs,
     TakeTheirs,

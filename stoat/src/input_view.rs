@@ -54,7 +54,6 @@ impl InputView {
 /// pane focus at dispatch time, not stored here, so the [`InputView`] stays
 /// constructible before the owning consumer has its slotmap key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum SubmitTarget {
     PaletteFilter,
     HelpSearch,
@@ -284,7 +283,6 @@ impl InputView {
     /// Replace the entire buffer text and move the cursor to the end. Used by
     /// consumers like the run pane where history navigation swaps the whole
     /// line, or when the consumer needs to clear the input after submission.
-    #[allow(dead_code)]
     pub(crate) fn replace_text(&self, ws: &mut Workspace, text: &str) {
         let Some(buffer) = ws.buffers.get(self.buffer_id) else {
             return;

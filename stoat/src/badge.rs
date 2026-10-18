@@ -78,7 +78,6 @@ pub enum BadgeSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct Badge {
     pub(crate) source: BadgeSource,
     pub(crate) anchor: Anchor,
@@ -104,7 +103,6 @@ pub(crate) struct BadgeTray {
     trays: [Tray; 8],
 }
 
-#[allow(dead_code)]
 impl BadgeTray {
     pub(crate) fn new() -> Self {
         let trays = Anchor::ALL.map(|anchor| {
@@ -149,6 +147,7 @@ impl BadgeTray {
         self.badges.get(id)
     }
 
+    #[cfg(test)]
     pub(crate) fn get_mut(&mut self, id: BadgeId) -> Option<&mut Badge> {
         self.badges.get_mut(id)
     }

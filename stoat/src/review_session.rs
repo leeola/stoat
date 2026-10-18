@@ -19,19 +19,24 @@ pub(crate) struct ReviewChunkId(u32);
 /// byte. They stay because a chunk that cannot say where it came from is not a
 /// chunk, and the extraction that fills them is what the tests pin.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct ReviewChunk {
+    #[allow(dead_code)]
     pub id: ReviewChunkId,
+    #[allow(dead_code)]
     pub file_index: usize,
     pub chunk_index_in_file: usize,
     pub hunk: ReviewHunk,
     /// 0-based half-open row range in the buffer (RHS) text. Empty for
     /// pure-deletion chunks; a caller that locates a chunk by row falls back
     /// to [`Self::base_line_range`] in that case.
+    #[allow(dead_code)]
     pub buffer_line_range: Range<u32>,
     /// 0-based half-open row range in the base (LHS) text.
+    #[allow(dead_code)]
     pub base_line_range: Range<u32>,
+    #[allow(dead_code)]
     pub buffer_byte_range: Range<usize>,
+    #[allow(dead_code)]
     pub base_byte_range: Range<usize>,
 }
 
