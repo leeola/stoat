@@ -1188,6 +1188,19 @@ fn status_segments(
             right_anchor = start;
         }
     }
+    // A lone cursor paints nothing here, since the count only answers how many
+    // places an edit lands once there is more than one.
+    if let Some((primary, count)) = status.selections
+        && count > 1
+    {
+        let text = format!(" {primary}/{count} sels ");
+        let width = text.chars().count() as u16;
+        let start = right_anchor.saturating_sub(width);
+        if start >= cursor {
+            right.push((text, base_style));
+            right_anchor = start;
+        }
+    }
     if is_focused {
         let badge_right = right_anchor;
         for server in frame.lsp_servers {
@@ -1735,6 +1748,10 @@ fn pane_status_info(
                 read_only: buffers.read_only(buffer_id).is_some(),
                 dirty,
                 cursor_pos: editor_cursor_position(editor),
+                selections: Some((
+                    editor.selections.primary_index() + 1,
+                    editor.selections.all_anchors().len(),
+                )),
                 staged_counts,
             }
         },
@@ -1769,6 +1786,9 @@ struct PaneStatusInfo {
     read_only: bool,
     dirty: bool,
     cursor_pos: Option<(u32, u32)>,
+    /// The primary cursor's 1-based place among the cursors in start order,
+    /// and the cursor count. `None` for a view with no editor.
+    selections: Option<(usize, usize)>,
     /// `(staged, unstaged)` hunk counts, `None` when the buffer has no diff.
     /// Read alongside `dirty` so the bar takes one lock, not two.
     staged_counts: Option<(usize, usize)>,
@@ -1874,7 +1894,9 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, RwLock},
     };
-    use stoat_action::OpenFile;
+    use stoat_action::{
+        AddSelectionAbove, AddSelectionBelow, KeepPrimarySelection, MoveDown, OpenFile,
+    };
     use tokio::sync::{mpsc, oneshot};
 
     /// The view a terminal session shows as, so one test covers each kind of
@@ -2975,6 +2997,67 @@ mod tests {
         assert_eq!(
             bar,
             format!("{:<56}1:1 ", " NOR  ro file.txt [readonly] [+]")
+        );
+    }
+
+    /// The bottom row of `area` in `buf`, with the composite's blank bar cells
+    /// read as spaces.
+    fn status_row(buf: &Buffer, area: Rect) -> String {
+        let row = area.y + area.height - 1;
+        (area.x..area.x + area.width)
+            .map(|x| buf[(x, row)].symbol())
+            .collect::<String>()
+            .replace('─', " ")
+    }
+
+    /// Several cursors show as `{primary}/{count} sels` left of the position,
+    /// with the primary counted in start order, and a lone cursor shows no
+    /// count.
+    #[test]
+    fn the_status_row_counts_the_cursors() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.seed_focused_buffer("foo\nbar\n");
+
+        dispatch(&mut h.stoat, &AddSelectionBelow);
+        let two = {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
+        dispatch(&mut h.stoat, &KeepPrimarySelection);
+        let buf = h.render_composited();
+        assert_eq!(
+            [two, status_row(&buf, buf.area)],
+            [
+                format!("{:<46}2/2 sels  2:1 ", " NOR  (unnamed) [scratch] [+]"),
+                format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]"),
+            ],
+        );
+    }
+
+    /// An unfocused pane keeps its cursors and shows its position, so it shows
+    /// its cursor count too.
+    ///
+    /// The added cursor sits above, so the primary is the first of two, which
+    /// tells the primary's place apart from the count.
+    #[test]
+    fn an_unfocused_pane_counts_its_cursors() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.seed_focused_buffer("foo\nbar\n");
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &AddSelectionAbove);
+        let counted = h.stoat.active_workspace().panes.focus();
+        h.type_action("SplitRight()");
+
+        let buf = h.render_composited();
+        let ws = h.stoat.active_workspace();
+        let bar = status_row(&buf, ws.panes.pane(counted).area);
+        assert_eq!(
+            (
+                ws.panes.focus() != counted,
+                bar.ends_with(" 1/2 sels  1:1 ")
+            ),
+            (true, true),
+            "the split moves the focus away, and the pane keeps its count:\n{bar}",
         );
     }
 
