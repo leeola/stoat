@@ -2326,6 +2326,63 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The select, goto, view, bracket, and match chords act on an editor, and
+    /// so do the space menus' position save, clipboard, buffer close, and symbol
+    /// hops. A run pane lists none of them.
+    #[test]
+    fn the_editor_keys_list_only_over_an_editor() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.stoat.key_hints_visible = true;
+        let chords = [
+            "select mode",
+            "goto mode",
+            "z mode",
+            "bracket_next mode",
+            "bracket_prev mode",
+            "match mode",
+        ];
+        let menu_rows = [
+            ("space", short_desc("SaveSelection")),
+            ("space", "space_clipboard mode"),
+            ("space b", short_desc("CloseBuffer")),
+            ("space l", short_desc("GotoReferences")),
+            ("space l", short_desc("GotoImplementors")),
+            ("space l", short_desc("GotoCaller")),
+            ("space l", short_desc("GotoCallee")),
+        ];
+        let listed = |h: &mut TestHarness| {
+            let normal = box_text(h);
+            let menus = menu_rows.map(|(keys, row)| chord_rows(h, keys).iter().any(|r| r == row));
+            (chords.map(|row| normal.contains(row)), menus)
+        };
+        let over_editor = listed(&mut h);
+
+        h.open_run();
+        h.type_keys("escape");
+        assert_eq!(
+            [over_editor, listed(&mut h)],
+            [([true; 6], [true; 7]), ([false; 6], [false; 7])],
+            "a scratch editor, then a run pane",
+        );
+    }
+
+    /// The buffer close refuses unsaved edits, so `space b` lists it only while
+    /// the focused buffer is clean.
+    #[test]
+    fn the_buffer_box_lists_the_close_only_for_a_clean_buffer() {
+        let mut h = TestHarness::with_size(150, 50);
+        let close = short_desc("CloseBuffer");
+        let lists_close = |rows: Vec<String>| rows.iter().any(|row| row == close);
+        let clean = lists_close(chord_rows(&mut h, "space b"));
+
+        h.type_keys("i x escape");
+        assert_eq!(
+            (clean, lists_close(chord_rows(&mut h, "space b"))),
+            (true, false),
+            "a clean scratch buffer, then one with an unsaved edit",
+        );
+    }
+
     #[test]
     fn the_git_chord_box_lists_the_pair_diff_only_with_a_pair() {
         let mut h = TestHarness::with_size(150, 50);

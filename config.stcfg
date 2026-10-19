@@ -531,7 +531,6 @@ on key {
         c -> [ChangeSelection(), SetMode(insert)];
         Alt-c -> [ChangeSelectionNoYank(), SetMode(insert)];
         r -> ReplaceChar();
-        v -> SetMode(select);
         C -> AddSelectionBelow();
         Alt-C -> AddSelectionAbove();
         h -> MoveLeft();
@@ -635,11 +634,6 @@ on key {
         > -> IndentSelection();
         < -> UnindentSelection();
         = -> FormatSelections();
-        g -> SetMode(goto);
-        z -> SetMode(z);
-        ] -> SetMode(bracket_next);
-        [ -> SetMode(bracket_prev);
-        m -> SetMode(match);
         R -> ReplaceWithYanked();
         / -> OpenSearchInput();
         ? -> OpenHelp();
@@ -843,9 +837,16 @@ on key {
     # Ctrl-c carries the editor pane in its predicate so the run pane keeps its
     # own. A run pane has no editor, so its mode reads as `normal`, and a plain
     # `mode == normal` binding would outrank `pane == run` on atom count and
-    # swallow the interrupt.
+    # swallow the interrupt. The chords that act on an editor live here too, so
+    # a pane with no editor lists none of them.
     !modal && mode == normal && pane == editor {
         Ctrl-c -> ToggleComments();
+        v -> SetMode(select);
+        g -> SetMode(goto);
+        z -> SetMode(z);
+        ] -> SetMode(bracket_next);
+        [ -> SetMode(bracket_prev);
+        m -> SetMode(match);
     }
     mode == select && pane == editor {
         Ctrl-c -> [ToggleComments(), SetMode(normal)];
@@ -1286,7 +1287,11 @@ on key {
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);
-        " -> SetMode(space_clipboard);
+
+        pane == editor {
+            " -> SetMode(space_clipboard);
+        }
+
         p -> OpenFileFinder();
         r -> [ReloadAll(), SetMode(normal)];
         g -> SetMode(space_goto);
@@ -1305,7 +1310,9 @@ on key {
             d -> [Diff(), SetMode(normal)];
         }
 
-        s -> [SaveSelection(), SetMode(normal)];
+        pane == editor {
+            s -> [SaveSelection(), SetMode(normal)];
+        }
 
         jump_back {
             j -> [JumpBackward(), SetMode(normal)];
@@ -1337,7 +1344,10 @@ on key {
     mode == space_buffer {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
-        d -> [CloseBuffer(), SetMode(normal)];
+
+        pane == editor && !modified {
+            d -> [CloseBuffer(), SetMode(normal)];
+        }
     }
     # The goto chord. `a` mirrors the normal-mode `g a` so both spellings of
     # goto reach the last buffer, and n/p repeat the git-change hops that the
@@ -1549,19 +1559,21 @@ on key {
             }
         }
 
-        !token_known || token {
-            R -> [GotoReferences(), SetMode(normal)];
-        }
-        !token_known || token == trait {
-            T -> [GotoImplementors(), SetMode(normal)];
-        }
-        !token_known || token == function {
-            c -> [GotoCaller(), SetMode(normal)];
-            C -> [GotoCallee(), SetMode(normal)];
+        pane == editor {
+            !token_known || token {
+                R -> [GotoReferences(), SetMode(normal)];
+            }
+            !token_known || token == trait {
+                T -> [GotoImplementors(), SetMode(normal)];
+            }
+            !token_known || token == function {
+                c -> [GotoCaller(), SetMode(normal)];
+                C -> [GotoCallee(), SetMode(normal)];
 
-            git {
-                u -> [GotoDiffCallerUp(), SetMode(normal)];
-                o -> [GotoDiffCalleeDown(), SetMode(normal)];
+                git {
+                    u -> [GotoDiffCallerUp(), SetMode(normal)];
+                    o -> [GotoDiffCalleeDown(), SetMode(normal)];
+                }
             }
         }
     }

@@ -3495,6 +3495,7 @@ mod tests {
 
         let diff = TestState::new()
             .set("view", StateValue::String("diff".into()))
+            .set("pane", StateValue::String("editor".into()))
             .set("mode", StateValue::String("normal".into()));
         let m = keymap
             .lookup(&diff, &key_event(KeyCode::Char('m'), KeyModifiers::NONE))
@@ -3514,7 +3515,9 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let space_buffer = TestState::new().set("mode", StateValue::String("space_buffer".into()));
+        let space_buffer = TestState::new()
+            .set("mode", StateValue::String("space_buffer".into()))
+            .set("pane", StateValue::String("editor".into()));
         let d = keymap
             .lookup(
                 &space_buffer,
