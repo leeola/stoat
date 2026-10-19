@@ -8929,6 +8929,7 @@ impl Stoat {
         action_handlers::sync_palette_picker(self);
         action_handlers::sync_file_finder_preview(self);
         action_handlers::search::sync_search_preview(self);
+        action_handlers::split_selection::sync_regex_preview(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
 

@@ -214,10 +214,10 @@ fn open_input(stoat: &mut Stoat, direction: SearchDirection) -> UpdateEffect {
 
 /// The focused pane's editor, or `None` when that pane shows something else.
 ///
-/// The search paths reach the editor this way rather than through
-/// [`super::focused_editor_mut`], because while the prompt is open focus sits
-/// on the prompt's own input view, which that one answers with instead.
-fn pane_editor(stoat: &mut Stoat) -> Option<&mut EditorState> {
+/// The search and regex prompt paths reach the editor this way rather than
+/// through [`super::focused_editor_mut`], because while a prompt is open focus
+/// sits on the prompt's own input view, which that one answers with instead.
+pub(super) fn pane_editor(stoat: &mut Stoat) -> Option<&mut EditorState> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let View::Editor(editor_id) = ws.panes.pane(focused).view else {
@@ -232,7 +232,11 @@ fn pane_editor(stoat: &mut Stoat) -> Option<&mut EditorState> {
 /// restored together too. The view goes back as a glide rather than a jump,
 /// which [`crate::app::Stoat::tick_scroll_anim`] eases and snaps past its
 /// three-viewport bound.
-fn restore_origin(stoat: &mut Stoat, selections: Arc<[Selection<Anchor>]>, view: (u32, f32)) {
+pub(super) fn restore_origin(
+    stoat: &mut Stoat,
+    selections: Arc<[Selection<Anchor>]>,
+    view: (u32, f32),
+) {
     let Some(editor) = pane_editor(stoat) else {
         return;
     };
