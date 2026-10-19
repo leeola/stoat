@@ -160,6 +160,12 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::walkthrough::WalkthroughCommand,
     },
+    /// Helpers for an agent that drives this editor. `plugin` writes the Claude
+    /// Code plugin that holds the `stoat:api` skill and prints its directory.
+    Agent {
+        #[command(subcommand)]
+        sub: crate::commands::agent::AgentCommand,
+    },
     /// Materialize a deterministic fixture and open the editor inside it. `ls`
     /// lists the catalog.
     Fixture(FixtureArgs),
@@ -199,6 +205,7 @@ pub fn run(args: Args, session_log: Option<PathBuf>) -> Result<(), Whatever> {
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
         Some(Command::Api(args)) => crate::commands::api::run(args),
         Some(Command::Walkthrough { sub }) => crate::commands::walkthrough::run(sub),
+        Some(Command::Agent { sub }) => crate::commands::agent::run(sub),
         Some(Command::Fixture(fixture)) => {
             run_fixture(fixture, text_proto_log, common, session_log)
         },
@@ -827,7 +834,7 @@ mod tests {
 
     #[test]
     fn only_an_editor_session_keeps_a_log_of_its_own() {
-        let cases: [(&[&str], bool); 14] = [
+        let cases: [(&[&str], bool); 15] = [
             (&[], true),
             (&["a.rs"], true),
             (&["review"], true),
@@ -840,6 +847,7 @@ mod tests {
             (&["api", "hook", "start"], false),
             (&["api", "open", "--wait", "a.rs"], false),
             (&["walkthrough", "list"], false),
+            (&["agent", "plugin"], false),
             (&["completions", "fish"], false),
             (&["dump", "open", "id"], false),
         ];

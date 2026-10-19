@@ -11,6 +11,7 @@ pub mod buffer;
 pub(crate) mod buffer_lifecycle;
 mod buffer_registry;
 pub(crate) mod button_repeat;
+pub mod claude_plugin;
 mod code_index;
 pub mod command_palette;
 mod commit_graph;
