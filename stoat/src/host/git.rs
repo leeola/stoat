@@ -66,9 +66,7 @@ pub struct ChangedFile {
     /// modifications, deletions, and staged additions are all `false`.
     ///
     /// Distinguishes an untracked file from an unstaged modification, which
-    /// otherwise look identical (`staged == false` for both). Cross-file diff
-    /// navigation relies on this to skip untracked files, which carry no diff
-    /// to show.
+    /// otherwise look identical (`staged == false` for both).
     pub untracked: bool,
     /// Absolute path this file moved from, when the entry is the new side of a
     /// rename. `None` for every other change.

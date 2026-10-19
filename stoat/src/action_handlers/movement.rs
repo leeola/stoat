@@ -4526,9 +4526,9 @@ struct HopStep {
 /// slow for the thread that handled the key, so they run on a blocking one and
 /// [`pump_changed_file_jump`] opens the target when they land.
 ///
-/// Only tracked changed files (modifications, deletions, staged additions) are
-/// visited. Untracked working-tree files are excluded because neither HEAD nor
-/// the index holds them, and so they have no diff to render.
+/// An untracked file is visited like any other changed file. It diffs against
+/// empty text, so its one hunk covers every line and a hop into it lands on
+/// that hunk. An ignored file never lists as changed.
 fn goto_change_across_files(
     stoat: &mut Stoat,
     dir: ChangeDir,
@@ -4672,11 +4672,7 @@ fn scan_changed_file_jump(
                 .collect()
         },
     };
-    let mut changed: Vec<PathBuf> = listed
-        .into_iter()
-        .filter(|f| !f.untracked)
-        .map(|f| f.path)
-        .collect();
+    let mut changed: Vec<PathBuf> = listed.into_iter().map(|f| f.path).collect();
     // `changed_files` groups staged before unstaged, which is the shape a list
     // surface paints in two sections. The walk has no sections, so that order
     // leaves a mixed changeset visiting files with no reading of its own. Path

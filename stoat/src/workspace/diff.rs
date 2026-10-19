@@ -226,9 +226,10 @@ pub(crate) struct DiffState {
     hunks_only: HashMap<BufferId, u64>,
     /// Buffer edit version each buffer's `diff_map` was last populated for.
     ///
-    /// Records no-repo and untracked buffers too (with a cleared map) so they
-    /// are not retried every frame, and drives re-population when a buffer is
-    /// edited past the recorded version.
+    /// Records the buffers that keep no diff too, those outside any repo's
+    /// workdir and those the repo ignores, with a cleared map so they are not
+    /// retried every frame. Drives re-population when a buffer is edited past
+    /// the recorded version.
     pub(super) versions: HashMap<BufferId, u64>,
     /// The buffer version each buffer's last diff job ran against.
     ///
@@ -244,11 +245,11 @@ pub(crate) struct DiffState {
     /// `.git` watcher drives, drops every entry, so no entry outlives the git
     /// state it was read from.
     ///
-    /// A `None` entry records a miss. The file has no HEAD blob and no move
-    /// explains the absence, which is the ordinary answer for an untracked one.
-    /// Reaching that answer costs a working-tree stat walk and two rename
-    /// passes, and only a git write turns a path into a rename target, so the
-    /// miss is as cacheable as a hit and clears with the rest.
+    /// A `None` entry records a miss, which is the answer for a file outside
+    /// the workdir or one the repo ignores. An untracked file's entry is the
+    /// empty pair. Reaching either answer costs a working-tree stat walk and
+    /// two rename passes, and only a git write turns a path into a rename
+    /// target, so each is as cacheable as a hit and clears with the rest.
     pub(super) base_text: HashMap<PathBuf, Option<DiffBaseText>>,
     /// A base that displaces the working tree's pick, `None` while nothing
     /// does.
@@ -1018,7 +1019,7 @@ impl DiffState {
     fn land(&mut self, buffers: &BufferRegistry, out: DiffJobOutput, superseded: bool) {
         if !superseded {
             // Filed whether or not it resolved, since a miss is what an
-            // untracked buffer keeps re-deriving otherwise.
+            // ignored buffer keeps re-deriving otherwise.
             self.base_text.insert(out.path, out.base);
         }
         if let Some(shared) = buffers.get(out.buffer_id) {
@@ -1062,11 +1063,11 @@ pub(super) struct DiffJobOutput {
     pub(super) path: PathBuf,
     pub(super) target_version: u64,
     pub(super) diff_map: Option<DiffMap>,
-    /// The blobs the diff ran against, `None` when the repo or the file's HEAD
-    /// content could not be read and there was nothing to diff.
+    /// The blobs the diff ran against, `None` when no repo holds the file in
+    /// its workdir or the repo ignores it, and there was nothing to diff.
     ///
     /// Filed into [`DiffState::base_text`] either way, because `None` is the
-    /// answer for an untracked file and re-deriving it costs a working-tree
+    /// answer for an ignored file and re-deriving it costs a working-tree
     /// walk.
     pub(super) base: Option<DiffBaseText>,
 }
@@ -1173,7 +1174,7 @@ fn run_diff_job(
     // Materialized only now that a job is committed, off the event-loop thread.
     let buffer_text = buffer_snapshot.visible_text.to_string();
     // A miss is an answer, so it is filed back like a hit and the next settle
-    // in an untracked buffer walks nothing.
+    // in an ignored buffer walks nothing.
     let base = match cached_base {
         Some(base) => base,
         None => resolve_base(git_host, git_root, &path, diff_base),
@@ -1689,8 +1690,9 @@ fn resolve_base(
 /// both sides. A path outside the pair diffs against the index, as with no
 /// override.
 ///
-/// [`None`] when the working tree carries no text for `path` in HEAD or the
-/// index, which is what leaves an untracked buffer without a diff map.
+/// An untracked file reads as empty text on both sides, so every line is an
+/// added, unstaged hunk. [`None`] only for a path outside the workdir or one
+/// the repo ignores, which is what leaves such a buffer without a diff map.
 pub(crate) fn base_texts(
     repo: &dyn GitRepo,
     path: &Path,
@@ -1752,8 +1754,9 @@ fn index_base(repo: &dyn GitRepo, path: &Path) -> Option<DiffBaseText> {
 /// reads as added. `git mv` also puts the new path in the index, and a read of
 /// that alone shows every line as a staged addition.
 ///
-/// [`None`] when neither side carries the file and no move explains the
-/// absence, which is what leaves an untracked buffer without a diff map.
+/// An untracked file, which neither side carries and no move explains, reads
+/// as empty text on both sides, so every line is an added, unstaged hunk.
+/// [`None`] only for a path outside the workdir or one the repo ignores.
 fn working_tree_texts(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
     if let Some(head) = repo.head_content(path) {
         let index = repo.index_content(path).unwrap_or_default();
@@ -1762,8 +1765,22 @@ fn working_tree_texts(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, A
     if let Some(moved) = moved_base(repo, path) {
         return Some(moved);
     }
-    let index = repo.index_content(path)?;
-    Some((Arc::default(), Arc::new(index)))
+    if let Some(index) = repo.index_content(path) {
+        return Some((Arc::default(), Arc::new(index)));
+    }
+    untracked_in_tree(repo, path).then(|| (Arc::default(), Arc::default()))
+}
+
+/// Whether `path` lies inside the repo's workdir with no ignore rule over it.
+///
+/// A file no blob holds is new work only there. The two files that keep no
+/// diff are an ignored file, such as a build artifact or a session log under
+/// an excluded directory, and a path outside the workdir. None of their lines
+/// is work.
+pub(crate) fn untracked_in_tree(repo: &dyn GitRepo, path: &Path) -> bool {
+    repo.workdir()
+        .is_some_and(|workdir| path.starts_with(&workdir))
+        && !repo.is_path_ignored(path)
 }
 
 /// HEAD's and the index's text for a moved `path`, with HEAD read from the
@@ -1773,7 +1790,8 @@ fn working_tree_texts(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, A
 /// every line as added, and the old path shows every line as deleted.
 ///
 /// [`None`] when `path` is not the new side of a move, which is the ordinary
-/// answer for an untracked file.
+/// answer for an untracked file. [`working_tree_texts`] then reads such a file
+/// as new.
 fn moved_base(repo: &dyn GitRepo, path: &Path) -> Option<(Arc<String>, Arc<String>)> {
     let old = repo.rename_source(path)?;
     let head = repo.head_content(&old)?;
@@ -2118,7 +2136,7 @@ mod tests {
     /// walk and two rename passes. Only a git write turns a path into a rename
     /// target, so that answer holds until one does.
     #[test]
-    fn an_untracked_buffer_asks_for_its_missing_base_once() {
+    fn an_untracked_buffer_asks_for_its_base_once() {
         let mut h = TestHarness::with_size(40, 12);
         let workdir = PathBuf::from("/untracked");
         h.stage_review_scenario(&workdir, &[("tracked.rs", "one\n", "ONE\n")]);
@@ -2139,7 +2157,7 @@ mod tests {
         assert_eq!(
             h.fake_git().rename_source_calls(&workdir),
             after_open,
-            "and the recorded miss answers every settle after it",
+            "and the recorded base answers every settle after it",
         );
     }
 
@@ -4633,7 +4651,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_job_leaves_untracked_buffer_without_a_diff_map() {
+    fn diff_job_leaves_a_buffer_outside_any_repo_without_a_diff_map() {
         let mut h = TestHarness::with_size(80, 24);
         h.stoat.set_diff_warm_auto(true);
         let path = h.write_file("loose.txt", "x\ny\n");
@@ -4650,6 +4668,90 @@ mod tests {
         assert!(
             buffer.read().expect("poisoned").diff_map.is_none(),
             "a buffer outside any repo gets no diff map"
+        );
+    }
+
+    /// A repo at `/repo` with one tracked change, and `fresh.rs` on disk that
+    /// no blob holds.
+    fn repo_with_fresh_file() -> TestHarness {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("tracked.rs", "one\n", "ONE\n")]);
+        h.fake_fs().insert_file("/repo/fresh.rs", b"a\nb\n");
+        h.stoat.set_diff_warm_auto(true);
+        h
+    }
+
+    /// Opens `path`, settles its diff job, and reads the map the job installs.
+    fn opened_diff_map<T>(
+        h: &mut TestHarness,
+        path: &Path,
+        read: impl FnOnce(Option<&DiffMap>) -> T,
+    ) -> T {
+        h.open_file(path);
+        h.settle_diff_jobs();
+
+        let ws = h.stoat.active_workspace();
+        let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer = ws
+            .buffers
+            .get(ws.editors[editor_id].buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("poisoned");
+        read(guard.diff_map.as_ref())
+    }
+
+    /// No blob holds an untracked file, so it diffs against empty text, and
+    /// every line is one addition that nothing has staged.
+    #[test]
+    fn diff_job_gives_an_untracked_buffer_one_added_hunk() {
+        let mut h = repo_with_fresh_file();
+        let read = opened_diff_map(&mut h, Path::new("/repo/fresh.rs"), |diff_map| {
+            let diff_map = diff_map.expect("diff map populated");
+            let hunks: Vec<_> = diff_map
+                .hunks_in_range(0..u32::MAX)
+                .into_iter()
+                .map(|hunk| (hunk.buffer_line_range.clone(), hunk.status, hunk.staged()))
+                .collect();
+            (
+                diff_map.base_text().map(|text| text.to_string()),
+                hunks,
+                diff_map.staged_marks.is_empty(),
+            )
+        });
+        assert_eq!(
+            read,
+            (
+                Some(String::new()),
+                vec![(0..2, DiffHunkStatus::Added, false)],
+                true
+            ),
+            "the file diffs against empty text as one unstaged addition with no staged mark",
+        );
+    }
+
+    #[test]
+    fn diff_job_leaves_an_ignored_untracked_buffer_without_a_diff_map() {
+        let mut h = repo_with_fresh_file();
+        h.fake_git().add_repo("/repo").ignored("fresh.rs");
+        assert!(
+            opened_diff_map(&mut h, Path::new("/repo/fresh.rs"), |diff_map| diff_map
+                .is_none()),
+            "an ignored file is no work, so it gets no diff map",
+        );
+    }
+
+    /// The workspace's repo answers for every buffer, so a file outside its
+    /// workdir resolves against it too.
+    #[test]
+    fn diff_job_leaves_a_buffer_outside_the_workdir_without_a_diff_map() {
+        let mut h = repo_with_fresh_file();
+        let path = h.write_file("loose.txt", "x\ny\n");
+        assert!(
+            opened_diff_map(&mut h, &path, |diff_map| diff_map.is_none()),
+            "a file outside the workdir is no work of the repo, so it gets no diff map",
         );
     }
 }

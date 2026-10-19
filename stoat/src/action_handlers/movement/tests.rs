@@ -249,9 +249,10 @@ fn a_count_walks_that_many_changes_in_the_held_review_mode() {
     );
 }
 
-/// A staged addition has no base blob, so it offers no row to land on. Opening
-/// it anyway drops the cursor at row 0 with nothing under it, and from there
-/// the in-file walk crosses out again on the next press.
+/// A file listed as staged whose HEAD, index, and working texts all agree, as a
+/// staged mode change leaves them, offers no row to land on. Opening it anyway
+/// drops the cursor at row 0 with nothing under it, and from there the in-file
+/// walk crosses out again on the next press.
 #[test]
 fn next_change_reports_no_more_changes_rather_than_open_a_landing_free_file() {
     let mut h = TestHarness::with_size(40, 20);
@@ -260,6 +261,7 @@ fn next_change_reports_no_more_changes_rather_than_open_a_landing_free_file() {
     {
         let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
         builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        builder.head_file("b.rs", "new\n");
         builder.staged_file("b.rs", "new\n");
     }
     h.stoat.set_diff_warm_auto(true);
@@ -288,6 +290,7 @@ fn next_change_walks_past_a_landing_free_file_to_the_one_beyond_it() {
     {
         let mut builder = h.fake_git().add_repo(&workdir).with_fs(h.fake_fs());
         builder.modified("a.rs", "a\nb\nc\n", "a\nX\nc\n");
+        builder.head_file("b.rs", "new\n");
         builder.staged_file("b.rs", "new\n");
         builder.modified("c.rs", "g\nh\ni\n", "g\nZ\ni\n");
     }
@@ -1167,26 +1170,60 @@ fn next_change_with_one_changed_file_reports_no_more_changes() {
     assert_eq!(h.stoat.pending_message.as_deref(), Some("no more changes"));
 }
 
-#[test]
-fn next_change_skips_untracked_files() {
-    let mut h = TestHarness::with_size(40, 20);
+/// A repo whose one tracked change sits in a.rs, beside untracked u.rs on disk,
+/// with a.rs open.
+fn untracked_beside_a_change(h: &mut TestHarness) -> PathBuf {
     let workdir = PathBuf::from("/repo");
     h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nc\n", "a\nX\nc\n")]);
     h.fake_git().add_repo(&workdir).untracked("u.rs");
+    h.fake_fs()
+        .insert_file(workdir.join("u.rs"), b"new\nfile\n");
     h.stoat.set_diff_warm_auto(true);
     h.open_file(&workdir.join("a.rs"));
     h.settle_diff_jobs();
+    workdir
+}
+
+/// An untracked file lists as changed and diffs against empty text, so the
+/// walk crosses into it and lands on its one hunk at the top.
+#[test]
+fn next_change_lands_on_an_untracked_file() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = untracked_beside_a_change(&mut h);
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
     goto_change(&mut h.stoat, ChangeDir::Next);
     h.settle();
 
     assert_eq!(
-        focused_buffer_path(&h.stoat),
-        workdir.join("a.rs"),
-        "stayed on a.rs; untracked u.rs is not a nav target",
+        (
+            focused_buffer_path(&h.stoat),
+            focused_cursor_point(&mut h.stoat).row,
+            h.stoat.pending_message.as_deref(),
+        ),
+        (workdir.join("u.rs"), 0, None),
+        "the walk crosses into u.rs and lands on its first row",
     );
-    assert_eq!(h.stoat.pending_message.as_deref(), Some("no more changes"));
+}
+
+#[test]
+fn next_change_from_the_diff_view_lands_on_an_untracked_file_in_the_diff_view() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = untracked_beside_a_change(&mut h);
+    h.stoat.toggle_diff_view();
+    h.settle_diff_jobs();
+
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            focused_editor_mut(&mut h.stoat).expect("editor").diff_view,
+        ),
+        (workdir.join("u.rs"), true),
+        "the walk crosses into u.rs and keeps the diff view",
+    );
 }
 
 /// A moved file lists as changed, but a move edits no line, so there is no

@@ -1731,6 +1731,15 @@ mod tests {
         Some(text)
     }
 
+    /// The text the diff map of the buffer open at `path` measures against.
+    fn diff_base_at(h: &TestHarness, path: &str) -> Option<String> {
+        let ws = h.stoat.active_workspace();
+        let id = ws.buffers.id_for_path(Path::new(path))?;
+        let shared = ws.buffers.get(id)?;
+        let guard = shared.read().expect("buffer poisoned");
+        Some(guard.diff_map.as_ref()?.base_text()?.to_string())
+    }
+
     /// The base texts a [`DiffBase::Memory`] override carries, by path.
     fn memory_base(h: &TestHarness) -> Vec<(String, String)> {
         let Some(DiffBase::Memory { files }) = h.stoat.active_workspace().diff_base() else {
@@ -2714,13 +2723,16 @@ mod tests {
                 pair_base(&h, "/repo/b.txt"),
                 pair_base(&h, "/repo/d.txt"),
                 editor_shows_changes(&mut h.stoat, editor),
+                diff_base_at(&h, "/repo/d.txt"),
             ),
             (
                 Some(("/repo/a.txt".into(), "one\ntwo\n".into())),
                 None,
-                false
+                true,
+                Some(String::new()),
             ),
-            "d.txt diffs against the repo again, which does not track it",
+            "d.txt diffs against the repo again, which does not track it, so every line reads \
+             as added",
         );
     }
 
