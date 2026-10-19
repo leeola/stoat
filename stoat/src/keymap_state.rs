@@ -30,6 +30,8 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "panes",
     "detached",
     "window_ipc",
+    "tabs",
+    "prev_tab",
     "token",
     "token_known",
     "lsp",
@@ -68,6 +70,11 @@ pub(crate) struct Flags {
     /// Whether stoatty's aux-window link is connected, which a pane detach
     /// needs. An app value that [`Self::with_app`] copies in.
     pub(crate) window_ipc: bool,
+    /// The number of tabs in the workspace. See [`Workspace::tabs`].
+    pub(crate) tabs: u32,
+    /// Whether a tab was active before the current one, which a tab toggle
+    /// returns to. See [`Workspace::last_tab`].
+    pub(crate) prev_tab: bool,
 }
 
 impl Flags {
@@ -82,6 +89,8 @@ impl Flags {
             panes: u32::try_from(ws.panes.split_pane_count()).unwrap_or(u32::MAX),
             detached: matches!(focused.placement, Placement::Window(_)),
             window_ipc: false,
+            tabs: u32::try_from(ws.tabs.len()).unwrap_or(u32::MAX),
+            prev_tab: ws.last_tab.is_some(),
         }
     }
 
@@ -129,6 +138,10 @@ pub(crate) struct StoatKeymapState<'a> {
     detached: StateValue,
     /// Whether stoatty's aux-window link is connected.
     window_ipc: StateValue,
+    /// The number of tabs in the workspace.
+    tabs: StateValue,
+    /// Whether a tab was active before the current one.
+    prev_tab: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -190,6 +203,8 @@ impl<'a> StoatKeymapState<'a> {
             panes: StateValue::Number(f64::from(flags.panes)),
             detached: StateValue::Bool(flags.detached),
             window_ipc: StateValue::Bool(flags.window_ipc),
+            tabs: StateValue::Number(f64::from(flags.tabs)),
+            prev_tab: StateValue::Bool(flags.prev_tab),
             pane: None,
             view: None,
             modal: None,
@@ -316,6 +331,8 @@ impl KeymapState for StoatKeymapState<'_> {
             "panes" => Some(&self.panes),
             "detached" => Some(&self.detached),
             "window_ipc" => Some(&self.window_ipc),
+            "tabs" => Some(&self.tabs),
+            "prev_tab" => Some(&self.prev_tab),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -1246,6 +1263,26 @@ mod tests {
                 [number(1.0), flag(true), flag(true)],
             ],
             "one pane, a split, then the focused pane detached over a live window link",
+        );
+    }
+
+    #[test]
+    fn tabs_and_prev_tab_read_the_workspace_tabs() {
+        let mut h = Stoat::test();
+        let tabs = |h: &crate::test_harness::TestHarness| {
+            let state = StoatKeymapState::from_stoat(&h.stoat);
+            ["tabs", "prev_tab"].map(|field| state.get(field).cloned())
+        };
+        let scratch = tabs(&h);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+        assert_eq!(
+            [scratch, tabs(&h)],
+            [
+                [Some(StateValue::Number(1.0)), Some(StateValue::Bool(false))],
+                [Some(StateValue::Number(2.0)), Some(StateValue::Bool(true))],
+            ],
+            "one tab, then a second tab with the first to toggle back to",
         );
     }
 

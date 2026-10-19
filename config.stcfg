@@ -364,6 +364,8 @@ on init {
 #   panes          the number of split panes in the active tab
 #   detached       the focused pane is detached into its own window
 #   window_ipc     stoatty's aux-window link is connected
+#   tabs           the number of tabs in the active workspace
+#   prev_tab       a tab was active before the current one
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when
