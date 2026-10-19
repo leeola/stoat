@@ -2357,6 +2357,77 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The text of each row the `space a` box lists.
+    fn pane_chord_rows(h: &mut TestHarness) -> Vec<String> {
+        h.type_keys("space a");
+        h.render_composited();
+        let rows = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the pane chord laid out its box")
+            .rows
+            .iter()
+            .map(|row| row.action.clone())
+            .collect();
+        h.type_keys("escape");
+        rows
+    }
+
+    #[test]
+    fn the_pane_chord_box_lists_layout_keys_only_with_a_layout() {
+        let mut h = TestHarness::with_size(150, 50);
+        let lists = |rows: &[String], text: &str| rows.iter().any(|row| row == text);
+        let ungated = |rows: &[String]| {
+            [
+                "SplitRight",
+                "SplitDown",
+                "OpenFileFinderHSplit",
+                "OpenFileFinderVSplit",
+            ]
+            .map(short_desc)
+            .into_iter()
+            .chain(["space_pane_nav_new mode", "space_pane_display mode"])
+            .all(|text| lists(rows, text))
+        };
+        let gated = |rows: &[String]| {
+            [
+                "ClosePane",
+                "CloseOtherPanes",
+                "TogglePaneWiden",
+                "FocusNext",
+                "DetachPane",
+                "ReattachPane",
+            ]
+            .map(|name| lists(rows, short_desc(name)))
+        };
+        let one_pane = pane_chord_rows(&mut h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let split = pane_chord_rows(&mut h);
+
+        h.stoat.window_ipc_connected = true;
+        let linked = pane_chord_rows(&mut h);
+
+        // A third pane leaves two split panes beside the detached one, so only
+        // the detach gates the layout rows.
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DetachPane);
+        let detached = pane_chord_rows(&mut h);
+
+        assert_eq!(
+            [one_pane, split, linked, detached].map(|rows| (ungated(&rows), gated(&rows))),
+            [
+                (true, [false, false, false, false, false, false]),
+                (true, [true, true, true, true, false, false]),
+                (true, [true, true, true, true, true, false]),
+                (true, [false, false, false, false, false, true]),
+            ],
+            "close, close others, widen, focus, detach, and reattach rows on one pane, \
+             a split, a split with the window link, and a detached pane",
+        );
+    }
+
     #[test]
     fn space_lsp_box_shows_all_rows_without_an_index() {
         let mut h = TestHarness::with_size(150, 50);

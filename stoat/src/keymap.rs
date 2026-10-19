@@ -1223,6 +1223,14 @@ mod tests {
                 .set("mode", StateValue::String(mode.into()))
                 .set("walkthrough", StateValue::Bool(true))
         }
+
+        /// A state in `mode` over two split panes, where the default config
+        /// binds the pane layout arms.
+        fn split(mode: &str) -> Self {
+            Self::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("panes", StateValue::Number(2.0))
+        }
     }
 
     impl KeymapState for TestState {
@@ -2999,14 +3007,15 @@ mod tests {
         }
     }
 
-    /// The actions `code` with `modifiers` resolves to in `mode`.
+    /// The actions `code` with `modifiers` resolves to in `mode`, over the two
+    /// split panes the pane chords act on.
     fn mode_calls(
         keymap: &Keymap,
         mode: &str,
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<Vec<(String, Vec<Value>)>> {
-        let state = TestState::new().set("mode", StateValue::String(mode.into()));
+        let state = TestState::split(mode);
         keymap
             .lookup(&state, &key_event(code, modifiers))
             .map(|actions| action_calls(&actions))
@@ -3200,14 +3209,14 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+        let prefix = TestState::split("prefix");
         let m = keymap
             .lookup(&prefix, &key_event(KeyCode::Char('m'), KeyModifiers::NONE))
             .expect("m is bound in prefix mode");
         assert_eq!(m[0].name, "SetMode");
         assert_eq!(m[0].args[0].value, Value::Ident("prefix_move".into()));
 
-        let mv = TestState::new().set("mode", StateValue::String("prefix_move".into()));
+        let mv = TestState::split("prefix_move");
 
         let h = keymap
             .lookup(&mv, &key_event(KeyCode::Char('h'), KeyModifiers::NONE))

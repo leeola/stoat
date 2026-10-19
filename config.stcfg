@@ -1493,28 +1493,41 @@ on key {
         f -> OpenWorkspaceFileFinder();
         x -> [CloseWorkspace(), SetMode(normal)];
     }
+    # The layout keys bind only with a second split pane and the focus in the
+    # split layout. The detach key also needs stoatty's window link, and the
+    # reattach key needs a detached pane.
     mode == space_pane_nav {
         Escape -> SetMode(normal);
         s -> [SplitRight(), SetMode(normal)];
         v -> [SplitDown(), SetMode(normal)];
         n -> SetMode(space_pane_nav_new);
         e -> SetMode(space_pane_display);
-        d -> [DetachPane(), SetMode(normal)];
-        r -> [ReattachPane(), SetMode(normal)];
+
+        window_ipc && panes > 1 && !detached {
+            d -> [DetachPane(), SetMode(normal)];
+        }
+
+        detached {
+            r -> [ReattachPane(), SetMode(normal)];
+        }
+
         f -> OpenFileFinderHSplit();
         F -> OpenFileFinderVSplit();
-        q -> [ClosePane(), SetMode(normal)];
-        o -> [CloseOtherPanes(), SetMode(normal)];
-        z -> [TogglePaneWiden(), SetMode(normal)];
-        w -> [FocusNext(), SetMode(normal)];
-        h -> [FocusLeft(), SetMode(normal)];
-        Left -> [FocusLeft(), SetMode(normal)];
-        j -> [FocusDown(), SetMode(normal)];
-        Down -> [FocusDown(), SetMode(normal)];
-        k -> [FocusUp(), SetMode(normal)];
-        Up -> [FocusUp(), SetMode(normal)];
-        l -> [FocusRight(), SetMode(normal)];
-        Right -> [FocusRight(), SetMode(normal)];
+
+        panes > 1 && !detached {
+            q -> [ClosePane(), SetMode(normal)];
+            o -> [CloseOtherPanes(), SetMode(normal)];
+            z -> [TogglePaneWiden(), SetMode(normal)];
+            w -> [FocusNext(), SetMode(normal)];
+            h -> [FocusLeft(), SetMode(normal)];
+            Left -> [FocusLeft(), SetMode(normal)];
+            j -> [FocusDown(), SetMode(normal)];
+            Down -> [FocusDown(), SetMode(normal)];
+            k -> [FocusUp(), SetMode(normal)];
+            Up -> [FocusUp(), SetMode(normal)];
+            l -> [FocusRight(), SetMode(normal)];
+            Right -> [FocusRight(), SetMode(normal)];
+        }
     }
     mode == space_pane_nav_new {
         Escape -> SetMode(normal);
@@ -1546,15 +1559,18 @@ on key {
         Ctrl-s -> [SetMode(normal), SplitRight()];
         # The focus moves of `space a`, for the same reason, with Ctrl-w for its
         # w. The chord ends first, so the pane focus leaves is at rest.
-        Ctrl-w -> [SetMode(normal), FocusNext()];
-        h -> [SetMode(normal), FocusLeft()];
-        Left -> [SetMode(normal), FocusLeft()];
-        j -> [SetMode(normal), FocusDown()];
-        Down -> [SetMode(normal), FocusDown()];
-        k -> [SetMode(normal), FocusUp()];
-        Up -> [SetMode(normal), FocusUp()];
-        l -> [SetMode(normal), FocusRight()];
-        Right -> [SetMode(normal), FocusRight()];
+        panes > 1 && !detached {
+            Ctrl-w -> [SetMode(normal), FocusNext()];
+            h -> [SetMode(normal), FocusLeft()];
+            Left -> [SetMode(normal), FocusLeft()];
+            j -> [SetMode(normal), FocusDown()];
+            Down -> [SetMode(normal), FocusDown()];
+            k -> [SetMode(normal), FocusUp()];
+            Up -> [SetMode(normal), FocusUp()];
+            l -> [SetMode(normal), FocusRight()];
+            Right -> [SetMode(normal), FocusRight()];
+        }
+
         # The workspace picker, as the zellij session manager sits behind the
         # same chord.
         Ctrl-f -> [SetMode(normal), SwitchWorkspace()];
@@ -1563,7 +1579,11 @@ on key {
         num -> [SetMode(normal), GotoTab($num)];
         0 -> [SetMode(normal), GotoTab(10)];
         t -> SetMode(prefix_tab);
-        m -> SetMode(prefix_move);
+
+        panes > 1 && !detached {
+            m -> SetMode(prefix_move);
+        }
+
         e -> SetMode(prefix_pane);
     }
     mode == prefix_tab {
@@ -1587,37 +1607,46 @@ on key {
     mode == prefix_move {
         Escape -> SetMode(normal);
         Ctrl-a -> SetMode(normal);
-        h -> MovePaneLeft();
-        Left -> MovePaneLeft();
-        j -> MovePaneDown();
-        Down -> MovePaneDown();
-        k -> MovePaneUp();
-        Up -> MovePaneUp();
-        l -> MovePaneRight();
-        Right -> MovePaneRight();
-        n -> MovePaneNext();
-        Tab -> MovePaneNext();
-        p -> MovePanePrev();
+
+        panes > 1 && !detached {
+            h -> MovePaneLeft();
+            Left -> MovePaneLeft();
+            j -> MovePaneDown();
+            Down -> MovePaneDown();
+            k -> MovePaneUp();
+            Up -> MovePaneUp();
+            l -> MovePaneRight();
+            Right -> MovePaneRight();
+            n -> MovePaneNext();
+            Tab -> MovePaneNext();
+            p -> MovePanePrev();
+        }
     }
     # The pane keys behind `Ctrl-a e`. A mode belongs to the focused pane and
     # does not follow focus, so a mode that held across a focus move would stay
     # on the pane focus left. Each key therefore ends the chord before it acts.
     # `prefix_move` holds only because the moved content keeps focus.
+    #
+    # The layout keys here and in `prefix_move` bind only with a second split
+    # pane and the focus in the split layout.
     mode == prefix_pane {
         Escape -> SetMode(normal);
         Ctrl-a -> SetMode(normal);
-        h -> [SetMode(normal), FocusLeft()];
-        Left -> [SetMode(normal), FocusLeft()];
-        j -> [SetMode(normal), FocusDown()];
-        Down -> [SetMode(normal), FocusDown()];
-        k -> [SetMode(normal), FocusUp()];
-        Up -> [SetMode(normal), FocusUp()];
-        l -> [SetMode(normal), FocusRight()];
-        Right -> [SetMode(normal), FocusRight()];
-        Tab -> [SetMode(normal), FocusNext()];
         d -> [SetMode(normal), SplitDown()];
         r -> [SetMode(normal), SplitRight()];
-        x -> [SetMode(normal), ClosePane()];
-        f -> [SetMode(normal), TogglePaneWiden()];
+
+        panes > 1 && !detached {
+            h -> [SetMode(normal), FocusLeft()];
+            Left -> [SetMode(normal), FocusLeft()];
+            j -> [SetMode(normal), FocusDown()];
+            Down -> [SetMode(normal), FocusDown()];
+            k -> [SetMode(normal), FocusUp()];
+            Up -> [SetMode(normal), FocusUp()];
+            l -> [SetMode(normal), FocusRight()];
+            Right -> [SetMode(normal), FocusRight()];
+            Tab -> [SetMode(normal), FocusNext()];
+            x -> [SetMode(normal), ClosePane()];
+            f -> [SetMode(normal), TogglePaneWiden()];
+        }
     }
 }
