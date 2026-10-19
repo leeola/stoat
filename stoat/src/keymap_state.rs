@@ -32,6 +32,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "window_ipc",
     "tabs",
     "prev_tab",
+    "workspaces",
     "token",
     "token_known",
     "lsp",
@@ -75,6 +76,9 @@ pub(crate) struct Flags {
     /// Whether a tab was active before the current one, which a tab toggle
     /// returns to. See [`Workspace::last_tab`].
     pub(crate) prev_tab: bool,
+    /// The number of open workspaces. An app value that [`Self::with_app`] copies
+    /// in.
+    pub(crate) workspaces: u32,
 }
 
 impl Flags {
@@ -91,12 +95,14 @@ impl Flags {
             window_ipc: false,
             tabs: u32::try_from(ws.tabs.len()).unwrap_or(u32::MAX),
             prev_tab: ws.last_tab.is_some(),
+            workspaces: 0,
         }
     }
 
     /// Copies in the values the app holds outside any workspace.
     pub(crate) fn with_app(mut self, app: AppFlags) -> Self {
         self.window_ipc = app.window_ipc;
+        self.workspaces = app.workspaces;
         self
     }
 }
@@ -109,12 +115,14 @@ impl Flags {
 #[derive(Clone, Copy, Default, Hash)]
 pub(crate) struct AppFlags {
     pub(crate) window_ipc: bool,
+    pub(crate) workspaces: u32,
 }
 
 impl AppFlags {
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         Self {
             window_ipc: stoat.window_ipc_connected,
+            workspaces: u32::try_from(stoat.workspaces.len()).unwrap_or(u32::MAX),
         }
     }
 }
@@ -142,6 +150,8 @@ pub(crate) struct StoatKeymapState<'a> {
     tabs: StateValue,
     /// Whether a tab was active before the current one.
     prev_tab: StateValue,
+    /// The number of open workspaces.
+    workspaces: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -205,6 +215,7 @@ impl<'a> StoatKeymapState<'a> {
             window_ipc: StateValue::Bool(flags.window_ipc),
             tabs: StateValue::Number(f64::from(flags.tabs)),
             prev_tab: StateValue::Bool(flags.prev_tab),
+            workspaces: StateValue::Number(f64::from(flags.workspaces)),
             pane: None,
             view: None,
             modal: None,
@@ -333,6 +344,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "window_ipc" => Some(&self.window_ipc),
             "tabs" => Some(&self.tabs),
             "prev_tab" => Some(&self.prev_tab),
+            "workspaces" => Some(&self.workspaces),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -1293,6 +1305,24 @@ mod tests {
                 [Some(StateValue::Number(2.0)), Some(StateValue::Bool(true))],
             ],
             "one tab, then a second tab with the first to toggle back to",
+        );
+    }
+
+    #[test]
+    fn workspaces_counts_the_open_workspaces() {
+        let mut h = Stoat::test();
+        let count = |h: &crate::test_harness::TestHarness| {
+            StoatKeymapState::from_stoat(&h.stoat)
+                .get("workspaces")
+                .cloned()
+        };
+        let one = count(&h);
+
+        h.type_action("NewWorkspace()");
+        assert_eq!(
+            [one, count(&h)],
+            [1.0, 2.0].map(|n| Some(StateValue::Number(n))),
+            "one workspace, then a second",
         );
     }
 

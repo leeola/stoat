@@ -366,6 +366,7 @@ on init {
 #   window_ipc     stoatty's aux-window link is connected
 #   tabs           the number of tabs in the active workspace
 #   prev_tab       a tab was active before the current one
+#   workspaces     the number of open workspaces
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when
@@ -1513,7 +1514,10 @@ on key {
         c -> [CopyWorkspace(), SetMode(normal)];
         s -> SwitchWorkspace();
         f -> OpenWorkspaceFileFinder();
-        x -> [CloseWorkspace(), SetMode(normal)];
+
+        workspaces > 1 {
+            x -> [CloseWorkspace(), SetMode(normal)];
+        }
     }
     # The layout keys bind only with a second split pane and the focus in the
     # split layout. The detach key also needs stoatty's window link, and the

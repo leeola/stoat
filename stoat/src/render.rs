@@ -2345,15 +2345,15 @@ mod lsp_filter_tests {
         );
     }
 
-    /// The text of each row the `space G` box lists.
-    fn git_chord_rows(h: &mut TestHarness) -> Vec<String> {
-        h.type_keys("space G");
+    /// The text of each row the box of the chord `keys` lists.
+    fn chord_rows(h: &mut TestHarness, keys: &str) -> Vec<String> {
+        h.type_keys(keys);
         h.render_composited();
         let rows = h
             .stoat
             .hints_cache
             .as_ref()
-            .expect("the git chord laid out its box")
+            .unwrap_or_else(|| panic!("{keys} laid out its box"))
             .rows
             .iter()
             .map(|row| row.action.clone())
@@ -2365,11 +2365,11 @@ mod lsp_filter_tests {
     #[test]
     fn the_git_chord_box_lists_git_rows_only_inside_a_repository() {
         let mut h = TestHarness::with_size(150, 50);
-        let scratch = git_chord_rows(&mut h);
+        let scratch = chord_rows(&mut h, "space G");
 
         h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
         h.type_keys("escape");
-        let staged = git_chord_rows(&mut h);
+        let staged = chord_rows(&mut h, "space G");
 
         let listed = |rows: &[String], names: &[&str]| -> Vec<bool> {
             names
@@ -2386,23 +2386,6 @@ mod lsp_filter_tests {
             (vec![true; 3], vec![false; 3], vec![true]),
             "a scratch root lists only the ungated rows, and a repository brings GitLs back",
         );
-    }
-
-    /// The text of each row the `space a` box lists.
-    fn pane_chord_rows(h: &mut TestHarness) -> Vec<String> {
-        h.type_keys("space a");
-        h.render_composited();
-        let rows = h
-            .stoat
-            .hints_cache
-            .as_ref()
-            .expect("the pane chord laid out its box")
-            .rows
-            .iter()
-            .map(|row| row.action.clone())
-            .collect();
-        h.type_keys("escape");
-        rows
     }
 
     #[test]
@@ -2432,19 +2415,19 @@ mod lsp_filter_tests {
             ]
             .map(|name| lists(rows, short_desc(name)))
         };
-        let one_pane = pane_chord_rows(&mut h);
+        let one_pane = chord_rows(&mut h, "space a");
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
-        let split = pane_chord_rows(&mut h);
+        let split = chord_rows(&mut h, "space a");
 
         h.stoat.window_ipc_connected = true;
-        let linked = pane_chord_rows(&mut h);
+        let linked = chord_rows(&mut h, "space a");
 
         // A third pane leaves two split panes beside the detached one, so only
         // the detach gates the layout rows.
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DetachPane);
-        let detached = pane_chord_rows(&mut h);
+        let detached = chord_rows(&mut h, "space a");
 
         assert_eq!(
             [one_pane, split, linked, detached].map(|rows| (ungated(&rows), gated(&rows))),
@@ -2456,6 +2439,22 @@ mod lsp_filter_tests {
             ],
             "close, close others, widen, focus, detach, and reattach rows on one pane, \
              a split, a split with the window link, and a detached pane",
+        );
+    }
+
+    /// Closing the only workspace is refused, so its row lists only once a
+    /// second workspace gives the close somewhere to land.
+    #[test]
+    fn the_workspace_chord_box_lists_close_only_with_another_workspace() {
+        let mut h = TestHarness::with_size(150, 50);
+        let close = short_desc("CloseWorkspace");
+        let lists_close = |rows: Vec<String>| rows.iter().any(|row| row == close);
+        let alone = lists_close(chord_rows(&mut h, "space w"));
+
+        h.type_action("NewWorkspace()");
+        assert_eq!(
+            (alone, lists_close(chord_rows(&mut h, "space w"))),
+            (false, true),
         );
     }
 

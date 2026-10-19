@@ -3438,7 +3438,7 @@ mod tests {
         let mut h = Stoat::test();
         let only = h.stoat.active_workspace;
 
-        h.type_action("CloseWorkspace()");
+        dispatch(&mut h.stoat, &stoat_action::CloseWorkspace);
 
         assert_eq!(h.stoat.workspaces.len(), 1);
         assert_eq!(h.stoat.active_workspace, only);
