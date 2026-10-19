@@ -361,6 +361,9 @@ on init {
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open
 #   trail          the call-graph trail's phase, armed or path, absent with none
+#   panes          the number of split panes in the active tab
+#   detached       the focused pane is detached into its own window
+#   window_ipc     stoatty's aux-window link is connected
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when

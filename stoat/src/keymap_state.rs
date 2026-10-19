@@ -6,7 +6,7 @@ use crate::{
     editor_state::EditorState,
     keymap::{self, KeymapState, ResolvedAction, ResolvedArg, StateValue},
     lsp::{registry::LspRegistry, LspSymbolKind},
-    pane::{FocusTarget, View},
+    pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     workspace::{self, Workspace},
 };
@@ -27,6 +27,9 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "git",
     "walkthrough",
     "trail",
+    "panes",
+    "detached",
+    "window_ipc",
     "token",
     "token_known",
     "lsp",
@@ -37,13 +40,14 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "changes",
 ];
 
-/// The keymap predicate values that a [`Workspace`] alone decides.
+/// The keymap predicate values that the active [`Workspace`] and the app
+/// decide.
 ///
-/// [`Self::from_workspace`] is their one derivation, so the hint box and the
-/// key dispatch agree on every value. The hint-overlay renderer holds a
-/// mutable workspace borrow while [`StoatKeymapState::from_stoat`] reads the
-/// whole [`Stoat`], so the renderer passes these to
-/// [`StoatKeymapState::with_flags`].
+/// [`Self::from_workspace`] and [`Self::with_app`] are their one derivation, so
+/// the hint box and the key dispatch agree on every value. The hint-overlay
+/// renderer holds a mutable workspace borrow while
+/// [`StoatKeymapState::from_stoat`] reads the whole [`Stoat`], so the renderer
+/// passes these to [`StoatKeymapState::with_flags`].
 #[derive(Default, Hash)]
 pub(crate) struct Flags {
     pub(crate) rebase_exec: bool,
@@ -57,16 +61,51 @@ pub(crate) struct Flags {
     /// The call-graph trail's phase, `armed` or `path`, or `None` with no
     /// trail. See [`Workspace::trail`].
     pub(crate) trail: Option<&'static str>,
+    /// The number of split panes in the active tab of [`Workspace::panes`].
+    pub(crate) panes: u32,
+    /// Whether the focused pane is detached into its own window.
+    pub(crate) detached: bool,
+    /// Whether stoatty's aux-window link is connected, which a pane detach
+    /// needs. An app value that [`Self::with_app`] copies in.
+    pub(crate) window_ipc: bool,
 }
 
 impl Flags {
     pub(crate) fn from_workspace(ws: &Workspace) -> Self {
+        let focused = ws.panes.pane(ws.panes.focus());
         Self {
             rebase_exec: ws.rebase_active.is_some(),
             pair: ws.pair_panes().is_some(),
             git: ws.repo_root.is_some(),
             walkthrough: ws.walkthrough.is_some(),
             trail: ws.trail.as_ref().and_then(|trail| trail.phase()),
+            panes: u32::try_from(ws.panes.split_pane_count()).unwrap_or(u32::MAX),
+            detached: matches!(focused.placement, Placement::Window(_)),
+            window_ipc: false,
+        }
+    }
+
+    /// Copies in the values the app holds outside any workspace.
+    pub(crate) fn with_app(mut self, app: AppFlags) -> Self {
+        self.window_ipc = app.window_ipc;
+        self
+    }
+}
+
+/// The keymap predicate values the app holds outside any workspace.
+///
+/// The hint-overlay renderer reads these before it takes its workspace
+/// borrow, which rules out a read of the whole [`Stoat`] after it.
+/// [`Flags::with_app`] copies them into the workspace's flags.
+#[derive(Clone, Copy, Default, Hash)]
+pub(crate) struct AppFlags {
+    pub(crate) window_ipc: bool,
+}
+
+impl AppFlags {
+    pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
+        Self {
+            window_ipc: stoat.window_ipc_connected,
         }
     }
 }
@@ -84,6 +123,12 @@ pub(crate) struct StoatKeymapState<'a> {
     /// The call-graph trail's phase, `armed` or `path`. Absent with no trail,
     /// so a bare `trail` reads false.
     trail: Option<StateValue>,
+    /// The number of split panes in the active tab.
+    panes: StateValue,
+    /// Whether the focused pane is detached into its own window.
+    detached: StateValue,
+    /// Whether stoatty's aux-window link is connected.
+    window_ipc: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -142,6 +187,9 @@ impl<'a> StoatKeymapState<'a> {
             git: StateValue::Bool(flags.git),
             walkthrough: StateValue::Bool(flags.walkthrough),
             trail: flags.trail.map(|phase| StateValue::String(phase.into())),
+            panes: StateValue::Number(f64::from(flags.panes)),
+            detached: StateValue::Bool(flags.detached),
+            window_ipc: StateValue::Bool(flags.window_ipc),
             pane: None,
             view: None,
             modal: None,
@@ -242,7 +290,7 @@ impl<'a> StoatKeymapState<'a> {
 
     pub(crate) fn from_stoat(stoat: &'a Stoat) -> Self {
         let ws = stoat.active_workspace();
-        let flags = Flags::from_workspace(ws);
+        let flags = Flags::from_workspace(ws).with_app(AppFlags::from_stoat(stoat));
         Self {
             pane: pane_predicate(ws).map(|s| StateValue::String(s.into())),
             view: view_predicate(ws).map(|s| StateValue::String(s.into())),
@@ -265,6 +313,9 @@ impl KeymapState for StoatKeymapState<'_> {
             "git" => Some(&self.git),
             "walkthrough" => Some(&self.walkthrough),
             "trail" => self.trail.as_ref(),
+            "panes" => Some(&self.panes),
+            "detached" => Some(&self.detached),
+            "window_ipc" => Some(&self.window_ipc),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -1168,6 +1219,33 @@ mod tests {
             [None, Some("armed"), Some("path"), None]
                 .map(|phase| phase.map(|phase| StateValue::String(phase.into()))),
             "no trail, a marked start, an installed path, then a cleared trail",
+        );
+    }
+
+    #[test]
+    fn panes_detached_and_window_ipc_read_the_layout_and_the_window_link() {
+        let mut h = Stoat::test();
+        let layout = |h: &crate::test_harness::TestHarness| {
+            let state = StoatKeymapState::from_stoat(&h.stoat);
+            ["panes", "detached", "window_ipc"].map(|field| state.get(field).cloned())
+        };
+        let scratch = layout(&h);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        let split = layout(&h);
+
+        h.stoat.window_ipc_connected = true;
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DetachPane);
+        let number = |n| Some(StateValue::Number(n));
+        let flag = |on| Some(StateValue::Bool(on));
+        assert_eq!(
+            [scratch, split, layout(&h)],
+            [
+                [number(1.0), flag(false), flag(false)],
+                [number(2.0), flag(false), flag(false)],
+                [number(1.0), flag(true), flag(true)],
+            ],
+            "one pane, a split, then the focused pane detached over a live window link",
         );
     }
 

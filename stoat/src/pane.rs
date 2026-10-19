@@ -1128,7 +1128,7 @@ impl PaneTree {
         self.recalculate();
     }
 
-    fn split_pane_count(&self) -> usize {
+    pub(crate) fn split_pane_count(&self) -> usize {
         self.panes
             .values()
             .filter(|p| p.placement == Placement::Split)

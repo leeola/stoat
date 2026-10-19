@@ -52,7 +52,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
-        pane_predicate, ActiveModal, Flags, FocusFlags, StoatKeymapState,
+        pane_predicate, ActiveModal, AppFlags, Flags, FocusFlags, StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
@@ -1275,6 +1275,7 @@ pub(crate) fn frame(
         .1;
     let mode = stoat.frame_mode.as_str();
     let toggles = ToggleStates::read(stoat);
+    let app = AppFlags::from_stoat(stoat);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::render_badges(
         &ws.badges,
@@ -1649,7 +1650,7 @@ pub(crate) fn frame(
         // the auto-shown hint box would only stack an eleven-row overlay over
         // them. The guard above keeps it suppressed even when the `?` key-hints
         // toggle is on.
-        let flags = Flags::from_workspace(ws);
+        let flags = Flags::from_workspace(ws).with_app(app);
         let pane = pane_predicate(ws);
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
