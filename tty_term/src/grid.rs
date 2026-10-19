@@ -2079,7 +2079,7 @@ pub struct MinimapStrip {
     /// The viewport overlay, drawn over them.
     pub thumb: Rgba,
     pub thumb_border: Rgb,
-    /// Colors a run's class indexes, up to 64 entries.
+    /// Colors a run's class indexes, up to 256 entries.
     pub palette: Vec<Rgb>,
 }
 

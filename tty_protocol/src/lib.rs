@@ -100,9 +100,14 @@
 /// whole scene. A terminal that predates it ignores both markers, so an
 /// emitter opens lanes only for a terminal at version 12 or later.
 ///
+/// Version 13 reads a `minimap` palette of up to 256 entries, one per class a
+/// run's `u8` names. A terminal that predates it drops a declaration past 64
+/// entries whole, so an emitter declares at most 64 entries to it and names no
+/// class past them.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 pub mod command;
 pub mod detect;

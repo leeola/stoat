@@ -27,7 +27,7 @@ pub struct Minimap<'a> {
     pub thumb: [u8; 4],
     /// Viewport-thumb outline, rgb.
     pub thumb_border: [u8; 3],
-    /// Run-class palette, up to 64 rgb entries a summary's classes index.
+    /// Run-class palette, up to 256 rgb entries a summary's classes index.
     ///
     /// Borrowed, since a strip is redeclared every frame and the palette it
     /// names outlives the declaration.

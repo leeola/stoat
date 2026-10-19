@@ -48,7 +48,8 @@ pub type LineSummary = Arc<[MinimapRun]>;
 /// [`MinimapLinesCommand`]). Each summarized line is drawn `lines_per_cell` to a
 /// cell, up to `max_columns` wide. [`Self::bg`] and [`Self::thumb`] are rgba, the
 /// thumb being the viewport overlay; [`Self::thumb_border`] is its rgb outline.
-/// [`Self::palette`] holds up to 64 rgb entries a run's class indexes.
+/// [`Self::palette`] holds up to 256 rgb entries, one per class a run's `u8`
+/// names.
 ///
 /// The palette is generic over its container so an emitter declaring a strip per
 /// frame can hand a borrowed slice, while a decoded command owns its copy. It
@@ -297,7 +298,7 @@ pub fn encode_minimap_drop_into(out: &mut Vec<u8>, command: &MinimapDropCommand)
 pub(super) fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
     let head: &[u8; 29] = args.first()?.get(..29)?.try_into().ok()?;
     let palette_bytes = args.get(1)?;
-    if palette_bytes.len() % 3 != 0 || palette_bytes.len() / 3 > 64 {
+    if palette_bytes.len() % 3 != 0 || palette_bytes.len() / 3 > 256 {
         return None;
     }
 
@@ -468,9 +469,21 @@ mod tests {
 
     #[test]
     fn rejects_oversized_minimap_palette() {
-        // 65 rgb entries (195 bytes) exceeds the 64-entry palette cap.
-        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 195]]);
+        // 257 rgb entries (771 bytes) exceeds the 256-entry palette cap.
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 771]]);
         assert!(decode(&bytes).is_none());
+    }
+
+    /// A run's class is a `u8`, so a palette with an entry for every class
+    /// decodes whole.
+    #[test]
+    fn accepts_a_full_palette() {
+        let palette: Vec<[u8; 3]> = (0..=255u8).map(|i| [i, 0, 255 - i]).collect();
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], palette.concat()]);
+        let Some(Command::Minimap(command)) = decode(&bytes) else {
+            panic!("a 256-entry palette decodes");
+        };
+        assert_eq!(command.palette, palette);
     }
 
     #[test]
