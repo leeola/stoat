@@ -2442,6 +2442,22 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The workspace picker lists every published diagnostic, so its row lists
+    /// only once one exists, whether or not the focused buffer holds it.
+    #[test]
+    fn the_space_lsp_box_lists_the_workspace_picker_only_with_a_diagnostic() {
+        let mut h = TestHarness::with_size(150, 50);
+        let picker = short_desc("OpenWorkspaceDiagnosticsPicker");
+        let lists_picker = |rows: Vec<String>| rows.iter().any(|row| row == picker);
+        let clean = lists_picker(chord_rows(&mut h, "space l"));
+
+        h.seed_diagnostics("/lsp/a.rs", vec![lsp_types::Diagnostic::default()]);
+        assert_eq!(
+            (clean, lists_picker(chord_rows(&mut h, "space l"))),
+            (false, true),
+        );
+    }
+
     /// The recall key reopens the last picker, so its row lists only once a
     /// picker has opened.
     #[test]
@@ -2492,8 +2508,7 @@ mod lsp_filter_tests {
     fn space_lsp_box_lists_the_diagnostic_steps_and_gates_lsp_and_picker_rows() {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
-        // The whole text, since the workspace picker's row, which always lists,
-        // starts the same way.
+        // The whole text, since the workspace picker's row starts the same way.
         let picker_row = "open the diagnostics picker for the focused buffer";
         let steps_list = |text: &str| {
             text.contains("jump to the next diagnostic")

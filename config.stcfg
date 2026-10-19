@@ -372,6 +372,7 @@ on init {
 #   jump_forward   the focused pane's jumplist has a newer entry
 #   prev_buffer    the focused pane showed another buffer that is still open
 #   last_picker    a picker was opened before, which space ' reopens
+#   any_diags      any file has published diagnostics, which space l D lists
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when
@@ -1488,7 +1489,10 @@ on key {
             x -> [TrailClear(), SetMode(normal)];
         }
 
-        D -> [SetMode(normal), OpenWorkspaceDiagnosticsPicker()];
+        any_diags {
+            D -> [SetMode(normal), OpenWorkspaceDiagnosticsPicker()];
+        }
+
         l -> [ToggleLspStatus(), SetMode(normal)];
         w -> [GotoNextDiagnostic(), SetMode(normal)];
         W -> [GotoPrevDiagnostic(), SetMode(normal)];

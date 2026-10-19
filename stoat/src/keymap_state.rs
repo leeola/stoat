@@ -37,6 +37,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "jump_forward",
     "prev_buffer",
     "last_picker",
+    "any_diags",
     "token",
     "token_known",
     "lsp",
@@ -97,6 +98,10 @@ pub(crate) struct Flags {
     /// Whether a picker opened earlier in the session, which the recall key
     /// reopens. An app value that [`Self::with_app`] copies in.
     pub(crate) last_picker: bool,
+    /// Whether any path holds a published diagnostic, which the workspace
+    /// diagnostics picker lists. An app value that [`Self::with_app`] copies
+    /// in.
+    pub(crate) any_diags: bool,
 }
 
 impl Flags {
@@ -120,6 +125,7 @@ impl Flags {
             jump_forward: jumps.is_some_and(|list| list.cursor() + 1 < list.entries().len()),
             prev_buffer: prev_buffer(ws),
             last_picker: false,
+            any_diags: false,
         }
     }
 
@@ -128,6 +134,7 @@ impl Flags {
         self.window_ipc = app.window_ipc;
         self.workspaces = app.workspaces;
         self.last_picker = app.last_picker;
+        self.any_diags = app.any_diags;
         self
     }
 }
@@ -142,6 +149,7 @@ pub(crate) struct AppFlags {
     pub(crate) window_ipc: bool,
     pub(crate) workspaces: u32,
     pub(crate) last_picker: bool,
+    pub(crate) any_diags: bool,
 }
 
 impl AppFlags {
@@ -150,6 +158,7 @@ impl AppFlags {
             window_ipc: stoat.window_ipc_connected,
             workspaces: u32::try_from(stoat.workspaces.len()).unwrap_or(u32::MAX),
             last_picker: stoat.last_picker_action.is_some(),
+            any_diags: stoat.diagnostics.iter().next().is_some(),
         }
     }
 }
@@ -187,6 +196,8 @@ pub(crate) struct StoatKeymapState<'a> {
     prev_buffer: StateValue,
     /// Whether a picker opened earlier in the session.
     last_picker: StateValue,
+    /// Whether any path holds a published diagnostic.
+    any_diags: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -255,6 +266,7 @@ impl<'a> StoatKeymapState<'a> {
             jump_forward: StateValue::Bool(flags.jump_forward),
             prev_buffer: StateValue::Bool(flags.prev_buffer),
             last_picker: StateValue::Bool(flags.last_picker),
+            any_diags: StateValue::Bool(flags.any_diags),
             pane: None,
             view: None,
             modal: None,
@@ -388,6 +400,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "jump_forward" => Some(&self.jump_forward),
             "prev_buffer" => Some(&self.prev_buffer),
             "last_picker" => Some(&self.last_picker),
+            "any_diags" => Some(&self.any_diags),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -1453,6 +1466,24 @@ mod tests {
             [fresh, opened(&h)],
             [false, true].map(|on| Some(StateValue::Bool(on))),
             "a fresh session, then one whose finder opened and closed",
+        );
+    }
+
+    #[test]
+    fn any_diags_reads_whether_any_path_holds_a_diagnostic() {
+        let mut h = Stoat::test();
+        let flags = |h: &crate::test_harness::TestHarness| {
+            let state = StoatKeymapState::from_stoat(&h.stoat);
+            ["any_diags", "diags"].map(|field| state.get(field).cloned())
+        };
+        let clean = flags(&h);
+
+        h.seed_diagnostics("/lsp/a.rs", vec![lsp_types::Diagnostic::default()]);
+        let flag = |on| Some(StateValue::Bool(on));
+        assert_eq!(
+            [clean, flags(&h)],
+            [[flag(false), flag(false)], [flag(true), flag(false)]],
+            "a clean session, then a diagnostic on a file no pane shows",
         );
     }
 
