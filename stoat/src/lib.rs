@@ -61,6 +61,9 @@ pub(crate) mod mouse;
 pub mod multi_buffer;
 mod nav_list;
 pub(crate) mod osc_cap;
+// FIXME: No pane view reads the overview state or its row model.
+#[allow(dead_code)]
+mod overview;
 pub mod pane;
 mod paths;
 #[cfg(feature = "perf")]
