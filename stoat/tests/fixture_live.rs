@@ -715,6 +715,48 @@ fn walkthrough_picker_plays_one_tour_after_another() {
     });
 }
 
+/// A diff stop lands in the diff view, which paints the base row beside the
+/// live one, so the old and the new text of each edit are on screen at once.
+/// The second stop is reached with a bare key, inside the walkthrough mode.
+#[test]
+fn walkthrough_changes_fixture_lands_in_the_diff_view() {
+    let (_dir, _root, harness) = fixture_harness("walkthrough-changes");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys(":walkthrough tour<Enter>")
+            .await
+            .expect("open the tour over the edits");
+        handle
+            .await_frame(
+                |text| {
+                    status_of(text).contains("1/3:")
+                        && text.contains("workers: 4")
+                        && text.contains("workers: 8")
+                },
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the first stop shows the pool edit as a diff");
+
+        handle
+            .send_keys("<Space>Wn")
+            .await
+            .expect("step to the handler edit");
+        handle
+            .await_frame(
+                |text| {
+                    status_of(text).contains("2/3:")
+                        && text.contains("remove(request)")
+                        && text.contains("delete(request)")
+                },
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the second stop shows the rename as a diff");
+    });
+}
+
 /// The status line of `frame`, being its last line with content.
 fn status_of(frame: &str) -> &str {
     frame

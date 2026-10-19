@@ -430,6 +430,10 @@ pub enum FixtureError {
 ///   six-stop tour committed on top whose stops name those commits two by two. Playing it checks a
 ///   commit out between stops, stays on one commit between the stops that share it, shows a file
 ///   the second commit modified, and follows a cross-file annotation at the third.
+/// - `walkthrough-changes`: the `walkthrough` crate committed, then edited in the working tree,
+///   with a three-stop tour over the edits. Two diff stops land on the doubled worker pool and the
+///   renamed handler arm in the diff view, and a plain stop lands on a file the edits leave alone,
+///   which shows plain.
 ///
 /// Fails with [`FixtureError::UnknownFixture`] for an unrecognized `name`, or
 /// [`FixtureError::Git`] / [`FixtureError::Io`] if the repository cannot be
@@ -452,6 +456,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "walkthrough-columns" => walkthrough::columns::materialize(dest),
         "walkthrough-catalog" => walkthrough::catalog::materialize(dest),
         "walkthrough-commits" => walkthrough::commits::materialize(dest),
+        "walkthrough-changes" => walkthrough::changes::materialize(dest),
         _ => UnknownFixtureSnafu {
             name: name.to_string(),
         }
@@ -478,6 +483,7 @@ pub fn default_inputs(name: &str) -> Option<String> {
         // The script counts stops and annotations, so the commits the tour
         // names make no difference to it.
         "walkthrough-commits" => walkthrough::commits::build(&Default::default()),
+        "walkthrough-changes" => walkthrough::changes::build(),
         _ => return None,
     };
 
