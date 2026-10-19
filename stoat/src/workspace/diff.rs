@@ -27,6 +27,7 @@ use crate::{
     editor_state::EditorId,
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
+    multi_buffer::MultiBuffer,
     pane::View,
     syntax_parse,
 };
@@ -1330,18 +1331,16 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
         Some(_) => ws.repo_hunk_totals()?,
     };
 
-    let buffer = ws.buffers.get(editor.buffer_id)?;
-    let guard = buffer.read().ok()?;
-    let diff_map = guard.diff_map.as_ref()?;
+    let snapshot = MultiBuffer::singleton(ws.buffers.get(editor.buffer_id)?).snapshot();
+    let diff_map = snapshot.diff_map.as_ref()?;
     let cursor_row = {
-        let snapshot = &guard.snapshot;
         let sel = editor.selections.newest_anchor();
         let offset = stoat_text::cursor_offset(
-            &snapshot.visible_text,
+            snapshot.rope(),
             snapshot.resolve_anchor(&sel.tail()),
             snapshot.resolve_anchor(&sel.head()),
         );
-        snapshot.visible_text.offset_to_point(offset).row
+        snapshot.rope().offset_to_point(offset).row
     };
 
     let (before, total, files_before, files_other) = totals.iter().fold(
@@ -1365,7 +1364,10 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
     Some(HunkPosition {
         file_at: files_before + 1,
         file_total: files_other + 1,
-        hunk_at: diff_map.hunk_index_at(cursor_row).map(|k| before + k),
+        hunk_at: diff_map
+            .live_hunks(&snapshot)
+            .hunk_index_at(snapshot.rope(), cursor_row)
+            .map(|k| before + k),
         hunk_total: total,
     })
 }
@@ -2286,6 +2288,40 @@ mod tests {
         );
     }
 
+    /// A removal of a file's last lines, in a file with no trailing newline,
+    /// leaves no row after it. The walk lands on the last row, and the position
+    /// names that removal rather than the hunk before it.
+    #[test]
+    fn a_landing_on_a_trailing_removal_has_a_position() {
+        let mut h = TestHarness::with_size(40, 16);
+        let workdir = PathBuf::from("/position");
+        h.stage_review_scenario(&workdir, &[("b.rs", "a\nb\nc\nd\n", "a\nb\nc")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+
+        let buffer_id = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.set_diff_view(true);
+            editor.buffer_id
+        };
+        h.stoat
+            .active_workspace_mut()
+            .install_test_diff_map(buffer_id, DiffMap::from_hunks([deleted_hunk(3)], None));
+
+        movement::goto_change_impl(&mut h.stoat, movement::ChangeDir::Next, 1);
+        assert_eq!(
+            repo_hunk_position(h.stoat.active_workspace()),
+            Some(HunkPosition {
+                file_at: 1,
+                file_total: 1,
+                hunk_at: Some(1),
+                hunk_total: 1,
+            }),
+            "the walk lands the removal on row 2, and the position counts it",
+        );
+    }
+
     /// Under the index base the position counts the stops the diff view's walk
     /// makes, and a file whose changes are all staged offers none.
     #[test]
@@ -2364,6 +2400,21 @@ mod tests {
             marked_rows: Vec::new(),
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        }
+    }
+
+    /// A removal that marks buffer `row`, the row after the removed lines.
+    fn deleted_hunk(row: u32) -> DiffHunk {
+        let rows = row..row;
+        DiffHunk {
+            status: DiffHunkStatus::Deleted,
+            unstaged_lines: vec![rows.clone()],
+            marked_rows: Vec::new(),
+            buffer_start_line: row,
+            buffer_line_range: rows,
             base_byte_range: 0..0,
             anchor_range: None,
             token_detail: None,

@@ -16,7 +16,9 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat_text::{Anchor, Bias, ContextLessSummary, Dimension, Item, Point, SeekTarget, SumTree};
+use stoat_text::{
+    Anchor, Bias, ContextLessSummary, Dimension, Item, Point, Rope, SeekTarget, SumTree,
+};
 
 static DIFF_MAP_VERSION_COUNTER: AtomicUsize = AtomicUsize::new(1);
 
@@ -344,6 +346,30 @@ impl<'a> LiveHunks<'a> {
         stops.sort_by_key(|run| (run.start, run.end));
         stops
     }
+
+    /// One-based position of the hunk at buffer `row` among the hunks, or
+    /// `None` when `row` sits before the first one.
+    ///
+    /// A row between two hunks answers the one before it. A jump lands the
+    /// cursor inside a hunk, so the walk stands on the previous hunk until it
+    /// reaches the next one. A position that blanks out between hunks flickers
+    /// as the reader moves.
+    ///
+    /// A zero-width hunk past the last row counts from the last row, which is
+    /// where the change walk lands it. `rope` is the text of the snapshot that
+    /// [`DiffMap::live_hunks`] read.
+    pub fn hunk_index_at(&self, rope: &Rope, row: u32) -> Option<usize> {
+        let last_row = rope.max_point().row;
+        let hunks = self.hunks.partition_point(|live| {
+            let landing = match live.rows.is_empty() {
+                true => live.rows.start.min(last_row),
+                false => live.rows.start,
+            };
+            landing <= row
+        });
+        (hunks > 0).then_some(hunks)
+    }
+
     /// The hunks meeting `rows`, each with the rows it now covers.
     ///
     /// A hunk covering no rows -- a deletion or move seam -- is included when
@@ -1254,22 +1280,6 @@ impl DiffMap {
     /// position reports on, does not stop on one.
     pub fn hunk_count(&self) -> usize {
         self.hunks.iter().count()
-    }
-
-    /// One-based position of the hunk at buffer `row` among this map's hunks,
-    /// or `None` when `row` sits before the first one.
-    ///
-    /// A row between two hunks answers the one before it. A jump lands the
-    /// cursor inside a hunk, so the previous hunk is where the walk stands
-    /// until the next one is reached, and a position that blanked out between
-    /// hunks flickers as the reader moves.
-    pub fn hunk_index_at(&self, row: u32) -> Option<usize> {
-        let hunks = self
-            .hunks
-            .iter()
-            .take_while(|hunk| hunk.buffer_start_line <= row)
-            .count();
-        (hunks > 0).then_some(hunks)
     }
 
     /// All hunks in buffer-start order.
@@ -2896,8 +2906,13 @@ mod tests {
             vec![mark(DiffHunkStatus::Modified, 1..2)],
         );
         assert_eq!(dm.hunk_count(), 1, "the hunk alone");
+
+        let snapshot = buffer_holding("b0\nS1\nb2\nX3\n").snapshot();
+        let live = dm.live_hunks(&snapshot);
         assert_eq!(
-            (0..4).map(|row| dm.hunk_index_at(row)).collect::<Vec<_>>(),
+            (0..4)
+                .map(|row| live.hunk_index_at(snapshot.rope(), row))
+                .collect::<Vec<_>>(),
             [None, None, None, Some(1)],
             "the mark on row 1 is no position, and the hunk on row 3 is the first",
         );
@@ -2934,7 +2949,9 @@ mod tests {
         let dm = DiffMap::from_hunks([added_hunk(2..4), added_hunk(8..9)], None);
         assert_eq!(dm.hunk_count(), 2, "both hunks counted");
 
-        let at = |row| dm.hunk_index_at(row);
+        let snapshot = buffer_holding(&"x\n".repeat(10)).snapshot();
+        let live = dm.live_hunks(&snapshot);
+        let at = |row| live.hunk_index_at(snapshot.rope(), row);
         assert_eq!(at(0), None, "above the first hunk nothing is behind it");
         assert_eq!(at(1), None, "and still nothing on the row before it");
         assert_eq!(at(2), Some(1), "the first hunk's own start");
@@ -2944,9 +2961,50 @@ mod tests {
         assert_eq!(at(400), Some(2), "and every row past it stays there");
 
         assert_eq!(
-            DiffMap::from_hunks([], None).hunk_index_at(0),
+            DiffMap::from_hunks([], None)
+                .live_hunks(&snapshot)
+                .hunk_index_at(snapshot.rope(), 0),
             None,
             "an empty map has no position to report"
+        );
+    }
+
+    /// The reader types while the next diff runs. The position counts a hunk
+    /// from the row its text holds now, which is the row the walk lands on.
+    #[test]
+    fn an_anchored_hunk_answers_its_live_row() {
+        let shared = Arc::new(std::sync::RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "l0\nl1\nl2\nl3\nl4\n",
+        )));
+        let mut dm = DiffMap::from_hunks([added_hunk(3..4)], None);
+        dm.anchor_hunks(&shared.read().expect("poisoned").snapshot);
+        shared.write().expect("poisoned").edit(0..3, "");
+
+        let snapshot = MultiBuffer::singleton(shared).snapshot();
+        let live = dm.live_hunks(&snapshot);
+        assert_eq!(
+            (0..4)
+                .map(|row| live.hunk_index_at(snapshot.rope(), row))
+                .collect::<Vec<_>>(),
+            [None, None, Some(1), Some(1)],
+            "the row deleted above moves the hunk from row 3 to row 2",
+        );
+    }
+
+    /// A removal of a file's last lines, in a file with no trailing newline,
+    /// has no row after it. The walk lands it on the last row, so the position
+    /// counts it from there.
+    #[test]
+    fn a_seam_past_the_last_row_counts_from_the_last_row() {
+        let dm = DiffMap::from_hunks([deleted_hunk(2, 0..0)], None);
+        let snapshot = buffer_holding("a\nb\nc").snapshot();
+        let live = dm.live_hunks(&snapshot);
+        assert_eq!(
+            (0..3)
+                .map(|row| live.hunk_index_at(snapshot.rope(), row))
+                .collect::<Vec<_>>(),
+            [None, None, Some(1)],
         );
     }
 
