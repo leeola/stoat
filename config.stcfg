@@ -1391,6 +1391,7 @@ on key {
             a -> WalkthroughNextAnnotation();
             A -> WalkthroughPrevAnnotation();
             s -> WalkthroughShowNarration();
+            S -> WalkthroughShowDescription();
             d -> [WalkthroughDone(), SetMode(normal)];
             Right -> WalkthroughForward();
             Left -> WalkthroughBackward();

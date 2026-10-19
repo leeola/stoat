@@ -139,6 +139,20 @@ define_action!(
 );
 
 define_action!(
+    WalkthroughShowDescriptionDef,
+    WalkthroughShowDescription,
+    "WalkthroughShowDescription",
+    ActionKind::WalkthroughShowDescription,
+    "show the walkthrough's description",
+    "Raise a card with the description of the whole walkthrough, headed by \
+     its title. The card takes the place of the narration until the next \
+     step, so the reader sees what the tour explains without moving off the \
+     point.",
+    ActionPriority::Normal,
+    command_name = "walkthrough-description"
+);
+
+define_action!(
     WalkthroughDoneDef,
     WalkthroughDone,
     "WalkthroughDone",

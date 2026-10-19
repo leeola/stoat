@@ -168,7 +168,7 @@ pub(crate) fn backward(stoat: &mut Stoat, count: i32) -> UpdateEffect {
     step_linear(stoat, -count)
 }
 
-/// Take the narration card down, or raise it again.
+/// Take the tour's card down, or raise the narration again.
 ///
 /// The card is pinned, so it stays through everything but a deliberate
 /// dismissal. That leaves one key to both hide it when it is in the way and
@@ -179,8 +179,8 @@ pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    // A card that is up came from this stop, so the reader asking again wants
-    // it out of the way rather than redrawn where it already is.
+    // A card that is up is the tour's, so the reader asking again wants it out
+    // of the way rather than redrawn where it already is.
     if stoat
         .pending_hover
         .as_ref()
@@ -198,6 +198,36 @@ pub(crate) fn show_narration_again(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.pending_hover.is_none() {
         stoat.set_status("this stop has no narration");
     }
+    UpdateEffect::Redraw
+}
+
+/// Raise the tour's description as a card headed by the tour's title.
+///
+/// A card that is up gives way rather than going down, since the reader asked
+/// for a different card than the one on screen. The next step puts the
+/// narration back.
+pub(crate) fn show_description(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
+        stoat.set_status("no walkthrough is playing");
+        return UpdateEffect::Redraw;
+    };
+
+    let tour = &run.walkthrough;
+    if tour.description.trim().is_empty() {
+        let message = format!("walkthrough '{}' has no description", tour.slug);
+        stoat.set_status(message);
+        return UpdateEffect::Redraw;
+    }
+    let title = tour.title.clone();
+    let description = tour.description.clone();
+    let point = current_anchor(run).range.start;
+
+    let Some(offset) =
+        action_handlers::focused_editor_mut(stoat).map(|editor| offset_of(editor, point))
+    else {
+        return UpdateEffect::None;
+    };
+    raise_card(stoat, title, &description, offset);
     UpdateEffect::Redraw
 }
 
@@ -759,8 +789,6 @@ const SKETCH_PROTOCOL: u32 = 3;
 ///
 /// A position with nothing to say takes the popup down rather than leaving the
 /// last one's up, so what is on screen always describes where the reader is.
-/// The popup itself is the one a hover raises, which is why the next key press
-/// dismisses it and [`show_narration_again`] exists to bring it back.
 fn show_narration(stoat: &mut Stoat, offset: usize) {
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
         return;
@@ -770,6 +798,16 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
         return;
     };
 
+    raise_card(stoat, heading, &narration, offset);
+}
+
+/// Raise a card of `heading` over the rendered `markdown`, anchored at
+/// `offset`.
+///
+/// The card takes the place of whatever popup is up. It is pinned, so an
+/// incidental key press leaves it up, and it sits where the slide puts it
+/// rather than beside the cursor.
+fn raise_card(stoat: &mut Stoat, heading: String, markdown: &str, offset: usize) {
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
         return;
     };
@@ -777,11 +815,18 @@ fn show_narration(stoat: &mut Stoat, offset: usize) {
     // The card is one part of the slide, so it takes its id from the same
     // scheme the marks do. A card re-declared on every frame of one stop must
     // not restart its stroke.
-    let card_id = run.part_id(part::CARD);
+    let Some(card_id) = stoat
+        .active_workspace()
+        .walkthrough
+        .as_ref()
+        .map(|run| run.part_id(part::CARD))
+    else {
+        return;
+    };
 
     let mut lines = vec![vec![(heading, stoat.theme.get("syntax.markup.title"))]];
     lines.extend(crate::markdown::render_markdown(
-        &narration,
+        markdown,
         &stoat.theme,
         &stoat.language_registry,
     ));
@@ -986,7 +1031,7 @@ fn drifted(editor: &mut EditorState, range: walkthrough::Range, captured: &str) 
 mod tests {
     use super::{
         backward, done, forward, next, next_annotation, open, prev, prev_annotation,
-        show_narration_again, CARD_MAX_WIDTH, CARD_MIN_WIDTH,
+        show_description, show_narration_again, CARD_MAX_WIDTH, CARD_MIN_WIDTH,
     };
     use crate::{
         action_handlers,
@@ -1019,6 +1064,9 @@ mod tests {
     const NARRATION: &str = "The **entry** point.";
     /// Annotation a1's narration. a2 has none, so one walk covers both cases.
     const ANNOTATION_NARRATION: &str = "Where the call **lands**.";
+    /// The description of the tour in [`harness_with_tour`]. The tour in
+    /// [`stoat_with_tour`] has none, so the two cover both cases.
+    const DESCRIPTION: &str = "From the **entry** to the exit.";
 
     fn range_of(line: u32, cols: (u32, u32)) -> Range {
         Range {
@@ -1401,6 +1449,37 @@ mod tests {
         );
     }
 
+    /// The reader asked for a different card than the narration on screen, so
+    /// the description replaces it rather than taking it down.
+    #[test]
+    fn the_description_card_names_the_tour() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        show_description(&mut h.stoat);
+        assert_eq!(
+            popup_lines(&h.stoat),
+            ["Tour", "From the entry to the exit."],
+        );
+    }
+
+    #[test]
+    fn a_tour_with_no_description_says_so() {
+        let mut stoat = stoat_with_tour(FIRST);
+        open(&mut stoat, "tour");
+
+        show_description(&mut stoat);
+        assert_eq!(
+            stoat.pending_message.as_deref(),
+            Some("walkthrough 'tour' has no description"),
+        );
+        assert_eq!(
+            popup_lines(&stoat),
+            ["first - 1/2", "The entry point."],
+            "the narration card stays up",
+        );
+    }
+
     /// Two stops inside one definition resolve to the same symbol, so the path
     /// between them is that symbol alone. That is ordinary rather than an
     /// edge, and "1 stops" tells the reader the count is generated and leaves
@@ -1754,6 +1833,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
 
         let mut walkthrough = Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        walkthrough.description = DESCRIPTION.to_owned();
         walkthrough
             .add_stop(
                 Some("first".to_owned()),
@@ -1923,6 +2003,13 @@ mod tests {
         h.type_keys("space W n");
         assert_eq!(h.stoat.focused_mode(), "walkthrough");
         assert_eq!(popup_lines(&h.stoat), ["second - 2/2", "The exit."]);
+
+        h.type_keys("S");
+        assert_eq!(
+            popup_lines(&h.stoat),
+            ["Tour", "From the entry to the exit."],
+            "a bare S raises the tour's description",
+        );
 
         h.type_keys("p");
         assert_eq!(

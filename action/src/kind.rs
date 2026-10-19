@@ -386,6 +386,7 @@ action_kinds! {
     WalkthroughForward,
     WalkthroughBackward,
     WalkthroughShowNarration,
+    WalkthroughShowDescription,
     WalkthroughDone,
     Hover,
     CodeAction,

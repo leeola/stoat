@@ -525,6 +525,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | WalkthroughForward
         | WalkthroughBackward
         | WalkthroughShowNarration
+        | WalkthroughShowDescription
         | WalkthroughDone => ctx.walkthrough_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,

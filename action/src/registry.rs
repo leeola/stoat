@@ -122,7 +122,7 @@ use crate::{
         walkthrough::{
             WalkthroughBackward, WalkthroughDone, WalkthroughForward, WalkthroughNext,
             WalkthroughNextAnnotation, WalkthroughOpen, WalkthroughPrev, WalkthroughPrevAnnotation,
-            WalkthroughShowNarration,
+            WalkthroughShowDescription, WalkthroughShowNarration,
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, Mosh, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -697,6 +697,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(WalkthroughShowNarration::DEF, |_| {
         Ok(Box::new(WalkthroughShowNarration))
     });
+    add(WalkthroughShowDescription::DEF, |_| {
+        Ok(Box::new(WalkthroughShowDescription))
+    });
     add(WalkthroughDone::DEF, |_| Ok(Box::new(WalkthroughDone)));
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
@@ -1207,6 +1210,7 @@ mod tests {
         "WalkthroughForward",
         "WalkthroughBackward",
         "WalkthroughShowNarration",
+        "WalkthroughShowDescription",
         "WalkthroughDone",
         "Hover",
         "CodeAction",
@@ -1807,6 +1811,7 @@ mod tests {
         // + 2 GotoDiffCallerUp, GotoDiffCalleeDown.
         // + 5 MarkTrailStart, MarkTrailEnd, TrailNext, TrailPrev, TrailClear.
         // + 7 WalkthroughOpen/Next/Prev/NextAnnotation/PrevAnnotation/ShowNarration/Done.
+        // + 1 WalkthroughShowDescription.
         // + 2 WalkthroughForward, WalkthroughBackward.
         // + 2 .
         // + 1 .
@@ -1891,7 +1896,7 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        assert_eq!(all().count(), 439);
+        assert_eq!(all().count(), 440);
     }
 
     #[test]

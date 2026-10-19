@@ -68,6 +68,25 @@ clip, so a failed `add-annotation` usually means the count was off by a few.
 Prefer the whole-line forms unless the point you are making is genuinely
 sub-line, and count from the file rather than from memory.
 
+## Playing a tour
+
+The reader plays a tour in stoat. `:walkthrough <slug>` opens it at the first
+stop. While a tour is open, `space W` enters the walkthrough mode. The mode
+stays until Escape, so each step is one bare key.
+
+| Key | Does |
+|---|---|
+| `n` / `p` | Next or previous stop |
+| `a` / `A` | Next or previous annotation of the stop |
+| `Right` / `Left` | Next or previous point, where a stop's focus and its annotations are one sequence |
+| `Down` / `Up` | Next or previous stop |
+| `s` | Hide the card, or show the narration again |
+| `S` | Show the tour's description under its title |
+| `d` | End the tour and leave the mode |
+| `Escape` | Leave the mode. The tour stays open, and `space W` goes back to it. |
+
+Give the user these keys when you hand them the slug.
+
 ## Tours across commits
 
 A tour that explains a series of commits reads each stop against the tree it
