@@ -1,4 +1,5 @@
 use crate::{
+    action_handlers::split_selection::RegexSelectKind,
     app::{Stoat, UpdateEffect},
     editor_state::{EditorState, ScrollGlide},
     input_history::InputHistory,
@@ -96,16 +97,18 @@ pub(crate) struct LastSearch {
     regex: Option<CursorRegex>,
 }
 
-/// The open search prompt as the status bar paints it.
+/// The open search or regex prompt as the status bar paints it.
 ///
-/// The prompt is the only thing on screen that shows the typed query, so it
+/// The prompt is the only thing on screen that shows the typed text, so it
 /// carries the caret position as well as the text. A snapshot rather than a
-/// borrow of [`SearchInputState`], because the caret resolves through a mutable
+/// borrow of the input state, because the caret resolves through a mutable
 /// workspace and the frame holds that borrow for the whole paint.
-pub(crate) struct SearchPrompt {
-    /// `/` for a forward search, `?` for a reverse one.
-    pub(crate) sigil: char,
-    /// The query typed so far.
+pub(crate) struct StatusPrompt {
+    /// What the prompt is for, painted ahead of the text. A search shows `/`
+    /// or `?` for its direction, and the regex modal shows `select:` or
+    /// `split:` for its kind.
+    pub(crate) label: &'static str,
+    /// The text typed so far.
     pub(crate) text: String,
     /// Caret position as a byte offset into [`Self::text`].
     ///
@@ -126,22 +129,30 @@ impl LastSearch {
     }
 }
 
-/// The open search prompt, or `None` when no search input is open.
+/// The open search or regex prompt, or `None` when neither input is open.
 ///
 /// Takes `&mut Stoat` because resolving the caret snapshots the input editor's
 /// display map, so the frame must call it before it borrows the workspace.
-pub(crate) fn prompt_display(stoat: &mut Stoat) -> Option<SearchPrompt> {
-    let (sigil, editor_id, text) = {
-        let state = stoat.search_input.as_ref()?;
-        let sigil = match state.direction {
-            SearchDirection::Forward => '/',
-            SearchDirection::Reverse => '?',
+pub(crate) fn prompt_display(stoat: &mut Stoat) -> Option<StatusPrompt> {
+    let (label, editor_id, text) = {
+        let (label, input) = match &stoat.search_input {
+            Some(state) => {
+                let label = match state.direction {
+                    SearchDirection::Forward => "/",
+                    SearchDirection::Reverse => "?",
+                };
+                (label, &state.input)
+            },
+            None => {
+                let state = stoat.split_selection_input.as_ref()?;
+                let label = match state.kind {
+                    RegexSelectKind::Select => "select:",
+                    RegexSelectKind::Split => "split:",
+                };
+                (label, &state.input)
+            },
         };
-        (
-            sigil,
-            state.input.editor_id,
-            state.input.text(stoat.active_workspace()),
-        )
+        (label, input.editor_id, input.text(stoat.active_workspace()))
     };
 
     // The caret marks where the next key lands. A mid-text insert cursor is a
@@ -153,8 +164,8 @@ pub(crate) fn prompt_display(stoat: &mut Stoat) -> Option<SearchPrompt> {
         .find(|&at| text.is_char_boundary(at))
         .unwrap_or(0);
 
-    Some(SearchPrompt {
-        sigil,
+    Some(StatusPrompt {
+        label,
         text,
         cursor,
     })
@@ -2107,6 +2118,35 @@ mod tests {
             cached_match_count(&mut h),
             1,
             "and abandoning the prompt lights the stored query again",
+        );
+    }
+
+    /// The regex prompt picks selections rather than searching, so while it is
+    /// open the highlights stay on the stored query that `n` walks.
+    ///
+    /// A keystroke in the prompt moves nothing the pane's replay key holds, so
+    /// the content replays and the highlight pass does not run. The test moves
+    /// the paint generation to force the repaint that any other change brings,
+    /// such as a selection preview or a buffer edit.
+    #[test]
+    fn the_regex_prompt_leaves_the_highlights_on_the_stored_query() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "aaa\n");
+        h.type_keys("/");
+        h.type_text("aa");
+        h.type_keys("enter");
+
+        h.type_keys("s");
+        h.type_text("a");
+        h.stoat.paint_generation += 1;
+        let _ = h.render_composited();
+        assert_eq!(
+            (
+                h.stoat.split_selection_input.is_some(),
+                cached_match_count(&mut h)
+            ),
+            (true, 1),
+            "the stored 'aa' lights its one match while the typed 'a' waits in the prompt",
         );
     }
 

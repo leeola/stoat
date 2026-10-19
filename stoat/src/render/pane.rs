@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::{search::SearchPrompt, view},
+    action_handlers::{search::StatusPrompt, view},
     app::SPINNER_FRAMES,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
@@ -1110,9 +1110,9 @@ fn status_segments(
     let mut left: Vec<(String, Style)> = Vec::new();
     let mut cursor = area.x;
     // The prompt takes the identifying left segments for as long as it is open.
-    // The query is what the user needs to read mid-type. The workspace, screen
-    // and file names are context they already have.
-    let prompt = frame.search_prompt.filter(|_| is_focused);
+    // The typed text is what the user needs to read mid-type. The workspace,
+    // screen and file names are context they already have.
+    let prompt = frame.status_prompt.filter(|_| is_focused);
     if is_focused {
         let (label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
@@ -1328,17 +1328,17 @@ fn status_segments(
     (left, right)
 }
 
-/// Append the open search prompt as left-anchored segments.
+/// Append the open status prompt as left-anchored segments.
 ///
 /// Three of them, because a segment carries one style for its whole text and
 /// the caret is a single inverted cell inside an otherwise uniform run. The
-/// trailing segment always ends in a space, so the query never abuts whatever
-/// the bar packs after it.
+/// trailing segment always ends in a space, so the typed text never abuts
+/// whatever the bar packs after it.
 fn push_prompt(
     left: &mut Vec<StatusSeg>,
     cursor: &mut u16,
     end_x: u16,
-    prompt: &SearchPrompt,
+    prompt: &StatusPrompt,
     base_style: Style,
 ) {
     let (before, rest) = prompt.text.split_at(prompt.cursor);
@@ -1348,7 +1348,7 @@ fn push_prompt(
         left,
         cursor,
         end_x,
-        format!("{}{before}", prompt.sigil),
+        format!("{}{before}", prompt.label),
         base_style,
     );
     push_left(
@@ -1363,7 +1363,7 @@ fn push_prompt(
     push_left(left, cursor, end_x, format!("{after} "), base_style);
 }
 
-/// Style for the one cell the search prompt's caret covers.
+/// Style for the one cell the status prompt's caret covers.
 ///
 /// Swaps the bar's own color pair rather than setting [`Modifier::REVERSED`],
 /// because [`resolve_rich_segments`] carries a segment across as an fg/bg pair

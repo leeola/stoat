@@ -45,7 +45,7 @@ pub(crate) mod workspace_picker;
 
 use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
-    action_handlers::search::{self, SearchPrompt},
+    action_handlers::search::{self, StatusPrompt},
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
@@ -358,10 +358,10 @@ pub(crate) struct FrameCtx<'a> {
     /// paint compiles its own regex, and a highlight disagreeing with the jump
     /// lights up a different set of matches than `n` walks.
     pub(crate) search_smart_case: bool,
-    /// The open `/` or `?` prompt, painted over the focused pane's status-bar
-    /// left segments so the user reads the query as they type it. `None`
-    /// whenever no search input is open.
-    pub(crate) search_prompt: Option<&'a SearchPrompt>,
+    /// The open search or regex prompt, painted over the focused pane's
+    /// status-bar left segments so the user reads the pattern as they type it.
+    /// `None` whenever neither input is open.
+    pub(crate) status_prompt: Option<&'a StatusPrompt>,
     /// How document editor panes number the gutter, resolved from
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
@@ -877,7 +877,7 @@ pub(crate) fn frame(
     // Resolved before the field borrows below, because snapshotting the prompt
     // editor's display map takes the whole app mutably. Nothing between here
     // and the status bars opens or closes the prompt.
-    let search_prompt = search::prompt_display(stoat);
+    let status_prompt = search::prompt_display(stoat);
 
     // The last whole-app borrows are behind us, so what the frame reads from
     // here on is field by field and can live alongside the workspace below.
@@ -1012,12 +1012,18 @@ pub(crate) fn frame(
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_label: pane::mode_segment(mode, &stoat.theme, &stoat.settings.mode_badges),
         diagnostics: &stoat.diagnostics,
-        search_query: match search_prompt.as_ref() {
+        // Only a search prompt types a query. The regex prompt's pattern picks
+        // selections inside the current ones, so the highlights stay on the
+        // stored search, which is also what `n` walks.
+        search_query: match status_prompt
+            .as_ref()
+            .filter(|_| stoat.search_input.is_some())
+        {
             Some(prompt) => Some(prompt.text.as_str()),
             None => stoat.last_search.as_ref().map(|s| s.query.as_str()),
         },
         search_smart_case,
-        search_prompt: search_prompt.as_ref(),
+        status_prompt: status_prompt.as_ref(),
         line_numbers: stoat
             .settings
             .editor_line_numbers

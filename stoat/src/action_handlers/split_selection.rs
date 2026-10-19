@@ -20,7 +20,7 @@ pub(crate) enum RegexSelectKind {
 /// [`cancel`].
 pub(crate) struct SplitSelectionInputState {
     pub(crate) input: InputView,
-    kind: RegexSelectKind,
+    pub(crate) kind: RegexSelectKind,
 }
 
 pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
@@ -187,7 +187,7 @@ pub(crate) fn cancel(stoat: &mut Stoat) -> bool {
 #[cfg(test)]
 mod tests {
     use crate::{
-        action_handlers::dispatch,
+        action_handlers::{dispatch, search},
         app::UpdateEffect,
         test_harness::{editor, keys, TestHarness},
         Stoat,
@@ -222,6 +222,41 @@ mod tests {
         );
         assert!(h.stoat.split_selection_input.is_some());
         assert_eq!(h.stoat.focused_mode(), "insert");
+    }
+
+    /// The bar reads back the typed pattern behind a `select:` label, the way it
+    /// reads back a search query behind `/`.
+    #[test]
+    fn the_select_prompt_shows_the_typed_pattern() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo bar");
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("fo");
+
+        let prompt = search::prompt_display(&mut h.stoat).expect("the prompt is open");
+        h.snapshot();
+        assert_eq!(
+            (
+                prompt.label,
+                prompt.text.as_str(),
+                prompt.cursor,
+                h.rendered_text().contains("select:fo"),
+            ),
+            ("select:", "fo", 2, true),
+            "the prompt names the kind, the text, and the caret, and the bar paints them",
+        );
+    }
+
+    #[test]
+    fn the_split_prompt_is_labeled_split() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("foo bar");
+        dispatch(&mut h.stoat, &action::SplitSelection);
+
+        assert_eq!(
+            search::prompt_display(&mut h.stoat).map(|prompt| prompt.label),
+            Some("split:"),
+        );
     }
 
     #[test]

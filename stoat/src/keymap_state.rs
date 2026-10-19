@@ -669,9 +669,9 @@ impl ActiveModal {
     /// worth drawing beneath it.
     ///
     /// False only for the transient text inputs, which never claim the editor
-    /// area as a box. Search draws in the focused pane's status bar, Rename
-    /// draws a popup beside the cursor, and SplitSelection, FilterSelections
-    /// and ShellInput do not paint yet.
+    /// area as a box. Search and SplitSelection draw in the focused pane's
+    /// status bar, Rename draws a popup beside the cursor, and only
+    /// FilterSelections and ShellInput do not paint.
     pub(crate) fn hides_minimap(self) -> bool {
         !matches!(
             self,
@@ -696,9 +696,9 @@ impl ActiveModal {
 
     /// Whether the frame paints this modal as its own centered box.
     ///
-    /// False for the transient text inputs. Search renders in the focused pane's
-    /// status bar and Rename in the popup section beside the cursor, while
-    /// SplitSelection, FilterSelections and ShellInput do not paint yet. All of
+    /// False for the transient text inputs. Search and SplitSelection render in
+    /// the focused pane's status bar and Rename in the popup section beside the
+    /// cursor, while only FilterSelections and ShellInput do not paint. All of
     /// them leave the frame free to paint the key-hints box over the editor
     /// behind them.
     pub(crate) fn paints_own_box(self) -> bool {
