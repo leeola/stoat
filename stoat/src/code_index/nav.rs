@@ -59,6 +59,22 @@ impl TrailState {
         self.path.entries().is_empty()
     }
 
+    /// The trail's phase as the `trail` keymap predicate reads it.
+    ///
+    /// `path` once a path exists, `armed` while only a start is marked, and
+    /// `None` otherwise. A trail installed without marks holds no start. An
+    /// empty path there has no armed phase, because the end mark has no start
+    /// to pair with.
+    pub(crate) fn phase(&self) -> Option<&'static str> {
+        if !self.is_armed() {
+            Some("path")
+        } else if self.start.is_some() {
+            Some("armed")
+        } else {
+            None
+        }
+    }
+
     /// Project the trail into its workspace badge.
     ///
     /// Total where [`AgentStatus::badge`](crate::agent_status::AgentStatus::badge)

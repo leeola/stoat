@@ -26,6 +26,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "pair",
     "git",
     "walkthrough",
+    "trail",
     "token",
     "token_known",
     "lsp",
@@ -53,6 +54,9 @@ pub(crate) struct Flags {
     pub(crate) git: bool,
     /// Whether a walkthrough tour is open. See [`Workspace::walkthrough`].
     pub(crate) walkthrough: bool,
+    /// The call-graph trail's phase, `armed` or `path`, or `None` with no
+    /// trail. See [`Workspace::trail`].
+    pub(crate) trail: Option<&'static str>,
 }
 
 impl Flags {
@@ -62,6 +66,7 @@ impl Flags {
             pair: ws.pair_panes().is_some(),
             git: ws.repo_root.is_some(),
             walkthrough: ws.walkthrough.is_some(),
+            trail: ws.trail.as_ref().and_then(|trail| trail.phase()),
         }
     }
 }
@@ -76,6 +81,9 @@ pub(crate) struct StoatKeymapState<'a> {
     git: StateValue,
     /// Whether a walkthrough tour is open.
     walkthrough: StateValue,
+    /// The call-graph trail's phase, `armed` or `path`. Absent with no trail,
+    /// so a bare `trail` reads false.
+    trail: Option<StateValue>,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -133,6 +141,7 @@ impl<'a> StoatKeymapState<'a> {
             pair: StateValue::Bool(flags.pair),
             git: StateValue::Bool(flags.git),
             walkthrough: StateValue::Bool(flags.walkthrough),
+            trail: flags.trail.map(|phase| StateValue::String(phase.into())),
             pane: None,
             view: None,
             modal: None,
@@ -255,6 +264,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "pair" => Some(&self.pair),
             "git" => Some(&self.git),
             "walkthrough" => Some(&self.walkthrough),
+            "trail" => self.trail.as_ref(),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -956,9 +966,11 @@ mod tests {
     use super::*;
     use crate::{
         app::DEFAULT_KEYMAP,
+        code_index::nav,
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, StagedMark},
         run::RunId,
     };
+    use codegraph::SymbolKey;
     use std::{collections::HashSet, iter};
     use stoat_config::Value;
 
@@ -1132,6 +1144,30 @@ mod tests {
             [scratch, unstaged, changes(&h)],
             [false, true, true].map(|on| Some(StateValue::Bool(on))),
             "a scratch buffer, then an unstaged hunk, then a staged hunk alone",
+        );
+    }
+
+    #[test]
+    fn trail_reads_the_phase_of_the_trail() {
+        let mut h = Stoat::test();
+        let phase = |h: &crate::test_harness::TestHarness| {
+            StoatKeymapState::from_stoat(&h.stoat).get("trail").cloned()
+        };
+        let scratch = phase(&h);
+
+        open_foo_bar(&mut h);
+        nav::mark_trail_start(&mut h.stoat);
+        let armed = phase(&h);
+
+        nav::install_trail(&mut h.stoat, &[SymbolKey([1u8; 16]), SymbolKey([2u8; 16])]);
+        let path = phase(&h);
+
+        nav::trail_clear(&mut h.stoat);
+        assert_eq!(
+            [scratch, armed, path, phase(&h)],
+            [None, Some("armed"), Some("path"), None]
+                .map(|phase| phase.map(|phase| StateValue::String(phase.into()))),
+            "no trail, a marked start, an installed path, then a cleared trail",
         );
     }
 
