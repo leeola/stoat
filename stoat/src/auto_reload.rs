@@ -997,21 +997,51 @@ pub(crate) fn note_followed_change(stoat: &mut Stoat, path: PathBuf) {
     }));
 }
 
-/// Land the held path once its follow window closes, and report whether the
-/// reader sees anything move.
+/// Land the held path, and report whether the reader sees anything move.
 ///
-/// Answers `false` until the window's timer fires, and when the path lands
-/// nowhere. See [`follow_change_now`] for where a path lands.
+/// After its follow window closes, the path lands on the first pass that finds
+/// an editor split pane in focus. While a terminal, agent, image, or label
+/// pane, a dock, or a modal has focus, the path waits in its slot. A later
+/// write replaces the held path and opens a new window.
+///
+/// Answers `false` while the path waits, and when it lands nowhere.
+///
+/// See also:
+/// - [`follow_change_now`] for where a path lands.
 pub(crate) fn drain_followed_change(stoat: &mut Stoat) -> bool {
-    if stoat.follow_rx.try_recv().is_err() {
+    let closed = stoat.follow_rx.try_recv().is_ok();
+    if closed {
+        stoat.follow_timer = None;
+    }
+    if stoat.follow_timer.is_some() {
         return false;
     }
-    stoat.follow_timer = None;
+
+    let Some(held) = stoat.follow_pending.as_ref() else {
+        return false;
+    };
+    if follow_target(stoat).is_none() {
+        if closed {
+            tracing::debug!(
+                target: "stoat::follow",
+                path = %held.display(),
+                "followed write held, no editor pane has focus"
+            );
+        }
+        return false;
+    }
 
     let Some(path) = stoat.follow_pending.take() else {
         return false;
     };
-    follow_change_now(stoat, &path)
+    let landed = follow_change_now(stoat, &path);
+    tracing::debug!(
+        target: "stoat::follow",
+        path = %path.display(),
+        landed,
+        "followed write landed"
+    );
+    landed
 }
 
 /// Land a followed write to `path` in the focused pane's diff view, and report
@@ -1054,11 +1084,12 @@ fn follow_change_now(stoat: &mut Stoat, path: &Path) -> bool {
 }
 
 /// The split pane a followed write lands in, or `None` while the reader works
-/// somewhere follow must leave alone.
+/// somewhere else.
 ///
 /// Follow reuses the focused editor. An open modal, a focused dock, and a
 /// focused pane that shows an agent, a terminal, or an image all answer `None`,
-/// because taking any of them over hides what the reader works in.
+/// because taking any of them over hides what the reader works in. On `None`,
+/// [`drain_followed_change`] holds the write until an editor pane has focus.
 fn follow_target(stoat: &Stoat) -> Option<PaneId> {
     if keymap_state::active_modal(stoat).is_some() {
         return None;
@@ -1914,6 +1945,7 @@ mod tests {
     fn a_watched_write_follows_once_its_window_closes() {
         let mut h = follow_harness();
         watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        h.settle();
         assert_eq!(
             landing(&mut h),
             (PathBuf::from("/repo/a.rs"), false, 0),
@@ -2055,17 +2087,96 @@ mod tests {
         assert_eq!(landing(&mut h), (PathBuf::from("/repo/a.rs"), false, 0));
     }
 
-    #[test]
-    fn follow_changes_leaves_a_pane_without_an_editor_alone() {
-        let mut h = follow_harness();
-        let focus = h.stoat.active_workspace().panes.focus();
-        h.stoat.active_workspace_mut().panes.pane_mut(focus).view = View::Label("agent".into());
+    fn focused_view(h: &TestHarness) -> View {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).view.clone()
+    }
 
-        assert!(!follow_change_now(&mut h.stoat, Path::new("/repo/b.rs")));
-        assert!(matches!(
-            h.stoat.active_workspace().panes.pane(focus).view,
-            View::Label(_)
-        ));
+    fn set_focused_view(h: &mut TestHarness, view: View) {
+        let focus = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(focus).view = view;
+    }
+
+    /// The [`follow_harness`] with an agent label in the focused pane and a
+    /// write to `b.rs` that waits for an editor pane. The second value is the
+    /// editor view that the label replaced.
+    fn held_write() -> (TestHarness, View) {
+        let mut h = follow_harness();
+        let editor = focused_view(&h);
+        set_focused_view(&mut h, View::Label("agent".into()));
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        (h, editor)
+    }
+
+    /// A write whose window closes while no editor pane has focus waits in its
+    /// slot, and lands once an editor pane has focus again.
+    #[test]
+    fn a_write_while_no_editor_pane_has_focus_waits_for_one() {
+        let (mut h, editor) = held_write();
+        assert!(!drain_followed_change(&mut h.stoat));
+        assert_eq!(
+            (
+                h.stoat.follow_pending.clone(),
+                h.stoat.follow_timer.is_some(),
+                focused_view(&h),
+            ),
+            (
+                Some(PathBuf::from("/repo/b.rs")),
+                false,
+                View::Label("agent".into())
+            ),
+            "the write waits, and the label stays",
+        );
+
+        set_focused_view(&mut h, editor);
+        assert!(drain_followed_change(&mut h.stoat));
+        h.settle();
+        assert_eq!(
+            (landing(&mut h), h.stoat.follow_pending.clone()),
+            ((PathBuf::from("/repo/b.rs"), true, 1), None),
+        );
+    }
+
+    /// A later write replaces the held path and opens a window of its own. The
+    /// write waits for that window even when an editor pane has focus.
+    #[test]
+    fn a_write_during_the_hold_replaces_the_held_path() {
+        let (mut h, editor) = held_write();
+        h.fake_fs().insert_file("/repo/c.rs", b"c\n");
+        watched_write(&mut h, "/repo/c.rs", FsEventKind::Created);
+        set_focused_view(&mut h, editor);
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.follow_pending.clone(),
+                h.stoat.follow_timer.is_some(),
+                landing(&mut h),
+            ),
+            (
+                Some(PathBuf::from("/repo/c.rs")),
+                true,
+                (PathBuf::from("/repo/a.rs"), false, 0)
+            ),
+            "the write waits for its window",
+        );
+
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+        assert_eq!(landing(&mut h).0, PathBuf::from("/repo/c.rs"));
+    }
+
+    #[test]
+    fn turning_follow_off_drops_a_held_write() {
+        let (mut h, editor) = held_write();
+        toggle_follow_changes(&mut h.stoat);
+        set_focused_view(&mut h, editor);
+        assert_eq!(
+            (
+                h.stoat.follow_pending.clone(),
+                drain_followed_change(&mut h.stoat)
+            ),
+            (None, false),
+        );
     }
 
     #[test]

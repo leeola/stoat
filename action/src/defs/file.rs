@@ -267,7 +267,7 @@ define_action!(
     "FollowChanges",
     ActionKind::FollowChanges,
     "follow every change in the repo",
-    "Toggle following of the working tree. While on, a file written outside the editor opens in the focused pane's diff view with the cursor on the change, whichever file it is. A buffer with unsaved edits is skipped, never clobbered. A second run turns following off. The mode lasts for the session and starts off.",
+    "Toggle following of the working tree. While on, a file written outside the editor opens in the focused pane's diff view with the cursor on the change, whichever file it is. While a terminal, an agent pane, a dock, or a modal has focus, the file waits. It opens when an editor pane next takes focus. A buffer with unsaved edits is skipped, never clobbered. A second run turns following off. The mode lasts for the session and starts off.",
     ActionPriority::Normal,
     command_name = "follow-changes"
 );

@@ -1803,6 +1803,9 @@ pub struct Stoat {
     /// One slot rather than a set. The pane shows one file at a time, so a burst
     /// of writes follows the last path it wrote, and the diff view's n and p walk
     /// the rest.
+    ///
+    /// The slot also holds a write whose window closed while no editor pane had
+    /// focus, until one takes focus.
     pub(crate) follow_pending: Option<PathBuf>,
     /// The debounce timer covering [`Self::follow_pending`].
     ///

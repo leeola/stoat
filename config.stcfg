@@ -1406,7 +1406,8 @@ on key {
     #
     # `f` follows the whole working tree. Each file written outside the editor
     # opens in the diff view with the cursor on the change, until a second `f`
-    # stops it.
+    # stops it. A write that lands while a terminal or an agent pane has focus
+    # waits for an editor pane.
     #
     # `R` holds `r` on. Each open buffer re-reads its file as an outside write
     # lands, with the pane and the cursor left where they are, until a second
