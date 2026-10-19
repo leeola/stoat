@@ -91,6 +91,29 @@ bare key.
 
 Give the user these keys when you hand them the slug.
 
+## Stops over working-tree changes
+
+A tour that explains uncommitted edits shows each stop as a diff. Pass
+`--diff` to `add-stop`, and the player shows the stop's file in the diff
+view, against the index or HEAD as the workspace's diff base says.
+
+```sh
+stoat walkthrough add-stop changes --file src/config.rs --range 12-20 --diff \
+  --narration "The loader reads the env override first."
+stoat walkthrough edit-stop changes s2 --diff      # show s2 as a diff
+stoat walkthrough edit-stop changes s2 --no-diff   # back to plain text
+```
+
+- The range reads the working tree, which is the live side of the hunk. Point
+  it at the lines the edit added or kept, not at the lines it removed.
+- `check` compares a diff stop against the working tree, as it does for any
+  stop.
+- `--diff` and `--commit` do not combine. A commit stop shows its own
+  commit's diff.
+
+A tour of diff stops is how an agent explains the edits it just made. Give
+each change a stop, in reading order, and let the narration say why.
+
 ## Tours across commits
 
 A tour that explains a series of commits reads each stop against the tree it

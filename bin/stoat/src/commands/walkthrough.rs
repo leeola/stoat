@@ -101,6 +101,11 @@ pub enum WalkthroughCommand {
         #[arg(long)]
         commit: Option<String>,
 
+        /// Play the stop in the diff view of its file, for a tour over
+        /// working-tree changes.
+        #[arg(long, conflicts_with = "commit")]
+        diff: bool,
+
         /// Short heading for the stop.
         #[arg(long)]
         title: Option<String>,
@@ -138,6 +143,14 @@ pub enum WalkthroughCommand {
         /// Return the stop to the working tree. Re-captures the snippet.
         #[arg(long, conflicts_with = "commit")]
         no_commit: bool,
+
+        /// Play the stop in the diff view of its file.
+        #[arg(long, conflicts_with = "commit")]
+        diff: bool,
+
+        /// Play the stop as plain text again.
+        #[arg(long, conflicts_with = "diff")]
+        no_diff: bool,
 
         #[arg(long)]
         title: Option<String>,
@@ -361,6 +374,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             file,
             range,
             commit,
+            diff,
             title,
             narration,
             before,
@@ -372,6 +386,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             &file,
             &range,
             commit.as_deref(),
+            diff,
             title,
             narration.read(fs)?.unwrap_or_default(),
             before.as_deref(),
@@ -384,6 +399,8 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             range,
             commit,
             no_commit,
+            diff,
+            no_diff,
             title,
             no_title,
             narration,
@@ -396,6 +413,7 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
             file.as_deref(),
             range.as_deref(),
             optional_edit(commit, no_commit),
+            optional_flag(diff, no_diff),
             optional_edit(title, no_title),
             narration.read(fs)?,
         ),
@@ -671,6 +689,8 @@ fn delete(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<String, Whatever> 
 /// A `commit` reads the range out of that commit's tree and stores the full
 /// sha it resolves to. A branch that moves later then leaves the stop on the
 /// commit it was written over.
+///
+/// A `diff` stop plays in the diff view of its file.
 #[allow(clippy::too_many_arguments)]
 fn add_stop(
     fs: &dyn FsHost,
@@ -679,6 +699,7 @@ fn add_stop(
     file: &Path,
     range: &str,
     commit: Option<&str>,
+    diff: bool,
     title: Option<String>,
     narration: String,
     before: Option<&str>,
@@ -692,6 +713,15 @@ fn add_stop(
         .whatever_context("add the stop")?
         .id
         .clone();
+    if diff {
+        let edit = StopEdit {
+            diff: Some(true),
+            ..StopEdit::default()
+        };
+        walkthrough
+            .edit_stop(&id, edit)
+            .whatever_context("mark the stop for the diff view")?;
+    }
 
     save(fs, root, &walkthrough, slug)?;
     Ok(id)
@@ -707,6 +737,8 @@ fn add_stop(
 /// `commit` edits the stop's commit in two layers. `Some(Some(rev))` moves the
 /// stop onto that commit's tree, and `Some(None)` returns it to the working
 /// tree. A re-capture with `None` reads wherever the stop already reads.
+///
+/// `diff` sets or clears the stop's diff view, and `None` leaves it.
 #[allow(clippy::too_many_arguments)]
 fn edit_stop(
     fs: &dyn FsHost,
@@ -716,6 +748,7 @@ fn edit_stop(
     file: Option<&Path>,
     range: Option<&str>,
     commit: Option<Option<String>>,
+    diff: Option<bool>,
     title: Option<Option<String>>,
     narration: Option<String>,
 ) -> Result<String, Whatever> {
@@ -749,6 +782,7 @@ fn edit_stop(
             StopEdit {
                 title,
                 commit,
+                diff,
                 narration,
                 focus,
             },
@@ -1140,6 +1174,16 @@ fn optional_edit(value: Option<String>, clear: bool) -> Option<Option<String>> {
     }
 }
 
+/// Which of a `--<flag>` and `--no-<flag>` pair the caller gave, as an edit
+/// that leaves the flag alone when neither is given.
+fn optional_flag(set: bool, clear: bool) -> Option<bool> {
+    match (set, clear) {
+        (true, _) => Some(true),
+        (false, true) => Some(false),
+        (false, false) => None,
+    }
+}
+
 fn load(fs: &dyn FsHost, root: &Path, slug: &str) -> Result<Walkthrough, Whatever> {
     store::load(fs, root, slug).whatever_context(format!("read walkthrough '{slug}'"))
 }
@@ -1178,6 +1222,8 @@ mod tests {
         new, remove_annotation, remove_stop, show, Annotation, Location, MoveArgs, Point, Range,
         Walkthrough,
     };
+    use crate::commands::default::Args;
+    use clap::{error::ErrorKind, Parser};
     use git2::{Commit, Repository, Signature};
     use std::path::{Path, PathBuf};
     use stoat::{host::LocalFs, walkthrough::store};
@@ -1233,6 +1279,7 @@ mod tests {
             &dir.path().join("main.rs"),
             range,
             commit,
+            false,
             None,
             String::new(),
             None,
@@ -1250,6 +1297,7 @@ mod tests {
             &dir.path().join("main.rs"),
             "2",
             None,
+            false,
             None,
             "the entry point".to_owned(),
             None,
@@ -1303,6 +1351,7 @@ mod tests {
             &dir.path().join("main.rs"),
             "1",
             None,
+            false,
             Some("Imports".to_owned()),
             String::new(),
             None,
@@ -1333,6 +1382,7 @@ mod tests {
             &dir.path().join("main.rs"),
             "1",
             None,
+            false,
             None,
             String::new(),
             Some("s1"),
@@ -1365,6 +1415,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some(Some("Named".to_owned())),
             None,
         )
@@ -1375,6 +1426,87 @@ mod tests {
         assert_eq!(
             stop.focus.snippet, "fn main() {",
             "the capture is untouched"
+        );
+    }
+
+    #[test]
+    fn add_stop_diff_stores_the_flag() {
+        let dir = workspace();
+        new(&LocalFs, dir.path(), "tour", None, None).expect("new");
+        add_stop(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            &dir.path().join("main.rs"),
+            "2",
+            None,
+            true,
+            None,
+            String::new(),
+            None,
+        )
+        .expect("add-stop");
+
+        let stop = &stored(&dir).stops[0];
+        assert_eq!((stop.diff, stop.commit.as_deref()), (true, None));
+    }
+
+    #[test]
+    fn edit_stop_no_diff_clears_it() {
+        let dir = workspace();
+        with_stop(&dir);
+        let diff_after = |diff| {
+            edit_stop(
+                &LocalFs,
+                dir.path(),
+                "tour",
+                "s1",
+                None,
+                None,
+                None,
+                diff,
+                None,
+                None,
+            )
+            .expect("edit-stop");
+            stored(&dir).stops[0].diff
+        };
+
+        assert_eq!(
+            [
+                diff_after(Some(true)),
+                diff_after(None),
+                diff_after(Some(false))
+            ],
+            [true, true, false],
+            "--diff sets it, an edit naming neither keeps it, and --no-diff clears it",
+        );
+    }
+
+    /// A commit stop shows its own commit's diff, so a stop asks for one or
+    /// the other.
+    #[test]
+    fn diff_and_commit_are_refused_together() {
+        let parsed = |argv: &[&str]| {
+            Args::try_parse_from(["stoat", "walkthrough"].iter().chain(argv).copied())
+                .map(|_| ())
+                .map_err(|error| error.kind())
+        };
+        let add = ["add-stop", "tour", "--file", "a.rs", "--range", "1"];
+
+        assert_eq!(
+            [
+                parsed(&[&add[..], &["--diff", "--commit", "HEAD"]].concat()),
+                parsed(&["edit-stop", "tour", "s1", "--diff", "--commit", "HEAD"]),
+                parsed(&["edit-stop", "tour", "s1", "--diff", "--no-diff"]),
+                parsed(&[&add[..], &["--diff"]].concat()),
+            ],
+            [
+                Err(ErrorKind::ArgumentConflict),
+                Err(ErrorKind::ArgumentConflict),
+                Err(ErrorKind::ArgumentConflict),
+                Ok(()),
+            ],
         );
     }
 
@@ -1390,6 +1522,7 @@ mod tests {
             "s1",
             None,
             Some("1"),
+            None,
             None,
             None,
             None,
@@ -1411,6 +1544,7 @@ mod tests {
                 &dir.path().join("main.rs"),
                 "1",
                 None,
+                false,
                 None,
                 String::new(),
                 None,
@@ -1863,6 +1997,7 @@ mod tests {
             &outside.path().join("other.rs"),
             "1",
             None,
+            false,
             None,
             String::new(),
             None,
@@ -2106,6 +2241,7 @@ mod tests {
             &file,
             "1",
             None,
+            false,
             None,
             String::new(),
             None,
@@ -2201,6 +2337,7 @@ mod tests {
             Some(None),
             None,
             None,
+            None,
         )
         .expect("edit-stop");
 
@@ -2225,6 +2362,7 @@ mod tests {
             None,
             None,
             Some(Some(first.clone())),
+            None,
             None,
             None,
         )
@@ -2252,6 +2390,7 @@ mod tests {
             "s1",
             None,
             Some("3"),
+            None,
             None,
             None,
             None,

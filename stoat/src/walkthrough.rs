@@ -81,6 +81,18 @@ pub struct Stop {
     /// the same bytes it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// Whether the player shows this stop in the diff view of its file, against
+    /// the workspace's diff base.
+    ///
+    /// A tour that explains working-tree changes sets it, so each stop lands on
+    /// its change as a diff rather than as plain text. A stop with a
+    /// [`Self::commit`] shows that commit's diff on its own, so the flag has no
+    /// effect there.
+    ///
+    /// Absent from the stored form while false, so a stop without it writes the
+    /// same bytes it always did.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diff: bool,
     /// Markdown narration shown alongside the focused code.
     pub narration: String,
     /// The file and range this stop is about.
@@ -173,6 +185,7 @@ pub enum RangeSpec {
 pub struct StopEdit {
     pub title: Option<Option<String>>,
     pub commit: Option<Option<String>>,
+    pub diff: Option<bool>,
     pub narration: Option<String>,
     pub focus: Option<Location>,
 }
@@ -322,6 +335,7 @@ impl Walkthrough {
             id: format!("s{}", self.next_stop_id),
             title,
             commit,
+            diff: false,
             narration,
             focus,
             annotations: Vec::new(),
@@ -342,6 +356,9 @@ impl Walkthrough {
         }
         if let Some(commit) = edit.commit {
             stop.commit = commit;
+        }
+        if let Some(diff) = edit.diff {
+            stop.diff = diff;
         }
         if let Some(narration) = edit.narration {
             stop.narration = narration;
@@ -833,6 +850,24 @@ mod tests {
         assert_eq!(parsed.stops[0].commit.as_deref(), Some("0123abcd"));
     }
 
+    /// Every walkthrough stored before stops named the diff view must read back
+    /// the same, and keep writing the same bytes it always did.
+    #[test]
+    fn a_diff_stop_round_trips_and_a_plain_one_stores_no_flag() {
+        let mut walkthrough = with_stops(1);
+        let plain = serde_json::to_string(&walkthrough).expect("serialize");
+
+        walkthrough.stops[0].diff = true;
+        let flagged = serde_json::to_string(&walkthrough).expect("serialize");
+        let parsed: Walkthrough = serde_json::from_str(&flagged).expect("deserialize");
+
+        assert_eq!(
+            (plain.contains("\"diff\""), parsed),
+            (false, walkthrough),
+            "a plain stop leaves the flag out of the file, and a set one reads back",
+        );
+    }
+
     /// Every walkthrough stored before stops named commits must read back the
     /// same, and keep writing the same bytes it always did.
     #[test]
@@ -1063,6 +1098,24 @@ mod tests {
             )
             .expect("s1 exists");
         assert_eq!(walkthrough.stops[0].title, None, "an inner None clears it");
+
+        let diff = |diff| StopEdit {
+            diff,
+            ..StopEdit::default()
+        };
+        walkthrough
+            .edit_stop("s1", diff(Some(true)))
+            .expect("s1 exists");
+        walkthrough.edit_stop("s1", diff(None)).expect("s1 exists");
+        let kept = walkthrough.stops[0].diff;
+        walkthrough
+            .edit_stop("s1", diff(Some(false)))
+            .expect("s1 exists");
+        assert_eq!(
+            (kept, walkthrough.stops[0].diff),
+            (true, false),
+            "an outer None leaves the flag, and Some sets it either way",
+        );
 
         walkthrough
             .add_annotation(
