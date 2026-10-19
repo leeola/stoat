@@ -81,6 +81,9 @@ A diff stop shows its file in the diff view. A plain stop leaves the view as
 the reader has it, so the diff view stays on through the rest of a tour that
 turned it on.
 
+`stoat api focus` reports the open tour, with the stop and the annotation the
+reader is on, so you can follow the reader through a tour you wrote.
+
 | Key | Does |
 |---|---|
 | `n` / `p` | Next or previous stop |

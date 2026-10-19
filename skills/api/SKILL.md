@@ -115,6 +115,12 @@ stoat api focus --text
   "modal": null,
   "pane": {"index": 0, "kind": "editor"},
   "tab": {"count": 1, "index": 0, "title": "main.rs"},
+  "walkthrough": {
+    "annotation": null,
+    "slug": "startup",
+    "stop": {"count": 3, "id": "s2", "index": 2, "title": "Loading the config"},
+    "title": "How startup works"
+  },
   "workspace": {
     "active": true,
     "git_root": "/home/me/app",
@@ -124,7 +130,8 @@ stoat api focus --text
 }
 ```
 
-What has focus, and what the focused editor shows.
+What has focus, what the focused editor shows, and where the reader is in an
+open walkthrough.
 
 - `pane.kind` is `editor`, `run`, `agent`, `terminal`, `commits`, `image`, or
   `label`. The same words work as the `pane` condition of a key binding.
@@ -136,6 +143,11 @@ What has focus, and what the focused editor shows.
   last line on screen, and is null before the editor's first paint.
 - `dirty` is true with unsaved edits. `pinned` and `diff_view` tell whether
   the editor is pinned and whether it shows the diff view.
+- `walkthrough` names the open tour by `slug` and `title`. `stop` is the stop
+  the reader is on, with its `index` from 1 of `count` and its own `title` or
+  null. `annotation` holds the `id`, `label`, `index`, and `count` of the
+  annotation the reader is on, or null on the stop's own focus. The field is
+  null with no tour open.
 - `--text` adds `visible_text`, the text of the lines on screen.
 
 ### selection

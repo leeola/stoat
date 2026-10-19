@@ -59,7 +59,8 @@ pub(crate) fn session_info(stoat: &Stoat, uid: WorkspaceUid) -> Value {
 /// workspace on screen reports one. `dock` names the side of a focused dock.
 /// `editor` follows the focus into a dock, and it is null when the focused view
 /// is no editor. With `with_text`, the editor report also carries the text of
-/// its lines on screen. An unknown `uid` reports an error object.
+/// its lines on screen. `walkthrough` names the open tour and the reader's place
+/// in it, and is null with none. An unknown `uid` reports an error object.
 pub(crate) fn focus(stoat: &mut Stoat, uid: WorkspaceUid, with_text: bool) -> Value {
     let Some(ws_id) = workspace_id(stoat, uid) else {
         return json!({ "error": "unknown session" });
@@ -72,6 +73,7 @@ pub(crate) fn focus(stoat: &mut Stoat, uid: WorkspaceUid, with_text: bool) -> Va
 
     let ws = &mut stoat.workspaces[ws_id];
     let editor = editor_report(ws, with_text);
+    let walkthrough = walkthrough_report(ws);
     let pane = ws.panes.pane(ws.panes.focus());
     let dock = match ws.focus {
         FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|dock| dock_side_name(dock.side)),
@@ -93,6 +95,7 @@ pub(crate) fn focus(stoat: &mut Stoat, uid: WorkspaceUid, with_text: bool) -> Va
         "pane": { "index": pane.index, "kind": workspace::view_kind(&pane.view) },
         "dock": dock,
         "modal": modal,
+        "walkthrough": walkthrough,
         "editor": editor,
     })
 }
@@ -171,6 +174,42 @@ fn editor_report(ws: &mut Workspace, with_text: bool) -> Value {
         report["visible_text"] = json!(text);
     }
     report
+}
+
+/// The open tour's slug and title and the reader's place in it, or null with
+/// no tour open.
+///
+/// Each `index` counts from 1, as the player's status line does. The stop's
+/// `title` is its own, null for an untitled stop. `annotation` is null while
+/// the reader is on the stop's own focus.
+fn walkthrough_report(ws: &Workspace) -> Value {
+    let Some(run) = ws.walkthrough.as_ref() else {
+        return Value::Null;
+    };
+    let stop = run.current_stop();
+    let (index, count) = run.progress();
+    let annotation = run.current_annotation().zip(run.annotation_progress()).map(
+        |(annotation, (index, count))| {
+            json!({
+                "id": annotation.id,
+                "label": annotation.label,
+                "index": index,
+                "count": count,
+            })
+        },
+    );
+
+    json!({
+        "slug": run.walkthrough.slug,
+        "title": run.walkthrough.title,
+        "stop": {
+            "id": stop.id,
+            "index": index,
+            "count": count,
+            "title": stop.title,
+        },
+        "annotation": annotation,
+    })
 }
 
 /// The `selection` report on every selection of the focused editor in the
@@ -468,6 +507,7 @@ mod tests {
         pane::Axis,
         test_fixture::{open_buffer, seed},
         test_harness::TestHarness,
+        walkthrough::{self, Location, Walkthrough},
     };
     use std::time::Duration;
     use stoat_action::Terminal;
@@ -587,6 +627,90 @@ mod tests {
 
         let uid = h.stoat.active_workspace().uid;
         assert_eq!(focus(&mut h.stoat, uid, false)["modal"], "palette");
+    }
+
+    /// A two-stop tour over `main.rs`, stored where `open` reads it, whose
+    /// titled first stop carries one annotation.
+    fn store_tour(h: &mut TestHarness) {
+        let text = "fn one() {}\nfn two() {}\n";
+        let root = seed(h, &[("main.rs", text)]);
+        let location = |range: &str| {
+            let Ok(walkthrough::RangeSpec::Points(range)) = walkthrough::parse_range(range) else {
+                panic!("{range} is an L:C-L:C range");
+            };
+            let snippet = walkthrough::snippet_for(text, range).expect("the range fits");
+            Location {
+                path: PathBuf::from("main.rs"),
+                range,
+                snippet,
+            }
+        };
+
+        let mut tour = Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        tour.add_stop(
+            Some("first".to_owned()),
+            String::new(),
+            location("1:1-1:11"),
+            None,
+            None,
+        )
+        .expect("append");
+        tour.add_stop(None, String::new(), location("2:1-2:11"), None, None)
+            .expect("append");
+        let name = location("1:4-1:6");
+        tour.add_annotation(
+            "s1",
+            None,
+            name.range,
+            name.snippet,
+            "the name".to_owned(),
+            String::new(),
+        )
+        .expect("s1 exists");
+
+        h.fake_fs().insert_file(
+            root.join(".stoat/walkthroughs/tour.json"),
+            serde_json::to_string(&tour).expect("serialize"),
+        );
+    }
+
+    #[test]
+    fn focus_names_the_open_tour_and_its_stop() {
+        let mut h = TestHarness::with_size(80, 24);
+        store_tour(&mut h);
+        let uid = h.stoat.active_workspace().uid;
+
+        action_handlers::walkthrough::open(&mut h.stoat, "tour");
+        action_handlers::walkthrough::next_annotation(&mut h.stoat, 1);
+        let on_annotation = focus(&mut h.stoat, uid, false)["walkthrough"].clone();
+
+        action_handlers::walkthrough::next(&mut h.stoat, 1);
+        let on_untitled = focus(&mut h.stoat, uid, false)["walkthrough"].clone();
+
+        assert_eq!(
+            [on_annotation, on_untitled],
+            [
+                json!({
+                    "slug": "tour",
+                    "title": "Tour",
+                    "stop": { "id": "s1", "index": 1, "count": 2, "title": "first" },
+                    "annotation": { "id": "a1", "label": "the name", "index": 1, "count": 1 },
+                }),
+                json!({
+                    "slug": "tour",
+                    "title": "Tour",
+                    "stop": { "id": "s2", "index": 2, "count": 2, "title": null },
+                    "annotation": null,
+                }),
+            ],
+        );
+    }
+
+    #[test]
+    fn focus_without_a_tour_reports_null() {
+        let mut h = TestHarness::with_size(80, 24);
+        let uid = h.stoat.active_workspace().uid;
+        assert_eq!(focus(&mut h.stoat, uid, false)["walkthrough"], Value::Null);
     }
 
     #[test]

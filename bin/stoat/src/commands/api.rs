@@ -105,8 +105,8 @@ pub enum ApiCommand {
         #[arg(value_parser = key_text)]
         keys: String,
     },
-    /// The focused workspace, tab, pane, and modal, and the focused editor's
-    /// file, cursor, and lines on screen.
+    /// The focused workspace, tab, pane, and modal, the focused editor's file,
+    /// cursor, and lines on screen, and the stop of the open walkthrough.
     Focus {
         /// Also print the text of the lines on screen.
         #[arg(long)]
