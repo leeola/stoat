@@ -696,7 +696,11 @@ on key {
     mode == bracket_next {
         Escape -> SetMode(normal);
         Space -> [AddNewlineBelow(), SetMode(normal)];
-        D -> [GotoLastDiagnostic(), SetMode(normal)];
+
+        diags {
+            D -> [GotoLastDiagnostic(), SetMode(normal)];
+            d -> [GotoNextDiagnostic(), SetMode(normal)];
+        }
 
         changes {
             G -> [GotoLastChange(), SetMode(normal)];
@@ -707,7 +711,6 @@ on key {
         }
 
         p -> [GotoNextParagraph(), SetMode(normal)];
-        d -> [GotoNextDiagnostic(), SetMode(normal)];
         f -> [GotoNextFunction(), SetMode(normal)];
         t -> [GotoNextClass(), SetMode(normal)];
         a -> [GotoNextParameter(), SetMode(normal)];
@@ -719,7 +722,11 @@ on key {
     mode == bracket_prev {
         Escape -> SetMode(normal);
         Space -> [AddNewlineAbove(), SetMode(normal)];
-        D -> [GotoFirstDiagnostic(), SetMode(normal)];
+
+        diags {
+            D -> [GotoFirstDiagnostic(), SetMode(normal)];
+            d -> [GotoPrevDiagnostic(), SetMode(normal)];
+        }
 
         changes {
             G -> [GotoFirstChange(), SetMode(normal)];
@@ -730,7 +737,6 @@ on key {
         }
 
         p -> [GotoPrevParagraph(), SetMode(normal)];
-        d -> [GotoPrevDiagnostic(), SetMode(normal)];
         f -> [GotoPrevFunction(), SetMode(normal)];
         t -> [GotoPrevClass(), SetMode(normal)];
         a -> [GotoPrevParameter(), SetMode(normal)];
@@ -745,7 +751,11 @@ on key {
     mode == select_bracket_next {
         Escape -> SetMode(select);
         Space -> [AddNewlineBelow(), SetMode(select)];
-        D -> [GotoLastDiagnostic(), SetMode(select)];
+
+        diags {
+            D -> [GotoLastDiagnostic(), SetMode(select)];
+            d -> [GotoNextDiagnostic(), SetMode(select)];
+        }
 
         changes {
             G -> [GotoLastChange(), SetMode(select)];
@@ -756,7 +766,6 @@ on key {
         }
 
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
-        d -> [GotoNextDiagnostic(), SetMode(select)];
         f -> [GotoNextFunction(), SetMode(select)];
         t -> [GotoNextClass(), SetMode(select)];
         a -> [GotoNextParameter(), SetMode(select)];
@@ -768,7 +777,11 @@ on key {
     mode == select_bracket_prev {
         Escape -> SetMode(select);
         Space -> [AddNewlineAbove(), SetMode(select)];
-        D -> [GotoFirstDiagnostic(), SetMode(select)];
+
+        diags {
+            D -> [GotoFirstDiagnostic(), SetMode(select)];
+            d -> [GotoPrevDiagnostic(), SetMode(select)];
+        }
 
         changes {
             G -> [GotoFirstChange(), SetMode(select)];
@@ -779,7 +792,6 @@ on key {
         }
 
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
-        d -> [GotoPrevDiagnostic(), SetMode(select)];
         f -> [GotoPrevFunction(), SetMode(select)];
         t -> [GotoPrevClass(), SetMode(select)];
         a -> [GotoPrevParameter(), SetMode(select)];
@@ -1494,10 +1506,10 @@ on key {
         }
 
         l -> [ToggleLspStatus(), SetMode(normal)];
-        w -> [GotoNextDiagnostic(), SetMode(normal)];
-        W -> [GotoPrevDiagnostic(), SetMode(normal)];
 
         diags {
+            w -> [GotoNextDiagnostic(), SetMode(normal)];
+            W -> [GotoPrevDiagnostic(), SetMode(normal)];
             d -> [SetMode(normal), OpenDiagnosticsPicker()];
         }
 

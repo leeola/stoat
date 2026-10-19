@@ -563,16 +563,75 @@ fn space_l_w_jumps_to_next_diagnostic() {
     assert_eq!(h.stoat.focused_mode(), "normal");
 }
 
+/// The diagnostic hops `mode` binds in the live state, by action name.
+fn diagnostic_hops(h: &TestHarness, mode: &str) -> Vec<String> {
+    h.stoat
+        .active_keys_for_mode(mode)
+        .into_iter()
+        .flat_map(|(_, actions)| actions)
+        .filter(|action| {
+            matches!(
+                action.name.as_str(),
+                "GotoNextDiagnostic"
+                    | "GotoPrevDiagnostic"
+                    | "GotoFirstDiagnostic"
+                    | "GotoLastDiagnostic"
+            )
+        })
+        .map(|action| action.name.clone())
+        .collect()
+}
+
+/// The steps walk the focused buffer's own diagnostics, so without one they
+/// stay unbound and a press leaves the chord open.
 #[test]
-fn space_l_w_with_no_diagnostic_returns_to_normal() {
+fn space_l_w_is_unbound_without_a_diagnostic() {
     let mut h = TestHarness::with_size(80, 24);
     let root = seed(&mut h, &[("a.rs", "abc\n")]);
     open_buffer(&mut h, root.join("a.rs"));
     h.type_keys("space l w");
     assert_eq!(
-        (h.primary_head_offset(), h.stoat.focused_mode()),
-        (0, "normal"),
-        "the step finds nothing to move to and still leaves the space mode"
+        (
+            diagnostic_hops(&h, "space_lsp"),
+            h.primary_head_offset(),
+            h.stoat.focused_mode()
+        ),
+        (Vec::new(), 0, "space_lsp"),
+        "no step binds, so w moves nothing and leaves the chord open"
+    );
+}
+
+/// Each bracket mode binds its two hops only once the focused buffer holds a
+/// diagnostic for them to reach.
+#[test]
+fn bracket_modes_bind_the_diagnostic_hops_only_with_a_diagnostic() {
+    let mut h = TestHarness::with_size(80, 24);
+    let root = seed(&mut h, &[("a.rs", "abc\n")]);
+    let path = root.join("a.rs");
+    open_buffer(&mut h, path.clone());
+    let hops = |h: &TestHarness| {
+        [
+            "bracket_next",
+            "bracket_prev",
+            "select_bracket_next",
+            "select_bracket_prev",
+        ]
+        .map(|mode| diagnostic_hops(h, mode))
+    };
+    let clean = hops(&h);
+
+    h.seed_diagnostics(path, vec![diag(0, 0, "first")]);
+    assert_eq!(
+        [clean, hops(&h)],
+        [
+            [vec![], vec![], vec![], vec![]],
+            [
+                vec!["GotoLastDiagnostic", "GotoNextDiagnostic"],
+                vec!["GotoFirstDiagnostic", "GotoPrevDiagnostic"],
+                vec!["GotoLastDiagnostic", "GotoNextDiagnostic"],
+                vec!["GotoFirstDiagnostic", "GotoPrevDiagnostic"],
+            ],
+        ],
     );
 }
 

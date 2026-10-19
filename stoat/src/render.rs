@@ -2505,14 +2505,16 @@ mod lsp_filter_tests {
     }
 
     #[test]
-    fn space_lsp_box_lists_the_diagnostic_steps_and_gates_lsp_and_picker_rows() {
+    fn space_lsp_box_gates_the_lsp_and_diagnostic_rows() {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
         // The whole text, since the workspace picker's row starts the same way.
         let picker_row = "open the diagnostics picker for the focused buffer";
-        let steps_list = |text: &str| {
-            text.contains("jump to the next diagnostic")
-                && text.contains("jump to the previous diagnostic")
+        let steps = |text: &str| {
+            [
+                text.contains("jump to the next diagnostic"),
+                text.contains("jump to the previous diagnostic"),
+            ]
         };
 
         let mut h = TestHarness::with_size(150, 50);
@@ -2529,9 +2531,10 @@ mod lsp_filter_tests {
             !scratch.contains("format document via LSP"),
             "the format row is hidden without a language server"
         );
-        assert!(
-            steps_list(&scratch),
-            "the diagnostic steps list without a diagnostic"
+        assert_eq!(
+            steps(&scratch),
+            [false, false],
+            "the diagnostic steps hide without a diagnostic"
         );
         assert!(
             !scratch.contains(picker_row),
@@ -2547,9 +2550,10 @@ mod lsp_filter_tests {
             served.contains("format document via LSP"),
             "the format row shows once a server serves the buffer"
         );
-        assert!(
-            steps_list(&served),
-            "the diagnostic steps list in a served buffer without a diagnostic"
+        assert_eq!(
+            steps(&served),
+            [false, false],
+            "the diagnostic steps hide in a served buffer without a diagnostic"
         );
         assert!(
             !served.contains(picker_row),
@@ -2576,6 +2580,11 @@ mod lsp_filter_tests {
         assert!(
             with_diag.contains(picker_row),
             "the picker row shows once a diagnostic is seeded"
+        );
+        assert_eq!(
+            steps(&with_diag),
+            [true, true],
+            "the diagnostic steps list once a diagnostic is seeded"
         );
     }
 }
