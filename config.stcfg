@@ -1309,7 +1309,10 @@ on key {
 
         git || changes {
             R -> SetMode(review);
-            d -> [Diff(), SetMode(normal)];
+        }
+
+        git || changes || pair {
+            d -> SetMode(space_diff);
         }
 
         pane == editor {
@@ -1454,6 +1457,39 @@ on key {
         c -> [ChangeWalkWrap(), SetMode(normal)];
         r -> [ReloadAll(), SetMode(normal)];
         R -> [LiveReload(), SetMode(normal)];
+    }
+    # The diff chord. It holds the diff arms the git chord also binds, so the
+    # diff keys sit under the diff letter. Each arm chains SetMode(normal), as
+    # the git chord's arms do, so the chord releases after one key.
+    #
+    # `d` toggles the diff view, as `space G d` does.
+    #
+    # `i` and `h` point the diff at the index or at HEAD, `b` flips the base
+    # between them, and `e` opens the base on the command line. A pair diff of
+    # two files has no index or HEAD behind it, so these four bind only where
+    # no pair stands behind the focused file.
+    mode == space_diff {
+        Escape -> SetMode(normal);
+
+        git || changes {
+            d -> [Diff(), SetMode(normal)];
+        }
+
+        git && !pair_diff {
+            i -> [DiffAgainstIndex(), SetMode(normal)];
+            h -> [DiffAgainstHead(), SetMode(normal)];
+            b -> [DiffBaseToggle(), SetMode(normal)];
+            e -> [SetMode(normal), DiffBaseEdit()];
+        }
+
+        view == diff {
+            m -> [JumpToMoveSource(), SetMode(normal)];
+            M -> [JumpToMoveTarget(), SetMode(normal)];
+        }
+
+        pair {
+            D -> [SetMode(normal), DiffPair()];
+        }
     }
     # Reading a tour is a run of steps rather than one, so `space W` holds this
     # mode instead of running a single arm. n and p walk the stops and a and A

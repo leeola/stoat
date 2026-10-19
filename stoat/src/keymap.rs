@@ -3396,6 +3396,95 @@ mod tests {
         );
     }
 
+    /// `space d` opens the diff chord wherever a repository, a change, or a
+    /// pair gives the focused file something to diff. A pane with none of them
+    /// lists no `d`.
+    #[test]
+    fn space_d_opens_the_diff_chord_only_with_a_diff_to_show() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let pressed = |field: Option<&str>| {
+            let state = TestState::new().set("mode", StateValue::String("space".into()));
+            let state = match field {
+                Some(field) => state.set(field, StateValue::Bool(true)),
+                None => state,
+            };
+            keymap
+                .lookup(&state, &key_event(KeyCode::Char('d'), KeyModifiers::NONE))
+                .map(|bound| {
+                    (
+                        bound.len(),
+                        bound[0].name.clone(),
+                        bound[0].args[0].value.clone(),
+                    )
+                })
+        };
+        let to_diff = Some((1, "SetMode".to_string(), Value::Ident("space_diff".into())));
+        assert_eq!(
+            [None, Some("git"), Some("changes"), Some("pair")].map(pressed),
+            [None, to_diff.clone(), to_diff.clone(), to_diff],
+        );
+    }
+
+    /// The one-key diff toggle sits under the chord, as `space G d` spells it.
+    #[test]
+    fn space_d_d_toggles_the_diff() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        assert_eq!(
+            action_names(keymap.lookup(
+                &TestState::in_repo("space_diff"),
+                &key_event(KeyCode::Char('d'), KeyModifiers::NONE),
+            )),
+            Some(vec!["Diff".to_string(), "SetMode".to_string()]),
+        );
+    }
+
+    /// A pair diff of two files has no index or HEAD behind it, so the keys
+    /// that point the diff at one bind only where no pair stands behind the
+    /// focused file.
+    #[test]
+    fn the_diff_chord_binds_the_git_bases_only_without_a_pair_diff() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let pressed = |key, pair_diff| {
+            let state =
+                TestState::in_repo("space_diff").set("pair_diff", StateValue::Bool(pair_diff));
+            action_names(keymap.lookup(&state, &key_event(KeyCode::Char(key), KeyModifiers::NONE)))
+        };
+        for (key, arm) in [
+            ('i', ["DiffAgainstIndex", "SetMode"]),
+            ('h', ["DiffAgainstHead", "SetMode"]),
+            ('b', ["DiffBaseToggle", "SetMode"]),
+            ('e', ["SetMode", "DiffBaseEdit"]),
+        ] {
+            assert_eq!(
+                (pressed(key, false), pressed(key, true)),
+                (Some(arm.map(String::from).to_vec()), None),
+                "{key} in space_diff",
+            );
+        }
+    }
+
+    #[test]
+    fn the_diff_chord_binds_the_pair_diff_only_with_a_pair() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let pressed = |pair| {
+            let state = TestState::new()
+                .set("mode", StateValue::String("space_diff".into()))
+                .set("pair", StateValue::Bool(pair));
+            action_names(keymap.lookup(&state, &key_event(KeyCode::Char('D'), KeyModifiers::NONE)))
+        };
+        assert_eq!(
+            [pressed(true), pressed(false)],
+            [
+                Some(vec!["SetMode".to_string(), "DiffPair".to_string()]),
+                None
+            ],
+        );
+    }
+
     /// The pinned twin of `space G G`, spelled with the doubled letter the
     /// same way.
     #[test]
