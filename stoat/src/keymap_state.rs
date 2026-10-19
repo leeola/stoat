@@ -33,6 +33,8 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "tabs",
     "prev_tab",
     "workspaces",
+    "jump_back",
+    "jump_forward",
     "token",
     "token_known",
     "lsp",
@@ -79,11 +81,20 @@ pub(crate) struct Flags {
     /// The number of open workspaces. An app value that [`Self::with_app`] copies
     /// in.
     pub(crate) workspaces: u32,
+    /// Whether the focused split pane's jumplist has an older entry to step back
+    /// to. A backward step records the live position first, so it also needs
+    /// an editor in that pane.
+    pub(crate) jump_back: bool,
+    /// Whether the focused split pane's jumplist has a newer entry to step
+    /// forward to.
+    pub(crate) jump_forward: bool,
 }
 
 impl Flags {
     pub(crate) fn from_workspace(ws: &Workspace) -> Self {
         let focused = ws.panes.pane(ws.panes.focus());
+        // Both walks return at once on a dock, so a dock focus reads neither.
+        let jumps = matches!(ws.focus, FocusTarget::SplitPane).then_some(&focused.jumplist);
         Self {
             rebase_exec: ws.rebase_active.is_some(),
             pair: ws.pair_panes().is_some(),
@@ -96,6 +107,8 @@ impl Flags {
             tabs: u32::try_from(ws.tabs.len()).unwrap_or(u32::MAX),
             prev_tab: ws.last_tab.is_some(),
             workspaces: 0,
+            jump_back: resolve_focus(ws).is_some() && jumps.is_some_and(|list| list.cursor() > 0),
+            jump_forward: jumps.is_some_and(|list| list.cursor() + 1 < list.entries().len()),
         }
     }
 
@@ -152,6 +165,10 @@ pub(crate) struct StoatKeymapState<'a> {
     prev_tab: StateValue,
     /// The number of open workspaces.
     workspaces: StateValue,
+    /// Whether the focused pane's jumplist has an older entry.
+    jump_back: StateValue,
+    /// Whether the focused pane's jumplist has a newer entry.
+    jump_forward: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -216,6 +233,8 @@ impl<'a> StoatKeymapState<'a> {
             tabs: StateValue::Number(f64::from(flags.tabs)),
             prev_tab: StateValue::Bool(flags.prev_tab),
             workspaces: StateValue::Number(f64::from(flags.workspaces)),
+            jump_back: StateValue::Bool(flags.jump_back),
+            jump_forward: StateValue::Bool(flags.jump_forward),
             pane: None,
             view: None,
             modal: None,
@@ -345,6 +364,8 @@ impl KeymapState for StoatKeymapState<'_> {
             "tabs" => Some(&self.tabs),
             "prev_tab" => Some(&self.prev_tab),
             "workspaces" => Some(&self.workspaces),
+            "jump_back" => Some(&self.jump_back),
+            "jump_forward" => Some(&self.jump_forward),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -1323,6 +1344,34 @@ mod tests {
             [one, count(&h)],
             [1.0, 2.0].map(|n| Some(StateValue::Number(n))),
             "one workspace, then a second",
+        );
+    }
+
+    #[test]
+    fn jump_back_and_jump_forward_read_the_focused_jumplist() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("alpha\nbeta\n");
+        let jumps = |h: &crate::test_harness::TestHarness| {
+            let state = StoatKeymapState::from_stoat(&h.stoat);
+            ["jump_back", "jump_forward"].map(|field| state.get(field).cloned())
+        };
+        let scratch = jumps(&h);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("j");
+        let saved = jumps(&h);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        let flag = |on| Some(StateValue::Bool(on));
+        assert_eq!(
+            [scratch, saved, jumps(&h)],
+            [
+                [flag(false), flag(false)],
+                [flag(true), flag(false)],
+                [flag(false), flag(true)],
+            ],
+            "an empty list, a saved jump to go back to, then the oldest entry \
+             with the jump just left ahead",
         );
     }
 

@@ -367,6 +367,9 @@ on init {
 #   tabs           the number of tabs in the active workspace
 #   prev_tab       a tab was active before the current one
 #   workspaces     the number of open workspaces
+#   jump_back      the focused pane's jumplist has an older entry, though a
+#                  walk skips an entry at the cursor's own position
+#   jump_forward   the focused pane's jumplist has a newer entry
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when
@@ -1266,8 +1269,15 @@ on key {
         }
 
         s -> [SaveSelection(), SetMode(normal)];
-        j -> [JumpBackward(), SetMode(normal)];
-        k -> [JumpForward(), SetMode(normal)];
+
+        jump_back {
+            j -> [JumpBackward(), SetMode(normal)];
+        }
+
+        jump_forward {
+            k -> [JumpForward(), SetMode(normal)];
+        }
+
         / -> OpenCodeSearch();
         # The mode switch leads, as in the goto menus' `?` arms. The recalled
         # picker takes focus with its own input, so a switch after the re-open
