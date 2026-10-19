@@ -147,7 +147,7 @@ pub fn save(fs: &dyn FsHost, root: &Path, walkthrough: &Walkthrough) -> Result<(
         .context(IoSnafu { path })
 }
 
-/// Every walkthrough in `root`, in slug order.
+/// Every walkthrough in `root`, loaded whole, in slug order.
 ///
 /// A workspace with no walkthroughs directory has no walkthroughs, so that is
 /// an empty list rather than an error.
@@ -155,7 +155,7 @@ pub fn save(fs: &dyn FsHost, root: &Path, walkthrough: &Walkthrough) -> Result<(
 /// A file that does not parse fails the whole call. The result has no room to
 /// report one bad entry, and naming the broken file is more use than quietly
 /// dropping a walkthrough the user knows they wrote.
-pub fn list(fs: &dyn FsHost, root: &Path) -> Result<Vec<Summary>, StoreError> {
+pub fn load_all(fs: &dyn FsHost, root: &Path) -> Result<Vec<Walkthrough>, StoreError> {
     let dir = walkthroughs_dir(root);
     let entries = match fs.list_dir(&dir) {
         Ok(entries) => entries,
@@ -163,7 +163,7 @@ pub fn list(fs: &dyn FsHost, root: &Path) -> Result<Vec<Summary>, StoreError> {
         Err(source) => return Err(source).context(IoSnafu { path: dir }),
     };
 
-    let mut summaries = Vec::new();
+    let mut walkthroughs = Vec::new();
     for entry in entries {
         if entry.is_dir || !entry.name.ends_with(".json") {
             continue;
@@ -173,14 +173,26 @@ pub fn list(fs: &dyn FsHost, root: &Path) -> Result<Vec<Summary>, StoreError> {
         let json = read_text(fs, &path).context(IoSnafu { path: &path })?;
         let walkthrough: Walkthrough =
             serde_json::from_str(&json).context(JsonSnafu { path: &path })?;
-        summaries.push(Summary {
+        walkthroughs.push(walkthrough);
+    }
+
+    walkthroughs.sort_by(|left, right| left.slug.cmp(&right.slug));
+    Ok(walkthroughs)
+}
+
+/// Every walkthrough in `root` as a [`Summary`], in slug order.
+///
+/// It reads each file whole, so it comes back empty and fails exactly where
+/// [`load_all`] does.
+pub fn list(fs: &dyn FsHost, root: &Path) -> Result<Vec<Summary>, StoreError> {
+    let summaries = load_all(fs, root)?
+        .into_iter()
+        .map(|walkthrough| Summary {
             slug: walkthrough.slug,
             title: walkthrough.title,
             stops: walkthrough.stops.len(),
-        });
-    }
-
-    summaries.sort_by(|left, right| left.slug.cmp(&right.slug));
+        })
+        .collect();
     Ok(summaries)
 }
 
@@ -355,8 +367,8 @@ fn head_commit(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        delete, head_commit, list, load, read_text, reader, resolve_commit, save, walkthroughs_dir,
-        workspace_reader, workspace_root, Summary,
+        delete, head_commit, list, load, load_all, read_text, reader, resolve_commit, save,
+        walkthroughs_dir, workspace_reader, workspace_root, Summary,
     };
     use crate::{
         host::{FsHost, LocalFs},
@@ -496,6 +508,19 @@ mod tests {
     fn list_finds_nothing_before_the_first_save() {
         let dir = tempfile::tempdir().expect("tempdir");
         assert_eq!(list(&LocalFs, dir.path()).expect("list"), Vec::new());
+    }
+
+    #[test]
+    fn load_all_returns_every_tour_in_slug_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (zebra, alpha) = (tour("zebra", "Z"), tour("alpha", "A"));
+        save(&LocalFs, dir.path(), &zebra).expect("save");
+        save(&LocalFs, dir.path(), &alpha).expect("save");
+
+        assert_eq!(
+            load_all(&LocalFs, dir.path()).expect("load all"),
+            [alpha, zebra]
+        );
     }
 
     #[test]
