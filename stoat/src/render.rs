@@ -362,6 +362,10 @@ pub(crate) struct FrameCtx<'a> {
     /// status-bar left segments so the user reads the pattern as they type it.
     /// `None` whenever neither input is open.
     pub(crate) status_prompt: Option<&'a StatusPrompt>,
+    /// The editor the terminal draws the primary cursor over this frame, which
+    /// is the focused editor while no modal input holds focus. A pane whose
+    /// editor is any other paints its own primary block.
+    pub(crate) terminal_cursor_editor: Option<EditorId>,
     /// How document editor panes number the gutter, resolved from
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
@@ -918,6 +922,9 @@ pub(crate) fn frame(
     // &Stoat, and the dials are separate fields on it.
     let diff_dials = DiffDials::from_stoat(stoat);
     let preview_dials = commits::PreviewDials::from_stoat(stoat);
+    // Resolved here for the same reason. It reads the whole &Stoat to find the
+    // input that holds focus.
+    let terminal_cursor_editor = stoat.focused_editor_ids().map(|(id, _)| id);
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -1024,6 +1031,7 @@ pub(crate) fn frame(
         },
         search_smart_case,
         status_prompt: status_prompt.as_ref(),
+        terminal_cursor_editor,
         line_numbers: stoat
             .settings
             .editor_line_numbers

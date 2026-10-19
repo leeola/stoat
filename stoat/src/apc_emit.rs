@@ -347,6 +347,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     // Resolved before the workspace borrow. The constructor reads the whole
     // &Stoat, and the dials are three separate fields on it.
     let preview_dials = crate::render::commits::PreviewDials::from_stoat(stoat);
+    let terminal_cursor_editor = stoat.focused_editor_ids().map(|(id, _)| id);
     stoat.refresh_chrome();
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let windowed = ws.panes.windowed_panes();
@@ -408,6 +409,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         search_query: None,
         search_smart_case: true,
         status_prompt: None,
+        terminal_cursor_editor,
         line_numbers: LineNumbers::Relative,
         wrap_mode: WrapMode::EditorWidth,
         wrap_column: 80,

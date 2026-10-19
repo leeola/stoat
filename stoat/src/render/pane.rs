@@ -126,6 +126,7 @@ pub(crate) fn render_pane(
                         true => Some(&mut *scene),
                         false => None,
                     },
+                    frame.terminal_cursor_editor == Some(*editor_id),
                     Some(undercurls),
                     if is_focused { 0.0 } else { frame.inactive_dim },
                     frame.diff_dials,
@@ -1895,7 +1896,8 @@ mod tests {
         sync::{Arc, RwLock},
     };
     use stoat_action::{
-        AddSelectionAbove, AddSelectionBelow, KeepPrimarySelection, MoveDown, OpenFile,
+        AddSelectionAbove, AddSelectionBelow, Conflict, KeepPrimarySelection, MoveDown, OpenFile,
+        OpenSearchInput,
     };
     use tokio::sync::{mpsc, oneshot};
 
@@ -2898,6 +2900,99 @@ mod tests {
         assert!(
             reverse.contains("?b"),
             "a reverse search prompts with its own sigil:\n{reverse}",
+        );
+    }
+
+    /// The focused pane's editor, whichever input holds focus.
+    fn pane_editor(h: &crate::test_harness::TestHarness) -> &EditorState {
+        let ws = h.stoat.active_workspace();
+        let View::Editor(id) = ws.panes.pane(ws.panes.focus()).view else {
+            panic!("the focused pane shows an editor");
+        };
+        &ws.editors[id]
+    }
+
+    /// Whether `buf` paints text column `col` of the focused pane's first text
+    /// row as the theme's cursor block.
+    fn block_at(h: &crate::test_harness::TestHarness, buf: &Buffer, col: u16) -> bool {
+        let rect = pane_editor(h).text_rect.expect("the pane painted its text");
+        let cell = &buf[(rect.x + col, rect.y)];
+        let cursor = h.stoat.theme.cursor_style();
+        cursor.bg.is_none_or(|bg| cell.bg == bg) && cell.modifier.contains(cursor.add_modifier)
+    }
+
+    /// Whether column zero paints as a block before a `/` search for `query`,
+    /// and whether the match at column `col` does while the prompt is open and
+    /// after Enter.
+    fn block_triple(h: &mut crate::test_harness::TestHarness, query: &str, col: u16) -> [bool; 3] {
+        h.snapshot();
+        let before = block_at(h, h.rendered_buffer(), 0);
+        h.type_keys("/");
+        h.type_text(query);
+        h.stoat.drive_background();
+        h.snapshot();
+        let during = block_at(h, h.rendered_buffer(), col);
+        h.type_keys("enter");
+        h.snapshot();
+        [before, during, block_at(h, h.rendered_buffer(), col)]
+    }
+
+    /// The terminal draws the focused editor's primary cursor, so the pane
+    /// leaves that cell alone. A search prompt takes the terminal cursor, so
+    /// the previewed match paints its own block until the prompt closes.
+    #[test]
+    fn the_previewed_match_keeps_its_cursor_block_while_the_prompt_is_open() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        h.seed_focused_buffer("abc def");
+        assert_eq!(block_triple(&mut h, "d", 4), [false, true, false]);
+    }
+
+    /// The diff view's right column takes the same cursor as a plain pane.
+    #[test]
+    fn a_diff_view_match_keeps_its_cursor_block_while_the_prompt_is_open() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 6);
+        h.seed_focused_buffer("abc def");
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        assert_eq!(block_triple(&mut h, "d", 4), [false, true, false]);
+    }
+
+    /// The conflict view's center column takes the same cursor as a plain pane.
+    #[test]
+    fn a_conflict_view_match_keeps_its_cursor_block_while_the_prompt_is_open() {
+        let mut h = crate::test_harness::TestHarness::with_size(90, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("abc def\nbase\n"),
+                Some("abc def\nours\n"),
+                Some("abc def\ntheirs\n"),
+            );
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        assert_eq!(block_triple(&mut h, "d", 4), [false, true, false]);
+    }
+
+    /// A prompt that opens over an insert-mode pane moves the terminal cursor
+    /// off the pane and leaves the mode as it was. With no background pass, no
+    /// preview runs either, so the terminal cursor is the one thing the next
+    /// frame changes, and the pane repaints its primary cell as a block rather
+    /// than replaying the paint that left the cell to the terminal.
+    #[test]
+    fn a_terminal_cursor_moving_off_the_pane_repaints_it() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+        h.seed_focused_buffer("abc def");
+        h.type_keys("i");
+        let delegated = h.stoat.render();
+        dispatch(&mut h.stoat, &OpenSearchInput);
+        let painted = h.stoat.render();
+        assert_eq!(
+            [block_at(&h, &delegated, 0), block_at(&h, &painted, 0)],
+            [false, true],
         );
     }
 

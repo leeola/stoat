@@ -135,6 +135,11 @@ pub(crate) struct PaneCacheKey {
     /// Whether a live scene takes the rich gutter and the cursor, which a dead
     /// one leaves to the cells.
     pub(crate) scene_live: bool,
+    /// Whether the terminal draws the pane's primary cursor, which the pane
+    /// otherwise paints as a block. A modal input takes the terminal cursor
+    /// whether or not it moves anything else in the pane, so this field
+    /// repaints the cell when nothing else does.
+    pub(crate) terminal_cursor: bool,
     /// Whether the search query compiles under smart case, which decides the
     /// matches the pane paints. Read off the settings like the dim, so no
     /// generation moves with it.
@@ -395,6 +400,7 @@ pub(crate) fn pane_cache_key(
         insert_mode: is_focused && frame.mode == "insert",
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
+        terminal_cursor: frame.terminal_cursor_editor == Some(*editor_id),
         search_smart_case: frame.search_smart_case,
     })
 }
@@ -446,6 +452,7 @@ mod tests {
             insert_mode: false,
             hover_cell: None,
             scene_live: false,
+            terminal_cursor: false,
             search_smart_case: false,
         }
     }
@@ -459,7 +466,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 22] = [
+        let moved: [(&str, PaneCacheKey); 23] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -604,6 +611,13 @@ mod tests {
                 "scene_live",
                 PaneCacheKey {
                     scene_live: true,
+                    ..base
+                },
+            ),
+            (
+                "terminal_cursor",
+                PaneCacheKey {
+                    terminal_cursor: true,
                     ..base
                 },
             ),

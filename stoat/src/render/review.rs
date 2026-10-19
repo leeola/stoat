@@ -181,7 +181,8 @@ impl DiffDials {
 /// selections, cursors, and goto-word labels over them, as a plain pane does
 /// through [`editor::paint_search_matches`], [`editor::paint_selections`], and
 /// [`editor::paint_goto_word_labels`]. An unfocused pane paints no selection,
-/// cursor, or label.
+/// cursor, or label. With a `scene` and `delegates_cursor` the terminal draws
+/// the primary cursor, so the paint leaves that cell to it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
@@ -194,6 +195,7 @@ pub(crate) fn render_diff_view(
     search_query: Option<&str>,
     search_smart_case: bool,
     scene: Option<&mut ApcScene>,
+    delegates_cursor: bool,
     dials: DiffDials,
 ) {
     let stoatty = scene.is_some();
@@ -249,7 +251,14 @@ pub(crate) fn render_diff_view(
     }
 
     editor::paint_selections(
-        editor, &snapshot, text, end_row, &visible, theme, buf, stoatty,
+        editor,
+        &snapshot,
+        text,
+        end_row,
+        &visible,
+        theme,
+        buf,
+        stoatty && delegates_cursor,
     );
     if let Some(labels) = goto_word_labels {
         editor::paint_goto_word_labels(
@@ -2824,6 +2833,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -2885,6 +2895,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3059,6 +3070,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3103,6 +3115,7 @@ mod tests {
             None,
             false,
             Some(&mut scene),
+            true,
             DiffDials::shipped(),
         );
 
@@ -3173,6 +3186,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
@@ -3215,6 +3229,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3283,6 +3298,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3322,6 +3338,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3388,6 +3405,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3436,6 +3454,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3546,6 +3565,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials {
                 soften_scale: 0.0,
                 ..DiffDials::shipped()
@@ -3855,6 +3875,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3885,6 +3906,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -3913,6 +3935,7 @@ mod tests {
             None,
             false,
             Some(&mut ApcScene::new()),
+            true,
             DiffDials::shipped(),
         );
         assert_eq!(
@@ -3940,6 +3963,7 @@ mod tests {
             None,
             false,
             Some(&mut ApcScene::new()),
+            true,
             DiffDials::shipped(),
         );
 
@@ -4323,6 +4347,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -4357,6 +4382,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -4645,7 +4671,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            editor, area, fallback, &theme, &mut buf, true, None, None, false, None, dials,
+            editor, area, fallback, &theme, &mut buf, true, None, None, false, None, true, dials,
         );
         row_cells_with(&buf, "beta", modifier)
     }
@@ -4905,6 +4931,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -4964,6 +4991,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -5082,6 +5110,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -5115,6 +5144,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -5151,6 +5181,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials::shipped(),
         );
 
@@ -5747,6 +5778,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
@@ -5778,6 +5810,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
@@ -5823,6 +5856,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials {
                 soften_scale: 0.0,
                 tint_amount: 1.0,
@@ -5877,6 +5911,7 @@ mod tests {
             None,
             false,
             None,
+            true,
             DiffDials {
                 soften_scale: 0.0,
                 ..DiffDials::shipped()

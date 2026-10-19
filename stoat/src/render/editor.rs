@@ -119,6 +119,7 @@ pub(crate) fn render_editor(
         false,
         None,
         None,
+        true,
         None,
         0.0,
         // Not a pane, so it never paints the diff view the scale and the tint
@@ -129,6 +130,12 @@ pub(crate) fn render_editor(
     );
 }
 
+/// Paint `editor` into `inner`, through its diff or conflict view when it shows
+/// one.
+///
+/// `delegates_cursor` names whether the terminal draws the primary cursor over
+/// this editor. With it and a live `scene`, the paint leaves the primary cell
+/// to the terminal. Otherwise the paint draws the block itself.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -147,6 +154,7 @@ pub(crate) fn render_editor_with_overlay(
     search_smart_case: bool,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
     mut scene: Option<&mut ApcScene>,
+    delegates_cursor: bool,
     undercurls: Option<&mut UndercurlBatch>,
     dim: f32,
     dials: DiffDials,
@@ -179,6 +187,7 @@ pub(crate) fn render_editor_with_overlay(
             search_query,
             search_smart_case,
             scene,
+            delegates_cursor,
             dials,
         );
         return;
@@ -186,10 +195,16 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.conflict_view.is_some() {
         editor.display_map.set_wrap_width(None);
-        // A scene means the terminal draws the cursor, matching the delegation
-        // the main editor path makes on the same condition.
-        let delegates_cursor = scene.is_some();
-        render_conflict_view(editor, inner, fallback_style, theme, buf, delegates_cursor);
+        // The terminal draws the cursor on the same condition the main editor
+        // path delegates on.
+        render_conflict_view(
+            editor,
+            inner,
+            fallback_style,
+            theme,
+            buf,
+            scene.is_some() && delegates_cursor,
+        );
         return;
     }
 
@@ -461,9 +476,10 @@ pub(crate) fn render_editor_with_overlay(
         return;
     }
 
-    // A scene means the terminal draws the primary cursor itself, so the pass
-    // records its cell and leaves it unpainted. Without one, as in an input view
-    // or dock, nothing downstream draws it, so the pass paints it.
+    // With a scene and `delegates_cursor` the terminal draws the primary cursor,
+    // so the pass records its cell and leaves it unpainted. Otherwise nothing
+    // downstream draws it, as in an input view, a dock, or a pane under an open
+    // prompt, so the pass paints it.
     paint_selections(
         editor,
         &snapshot,
@@ -472,7 +488,7 @@ pub(crate) fn render_editor_with_overlay(
         &visible,
         theme,
         buf,
-        scene.is_some(),
+        scene.is_some() && delegates_cursor,
     );
 
     if let Some((path, set)) = diagnostic_info {
@@ -3004,6 +3020,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -3106,6 +3123,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -3182,6 +3200,7 @@ mod tests {
                 false,
                 None,
                 None,
+                true,
                 None,
                 0.0,
                 DiffDials::shipped(),
@@ -3278,6 +3297,7 @@ mod tests {
                 false,
                 None,
                 None,
+                true,
                 None,
                 0.0,
                 DiffDials::shipped(),
@@ -3676,6 +3696,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -3791,6 +3812,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -3831,6 +3853,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -3968,6 +3991,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4140,6 +4164,7 @@ mod tests {
                 false,
                 None,
                 None,
+                true,
                 None,
                 0.0,
                 DiffDials::shipped(),
@@ -4186,6 +4211,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4348,6 +4374,7 @@ mod tests {
             false,
             None,
             Some(&mut scene),
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4429,6 +4456,7 @@ mod tests {
             false,
             None,
             Some(&mut scene),
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4532,6 +4560,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4582,6 +4611,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4696,6 +4726,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4937,6 +4968,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
@@ -4998,6 +5030,7 @@ mod tests {
             false,
             None,
             None,
+            true,
             None,
             0.0,
             DiffDials::shipped(),
