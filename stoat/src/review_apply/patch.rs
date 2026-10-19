@@ -182,7 +182,7 @@ fn hunk_lines<'a>(lines: &[&'a str], start: u32, len: u32) -> Vec<&'a str> {
 /// index as the base, so the patch lands whatever the index holds above it.
 ///
 /// See also:
-/// - [`rows_to_unified_diff`] for what `removes_file` does to the patch.
+/// - [`rows_to_unified_diff`] for what `removes_file` and `creates_file` do to the patch.
 pub(crate) fn hunk_to_patch(
     rel: &Path,
     base_text: &str,
@@ -190,6 +190,7 @@ pub(crate) fn hunk_to_patch(
     hunks: &[DiffHunk],
     k: usize,
     removes_file: bool,
+    creates_file: bool,
 ) -> Option<String> {
     let rows = hunk_rows(base_text, buffer_text, hunks, k, HUNK_CONTEXT)?;
     Some(rows_to_unified_diff(
@@ -198,6 +199,7 @@ pub(crate) fn hunk_to_patch(
         buffer_text,
         &rows,
         removes_file,
+        creates_file,
     ))
 }
 
@@ -267,14 +269,19 @@ pub(crate) fn line_restricted_rows(
 /// not tell a removed file from a file that holds zero bytes, so the caller
 /// decides.
 ///
-/// The patch never creates a file. A patch for a path the index does not hold
-/// fails to apply, rather than giving the index a partial copy of the file.
+/// `creates_file` marks a pre-image with no file, a path the index does not
+/// hold. The patch then names `/dev/null` as its base and creates the index
+/// entry from its rows, so a stage of part of an untracked file puts that part
+/// alone in the index. Without it, a patch for a path the index does not hold
+/// fails to apply, rather than giving the index a partial copy of a file the
+/// index tracked.
 pub(crate) fn rows_to_unified_diff(
     rel: &Path,
     base_text: &str,
     buffer_text: &str,
     rows: &[ReviewRow],
     removes_file: bool,
+    creates_file: bool,
 ) -> String {
     let rel_display = rel.display();
 
@@ -299,7 +306,10 @@ pub(crate) fn rows_to_unified_diff(
     if deletes_file {
         out.push_str("deleted file mode 100644\n");
     }
-    out.push_str(&format!("--- a/{rel_display}\n"));
+    match creates_file {
+        true => out.push_str("new file mode 100644\n--- /dev/null\n"),
+        false => out.push_str(&format!("--- a/{rel_display}\n")),
+    }
     match deletes_file {
         true => out.push_str("+++ /dev/null\n"),
         false => out.push_str(&format!("+++ b/{rel_display}\n")),
@@ -545,8 +555,8 @@ mod tests {
             2,
             "the file has two hunks to keep apart"
         );
-        let stage =
-            hunk_to_patch(rel, BASE, BUFFER, &buffer_hunks, 0, false).expect("hunk 0 exists");
+        let stage = hunk_to_patch(rel, BASE, BUFFER, &buffer_hunks, 0, false, false)
+            .expect("hunk 0 exists");
         host_repo
             .apply_to_index(&stage)
             .expect("the hunk patch must apply to real libgit2");
@@ -556,7 +566,7 @@ mod tests {
             "the index carries the first change and not the second"
         );
 
-        let unstage = hunk_to_patch(rel, &staged, BASE, &hunks(&staged, BASE), 0, false)
+        let unstage = hunk_to_patch(rel, &staged, BASE, &hunks(&staged, BASE), 0, false, false)
             .expect("hunk 0 is staged");
         host_repo
             .apply_to_index(&unstage)
@@ -585,6 +595,7 @@ mod tests {
             &hunks(BASE, BUFFER),
             1,
             false,
+            false,
         )
         .expect("hunk 1 exists");
         host_repo
@@ -610,6 +621,7 @@ mod tests {
             buffer,
             &hunks(base, buffer),
             k,
+            false,
             false,
         )
         .expect("the hunk exists");
@@ -676,7 +688,7 @@ mod tests {
         let rows =
             hunk_rows(base, buffer, &hunks(base, buffer), 0, HUNK_CONTEXT).expect("hunk 0 exists");
         let rows = line_restricted_rows(&rows, lines, true).expect("a change sits on the lines");
-        let patch = rows_to_unified_diff(Path::new("a.rs"), base, buffer, &rows, false);
+        let patch = rows_to_unified_diff(Path::new("a.rs"), base, buffer, &rows, false, false);
         host_repo
             .apply_to_index(&patch)
             .expect("the line patch applies to real libgit2");
@@ -710,18 +722,32 @@ mod tests {
         let (_dir, repo, host_repo) = index_repo("", "x\n");
         let rel = Path::new("a.rs");
 
-        let stage =
-            hunk_to_patch(rel, "", "x\n", &hunks("", "x\n"), 0, false).expect("hunk 0 exists");
+        let stage = hunk_to_patch(rel, "", "x\n", &hunks("", "x\n"), 0, false, false)
+            .expect("hunk 0 exists");
         host_repo
             .apply_to_index(&stage)
             .expect("the stage applies to real libgit2");
         let staged = staged_text(&repo);
 
-        let unstage = hunk_to_patch(rel, &staged, "", &hunks(&staged, ""), 0, false)
+        let unstage = hunk_to_patch(rel, &staged, "", &hunks(&staged, ""), 0, false, false)
             .expect("hunk 0 is staged");
         host_repo
             .apply_to_index(&unstage)
             .expect("the unstage applies too");
         assert_eq!((staged.as_str(), staged_text(&repo).as_str()), ("x\n", ""));
+    }
+
+    /// A path the index does not hold has no pre-image, so the patch creates
+    /// the entry from `/dev/null`, in the shape `git apply --cached` takes for
+    /// a new file.
+    #[test]
+    fn a_creating_patch_names_dev_null_as_its_base() {
+        let rows =
+            hunk_rows("", "x\ny\n", &hunks("", "x\ny\n"), 0, HUNK_CONTEXT).expect("hunk 0 exists");
+        assert_eq!(
+            rows_to_unified_diff(Path::new("new.rs"), "", "x\ny\n", &rows, false, true),
+            "diff --git a/new.rs b/new.rs\nnew file mode 100644\n--- /dev/null\n+++ b/new.rs\n\
+             @@ -0,0 +1,2 @@\n+x\n+y\n",
+        );
     }
 }

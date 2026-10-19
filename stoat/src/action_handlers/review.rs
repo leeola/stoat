@@ -843,8 +843,9 @@ pub(super) enum StageOutcome {
 /// and unstages a staged one. Each reads the index, so a change lands whatever
 /// the index holds above it.
 ///
-/// The action works in any editor view on a git-tracked file. A missing repo, an
-/// untracked file, or a cursor on a row no hunk covers sets a status message and
+/// The action works in any editor view on a file in the repo's workdir. A press
+/// on an untracked file's hunk adds the file to the index. A missing repo, an
+/// ignored file, or a cursor on a row no hunk covers sets a status message and
 /// changes nothing.
 ///
 /// The press captures the cursor row, the text, and the review base. The diff
@@ -855,13 +856,14 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 }
 
 /// Stage, unstage, or toggle the git-index state of only the cursor line's
-/// change, in the focused editor on any git-tracked file.
+/// change, in the focused editor on any file in the repo's workdir.
 ///
 /// The emitted patch is restricted to the cursor's line via
 /// [`line_restricted_rows`], and staging diffs the git index (not HEAD) against
 /// the live buffer, so sequential single-line stages inside one hunk compose. A
-/// missing repo, an untracked file, or a cursor on no change sets a status
-/// message and changes nothing.
+/// press on an untracked file's line adds the file to the index with that line
+/// alone. A missing repo, an ignored file, or a cursor on no change sets a
+/// status message and changes nothing.
 ///
 /// The index is not the only target. Under a review base the staged side is the
 /// checked-out commit, so the keys amend the cursor's line into or out of it
@@ -1147,16 +1149,16 @@ fn index_hunk(
     mode: HunkStage,
 ) -> StageOutcome {
     let nothing = || StageOutcome::Unchanged("no hunk under the cursor".to_string());
-    let Some((head_text, index_text)) = read_staging_texts(repo, path, buffer_text) else {
+    let Some(texts) = read_staging_texts(repo, path, buffer_text) else {
         return nothing();
     };
 
-    let stage = || stage_hunk_patch(rel, &index_text, buffer_text, cursor_row);
+    let stage = || stage_hunk_patch(rel, &texts, buffer_text, cursor_row);
     let unstage = || {
         unstage_hunk_patch(
             rel,
-            &index_text,
-            head_text.as_deref(),
+            &texts.index,
+            texts.head.as_deref(),
             buffer_text,
             cursor_row,
         )
@@ -1181,34 +1183,42 @@ fn index_hunk(
 /// [`staging_texts`] for a staging press, with a debug line on the
 /// `stoat::review` target that says what the press read.
 ///
-/// A file that neither HEAD nor the index holds logs as such, because its
-/// press reports the same status as a row that no hunk covers.
-fn read_staging_texts(
-    repo: &dyn GitRepo,
-    path: &Path,
-    buffer_text: &str,
-) -> Option<(Option<String>, String)> {
-    let Some((head_text, index_text)) = staging_texts(repo, path) else {
+/// A file that no blob holds and that is no untracked work logs as such,
+/// because its press reports the same status as a row that no hunk covers.
+fn read_staging_texts(repo: &dyn GitRepo, path: &Path, buffer_text: &str) -> Option<StagingTexts> {
+    let Some(texts) = staging_texts(repo, path) else {
         tracing::debug!(
             target: "stoat::review",
             path = %path.display(),
-            "neither HEAD nor the index holds the file"
+            "no blob holds the file, and the repo ignores it or it lies outside the workdir"
         );
         return None;
     };
     tracing::debug!(
         target: "stoat::review",
         path = %path.display(),
-        head = head_text.is_some(),
-        index_lines = index_text.lines().count(),
+        head = texts.head.is_some(),
+        in_index = texts.in_index,
+        index_lines = texts.index.lines().count(),
         buffer_lines = buffer_text.lines().count(),
         "staging texts read"
     );
-    Some((head_text, index_text))
+    Some(texts)
 }
 
-/// HEAD's and the index's text for `path`, as `(head, index)`, for a press that
-/// stages or unstages.
+/// HEAD's and the index's text for a staging press, as [`staging_texts`]
+/// reads them.
+struct StagingTexts {
+    /// [`None`] for a file HEAD does not hold.
+    head: Option<String>,
+    index: String,
+    /// False for an untracked file, whose empty index text stands for no entry,
+    /// so its stage creates one.
+    in_index: bool,
+}
+
+/// HEAD's and the index's text for `path`, for a press that stages or
+/// unstages.
 ///
 /// A moved file has no HEAD blob at its own path, so its HEAD text comes from
 /// the path it moved from. A file HEAD does not hold reads [`None`] there, and
@@ -1218,26 +1228,39 @@ fn read_staging_texts(
 /// file that `git rm --cached` took out of the index then fails to apply,
 /// rather than putting part of the file back.
 ///
-/// [`None`] when neither HEAD nor the index holds the file, which is what an
-/// untracked file answers.
-fn staging_texts(repo: &dyn GitRepo, path: &Path) -> Option<(Option<String>, String)> {
+/// An untracked file reads as empty index text with no entry behind it, so its
+/// stage adds the file to the index. [`None`] when no blob holds the file and
+/// the repo ignores it or it lies outside the workdir.
+fn staging_texts(repo: &dyn GitRepo, path: &Path) -> Option<StagingTexts> {
     let head = repo
         .head_content(path)
         .or_else(|| repo.head_content(&repo.rename_source(path)?));
-    let index = repo.index_content(path).or_else(|| head.clone())?;
-    Some((head, index))
+    if let Some(index) = repo.index_content(path).or_else(|| head.clone()) {
+        return Some(StagingTexts {
+            head,
+            index,
+            in_index: true,
+        });
+    }
+    diff::untracked_in_tree(repo, path).then(|| StagingTexts {
+        head: None,
+        index: String::new(),
+        in_index: false,
+    })
 }
 
 /// Build the patch that stages the hunk under the cursor by diffing the git
 /// index against the live buffer.
 ///
-/// `None` when the cursor sits on no index-vs-buffer hunk.
+/// An untracked file's patch creates its index entry. `None` when the cursor
+/// sits on no index-vs-buffer hunk.
 fn stage_hunk_patch(
     rel: &Path,
-    index_text: &str,
+    texts: &StagingTexts,
     buffer_text: &str,
     cursor_row: u32,
 ) -> Option<String> {
+    let index_text = texts.index.as_str();
     let (buffer_text, removes_file) = stage_post_image(buffer_text);
     let hunks = line_hunks(index_text, buffer_text);
     log_hunks_near(
@@ -1258,7 +1281,15 @@ fn stage_hunk_patch(
             false => rows.contains(&cursor_row),
         }
     })?;
-    hunk_to_patch(rel, index_text, buffer_text, &hunks, k, removes_file)
+    hunk_to_patch(
+        rel,
+        index_text,
+        buffer_text,
+        &hunks,
+        k,
+        removes_file,
+        !texts.in_index,
+    )
 }
 
 /// The text a stage diffs the index against, and whether it stands for a file
@@ -1304,7 +1335,7 @@ fn unstage_hunk_patch(
         true => rows.start == index_row,
         false => rows.contains(&index_row),
     })?;
-    hunk_to_patch(rel, index_text, head_text, &hunks, k, removes_file)
+    hunk_to_patch(rel, index_text, head_text, &hunks, k, removes_file, false)
 }
 
 /// What a line press reports, as `(staged, unstaged, nothing to move)`.
@@ -1336,25 +1367,20 @@ fn index_rows(
     (staged, unstaged, nothing): (&'static str, &'static str, &'static str),
 ) -> StageOutcome {
     let unchanged = || StageOutcome::Unchanged(nothing.to_string());
-    let Some((head_text, index_text)) = read_staging_texts(repo, path, buffer_text) else {
+    let Some(texts) = read_staging_texts(repo, path, buffer_text) else {
         return unchanged();
     };
     let rel = rel.to_string_lossy();
 
     let stage = || {
-        Some(stage_rows_patch(
-            &rel,
-            &index_text,
-            buffer_text,
-            rows.clone(),
-        ))
-        .filter(|patches| !patches.is_empty())
+        Some(stage_rows_patch(&rel, &texts, buffer_text, rows.clone()))
+            .filter(|patches| !patches.is_empty())
     };
     let unstage = || {
         Some(unstage_rows_patch(
             &rel,
-            &index_text,
-            head_text.as_deref(),
+            &texts.index,
+            texts.head.as_deref(),
             buffer_text,
             rows.clone(),
         ))
@@ -1446,12 +1472,16 @@ fn log_hunks_near(
 /// patch is built against the same index text, and a patch applied below
 /// another never moves the lines the other names. Empty when the rows meet no
 /// change.
+///
+/// An untracked file's empty index text meets the buffer in one hunk, so its
+/// rows take one patch, and that patch creates the index entry.
 fn stage_rows_patch(
     rel: &str,
-    index_text: &str,
+    texts: &StagingTexts,
     buffer_text: &str,
     rows: Range<u32>,
 ) -> Vec<String> {
+    let index_text = texts.index.as_str();
     let (buffer_text, removes_file) = stage_post_image(buffer_text);
     let hunks = line_hunks(index_text, buffer_text);
     log_hunks_near(
@@ -1473,6 +1503,7 @@ fn stage_rows_patch(
                 buffer_text,
                 &kept,
                 removes_file,
+                !texts.in_index,
             ))
         })
         .collect()
@@ -1524,6 +1555,7 @@ fn unstage_rows_patch(
                 head_text,
                 &kept,
                 removes_file,
+                false,
             ))
         })
         .collect()
@@ -1703,7 +1735,7 @@ pub(crate) fn populate_diff_cache_from(
 mod tests {
     use super::{
         attach_preview_highlights, build_document_from_changes, editor_shows_changes, hunks_around,
-        stage_rows_patch, unstage_rows_patch,
+        stage_rows_patch, unstage_rows_patch, StagingTexts,
     };
     use crate::{
         badge::BadgeSource,
@@ -3220,10 +3252,15 @@ mod tests {
         const EDITED: &str = "a\nZ\nc\nd\ne\nf\nY\nh\n";
         let patch =
             |hunk: &str| format!("diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n{hunk}");
+        let tracked = StagingTexts {
+            head: Some(HEAD.to_string()),
+            index: HEAD.to_string(),
+            in_index: true,
+        };
 
         assert_eq!(
             (
-                stage_rows_patch("a.rs", HEAD, EDITED, 1..7),
+                stage_rows_patch("a.rs", &tracked, EDITED, 1..7),
                 unstage_rows_patch("a.rs", EDITED, Some(HEAD), EDITED, 1..7),
             ),
             (
@@ -3634,6 +3671,71 @@ mod tests {
 
         h.settle();
         assert_eq!(h.stoat.pending_message.as_deref(), Some("staged hunk"));
+    }
+
+    /// A patch that creates `rel` in the index with `hunk`.
+    fn creating_patch(rel: &str, hunk: &str) -> String {
+        format!(
+            "diff --git a/{rel} b/{rel}\nnew file mode 100644\n--- /dev/null\n+++ b/{rel}\n{hunk}"
+        )
+    }
+
+    /// Presses `action` on row 0 of untracked `name`, which holds `x` and `y`
+    /// beside a repo's one tracked change, and answers the patches the press
+    /// applied and the status it set.
+    fn press_on_untracked(name: &str, action: &dyn Action) -> (Vec<String>, Option<String>) {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/repo");
+        h.stage_review_scenario(&workdir, &[("t.rs", "a\n", "b\n")]);
+        h.fake_fs().insert_file(workdir.join(name), b"x\ny\n");
+        h.fake_git().add_repo(&workdir).untracked(name);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join(name));
+        h.settle_diff_jobs();
+
+        run(&mut h, action);
+        (
+            h.fake_git().applied_patches(&workdir),
+            h.stoat.pending_message.clone(),
+        )
+    }
+
+    /// No blob holds an untracked file, so its hunk stages as a patch that
+    /// creates the file in the index. The tree pass narrows a Rust file's
+    /// added hunk to a run, which stages through the rows path, while a file
+    /// with no language stages its whole hunk.
+    #[test]
+    fn staging_an_untracked_file_s_hunk_adds_it_to_the_index() {
+        let whole = "@@ -0,0 +1,2 @@\n+x\n+y\n";
+        assert_eq!(
+            [
+                press_on_untracked("fresh.rs", &stoat_action::StageHunk),
+                press_on_untracked("fresh.txt", &stoat_action::StageHunk),
+            ],
+            [
+                (
+                    vec![creating_patch("fresh.rs", whole)],
+                    Some("staged hunk".to_string())
+                ),
+                (
+                    vec![creating_patch("fresh.txt", whole)],
+                    Some("staged hunk".to_string())
+                ),
+            ],
+        );
+    }
+
+    /// A line press creates the index entry with that line alone, which leaves
+    /// the rest of the file an unstaged hunk.
+    #[test]
+    fn staging_an_untracked_file_s_line_adds_that_line_alone() {
+        assert_eq!(
+            press_on_untracked("fresh.rs", &stoat_action::StageLine),
+            (
+                vec![creating_patch("fresh.rs", "@@ -0,0 +1,1 @@\n+x\n")],
+                Some("staged line".to_string())
+            ),
+        );
     }
 
     #[test]
