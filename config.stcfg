@@ -371,6 +371,7 @@ on init {
 #                  walk skips an entry at the cursor's own position
 #   jump_forward   the focused pane's jumplist has a newer entry
 #   prev_buffer    the focused pane showed another buffer that is still open
+#   last_picker    a picker was opened before, which space ' reopens
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when
@@ -1283,10 +1284,14 @@ on key {
         }
 
         / -> OpenCodeSearch();
-        # The mode switch leads, as in the goto menus' `?` arms. The recalled
-        # picker takes focus with its own input, so a switch after the re-open
-        # lands there and leaves the picker unable to take keys.
-        ' -> [SetMode(normal), OpenLastPicker()];
+
+        last_picker {
+            # The mode switch leads, as in the goto menus' `?` arms. The
+            # recalled picker takes focus with its own input, so a switch after
+            # the re-open lands there and leaves the picker unable to take keys.
+            ' -> [SetMode(normal), OpenLastPicker()];
+        }
+
         ? -> [ToggleKeyHints(), SetMode(normal)];
     }
     mode == space_clipboard {

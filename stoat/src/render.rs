@@ -2442,6 +2442,23 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The recall key reopens the last picker, so its row lists only once a
+    /// picker has opened.
+    #[test]
+    fn the_space_box_lists_the_recall_only_after_a_picker_opened() {
+        let mut h = TestHarness::with_size(150, 50);
+        let recall = short_desc("OpenLastPicker");
+        let lists_recall = |rows: Vec<String>| rows.iter().any(|row| row == recall);
+        let fresh = lists_recall(chord_rows(&mut h, "space"));
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.type_keys("escape");
+        assert_eq!(
+            (fresh, lists_recall(chord_rows(&mut h, "space"))),
+            (false, true),
+        );
+    }
+
     /// Closing the only workspace is refused, so its row lists only once a
     /// second workspace gives the close somewhere to land.
     #[test]
