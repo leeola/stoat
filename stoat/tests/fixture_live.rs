@@ -651,6 +651,70 @@ fn walkthrough_catalog_fixture_swaps_tours_mid_play() {
     });
 }
 
+/// The picker is how a reader moves between the tours a workspace holds, so
+/// this walks two of them through it. A bare `n` proves Enter left the reader
+/// in the walkthrough mode, and the second Enter proves the selection opened
+/// on the tour after the one playing.
+#[test]
+fn walkthrough_picker_plays_one_tour_after_another() {
+    let (_dir, _root, harness) = fixture_harness("walkthrough-catalog");
+    let mut harness = harness.with_size(WIDE_COLS, 24);
+    harness.run(|mut handle| async move {
+        handle
+            .send_keys("<Space>W")
+            .await
+            .expect("open the picker with no tour playing");
+        handle
+            .await_frame(
+                |text| {
+                    text.contains(" walkthroughs ")
+                        && ["empty", "plain", "solo", "tour"]
+                            .iter()
+                            .all(|slug| text.contains(slug))
+                },
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the picker lists every stored tour");
+
+        handle
+            .send_keys("plain<Enter>")
+            .await
+            .expect("pick the three-stop tour");
+        handle
+            .await_frame(|text| status_of(text).contains("1/3:"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("Enter plays the picked tour from its first stop");
+
+        handle.send_keys("n").await.expect("step with a bare key");
+        handle
+            .await_frame(|text| status_of(text).contains("2/3:"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("Enter left the reader in the walkthrough mode");
+
+        handle
+            .send_keys("o")
+            .await
+            .expect("open the picker over the playing tour");
+        handle
+            .await_frame(
+                |text| text.lines().any(|line| line.contains("> plain")),
+                WALKTHROUGH_TIMEOUT,
+            )
+            .await
+            .expect("the picker marks the tour that is playing");
+
+        handle
+            .send_keys("<Enter>")
+            .await
+            .expect("play the tour after it");
+        handle
+            .await_frame(|text| status_of(text).contains("1/1:"), WALKTHROUGH_TIMEOUT)
+            .await
+            .expect("the selection opened on solo, the tour after plain");
+    });
+}
+
 /// The status line of `frame`, being its last line with content.
 fn status_of(frame: &str) -> &str {
     frame
