@@ -357,6 +357,8 @@ on init {
 #   modified       the buffer has unsaved edits
 #   changes        the focused buffer's diff holds at least one hunk, staged
 #                  or not
+#   pair_diff      the focused file diffs against another file, the pair
+#                  space G D set
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open

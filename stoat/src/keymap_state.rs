@@ -46,6 +46,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "has_selection",
     "modified",
     "changes",
+    "pair_diff",
 ];
 
 /// The keymap predicate values that the active [`Workspace`] and the app
@@ -236,6 +237,10 @@ pub(crate) struct StoatKeymapState<'a> {
     /// not. A hunk already in the index counts, so the stage toggle stays bound
     /// to take it back out.
     changes: StateValue,
+    /// Whether the focused file is measured against another file, the pair
+    /// `DiffPair` installs. No index or HEAD stands behind such a diff, so the
+    /// git base arms stay unbound over it.
+    pair_diff: StateValue,
     /// Config-defined session variables, read only after the built-in fields so
     /// a variable can never shadow one. Borrowed from the owning [`Stoat`];
     /// `None` for the flag-built states that carry no user vars.
@@ -279,6 +284,7 @@ impl<'a> StoatKeymapState<'a> {
             has_selection: StateValue::Bool(false),
             modified: StateValue::Bool(false),
             changes: StateValue::Bool(false),
+            pair_diff: StateValue::Bool(false),
             user_vars: None,
         }
     }
@@ -353,8 +359,9 @@ impl<'a> StoatKeymapState<'a> {
         self
     }
 
-    /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified`/`changes`
-    /// predicate values from a focused-buffer derivation (see [`focus_flags`]).
+    /// Set the `lsp`/`lang`/`diags`/`has_selection`/`modified`/`changes`/
+    /// `pair_diff` predicate values from a focused-buffer derivation (see
+    /// [`focus_flags`]).
     pub(crate) fn with_focus_flags(mut self, flags: FocusFlags) -> Self {
         self.lsp = StateValue::Bool(flags.lsp);
         self.lang = flags.lang.map(|l| StateValue::String(l.into()));
@@ -362,6 +369,7 @@ impl<'a> StoatKeymapState<'a> {
         self.has_selection = StateValue::Bool(flags.has_selection);
         self.modified = StateValue::Bool(flags.modified);
         self.changes = StateValue::Bool(flags.changes);
+        self.pair_diff = StateValue::Bool(flags.pair_diff);
         self
     }
 
@@ -413,6 +421,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "has_selection" => Some(&self.has_selection),
             "modified" => Some(&self.modified),
             "changes" => Some(&self.changes),
+            "pair_diff" => Some(&self.pair_diff),
             other => self.user_vars.and_then(|m| m.get(other)),
         }
     }
@@ -492,6 +501,7 @@ pub(crate) struct FocusFlags {
     has_selection: bool,
     modified: bool,
     changes: bool,
+    pair_diff: bool,
 }
 
 /// Derive [`FocusFlags`] for the focused buffer, sharing [`resolve_focus`] with
@@ -527,6 +537,10 @@ pub(crate) fn focus_flags(
             Some((g.dirty, changes))
         })
         .unwrap_or_default();
+    let pair_diff = ws
+        .buffers
+        .path_for(buffer_id)
+        .is_some_and(|path| ws.pair_for(path).is_some());
     FocusFlags {
         lsp,
         lang,
@@ -534,6 +548,7 @@ pub(crate) fn focus_flags(
         has_selection,
         modified,
         changes,
+        pair_diff,
     }
 }
 
@@ -1184,6 +1199,35 @@ mod tests {
 
         h.open_side_by_side(("/pair/a.txt", "a\n"), ("/pair/b.txt", "b\n"));
         assert_eq!(pair(&h), Some(StateValue::Bool(true)));
+    }
+
+    /// The pair belongs to the right file, which the pair diff focuses. Closing
+    /// the view returns that file to the workspace's base, so the flag drops.
+    ///
+    /// The two files are equal, so the pair holds no hunk. The flag answers for
+    /// the pair, not for the changes the diff shows.
+    #[test]
+    fn pair_diff_reads_whether_the_focused_file_has_a_pair() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 20);
+        h.open_side_by_side(("/pair/a.txt", "same\n"), ("/pair/b.txt", "same\n"));
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+        let pair_diff = |h: &crate::test_harness::TestHarness| {
+            StoatKeymapState::from_stoat(&h.stoat)
+                .get("pair_diff")
+                .cloned()
+        };
+
+        let before = pair_diff(&h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
+        h.settle();
+        let paired = pair_diff(&h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        h.settle();
+
+        assert_eq!(
+            [before, paired, pair_diff(&h)],
+            [false, true, false].map(|on| Some(StateValue::Bool(on))),
+        );
     }
 
     #[test]
