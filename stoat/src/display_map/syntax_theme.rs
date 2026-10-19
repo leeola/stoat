@@ -36,6 +36,7 @@ const THEME_KEYS: &[&str] = &[
     "operator",
     "punctuation.bracket",
     "punctuation.delimiter",
+    "punctuation.special",
     "property",
     "attribute",
     "variable",
@@ -241,7 +242,7 @@ mod tests {
     use crate::theme::Theme;
     use std::collections::HashSet;
     use stoat_config::parse;
-    use stoat_language::HighlightId;
+    use stoat_language::{HighlightId, HighlightMap};
 
     fn theme_from(src: &str) -> Theme {
         let (config, errors) = parse(src);
@@ -265,6 +266,17 @@ mod tests {
             );
         }
         assert_eq!(super::highlight_id_for_key("not.a.stem"), None);
+    }
+
+    /// A `@punctuation.special` capture, such as YAML's `&` and Rust's
+    /// attribute `#`, resolves to its own key rather than to the unstyled
+    /// default.
+    #[test]
+    fn special_punctuation_captures_resolve_to_their_own_key() {
+        assert_eq!(
+            HighlightMap::new(&["punctuation.special"], THEME_KEYS).get(0),
+            super::highlight_id_for_key("punctuation.special").unwrap(),
+        );
     }
 
     #[test]
