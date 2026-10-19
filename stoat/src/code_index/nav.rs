@@ -551,9 +551,9 @@ fn focused_offset(editor: &mut EditorState) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        build, goto_callee, goto_caller, jump_to_symbol, mark_trail_end, mark_trail_start,
-        nearest_diff_target, present_or_pick, symbol_at_cursor, trail_clear, trail_next,
-        trail_prev,
+        build, goto_callee, goto_caller, install_trail, jump_to_symbol, mark_trail_end,
+        mark_trail_start, nearest_diff_target, present_or_pick, symbol_at_cursor, trail_clear,
+        trail_next, trail_prev,
     };
     use crate::{
         action_handlers::dispatch,
@@ -566,7 +566,7 @@ mod tests {
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{ops::Range, path::PathBuf, sync::Arc};
-    use stoat_action::GotoDiffCalleeDown;
+    use stoat_action::{registry, GotoDiffCalleeDown};
     use stoat_config::Settings;
     use stoat_language::SymbolKind;
     use stoat_scheduler::TestScheduler;
@@ -1255,6 +1255,56 @@ mod tests {
             Some("no call relation; direct trail"),
             "two unrelated symbols still give a trail, named as the fallback \
              it is rather than passing for a two-stop path",
+        );
+    }
+
+    /// The text of each row the `space l` box lists.
+    fn space_lsp_rows(h: &mut TestHarness) -> Vec<String> {
+        h.type_keys("space l");
+        h.render_composited();
+        let rows = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the space l chord laid out its box")
+            .rows
+            .iter()
+            .map(|row| row.action.clone())
+            .collect();
+        h.type_keys("escape");
+        rows
+    }
+
+    #[test]
+    fn the_space_l_box_lists_each_trail_key_in_its_phase() {
+        let mut h = TestHarness::default();
+        let listed = |rows: &[String]| {
+            [
+                "MarkTrailStart",
+                "MarkTrailEnd",
+                "TrailNext",
+                "TrailPrev",
+                "TrailClear",
+            ]
+            .map(|name| {
+                let desc = registry::lookup(name).expect("registered").def.short_desc();
+                rows.iter().any(|row| row == desc)
+            })
+        };
+        let scratch = listed(&space_lsp_rows(&mut h));
+
+        mark_trail_start(&mut h.stoat);
+        let armed = listed(&space_lsp_rows(&mut h));
+
+        install_trail(&mut h.stoat, &[SymbolKey([1u8; 16]), SymbolKey([2u8; 16])]);
+        assert_eq!(
+            [scratch, armed, listed(&space_lsp_rows(&mut h))],
+            [
+                [true, false, false, false, false],
+                [true, true, false, false, true],
+                [true, false, true, true, true],
+            ],
+            "start, end, next, prev, and clear rows with no trail, an armed one, and a path",
         );
     }
 }

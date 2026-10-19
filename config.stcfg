@@ -1422,11 +1422,24 @@ on key {
     }
     mode == space_lsp {
         Escape -> SetMode(normal);
-        m -> [MarkTrailStart(), SetMode(normal)];
-        M -> [MarkTrailEnd(), SetMode(normal)];
-        n -> [TrailNext(), SetMode(normal)];
-        p -> [TrailPrev(), SetMode(normal)];
-        x -> [TrailClear(), SetMode(normal)];
+
+        pane == editor {
+            m -> [MarkTrailStart(), SetMode(normal)];
+        }
+
+        trail == armed {
+            M -> [MarkTrailEnd(), SetMode(normal)];
+        }
+
+        trail == path {
+            n -> [TrailNext(), SetMode(normal)];
+            p -> [TrailPrev(), SetMode(normal)];
+        }
+
+        trail {
+            x -> [TrailClear(), SetMode(normal)];
+        }
+
         D -> [SetMode(normal), OpenWorkspaceDiagnosticsPicker()];
         l -> [ToggleLspStatus(), SetMode(normal)];
         w -> [GotoNextDiagnostic(), SetMode(normal)];
