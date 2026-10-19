@@ -1232,7 +1232,10 @@ on key {
         r -> [ReloadAll(), SetMode(normal)];
         g -> SetMode(space_goto);
         G -> SetMode(space_git);
-        W -> SetMode(walkthrough);
+
+        walkthrough {
+            W -> SetMode(walkthrough);
+        }
 
         git || changes {
             R -> SetMode(review);
@@ -1370,23 +1373,29 @@ on key {
     # leaves the tour open for `space W` to return to, and d ends it. The
     # arrows walk the tour too, Right and Left by attention point and Down and
     # Up by stop.
+    #
+    # `space W` and every arm but Escape bind only while a tour is open. A tour
+    # closed from the palette then leaves no dead key in the held mode.
     mode == walkthrough {
         Escape -> SetMode(normal);
-        n -> WalkthroughNext();
-        p -> WalkthroughPrev();
-        a -> WalkthroughNextAnnotation();
-        A -> WalkthroughPrevAnnotation();
-        s -> WalkthroughShowNarration();
-        d -> [WalkthroughDone(), SetMode(normal)];
-        Right -> WalkthroughForward();
-        Left -> WalkthroughBackward();
-        Down -> WalkthroughNext();
-        Up -> WalkthroughPrev();
-        # The wheel walks the tour's attention points where the diff view walks
-        # its changes. A bare notch still scrolls, so the reader roams the file
-        # and Alt-notches back onto the path.
-        Alt-WheelDown -> WalkthroughForward();
-        Alt-WheelUp -> WalkthroughBackward();
+
+        walkthrough {
+            n -> WalkthroughNext();
+            p -> WalkthroughPrev();
+            a -> WalkthroughNextAnnotation();
+            A -> WalkthroughPrevAnnotation();
+            s -> WalkthroughShowNarration();
+            d -> [WalkthroughDone(), SetMode(normal)];
+            Right -> WalkthroughForward();
+            Left -> WalkthroughBackward();
+            Down -> WalkthroughNext();
+            Up -> WalkthroughPrev();
+            # The wheel walks the tour's attention points where the diff view
+            # walks its changes. A bare notch still scrolls, so the reader roams
+            # the file and Alt-notches back onto the path.
+            Alt-WheelDown -> WalkthroughForward();
+            Alt-WheelUp -> WalkthroughBackward();
+        }
     }
     # Reading a diff is a run of hops rather than one, so `space R` holds this
     # mode instead of running a single arm. d opens the diff and a second d

@@ -1215,6 +1215,14 @@ mod tests {
                 .set("mode", StateValue::String(mode.into()))
                 .set("git", StateValue::Bool(true))
         }
+
+        /// A state in `mode` with a walkthrough tour open, where the default
+        /// config binds `space W` and the tour's arms.
+        fn on_tour(mode: &str) -> Self {
+            Self::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("walkthrough", StateValue::Bool(true))
+        }
     }
 
     impl KeymapState for TestState {
@@ -2530,7 +2538,7 @@ mod tests {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
-        let space = TestState::new().set("mode", StateValue::String("space".into()));
+        let space = TestState::on_tour("space");
         let to_walkthrough = keymap
             .lookup(&space, &key_event(KeyCode::Char('W'), KeyModifiers::NONE))
             .expect("W is bound in space mode");
@@ -2541,7 +2549,7 @@ mod tests {
             "space W reaches the mode itself, with no one-shot layer between",
         );
 
-        let walkthrough = TestState::new().set("mode", StateValue::String("walkthrough".into()));
+        let walkthrough = TestState::on_tour("walkthrough");
         for (key, action) in [
             (KeyCode::Char('n'), "WalkthroughNext"),
             (KeyCode::Char('p'), "WalkthroughPrev"),
@@ -2574,7 +2582,7 @@ mod tests {
     fn alt_wheel_walks_the_tour_and_a_bare_notch_does_not() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let walkthrough = TestState::new().set("mode", StateValue::String("walkthrough".into()));
+        let walkthrough = TestState::on_tour("walkthrough");
 
         for (dir, action) in [
             (WheelDirection::Down, "WalkthroughForward"),

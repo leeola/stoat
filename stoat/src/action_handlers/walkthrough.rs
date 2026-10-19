@@ -1815,6 +1815,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_space_box_lists_the_tour_only_while_one_is_open() {
+        let mut h = harness_with_tour();
+        let lists_the_tour = |h: &mut TestHarness| {
+            h.type_keys("space");
+            h.render_composited();
+            let listed = h
+                .stoat
+                .hints_cache
+                .as_ref()
+                .expect("the space chord laid out its box")
+                .rows
+                .iter()
+                .any(|row| row.action == "walkthrough mode");
+            h.type_keys("escape");
+            listed
+        };
+        let before = lists_the_tour(&mut h);
+
+        open(&mut h.stoat, "tour");
+        assert_eq!(
+            (before, lists_the_tour(&mut h)),
+            (false, true),
+            "space lists W only with a tour to enter",
+        );
+    }
+
     /// The narration shares the hover popup, which any key takes down, and the
     /// chord that raises it is itself a key press. A popup this dispatch put up
     /// is the one case that clear must leave alone, or no reader ever sees it.
