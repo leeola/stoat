@@ -7,9 +7,11 @@ fn main() {
     compile_grammar("tree-sitter-rust", "tree-sitter-rust", "src", true);
     compile_grammar("tree-sitter-json", "tree-sitter-json", "src", false);
     compile_grammar("tree-sitter-toml", "tree-sitter-toml", "src", true);
-    // tree-sitter-grammars/tree-sitter-yaml v0.7.2,
-    // 7708026449bed86239b1cd5bce6e3c34dbca6415. The scanner includes
-    // schema.core.c, its default schema, from beside it.
+    // tree-sitter-grammars/tree-sitter-yaml master,
+    // a1c4812a73ec5e089de8e441fdea3a921e8d5079, two commits past v0.7.2. It
+    // carries PR 36, which accepts a double-quoted continuation line at any
+    // indent. The scanner includes schema.core.c, its default schema, from
+    // beside it.
     compile_grammar("tree-sitter-yaml", "tree-sitter-yaml", "src", true);
     // tree-sitter-grammars/tree-sitter-ron,
     // 78938553b93075e638035f624973083451b29055.

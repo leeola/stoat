@@ -100,6 +100,16 @@ mod tests {
         assert_eq!(tree.root_node().kind(), "stream");
     }
 
+    /// YAML allows the continuation line of a double-quoted scalar at any
+    /// indent, and an error node there uncolors the keys after the string.
+    #[test]
+    fn yaml_double_quoted_continuation_at_column_zero_parses() {
+        let mut p = Parser::new();
+        p.set_language(&yaml()).unwrap();
+        let tree = p.parse("a:\n  b: \"x\ny\"\n  c: 1\n", None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
     #[test]
     fn loads_ron() {
         let mut p = Parser::new();
