@@ -370,6 +370,7 @@ on init {
 #   jump_back      the focused pane's jumplist has an older entry, though a
 #                  walk skips an entry at the cursor's own position
 #   jump_forward   the focused pane's jumplist has a newer entry
+#   prev_buffer    the focused pane showed another buffer that is still open
 #
 # Operators: == != > < >= <= comparison, ~ glob match, ! negation, && and,
 # || or, and a bare field name is truthy. A token condition must fail open when
@@ -666,7 +667,10 @@ on key {
         w -> [GotoWord(), SetMode(normal)];
         | -> [GotoColumn(), SetMode(normal)];
         . -> [GotoLastModification(), SetMode(normal)];
-        a -> [GotoLastAccessed(), SetMode(normal)];
+
+        prev_buffer {
+            a -> [GotoLastAccessed(), SetMode(normal)];
+        }
     }
     mode == z {
         Escape -> SetMode(normal);
@@ -1312,7 +1316,10 @@ on key {
     mode == space_goto {
         Escape -> SetMode(normal);
         g -> PinMode();
-        a -> [GotoLastAccessed(), SetMode(normal)];
+
+        prev_buffer {
+            a -> [GotoLastAccessed(), SetMode(normal)];
+        }
 
         git || changes {
             n -> [GotoNextChange(), SetMode(normal)];

@@ -3410,7 +3410,8 @@ mod tests {
         assert_eq!(to_goto[0].name, "SetMode");
         assert_eq!(to_goto[0].args[0].value, Value::Ident("space_goto".into()));
 
-        let space_goto = TestState::in_repo("space_goto");
+        let space_goto =
+            TestState::in_repo("space_goto").set("prev_buffer", StateValue::Bool(true));
         let g = keymap
             .lookup(
                 &space_goto,
@@ -3464,22 +3465,26 @@ mod tests {
         assert_eq!(g[0].name, "SetMode");
         assert_eq!(g[0].args[0].value, Value::Ident("space_goto".into()));
 
-        let space_goto = TestState::new().set("mode", StateValue::String("space_goto".into()));
-        let a = keymap
-            .lookup(
-                &space_goto,
-                &key_event(KeyCode::Char('a'), KeyModifiers::NONE),
-            )
-            .expect("a is bound in space_goto mode");
-        assert_eq!(a[0].name, "GotoLastAccessed");
-
-        let goto = TestState::new().set("mode", StateValue::String("goto".into()));
-        let normal_a = keymap
-            .lookup(&goto, &key_event(KeyCode::Char('a'), KeyModifiers::NONE))
-            .expect("a is bound in goto mode");
+        // With no other buffer to return to, the switch does nothing, so `a`
+        // binds only once the pane has shown one.
+        let a_in = |mode: &str, prev_buffer: bool| {
+            let state = TestState::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("prev_buffer", StateValue::Bool(prev_buffer));
+            keymap
+                .lookup(&state, &key_event(KeyCode::Char('a'), KeyModifiers::NONE))
+                .map(|actions| actions[0].name.clone())
+        };
+        let last = Some("GotoLastAccessed".to_owned());
         assert_eq!(
-            normal_a[0].name, "GotoLastAccessed",
-            "g a and space g a reach the same action"
+            [
+                a_in("space_goto", false),
+                a_in("goto", false),
+                a_in("space_goto", true),
+                a_in("goto", true),
+            ],
+            [None, None, last.clone(), last],
+            "g a and space g a reach the same action, and only with a buffer to return to",
         );
     }
 

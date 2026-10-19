@@ -35,6 +35,7 @@ pub(crate) const BUILTIN_FIELDS: &[&str] = &[
     "workspaces",
     "jump_back",
     "jump_forward",
+    "prev_buffer",
     "token",
     "token_known",
     "lsp",
@@ -88,6 +89,10 @@ pub(crate) struct Flags {
     /// Whether the focused split pane's jumplist has a newer entry to step
     /// forward to.
     pub(crate) jump_forward: bool,
+    /// Whether the focused split pane showed another buffer that is still open,
+    /// which a switch to the last accessed buffer returns to. See
+    /// [`Pane::buffer_history`](crate::pane::Pane::buffer_history).
+    pub(crate) prev_buffer: bool,
 }
 
 impl Flags {
@@ -109,6 +114,7 @@ impl Flags {
             workspaces: 0,
             jump_back: resolve_focus(ws).is_some() && jumps.is_some_and(|list| list.cursor() > 0),
             jump_forward: jumps.is_some_and(|list| list.cursor() + 1 < list.entries().len()),
+            prev_buffer: prev_buffer(ws),
         }
     }
 
@@ -169,6 +175,8 @@ pub(crate) struct StoatKeymapState<'a> {
     jump_back: StateValue,
     /// Whether the focused pane's jumplist has a newer entry.
     jump_forward: StateValue,
+    /// Whether the focused pane showed another buffer that is still open.
+    prev_buffer: StateValue,
     /// The focused pane's kind, absent only when there is no focus. `None` reads
     /// as an unset field, so a `pane == x` predicate is false without one.
     pane: Option<StateValue>,
@@ -235,6 +243,7 @@ impl<'a> StoatKeymapState<'a> {
             workspaces: StateValue::Number(f64::from(flags.workspaces)),
             jump_back: StateValue::Bool(flags.jump_back),
             jump_forward: StateValue::Bool(flags.jump_forward),
+            prev_buffer: StateValue::Bool(flags.prev_buffer),
             pane: None,
             view: None,
             modal: None,
@@ -366,6 +375,7 @@ impl KeymapState for StoatKeymapState<'_> {
             "workspaces" => Some(&self.workspaces),
             "jump_back" => Some(&self.jump_back),
             "jump_forward" => Some(&self.jump_forward),
+            "prev_buffer" => Some(&self.prev_buffer),
             "pane" => self.pane.as_ref(),
             "view" => self.view.as_ref(),
             "modal" => self.modal.as_ref(),
@@ -428,6 +438,23 @@ pub(crate) fn resolve_focus(ws: &Workspace) -> Option<(&EditorState, BufferId)> 
     let editor = ws.editors.get(editor_id)?;
     let buffer_id = editor.buffer_id;
     Some((editor, buffer_id))
+}
+
+/// Whether the focused split pane showed another buffer that is still open.
+///
+/// The same read as the last-accessed switch makes, without the pops that
+/// switch uses to forget closed buffers. A dock focus reads false, since the
+/// switch does nothing there.
+fn prev_buffer(ws: &Workspace) -> bool {
+    if !matches!(ws.focus, FocusTarget::SplitPane) {
+        return false;
+    }
+    let current = resolve_focus(ws).map(|(_, buffer)| buffer);
+    ws.panes
+        .pane(ws.panes.focus())
+        .buffer_history
+        .iter()
+        .any(|&id| Some(id) != current && ws.buffers.get(id).is_some())
 }
 
 /// The focused-buffer predicate values, all false or absent when no editor is
@@ -1372,6 +1399,29 @@ mod tests {
             ],
             "an empty list, a saved jump to go back to, then the oldest entry \
              with the jump just left ahead",
+        );
+    }
+
+    #[test]
+    fn prev_buffer_reads_whether_the_pane_showed_another_open_buffer() {
+        let mut h = Stoat::test();
+        let root = crate::test_fixture::seed(&mut h, &[("a.rs", "a\n"), ("b.rs", "b\n")]);
+        let prev = |h: &crate::test_harness::TestHarness| {
+            StoatKeymapState::from_stoat(&h.stoat)
+                .get("prev_buffer")
+                .cloned()
+        };
+        let scratch = prev(&h);
+
+        h.open_file(&root.join("a.rs"));
+        h.open_file(&root.join("b.rs"));
+        let two = prev(&h);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseBuffer);
+        assert_eq!(
+            [scratch, two, prev(&h)],
+            [false, true, false].map(|on| Some(StateValue::Bool(on))),
+            "a fresh pane, a second file shown after the first, then the second closed",
         );
     }
 
