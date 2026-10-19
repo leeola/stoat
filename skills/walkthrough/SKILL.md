@@ -73,8 +73,9 @@ sub-line, and count from the file rather than from memory.
 The reader plays a tour in stoat. `:walkthrough <slug>` opens it at the first
 stop. `:walkthroughs` opens a picker over every stored tour, with a preview of
 its description and stops. Enter plays the selected tour in the walkthrough
-mode. While a tour is open, `space W` enters that mode. The mode stays until
-Escape, so each step is one bare key.
+mode. `space W` opens the same picker when no tour is open, and enters the
+walkthrough mode when one is. The mode stays until Escape, so each step is one
+bare key.
 
 | Key | Does |
 |---|---|
@@ -85,6 +86,7 @@ Escape, so each step is one bare key.
 | `s` | Hide the card, or show the narration again |
 | `S` | Show the tour's description under its title |
 | `d` | End the tour and leave the mode |
+| `o` | Open the picker to switch to another tour |
 | `Escape` | Leave the mode. The tour stays open, and `space W` goes back to it. |
 
 Give the user these keys when you hand them the slug.

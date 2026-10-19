@@ -1896,29 +1896,54 @@ mod tests {
     }
 
     #[test]
-    fn the_space_box_lists_the_tour_only_while_one_is_open() {
+    fn the_space_box_offers_the_picker_without_a_tour_and_the_mode_with_one() {
         let mut h = harness_with_tour();
-        let lists_the_tour = |h: &mut TestHarness| {
+        let w_row = |h: &mut TestHarness| {
             h.type_keys("space");
             h.render_composited();
-            let listed = h
+            let action = h
                 .stoat
                 .hints_cache
                 .as_ref()
                 .expect("the space chord laid out its box")
                 .rows
                 .iter()
-                .any(|row| row.action == "walkthrough mode");
+                .find(|row| row.keys == "W")
+                .map(|row| row.action.clone());
             h.type_keys("escape");
-            listed
+            action
         };
-        let before = lists_the_tour(&mut h);
+        let before = w_row(&mut h);
 
         open(&mut h.stoat, "tour");
         assert_eq!(
-            (before, lists_the_tour(&mut h)),
-            (false, true),
-            "space lists W only with a tour to enter",
+            [before, w_row(&mut h)],
+            [
+                Some("open the walkthrough picker"),
+                Some("walkthrough mode")
+            ]
+            .map(|action| action.map(str::to_owned)),
+            "W picks a tour with none open, and enters the mode with one",
+        );
+    }
+
+    /// The picker opens over the tour that plays, so the reader swaps tours
+    /// without closing the open one first.
+    #[test]
+    fn o_in_the_mode_opens_the_picker_over_the_playing_tour() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+
+        h.type_keys("space W o");
+        assert_eq!(
+            (
+                h.stoat
+                    .walkthrough_picker
+                    .as_ref()
+                    .map(|picker| picker.playing_idx()),
+                h.stoat.active_workspace().walkthrough.is_some(),
+            ),
+            (Some(Some(0)), true),
         );
     }
 

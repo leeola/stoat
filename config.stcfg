@@ -1255,6 +1255,10 @@ on key {
             W -> SetMode(walkthrough);
         }
 
+        !walkthrough {
+            W -> [SetMode(normal), OpenWalkthroughPicker()];
+        }
+
         git || changes {
             R -> SetMode(review);
             d -> [Diff(), SetMode(normal)];
@@ -1386,14 +1390,16 @@ on key {
     }
     # Reading a tour is a run of steps rather than one, so `space W` holds this
     # mode instead of running a single arm. n and p walk the stops and a and A
-    # the annotations until Escape. No arm here chains SetMode(normal), which
-    # is what holds the mode, so the tour needs no pin of its own. Escape
-    # leaves the tour open for `space W` to return to, and d ends it. The
-    # arrows walk the tour too, Right and Left by attention point and Down and
-    # Up by stop.
+    # the annotations until Escape. Only d and o chain SetMode(normal), so the
+    # stepping arms hold the mode and the tour needs no pin of its own. Escape
+    # leaves the tour open for `space W` to return to, d ends it, and o opens
+    # the walkthrough picker to swap it for another. The arrows walk the tour
+    # too, Right and Left by attention point and Down and Up by stop.
     #
-    # `space W` and every arm but Escape bind only while a tour is open. A tour
-    # closed from the palette then leaves no dead key in the held mode.
+    # Without a tour, `space W` opens the picker instead, and Enter there plays
+    # the pick in this mode. Every arm here but Escape binds only while a tour
+    # is open. A tour closed from the palette then leaves no dead key in the
+    # held mode.
     mode == walkthrough {
         Escape -> SetMode(normal);
 
@@ -1405,6 +1411,7 @@ on key {
             s -> WalkthroughShowNarration();
             S -> WalkthroughShowDescription();
             d -> [WalkthroughDone(), SetMode(normal)];
+            o -> [SetMode(normal), OpenWalkthroughPicker()];
             Right -> WalkthroughForward();
             Left -> WalkthroughBackward();
             Down -> WalkthroughNext();
