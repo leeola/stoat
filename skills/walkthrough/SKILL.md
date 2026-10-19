@@ -71,8 +71,10 @@ sub-line, and count from the file rather than from memory.
 ## Playing a tour
 
 The reader plays a tour in stoat. `:walkthrough <slug>` opens it at the first
-stop. While a tour is open, `space W` enters the walkthrough mode. The mode
-stays until Escape, so each step is one bare key.
+stop. `:walkthroughs` opens a picker over every stored tour, with a preview of
+its description and stops. Enter plays the selected tour in the walkthrough
+mode. While a tour is open, `space W` enters that mode. The mode stays until
+Escape, so each step is one bare key.
 
 | Key | Does |
 |---|---|

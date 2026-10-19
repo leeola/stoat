@@ -23,7 +23,7 @@ use crate::{
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_sizing,
-        picker_layout, target_picker_rows,
+        picker_layout, store_two_tours, target_picker_rows,
     },
     test_harness::{
         keys::{ctrl, key},
@@ -14177,6 +14177,29 @@ fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,
         "the selected diagnostic is painted as selected"
+    );
+}
+
+/// A reader tells stored tours apart by slug, stop count, and title, so each
+/// row shows all three.
+#[test]
+fn the_walkthrough_picker_rows_show_slug_count_and_title() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    store_two_tours(&mut h);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWalkthroughPicker);
+    h.snapshot();
+
+    let rows = target_picker_rows(&h, ModalKind::WalkthroughPicker);
+    let row_words = |row: u16| -> String {
+        let buf = h.rendered_buffer();
+        let text: String = (rows.x..rows.x + rows.width)
+            .map(|col| buf[(col, row)].symbol())
+            .collect();
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    assert_eq!(
+        [row_words(rows.y), row_words(rows.y + 1)],
+        ["alpha 1 Alpha tour", "zebra 2 Zebra tour"],
     );
 }
 

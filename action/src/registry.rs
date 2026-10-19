@@ -120,9 +120,9 @@ use crate::{
         tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
         terminal::Terminal,
         walkthrough::{
-            WalkthroughBackward, WalkthroughDone, WalkthroughForward, WalkthroughNext,
-            WalkthroughNextAnnotation, WalkthroughOpen, WalkthroughPrev, WalkthroughPrevAnnotation,
-            WalkthroughShowDescription, WalkthroughShowNarration,
+            OpenWalkthroughPicker, WalkthroughBackward, WalkthroughDone, WalkthroughForward,
+            WalkthroughNext, WalkthroughNextAnnotation, WalkthroughOpen, WalkthroughPrev,
+            WalkthroughPrevAnnotation, WalkthroughShowDescription, WalkthroughShowNarration,
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, Mosh, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
@@ -474,6 +474,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(JumpForward::DEF, |_| Ok(Box::new(JumpForward)));
     add(OpenJumplistPicker::DEF, |_| {
         Ok(Box::new(OpenJumplistPicker))
+    });
+    add(OpenWalkthroughPicker::DEF, |_| {
+        Ok(Box::new(OpenWalkthroughPicker))
     });
     add(OpenLastPicker::DEF, |_| Ok(Box::new(OpenLastPicker)));
     add(OpenDiagnosticsPicker::DEF, |_| {
@@ -1203,6 +1206,7 @@ mod tests {
         "TrailNext",
         "TrailPrev",
         "TrailClear",
+        "OpenWalkthroughPicker",
         "WalkthroughNext",
         "WalkthroughPrev",
         "WalkthroughNextAnnotation",
@@ -1730,6 +1734,7 @@ mod tests {
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
+        // + 1 OpenWalkthroughPicker.
         // + 1 OpenLastPicker.
         // + 1 OpenDiagnosticsPicker.
         // + 1 OpenWorkspaceDiagnosticsPicker.
@@ -1896,7 +1901,7 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        assert_eq!(all().count(), 440);
+        assert_eq!(all().count(), 441);
     }
 
     #[test]

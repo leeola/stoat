@@ -29,6 +29,9 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         Some(ActiveModal::Jumplist) => {
             shift!(stoat.jumplist_picker.as_mut().map(|p| &mut p.picker))
         },
+        Some(ActiveModal::WalkthroughPicker) => {
+            shift!(stoat.walkthrough_picker.as_mut().map(|p| &mut p.picker))
+        },
         Some(ActiveModal::Diagnostics) => {
             shift!(stoat.diagnostics_picker.as_mut().map(|p| &mut p.picker))
         },
@@ -52,6 +55,7 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
 pub(super) fn picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     match active_modal(stoat) {
         Some(ActiveModal::Jumplist) => jumplist_picker_page(stoat, dir),
+        Some(ActiveModal::WalkthroughPicker) => walkthrough_picker_page(stoat, dir),
         Some(ActiveModal::Diagnostics) => diagnostics_picker_page(stoat, dir),
         Some(ActiveModal::Location) => location_picker_page(stoat, dir),
         Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_page(stoat, dir),
@@ -216,6 +220,45 @@ pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     super::jump::apply_jump_entry(stoat, entry);
     if let Some(jumplist) = focused_pane_jumplist(stoat) {
         jumplist.set_cursor(idx);
+    }
+    UpdateEffect::Redraw
+}
+
+/// Page the walkthrough picker's selection by half its visible rows in `dir`.
+pub(super) fn walkthrough_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(picker) = stoat.walkthrough_picker.as_mut() {
+        picker.page(dir);
+    }
+    UpdateEffect::Redraw
+}
+
+pub(super) fn walkthrough_picker_close(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(picker) = stoat.walkthrough_picker.take() {
+        picker.dispose(stoat.active_workspace_mut());
+    }
+    UpdateEffect::Redraw
+}
+
+/// Play the tour under the walkthrough picker's selection in the walkthrough
+/// mode, so its stepping keys work at once. An empty picker just closes.
+///
+/// A tour that fails to open reports why and leaves the tour that was open in
+/// place, which the mode then steps.
+pub(super) fn walkthrough_picker_select(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(mut picker) = stoat.walkthrough_picker.take() else {
+        return UpdateEffect::None;
+    };
+    let query = picker.picker.input.text(stoat.active_workspace());
+    picker.picker.settle_rank(&query);
+    let slug = picker.selected_slug().map(str::to_owned);
+    picker.dispose(stoat.active_workspace_mut());
+    let Some(slug) = slug else {
+        return UpdateEffect::Redraw;
+    };
+
+    super::walkthrough::open(stoat, &slug);
+    if stoat.active_workspace().walkthrough.is_some() {
+        stoat.set_focused_mode("walkthrough".into());
     }
     UpdateEffect::Redraw
 }
@@ -473,6 +516,100 @@ pub(crate) fn sync_jumplist_picker(stoat: &mut Stoat) {
         .sync_preview(ws, fs_host, language_registry, target);
 }
 
+/// Drive [`ActionKind::OpenWalkthroughPicker`]. Lists the workspace's stored
+/// walkthroughs in [`Stoat::walkthrough_picker`], with the selection on the
+/// tour after the one that is open.
+///
+/// A workspace with no walkthroughs, or a store that fails to load, reports
+/// why in the status line and opens nothing.
+///
+/// The editor under the picker resets to normal mode, as the jumplist
+/// picker's does.
+pub(super) fn open_walkthrough_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let loaded = {
+        let ws = stoat.active_workspace();
+        crate::walkthrough::store::load_all(stoat.fs_host.as_ref(), &ws.git_root)
+    };
+    let tours = match loaded {
+        Ok(tours) if tours.is_empty() => {
+            stoat.set_status("no walkthroughs in this workspace");
+            return UpdateEffect::Redraw;
+        },
+        Ok(tours) => tours,
+        Err(error) => {
+            stoat.set_status(format!("{error}"));
+            return UpdateEffect::Redraw;
+        },
+    };
+    let playing = stoat
+        .active_workspace()
+        .walkthrough
+        .as_ref()
+        .map(|run| run.walkthrough.slug.clone());
+
+    let executor = stoat.executor.clone();
+    let redraw = stoat.redraw_notify.clone();
+    stoat.set_focused_mode("normal".into());
+    let ws = stoat.active_workspace_mut();
+    let input = crate::input_view::InputView::create(
+        ws,
+        executor.clone(),
+        crate::input_view::SubmitTarget::WalkthroughPicker,
+        "",
+        "insert",
+    );
+    let preview = crate::picker::Preview::new(ws, executor.clone());
+    stoat.walkthrough_picker = Some(crate::walkthrough_picker::WalkthroughPicker::from_tours(
+        tours,
+        playing.as_deref(),
+        input,
+        preview,
+        executor,
+        redraw,
+    ));
+    UpdateEffect::Redraw
+}
+
+/// Re-rank the walkthrough picker for what is typed and sync its preview.
+///
+/// Driven once per frame beside the other picker syncs, so typing narrows the
+/// list and the pane follows the selection without an action of its own.
+pub(crate) fn sync_walkthrough_picker(stoat: &mut Stoat) {
+    if stoat.walkthrough_picker.is_none() {
+        return;
+    }
+    let query = {
+        let ws = stoat.active_workspace();
+        stoat
+            .walkthrough_picker
+            .as_ref()
+            .expect("walkthrough_picker present")
+            .picker
+            .input
+            .text(ws)
+    };
+
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let Some(picker) = stoat.walkthrough_picker.as_mut() else {
+        return;
+    };
+    picker.picker.refilter(&query);
+    if picker.picker.preview_current() {
+        return;
+    }
+
+    let target = picker
+        .picker
+        .selected_entry()
+        .map(crate::walkthrough_picker::walkthrough_target);
+    picker
+        .picker
+        .sync_preview(ws, fs_host, language_registry, target);
+}
+
 /// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].
 /// Snapshots every `(path, diagnostic)` pair currently in
 /// `Stoat::diagnostics` and stores the workspace-scope picker
@@ -585,7 +722,10 @@ pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
 #[cfg(test)]
 mod tests {
     use super::{super::dispatch, *};
-    use crate::test_harness::{editor, keys, stoat};
+    use crate::{
+        test_fixture::store_two_tours,
+        test_harness::{editor, keys, stoat, TestHarness},
+    };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use stoat_action::{MoveDown, SaveSelection};
 
@@ -682,5 +822,120 @@ mod tests {
         let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(h.stoat.update(Event::Key(event)), UpdateEffect::Redraw);
         assert!(h.stoat.jumplist_picker.is_none());
+    }
+
+    /// A harness over [`store_two_tours`] with the walkthrough picker open.
+    fn walkthrough_picker_over_two_tours() -> TestHarness {
+        let mut h = Stoat::test();
+        store_two_tours(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::OpenWalkthroughPicker);
+        h
+    }
+
+    fn playing_slug(h: &TestHarness) -> Option<&str> {
+        let run = h.stoat.active_workspace().walkthrough.as_ref()?;
+        Some(run.walkthrough.slug.as_str())
+    }
+
+    #[test]
+    fn open_walkthrough_picker_lists_the_tours_in_slug_order() {
+        let h = walkthrough_picker_over_two_tours();
+        let picker = h.stoat.walkthrough_picker.as_ref().expect("modal open");
+        let rows: Vec<_> = picker
+            .entries()
+            .iter()
+            .map(|row| {
+                (
+                    row.slug.as_str(),
+                    row.title.as_str(),
+                    row.stops,
+                    &*row.preview,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    "alpha",
+                    "Alpha tour",
+                    1,
+                    "# Alpha tour\n\nWhere it **starts**.\n\n1 stop\n\n1. entry: a.rs 1:1-1:11\n"
+                ),
+                (
+                    "zebra",
+                    "Zebra tour",
+                    2,
+                    "# Zebra tour\n\n2 stops\n\n1. a.rs: a.rs 1:1-1:11\n2. a.rs: a.rs 2:1-2:11\n"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn open_walkthrough_picker_with_no_tours_reports_it() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &stoat_action::OpenWalkthroughPicker);
+        assert_eq!(
+            (
+                h.stoat.walkthrough_picker.is_none(),
+                h.stoat.pending_message.as_deref()
+            ),
+            (true, Some("no walkthroughs in this workspace")),
+        );
+    }
+
+    /// The reader picked a tour to read, so its stepping keys work at once.
+    #[test]
+    fn enter_plays_the_picked_tour_in_walkthrough_mode() {
+        let mut h = walkthrough_picker_over_two_tours();
+        h.type_keys("down enter");
+        assert_eq!(
+            (
+                h.stoat.walkthrough_picker.is_none(),
+                playing_slug(&h),
+                h.stoat.focused_mode()
+            ),
+            (true, Some("zebra"), "walkthrough"),
+        );
+    }
+
+    /// A reader walks the tours in a row, so Enter alone moves on to the next
+    /// one, and the last wraps to the first.
+    #[test]
+    fn the_selection_starts_after_the_playing_tour() {
+        let selected_with = |slug: &str| {
+            let mut h = Stoat::test();
+            store_two_tours(&mut h);
+            dispatch(
+                &mut h.stoat,
+                &stoat_action::WalkthroughOpen {
+                    slug: slug.to_owned(),
+                },
+            );
+            dispatch(&mut h.stoat, &stoat_action::OpenWalkthroughPicker);
+            let picker = h.stoat.walkthrough_picker.as_ref().expect("modal open");
+            (
+                picker.selected_slug().map(str::to_owned),
+                picker.playing_idx(),
+            )
+        };
+        assert_eq!(
+            [selected_with("alpha"), selected_with("zebra")],
+            [
+                (Some("zebra".to_owned()), Some(0)),
+                (Some("alpha".to_owned()), Some(1))
+            ],
+        );
+    }
+
+    #[test]
+    fn escape_closes_without_opening() {
+        let mut h = walkthrough_picker_over_two_tours();
+        h.type_keys("escape");
+        assert_eq!(
+            (h.stoat.walkthrough_picker.is_none(), playing_slug(&h)),
+            (true, None),
+        );
     }
 }

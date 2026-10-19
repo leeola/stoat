@@ -93,6 +93,7 @@ pub mod tty;
 pub mod ui;
 mod vt_input;
 pub mod walkthrough;
+pub(crate) mod walkthrough_picker;
 pub mod workspace;
 pub mod workspace_picker;
 

@@ -45,6 +45,20 @@ impl Action for WalkthroughOpen {
 }
 
 define_action!(
+    OpenWalkthroughPickerDef,
+    OpenWalkthroughPicker,
+    "OpenWalkthroughPicker",
+    ActionKind::OpenWalkthroughPicker,
+    "open the walkthrough picker",
+    "Open a modal listing the workspace's stored walkthroughs by slug, stop \
+     count, and title, over a preview of the selected tour's description and \
+     stops. Enter plays the selected tour in the walkthrough mode, and the \
+     selection opens on the tour after the one playing. Esc cancels.",
+    ActionPriority::Common,
+    command_name = "walkthroughs"
+);
+
+define_action!(
     WalkthroughNextDef,
     WalkthroughNext,
     "WalkthroughNext",

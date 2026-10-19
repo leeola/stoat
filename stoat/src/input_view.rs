@@ -57,6 +57,7 @@ pub(crate) enum SubmitTarget {
     WorkspacePicker,
     LocationPicker,
     JumplistPicker,
+    WalkthroughPicker,
     DiagnosticsPicker,
     RenameSymbol,
     Search,

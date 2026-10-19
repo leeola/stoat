@@ -454,6 +454,18 @@ on key {
         Ctrl-d -> PickerDetailDown();
         Ctrl-u -> PickerDetailUp();
     }
+    modal == walkthrough_picker && mode == insert {
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
+    }
     modal == diagnostics && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();

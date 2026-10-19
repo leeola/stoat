@@ -652,6 +652,7 @@ pub(crate) enum ModalKind {
     LocationPicker,
     DiagnosticsPicker,
     JumplistPicker,
+    WalkthroughPicker,
 }
 
 /// Rows one wheel notch moves the commit picker's diff preview.
@@ -1030,6 +1031,10 @@ pub struct Stoat {
     /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
     /// cancel.
     pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
+    /// Modal listing the workspace's stored walkthroughs, opened by
+    /// [`stoat_action::OpenWalkthroughPicker`] and dismissed when a tour plays or
+    /// on cancel.
+    pub(crate) walkthrough_picker: Option<crate::walkthrough_picker::WalkthroughPicker>,
     /// Active diagnostics picker modal (`space l d`). `Some` while
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
@@ -2588,6 +2593,7 @@ impl Stoat {
             workspace_picker: None,
             quit_all_confirm: None,
             jumplist_picker: None,
+            walkthrough_picker: None,
             diagnostics_picker: None,
             commit_picker: None,
             location_picker: None,
@@ -6456,6 +6462,7 @@ impl Stoat {
             ActiveModal::Location => &self.location_picker.as_ref()?.input,
             ActiveModal::Diagnostics => &self.diagnostics_picker.as_ref()?.picker.input,
             ActiveModal::Jumplist => &self.jumplist_picker.as_ref()?.picker.input,
+            ActiveModal::WalkthroughPicker => &self.walkthrough_picker.as_ref()?.picker.input,
             ActiveModal::Run | ActiveModal::QuitConfirm => return None,
         };
 
@@ -8968,6 +8975,7 @@ impl Stoat {
         action_handlers::picker::sync_location_picker(self);
         action_handlers::picker::sync_diagnostics_picker(self);
         action_handlers::picker::sync_jumplist_picker(self);
+        action_handlers::picker::sync_walkthrough_picker(self);
 
         let followed_change = crate::auto_reload::drain_followed_change(self);
         let live_reload = crate::auto_reload::drain_live_reload(self);

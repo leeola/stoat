@@ -284,6 +284,10 @@ pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
             .jumplist_picker
             .as_ref()
             .map(|p| p.picker.preview.editor),
+        ActiveModal::WalkthroughPicker => stoat
+            .walkthrough_picker
+            .as_ref()
+            .map(|p| p.picker.preview.editor),
         _ => None,
     }
 }
@@ -423,6 +427,20 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 size,
                 zoom(ModalKind::JumplistPicker),
                 split(ModalKind::JumplistPicker),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: picker.filtered().len(),
+                selected: picker.selected(),
+            })
+        },
+        ActiveModal::WalkthroughPicker => {
+            let picker = stoat.walkthrough_picker.as_ref()?;
+            let layout = crate::render::picker::target_picker_layout(
+                size,
+                zoom(ModalKind::WalkthroughPicker),
+                split(ModalKind::WalkthroughPicker),
             )?;
             Some(ModalSurfaces {
                 list: layout.list,
@@ -618,6 +636,10 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
         },
         ModalKind::JumplistPicker => {
             stoat.jumplist_picker.as_ref()?;
+            crate::render::picker::target_picker_layout(size, zoom, split)?.modal
+        },
+        ModalKind::WalkthroughPicker => {
+            stoat.walkthrough_picker.as_ref()?;
             crate::render::picker::target_picker_layout(size, zoom, split)?.modal
         },
     };

@@ -1697,6 +1697,9 @@ pub(crate) enum PreviewSource {
     /// A terminal session's screen text as of the sync, with no language. The
     /// pane does not follow the child's later output.
     Terminal(TermId),
+    /// Text a picker composes itself, such as a tour's description, painted
+    /// with the markdown grammar. No file backs it, so nothing is read.
+    Markdown(Arc<str>),
 }
 
 /// Paths [`PreviewTextCache`] holds before the oldest goes.
@@ -1848,6 +1851,10 @@ impl Preview {
                 let text = sanitize::sanitize_preview_text(&text);
                 replace_preview_text(ws, self.editor, self.buffer, &text);
                 None
+            },
+            PreviewSource::Markdown(text) => {
+                replace_preview_text(ws, self.editor, self.buffer, text);
+                language_registry.for_path(Path::new("preview.md"))
             },
         };
         ws.reset_preview_syntax(self.buffer);
@@ -2573,12 +2580,21 @@ mod tests {
     /// The text a preview of `path` on `fs` shows, and the language it paints
     /// that text in.
     fn previewed(fs: &crate::host::FakeFs, path: &str) -> (String, Option<&'static str>) {
+        preview_of(fs, PreviewSource::File(p(path)))
+    }
+
+    /// The text a preview of `source` shows, and the language it paints that
+    /// text in.
+    fn preview_of(
+        fs: &crate::host::FakeFs,
+        source: PreviewSource,
+    ) -> (String, Option<&'static str>) {
         let mut h = crate::Stoat::test();
         let executor = h.stoat.executor.clone();
         let language_registry = h.stoat.language_registry.clone();
         let ws = h.stoat.active_workspace_mut();
         let mut preview = Preview::new(ws, executor);
-        preview.sync(ws, fs, &language_registry, PreviewSource::File(p(path)));
+        preview.sync(ws, fs, &language_registry, source);
 
         let text = ws
             .buffers
@@ -2619,6 +2635,20 @@ mod tests {
         assert_eq!(
             [language_after("/repo/a.rs"), language_after("/repo/b.txt")],
             [Some("rust"), None],
+        );
+    }
+
+    /// A picker composes markdown with no file behind it, so the language
+    /// comes from the source rather than from a path.
+    #[test]
+    fn a_markdown_source_paints_with_the_markdown_grammar() {
+        let text = "# Tour\n\nFrom the **entry** to the exit.\n";
+        assert_eq!(
+            preview_of(
+                &crate::host::FakeFs::new(),
+                PreviewSource::Markdown(text.into())
+            ),
+            (text.to_owned(), Some("markdown")),
         );
     }
 

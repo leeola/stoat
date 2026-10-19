@@ -40,6 +40,7 @@ pub(crate) mod term_pane;
 pub(crate) mod text;
 pub(crate) mod undercurl;
 pub(crate) mod walkthrough;
+pub(crate) mod walkthrough_picker;
 pub(crate) mod workspace_picker;
 
 use self::{review::DiffDials, undercurl::UndercurlBatch};
@@ -1364,6 +1365,36 @@ pub(crate) fn frame(
                     &stoat.keymap,
                     mode,
                     "jumplist",
+                    None,
+                    None,
+                    toggles,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
+        Some(ActiveModal::WalkthroughPicker) => {
+            if let Some(picker) = &mut stoat.walkthrough_picker {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::WalkthroughPicker);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::WalkthroughPicker);
+                walkthrough_picker::render_walkthrough_picker(
+                    picker,
+                    ws,
+                    &stoat.theme,
+                    chrome,
+                    full,
+                    zoom,
+                    split,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    mode,
+                    "walkthrough_picker",
                     None,
                     None,
                     toggles,

@@ -20,6 +20,7 @@ use crate::{
     term_screen::TermScreen,
     term_session::TermSession,
     test_harness::TestHarness,
+    walkthrough::{self, Location, Point, Walkthrough},
 };
 use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
 use lsp_types::{
@@ -361,4 +362,47 @@ pub(crate) fn fake_term_session(rows: u16, cols: u16) -> (TermSession, Arc<FakeT
         TermSession::next_token(),
     );
     (session, fake)
+}
+
+/// Store two tours under `/repo`, with the file their stops read.
+///
+/// `alpha` has a description and one titled stop. `zebra` has two untitled
+/// stops and no description, so the pair covers both preview forms and two
+/// stop counts.
+pub(crate) fn store_two_tours(h: &mut TestHarness) {
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    h.fake_fs()
+        .insert_file("/repo/a.rs", "fn one() {}\nfn two() {}\n");
+
+    let stop = |line: u32, snippet: &str| Location {
+        path: PathBuf::from("a.rs"),
+        range: walkthrough::Range {
+            start: Point { line, col: 1 },
+            end: Point { line, col: 11 },
+        },
+        snippet: snippet.to_owned(),
+    };
+    let alpha = {
+        let mut tour = Walkthrough::new("alpha".to_owned(), "Alpha tour".to_owned(), None);
+        tour.description = "Where it **starts**.".to_owned();
+        let focus = stop(1, "fn one() {}");
+        tour.add_stop(Some("entry".to_owned()), String::new(), focus, None, None)
+            .expect("append");
+        tour
+    };
+    let zebra = {
+        let mut tour = Walkthrough::new("zebra".to_owned(), "Zebra tour".to_owned(), None);
+        for (line, snippet) in [(1, "fn one() {}"), (2, "fn two() {}")] {
+            tour.add_stop(None, String::new(), stop(line, snippet), None, None)
+                .expect("append");
+        }
+        tour
+    };
+
+    for tour in [zebra, alpha] {
+        h.fake_fs().insert_file(
+            format!("/repo/.stoat/walkthroughs/{}.json", tour.slug),
+            serde_json::to_string(&tour).expect("serialize"),
+        );
+    }
 }
