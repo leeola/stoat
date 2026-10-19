@@ -44,6 +44,13 @@ pub struct Walkthrough {
     /// Filename stem the walkthrough is stored and addressed under.
     pub slug: String,
     pub title: String,
+    /// Markdown on what the whole path explains, which the picker preview and
+    /// the description card show before the reader steps onto a stop.
+    ///
+    /// Absent from the stored form while empty, so a walkthrough without one
+    /// writes the same bytes it always did.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
     /// Commit the working-tree stops were captured against, when the workspace
     /// had one.
     ///
@@ -287,6 +294,7 @@ impl Walkthrough {
         Walkthrough {
             slug,
             title,
+            description: String::new(),
             git_head,
             next_stop_id: 1,
             next_annotation_id: 1,
@@ -834,6 +842,24 @@ mod tests {
 
         let parsed: Walkthrough = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed.stops[0].commit, None);
+    }
+
+    /// Every walkthrough stored before tours carried a description must read
+    /// back the same, and keep writing the same bytes it always did.
+    #[test]
+    fn a_description_round_trips_and_is_absent_while_empty() {
+        let mut walkthrough = with_stops(1);
+        let bare = serde_json::to_string(&walkthrough).expect("serialize");
+
+        walkthrough.description = "The **whole** path.".to_owned();
+        let described = serde_json::to_string(&walkthrough).expect("serialize");
+        let parsed: Walkthrough = serde_json::from_str(&described).expect("deserialize");
+
+        assert_eq!(
+            (bare.contains("\"description\""), parsed),
+            (false, walkthrough),
+            "an empty description stays out of the file, and a set one reads back",
+        );
     }
 
     /// Every walkthrough stored before annotations carried narration must read

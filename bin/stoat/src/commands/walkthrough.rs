@@ -40,6 +40,24 @@ pub enum WalkthroughCommand {
         title: Option<String>,
 
         #[command(flatten)]
+        description: DescriptionArgs,
+
+        #[command(flatten)]
+        workspace: WorkspaceArgs,
+    },
+
+    /// Change a walkthrough's title or description, and print its file.
+    Edit {
+        slug: String,
+
+        /// New human-readable title.
+        #[arg(long)]
+        title: Option<String>,
+
+        #[command(flatten)]
+        description: DescriptionArgs,
+
+        #[command(flatten)]
         workspace: WorkspaceArgs,
     },
 
@@ -261,6 +279,24 @@ pub struct NarrationArgs {
     narration_file: Option<PathBuf>,
 }
 
+/// Where a walkthrough's description comes from.
+///
+/// The two sources are exclusive, and both are optional so an edit that touches
+/// neither leaves the description alone. The file form exists for the same
+/// reason as [`NarrationArgs`]'s: a description is markdown that runs to
+/// paragraphs.
+#[derive(Args, Debug)]
+#[group(multiple = false)]
+pub struct DescriptionArgs {
+    /// Markdown description of the whole path, given inline.
+    #[arg(long)]
+    description: Option<String>,
+
+    /// Read the markdown description from a file, or from stdin for `-`.
+    #[arg(long)]
+    description_file: Option<PathBuf>,
+}
+
 /// Where [`WalkthroughCommand::MoveStop`] puts the stop.
 ///
 /// Exactly one, enforced by clap rather than checked at run time, so naming two
@@ -291,8 +327,28 @@ pub fn run(sub: WalkthroughCommand) -> Result<(), Whatever> {
         WalkthroughCommand::New {
             slug,
             title,
+            description,
             workspace,
-        } => new(fs, &workspace.resolve()?, &slug, title.as_deref()),
+        } => new(
+            fs,
+            &workspace.resolve()?,
+            &slug,
+            title.as_deref(),
+            description.read(fs)?,
+        ),
+
+        WalkthroughCommand::Edit {
+            slug,
+            title,
+            description,
+            workspace,
+        } => edit(
+            fs,
+            &workspace.resolve()?,
+            &slug,
+            title,
+            description.read(fs)?,
+        ),
 
         WalkthroughCommand::List { workspace } => list(fs, &workspace.resolve()?),
 
@@ -430,26 +486,53 @@ impl WorkspaceArgs {
 
 impl NarrationArgs {
     /// The narration these flags name, or `None` when neither was given.
-    ///
-    /// `-` reads stdin, which is how a long markdown narration arrives without
-    /// becoming one enormous shell argument.
     fn read(&self, fs: &dyn FsHost) -> Result<Option<String>, Whatever> {
-        if let Some(inline) = &self.narration {
-            return Ok(Some(inline.clone()));
-        }
-        let Some(path) = &self.narration_file else {
-            return Ok(None);
-        };
-
-        let text = match path.as_os_str() == "-" {
-            true => {
-                io::read_to_string(io::stdin()).whatever_context("read the narration from stdin")?
-            },
-            false => read_file(fs, path)
-                .whatever_context(format!("read the narration from {}", path.display()))?,
-        };
-        Ok(Some(text))
+        read_text_arg(
+            fs,
+            self.narration.as_deref(),
+            self.narration_file.as_deref(),
+            "narration",
+        )
     }
+}
+
+impl DescriptionArgs {
+    /// The description these flags name, or `None` when neither was given.
+    fn read(&self, fs: &dyn FsHost) -> Result<Option<String>, Whatever> {
+        read_text_arg(
+            fs,
+            self.description.as_deref(),
+            self.description_file.as_deref(),
+            "description",
+        )
+    }
+}
+
+/// The text given `inline`, or read from `file`, or `None` when neither was
+/// given. `what` names the text in an error's context.
+///
+/// `-` reads stdin, which is how a long markdown text arrives without becoming
+/// one enormous shell argument.
+fn read_text_arg(
+    fs: &dyn FsHost,
+    inline: Option<&str>,
+    file: Option<&Path>,
+    what: &str,
+) -> Result<Option<String>, Whatever> {
+    if let Some(inline) = inline {
+        return Ok(Some(inline.to_owned()));
+    }
+    let Some(path) = file else {
+        return Ok(None);
+    };
+
+    let text = match path.as_os_str() == "-" {
+        true => io::read_to_string(io::stdin())
+            .whatever_context(format!("read the {what} from stdin"))?,
+        false => read_file(fs, path)
+            .whatever_context(format!("read the {what} from {}", path.display()))?,
+    };
+    Ok(Some(text))
 }
 
 impl MoveArgs {
@@ -508,7 +591,13 @@ fn resolve_range(spec: RangeSpec, content: &str) -> Result<Range, Whatever> {
 /// authored stops with an empty file. A slug whose file exists but does not
 /// parse reports the parse failure instead, which is the more useful answer for
 /// a user whose file is broken.
-fn new(fs: &dyn FsHost, root: &Path, slug: &str, title: Option<&str>) -> Result<String, Whatever> {
+fn new(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    title: Option<&str>,
+    description: Option<String>,
+) -> Result<String, Whatever> {
     match store::load(fs, root, slug) {
         Ok(_) => whatever!("walkthrough '{slug}' already exists"),
         Err(StoreError::UnknownWalkthrough { .. }) => {},
@@ -518,9 +607,32 @@ fn new(fs: &dyn FsHost, root: &Path, slug: &str, title: Option<&str>) -> Result<
     }
 
     let title = title.unwrap_or(slug).to_owned();
-    let walkthrough = Walkthrough::new(slug.to_owned(), title, None);
+    let mut walkthrough = Walkthrough::new(slug.to_owned(), title, None);
+    walkthrough.description = description.unwrap_or_default();
     store::save(fs, root, &walkthrough).whatever_context(format!("write walkthrough '{slug}'"))?;
 
+    Ok(relative_path(root, slug))
+}
+
+/// Replace the title or the description of the walkthrough `slug`, returning
+/// the file it wrote.
+///
+/// A field left out keeps its value, and the stops stay as they are.
+fn edit(
+    fs: &dyn FsHost,
+    root: &Path,
+    slug: &str,
+    title: Option<String>,
+    description: Option<String>,
+) -> Result<String, Whatever> {
+    let mut walkthrough = load(fs, root, slug)?;
+    if let Some(title) = title {
+        walkthrough.title = title;
+    }
+    if let Some(description) = description {
+        walkthrough.description = description;
+    }
+    save(fs, root, &walkthrough, slug)?;
     Ok(relative_path(root, slug))
 }
 
@@ -1062,8 +1174,8 @@ fn relative_path(root: &Path, slug: &str) -> String {
 #[allow(clippy::disallowed_methods)]
 mod tests {
     use super::{
-        add_annotation, add_stop, check, delete, edit_annotation, edit_stop, list, move_stop, new,
-        remove_annotation, remove_stop, show, Annotation, Location, MoveArgs, Point, Range,
+        add_annotation, add_stop, check, delete, edit, edit_annotation, edit_stop, list, move_stop,
+        new, remove_annotation, remove_stop, show, Annotation, Location, MoveArgs, Point, Range,
         Walkthrough,
     };
     use git2::{Commit, Repository, Signature};
@@ -1107,7 +1219,7 @@ mod tests {
         let parent = repo.find_commit(first).expect("first commit");
         commit(&format!("{PREPENDED}{SOURCE}"), &[&parent]);
 
-        new(&LocalFs, dir.path(), "tour", None).expect("new");
+        new(&LocalFs, dir.path(), "tour", None, None).expect("new");
         (dir, first.to_string())
     }
 
@@ -1130,7 +1242,7 @@ mod tests {
 
     /// A walkthrough with one stop over line 2 of `main.rs`.
     fn with_stop(dir: &TempDir) -> PathBuf {
-        new(&LocalFs, dir.path(), "tour", None).expect("new");
+        new(&LocalFs, dir.path(), "tour", None, None).expect("new");
         add_stop(
             &LocalFs,
             dir.path(),
@@ -1742,7 +1854,7 @@ mod tests {
         let dir = workspace();
         let outside = tempfile::tempdir().expect("tempdir");
         std::fs::write(outside.path().join("other.rs"), SOURCE).expect("write");
-        new(&LocalFs, dir.path(), "tour", None).expect("new");
+        new(&LocalFs, dir.path(), "tour", None, None).expect("new");
 
         assert!(add_stop(
             &LocalFs,
@@ -1762,7 +1874,8 @@ mod tests {
     fn new_writes_the_file_and_prints_where() {
         let dir = workspace();
 
-        let printed = new(&LocalFs, dir.path(), "intro", Some("Getting started")).expect("new");
+        let printed =
+            new(&LocalFs, dir.path(), "intro", Some("Getting started"), None).expect("new");
         assert_eq!(printed, ".stoat/walkthroughs/intro.json");
         assert!(dir.path().join(&printed).exists(), "the file is there");
     }
@@ -1772,15 +1885,15 @@ mod tests {
     #[test]
     fn new_refuses_a_slug_that_is_taken() {
         let dir = workspace();
-        new(&LocalFs, dir.path(), "intro", None).expect("new");
+        new(&LocalFs, dir.path(), "intro", None, None).expect("new");
 
-        assert!(new(&LocalFs, dir.path(), "intro", None).is_err());
+        assert!(new(&LocalFs, dir.path(), "intro", None, None).is_err());
     }
 
     #[test]
     fn a_new_walkthrough_titles_itself_after_its_slug() {
         let dir = workspace();
-        new(&LocalFs, dir.path(), "intro", None).expect("new");
+        new(&LocalFs, dir.path(), "intro", None, None).expect("new");
 
         assert_eq!(
             list(&LocalFs, dir.path()).expect("list"),
@@ -1790,10 +1903,62 @@ mod tests {
     }
 
     #[test]
+    fn new_stores_the_description_it_is_given() {
+        let dir = workspace();
+        let description = Some("The **whole** path.".to_owned());
+        new(&LocalFs, dir.path(), "tour", None, description).expect("new");
+
+        assert_eq!(stored(&dir).description, "The **whole** path.");
+    }
+
+    #[test]
+    fn edit_replaces_the_title_and_the_description_and_leaves_the_stops() {
+        let dir = workspace();
+        with_stop(&dir);
+        let stops = stored(&dir).stops;
+
+        let printed = edit(
+            &LocalFs,
+            dir.path(),
+            "tour",
+            Some("The tour".to_owned()),
+            Some("What the path does.".to_owned()),
+        )
+        .expect("edit");
+
+        let tour = stored(&dir);
+        assert_eq!(
+            (
+                printed.as_str(),
+                tour.title.as_str(),
+                tour.description.as_str(),
+                tour.stops
+            ),
+            (
+                ".stoat/walkthroughs/tour.json",
+                "The tour",
+                "What the path does.",
+                stops
+            ),
+        );
+    }
+
+    #[test]
+    fn edit_needs_the_walkthrough_to_exist() {
+        let dir = workspace();
+
+        assert_eq!(
+            edit(&LocalFs, dir.path(), "tour", Some("T".to_owned()), None)
+                .map_err(|error| error.to_string()),
+            Err("read walkthrough 'tour'".to_owned()),
+        );
+    }
+
+    #[test]
     fn list_prints_one_tab_separated_line_per_walkthrough_in_slug_order() {
         let dir = workspace();
-        new(&LocalFs, dir.path(), "zebra", Some("Z")).expect("new");
-        new(&LocalFs, dir.path(), "alpha", Some("A")).expect("new");
+        new(&LocalFs, dir.path(), "zebra", Some("Z"), None).expect("new");
+        new(&LocalFs, dir.path(), "alpha", Some("A"), None).expect("new");
 
         assert_eq!(
             list(&LocalFs, dir.path()).expect("list"),
@@ -1810,7 +1975,7 @@ mod tests {
     #[test]
     fn show_prints_the_stored_json() {
         let dir = workspace();
-        new(&LocalFs, dir.path(), "intro", Some("Getting started")).expect("new");
+        new(&LocalFs, dir.path(), "intro", Some("Getting started"), None).expect("new");
 
         let printed = show(&LocalFs, dir.path(), "intro").expect("show");
         let stored = std::fs::read_to_string(
@@ -1836,7 +2001,7 @@ mod tests {
     #[test]
     fn delete_removes_the_file_and_prints_where() {
         let dir = workspace();
-        new(&LocalFs, dir.path(), "intro", None).expect("new");
+        new(&LocalFs, dir.path(), "intro", None, None).expect("new");
 
         let printed = delete(&LocalFs, dir.path(), "intro").expect("delete");
         assert_eq!(printed, ".stoat/walkthroughs/intro.json");
@@ -1933,7 +2098,7 @@ mod tests {
     fn checking_one_slug_ignores_the_others() {
         let dir = workspace();
         let file = with_stop(&dir);
-        new(&LocalFs, dir.path(), "other", None).expect("new");
+        new(&LocalFs, dir.path(), "other", None, None).expect("new");
         add_stop(
             &LocalFs,
             dir.path(),
@@ -1967,8 +2132,8 @@ mod tests {
     #[test]
     fn a_bad_slug_fails_the_command() {
         let dir = workspace();
-        assert!(new(&LocalFs, dir.path(), "../escape", None).is_err());
-        assert!(new(&LocalFs, dir.path(), "Upper", None).is_err());
+        assert!(new(&LocalFs, dir.path(), "../escape", None, None).is_err());
+        assert!(new(&LocalFs, dir.path(), "Upper", None, None).is_err());
         assert!(show(&LocalFs, Path::new("/nowhere"), "..").is_err());
     }
 

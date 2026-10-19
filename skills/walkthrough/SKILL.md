@@ -22,7 +22,7 @@ the slug.
 
 | Thing | What it is |
 |---|---|
-| Walkthrough | A slug, a title, and an ordered list of stops. One JSON file. |
+| Walkthrough | A slug, a title, an optional markdown description of the whole path, and an ordered list of stops. One JSON file. |
 | Stop | One focus range of one file, plus narration. Id `s1`, `s2`, ... |
 | Annotation | A labeled range, in that stop's focus file or in another, plus optional narration. Id `a1`, `a2`, ... |
 | Focus | Path, range, and the bytes the range covered when captured. |
@@ -111,7 +111,11 @@ Every command takes `--workspace <path>`. It is omitted below.
 ### Create and inspect
 
 ```sh
-stoat walkthrough new startup --title "How startup works"
+stoat walkthrough new startup --title "How startup works" \
+  --description "Startup reads the config, then starts the runtime."
+# .stoat/walkthroughs/startup.json
+
+stoat walkthrough edit startup --description-file description.md
 # .stoat/walkthroughs/startup.json
 
 stoat walkthrough list
@@ -125,6 +129,9 @@ stoat walkthrough delete startup
 ```
 
 `new` refuses a slug that already exists rather than overwriting authored stops.
+`edit` changes the title or the description and leaves the stops alone. Both
+take the description as markdown, inline with `--description` or from a file
+with `--description-file` (`-` reads stdin).
 
 ### Stops
 
@@ -250,6 +257,9 @@ Gate on the exit status, not on parsing the output.
   rather than the order the code appears in the file.
 - **Open each commit with a stop.** In a tour over history, give each commit a
   first stop over the change that defines it, then the stops that explain it.
+- **The description says what the whole path does.** A stop's narration says
+  what one place does. Write the description so the reader knows what the tour
+  explains before the first stop.
 - **Narration carries the why.** The reader can see the code. Tell them what it
   is for and what to notice.
 - **Annotate sparingly.** Add one only where a short label says something the
