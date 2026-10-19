@@ -168,6 +168,7 @@ fn relayout(stoat: &mut Stoat) {
 #[cfg(test)]
 mod tests {
     use crate::{app::Stoat, pane::View, term_session::TermId, test_harness::TestHarness};
+    use stoat_action::registry;
     use stoat_config::TabBarMode;
 
     fn dispatch(h: &mut TestHarness, action: &dyn stoat_action::Action) {
@@ -631,6 +632,47 @@ mod tests {
             palette.command.map(|entry| entry.def.name()),
             Some("RenameTab"),
             "the seed parses into arg mode, not filter text"
+        );
+    }
+
+    /// The text of each row the `prefix_tab` box lists.
+    fn tab_chord_rows(h: &mut TestHarness) -> Vec<String> {
+        h.stoat.set_focused_mode("prefix_tab".into());
+        h.snapshot();
+        h.stoat
+            .hints_cache
+            .as_ref()
+            .expect("the tab chord laid out its box")
+            .rows
+            .iter()
+            .map(|row| row.action.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_tab_chord_box_lists_tab_steps_only_with_a_tab_to_reach() {
+        let mut h = Stoat::test();
+        let listed = |rows: &[String]| {
+            [
+                "RenameTab",
+                "NewTab",
+                "CloseTab",
+                "NextTab",
+                "PrevTab",
+                "ToggleTab",
+            ]
+            .map(|name| {
+                let desc = registry::lookup(name).expect("registered").def.short_desc();
+                rows.iter().any(|row| row == desc)
+            })
+        };
+        let one_tab = listed(&tab_chord_rows(&mut h));
+
+        dispatch(&mut h, &stoat_action::NewTab);
+        assert_eq!(
+            [one_tab, listed(&tab_chord_rows(&mut h))],
+            [[true, true, false, false, false, false], [true; 6]],
+            "rename, new, close, next, prev, and toggle rows on one tab and on two",
         );
     }
 }

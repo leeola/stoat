@@ -1551,7 +1551,11 @@ on key {
     }
     mode == prefix {
         Escape -> SetMode(normal);
-        Ctrl-a -> [SetMode(normal), ToggleTab()];
+
+        prev_tab {
+            Ctrl-a -> [SetMode(normal), ToggleTab()];
+        }
+
         # The pane picker, for a pane where `space a e` is out of reach, since a
         # terminal sends space to its child.
         Ctrl-e -> SetMode(space_pane_display);
@@ -1577,9 +1581,17 @@ on key {
         # same chord.
         Ctrl-f -> [SetMode(normal), SwitchWorkspace()];
         c -> [SetMode(normal), NewTab()];
-        x -> [SetMode(normal), CloseTab()];
+
+        tabs > 1 {
+            x -> [SetMode(normal), CloseTab()];
+        }
+
         num -> [SetMode(normal), GotoTab($num)];
-        0 -> [SetMode(normal), GotoTab(10)];
+
+        tabs >= 10 {
+            0 -> [SetMode(normal), GotoTab(10)];
+        }
+
         t -> SetMode(prefix_tab);
 
         panes > 1 && !detached {
@@ -1588,23 +1600,37 @@ on key {
 
         e -> SetMode(prefix_pane);
     }
+    # The step and close keys bind only with a second tab, and the toggle keys
+    # only with a tab to return to. `num` stays bound for every digit, because
+    # one placeholder binding cannot gate per digit and a miss reports it.
     mode == prefix_tab {
         Escape -> SetMode(normal);
         r -> [SetMode(normal), RenameTab()];
-        h -> [SetMode(normal), PrevTab()];
-        Left -> [SetMode(normal), PrevTab()];
-        k -> [SetMode(normal), PrevTab()];
-        Up -> [SetMode(normal), PrevTab()];
-        l -> [SetMode(normal), NextTab()];
-        Right -> [SetMode(normal), NextTab()];
-        j -> [SetMode(normal), NextTab()];
-        Down -> [SetMode(normal), NextTab()];
+
+        tabs > 1 {
+            h -> [SetMode(normal), PrevTab()];
+            Left -> [SetMode(normal), PrevTab()];
+            k -> [SetMode(normal), PrevTab()];
+            Up -> [SetMode(normal), PrevTab()];
+            l -> [SetMode(normal), NextTab()];
+            Right -> [SetMode(normal), NextTab()];
+            j -> [SetMode(normal), NextTab()];
+            Down -> [SetMode(normal), NextTab()];
+            x -> [SetMode(normal), CloseTab()];
+        }
+
         n -> [SetMode(normal), NewTab()];
-        x -> [SetMode(normal), CloseTab()];
-        Ctrl-a -> [SetMode(normal), ToggleTab()];
-        Tab -> [SetMode(normal), ToggleTab()];
+
+        prev_tab {
+            Ctrl-a -> [SetMode(normal), ToggleTab()];
+            Tab -> [SetMode(normal), ToggleTab()];
+        }
+
         num -> [SetMode(normal), GotoTab($num)];
-        0 -> [SetMode(normal), GotoTab(10)];
+
+        tabs >= 10 {
+            0 -> [SetMode(normal), GotoTab(10)];
+        }
     }
     mode == prefix_move {
         Escape -> SetMode(normal);

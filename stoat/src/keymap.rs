@@ -1231,6 +1231,15 @@ mod tests {
                 .set("mode", StateValue::String(mode.into()))
                 .set("panes", StateValue::Number(2.0))
         }
+
+        /// A state in `mode` with `tabs` tabs and one to toggle back to, where
+        /// the default config binds the tab step, close, and toggle arms.
+        fn with_tabs(mode: &str, tabs: f64) -> Self {
+            Self::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("tabs", StateValue::Number(tabs))
+                .set("prev_tab", StateValue::Bool(true))
+        }
     }
 
     impl KeymapState for TestState {
@@ -3078,7 +3087,7 @@ mod tests {
     fn ca_prefix_chords_resolve_tab_actions() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let prefix = TestState::new().set("mode", StateValue::String("prefix".into()));
+        let prefix = TestState::with_tabs("prefix", 10.0);
 
         let toggle = keymap
             .lookup(
@@ -3179,7 +3188,7 @@ mod tests {
     fn ca_t_tab_mode_chords_cycle_and_rename() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let tab = TestState::new().set("mode", StateValue::String("prefix_tab".into()));
+        let tab = TestState::with_tabs("prefix_tab", 2.0);
 
         let r = keymap
             .lookup(&tab, &key_event(KeyCode::Char('r'), KeyModifiers::NONE))
