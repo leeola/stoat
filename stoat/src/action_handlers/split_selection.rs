@@ -32,8 +32,9 @@ pub(crate) struct SplitSelectionInputState {
     /// same whether the user typed up to it or deleted down to it.
     origin_selections: Arc<[Selection<Anchor>]>,
     /// The pane editor's scroll position when the prompt opened, as
-    /// `(scroll_row, scroll_offset)`. Restored with the selections, so a
-    /// pattern that selects nothing glides the view back to where it started.
+    /// `(scroll_row, scroll_offset)`. Restored when the pattern is empty or
+    /// does not compile, when a select finds no match, and on cancel. Any other
+    /// pattern leaves the view to follow its landing from where it stands.
     origin_view: (u32, f32),
     /// The pattern the live preview last ran for.
     ///
@@ -71,13 +72,13 @@ pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
 /// Bring the open regex prompt's live preview up to date with what is typed.
 ///
 /// A no-op when no prompt is open, or when the pattern has not changed since
-/// the last sync. Otherwise the pane editor returns to the origin captured at
-/// open and the prompt's transform runs from there, so the preview shown is
-/// always the one that pattern alone produces.
+/// the last sync. Otherwise the prompt's transform runs again from the
+/// selections captured at open, so the preview shown is always the one that
+/// pattern alone produces. The view follows the result from where it stands.
 ///
 /// The preview is silent. A pattern that is empty, does not compile yet, or
-/// selects nothing is an ordinary state mid-typing, so it keeps the origin and
-/// raises no status message the way a submit does.
+/// selects nothing is an ordinary state mid-typing. It glides the view back to
+/// the origin and raises no status message the way a submit does.
 pub(crate) fn sync_regex_preview(stoat: &mut Stoat) {
     let Some(state) = stoat.split_selection_input.as_ref() else {
         return;
@@ -96,18 +97,19 @@ pub(crate) fn sync_regex_preview(stoat: &mut Stoat) {
     let selections = Arc::clone(&state.origin_selections);
     let view = state.origin_view;
 
-    search::restore_origin(stoat, selections, view);
+    search::restore_origin_selections(stoat, selections);
 
-    let Some(regex) = (!pattern.is_empty())
+    let regex = (!pattern.is_empty())
         .then(|| search::compile_cursor_regex(&pattern, search::smart_case(stoat)))
-        .flatten()
-    else {
-        return;
-    };
+        .flatten();
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-    if let Some(editor) = search::pane_editor(stoat) {
-        apply_kind(editor, kind, &regex, scrolloff);
+    if let Some(regex) = regex
+        && let Some(editor) = search::pane_editor(stoat)
+        && apply_kind(editor, kind, &regex, scrolloff)
+    {
+        return;
     }
+    search::restore_origin_view(stoat, view);
 }
 
 /// Submit the regex modal. Reads the typed pattern, compiles it, and either
@@ -118,6 +120,9 @@ pub(crate) fn sync_regex_preview(stoat: &mut Stoat) {
 ///
 /// The transform runs from the selections the prompt opened over, not from the
 /// preview on screen, so Enter lands what the last preview showed.
+///
+/// The view stays where the preview left it. An empty or invalid pattern, or a
+/// select that finds nothing, glides it back to the origin.
 pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.split_selection_input.take() else {
         return false;
@@ -126,13 +131,15 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
-    search::restore_origin(stoat, state.origin_selections, state.origin_view);
+    search::restore_origin_selections(stoat, state.origin_selections);
 
     if query.is_empty() {
+        search::restore_origin_view(stoat, state.origin_view);
         return true;
     }
     let smart_case = search::smart_case(stoat);
     let Some(regex) = search::compile_cursor_regex(&query, smart_case) else {
+        search::restore_origin_view(stoat, state.origin_view);
         stoat.set_status(format!("invalid regex: {query}"));
         return true;
     };
@@ -140,6 +147,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     if let Some(editor) = search::pane_editor(stoat)
         && !apply_kind(editor, state.kind, &regex, scrolloff)
     {
+        search::restore_origin_view(stoat, state.origin_view);
         stoat.set_status("nothing selected");
     }
     true
@@ -287,6 +295,7 @@ mod tests {
     use crate::{
         action_handlers::{dispatch, search},
         app::UpdateEffect,
+        editor_state::ScrollGlide,
         test_harness::{editor, keys, TestHarness},
         Stoat,
     };
@@ -498,34 +507,68 @@ mod tests {
         assert_eq!(pane_spans(&mut h), [(0, 4), (7, 11)]);
     }
 
-    /// The preview follows its primary below the view, and Enter keeps the view
-    /// there rather than gliding back to where the prompt opened.
-    ///
-    /// The frame runs the sync from `drive_background`, which this test calls in
-    /// place of the sync to cover that path.
-    #[test]
-    fn a_preview_scrolls_to_its_match_and_enter_keeps_it() {
+    /// A hundred `line N` rows with `needle` on row 80, selected whole, with
+    /// the select prompt open over them.
+    fn needle_prompt() -> TestHarness {
         let text: String = (0..100)
             .map(|row| match row {
                 80 => "needle\n".to_string(),
                 _ => format!("line {row}\n"),
             })
             .collect();
-        let mut h = prompt_over(&text, &action::SelectRegex);
-        h.type_text("needle");
-        h.stoat.drive_background();
+        prompt_over(&text, &action::SelectRegex)
+    }
 
-        let scroll = |h: &mut TestHarness| {
-            search::pane_editor(&mut h.stoat)
-                .expect("pane holds an editor")
-                .scroll_row
-        };
-        let previewed = scroll(&mut h);
+    /// The pane editor's view, as `(scroll_row, scroll_offset, scroll_glide)`.
+    fn pane_view(h: &mut TestHarness) -> (u32, f32, ScrollGlide) {
+        let editor = search::pane_editor(&mut h.stoat).expect("pane holds an editor");
+        (editor.scroll_row, editor.scroll_offset, editor.scroll_glide)
+    }
+
+    /// Finish the pane editor's glide the way the run loop's animation does,
+    /// and return the view it rests at.
+    fn finish_glide(h: &mut TestHarness) -> (u32, f32, ScrollGlide) {
+        let editor = search::pane_editor(&mut h.stoat).expect("pane holds an editor");
+        editor.scroll_offset = editor.scroll_row as f32;
+        editor.scroll_glide = ScrollGlide::None;
+        pane_view(h)
+    }
+
+    /// The preview follows its primary below the view. After that, neither a
+    /// keystroke that keeps the match nor Enter moves the view.
+    ///
+    /// The frame runs the sync from `drive_background`, which this test calls in
+    /// place of the sync to cover that path.
+    #[test]
+    fn a_preview_scrolls_to_its_match_and_enter_keeps_it() {
+        let mut h = needle_prompt();
+        h.type_text("need");
+        h.stoat.drive_background();
+        let landed = finish_glide(&mut h);
+
+        h.type_text("le");
+        h.stoat.drive_background();
+        let typed = pane_view(&mut h);
         h.type_keys("enter");
         assert_eq!(
-            (previewed > 0, scroll(&mut h)),
-            (true, previewed),
-            "the preview scrolled to the match, and Enter kept that scroll",
+            (landed.0 > 0, typed, pane_view(&mut h)),
+            (true, landed, landed),
+            "the preview scrolled to the match, and the next key and Enter kept that view",
+        );
+    }
+
+    /// A pattern that stops selecting anything glides the view back to where
+    /// the prompt opened, along with the selections.
+    #[test]
+    fn a_pattern_that_stops_matching_glides_the_view_back() {
+        let mut h = needle_prompt();
+        preview(&mut h, "needle");
+        let landed = finish_glide(&mut h);
+        preview(&mut h, "x");
+        assert_eq!(
+            (landed.0 > 0, pane_view(&mut h)),
+            (true, (0, landed.0 as f32, ScrollGlide::Page)),
+            "the view glides from the landing back to the origin row",
         );
     }
 

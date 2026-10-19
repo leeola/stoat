@@ -37,9 +37,10 @@ impl SearchDirection {
 /// input modal. Disposed by [`search_submit`] / [`search_cancel`].
 ///
 /// Everything past [`Self::input`] is the origin the preview computes from:
-/// where the editor stood when the prompt opened. Each keystroke restores that
-/// state and jumps again from it, so a preview never builds on the previous
-/// preview's landing.
+/// where the editor stood when the prompt opened. Each keystroke restores the
+/// origin selections and jumps again from them, so a preview never builds on
+/// the previous preview's landing. The view follows each landing from where it
+/// stands.
 pub(crate) struct SearchInputState {
     pub(crate) input: InputView,
     pub(crate) direction: SearchDirection,
@@ -59,8 +60,9 @@ pub(crate) struct SearchInputState {
     /// chaining collects a range per keystroke.
     origin_selections: Arc<[Selection<Anchor>]>,
     /// The pane editor's scroll position when the prompt opened, as
-    /// `(scroll_row, scroll_offset)`. Restored when the query stops naming a
-    /// match, so an emptied prompt glides back to where the search started.
+    /// `(scroll_row, scroll_offset)`. Restored only when the query stops naming
+    /// a match and on cancel, so an emptied prompt glides back to where the
+    /// search started.
     origin_view: (u32, f32),
     /// The jumplist entry for the origin, captured before the prompt took
     /// focus. `None` when no editor was focused.
@@ -228,20 +230,36 @@ pub(super) fn pane_editor(stoat: &mut Stoat) -> Option<&mut EditorState> {
 
 /// Put the pane editor back where the open prompt found it.
 ///
-/// Both halves move together on every path that abandons a preview, so they are
-/// restored together too. The view goes back as a glide rather than a jump,
-/// which [`crate::app::Stoat::tick_scroll_anim`] eases and snaps past its
-/// three-viewport bound.
+/// Both halves come back together only when the reader abandons a prompt. A
+/// re-run from the origin restores the selections alone, so the view follows
+/// the new landing from where the reader looks.
 pub(super) fn restore_origin(
     stoat: &mut Stoat,
     selections: Arc<[Selection<Anchor>]>,
     view: (u32, f32),
 ) {
+    restore_origin_selections(stoat, selections);
+    restore_origin_view(stoat, view);
+}
+
+/// Put the pane editor's selections back where the open prompt found them.
+///
+/// The view stays where it stands.
+pub(super) fn restore_origin_selections(stoat: &mut Stoat, selections: Arc<[Selection<Anchor>]>) {
+    if let Some(editor) = pane_editor(stoat) {
+        editor.selections.restore(selections);
+    }
+}
+
+/// Put the pane editor's view back where the open prompt found it.
+///
+/// The view goes back as a glide rather than a jump, which
+/// [`crate::app::Stoat::tick_scroll_anim`] eases and snaps past its
+/// three-viewport bound.
+pub(super) fn restore_origin_view(stoat: &mut Stoat, view: (u32, f32)) {
     let Some(editor) = pane_editor(stoat) else {
         return;
     };
-    editor.selections.restore(selections);
-
     let (row, offset) = view;
     if editor.scroll_row != row {
         editor.scroll_row = row;
@@ -254,14 +272,15 @@ pub(super) fn restore_origin(
 /// Bring the open search prompt's live preview up to date with what is typed.
 ///
 /// A no-op when no prompt is open, or when the query has not changed since the
-/// last sync. Otherwise the pane editor returns to the origin captured at open
-/// and jumps again from there, so the preview shown is always the one that
-/// query alone produces.
+/// last sync. Otherwise the jump runs again from the selections captured at
+/// open, so the preview shown is always the one that query alone produces. The
+/// view follows the landing from where it stands, so a keystroke that keeps its
+/// match moves nothing on screen.
 ///
 /// The preview is deliberately silent. A query that wraps, matches nothing, or
 /// does not compile yet is an ordinary state mid-typing, so none of them raises
 /// a status message the way a submit does. A query with no usable match
-/// restores the origin instead.
+/// restores the origin view as well.
 ///
 /// Runs from `drive_background` rather than the paint, so the preview lands in
 /// the same frame as the keystroke that caused it.
@@ -288,7 +307,7 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
     let selections = Arc::clone(&state.origin_selections);
     let view = state.origin_view;
 
-    restore_origin(stoat, selections, view);
+    restore_origin_selections(stoat, selections);
 
     let regex = (!query.is_empty())
         .then(|| compile_cursor_regex(&query, smart_case(stoat)))
@@ -300,6 +319,8 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
         if let Some(editor) = pane_editor(stoat) {
             super::view::follow_jump(editor, scrolloff);
         }
+    } else {
+        restore_origin_view(stoat, view);
     }
 
     // The frame reads the query straight off the prompt rather than through a
@@ -312,9 +333,12 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
 /// Stores [`LastSearch`] for `n` / `N` to repeat. Returns true when the modal
 /// was open, so the prompt-submit router short-circuits.
 ///
-/// The jump re-runs from the origin the prompt captured rather than from the
-/// preview's landing. Repeated from the origin it finds the same match again,
-/// where a search on from the preview skips past it to the next one.
+/// The jump re-runs from the origin selections the prompt captured rather than
+/// from the preview's landing. Repeated from the origin it finds the same match
+/// again, where a search on from the preview skips past it to the next one.
+///
+/// The view stays where the preview left it. It glides back to the origin only
+/// when the query names no match.
 pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.search_input.take() else {
         return false;
@@ -325,9 +349,10 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
-    restore_origin(stoat, state.origin_selections, state.origin_view);
+    restore_origin_selections(stoat, state.origin_selections);
 
     if query.is_empty() {
+        restore_origin_view(stoat, state.origin_view);
         stoat.paint_generation += 1;
         return true;
     }
@@ -342,9 +367,11 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         .regex
         .as_ref()
         .map(|regex| jump_to_match(stoat, regex, direction, extend));
-    if outcome.is_some_and(SearchOutcome::moved)
-        && let Some(entry) = state.origin_jump
-    {
+    let moved = outcome.is_some_and(SearchOutcome::moved);
+    if !moved {
+        restore_origin_view(stoat, state.origin_view);
+    }
+    if moved && let Some(entry) = state.origin_jump {
         super::jump::push_entry(stoat, entry);
     }
     if last.regex.is_none() {
@@ -820,7 +847,9 @@ pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<Cu
 #[cfg(test)]
 mod tests {
     use super::SearchDirection;
-    use crate::{test_fixture::open_scratch_at, test_harness::TestHarness};
+    use crate::{
+        editor_state::ScrollGlide, test_fixture::open_scratch_at, test_harness::TestHarness,
+    };
     use std::path::PathBuf;
     use stoat_action as action;
 
@@ -1719,6 +1748,31 @@ mod tests {
             .scroll_row
     }
 
+    /// The pane editor's view, as `(scroll_row, scroll_offset, scroll_glide)`.
+    fn pane_view(h: &mut TestHarness) -> (u32, f32, ScrollGlide) {
+        let editor = super::pane_editor(&mut h.stoat).expect("pane holds an editor");
+        (editor.scroll_row, editor.scroll_offset, editor.scroll_glide)
+    }
+
+    /// Finish the pane editor's glide the way the run loop's animation does,
+    /// and return the view it rests at.
+    fn finish_glide(h: &mut TestHarness) -> (u32, f32, ScrollGlide) {
+        let editor = super::pane_editor(&mut h.stoat).expect("pane holds an editor");
+        editor.scroll_offset = editor.scroll_row as f32;
+        editor.scroll_glide = ScrollGlide::None;
+        pane_view(h)
+    }
+
+    /// A hundred `line N` rows, with each of `rows` holding its own text.
+    fn lines_with(rows: &[(u32, &str)]) -> String {
+        (0..100)
+            .map(|row| match rows.iter().find(|(at, _)| *at == row) {
+                Some((_, text)) => format!("{text}\n"),
+                None => format!("line {row}\n"),
+            })
+            .collect()
+    }
+
     /// Type into the open prompt and run the preview a frame runs.
     ///
     /// The tests drive the sync directly rather than through a paint, the way
@@ -1941,6 +1995,55 @@ mod tests {
         assert_eq!(pane_spans(&mut h), origin, "the selection came back");
         assert_ne!(previewed_row, 0, "the preview had scrolled away");
         assert_eq!(pane_scroll_row(&mut h), 0, "and the view came back too");
+    }
+
+    /// A keystroke that keeps its match leaves the view still, rather than
+    /// gliding in again from where the prompt opened.
+    #[test]
+    fn a_keystroke_that_keeps_its_match_leaves_the_view_still() {
+        let mut h = TestHarness::with_size(40, 12);
+        seed(&mut h, &lines_with(&[(80, "needle")]));
+        h.type_keys("/");
+
+        preview(&mut h, "need");
+        let landed = finish_glide(&mut h);
+        preview(&mut h, "le");
+        assert_eq!((landed.0 > 0, pane_view(&mut h)), (true, landed));
+    }
+
+    /// A keystroke that moves its match glides the view from the last landing,
+    /// not from the origin row 0.
+    #[test]
+    fn a_keystroke_that_moves_its_match_glides_from_the_last_landing() {
+        let mut h = TestHarness::with_size(40, 12);
+        seed(
+            &mut h,
+            &lines_with(&[(40, "needle-one"), (80, "needle-two")]),
+        );
+        h.type_keys("/");
+
+        preview(&mut h, "needle");
+        let (first, ..) = finish_glide(&mut h);
+        preview(&mut h, "-t");
+        let (row, offset, glide) = pane_view(&mut h);
+        assert_eq!(
+            (first > 0, row > first, offset, glide),
+            (true, true, first as f32, ScrollGlide::Page),
+        );
+    }
+
+    /// Enter keeps the view where the preview left it, rather than gliding in
+    /// once more from where the prompt opened.
+    #[test]
+    fn enter_keeps_the_view_where_the_preview_landed() {
+        let mut h = TestHarness::with_size(40, 12);
+        seed(&mut h, &lines_with(&[(80, "needle")]));
+        h.type_keys("/");
+
+        preview(&mut h, "needle");
+        let landed = finish_glide(&mut h);
+        h.type_keys("enter");
+        assert_eq!((landed.0 > 0, pane_view(&mut h)), (true, landed));
     }
 
     /// Escape abandons the search, so it undoes the preview as well as closing
