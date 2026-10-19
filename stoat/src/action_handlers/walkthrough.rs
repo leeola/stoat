@@ -654,6 +654,9 @@ fn jump_to_stop(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
     };
     let stop = run.current_stop();
     let (focus, id) = (stop.focus.clone(), stop.id.clone());
+    // A tour over commits latches on its own landing, and a stop without the
+    // flag leaves the view as the reader had it.
+    let latch = stop.diff && !run.spans_commits();
     let (at, stops) = run.progress();
     let title = stop_title(run);
     let commit = commit_suffix(run);
@@ -661,6 +664,12 @@ fn jump_to_stop(stoat: &mut Stoat, note: Option<String>) -> UpdateEffect {
     let Some(landed) = jump_to_range(stoat, &focus.path, focus.range, &focus.snippet) else {
         return UpdateEffect::Redraw;
     };
+    if latch {
+        super::review::latch_diff_view(stoat);
+        // The latch lays the diff out anew, so the landing frames its range
+        // again against the rows the reader sees.
+        frame_range(stoat, focus.range, false);
+    }
     show_narration(stoat, landed.offset);
 
     match (landed.drifted, note) {
@@ -1060,6 +1069,9 @@ mod tests {
 
     const FIRST: &str = "fn one() {}\nfn two() {}\n";
     const SECOND: &str = "fn three() {}\n";
+    /// [`FIRST`] with `fn two` renamed, the working-tree edit a diff tour
+    /// explains.
+    const RENAMED: &str = "fn one() {}\nfn deux() {}\n";
     /// Stop 1's narration. Stop 2 has none, so one tour covers both cases.
     const NARRATION: &str = "The **entry** point.";
     /// Annotation a1's narration. a2 has none, so one walk covers both cases.
@@ -2119,6 +2131,74 @@ mod tests {
         h.fake_fs().insert_file(
             format!("/repo/.stoat/walkthroughs/{slug}.json"),
             serde_json::to_string(&walkthrough).expect("serialize"),
+        );
+    }
+
+    /// A repository whose working tree renames `fn two` in `a.rs`, and a tour
+    /// whose `s1` is a diff stop over the renamed line and whose `s2` is a plain
+    /// stop in `b.rs`, which the edit leaves alone.
+    fn diff_tour_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.stage_review_scenario("/repo", &[("a.rs", FIRST, RENAMED)]);
+        h.fake_fs().insert_file("/repo/b.rs", SECOND);
+
+        let mut walkthrough = Walkthrough::new("tour".to_owned(), "Tour".to_owned(), None);
+        for (title, focus) in [
+            ("renamed", location("a.rs", 2, (1, 12), "fn deux() {}")),
+            ("plain", location("b.rs", 1, (1, 13), "fn three() {}")),
+        ] {
+            walkthrough
+                .add_stop(Some(title.to_owned()), String::new(), focus, None, None)
+                .expect("append");
+        }
+        walkthrough.stops[0].diff = true;
+        h.fake_fs().insert_file(
+            "/repo/.stoat/walkthroughs/tour.json",
+            serde_json::to_string(&walkthrough).expect("serialize"),
+        );
+        h
+    }
+
+    /// Whether the focused editor shows its file as a diff.
+    fn diff_shown(h: &TestHarness) -> bool {
+        let ws = h.stoat.active_workspace();
+        h.stoat
+            .focused_editor_ids()
+            .and_then(|(editor, _)| ws.editors.get(editor))
+            .is_some_and(|editor| editor.diff_view)
+    }
+
+    #[test]
+    fn a_diff_stop_latches_the_diff_view() {
+        let mut h = diff_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+
+        assert_eq!(
+            (open_path(&h), latched(&h), diff_shown(&h)),
+            (Some(PathBuf::from("/repo/a.rs")), true, true),
+            "the stop's file shows as a diff in a latched pane",
+        );
+    }
+
+    /// The flag turns the view on and never off. A tour of diff stops then
+    /// needs no flag on every stop to stay in the view, and a reader who
+    /// opened the view by hand keeps it through a plain tour.
+    #[test]
+    fn a_plain_stop_leaves_the_view_as_it_was() {
+        let mut plain = harness_with_tour();
+        open(&mut plain.stoat, "tour");
+
+        let mut h = diff_tour_harness();
+        open(&mut h.stoat, "tour");
+        h.settle();
+        next(&mut h.stoat, 1);
+        h.settle();
+
+        assert_eq!(
+            (latched(&plain), open_path(&h), latched(&h)),
+            (false, Some(PathBuf::from("/repo/b.rs")), true),
+            "a plain stop latches nothing, and keeps the latch a diff stop set",
         );
     }
 

@@ -77,6 +77,10 @@ mode. `space W` opens the same picker when no tour is open, and enters the
 walkthrough mode when one is. The mode stays until Escape, so each step is one
 bare key.
 
+A diff stop shows its file in the diff view. A plain stop leaves the view as
+the reader has it, so the diff view stays on through the rest of a tour that
+turned it on.
+
 | Key | Does |
 |---|---|
 | `n` / `p` | Next or previous stop |
