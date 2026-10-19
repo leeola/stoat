@@ -5309,9 +5309,10 @@ impl Stoat {
 
                 let before = self.focused_cursor_pos();
                 let workspace_before = self.active_workspace;
-                let term_before = self.focused_term_id();
+                let focus_before = self.active_workspace().focus;
+                let pane_before = self.active_workspace().panes.focus();
                 let effect = self.handle_key(key);
-                self.rest_left_terminal(workspace_before, term_before);
+                self.rest_left_pane(workspace_before, focus_before, pane_before);
                 let cursor_moved = self.focused_cursor_pos() != before;
 
                 // Re-follow the cursor when a key moved it, pulling the view
@@ -5334,9 +5335,10 @@ impl Stoat {
             Event::Mouse(mouse) => {
                 button_repeat::note_press(self, PressSource::Terminal(mouse));
                 let workspace_before = self.active_workspace;
-                let term_before = self.focused_term_id();
+                let focus_before = self.active_workspace().focus;
+                let pane_before = self.active_workspace().panes.focus();
                 let effect = mouse::handle_mouse(self, mouse);
-                self.rest_left_terminal(workspace_before, term_before);
+                self.rest_left_pane(workspace_before, focus_before, pane_before);
                 effect
             },
             Event::Paste(text) => self.handle_paste(&text),
@@ -6924,32 +6926,62 @@ impl Stoat {
         }
     }
 
-    /// Put the terminal or agent pane that held focus before an event back in
-    /// normal mode when the event moved focus off it.
+    /// Put the view that held focus before an event back in normal mode when
+    /// the event moved focus off it.
     ///
-    /// A mode other than normal on such a pane is a chord in progress, and the
-    /// chord ends when focus leaves, because a pane without focus takes no
-    /// keys. A binding that moves focus before it switches the mode leaves the
-    /// switch on the pane that took focus. Without this reset, the pane it left
-    /// keeps the chord mode and holds its keys back from the child when focus
-    /// returns.
+    /// A chord mode on that view ends when focus leaves, because a view without
+    /// focus takes no keys. A binding that moves focus before it switches the
+    /// mode leaves the switch on the view that took focus, and a click moves
+    /// focus with no switch at all. Without this reset, the view it left keeps
+    /// the chord mode, and the chord comes back with focus.
     ///
-    /// `workspace` is the active workspace and `term` is
-    /// [`Self::focused_term_id`], both read before the event.
-    fn rest_left_terminal(&mut self, workspace: WorkspaceId, term: Option<TermId>) {
-        let Some(term_id) = term else {
+    /// An editor or run pane keeps a primary mode, `insert` or `select`, and a
+    /// pinned chord, which the reader holds on purpose. A commits, terminal, or
+    /// agent view has no primary mode but normal, so any other mode ends.
+    ///
+    /// `workspace`, `focus`, and `pane` are the active workspace, its focus
+    /// target, and its focused split pane, all read before the event.
+    fn rest_left_pane(&mut self, workspace: WorkspaceId, focus: FocusTarget, pane: PaneId) {
+        if self.active_workspace == workspace {
+            let ws = self.active_workspace();
+            if ws.focus == focus && (focus != FocusTarget::SplitPane || ws.panes.focus() == pane) {
+                return;
+            }
+        }
+        let Some(ws) = self.workspaces.get_mut(workspace) else {
             return;
         };
-        if self.active_workspace == workspace && self.focused_term_id() == Some(term_id) {
-            return;
-        }
 
-        if let Some(session) = self
-            .workspaces
-            .get_mut(workspace)
-            .and_then(|ws| ws.terms.get_mut(term_id))
+        let left = match focus {
+            FocusTarget::SplitPane => ws.panes.contains(pane).then(|| &ws.panes.pane(pane).view),
+            FocusTarget::Dock(id) => ws.docks.get(id).map(|dock| &dock.view),
+        };
+        let editor = match left {
+            Some(View::Editor(id)) => Some(*id),
+            Some(View::Run(id)) => ws.runs.get(*id).map(|run| run.input.editor_id),
+            Some(View::Commits(id)) => {
+                if let Some(list) = ws.commit_lists.get_mut(*id)
+                    && list.mode != "normal"
+                {
+                    list.mode = "normal".into();
+                }
+                None
+            },
+            Some(View::Terminal(id) | View::Agent(id)) => {
+                if let Some(term) = ws.terms.get_mut(*id)
+                    && term.mode != "normal"
+                {
+                    term.mode = "normal".into();
+                }
+                None
+            },
+            Some(View::Label(_) | View::Image { .. }) | None => None,
+        };
+        if let Some(editor) = editor.and_then(|id| ws.editors.get_mut(id))
+            && !editor.pinned
+            && !PRIMARY_MODES.contains(&editor.mode.as_str())
         {
-            session.mode = "normal".into();
+            editor.mode = "normal".into();
         }
     }
 

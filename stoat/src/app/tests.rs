@@ -7,6 +7,7 @@ use crate::{
         display_map_stamp, editor_page_content_version, osc_default_colors, window_content_version,
     },
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
+    commit_list::CommitListState,
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
     display_map::{DisplayPoint, PaintVersion},
     editor_state::EditorState,
@@ -14,6 +15,7 @@ use crate::{
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
     keymap::KeymapState,
+    pane::{DockPanel, DockSide},
     render::{
         content_lane, hints::HintRow, pane::pane_areas, review::DiffDials, status_lane,
         walkthrough::Spotlight,
@@ -5056,6 +5058,15 @@ fn term_mode(stoat: &Stoat, pane: PaneId) -> String {
     }
 }
 
+/// The input mode of the editor shown in `pane`.
+fn editor_mode(stoat: &Stoat, pane: PaneId) -> String {
+    let ws = stoat.active_workspace();
+    match ws.panes.pane(pane).view {
+        View::Editor(id) => ws.editors[id].mode.clone(),
+        ref other => panic!("pane shows {other:?}, not an editor"),
+    }
+}
+
 /// A two-pane split with an editor on the left and a terminal on the right,
 /// focus left on the editor. Returns the two pane ids.
 fn split_editor_and_terminal(h: &mut crate::test_harness::TestHarness) -> (PaneId, PaneId) {
@@ -5127,6 +5138,164 @@ fn ctrl_a_ctrl_e_and_a_digit_pick_a_pane_from_a_terminal() {
         h.fake_terminal().sent_bytes(),
         vec![b"x".to_vec()],
         "the terminal takes its keys again when focus returns",
+    );
+}
+
+/// The scratch editor split in two, with click areas set and focus on the
+/// left. Returns the left and right pane ids.
+fn split_editor_pair(h: &mut crate::test_harness::TestHarness) -> (PaneId, PaneId) {
+    h.type_action("SplitRight()");
+    let right = h.stoat.active_workspace().panes.focus();
+    h.type_action("FocusLeft()");
+    let ws = h.stoat.active_workspace_mut();
+    let left = ws.panes.focus();
+    ws.panes.pane_mut(left).area = Rect::new(0, 0, 40, 24);
+    ws.panes.pane_mut(right).area = Rect::new(40, 0, 40, 24);
+    (left, right)
+}
+
+fn click(h: &mut crate::test_harness::TestHarness, column: u16, row: u16) {
+    h.stoat.update(mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        column,
+        row,
+    ));
+}
+
+/// Put the mode `mode_of` reaches into a chord, click into the right pane of
+/// a [`split_editor_pair`], and read the mode again.
+fn mode_after_click_away(
+    h: &mut crate::test_harness::TestHarness,
+    mode_of: impl Fn(&mut Workspace) -> &mut String,
+) -> String {
+    *mode_of(h.stoat.active_workspace_mut()) = "space_pane_display".into();
+    click(h, 45, 5);
+    mode_of(h.stoat.active_workspace_mut()).clone()
+}
+
+#[test]
+fn a_digit_pick_rests_the_editor_pane_it_left() {
+    let mut h = Stoat::test();
+    let (left, right) = split_editor_pair(&mut h);
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('e')));
+    assert_eq!(editor_mode(&h.stoat, left), "space_pane_display");
+
+    h.stoat.update(Event::Key(key(KeyCode::Char('2'))));
+    assert_eq!(
+        (
+            h.stoat.active_workspace().panes.focus(),
+            editor_mode(&h.stoat, left)
+        ),
+        (right, "normal".to_string()),
+        "the digit focuses the right pane, and the editor it left rests",
+    );
+
+    h.type_action("FocusLeft()");
+    assert_eq!(
+        h.stoat.focused_mode(),
+        "normal",
+        "the badges stay gone when focus returns",
+    );
+}
+
+#[test]
+fn a_click_into_another_pane_rests_the_editor_picker() {
+    let mut h = Stoat::test();
+    let (left, _) = split_editor_pair(&mut h);
+    h.stoat.update(Event::Key(ctrl('a')));
+    h.stoat.update(Event::Key(ctrl('e')));
+    click(&mut h, 45, 5);
+    let rested = editor_mode(&h.stoat, left);
+    click(&mut h, 5, 5);
+    assert_eq!(
+        (rested.as_str(), h.stoat.focused_mode()),
+        ("normal", "normal"),
+    );
+}
+
+/// Insert and select are modes the reader works in, not chords, so they wait
+/// for focus to come back.
+#[test]
+fn insert_mode_survives_a_click_into_another_pane() {
+    let mut h = Stoat::test();
+    split_editor_pair(&mut h);
+    h.stoat.update(Event::Key(key(KeyCode::Char('i'))));
+    click(&mut h, 45, 5);
+    click(&mut h, 5, 5);
+    assert_eq!(h.stoat.focused_mode(), "insert");
+}
+
+/// A pinned chord is a hold the reader asked for, so it waits for focus to
+/// come back.
+#[test]
+fn a_pinned_chord_survives_a_click_into_another_pane() {
+    let mut h = Stoat::test();
+    split_editor_pair(&mut h);
+    for c in [' ', 'g', 'g'] {
+        h.stoat.update(Event::Key(key(KeyCode::Char(c))));
+    }
+    click(&mut h, 45, 5);
+    click(&mut h, 5, 5);
+    assert_eq!(h.stoat.focused_mode(), "space_goto");
+}
+
+/// A run pane, a commits pane, and a docked terminal end their chords on a
+/// focus move the way an editor pane does.
+#[test]
+fn a_click_away_rests_a_run_commits_or_docked_view() {
+    let mut run = Stoat::test();
+    let (left, _) = split_editor_pair(&mut run);
+    let run_editor = {
+        let exec = run.stoat.executor.clone();
+        let ws = run.stoat.active_workspace_mut();
+        let state = crate::run::RunState::new(PathBuf::from("/work"), ws, exec);
+        let editor = state.input.editor_id;
+        let id = ws.runs.insert(state);
+        ws.panes.pane_mut(left).view = View::Run(id);
+        editor
+    };
+
+    let mut commits = Stoat::test();
+    let (left, _) = split_editor_pair(&mut commits);
+    let list = {
+        commits.fake_git().add_repo("/work");
+        let repo = commits
+            .stoat
+            .git_host
+            .discover(Path::new("/work"))
+            .expect("the repo was just added");
+        let ws = commits.stoat.active_workspace_mut();
+        let id = ws
+            .commit_lists
+            .insert(CommitListState::new(PathBuf::from("/work"), repo));
+        ws.panes.pane_mut(left).view = View::Commits(id);
+        id
+    };
+
+    let mut dock = Stoat::test();
+    split_editor_pair(&mut dock);
+    let term = {
+        let ws = dock.stoat.active_workspace_mut();
+        let term = insert_term_session(ws);
+        let id = ws.docks.insert(DockPanel {
+            view: View::Terminal(term),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Default::default(),
+        });
+        ws.focus = FocusTarget::Dock(id);
+        term
+    };
+
+    assert_eq!(
+        [
+            mode_after_click_away(&mut run, |ws| &mut ws.editors[run_editor].mode),
+            mode_after_click_away(&mut commits, |ws| &mut ws.commit_lists[list].mode),
+            mode_after_click_away(&mut dock, |ws| &mut ws.terms[term].mode),
+        ],
+        ["normal"; 3],
     );
 }
 

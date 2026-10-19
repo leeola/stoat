@@ -79,8 +79,10 @@ pub(crate) struct StatusFilename {
 pub(crate) struct EditorState {
     pub(crate) buffer_id: BufferId,
     /// This editor's input mode (`normal`, `insert`, `select`, ...). Held
-    /// per-editor so the mode survives focus moving to another pane and back,
-    /// rather than living in one global slot shared by every pane.
+    /// per-editor, so a primary mode survives focus moving to another pane and
+    /// back, rather than living in one global slot shared by every pane. An
+    /// unpinned chord mode ends when focus leaves, because a pane without
+    /// focus takes no keys.
     pub(crate) mode: String,
     /// Whether [`Self::mode`] is held until a pure mode switch releases it.
     ///
