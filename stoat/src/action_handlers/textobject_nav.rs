@@ -350,8 +350,8 @@ mod tests {
     };
     use std::path::PathBuf;
     use stoat_action::{
-        GotoNextClass, GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParameter,
-        GotoNextTest, GotoNextXmlElement, GotoPrevClass, GotoPrevFunction,
+        registry, GotoNextClass, GotoNextComment, GotoNextEntry, GotoNextFunction,
+        GotoNextParameter, GotoNextTest, GotoNextXmlElement, GotoPrevClass, GotoPrevFunction,
     };
 
     fn seed(h: &mut TestHarness, name: &str, contents: &str) -> PathBuf {
@@ -852,5 +852,77 @@ mod tests {
         let off = h.primary_head_offset();
         assert!(src[off..].starts_with("struct Bar"), "{}", &src[off..]);
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// The text of each row the `]` box lists.
+    fn bracket_rows(h: &mut TestHarness) -> Vec<String> {
+        h.type_keys("]");
+        h.render_composited();
+        let rows = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the ] chord laid out its box")
+            .rows
+            .iter()
+            .map(|row| row.action.clone())
+            .collect();
+        h.type_keys("escape");
+        rows
+    }
+
+    /// The object hops walk the syntax tree, so the `]` box lists them only
+    /// once a grammar parses the buffer. The newline and paragraph rows need no
+    /// grammar.
+    #[test]
+    fn the_bracket_box_lists_the_object_hops_only_with_a_grammar() {
+        let mut h = TestHarness::with_size(150, 50);
+        let listed = |rows: &[String]| {
+            ["AddNewlineBelow", "GotoNextParagraph", "GotoNextFunction"].map(|name| {
+                let desc = registry::lookup(name).expect("registered").def.short_desc();
+                rows.iter().any(|row| row == desc)
+            })
+        };
+        let scratch = listed(&bracket_rows(&mut h));
+
+        seed(&mut h, "main.rs", "fn a() {}\n");
+        assert_eq!(
+            [scratch, listed(&bracket_rows(&mut h))],
+            [[true, true, false], [true, true, true]],
+            "a scratch buffer, then a rust file",
+        );
+    }
+
+    /// The object-hop keys each bracket mode binds in the live state.
+    fn object_hop_keys(h: &TestHarness) -> [String; 4] {
+        [
+            "bracket_next",
+            "bracket_prev",
+            "select_bracket_next",
+            "select_bracket_prev",
+        ]
+        .map(|mode| {
+            h.stoat
+                .active_keys_for_mode(mode)
+                .into_iter()
+                .map(|(key, _)| key.display_label())
+                .filter(|label| ["f", "t", "a", "c", "T", "e", "x"].contains(&label.as_str()))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    }
+
+    /// The select flavors gate their hops the same way the normal ones do.
+    #[test]
+    fn every_bracket_mode_binds_the_object_hops_only_with_a_grammar() {
+        let mut h = TestHarness::with_size(60, 20);
+        let scratch = object_hop_keys(&h);
+
+        seed(&mut h, "main.rs", "fn a() {}\n");
+        assert_eq!(
+            [scratch, object_hop_keys(&h)],
+            [[""; 4], ["f t a c T e x"; 4]],
+            "a scratch buffer, then a rust file",
+        );
     }
 }

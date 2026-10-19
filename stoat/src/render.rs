@@ -2458,6 +2458,31 @@ mod lsp_filter_tests {
         );
     }
 
+    /// The implementation jump asks a language server about the token under
+    /// the cursor. Its row lists only in a served buffer, and once the buffer
+    /// has a token index, only over a token.
+    #[test]
+    fn the_goto_box_lists_the_implementation_jump_only_where_a_server_answers() {
+        let mut h = TestHarness::with_size(150, 50);
+        let jump = short_desc("GotoImplementation");
+        let lists_jump = |rows: Vec<String>| rows.iter().any(|row| row == jump);
+        let scratch = lists_jump(chord_rows(&mut h, "g"));
+
+        let buffer_id = open_foo_bar(&mut h);
+        let served = lists_jump(chord_rows(&mut h, "g"));
+
+        h.stoat
+            .active_workspace_mut()
+            .buffers
+            .store_lsp_symbol_kinds(buffer_id, Arc::from(Vec::new()));
+        assert_eq!(
+            [scratch, served, lists_jump(chord_rows(&mut h, "g"))],
+            [false, true, false],
+            "a scratch buffer, a served one, then one whose index puts no token \
+             under the cursor",
+        );
+    }
+
     /// The recall key reopens the last picker, so its row lists only once a
     /// picker has opened.
     #[test]

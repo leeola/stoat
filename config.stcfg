@@ -658,7 +658,11 @@ on key {
         # lands there and drops the prompt out of insert.
         ? -> [SetMode(normal), OpenReverseSearchInput()];
         i -> [GotoFirstNonwhitespace(), SetMode(normal)];
-        s -> [GotoImplementation(), SetMode(normal)];
+
+        lsp && (!token_known || token) {
+            s -> [GotoImplementation(), SetMode(normal)];
+        }
+
         j -> [GotoLastLine(), SetMode(normal)];
         k -> [GotoFileStart(), SetMode(normal)];
         h -> [GotoLineStart(), SetMode(normal)];
@@ -711,13 +715,19 @@ on key {
         }
 
         p -> [GotoNextParagraph(), SetMode(normal)];
-        f -> [GotoNextFunction(), SetMode(normal)];
-        t -> [GotoNextClass(), SetMode(normal)];
-        a -> [GotoNextParameter(), SetMode(normal)];
-        c -> [GotoNextComment(), SetMode(normal)];
-        T -> [GotoNextTest(), SetMode(normal)];
-        e -> [GotoNextEntry(), SetMode(normal)];
-        x -> [GotoNextXmlElement(), SetMode(normal)];
+
+        # The object hops walk the syntax tree, so they bind only where a
+        # grammar parses the buffer. A grammar that lacks one kind's query still
+        # binds that kind's key, which then finds nothing.
+        lang {
+            f -> [GotoNextFunction(), SetMode(normal)];
+            t -> [GotoNextClass(), SetMode(normal)];
+            a -> [GotoNextParameter(), SetMode(normal)];
+            c -> [GotoNextComment(), SetMode(normal)];
+            T -> [GotoNextTest(), SetMode(normal)];
+            e -> [GotoNextEntry(), SetMode(normal)];
+            x -> [GotoNextXmlElement(), SetMode(normal)];
+        }
     }
     mode == bracket_prev {
         Escape -> SetMode(normal);
@@ -737,13 +747,16 @@ on key {
         }
 
         p -> [GotoPrevParagraph(), SetMode(normal)];
-        f -> [GotoPrevFunction(), SetMode(normal)];
-        t -> [GotoPrevClass(), SetMode(normal)];
-        a -> [GotoPrevParameter(), SetMode(normal)];
-        c -> [GotoPrevComment(), SetMode(normal)];
-        T -> [GotoPrevTest(), SetMode(normal)];
-        e -> [GotoPrevEntry(), SetMode(normal)];
-        x -> [GotoPrevXmlElement(), SetMode(normal)];
+
+        lang {
+            f -> [GotoPrevFunction(), SetMode(normal)];
+            t -> [GotoPrevClass(), SetMode(normal)];
+            a -> [GotoPrevParameter(), SetMode(normal)];
+            c -> [GotoPrevComment(), SetMode(normal)];
+            T -> [GotoPrevTest(), SetMode(normal)];
+            e -> [GotoPrevEntry(), SetMode(normal)];
+            x -> [GotoPrevXmlElement(), SetMode(normal)];
+        }
     }
     # The bracket submodes come in select-mode flavors so a bracket motion
     # made from select extends and returns there, rather than dropping the
@@ -766,13 +779,16 @@ on key {
         }
 
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
-        f -> [GotoNextFunction(), SetMode(select)];
-        t -> [GotoNextClass(), SetMode(select)];
-        a -> [GotoNextParameter(), SetMode(select)];
-        c -> [GotoNextComment(), SetMode(select)];
-        T -> [GotoNextTest(), SetMode(select)];
-        e -> [GotoNextEntry(), SetMode(select)];
-        x -> [GotoNextXmlElement(), SetMode(select)];
+
+        lang {
+            f -> [GotoNextFunction(), SetMode(select)];
+            t -> [GotoNextClass(), SetMode(select)];
+            a -> [GotoNextParameter(), SetMode(select)];
+            c -> [GotoNextComment(), SetMode(select)];
+            T -> [GotoNextTest(), SetMode(select)];
+            e -> [GotoNextEntry(), SetMode(select)];
+            x -> [GotoNextXmlElement(), SetMode(select)];
+        }
     }
     mode == select_bracket_prev {
         Escape -> SetMode(select);
@@ -792,13 +808,16 @@ on key {
         }
 
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
-        f -> [GotoPrevFunction(), SetMode(select)];
-        t -> [GotoPrevClass(), SetMode(select)];
-        a -> [GotoPrevParameter(), SetMode(select)];
-        c -> [GotoPrevComment(), SetMode(select)];
-        T -> [GotoPrevTest(), SetMode(select)];
-        e -> [GotoPrevEntry(), SetMode(select)];
-        x -> [GotoPrevXmlElement(), SetMode(select)];
+
+        lang {
+            f -> [GotoPrevFunction(), SetMode(select)];
+            t -> [GotoPrevClass(), SetMode(select)];
+            a -> [GotoPrevParameter(), SetMode(select)];
+            c -> [GotoPrevComment(), SetMode(select)];
+            T -> [GotoPrevTest(), SetMode(select)];
+            e -> [GotoPrevEntry(), SetMode(select)];
+            x -> [GotoPrevXmlElement(), SetMode(select)];
+        }
     }
     mode == match {
         Escape -> SetMode(normal);
