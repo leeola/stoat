@@ -1,11 +1,11 @@
-//! The paint of a [`View::Overview`](crate::pane::View::Overview) pane.
+//! The paint of a [`View::DiffChanges`](crate::pane::View::DiffChanges) pane.
 //!
-//! The overview shows its document through the commit preview's painter, so a
-//! hunk reads the same here as in a commit's preview. A cursor row marks where
-//! the overview's keys act.
+//! The changes view shows its document through the commit preview's painter, so
+//! a hunk reads the same here as in a commit's preview. A cursor row marks
+//! where the changes view's keys act.
 
 use crate::{
-    overview::OverviewState,
+    diff_changes::DiffChangesState,
     pane::Pane,
     render::{
         commits::{preview_row_count, render_commit_preview},
@@ -22,22 +22,22 @@ use ratatui::buffer::Buffer;
 use std::sync::Arc;
 use stoat_widgets::ApcScene;
 
-/// Paint the overview `state` shows into `pane`, with its own status row.
+/// Paint the changes view `state` shows into `pane`, with its own status row.
 ///
 /// With `doc` the hunks paint from the scroll of `state`, and the cursor row
 /// takes the selection background under the diff colors. The cursor clamps to
 /// the document's last row, so a smaller rebuild never leaves it past the end.
 ///
-/// With no document the pane says "building overview..." while a build is on
+/// With no document the pane says "building changes..." while a build is on
 /// the pool, and "no changes" when the last build found none.
 ///
 /// With per-pane minimaps on, a pane wide enough for the minimap strip gives
 /// its right edge to the strip, with or without a document. The strip's rect
-/// lands on [`OverviewState::minimap_rect`].
-pub(crate) fn render_overview(
+/// lands on [`DiffChangesState::minimap_rect`].
+pub(crate) fn render_diff_changes(
     pane: &Pane,
     is_focused: bool,
-    state: &mut OverviewState,
+    state: &mut DiffChangesState,
     doc: Option<&Arc<DiffDocument>>,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
@@ -47,7 +47,7 @@ pub(crate) fn render_overview(
     render_overlay_status(
         status_area,
         is_focused,
-        Some("overview"),
+        Some("diff_changes"),
         frame,
         buf,
         &mut *scene,
@@ -59,8 +59,8 @@ pub(crate) fn render_overview(
     }
 
     let Some(doc) = doc else {
-        let text = match frame.overview_building {
-            true => "building overview...",
+        let text = match frame.diff_changes_building {
+            true => "building changes...",
             false => "no changes",
         };
         write_str(
@@ -121,8 +121,8 @@ mod tests {
     /// declares.
     type Declared = (u32, u32, Vec<[u8; 3]>);
 
-    /// The first row the overview paints, as text, from one render that runs
-    /// no pool job.
+    /// The first row the changes view paints, as text, from one render that
+    /// runs no pool job.
     fn first_row(h: &mut TestHarness) -> String {
         let buf = h.render_composited();
         (0..buf.area.width)
@@ -134,35 +134,35 @@ mod tests {
 
     /// The cursor row moves with a step to the second chunk.
     #[test]
-    fn an_overview_paints_its_document_under_a_cursor_row() {
+    fn a_changes_view_paints_its_document_under_a_cursor_row() {
         let mut h = TestHarness::with_size(100, 16);
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
         h.open_file(Path::new("/repo/a.txt"));
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
-        h.assert_snapshot("overview_two_files");
+        h.assert_snapshot("diff_changes_two_files");
 
-        dispatch(&mut h.stoat, &stoat_action::OverviewNextChunk);
-        h.assert_snapshot("overview_cursor_on_second_chunk");
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesNextChunk);
+        h.assert_snapshot("diff_changes_cursor_on_second_chunk");
     }
 
-    /// With no document the overview says that a build runs, or that the last
-    /// build found no change.
+    /// With no document the changes view says that a build runs, or that the
+    /// last build found no change.
     #[test]
-    fn an_overview_with_no_document_says_why() {
+    fn a_changes_view_with_no_document_says_why() {
         let mut building = TestHarness::with_size(100, 16);
         building.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
-        building.cover_with_overview(false);
+        building.cover_with_diff_changes(false);
 
         let mut clean = TestHarness::with_size(100, 16);
         clean.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         clean.fake_git().add_repo(PathBuf::from("/repo"));
-        clean.cover_with_overview(false);
+        clean.cover_with_diff_changes(false);
         clean.settle();
 
         assert_eq!(
             (first_row(&mut building), first_row(&mut clean)),
-            ("building overview...".to_string(), "no changes".to_string()),
+            ("building changes...".to_string(), "no changes".to_string()),
         );
     }
 
@@ -172,32 +172,32 @@ mod tests {
     fn a_cursor_past_the_end_lands_on_the_last_row_in_view() {
         let mut h = TestHarness::with_size(100, 4);
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         let rows = h
             .stoat
             .active_workspace()
-            .overview_doc
+            .diff_changes_doc
             .as_ref()
             .and_then(|built| built.doc.as_deref())
             .map_or(0, preview_row_count);
         h.stoat
             .active_workspace_mut()
-            .focused_overview_mut()
-            .expect("the overview is open")
+            .focused_diff_changes_mut()
+            .expect("the changes view is open")
             .cursor = 99;
 
         h.render_composited();
         let placed = h
             .stoat
             .active_workspace()
-            .focused_overview()
+            .focused_diff_changes()
             .map(|state| (state.cursor, state.scroll_top + state.viewport_rows));
         assert_eq!(placed, Some((rows - 1, rows)));
     }
 
-    /// Two staged files under a focused overview at 120 by 24, with the minimap
-    /// in `mode`, on a stoatty of protocol 13.
+    /// Two staged files under a focused changes view at 120 by 24, with the
+    /// minimap in `mode`, on a stoatty of protocol 13.
     fn strip_harness(mode: MinimapMode) -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
         let mut h = TestHarness::with_size(120, 24);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -206,13 +206,13 @@ mod tests {
         h.stoat.settings.editor_minimap = Some(mode);
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
         h.open_file(Path::new("/repo/a.txt"));
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         (h, rx)
     }
 
     /// Paint one frame, and return its cells, the strip rect the focused
-    /// overview reserved, and every minimap strip the frame declared.
+    /// changes view reserved, and every minimap strip the frame declared.
     fn paint_strips(
         h: &mut TestHarness,
         rx: &mut UnboundedReceiver<Vec<u8>>,
@@ -229,14 +229,15 @@ mod tests {
         let reserved = h
             .stoat
             .active_workspace()
-            .focused_overview()
+            .focused_diff_changes()
             .and_then(|state| state.minimap_rect);
         (buf, reserved, declared)
     }
 
-    /// The workspace's overview strip as `strip_id` declares it, in the diff
-    /// palette that the dials derive, blended toward the background by `dim`.
-    fn overview_strip(h: &TestHarness, strip_id: u32, dim: f32) -> Declared {
+    /// The workspace's changes view strip as `strip_id` declares it, in the
+    /// diff palette that the dials derive, blended toward the background by
+    /// `dim`.
+    fn diff_changes_strip(h: &TestHarness, strip_id: u32, dim: f32) -> Declared {
         let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
             .expect("the test theme has an rgb background");
         let palette = review::diff_minimap_palette(
@@ -248,7 +249,7 @@ mod tests {
         .into_iter()
         .map(|color| paint::dim_rgb(color, bg, dim))
         .collect();
-        let content_id = h.stoat.overview_strips[&h.stoat.active_workspace].content_id();
+        let content_id = h.stoat.diff_changes_strips[&h.stoat.active_workspace].content_id();
         (strip_id, content_id, palette)
     }
 
@@ -257,10 +258,11 @@ mod tests {
         ws.panes.pane(ws.panes.focus()).index
     }
 
-    /// A per-pane overview gives its right edge to the minimap strip, leaves
-    /// the strip's cells blank, and declares the strip in the diff palette.
+    /// A per-pane changes view gives its right edge to the minimap strip,
+    /// leaves the strip's cells blank, and declares the strip in the diff
+    /// palette.
     #[test]
-    fn a_per_pane_overview_declares_its_strip_in_the_diff_palette() {
+    fn a_per_pane_changes_view_declares_its_strip_in_the_diff_palette() {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
         let (buf, reserved, declared) = paint_strips(&mut h, &mut rx);
         let strip = Rect::new(112, 0, 8, 23);
@@ -274,15 +276,15 @@ mod tests {
             (
                 Some(strip),
                 vec![],
-                vec![overview_strip(&h, focused_pane_index(&h), 0.0)]
+                vec![diff_changes_strip(&h, focused_pane_index(&h), 0.0)]
             ),
         );
     }
 
-    /// A per-pane overview that a dock took focus from declares its strip in
-    /// the diff palette at the inactive dim.
+    /// A per-pane changes view that a dock took focus from declares its strip
+    /// in the diff palette at the inactive dim.
     #[test]
-    fn an_unfocused_per_pane_overview_dims_its_strip() {
+    fn an_unfocused_per_pane_changes_view_dims_its_strip() {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
         let index = focused_pane_index(&h);
         let ws = h.stoat.active_workspace_mut();
@@ -297,18 +299,21 @@ mod tests {
 
         let (_, _, declared) = paint_strips(&mut h, &mut rx);
         // 0.25 is the default ui.inactive_dim the test harness resolves.
-        assert_eq!(declared, [overview_strip(&h, index, 0.25)]);
+        assert_eq!(declared, [diff_changes_strip(&h, index, 0.25)]);
     }
 
-    /// The single band shows a focused overview's strip in the diff palette,
-    /// and the pane reserves no strip of its own.
+    /// The single band shows a focused changes view's strip in the diff
+    /// palette, and the pane reserves no strip of its own.
     #[test]
-    fn the_single_band_follows_a_focused_overview() {
+    fn the_single_band_follows_a_focused_changes_view() {
         let (mut h, mut rx) = strip_harness(MinimapMode::Single);
         let (_, reserved, declared) = paint_strips(&mut h, &mut rx);
         assert_eq!(
             (reserved, declared),
-            (None, vec![overview_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]),
+            (
+                None,
+                vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]
+            ),
         );
     }
 }

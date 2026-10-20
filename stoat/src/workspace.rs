@@ -19,11 +19,11 @@ use crate::{
     commit_list::{CommitListId, CommitListSnap, CommitListState},
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
+    diff_changes::{DiffChangesDoc, DiffChangesId, DiffChangesState},
     display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
     host::GitHost,
     input_history::InputHistory,
-    overview::{OverviewDoc, OverviewId, OverviewState},
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, text, walkthrough::SlideParts},
@@ -317,18 +317,18 @@ pub struct Workspace {
     /// [`respawn_commits_panes`](crate::action_handlers::respawn_commits_panes)
     /// gives that pane a live list.
     pub(crate) restored_commit_lists: HashMap<CommitListId, CommitListSnap>,
-    /// Every open overview in the workspace, keyed from the
-    /// [`View::Overview`] pane that shows it.
+    /// Every open changes view in the workspace, keyed from the
+    /// [`View::DiffChanges`] pane that shows it.
     ///
     /// Held here rather than by the pane, as [`Self::commit_lists`] holds a
-    /// list, so a parked tab's overview keeps its cursor.
-    pub(crate) overviews: SlotMap<OverviewId, OverviewState>,
-    /// The last overview document a build finished, kept so an overview paints
-    /// at once while the next one builds.
-    pub(crate) overview_doc: Option<OverviewDoc>,
+    /// list, so a parked tab's changes view keeps its cursor.
+    pub(crate) diff_changes_views: SlotMap<DiffChangesId, DiffChangesState>,
+    /// The last changes view document a build finished, kept so a changes view
+    /// paints at once while the next one builds.
+    pub(crate) diff_changes_doc: Option<DiffChangesDoc>,
     /// Moves when the diff base or the git state changes. That stales the
-    /// overview document even where no buffer text moved.
-    pub(crate) overview_epoch: u64,
+    /// changes view document even where no buffer text moved.
+    pub(crate) diff_changes_epoch: u64,
     /// Active commit-by-commit review walk (if any). Outlives the diff view
     /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
@@ -544,9 +544,9 @@ impl Workspace {
             conflict: None,
             commit_lists: SlotMap::with_key(),
             restored_commit_lists: HashMap::new(),
-            overviews: SlotMap::with_key(),
-            overview_doc: None,
-            overview_epoch: 0,
+            diff_changes_views: SlotMap::with_key(),
+            diff_changes_doc: None,
+            diff_changes_epoch: 0,
             review_walk: None,
             ending_walk: None,
             walkthrough: None,
@@ -683,27 +683,27 @@ impl Workspace {
         self.commit_lists.get_mut(id)
     }
 
-    /// The overview the focused split pane shows, or `None` when focus sits on
-    /// a dock or the focused pane shows something else.
-    pub(crate) fn focused_overview_id(&self) -> Option<OverviewId> {
+    /// The changes view the focused split pane shows, or `None` when focus sits
+    /// on a dock or the focused pane shows something else.
+    pub(crate) fn focused_diff_changes_id(&self) -> Option<DiffChangesId> {
         let FocusTarget::SplitPane = self.focus else {
             return None;
         };
         match self.panes.pane(self.panes.focus()).view {
-            View::Overview(id) => Some(id),
+            View::DiffChanges(id) => Some(id),
             _ => None,
         }
     }
 
-    /// The state of the overview the focused split pane shows.
-    pub(crate) fn focused_overview(&self) -> Option<&OverviewState> {
-        self.overviews.get(self.focused_overview_id()?)
+    /// The state of the changes view the focused split pane shows.
+    pub(crate) fn focused_diff_changes(&self) -> Option<&DiffChangesState> {
+        self.diff_changes_views.get(self.focused_diff_changes_id()?)
     }
 
-    /// The state of the overview the focused split pane shows, to change.
-    pub(crate) fn focused_overview_mut(&mut self) -> Option<&mut OverviewState> {
-        let id = self.focused_overview_id()?;
-        self.overviews.get_mut(id)
+    /// The state of the changes view the focused split pane shows, to change.
+    pub(crate) fn focused_diff_changes_mut(&mut self) -> Option<&mut DiffChangesState> {
+        let id = self.focused_diff_changes_id()?;
+        self.diff_changes_views.get_mut(id)
     }
 
     /// What tab `idx` calls itself in the tab bar, taken from its focused
@@ -767,7 +767,7 @@ impl Workspace {
             View::Agent(id) => self.session_tab_title(*id, "agent"),
             View::Terminal(id) => self.session_tab_title(*id, "term"),
             View::Commits(_) => "commits".to_string(),
-            View::Overview(_) => "overview".to_string(),
+            View::DiffChanges(_) => "diff-changes".to_string(),
             View::Run(_) => "run".to_string(),
             View::Image { path, .. } => path
                 .file_name()
@@ -1121,7 +1121,7 @@ impl Workspace {
     /// map against `path`'s fresh blobs. See [`DiffState::invalidate`].
     pub(crate) fn invalidate_diff(&mut self, id: BufferId, path: &Path) {
         self.diff.invalidate(id, Some(path));
-        self.overview_epoch += 1;
+        self.diff_changes_epoch += 1;
     }
 
     /// Mark the repo-wide hunk tally as owed. See [`DiffState::stale_tally`].
@@ -1132,7 +1132,7 @@ impl Workspace {
     /// Stale every buffer's diff map. See [`DiffState::invalidate_all`].
     pub(crate) fn invalidate_all_diffs(&mut self) {
         self.diff.invalidate_all();
-        self.overview_epoch += 1;
+        self.diff_changes_epoch += 1;
     }
 
     /// Whether `id`'s installed diff map was computed for the buffer's current
@@ -1230,7 +1230,7 @@ impl Workspace {
     pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
         self.diff.base_override = base;
         self.diff.reset_for_new_base();
-        self.overview_epoch += 1;
+        self.diff_changes_epoch += 1;
     }
 
     /// Pick which of its two own bases the working tree diffs against.
@@ -1779,7 +1779,7 @@ impl Workspace {
                 | View::Agent(_)
                 | View::Terminal(_)
                 | View::Commits(_)
-                | View::Overview(_)
+                | View::DiffChanges(_)
                 | View::Image { .. } => {},
             }
         }
@@ -2058,7 +2058,7 @@ pub(crate) fn view_kind(view: &View) -> &'static str {
         View::Agent(_) => "agent",
         View::Terminal(_) => "terminal",
         View::Commits(_) => "commits",
-        View::Overview(_) => "overview",
+        View::DiffChanges(_) => "diff_changes",
         View::Image { .. } => "image",
     }
 }
@@ -2070,8 +2070,8 @@ mod tests {
         buffer::BufferId,
         code_index::build::IndexUpdate,
         commit_list::CommitListId,
+        diff_changes::DiffChangesId,
         editor_state::EditorId,
-        overview::OverviewId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::RunId,
         term_session::TermId,
@@ -2228,14 +2228,23 @@ mod tests {
             View::Agent(TermId::default()),
             View::Terminal(TermId::default()),
             View::Commits(CommitListId::default()),
-            View::Overview(OverviewId::default()),
+            View::DiffChanges(DiffChangesId::default()),
         ]
         .iter()
         .map(|view| ws.view_title(view))
         .collect();
         assert_eq!(
             titles,
-            ["pane", "scratch", "cat.png", "run", "agent", "term", "commits", "overview"]
+            [
+                "pane",
+                "scratch",
+                "cat.png",
+                "run",
+                "agent",
+                "term",
+                "commits",
+                "diff-changes"
+            ]
         );
     }
 

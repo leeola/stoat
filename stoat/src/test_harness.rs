@@ -452,27 +452,29 @@ impl TestHarness {
         self.capture("open_commits");
     }
 
-    /// Turn the focused pane into an overview over the view it shows, widened
-    /// as a full-window screen, with its document's build started.
+    /// Turn the focused pane into a changes view over the view it shows,
+    /// widened as a full-window screen, with its document's build started.
     ///
     /// `covered_diff` records that the covered editor showed the diff view, so
     /// a close returns to it. The build is still on the pool, so a test settles
     /// when it wants the document.
-    pub(crate) fn cover_with_overview(
+    pub(crate) fn cover_with_diff_changes(
         &mut self,
         covered_diff: bool,
-    ) -> crate::overview::OverviewId {
+    ) -> crate::diff_changes::DiffChangesId {
         let ws = self.stoat.active_workspace_mut();
         let focus = ws.panes.focus();
         let covered = ws.panes.pane(focus).view.clone();
-        let id = ws.overviews.insert(crate::overview::OverviewState {
-            covered: Some(covered),
-            covered_diff,
-            ..Default::default()
-        });
-        ws.panes.pane_mut(focus).view = crate::pane::View::Overview(id);
+        let id = ws
+            .diff_changes_views
+            .insert(crate::diff_changes::DiffChangesState {
+                covered: Some(covered),
+                covered_diff,
+                ..Default::default()
+            });
+        ws.panes.pane_mut(focus).view = crate::pane::View::DiffChanges(id);
         ws.panes.widen(focus);
-        crate::overview::ensure_overview_doc(&mut self.stoat);
+        crate::diff_changes::ensure_diff_changes_doc(&mut self.stoat);
         id
     }
 

@@ -608,8 +608,8 @@ pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
     if ws.rebase.is_some() {
         return Some("rebase");
     }
-    if matches!(focused_view(ws), Some(View::Overview(_))) {
-        return Some("overview");
+    if matches!(focused_view(ws), Some(View::DiffChanges(_))) {
+        return Some("diff_changes");
     }
     if matches!(focused_view(ws), Some(View::Commits(_))) {
         return Some("commits");

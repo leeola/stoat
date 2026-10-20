@@ -1,18 +1,18 @@
-//! The diff overview, which shows every change against the diff base as one
+//! The changes view, which shows every change against the diff base as one
 //! side-by-side list of hunks.
 //!
-//! An overview row is a row of the commit preview's layout. Each chunk takes a
-//! header row and then its diff rows, with files in document order. The row
+//! A changes view row is a row of the commit preview's layout. Each chunk takes
+//! a header row and then its diff rows, with files in document order. The row
 //! model numbers those same rows. So a cursor row resolves to the file, the
 //! chunk, and the buffer line that the paint puts on that row.
 //!
-//! The workspace builds the document an overview shows on the pool and keeps
-//! the last one, so an overview paints at once while the next one builds.
+//! The workspace builds the document a changes view shows on the pool and keeps
+//! the last one, so a changes view paints at once while the next one builds.
 //!
 //! See also:
 //! - [`render_commit_preview`](crate::render::commits::render_commit_preview) for the paint that
 //!   lays out these rows.
-//! - [`ensure_overview_doc`] for the build.
+//! - [`ensure_diff_changes_doc`] for the build.
 
 use crate::{
     action_handlers::{self, commits::PreviewHighlights},
@@ -40,13 +40,13 @@ use stoat_scheduler::Task;
 use stoat_text::Rope;
 
 new_key_type! {
-    /// Key for one overview pane's [`OverviewState`].
-    pub struct OverviewId;
+    /// Key for one changes view pane's [`DiffChangesState`].
+    pub struct DiffChangesId;
 }
 
-/// One overview pane's cursor, scroll, and input mode, and the view the
-/// overview replaced in that pane.
-pub(crate) struct OverviewState {
+/// One changes view pane's cursor, scroll, and input mode, and the view the
+/// changes view replaced in that pane.
+pub(crate) struct DiffChangesState {
     /// The row under the cursor, in the rows
     /// [`preview_row_count`](crate::render::commits::preview_row_count) counts.
     pub cursor: usize,
@@ -57,26 +57,26 @@ pub(crate) struct OverviewState {
     /// The minimap strip the most recent paint reserved at the pane's right
     /// edge, or `None` where no per-pane strip shows.
     pub minimap_rect: Option<Rect>,
-    /// The input mode while the overview's pane is focused.
+    /// The input mode while the changes view's pane is focused.
     ///
-    /// Each overview holds its own mode, as a commits list does, so a chord
-    /// left pending on another pane never carries into the overview.
+    /// Each changes view holds its own mode, as a commits list does, so a chord
+    /// left pending on another pane never carries into the changes view.
     pub mode: String,
-    /// The view the overview replaced in its pane, which closing the overview
-    /// puts back.
+    /// The view the changes view replaced in its pane, which closing the
+    /// changes view puts back.
     pub covered: Option<View>,
     /// True when the covered editor showed the diff view, so closing the
-    /// overview returns to the per-file diff it came from.
+    /// changes view returns to the per-file diff it came from.
     pub covered_diff: bool,
     /// The `(rel_path, buffer_row)` the cursor moves onto once a document
     /// exists.
     ///
-    /// An overview opens before its first document builds, so the editor line
-    /// it opened from waits here.
+    /// A changes view opens before its first document builds, so the editor
+    /// line it opened from waits here.
     pub pending_landing: Option<(String, u32)>,
 }
 
-impl OverviewState {
+impl DiffChangesState {
     /// Scrolls the least distance that keeps [`Self::cursor`] on screen in a
     /// viewport of `rows` rows.
     ///
@@ -94,8 +94,8 @@ impl OverviewState {
     }
 }
 
-impl Default for OverviewState {
-    /// An overview on its first row, in normal mode, that covers no view and
+impl Default for DiffChangesState {
+    /// A changes view on its first row, in normal mode, that covers no view and
     /// waits on no landing.
     fn default() -> Self {
         Self {
@@ -111,18 +111,18 @@ impl Default for OverviewState {
     }
 }
 
-/// The state of a workspace that an overview document was built from.
+/// The state of a workspace that a changes view document was built from.
 ///
 /// A document is current while its stamp equals the workspace's stamp now.
 /// `epoch` moves when the diff base or the git state changes, and `buffers`
 /// moves with the text of every open buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct OverviewStamp {
+pub(crate) struct DiffChangesStamp {
     epoch: u64,
     buffers: u64,
 }
 
-impl OverviewStamp {
+impl DiffChangesStamp {
     /// Read the stamp of `ws` as it stands.
     pub(crate) fn read(ws: &Workspace) -> Self {
         let mut hasher = DefaultHasher::new();
@@ -137,38 +137,38 @@ impl OverviewStamp {
             (id, version).hash(&mut hasher);
         }
         Self {
-            epoch: ws.overview_epoch,
+            epoch: ws.diff_changes_epoch,
             buffers: hasher.finish(),
         }
     }
 }
 
-/// The last overview document a build finished, with the stamp it was built
+/// The last changes view document a build finished, with the stamp it was built
 /// from.
-pub(crate) struct OverviewDoc {
+pub(crate) struct DiffChangesDoc {
     /// The document, or `None` when the build found no change to show.
     ///
     /// An empty build keeps its stamp all the same, so an unchanged tree does
     /// not build again.
     pub doc: Option<Arc<DiffDocument>>,
-    pub stamp: OverviewStamp,
+    pub stamp: DiffChangesStamp,
 }
 
-/// An overview document building on the pool, which [`pump_overview_build`]
-/// stores when it lands.
-pub(crate) struct PendingOverviewBuild {
+/// A changes view document building on the pool, which
+/// [`pump_diff_changes_build`] stores when it lands.
+pub(crate) struct PendingDiffChangesBuild {
     _task: Task<()>,
     rx: mpsc::Receiver<Option<DiffDocument>>,
     /// The workspace that asked for the build, which the document belongs to
     /// whatever workspace is active when it lands.
     workspace: WorkspaceId,
-    stamp: OverviewStamp,
+    stamp: DiffChangesStamp,
 }
 
-/// The chunk that one overview row belongs to, and the part of it the row
+/// The chunk that one changes view row belongs to, and the part of it the row
 /// shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct OverviewRow {
+pub(crate) struct DiffChangesRow {
     pub file_index: usize,
     pub chunk: ReviewChunkId,
     pub kind: RowKind,
@@ -182,7 +182,7 @@ pub(crate) enum RowKind {
     Diff(usize),
 }
 
-/// What an overview build reads, gathered on the run loop.
+/// What a changes view build reads, gathered on the run loop.
 ///
 /// The build runs on the pool, so it carries owned copies of what it reads.
 /// The hunk cache, the highlight cache, and the parse memo are the exceptions.
@@ -203,7 +203,7 @@ struct BuildInputs {
     memo: TreeCache,
 }
 
-/// A chunk the overview shows, with the row its header takes.
+/// A chunk the changes view shows, with the row its header takes.
 struct PlacedChunk<'a> {
     file_index: usize,
     id: ReviewChunkId,
@@ -211,21 +211,22 @@ struct PlacedChunk<'a> {
     header: usize,
 }
 
-/// Start a build of the active workspace's overview document, unless one is
+/// Start a build of the active workspace's changes view document, unless one is
 /// pending or the last one is current.
 ///
 /// The build diffs every changed file against the base the per-file view uses,
-/// on the pool. [`pump_overview_build`] stores what it finds on the workspace
-/// that asked for it, so the last document paints while the next one builds.
-pub(crate) fn ensure_overview_doc(stoat: &mut Stoat) {
-    if stoat.pending_overview_build.is_some() {
+/// on the pool. [`pump_diff_changes_build`] stores what it finds on the
+/// workspace that asked for it, so the last document paints while the next one
+/// builds.
+pub(crate) fn ensure_diff_changes_doc(stoat: &mut Stoat) {
+    if stoat.pending_diff_changes_build.is_some() {
         return;
     }
     let workspace = stoat.active_workspace;
     let ws = stoat.active_workspace();
-    let stamp = OverviewStamp::read(ws);
+    let stamp = DiffChangesStamp::read(ws);
     if ws
-        .overview_doc
+        .diff_changes_doc
         .as_ref()
         .is_some_and(|built| built.stamp == stamp)
     {
@@ -242,7 +243,7 @@ pub(crate) fn ensure_overview_doc(stoat: &mut Stoat) {
         cache: stoat.diff_cache.clone(),
         highlights: PreviewHighlights::from_stoat(stoat),
         memo: ws
-            .overview_doc
+            .diff_changes_doc
             .as_ref()
             .and_then(|built| built.doc.as_ref())
             .map(|doc| doc.tree_cache.clone())
@@ -254,7 +255,7 @@ pub(crate) fn ensure_overview_doc(stoat: &mut Stoat) {
         let _ = tx.send(build(inputs));
         redraw.notify_one();
     });
-    stoat.pending_overview_build = Some(PendingOverviewBuild {
+    stoat.pending_diff_changes_build = Some(PendingDiffChangesBuild {
         _task: task,
         rx,
         workspace,
@@ -262,21 +263,21 @@ pub(crate) fn ensure_overview_doc(stoat: &mut Stoat) {
     });
 }
 
-/// Store a landed overview build on the workspace that asked for it.
+/// Store a landed changes view build on the workspace that asked for it.
 ///
 /// A build that found no change stores no document, which drops the document
-/// before it. Each overview cursor of the workspace moves to the row that shows
-/// its chunk in the new document, and each waiting landing lands. Returns
-/// whether a build landed, on the contract every pump in
-/// [`Stoat::drive_pumps`] answers.
-pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
-    let Some(pending) = stoat.pending_overview_build.take() else {
+/// before it. Each changes view cursor of the workspace moves to the row that
+/// shows its chunk in the new document, and each waiting landing lands. Returns
+/// whether a build landed, on the contract every pump in [`Stoat::drive_pumps`]
+/// answers.
+pub(crate) fn pump_diff_changes_build(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_diff_changes_build.take() else {
         return false;
     };
     let doc = match pending.rx.try_recv() {
         Ok(doc) => doc,
         Err(mpsc::TryRecvError::Empty) => {
-            stoat.pending_overview_build = Some(pending);
+            stoat.pending_diff_changes_build = Some(pending);
             return false;
         },
         Err(mpsc::TryRecvError::Disconnected) => return false,
@@ -285,7 +286,7 @@ pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
     if let Some(ws) = stoat.workspaces.get_mut(pending.workspace) {
         let doc = doc.map(Arc::new);
         remap_cursors(ws, doc.as_deref());
-        ws.overview_doc = Some(OverviewDoc {
+        ws.diff_changes_doc = Some(DiffChangesDoc {
             doc,
             stamp: pending.stamp,
         });
@@ -294,8 +295,8 @@ pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// Move the cursor of each overview in `ws` that waits on a landing onto the
-/// row of its landing in the workspace's document.
+/// Move the cursor of each changes view in `ws` that waits on a landing onto
+/// the row of its landing in the workspace's document.
 ///
 /// A landing waits while the workspace has no document. It also waits while a
 /// stale document holds no change of its file, because the next build holds
@@ -303,14 +304,14 @@ pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
 /// row, or the first row when the document holds no change of the file.
 pub(crate) fn land_pending(ws: &mut Workspace) {
     let Some((doc, stamp)) = ws
-        .overview_doc
+        .diff_changes_doc
         .as_ref()
         .map(|built| (built.doc.clone(), built.stamp))
     else {
         return;
     };
-    let current = stamp == OverviewStamp::read(ws);
-    for state in ws.overviews.values_mut() {
+    let current = stamp == DiffChangesStamp::read(ws);
+    for state in ws.diff_changes_views.values_mut() {
         let Some((rel_path, buffer_row)) = &state.pending_landing else {
             continue;
         };
@@ -325,10 +326,10 @@ pub(crate) fn land_pending(ws: &mut Workspace) {
     }
 }
 
-/// The overview row at `row`, or `None` past the last row.
-pub(crate) fn row_at(doc: &DiffDocument, row: usize) -> Option<OverviewRow> {
+/// The changes view row at `row`, or `None` past the last row.
+pub(crate) fn row_at(doc: &DiffDocument, row: usize) -> Option<DiffChangesRow> {
     let (placed, kind) = locate(doc, row)?;
-    Some(OverviewRow {
+    Some(DiffChangesRow {
         file_index: placed.file_index,
         chunk: placed.id,
         kind,
@@ -340,7 +341,7 @@ pub(crate) fn chunk_starts(doc: &DiffDocument) -> Vec<usize> {
     placed_chunks(doc).map(|placed| placed.header).collect()
 }
 
-/// The overview row that shows line `buffer_row` of the file at `rel_path`.
+/// The changes view row that shows line `buffer_row` of the file at `rel_path`.
 ///
 /// A line inside a chunk lands on its own row. A line outside every chunk
 /// lands on the header of the next chunk below it. A line below the file's
@@ -370,7 +371,7 @@ pub(crate) fn row_for(doc: &DiffDocument, rel_path: &str, buffer_row: u32) -> Op
     next_below.or(first_header)
 }
 
-/// The file and the buffer row that the overview row at `row` opens on.
+/// The file and the buffer row that the changes view row at `row` opens on.
 ///
 /// A row with a buffer side opens on its own line. A deletion row has no
 /// buffer side, so it opens on the next buffer line of its chunk, or on the
@@ -399,7 +400,7 @@ pub(crate) fn target_of(doc: &DiffDocument, row: usize) -> Option<(String, u32)>
     ))
 }
 
-/// Build the overview document from `inputs`, on whatever thread calls.
+/// Build the changes view document from `inputs`, on whatever thread calls.
 ///
 /// `None` when the git root is in no repository, or when no file differs from
 /// its base.
@@ -518,17 +519,20 @@ fn file_hunks(
         .collect()
 }
 
-/// Move each overview cursor of `ws` onto the row of `new` that shows the part
-/// of a chunk it showed in the workspace's last document.
+/// Move each changes view cursor of `ws` onto the row of `new` that shows the
+/// part of a chunk it showed in the workspace's last document.
 ///
 /// A cursor whose chunk is gone stays, and the paint holds it inside the rows.
 /// A cursor that waits on a landing moves too, and the landing then places it.
 fn remap_cursors(ws: &mut Workspace, new: Option<&DiffDocument>) {
-    let old = ws.overview_doc.as_ref().and_then(|built| built.doc.clone());
+    let old = ws
+        .diff_changes_doc
+        .as_ref()
+        .and_then(|built| built.doc.clone());
     let (Some(old), Some(new)) = (old, new) else {
         return;
     };
-    for state in ws.overviews.values_mut() {
+    for state in ws.diff_changes_views.values_mut() {
         if let Some(row) = remap_row(&old, new, state.cursor) {
             state.cursor = row;
         }
@@ -646,8 +650,8 @@ fn right(row: &ReviewRow) -> Option<&ReviewSide> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_starts, ensure_overview_doc, remap_row, row_at, row_for, target_of, OverviewRow,
-        OverviewStamp, OverviewState, RowKind,
+        chunk_starts, ensure_diff_changes_doc, remap_row, row_at, row_for, target_of,
+        DiffChangesRow, DiffChangesStamp, DiffChangesState, RowKind,
     };
     use crate::{
         action_handlers,
@@ -717,7 +721,7 @@ mod tests {
         .into_iter()
         .flat_map(|(file_index, chunk, diff_rows)| {
             let row = move |kind| {
-                Some(OverviewRow {
+                Some(DiffChangesRow {
                     file_index,
                     chunk,
                     kind,
@@ -786,10 +790,10 @@ mod tests {
     #[test]
     fn ensure_cursor_visible_scrolls_the_least_distance() {
         let scrolled = |cursor, rows| {
-            let mut state = OverviewState {
+            let mut state = DiffChangesState {
                 cursor,
                 scroll_top: 5,
-                ..OverviewState::default()
+                ..DiffChangesState::default()
             };
             state.ensure_cursor_visible(rows);
             state.scroll_top
@@ -824,14 +828,14 @@ mod tests {
         );
     }
 
-    /// The active workspace's overview document, once a build started now
+    /// The active workspace's changes view document, once a build started now
     /// lands.
     fn built(h: &mut TestHarness) -> Option<Arc<DiffDocument>> {
-        ensure_overview_doc(&mut h.stoat);
+        ensure_diff_changes_doc(&mut h.stoat);
         h.settle();
         h.stoat
             .active_workspace()
-            .overview_doc
+            .diff_changes_doc
             .as_ref()
             .and_then(|built| built.doc.clone())
     }
@@ -852,8 +856,8 @@ mod tests {
             .collect()
     }
 
-    fn stamp(h: &TestHarness) -> OverviewStamp {
-        OverviewStamp::read(h.stoat.active_workspace())
+    fn stamp(h: &TestHarness) -> DiffChangesStamp {
+        DiffChangesStamp::read(h.stoat.active_workspace())
     }
 
     fn type_at_start(h: &mut TestHarness, text: &str) {
@@ -871,7 +875,7 @@ mod tests {
     }
 
     /// An untracked file stays out, so a scratch file beside the work does not
-    /// fill the overview.
+    /// fill the changes view.
     #[test]
     fn a_build_holds_every_tracked_change_in_path_order_with_its_colors() {
         let mut h = TestHarness::with_size(80, 24);
@@ -989,8 +993,8 @@ mod tests {
         h.open_file(Path::new("/repo/d.txt"));
 
         let clean = built(&mut h);
-        ensure_overview_doc(&mut h.stoat);
-        let rebuilt = h.stoat.pending_overview_build.is_some();
+        ensure_diff_changes_doc(&mut h.stoat);
+        let rebuilt = h.stoat.pending_diff_changes_build.is_some();
         type_at_start(&mut h, "new ");
         let edited = built(&mut h).expect("the unsaved edit builds a document");
         assert_eq!(
@@ -1040,7 +1044,7 @@ mod tests {
         assert_eq!((first != staged, staged != refreshed), (true, true));
     }
 
-    /// Under a revision base the overview lists what changed since that
+    /// Under a revision base the changes view lists what changed since that
     /// revision, which includes a file committed since and clean in the tree.
     #[test]
     fn a_revision_base_lists_what_changed_since_the_revision() {

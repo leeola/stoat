@@ -10,6 +10,7 @@ pub(crate) mod conflict;
 pub(crate) mod conflict_view;
 pub(crate) mod cursor_popup;
 pub(crate) mod diagnostics_picker;
+pub(crate) mod diff_changes;
 pub(crate) mod dock;
 pub(crate) mod editor;
 pub(crate) mod file_finder;
@@ -19,7 +20,6 @@ pub(crate) mod hover;
 pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
 pub(crate) mod location_picker;
-pub(crate) mod overview;
 pub(crate) mod paint;
 pub(crate) mod pane;
 pub(crate) mod pane_cache;
@@ -51,6 +51,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     commit_list::{CommitListId, CommitListState},
+    diff_changes::{DiffChangesId, DiffChangesState},
     editor_state::{EditorId, EditorState},
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
@@ -58,7 +59,6 @@ use crate::{
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
-    overview::{OverviewId, OverviewState},
     pane::{DockVisibility, FocusTarget, PaneId, View},
     rebase::RebasePause,
     review_session::DiffDocument,
@@ -138,11 +138,11 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) term_pool_grids: &'a HashMap<TermId, (u16, u16)>,
     /// Every open commits list, which a [`View::Commits`] pane paints from.
     pub(crate) commit_lists: &'a mut SlotMap<CommitListId, CommitListState>,
-    /// Every open overview, which a [`View::Overview`] pane paints from.
-    pub(crate) overviews: &'a mut SlotMap<OverviewId, OverviewState>,
-    /// The workspace's last overview document, or `None` before the first one
-    /// lands and while the changes stand at none.
-    pub(crate) overview_doc: Option<Arc<DiffDocument>>,
+    /// Every open changes view, which a [`View::DiffChanges`] pane paints from.
+    pub(crate) diff_changes_views: &'a mut SlotMap<DiffChangesId, DiffChangesState>,
+    /// The workspace's last changes view document, or `None` before the first
+    /// one lands and while the changes stand at none.
+    pub(crate) diff_changes_doc: Option<Arc<DiffDocument>>,
 }
 
 /// The lookup and colors a pane needs to declare its minimap strip.
@@ -175,10 +175,10 @@ pub(crate) struct MinimapChrome<'a> {
     /// [`Self::diff_palette`] at the inactive dim, for an unfocused diff view's
     /// strip. Aliases [`Self::diff_palette`] when no dim applies.
     pub(crate) dimmed_diff_palette: &'a [[u8; 3]],
-    /// The content store of the active workspace's overview strip, which every
-    /// overview pane's strip and the single band over a focused overview show.
-    /// `None` while the workspace holds no overview.
-    pub(crate) overview_content: Option<u32>,
+    /// The content store of the active workspace's changes view strip, which
+    /// every changes view pane's strip and the single band over a focused
+    /// changes view show. `None` while the workspace holds no changes view.
+    pub(crate) diff_changes_content: Option<u32>,
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
 }
@@ -275,10 +275,10 @@ pub(crate) struct FrameCtx<'a> {
     /// previews paint through `:diff-files`'s own painter, so they answer the
     /// same session dials rather than carrying a second set.
     pub(crate) preview_dials: commits::PreviewDials,
-    /// Whether an overview document build is on the pool, so an overview with
-    /// no document yet shows that a build runs rather than that nothing
+    /// Whether a changes view document build is on the pool, so a changes view
+    /// with no document yet shows that a build runs rather than that nothing
     /// changed.
-    pub(crate) overview_building: bool,
+    pub(crate) diff_changes_building: bool,
     /// The gutter, severity, and diff-mark colors already resolved from
     /// [`Self::theme`], so each pane paints from them rather than re-walking
     /// the scope table for every one.
@@ -416,10 +416,10 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.
     pub(crate) images_capable: bool,
-    /// Whether editor and overview panes reserve their own per-pane right-edge
-    /// minimap strip.
-    /// `true` only in [`MinimapMode::PerPane`] under stoatty. Single mode gates
-    /// this off and declares one shared strip over the reserved band instead.
+    /// Whether editor and changes view panes reserve their own per-pane
+    /// right-edge minimap strip. `true` only in [`MinimapMode::PerPane`] under
+    /// stoatty. Single mode gates this off and declares one shared strip over
+    /// the reserved band instead.
     pub(crate) minimap_enabled: bool,
     /// The lookup and colors a pane needs to declare its minimap strip, `Some`
     /// only when the strip is active (under stoatty with the minimap enabled).
@@ -944,8 +944,8 @@ pub(crate) fn frame(
                 .diff_dimmed
                 .as_deref()
                 .map_or(diff_palette, |dimmed| &dimmed[..declared]),
-            overview_content: stoat
-                .overview_strips
+            diff_changes_content: stoat
+                .diff_changes_strips
                 .get(&stoat.active_workspace)
                 .map(|strip| strip.content_id()),
             thumb,
@@ -1034,7 +1034,7 @@ pub(crate) fn frame(
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
         preview_dials,
-        overview_building: stoat.pending_overview_build.is_some(),
+        diff_changes_building: stoat.pending_diff_changes_build.is_some(),
         chrome: &stoat
             .chrome
             .as_ref()
@@ -1176,8 +1176,11 @@ pub(crate) fn frame(
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
                 commit_lists: &mut ws.commit_lists,
-                overviews: &mut ws.overviews,
-                overview_doc: ws.overview_doc.as_ref().and_then(|built| built.doc.clone()),
+                diff_changes_views: &mut ws.diff_changes_views,
+                diff_changes_doc: ws
+                    .diff_changes_doc
+                    .as_ref()
+                    .and_then(|built| built.doc.clone()),
             },
             frame,
             buf,
@@ -1219,9 +1222,9 @@ pub(crate) fn frame(
         .retain(|(ws_id, pane_id), _| *ws_id == workspace && live.contains(pane_id));
 
     // Single mode declares one strip over the reserved right-edge band for the
-    // focused split pane's buffer or overview. The scene re-stamps every paint,
-    // so a focus switch to another buffer redeclares it. Any other view leaves
-    // the band empty.
+    // focused split pane's buffer or changes view. The scene re-stamps every
+    // paint, so a focus switch to another buffer redeclares it. Any other view
+    // leaves the band empty.
     if !modal_overlay
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let Some((content_id, palette)) = single_band_content(ws, chrome)
@@ -1310,8 +1313,11 @@ pub(crate) fn frame(
                     terms: &ws.terms,
                     term_pool_grids: &ws.term_pool_grids,
                     commit_lists: &mut ws.commit_lists,
-                    overviews: &mut ws.overviews,
-                    overview_doc: ws.overview_doc.as_ref().and_then(|built| built.doc.clone()),
+                    diff_changes_views: &mut ws.diff_changes_views,
+                    diff_changes_doc: ws
+                        .diff_changes_doc
+                        .as_ref()
+                        .and_then(|built| built.doc.clone()),
                 },
                 frame,
                 buf,
@@ -1850,11 +1856,11 @@ pub(crate) fn frame(
 
 /// The content store and palette the single band declares for the focused
 /// split pane of `ws`, or `None` when that pane shows neither a buffer nor an
-/// overview.
+/// changes view.
 ///
 /// An editor's strip shows its buffer, in the diff palette while the diff view
-/// is on. An overview's strip shows the workspace's overview document, always
-/// in the diff palette.
+/// is on. A changes view's strip shows the workspace's changes view document,
+/// always in the diff palette.
 fn single_band_content<'a>(
     ws: &Workspace,
     chrome: MinimapChrome<'a>,
@@ -1869,7 +1875,7 @@ fn single_band_content<'a>(
             };
             Some((content.content_id(), palette))
         },
-        View::Overview(_) => Some((chrome.overview_content?, chrome.diff_palette)),
+        View::DiffChanges(_) => Some((chrome.diff_changes_content?, chrome.diff_palette)),
         _ => None,
     }
 }

@@ -1,13 +1,15 @@
-//! Minimap lines for the diff overview, one per overview row.
+//! Minimap lines for the changes view, one per changes view row.
 //!
-//! The overview strip holds the rows the overview pane paints, a header per
-//! chunk and then the chunk's diff rows, so the thumb maps the overview's scroll
-//! straight onto strip lines. A diff row summarizes the side that the commit
-//! preview paints as its text. That is the live side where the row has one and
-//! the base side otherwise, so a deletion shows in the deleted block.
+//! The changes view strip holds the rows the changes view pane paints, a header
+//! per chunk and then the chunk's diff rows, so the thumb maps the changes
+//! view's scroll straight onto strip lines. A diff row summarizes the side that
+//! the commit preview paints as its text. That is the live side where the row
+//! has one and the base side otherwise, so a deletion shows in the deleted
+//! block.
 //!
-//! A workspace holds one strip for its overviews, filled from its overview
-//! document a slice per frame, as a freshly opened file fills its own strip.
+//! A workspace holds one strip for its changes views, filled from its changes
+//! view document a slice per frame, as a freshly opened file fills its own
+//! strip.
 
 use super::{
     emit::{convert_minimap_runs, POPULATION_PALETTE_PROTOCOL, WEIGHTED_RUN_PROTOCOL},
@@ -16,9 +18,9 @@ use super::{
 };
 use crate::{
     app::Stoat,
+    diff_changes::DiffChangesId,
     diff_map::BaseHighlights,
     host::DiffStatus,
-    overview::OverviewId,
     render::commits::{preview_row_count, side_is_marked},
     review::{ReviewRow, ReviewSide},
     review_session::{DiffDocument, ReviewFile},
@@ -29,13 +31,13 @@ use std::{iter, mem, ops::Range, sync::Arc};
 use stoat_widgets::pool::MinimapWindowInputs;
 use stoatty_protocol::command::{self, MinimapLinesCommand};
 
-/// The minimap strip of a workspace's overviews, kept in step with the
-/// workspace's overview document.
+/// The minimap strip of a workspace's changes views, kept in step with the
+/// workspace's changes view document.
 ///
 /// The terminal holds the lines already sent. A new document replaces them,
 /// and the first splice of the new lines removes every line the terminal still
 /// holds.
-pub(crate) struct OverviewStrip {
+pub(crate) struct DiffChangesStrip {
     content_id: u32,
     /// The document the strip's lines summarize, or fill from.
     synced: Option<Arc<DiffDocument>>,
@@ -50,7 +52,7 @@ pub(crate) struct OverviewStrip {
     pending_removed: usize,
 }
 
-impl OverviewStrip {
+impl DiffChangesStrip {
     pub(crate) fn new(content_id: u32) -> Self {
         Self {
             content_id,
@@ -73,12 +75,12 @@ impl OverviewStrip {
     }
 }
 
-/// Lines the overview strip holds for `doc`, one per overview row.
+/// Lines the changes view strip holds for `doc`, one per changes view row.
 pub(crate) fn row_count(doc: &DiffDocument) -> usize {
     preview_row_count(doc)
 }
 
-/// The minimap lines of the overview rows in `rows`, as the commit preview
+/// The minimap lines of the changes view rows in `rows`, as the commit preview
 /// paints those rows.
 ///
 /// A chunk header row is a bar across the whole strip in the header class, the
@@ -123,27 +125,32 @@ pub(crate) fn summarize_rows(
     lines
 }
 
-/// Bring the overview strip of workspace `ws_id` in step with the workspace's
-/// overview document, and append at most one slice of lines to `out`.
+/// Bring the changes view strip of workspace `ws_id` in step with the
+/// workspace's changes view document, and append at most one slice of lines to
+/// `out`.
 ///
 /// A new document replaces the strip's lines, and so does a protocol that
 /// changes whether lines carry population blocks. Each call sends the next
 /// slice, so a long document fills over idle frames. A document with no rows
 /// empties the strip in one splice.
-pub(crate) fn sync_overview_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
+pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
     let populations = stoat.stoatty_protocol >= POPULATION_PALETTE_PROTOCOL;
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
     let Stoat {
         workspaces,
-        overview_strips,
+        diff_changes_strips,
         minimap_class_table,
         ..
     } = stoat;
-    let (Some(ws), Some(strip)) = (workspaces.get(ws_id), overview_strips.get_mut(&ws_id)) else {
+    let (Some(ws), Some(strip)) = (workspaces.get(ws_id), diff_changes_strips.get_mut(&ws_id))
+    else {
         return;
     };
 
-    let doc = ws.overview_doc.as_ref().and_then(|built| built.doc.clone());
+    let doc = ws
+        .diff_changes_doc
+        .as_ref()
+        .and_then(|built| built.doc.clone());
     let same = match (&doc, &strip.synced) {
         (Some(doc), Some(synced)) => Arc::ptr_eq(doc, synced),
         (doc, synced) => doc.is_none() && synced.is_none(),
@@ -178,24 +185,24 @@ pub(crate) fn sync_overview_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &m
     }
 }
 
-/// Place the thumb of overview `id` in workspace `ws_id` on strip `strip_id`,
-/// over the rows that the overview's last paint showed.
+/// Place the thumb of changes view `id` in workspace `ws_id` on strip
+/// `strip_id`, over the rows that the changes view's last paint showed.
 ///
 /// The thumb passes the change gate the editor thumbs pass, under a pool id of
-/// its own. A strip that shows the overview's thumb and then an editor's
+/// its own. A strip that shows the changes view's thumb and then an editor's
 /// therefore gets the editor's thumb back, though the editor's view never
 /// moved.
-pub(crate) fn emit_overview_thumb(
+pub(crate) fn emit_diff_changes_thumb(
     stoat: &mut Stoat,
     ws_id: WorkspaceId,
-    id: OverviewId,
+    id: DiffChangesId,
     strip_id: u32,
     out: &mut Vec<u8>,
 ) {
     let Some(state) = stoat
         .workspaces
         .get(ws_id)
-        .and_then(|ws| ws.overviews.get(id))
+        .and_then(|ws| ws.diff_changes_views.get(id))
     else {
         return;
     };
@@ -205,7 +212,7 @@ pub(crate) fn emit_overview_thumb(
     stoat.smooth_scroll.emit_minimap_view(
         out,
         strip_id,
-        non_pane_pool::OVERVIEW_THUMB,
+        non_pane_pool::DIFF_CHANGES_THUMB,
         MinimapWindowInputs::new(top, 0, rows),
         || (top, visible),
     );
@@ -326,13 +333,13 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         apc_emit,
+        diff_changes::DiffChangesStamp,
         display_map::highlights::HighlightStyle,
         host::DiffStatus,
         minimap::{
             emit::{self, convert_minimap_runs},
             summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SYNC_SLICE,
         },
-        overview::OverviewStamp,
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::SINGLE_MINIMAP_STRIP_ID,
         review::{ReviewFileInput, ReviewHunk, ReviewRow, ReviewSide},
@@ -555,8 +562,9 @@ mod tests {
         );
     }
 
-    /// `count` changed one-line files under a focused overview, on a stoatty of
-    /// protocol 13, in a window short enough that the overview scrolls.
+    /// `count` changed one-line files under a focused changes view, on a
+    /// stoatty of protocol 13, in a window short enough that the changes view
+    /// scrolls.
     fn strip_harness(count: usize) -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
         let mut h = TestHarness::with_size(100, 10);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -571,7 +579,7 @@ mod tests {
             .collect();
         h.stage_review_scenario("/repo", &files);
         h.open_file(Path::new("/repo/f000.txt"));
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         (h, rx)
     }
@@ -611,23 +619,23 @@ mod tests {
     fn strip_doc(h: &TestHarness) -> Arc<DiffDocument> {
         h.stoat
             .active_workspace()
-            .overview_doc
+            .diff_changes_doc
             .as_ref()
             .and_then(|built| built.doc.clone())
-            .expect("a built overview document")
+            .expect("a built changes view document")
     }
 
     fn strip_id(h: &TestHarness) -> u32 {
-        h.stoat.overview_strips[&h.stoat.active_workspace].content_id()
+        h.stoat.diff_changes_strips[&h.stoat.active_workspace].content_id()
     }
 
-    /// The overview's scroll and its painted rows.
+    /// The changes view's scroll and its painted rows.
     fn view_of(h: &TestHarness) -> (usize, usize) {
         let state = h
             .stoat
             .active_workspace()
-            .focused_overview()
-            .expect("a focused overview");
+            .focused_diff_changes()
+            .expect("a focused changes view");
         (state.scroll_top, state.viewport_rows)
     }
 
@@ -645,7 +653,7 @@ mod tests {
     }
 
     /// Replace `range` in the open buffer of f000.txt with `text`, then let the
-    /// focused overview's rebuild land.
+    /// focused changes view's rebuild land.
     fn edit_and_rebuild(h: &mut TestHarness, range: Range<usize>, text: &str) {
         let ws = h.stoat.active_workspace();
         let buffer_id = ws
@@ -662,8 +670,8 @@ mod tests {
         h.settle();
     }
 
-    /// The first frame fills the strip with every overview row in one splice,
-    /// and places the thumb over the painted rows on the band.
+    /// The first frame fills the strip with every changes view row in one
+    /// splice, and places the thumb over the painted rows on the band.
     #[test]
     fn the_first_frame_fills_the_strip_and_places_its_thumb() {
         let (mut h, mut rx) = strip_harness(8);
@@ -685,7 +693,7 @@ mod tests {
         let (mut h, mut rx) = strip_harness(8);
         frame(&mut h, &mut rx);
 
-        dispatch(&mut h.stoat, &stoat_action::OverviewPageDown);
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesPageDown);
         let paged = strip_frames(&frame(&mut h, &mut rx));
         let (top, rows) = view_of(&h);
         dispatch(&mut h.stoat, &stoat_action::DiffTintUp);
@@ -751,14 +759,14 @@ mod tests {
         );
     }
 
-    /// The strip goes when the workspace's last overview closes.
+    /// The strip goes when the workspace's last changes view closes.
     #[test]
-    fn closing_the_last_overview_drops_the_strip() {
+    fn closing_the_last_changes_view_drops_the_strip() {
         let (mut h, mut rx) = strip_harness(8);
         frame(&mut h, &mut rx);
         let content_id = strip_id(&h);
 
-        dispatch(&mut h.stoat, &stoat_action::CloseOverview);
+        dispatch(&mut h.stoat, &stoat_action::CloseDiffChanges);
         let drops: Vec<u32> = frame(&mut h, &mut rx)
             .iter()
             .filter_map(|command| match command {
@@ -770,23 +778,23 @@ mod tests {
             (
                 drops,
                 h.stoat
-                    .overview_strips
+                    .diff_changes_strips
                     .contains_key(&h.stoat.active_workspace)
             ),
             (vec![content_id], false),
         );
     }
 
-    /// A theme change stales the overview document, so the rebuild bakes the
-    /// new theme's colors for the strip to read.
+    /// A theme change stales the changes view document, so the rebuild bakes
+    /// the new theme's colors for the strip to read.
     #[test]
-    fn a_theme_change_stales_the_overview_document() {
+    fn a_theme_change_stales_the_changes_view_document() {
         let (mut h, _rx) = strip_harness(2);
         let fresh = |h: &TestHarness| {
             let ws = h.stoat.active_workspace();
-            ws.overview_doc
+            ws.diff_changes_doc
                 .as_ref()
-                .is_some_and(|built| built.stamp == OverviewStamp::read(ws))
+                .is_some_and(|built| built.stamp == DiffChangesStamp::read(ws))
         };
         let before = fresh(&h);
         dispatch(
@@ -798,10 +806,10 @@ mod tests {
         assert_eq!((before, fresh(&h)), (true, false));
     }
 
-    /// In per-pane mode an overview places its thumb on its own strip, where
+    /// In per-pane mode a changes view places its thumb on its own strip, where
     /// the paint reserved one.
     #[test]
-    fn a_per_pane_overview_places_its_thumb_on_its_own_strip() {
+    fn a_per_pane_changes_view_places_its_thumb_on_its_own_strip() {
         let (mut h, mut rx) = strip_harness(8);
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
         h.resize(120, 10);
@@ -812,10 +820,10 @@ mod tests {
         assert_eq!(views, [(index, 0, rows as u16)]);
     }
 
-    /// In single mode the band follows focus, so an overview that a dock took
-    /// focus from places no thumb.
+    /// In single mode the band follows focus, so a changes view that a dock
+    /// took focus from places no thumb.
     #[test]
-    fn an_unfocused_overview_places_no_thumb_on_the_band() {
+    fn an_unfocused_changes_view_places_no_thumb_on_the_band() {
         let (mut h, mut rx) = strip_harness(8);
         let ws = h.stoat.active_workspace_mut();
         let dock = ws.docks.insert(DockPanel {

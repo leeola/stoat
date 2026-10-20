@@ -424,8 +424,8 @@ pub struct Availability {
     pub diff_view_open: bool,
     /// The focused pane shows a commits list.
     pub commits_open: bool,
-    /// The focused pane shows a diff overview.
-    pub overview_open: bool,
+    /// The focused pane shows a changes view.
+    pub diff_changes_open: bool,
     /// `workspace.review_walk.is_some()`: a commit-by-commit review walk is
     /// running, whether or not one of its diffs is currently open.
     pub review_walk_open: bool,
@@ -473,7 +473,7 @@ impl Availability {
             in_conflict,
             diff_view_open,
             commits_open: ws.focused_commits().is_some(),
-            overview_open: ws.focused_overview().is_some(),
+            diff_changes_open: ws.focused_diff_changes().is_some(),
             review_walk_open: ws.review_walk.is_some(),
             walkthrough_open: ws.walkthrough.is_some(),
             run_focused,
@@ -517,12 +517,21 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
 
-        // DiffOverview is absent on purpose. Like DiffFiles, it opens a screen
-        // from anywhere, and on the overview it flips back to the per-file
+        // DiffChanges is absent on purpose. Like DiffFiles, it opens a screen
+        // from anywhere, and on the changes view it flips back to the per-file
         // diff.
-        CloseOverview | OverviewNext | OverviewPrev | OverviewNextChunk | OverviewPrevChunk
-        | OverviewPageDown | OverviewPageUp | OverviewHalfPageDown | OverviewHalfPageUp
-        | OverviewFirst | OverviewLast | OverviewOpen => ctx.overview_open,
+        CloseDiffChanges
+        | DiffChangesNext
+        | DiffChangesPrev
+        | DiffChangesNextChunk
+        | DiffChangesPrevChunk
+        | DiffChangesPageDown
+        | DiffChangesPageUp
+        | DiffChangesHalfPageDown
+        | DiffChangesHalfPageUp
+        | DiffChangesFirst
+        | DiffChangesLast
+        | DiffChangesOpen => ctx.diff_changes_open,
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
@@ -1357,8 +1366,8 @@ mod tests {
             "CommitsOpenReview",
             "RunSubmit",
             "EnterRebase",
-            "CloseOverview",
-            "OverviewNext",
+            "CloseDiffChanges",
+            "DiffChangesNext",
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
@@ -1366,7 +1375,7 @@ mod tests {
             "Quit",
             "OpenFile",
             "DiffFiles",
-            "DiffOverview",
+            "DiffChanges",
             "OpenCommits",
             "FocusLeft",
         ] {
@@ -1480,30 +1489,33 @@ mod tests {
     }
 
     #[test]
-    fn active_scope_overview_open_surfaces_overview_actions() {
+    fn active_scope_diff_changes_open_surfaces_diff_changes_actions() {
         let ctx = Availability {
-            overview_open: true,
+            diff_changes_open: true,
             ..Availability::default()
         };
         let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
         for name in [
-            "CloseOverview",
-            "OverviewNext",
-            "OverviewOpen",
-            "DiffOverview",
+            "CloseDiffChanges",
+            "DiffChangesNext",
+            "DiffChangesOpen",
+            "DiffChanges",
         ] {
-            assert!(listed.contains(&name), "{name} missing when overview_open");
+            assert!(
+                listed.contains(&name),
+                "{name} missing when diff_changes_open"
+            );
         }
         assert!(!listed.contains(&"CommitsNext"));
     }
 
     #[test]
-    fn a_focused_overview_reads_as_open() {
+    fn a_focused_changes_view_reads_as_open() {
         let mut h = Stoat::test();
-        let before = Availability::from_stoat(&h.stoat).overview_open;
-        h.cover_with_overview(false);
+        let before = Availability::from_stoat(&h.stoat).diff_changes_open;
+        h.cover_with_diff_changes(false);
         assert_eq!(
-            (before, Availability::from_stoat(&h.stoat).overview_open),
+            (before, Availability::from_stoat(&h.stoat).diff_changes_open),
             (false, true)
         );
     }
@@ -1555,7 +1567,7 @@ mod tests {
             in_conflict: true,
             diff_view_open: true,
             commits_open: true,
-            overview_open: true,
+            diff_changes_open: true,
             review_walk_open: true,
             walkthrough_open: true,
             run_focused: true,

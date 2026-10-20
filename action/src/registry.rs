@@ -12,6 +12,12 @@ use crate::{
             ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
             ConflictPickTheirsLine, ConflictPrevChunk, ConflictPrevFile, ConflictResetChunk,
         },
+        diff_changes::{
+            CloseDiffChanges, DiffChanges, DiffChangesFirst, DiffChangesHalfPageDown,
+            DiffChangesHalfPageUp, DiffChangesLast, DiffChangesNext, DiffChangesNextChunk,
+            DiffChangesOpen, DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev,
+            DiffChangesPrevChunk,
+        },
         dump::Dump,
         editor::{
             AcceptCompletion, AddNewlineAbove, AddNewlineBelow, AddSelectionAbove,
@@ -78,11 +84,6 @@ use crate::{
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
             OpenWorkspaceSymbolPicker, RenameSymbol,
-        },
-        overview::{
-            CloseOverview, DiffOverview, OverviewFirst, OverviewHalfPageDown, OverviewHalfPageUp,
-            OverviewLast, OverviewNext, OverviewNextChunk, OverviewOpen, OverviewPageDown,
-            OverviewPageUp, OverviewPrev, OverviewPrevChunk,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -946,23 +947,29 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
-    add(DiffOverview::DEF, |_| Ok(Box::new(DiffOverview)));
-    add(CloseOverview::DEF, |_| Ok(Box::new(CloseOverview)));
-    add(OverviewNext::DEF, |_| Ok(Box::new(OverviewNext)));
-    add(OverviewPrev::DEF, |_| Ok(Box::new(OverviewPrev)));
-    add(OverviewNextChunk::DEF, |_| Ok(Box::new(OverviewNextChunk)));
-    add(OverviewPrevChunk::DEF, |_| Ok(Box::new(OverviewPrevChunk)));
-    add(OverviewPageDown::DEF, |_| Ok(Box::new(OverviewPageDown)));
-    add(OverviewPageUp::DEF, |_| Ok(Box::new(OverviewPageUp)));
-    add(OverviewHalfPageDown::DEF, |_| {
-        Ok(Box::new(OverviewHalfPageDown))
+    add(DiffChanges::DEF, |_| Ok(Box::new(DiffChanges)));
+    add(CloseDiffChanges::DEF, |_| Ok(Box::new(CloseDiffChanges)));
+    add(DiffChangesNext::DEF, |_| Ok(Box::new(DiffChangesNext)));
+    add(DiffChangesPrev::DEF, |_| Ok(Box::new(DiffChangesPrev)));
+    add(DiffChangesNextChunk::DEF, |_| {
+        Ok(Box::new(DiffChangesNextChunk))
     });
-    add(OverviewHalfPageUp::DEF, |_| {
-        Ok(Box::new(OverviewHalfPageUp))
+    add(DiffChangesPrevChunk::DEF, |_| {
+        Ok(Box::new(DiffChangesPrevChunk))
     });
-    add(OverviewFirst::DEF, |_| Ok(Box::new(OverviewFirst)));
-    add(OverviewLast::DEF, |_| Ok(Box::new(OverviewLast)));
-    add(OverviewOpen::DEF, |_| Ok(Box::new(OverviewOpen)));
+    add(DiffChangesPageDown::DEF, |_| {
+        Ok(Box::new(DiffChangesPageDown))
+    });
+    add(DiffChangesPageUp::DEF, |_| Ok(Box::new(DiffChangesPageUp)));
+    add(DiffChangesHalfPageDown::DEF, |_| {
+        Ok(Box::new(DiffChangesHalfPageDown))
+    });
+    add(DiffChangesHalfPageUp::DEF, |_| {
+        Ok(Box::new(DiffChangesHalfPageUp))
+    });
+    add(DiffChangesFirst::DEF, |_| Ok(Box::new(DiffChangesFirst)));
+    add(DiffChangesLast::DEF, |_| Ok(Box::new(DiffChangesLast)));
+    add(DiffChangesOpen::DEF, |_| Ok(Box::new(DiffChangesOpen)));
     add(GitLs::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `git-ls`
         // arrives with an empty argument. That means HEAD, not a revision
@@ -1318,19 +1325,19 @@ mod tests {
         "CommitsLast",
         "CommitsRefresh",
         "CommitsOpenReview",
-        "DiffOverview",
-        "CloseOverview",
-        "OverviewNext",
-        "OverviewPrev",
-        "OverviewNextChunk",
-        "OverviewPrevChunk",
-        "OverviewPageDown",
-        "OverviewPageUp",
-        "OverviewHalfPageDown",
-        "OverviewHalfPageUp",
-        "OverviewFirst",
-        "OverviewLast",
-        "OverviewOpen",
+        "DiffChanges",
+        "CloseDiffChanges",
+        "DiffChangesNext",
+        "DiffChangesPrev",
+        "DiffChangesNextChunk",
+        "DiffChangesPrevChunk",
+        "DiffChangesPageDown",
+        "DiffChangesPageUp",
+        "DiffChangesHalfPageDown",
+        "DiffChangesHalfPageUp",
+        "DiffChangesFirst",
+        "DiffChangesLast",
+        "DiffChangesOpen",
         "GitLs",
         "EnterRebase",
         "AbortRebase",
@@ -1949,7 +1956,7 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        // + 13 the diff overview actions.
+        // + 13 the changes view actions.
         assert_eq!(all().count(), 454);
     }
 

@@ -2550,10 +2550,10 @@ fn a_terminal_beside_the_commits_list_keeps_its_pool() {
     );
 }
 
-/// The overview is a screen like the commits list, so every editor pool
+/// The changes view is a screen like the commits list, so every editor pool
 /// retires under it, and an editor beside it paints on the live grid.
 #[test]
-fn an_overview_retires_the_pool_of_an_editor_beside_it() {
+fn a_changes_view_retires_the_pool_of_an_editor_beside_it() {
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
@@ -2567,7 +2567,7 @@ fn an_overview_retires_the_pool_of_an_editor_beside_it() {
         .map(|(_, _, region)| region.pool)
         .collect();
 
-    h.cover_with_overview(false);
+    h.cover_with_diff_changes(false);
     let ws = h.stoat.active_workspace_mut();
     ws.panes.unwiden();
     ws.layout(size);

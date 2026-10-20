@@ -117,8 +117,8 @@ fn dropped_fields_for(workspace: &Workspace) -> Vec<String> {
     if !workspace.commit_lists.is_empty() {
         dropped.push("commits".to_string());
     }
-    if !workspace.overviews.is_empty() {
-        dropped.push("overview".to_string());
+    if !workspace.diff_changes_views.is_empty() {
+        dropped.push("diff_changes".to_string());
     }
     dropped
 }
@@ -141,17 +141,17 @@ fn build_snapshot(workspace: &Workspace, mode: &str) -> (WorkspaceSnapshot, Vec<
 #[cfg(test)]
 mod tests {
     use super::dropped_fields_for;
-    use crate::{overview::OverviewState, test_harness::TestHarness};
+    use crate::{diff_changes::DiffChangesState, test_harness::TestHarness};
 
     #[test]
-    fn an_open_overview_counts_among_the_dropped_fields() {
+    fn an_open_changes_view_counts_among_the_dropped_fields() {
         let mut h = TestHarness::with_size(80, 24);
         let mut expected = dropped_fields_for(h.stoat.active_workspace());
-        expected.push("overview".to_string());
+        expected.push("diff_changes".to_string());
         h.stoat
             .active_workspace_mut()
-            .overviews
-            .insert(OverviewState::default());
+            .diff_changes_views
+            .insert(DiffChangesState::default());
         assert_eq!(dropped_fields_for(h.stoat.active_workspace()), expected);
     }
 }

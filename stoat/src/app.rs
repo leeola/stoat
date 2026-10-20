@@ -1253,12 +1253,12 @@ pub struct Stoat {
     /// the whole index. Each file then reads its three stages, and the
     /// alignment runs two structural diffs against the ancestor.
     pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
-    /// An overview document building off the UI thread, stored by
-    /// [`crate::overview::pump_overview_build`] when it lands.
+    /// A changes view document building off the UI thread, stored by
+    /// [`crate::diff_changes::pump_diff_changes_build`] when it lands.
     ///
     /// The build lists the changed files, reads both sides of each, and diffs
     /// the files the hunk cache does not hold.
-    pub(crate) pending_overview_build: Option<crate::overview::PendingOverviewBuild>,
+    pub(crate) pending_diff_changes_build: Option<crate::diff_changes::PendingDiffChangesBuild>,
     /// The git writes the loop started, run one at a time in press order.
     ///
     /// Two writes on the pool race, so every write the loop starts waits here
@@ -1631,10 +1631,10 @@ pub struct Stoat {
     /// separator and its share has one home.
     pub(crate) commits_separator_drag: bool,
     /// Set on `MouseEventKind::Down(Left)` over a pane's minimap strip. While
-    /// `Some`, `Drag(Left)` scrubs the named editor's viewport or overview to
-    /// the pointer position and `Up(Left)` clears it. Takes over the pointer so
-    /// the press never reaches the text-area cursor, the selection handling, or
-    /// an overview's rows.
+    /// `Some`, `Drag(Left)` scrubs the named editor's viewport or changes view
+    /// to the pointer position and `Up(Left)` clears it. Takes over the pointer
+    /// so the press never reaches the text-area cursor, the selection handling,
+    /// or a changes view's rows.
     pub(crate) minimap_drag: Option<MinimapDrag>,
     /// The workspace whose documents the language servers hold.
     ///
@@ -2401,13 +2401,14 @@ pub struct Stoat {
     /// recomputed by [`Self::emit_minimap`]. Keeps the run loop's frame timer
     /// firing so idle frames drive the build to completion.
     pub(crate) minimap_build_pending: bool,
-    /// The minimap strip of each workspace's overview, kept in step with that
-    /// workspace's overview document.
+    /// The minimap strip of each workspace's changes view, kept in step with
+    /// that workspace's changes view document.
     ///
-    /// Every overview of a workspace shows the one document, so the workspace
-    /// holds one strip. It exists while the workspace holds an overview.
-    pub(crate) overview_strips:
-        std::collections::HashMap<WorkspaceId, crate::minimap::overview::OverviewStrip>,
+    /// Every changes view of a workspace shows the one document, so the
+    /// workspace holds one strip. It exists while the workspace holds a changes
+    /// view.
+    pub(crate) diff_changes_strips:
+        std::collections::HashMap<WorkspaceId, crate::minimap::diff_changes::DiffChangesStrip>,
     /// Whether a visible run or terminal fed output since the last frame tick, so
     /// the tick repaints once rather than the output arm repainting per PTY chunk.
     /// A terminal that changed its title sets it too, visible or not.
@@ -2663,7 +2664,7 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_changed_file_jump: None,
             pending_conflict_file: None,
-            pending_overview_build: None,
+            pending_diff_changes_build: None,
             git_jobs: GitJobs::default(),
             pending_diff_nav_jump: None,
             pending_code_search: None,
@@ -2875,7 +2876,7 @@ impl Stoat {
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
             minimap_build_pending: false,
-            overview_strips: std::collections::HashMap::new(),
+            diff_changes_strips: std::collections::HashMap::new(),
             pty_dirty: false,
             spinner_clock: 0.0,
             minimap_class_table,
@@ -3394,7 +3395,7 @@ impl Stoat {
     fn on_a_diff_surface(&self) -> bool {
         matches!(
             keymap_state::view_predicate(self.active_workspace()),
-            Some("diff" | "commits" | "overview")
+            Some("diff" | "commits" | "diff_changes")
         )
     }
 
@@ -5069,7 +5070,7 @@ impl Stoat {
         crate::lsp::drain::reopen_buffers(self, None);
         action_handlers::respawn_terminal_panes(self);
         action_handlers::respawn_commits_panes(self);
-        action_handlers::overview::respawn_overview_panes(self);
+        action_handlers::diff_changes::respawn_diff_changes_panes(self);
         if self.active_workspace().remote.is_some() {
             self.remote_pending = true;
             ssh::reconnect_when_ready(self);
@@ -5113,7 +5114,7 @@ impl Stoat {
         }
         action_handlers::respawn_terminal_panes(self);
         action_handlers::respawn_commits_panes(self);
-        action_handlers::overview::respawn_overview_panes(self);
+        action_handlers::diff_changes::respawn_diff_changes_panes(self);
     }
 
     /// Persist a workspace's state, serializing it off this thread.
@@ -6767,7 +6768,7 @@ impl Stoat {
     /// The target is resolved the way [`Self::focused_editor_ids`] resolves it.
     /// A topmost open input modal, or else a focused editor or run pane,
     /// supplies its editor's [`EditorState::mode`]. A focused commits pane
-    /// supplies its list's mode, a focused overview pane its own, and a
+    /// supplies its list's mode, a focused changes view pane its own, and a
     /// focused terminal or agent pane its [`TermSession::mode`]. With no such
     /// target the mode falls back to [`Self::fallback_mode`].
     pub(crate) fn focused_mode(&self) -> &str {
@@ -6784,8 +6785,8 @@ impl Stoat {
         if let Some(list) = ws.focused_commits() {
             return &list.mode;
         }
-        if let Some(overview) = ws.focused_overview() {
-            return &overview.mode;
+        if let Some(diff_changes) = ws.focused_diff_changes() {
+            return &diff_changes.mode;
         }
         if let Some(term_id) = self.focused_term_id()
             && let Some(term) = ws.terms.get(term_id)
@@ -6838,8 +6839,8 @@ impl Stoat {
             list.mode = mode;
             return;
         }
-        if let Some(overview) = self.active_workspace_mut().focused_overview_mut() {
-            overview.mode = mode;
+        if let Some(diff_changes) = self.active_workspace_mut().focused_diff_changes_mut() {
+            diff_changes.mode = mode;
             return;
         }
         if let Some(term_id) = self.focused_term_id()
@@ -6956,9 +6957,9 @@ impl Stoat {
     /// the chord mode, and the chord comes back with focus.
     ///
     /// An editor or run pane keeps a primary mode, `insert` or `select`, and a
-    /// pinned chord, which the reader holds on purpose. A commits, overview,
-    /// terminal, or agent view has no primary mode but normal, so any other mode
-    /// ends.
+    /// pinned chord, which the reader holds on purpose. A commits, changes
+    /// view, terminal, or agent view has no primary mode but normal, so any
+    /// other mode ends.
     ///
     /// `workspace`, `focus`, and `pane` are the active workspace, its focus
     /// target, and its focused split pane, all read before the event.
@@ -6988,11 +6989,11 @@ impl Stoat {
                 }
                 None
             },
-            Some(View::Overview(id)) => {
-                if let Some(overview) = ws.overviews.get_mut(*id)
-                    && overview.mode != "normal"
+            Some(View::DiffChanges(id)) => {
+                if let Some(diff_changes) = ws.diff_changes_views.get_mut(*id)
+                    && diff_changes.mode != "normal"
                 {
-                    overview.mode = "normal".into();
+                    diff_changes.mode = "normal".into();
                 }
                 None
             },
@@ -8996,10 +8997,10 @@ impl Stoat {
         action_handlers::split_selection::sync_regex_preview(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
-        // Only an overview on screen follows edits, so a keystroke in a plain
-        // pane starts no build.
-        if self.active_workspace().focused_overview_id().is_some() {
-            crate::overview::ensure_overview_doc(self);
+        // Only a changes view on screen follows edits, so a keystroke in a
+        // plain pane starts no build.
+        if self.active_workspace().focused_diff_changes_id().is_some() {
+            crate::diff_changes::ensure_diff_changes_doc(self);
         }
 
         self.drive_pumps();
@@ -9039,7 +9040,7 @@ impl Stoat {
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
         let conflict_file = action_handlers::conflict_view::pump_conflict_file(self);
-        let overview_build = crate::overview::pump_overview_build(self);
+        let diff_changes_build = crate::diff_changes::pump_diff_changes_build(self);
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
@@ -9066,7 +9067,7 @@ impl Stoat {
             || changed_file_jump
             || diff_wants
             || conflict_file
-            || overview_build
+            || diff_changes_build
             || diff_nav_jump
             || lsp
             || followed_change

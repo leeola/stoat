@@ -1,6 +1,6 @@
-//! The handlers of a [`View::Overview`] pane.
+//! The handlers of a [`View::DiffChanges`] pane.
 //!
-//! They open and close the overview, flip between it and the per-file diff,
+//! They open and close the changes view, flip between it and the per-file diff,
 //! step its cursor, and respawn a pane whose state did not survive a restore.
 
 use super::{
@@ -12,7 +12,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
-    overview::{self, OverviewState},
+    diff_changes::{self, DiffChangesState},
     pane::{PaneId, View},
     render::commits::preview_row_count,
     review_session::DiffDocument,
@@ -21,29 +21,30 @@ use crate::{
 use std::{path::PathBuf, sync::Arc};
 use stoat_text::Point;
 
-/// Flip between the overview and the per-file diff.
+/// Flip between the changes view and the per-file diff.
 ///
-/// On a focused overview this opens the per-file diff at the cursor's hunk.
-/// Anywhere else it shows an overview over the focused view.
-pub(super) fn toggle_overview(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.active_workspace().focused_overview_id().is_some() {
-        return overview_open(stoat);
+/// On a focused changes view this opens the per-file diff at the cursor's hunk.
+/// Anywhere else it shows a changes view over the focused view.
+pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().focused_diff_changes_id().is_some() {
+        return diff_changes_open(stoat);
     }
-    open_overview(stoat)
+    open_diff_changes(stoat)
 }
 
-/// Close the overview the focused pane shows and put back the view it covered.
+/// Close the changes view the focused pane shows and put back the view it
+/// covered.
 ///
 /// A covered view that is gone closes the pane instead, and a last pane gets a
-/// fresh scratch editor. An overview opened from a per-file diff returns to
+/// fresh scratch editor. A changes view opened from a per-file diff returns to
 /// that diff, so a close peels back one layer.
-pub(crate) fn close_overview(stoat: &mut Stoat) -> UpdateEffect {
+pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let Some(id) = ws.focused_overview_id() else {
+    let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;
     };
     let (covered, covered_diff) = ws
-        .overviews
+        .diff_changes_views
         .remove(id)
         .map_or((None, false), |state| (state.covered, state.covered_diff));
     let focus = ws.panes.focus();
@@ -65,29 +66,29 @@ pub(crate) fn close_overview(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Close the overview and open the file its cursor row shows in the per-file
-/// diff, on the line that the row shows.
+/// Close the changes view and open the file its cursor row shows in the
+/// per-file diff, on the line that the row shows.
 ///
-/// The file opens in the pane after the overview's close puts back the view
+/// The file opens in the pane after the changes view's close puts back the view
 /// it covered. A row with no file under it, as before the first document
-/// lands, leaves the overview open and says so in the status row.
-pub(super) fn overview_open(stoat: &mut Stoat) -> UpdateEffect {
+/// lands, leaves the changes view open and says so in the status row.
+pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     let target = {
         let ws = stoat.active_workspace();
-        let cursor = ws.focused_overview().map(|state| state.cursor);
+        let cursor = ws.focused_diff_changes().map(|state| state.cursor);
         cursor
             .zip(document(ws))
-            .and_then(|(cursor, doc)| overview::target_of(&doc, cursor))
+            .and_then(|(cursor, doc)| diff_changes::target_of(&doc, cursor))
     };
     let Some(((rel_path, row), workdir)) = target.zip(repo_workdir(stoat)) else {
         stoat.set_status("no change under the cursor");
         return UpdateEffect::Redraw;
     };
 
-    if let Some(state) = stoat.active_workspace_mut().focused_overview_mut() {
+    if let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() {
         state.covered_diff = false;
     }
-    close_overview(stoat);
+    close_diff_changes(stoat);
 
     let focus = stoat.active_workspace().panes.focus();
     let path = workdir.join(rel_path);
@@ -109,12 +110,12 @@ pub(super) fn overview_open(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Move the focused overview's cursor by `delta` rows, held inside the
+/// Move the focused changes view's cursor by `delta` rows, held inside the
 /// document's rows.
-pub(crate) fn overview_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub(crate) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let rows = document(ws).map_or(0, |doc| preview_row_count(&doc));
-    let Some(state) = ws.focused_overview_mut() else {
+    let Some(state) = ws.focused_diff_changes_mut() else {
         return UpdateEffect::None;
     };
     if rows == 0 {
@@ -127,20 +128,20 @@ pub(crate) fn overview_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Move the focused overview's cursor to the header of the next or the
+/// Move the focused changes view's cursor to the header of the next or the
 /// previous chunk.
 ///
 /// A step back from inside a chunk lands on that chunk's own header. At either
 /// end the cursor stays, and the status row says that no more changes lie that
 /// way, as the change walk of the per-file diff says.
-pub(super) fn overview_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+pub(super) fn diff_changes_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let target = {
         let ws = stoat.active_workspace();
-        let cursor = ws.focused_overview().map(|state| state.cursor);
+        let cursor = ws.focused_diff_changes().map(|state| state.cursor);
         let Some((cursor, doc)) = cursor.zip(document(ws)) else {
             return UpdateEffect::None;
         };
-        let starts = overview::chunk_starts(&doc);
+        let starts = diff_changes::chunk_starts(&doc);
         match dir {
             ChangeDir::Next => starts.into_iter().find(|&start| start > cursor),
             ChangeDir::Prev => starts.into_iter().rev().find(|&start| start < cursor),
@@ -150,28 +151,28 @@ pub(super) fn overview_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEf
         stoat.set_status("no more changes");
         return UpdateEffect::Redraw;
     };
-    overview_select(stoat, row)
+    diff_changes_select(stoat, row)
 }
 
-/// Move the focused overview's cursor by the rows of its last paint.
-pub(super) fn overview_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
+/// Move the focused changes view's cursor by the rows of its last paint.
+pub(super) fn diff_changes_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
     let rows = viewport_rows(stoat);
-    overview_step(stoat, page_delta(rows, dir))
+    diff_changes_step(stoat, page_delta(rows, dir))
 }
 
-/// Move the focused overview's cursor by half the rows of its last paint, and
-/// by one row at least.
-pub(super) fn overview_half_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
+/// Move the focused changes view's cursor by half the rows of its last paint,
+/// and by one row at least.
+pub(super) fn diff_changes_half_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
     let rows = (viewport_rows(stoat) / 2).max(1);
-    overview_step(stoat, page_delta(rows, dir))
+    diff_changes_step(stoat, page_delta(rows, dir))
 }
 
-/// Put the focused overview's cursor on the first row, or on the last row when
-/// `last` is set.
-pub(super) fn overview_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
+/// Put the focused changes view's cursor on the first row, or on the last row
+/// when `last` is set.
+pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let rows = document(ws).map_or(0, |doc| preview_row_count(&doc));
-    let Some(state) = ws.focused_overview_mut() else {
+    let Some(state) = ws.focused_diff_changes_mut() else {
         return UpdateEffect::None;
     };
     state.cursor = match last {
@@ -181,26 +182,26 @@ pub(super) fn overview_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Put the focused overview's cursor on `row`, as a press on that row does.
-pub(crate) fn overview_select(stoat: &mut Stoat, row: usize) -> UpdateEffect {
-    let Some(state) = stoat.active_workspace_mut().focused_overview_mut() else {
+/// Put the focused changes view's cursor on `row`, as a press on that row does.
+pub(crate) fn diff_changes_select(stoat: &mut Stoat, row: usize) -> UpdateEffect {
+    let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() else {
         return UpdateEffect::None;
     };
     state.cursor = row;
     UpdateEffect::Redraw
 }
 
-/// Give a fresh state to every overview pane of the active workspace whose
+/// Give a fresh state to every changes view pane of the active workspace whose
 /// state did not survive, then start the document's build.
 ///
 /// The panes of every tab count, a parked one included, so a tab shows a live
-/// overview when the reader next switches to it.
+/// changes view when the reader next switches to it.
 ///
-/// An overview pane rides `PaneTree` serde as [`View::Overview`], but its state
-/// is live state the session file does not hold, so the id is dead after a
-/// restore or a workspace copy. A fresh state covers no view, so its close
+/// A changes view pane rides `PaneTree` serde as [`View::DiffChanges`], but its
+/// state is live state the session file does not hold, so the id is dead after
+/// a restore or a workspace copy. A fresh state covers no view, so its close
 /// leaves a scratch editor.
-pub(crate) fn respawn_overview_panes(stoat: &mut Stoat) {
+pub(crate) fn respawn_diff_changes_panes(stoat: &mut Stoat) {
     let dead_panes = {
         let ws = stoat.active_workspace();
         ws.pane_trees()
@@ -210,7 +211,7 @@ pub(crate) fn respawn_overview_panes(stoat: &mut Stoat) {
                     .split_pane_ids()
                     .into_iter()
                     .filter_map(move |id| match panes.pane(id).view {
-                        View::Overview(dead) if !ws.overviews.contains_key(dead) => {
+                        View::DiffChanges(dead) if !ws.diff_changes_views.contains_key(dead) => {
                             Some((tree, id))
                         },
                         _ => None,
@@ -226,21 +227,21 @@ pub(crate) fn respawn_overview_panes(stoat: &mut Stoat) {
     // index collected above names the same tree here.
     let ws = stoat.active_workspace_mut();
     for (tree, pane_id) in dead_panes {
-        let id = ws.overviews.insert(OverviewState::default());
+        let id = ws.diff_changes_views.insert(DiffChangesState::default());
         if let Some(panes) = ws.pane_trees_mut().nth(tree) {
-            panes.pane_mut(pane_id).view = View::Overview(id);
+            panes.pane_mut(pane_id).view = View::DiffChanges(id);
         }
     }
-    overview::ensure_overview_doc(stoat);
+    diff_changes::ensure_diff_changes_doc(stoat);
 }
 
-/// Show an overview in the focused pane, over the view the pane showed.
+/// Show a changes view in the focused pane, over the view the pane showed.
 ///
-/// A focused editor's cursor line waits as the landing, so the overview opens
-/// on that line's chunk once a document exists. An editor in the diff view
-/// leaves it first, so the editor comes back plain beneath the overview, and
-/// the close returns to the diff.
-fn open_overview(stoat: &mut Stoat) -> UpdateEffect {
+/// A focused editor's cursor line waits as the landing, so the changes view
+/// opens on that line's chunk once a document exists. An editor in the diff
+/// view leaves it first, so the editor comes back plain beneath the changes
+/// view, and the close returns to the diff.
+fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let landing = editor_landing(stoat);
     let (covered, covered_diff) = {
         let ws = stoat.active_workspace();
@@ -257,17 +258,17 @@ fn open_overview(stoat: &mut Stoat) -> UpdateEffect {
 
     let ws = stoat.active_workspace_mut();
     let focus = ws.panes.focus();
-    let id = ws.overviews.insert(OverviewState {
+    let id = ws.diff_changes_views.insert(DiffChangesState {
         covered: Some(covered),
         covered_diff,
         pending_landing: landing,
-        ..OverviewState::default()
+        ..DiffChangesState::default()
     });
-    ws.panes.pane_mut(focus).view = View::Overview(id);
+    ws.panes.pane_mut(focus).view = View::DiffChanges(id);
     ws.panes.widen(focus);
 
-    overview::ensure_overview_doc(stoat);
-    overview::land_pending(stoat.active_workspace_mut());
+    diff_changes::ensure_diff_changes_doc(stoat);
+    diff_changes::land_pending(stoat.active_workspace_mut());
     UpdateEffect::Redraw
 }
 
@@ -298,7 +299,7 @@ fn editor_landing(stoat: &mut Stoat) -> Option<(String, u32)> {
 
 /// The working directory of the repository that holds the active workspace.
 ///
-/// The overview names each file relative to it.
+/// The changes view names each file relative to it.
 fn repo_workdir(stoat: &Stoat) -> Option<PathBuf> {
     stoat
         .git_host
@@ -306,16 +307,19 @@ fn repo_workdir(stoat: &Stoat) -> Option<PathBuf> {
         .workdir()
 }
 
-/// The workspace's last overview document, which every overview pane shows.
+/// The workspace's last changes view document, which every changes view pane
+/// shows.
 fn document(ws: &Workspace) -> Option<Arc<DiffDocument>> {
-    ws.overview_doc.as_ref().and_then(|built| built.doc.clone())
+    ws.diff_changes_doc
+        .as_ref()
+        .and_then(|built| built.doc.clone())
 }
 
-/// The rows of the focused overview's last paint, zero before the first.
+/// The rows of the focused changes view's last paint, zero before the first.
 fn viewport_rows(stoat: &Stoat) -> usize {
     stoat
         .active_workspace()
-        .focused_overview()
+        .focused_diff_changes()
         .map_or(0, |state| state.viewport_rows)
 }
 
@@ -330,11 +334,12 @@ fn page_delta(rows: usize, dir: PageDir) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{document, overview_step, respawn_overview_panes};
+    use super::{diff_changes_step, document, respawn_diff_changes_panes};
     use crate::{
         action_handlers::{commits, dispatch, focused_editor_mut, pane, review::diff_cache_key},
-        overview::{
-            chunk_starts, ensure_overview_doc, target_of, OverviewId, OverviewStamp, OverviewState,
+        diff_changes::{
+            chunk_starts, ensure_diff_changes_doc, target_of, DiffChangesId, DiffChangesStamp,
+            DiffChangesState,
         },
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::commits::preview_row_count,
@@ -379,17 +384,17 @@ mod tests {
         h
     }
 
-    /// The active workspace's overview document.
+    /// The active workspace's changes view document.
     fn doc(h: &TestHarness) -> Arc<DiffDocument> {
-        document(h.stoat.active_workspace()).expect("a built overview document")
+        document(h.stoat.active_workspace()).expect("a built changes view document")
     }
 
-    /// The row of the focused overview's cursor.
+    /// The row of the focused changes view's cursor.
     fn cursor(h: &TestHarness) -> usize {
         h.stoat
             .active_workspace()
-            .focused_overview()
-            .expect("a focused overview")
+            .focused_diff_changes()
+            .expect("a focused changes view")
             .cursor
     }
 
@@ -404,12 +409,12 @@ mod tests {
     }
 
     /// A second tab of two panes whose focused pane shows a shell over an
-    /// overview, and that shell.
-    fn shell_over_an_overview() -> (TestHarness, TermId) {
+    /// changes view, and that shell.
+    fn shell_over_a_changes_view() -> (TestHarness, TermId) {
         let mut h = two_files();
         dispatch(&mut h.stoat, &stoat_action::NewTab);
         dispatch(&mut h.stoat, &stoat_action::SplitRight);
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         dispatch(&mut h.stoat, &stoat_action::Terminal);
         let ws = h.stoat.active_workspace();
         let View::Terminal(shell) = ws.panes.pane(ws.panes.focus()).view else {
@@ -418,12 +423,12 @@ mod tests {
         (h, shell)
     }
 
-    /// The overview's keys read its own mode, which starts at normal, and the
-    /// diff dials step on it as on the diff view.
+    /// The changes view's keys read its own mode, which starts at normal, and
+    /// the diff dials step on it as on the diff view.
     #[test]
-    fn an_overview_pane_holds_its_own_mode_and_answers_the_dials() {
+    fn a_changes_view_pane_holds_its_own_mode_and_answers_the_dials() {
         let mut h = two_files();
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         let fresh = h.stoat.focused_mode().to_string();
         h.stoat.set_focused_mode("space".to_string());
         let mode = h.stoat.focused_mode().to_string();
@@ -431,7 +436,7 @@ mod tests {
         let state_mode = h
             .stoat
             .active_workspace()
-            .focused_overview()
+            .focused_diff_changes()
             .map(|state| state.mode.clone());
         assert_eq!(
             (
@@ -442,7 +447,7 @@ mod tests {
                 h.stoat.diff_tint
             ),
             (
-                Some("overview"),
+                Some("diff_changes"),
                 "normal".to_string(),
                 "space".to_string(),
                 Some("space".to_string()),
@@ -451,23 +456,23 @@ mod tests {
         );
     }
 
-    /// A layout key on the overview closes it, as it closes every full-window
-    /// screen, and the pane shows the editor the overview covered at its own
-    /// width and in normal mode. An overview opened from the per-file diff
-    /// returns to that diff, which widens the pane again.
+    /// A layout key on the changes view closes it, as it closes every
+    /// full-window screen, and the pane shows the editor the changes view
+    /// covered at its own width and in normal mode. A changes view opened from
+    /// the per-file diff returns to that diff, which widens the pane again.
     #[test]
-    fn a_layout_key_closes_the_overview_to_the_view_it_covered() {
+    fn a_layout_key_closes_the_changes_view_to_the_view_it_covered() {
         for (covered_diff, view, widened) in [(false, "file", false), (true, "diff", true)] {
             let mut h = two_files();
             let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
             h.stoat.set_focused_mode("insert".to_string());
-            h.cover_with_overview(covered_diff);
+            h.cover_with_diff_changes(covered_diff);
 
             dispatch(&mut h.stoat, &stoat_action::SplitRight);
             let ws = h.stoat.active_workspace();
             assert_eq!(
                 (
-                    ws.overviews.len(),
+                    ws.diff_changes_views.len(),
                     ws.panes.split_pane_ids().len(),
                     ws.panes.pane(ws.panes.focus()).view.clone(),
                     ws.panes.widened().is_some(),
@@ -482,17 +487,17 @@ mod tests {
                     widened,
                     Some(view),
                     "normal",
-                    Some("overview closed")
+                    Some("changes closed")
                 ),
                 "covered_diff {covered_diff}",
             );
         }
     }
 
-    /// An overview over a dead view closes its pane, and a last pane gets a
+    /// A changes view over a dead view closes its pane, and a last pane gets a
     /// scratch editor.
     #[test]
-    fn closing_an_overview_over_a_label_closes_the_pane_or_falls_back_to_a_scratch() {
+    fn closing_a_changes_view_over_a_label_closes_the_pane_or_falls_back_to_a_scratch() {
         let mut h = two_files();
         dispatch(&mut h.stoat, &stoat_action::SplitRight);
 
@@ -501,7 +506,7 @@ mod tests {
             let ws = h.stoat.active_workspace_mut();
             let focus = ws.panes.focus();
             ws.panes.pane_mut(focus).view = View::Label("label".into());
-            h.cover_with_overview(false);
+            h.cover_with_diff_changes(false);
             dispatch(&mut h.stoat, &stoat_action::SplitRight);
             closed.push((
                 h.stoat.active_workspace().panes.split_pane_ids().len(),
@@ -511,14 +516,14 @@ mod tests {
         assert_eq!(closed, [(1, Some("file")), (1, Some("file"))]);
     }
 
-    /// The overview belongs to its pane. A split off it opens a scratch editor
-    /// and rests the overview's chord, and a close of its pane drops it with
-    /// the editor it covered.
+    /// The changes view belongs to its pane. A split off it opens a scratch
+    /// editor and rests the changes view's chord, and a close of its pane drops
+    /// it with the editor it covered.
     #[test]
-    fn an_overview_stays_with_its_own_pane() {
+    fn a_changes_view_stays_with_its_own_pane() {
         let mut h = two_files();
         let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
-        let id = h.cover_with_overview(false);
+        let id = h.cover_with_diff_changes(false);
         h.stoat.set_focused_mode("space".to_string());
         let source = h.stoat.active_workspace().panes.focus();
         h.stoat.active_workspace_mut().panes.unwiden();
@@ -529,7 +534,7 @@ mod tests {
             (
                 ws.panes.pane(source).view.clone(),
                 ws.panes.pane(ws.panes.focus()).view.clone(),
-                ws.overviews[id].mode.clone(),
+                ws.diff_changes_views[id].mode.clone(),
             )
         };
         pane::close_pane_by_id(&mut h.stoat, source);
@@ -539,15 +544,15 @@ mod tests {
                 kept,
                 matches!(split_view, View::Editor(_)),
                 mode,
-                ws.overviews.len(),
+                ws.diff_changes_views.len(),
                 ws.editors.contains_key(editor),
             ),
-            (View::Overview(id), true, "normal".to_string(), 0, false),
+            (View::DiffChanges(id), true, "normal".to_string(), 0, false),
         );
     }
 
     #[test]
-    fn closing_an_overview_pane_keeps_a_shell_another_pane_shows() {
+    fn closing_a_changes_view_pane_keeps_a_shell_another_pane_shows() {
         let mut h = two_files();
         dispatch(&mut h.stoat, &stoat_action::Terminal);
         // The split action runs a shell of its own, so the tree split, which
@@ -557,48 +562,48 @@ mod tests {
         let View::Terminal(shell) = ws.panes.pane(ws.panes.focus()).view else {
             panic!("the split shows the shell too");
         };
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
 
         dispatch(&mut h.stoat, &stoat_action::ClosePane);
         let ws = h.stoat.active_workspace();
         assert_eq!(
-            (ws.overviews.len(), ws.terms.contains_key(shell)),
+            (ws.diff_changes_views.len(), ws.terms.contains_key(shell)),
             (0, true)
         );
     }
 
-    /// A shell opened over the overview holds it beneath, and the pane or the
-    /// tab that closes takes it along.
+    /// A shell opened over the changes view holds it beneath, and the pane or
+    /// the tab that closes takes it along.
     #[test]
-    fn an_overview_beneath_a_shell_closes_with_its_pane_or_tab() {
+    fn a_changes_view_beneath_a_shell_closes_with_its_pane_or_tab() {
         let actions: [&dyn Action; 2] = [&stoat_action::ClosePane, &stoat_action::CloseTab];
         let counts = actions.map(|action| {
-            let (mut h, _) = shell_over_an_overview();
-            let open = h.stoat.active_workspace().overviews.len();
+            let (mut h, _) = shell_over_a_changes_view();
+            let open = h.stoat.active_workspace().diff_changes_views.len();
             dispatch(&mut h.stoat, action);
-            (open, h.stoat.active_workspace().overviews.len())
+            (open, h.stoat.active_workspace().diff_changes_views.len())
         });
         assert_eq!(counts, [(1, 0); 2]);
     }
 
-    /// A shell that exits in a parked tab closes its pane, and the overview
+    /// A shell that exits in a parked tab closes its pane, and the changes view
     /// beneath the shell goes with it.
     #[test]
-    fn an_exited_shell_in_a_parked_tab_drops_the_overview_beneath() {
-        let (mut h, shell) = shell_over_an_overview();
+    fn an_exited_shell_in_a_parked_tab_drops_the_changes_view_beneath() {
+        let (mut h, shell) = shell_over_a_changes_view();
         dispatch(&mut h.stoat, &stoat_action::PrevTab);
         h.stoat
             .handle_pty_notification(PtyNotification::TermExited {
                 workspace: h.stoat.active_workspace,
                 term_id: shell,
             });
-        assert_eq!(h.stoat.active_workspace().overviews.len(), 0);
+        assert_eq!(h.stoat.active_workspace().diff_changes_views.len(), 0);
     }
 
     #[test]
-    fn a_shell_over_the_overview_gives_it_back_when_it_exits() {
+    fn a_shell_over_the_changes_view_gives_it_back_when_it_exits() {
         let mut h = two_files();
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         dispatch(&mut h.stoat, &stoat_action::Terminal);
         let ws = h.stoat.active_workspace();
         let View::Terminal(term_id) = ws.panes.pane(ws.panes.focus()).view else {
@@ -610,47 +615,47 @@ mod tests {
                 workspace: h.stoat.active_workspace,
                 term_id,
             });
-        assert_eq!(h.stoat.current_view(), Some("overview"));
+        assert_eq!(h.stoat.current_view(), Some("diff_changes"));
     }
 
     /// A step holds the cursor inside the document's rows, and a step before
     /// the first document lands moves nothing.
     #[test]
-    fn an_overview_step_stays_inside_the_document() {
+    fn a_changes_view_step_stays_inside_the_document() {
         let cursor = |h: &TestHarness| {
             h.stoat
                 .active_workspace()
-                .focused_overview()
+                .focused_diff_changes()
                 .map(|state| state.cursor)
         };
         let mut h = two_files();
-        h.cover_with_overview(false);
-        overview_step(&mut h.stoat, 1);
+        h.cover_with_diff_changes(false);
+        diff_changes_step(&mut h.stoat, 1);
         let unbuilt = cursor(&h);
 
         h.settle();
         let rows = h
             .stoat
             .active_workspace()
-            .overview_doc
+            .diff_changes_doc
             .as_ref()
             .and_then(|built| built.doc.as_deref())
             .map_or(0, preview_row_count);
-        overview_step(&mut h.stoat, -1);
+        diff_changes_step(&mut h.stoat, -1);
         let above_first = cursor(&h);
-        overview_step(&mut h.stoat, 100);
+        diff_changes_step(&mut h.stoat, 100);
         assert_eq!(
             (unbuilt, above_first, cursor(&h)),
             (Some(0), Some(0), Some(rows - 1)),
         );
     }
 
-    /// Keys go to a focused dock, so the overview in the split pane beneath it
-    /// lends the dock no mode.
+    /// Keys go to a focused dock, so the changes view in the split pane beneath
+    /// it lends the dock no mode.
     #[test]
-    fn a_focused_dock_takes_no_mode_from_the_overview() {
+    fn a_focused_dock_takes_no_mode_from_the_changes_view() {
         let mut h = two_files();
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.stoat.set_focused_mode("space".to_string());
         let ws = h.stoat.active_workspace_mut();
         let dock = ws.docks.insert(DockPanel {
@@ -666,36 +671,39 @@ mod tests {
 
     /// A restore brings back the pane with a dead id, which gets a live state
     /// of its own and a document, though another pane holds focus. A live
-    /// overview keeps its state, and a respawn that finds no dead pane builds
-    /// nothing.
+    /// changes view keeps its state, and a respawn that finds no dead pane
+    /// builds nothing.
     #[test]
-    fn a_restored_overview_pane_gets_a_fresh_state_and_a_document() {
+    fn a_restored_changes_view_pane_gets_a_fresh_state_and_a_document() {
         let mut h = two_files();
-        respawn_overview_panes(&mut h.stoat);
+        respawn_diff_changes_panes(&mut h.stoat);
         h.settle();
-        let built_for_no_pane = h.stoat.active_workspace().overview_doc.is_some();
+        let built_for_no_pane = h.stoat.active_workspace().diff_changes_doc.is_some();
 
         let restored = h.stoat.active_workspace().panes.focus();
         pane::split_pane(&mut h.stoat, Axis::Vertical);
         let live = h.stoat.active_workspace().panes.focus();
         pane::split_pane(&mut h.stoat, Axis::Vertical);
         let ws = h.stoat.active_workspace_mut();
-        let live_id = ws.overviews.insert(OverviewState::default());
-        ws.panes.pane_mut(live).view = View::Overview(live_id);
-        ws.panes.pane_mut(restored).view = View::Overview(OverviewId::default());
-        respawn_overview_panes(&mut h.stoat);
+        let live_id = ws.diff_changes_views.insert(DiffChangesState::default());
+        ws.panes.pane_mut(live).view = View::DiffChanges(live_id);
+        ws.panes.pane_mut(restored).view = View::DiffChanges(DiffChangesId::default());
+        respawn_diff_changes_panes(&mut h.stoat);
         h.settle();
         let ws = h.stoat.active_workspace();
-        let kept = (ws.panes.pane(live).view.clone(), ws.overviews.len());
+        let kept = (
+            ws.panes.pane(live).view.clone(),
+            ws.diff_changes_views.len(),
+        );
         let state = match ws.panes.pane(restored).view {
-            View::Overview(id) => ws
-                .overviews
+            View::DiffChanges(id) => ws
+                .diff_changes_views
                 .get(id)
                 .map(|state| (state.cursor, state.covered.clone())),
             _ => None,
         };
         let files: Vec<&str> = ws
-            .overview_doc
+            .diff_changes_doc
             .as_ref()
             .and_then(|built| built.doc.as_deref())
             .map(|doc| {
@@ -709,31 +717,32 @@ mod tests {
             (built_for_no_pane, kept, state, files),
             (
                 false,
-                (View::Overview(live_id), 2),
+                (View::DiffChanges(live_id), 2),
                 Some((0, None)),
                 vec!["a.txt", "b.txt"]
             ),
         );
     }
 
-    /// Only an overview on screen follows the tree. After a git event a frame
-    /// rebuilds the document under one and leaves it stale under a plain pane.
+    /// Only a changes view on screen follows the tree. After a git event a
+    /// frame rebuilds the document under one and leaves it stale under a plain
+    /// pane.
     #[test]
-    fn a_focused_overview_rebuilds_when_the_tree_moves() {
+    fn a_focused_changes_view_rebuilds_when_the_tree_moves() {
         let current = |h: &TestHarness| {
             let ws = h.stoat.active_workspace();
-            ws.overview_doc
+            ws.diff_changes_doc
                 .as_ref()
-                .is_some_and(|built| built.stamp == OverviewStamp::read(ws))
+                .is_some_and(|built| built.stamp == DiffChangesStamp::read(ws))
         };
         let mut h = two_files();
-        ensure_overview_doc(&mut h.stoat);
+        ensure_diff_changes_doc(&mut h.stoat);
         h.settle();
         h.stoat.active_workspace_mut().invalidate_all_diffs();
         h.stoat.drive_background();
         let plain = current(&h);
 
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         h.stoat.active_workspace_mut().invalidate_all_diffs();
         h.stoat.drive_background();
@@ -741,15 +750,15 @@ mod tests {
         assert_eq!((plain, focused), (false, true));
     }
 
-    /// From a plain editor the overview opens on the editor's line once the
+    /// From a plain editor the changes view opens on the editor's line once the
     /// first document lands. A line above every change of its file lands on
     /// the header of the chunk below it.
     #[test]
-    fn diff_overview_from_a_plain_editor_lands_below_its_line() {
+    fn diff_changes_from_a_plain_editor_lands_below_its_line() {
         let mut h = deep_files();
         h.open_file(Path::new("/repo/b.txt"));
         h.type_keys("j j");
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         assert_eq!(
             (
@@ -757,21 +766,21 @@ mod tests {
                 h.stoat.active_workspace().panes.widened().is_some(),
                 cursor(&h),
             ),
-            (Some("overview"), true, chunk_starts(&doc(&h))[1]),
+            (Some("diff_changes"), true, chunk_starts(&doc(&h))[1]),
         );
     }
 
-    /// From the per-file diff the overview opens on the diff's line, with the
-    /// editor plain beneath it, and a close returns to the diff.
+    /// From the per-file diff the changes view opens on the diff's line, with
+    /// the editor plain beneath it, and a close returns to the diff.
     #[test]
-    fn diff_overview_from_the_diff_lands_on_its_line_and_q_returns_to_the_diff() {
+    fn diff_changes_from_the_diff_lands_on_its_line_and_q_returns_to_the_diff() {
         let mut h = deep_files();
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
         let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
 
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         let landed = {
             let (doc, at) = (doc(&h), cursor(&h));
             (target_of(&doc, at), chunk_starts(&doc).contains(&at))
@@ -797,13 +806,14 @@ mod tests {
         );
     }
 
-    /// Ctrl-t on the overview opens the cursor's file in the per-file diff on
-    /// the row's line, and Ctrl-t there returns to the overview on that line.
+    /// Ctrl-t on the changes view opens the cursor's file in the per-file diff
+    /// on the row's line, and Ctrl-t there returns to the changes view on that
+    /// line.
     #[test]
-    fn ctrl_t_flips_between_the_overview_and_the_diff_on_one_line() {
+    fn ctrl_t_flips_between_the_changes_view_and_the_diff_on_one_line() {
         let mut h = deep_files();
         h.open_file(Path::new("/repo/a.txt"));
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         h.type_keys("n Ctrl-t");
         h.settle();
@@ -827,7 +837,7 @@ mod tests {
             (opened, back),
             (
                 (Some("diff"), Some(PathBuf::from("/repo/b.txt")), 8),
-                (Some("overview"), Some(("b.txt".to_string(), 8)), false),
+                (Some("diff_changes"), Some(("b.txt".to_string(), 8)), false),
             ),
         );
     }
@@ -838,7 +848,7 @@ mod tests {
     #[test]
     fn n_and_p_walk_the_chunk_headers_and_stop_at_either_end() {
         let mut h = deep_files();
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         let starts = chunk_starts(&doc(&h));
         let walk: Vec<usize> = ["n", "n", "j", "j", "k", "p", "p", "p"]
@@ -867,13 +877,13 @@ mod tests {
     }
 
     #[test]
-    fn an_open_before_the_first_document_keeps_the_overview() {
+    fn an_open_before_the_first_document_keeps_the_changes_view() {
         let mut h = deep_files();
-        h.cover_with_overview(false);
-        dispatch(&mut h.stoat, &stoat_action::OverviewOpen);
+        h.cover_with_diff_changes(false);
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesOpen);
         assert_eq!(
             (h.stoat.current_view(), h.stoat.pending_message.as_deref()),
-            (Some("overview"), Some("no change under the cursor")),
+            (Some("diff_changes"), Some("no change under the cursor")),
         );
     }
 
@@ -883,26 +893,26 @@ mod tests {
     #[test]
     fn pages_step_by_the_painted_rows_and_edges_reach_the_ends() {
         let mut h = deep_files();
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         let rows = preview_row_count(&doc(&h));
         let set_viewport = |h: &mut TestHarness, rows: usize| {
-            if let Some(state) = h.stoat.active_workspace_mut().focused_overview_mut() {
+            if let Some(state) = h.stoat.active_workspace_mut().focused_diff_changes_mut() {
                 state.viewport_rows = rows;
             }
         };
 
         set_viewport(&mut h, 0);
-        dispatch(&mut h.stoat, &stoat_action::OverviewHalfPageDown);
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesHalfPageDown);
         let mut cursors = vec![cursor(&h)];
         set_viewport(&mut h, 4);
         let actions: [&dyn Action; 6] = [
-            &stoat_action::OverviewPageDown,
-            &stoat_action::OverviewHalfPageDown,
-            &stoat_action::OverviewHalfPageUp,
-            &stoat_action::OverviewPageUp,
-            &stoat_action::OverviewLast,
-            &stoat_action::OverviewFirst,
+            &stoat_action::DiffChangesPageDown,
+            &stoat_action::DiffChangesHalfPageDown,
+            &stoat_action::DiffChangesHalfPageUp,
+            &stoat_action::DiffChangesPageUp,
+            &stoat_action::DiffChangesLast,
+            &stoat_action::DiffChangesFirst,
         ];
         for action in actions {
             dispatch(&mut h.stoat, action);
@@ -912,17 +922,17 @@ mod tests {
     }
 
     /// A rebuild keeps the cursor on its chunk though a grown chunk above it
-    /// moves the chunk's rows down, and the landing the overview opened on
+    /// moves the chunk's rows down, and the landing the changes view opened on
     /// does not pull the cursor back.
     #[test]
     fn a_rebuild_keeps_the_cursor_on_its_chunk() {
         let last_start = |h: &TestHarness| *chunk_starts(&doc(h)).last().expect("a chunk");
         let mut h = deep_files();
         h.open_file(Path::new("/repo/b.txt"));
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         let before = last_start(&h);
-        if let Some(state) = h.stoat.active_workspace_mut().focused_overview_mut() {
+        if let Some(state) = h.stoat.active_workspace_mut().focused_diff_changes_mut() {
             state.cursor = before + 2;
         }
 
@@ -943,16 +953,16 @@ mod tests {
     fn a_landing_on_a_fresh_edit_waits_for_the_build_that_holds_it() {
         let mut h = deep_files();
         track_clean_c(&mut h);
-        ensure_overview_doc(&mut h.stoat);
+        ensure_diff_changes_doc(&mut h.stoat);
         h.settle();
         h.open_file(Path::new("/repo/c.txt"));
         h.type_keys("j i Z Escape");
 
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         let waiting = h
             .stoat
             .active_workspace()
-            .focused_overview()
+            .focused_diff_changes()
             .and_then(|state| state.pending_landing.clone());
         h.settle();
         assert_eq!(
@@ -965,7 +975,7 @@ mod tests {
     }
 
     /// Either half of the diff view, the pane's latch or the editor's flag,
-    /// counts as a diff that the overview's close returns to.
+    /// counts as a diff that the changes view's close returns to.
     #[test]
     fn either_half_of_the_diff_view_brings_the_close_back_to_the_diff() {
         let views = [true, false].map(|latch| {
@@ -978,23 +988,23 @@ mod tests {
             } else if let Some(editor) = focused_editor_mut(&mut h.stoat) {
                 editor.set_diff_view(true);
             }
-            dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+            dispatch(&mut h.stoat, &stoat_action::DiffChanges);
             h.type_keys("q");
             h.stoat.current_view()
         });
         assert_eq!(views, [Some("diff"); 2]);
     }
 
-    /// An open from an overview over a commits list puts the list back first,
-    /// so the list waits behind the opened file as it waits behind any diff
-    /// opened from it.
+    /// An open from a changes view over a commits list puts the list back
+    /// first, so the list waits behind the opened file as it waits behind any
+    /// diff opened from it.
     #[test]
-    fn an_open_from_an_overview_over_a_list_keeps_the_list_behind_the_file() {
+    fn an_open_from_a_changes_view_over_a_list_keeps_the_list_behind_the_file() {
         let mut h = deep_files();
         h.open_commits("/repo");
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        dispatch(&mut h.stoat, &stoat_action::OverviewOpen);
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesOpen);
         let ws = h.stoat.active_workspace();
         assert_eq!(
             (
@@ -1014,13 +1024,13 @@ mod tests {
         let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
         let working = base.replace("\n41\n", "\nFORTY-ONE\n");
         h.stage_review_scenario("/repo", &[("long.txt", &base, &working)]);
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         let scroll = |h: &mut TestHarness| {
             focused_editor_mut(&mut h.stoat).map_or(0, |editor| editor.scroll_row)
         };
 
-        dispatch(&mut h.stoat, &stoat_action::OverviewOpen);
+        dispatch(&mut h.stoat, &stoat_action::DiffChangesOpen);
         let opened = scroll(&mut h);
         dispatch(&mut h.stoat, &stoat_action::AlignViewCenter);
         assert_eq!((opened, opened > 0), (scroll(&mut h), true));
@@ -1034,24 +1044,24 @@ mod tests {
         track_clean_c(&mut h);
         h.open_file(Path::new("/repo/c.txt"));
         h.type_keys("j");
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         let state = h
             .stoat
             .active_workspace()
-            .focused_overview()
+            .focused_diff_changes()
             .map(|state| (state.cursor, state.pending_landing.clone()));
         assert_eq!(state, Some((0, None)));
     }
 
-    /// A second overview after one edit to one open file diffs that file
+    /// A second changes view after one edit to one open file diffs that file
     /// alone. Every other file keeps its cache key, so its lookup hits, and
     /// the rebuild adds the one entry of the edit.
     ///
     /// Empty hunks planted under the untouched files' keys tell a hit from a
     /// fresh diff, because a fresh diff shows each file's one chunk.
     #[test]
-    fn a_second_overview_after_one_edit_diffs_the_edited_file_alone() {
+    fn a_second_changes_view_after_one_edit_diffs_the_edited_file_alone() {
         let untouched = [("b\n", "B\n"), ("c\n", "C\n"), ("d\n", "D\n")];
         let mut h = TestHarness::with_size(100, 24);
         h.stage_review_scenario(
@@ -1064,7 +1074,7 @@ mod tests {
             ],
         );
         h.open_file(Path::new("/repo/a.txt"));
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         h.type_keys("q i x Escape");
         h.settle();
@@ -1081,7 +1091,7 @@ mod tests {
             cache.len()
         };
 
-        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
         let added = h
             .stoat

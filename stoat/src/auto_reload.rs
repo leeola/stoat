@@ -2038,7 +2038,7 @@ mod tests {
         h.settle();
         h.settle_diff_jobs();
         // The diff makes two lookups, one for the resolve the write overtook
-        // and one after it. The overview build that entering the diff view
+        // and one after it. The changes view build that entering the diff view
         // starts makes the third, when it reads the new file's base.
         assert_eq!(
             h.fake_git().rename_source_calls(Path::new("/repo")),

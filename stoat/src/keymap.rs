@@ -2490,23 +2490,23 @@ mod tests {
         );
         assert_eq!(
             (
-                plain("overview", KeyCode::Down),
-                plain("overview", KeyCode::Up),
-                bound("overview", KeyCode::Char('d'), KeyModifiers::CONTROL),
-                bound("overview", KeyCode::Char('u'), KeyModifiers::CONTROL),
+                plain("diff_changes", KeyCode::Down),
+                plain("diff_changes", KeyCode::Up),
+                bound("diff_changes", KeyCode::Char('d'), KeyModifiers::CONTROL),
+                bound("diff_changes", KeyCode::Char('u'), KeyModifiers::CONTROL),
             ),
             (
-                "OverviewNext".to_string(),
-                "OverviewPrev".to_string(),
-                "OverviewHalfPageDown".to_string(),
-                "OverviewHalfPageUp".to_string(),
+                "DiffChangesNext".to_string(),
+                "DiffChangesPrev".to_string(),
+                "DiffChangesHalfPageDown".to_string(),
+                "DiffChangesHalfPageUp".to_string(),
             ),
-            "the overview steps on the arrows and half-pages on Ctrl-d and Ctrl-u"
+            "the changes view steps on the arrows and half-pages on Ctrl-d and Ctrl-u"
         );
     }
 
     /// Ctrl-t flips between the two diff layouts, so it names one action on the
-    /// per-file diff and on the overview, and no other view binds it.
+    /// per-file diff and on the changes view, and no other view binds it.
     #[test]
     fn ctrl_t_flips_the_diff_layout_from_either_screen() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
@@ -2523,9 +2523,9 @@ mod tests {
                 .map(|actions| actions[0].name.clone())
         };
 
-        let flip = Some("DiffOverview".to_string());
+        let flip = Some("DiffChanges".to_string());
         assert_eq!(
-            [ctrl_t("diff"), ctrl_t("overview"), ctrl_t("file")],
+            [ctrl_t("diff"), ctrl_t("diff_changes"), ctrl_t("file")],
             [flip.clone(), flip, None],
         );
     }

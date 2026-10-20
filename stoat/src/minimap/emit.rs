@@ -14,13 +14,13 @@
 use crate::{
     app::Stoat,
     buffer::BufferId,
+    diff_changes::DiffChangesId,
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::EditorId,
     minimap::{
-        overview::{self, OverviewStrip},
+        diff_changes::{self, DiffChangesStrip},
         EdgeSource, RowMark,
     },
-    overview::OverviewId,
     pane::View,
     render::{
         paint,
@@ -41,8 +41,9 @@ use stoat_config::MinimapMode;
 use stoat_text::Bias;
 
 /// Assign a `content_id` to each visible split-editor buffer that a minimap
-/// strip renders, and to the active workspace's overview strip while an
-/// overview shows, so the declare widget reads the id while the frame paints.
+/// strip renders, and to the active workspace's changes view strip while an
+/// changes view shows, so the declare widget reads the id while the frame
+/// paints.
 ///
 /// The summaries themselves sync afterward at the frame seam in
 /// [`emit_minimap`]. A no-op with the minimap off.
@@ -58,7 +59,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
     let Stoat {
         workspaces,
         minimap_content,
-        overview_strips,
+        diff_changes_strips,
         minimap_next_content_id,
         executor,
         ..
@@ -68,9 +69,9 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
     for (_, pane) in ws.panes.split_panes() {
         let editor_id = match pane.view {
             View::Editor(editor_id) => editor_id,
-            View::Overview(_) => {
-                if let Entry::Vacant(slot) = overview_strips.entry(ws_id) {
-                    slot.insert(OverviewStrip::new(*minimap_next_content_id));
+            View::DiffChanges(_) => {
+                if let Entry::Vacant(slot) = diff_changes_strips.entry(ws_id) {
+                    slot.insert(DiffChangesStrip::new(*minimap_next_content_id));
                     *minimap_next_content_id += 1;
                 }
                 continue;
@@ -218,18 +219,19 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
             .collect()
     };
 
-    // Per-pane mode places an overview's thumb on its own strip where the paint
-    // reserved one. Single mode places the focused overview's thumb on the band.
-    let overviews: Vec<(OverviewId, Option<u32>)> = {
+    // Per-pane mode places a changes view's thumb on its own strip where the
+    // paint reserved one. Single mode places the focused changes view's thumb
+    // on the band.
+    let diff_changes_views: Vec<(DiffChangesId, Option<u32>)> = {
         let ws = &stoat.workspaces[ws_id];
-        let focused = ws.focused_overview_id();
+        let focused = ws.focused_diff_changes_id();
         ws.panes
             .split_panes()
             .filter_map(|(_, pane)| {
-                let View::Overview(id) = pane.view else {
+                let View::DiffChanges(id) = pane.view else {
                     return None;
                 };
-                let state = ws.overviews.get(id)?;
+                let state = ws.diff_changes_views.get(id)?;
                 let strip_id = match single {
                     true => (focused == Some(id)).then_some(SINGLE_MINIMAP_STRIP_ID),
                     false => state.minimap_rect.is_some().then_some(pane.index),
@@ -247,16 +249,16 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
             .get(&(ws_id, buffer_id))
             .is_some_and(|content| content.build_pending());
     }
-    if !overviews.is_empty() {
-        overview::sync_overview_strip(stoat, ws_id, &mut out);
+    if !diff_changes_views.is_empty() {
+        diff_changes::sync_diff_changes_strip(stoat, ws_id, &mut out);
         stoat.minimap_build_pending |= stoat
-            .overview_strips
+            .diff_changes_strips
             .get(&ws_id)
-            .is_some_and(OverviewStrip::build_pending);
+            .is_some_and(DiffChangesStrip::build_pending);
     }
-    for (id, strip_id) in overviews {
+    for (id, strip_id) in diff_changes_views {
         if let Some(strip_id) = strip_id {
-            overview::emit_overview_thumb(stoat, ws_id, id, strip_id, &mut out);
+            diff_changes::emit_diff_changes_thumb(stoat, ws_id, id, strip_id, &mut out);
         }
     }
 
@@ -278,8 +280,8 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
             );
         }
     }
-    if stoat.workspaces[ws_id].overviews.is_empty()
-        && let Some(strip) = stoat.overview_strips.remove(&ws_id)
+    if stoat.workspaces[ws_id].diff_changes_views.is_empty()
+        && let Some(strip) = stoat.diff_changes_strips.remove(&ws_id)
     {
         stoatty_protocol::command::encode_minimap_drop_into(
             &mut out,

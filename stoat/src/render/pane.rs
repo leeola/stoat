@@ -6,10 +6,9 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, Placement, View},
     render::{
-        chrome, commits, content_lane,
+        chrome, commits, content_lane, diff_changes,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
-        overview,
         paint::{dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
@@ -76,8 +75,8 @@ pub(crate) fn render_pane(
         terms,
         term_pool_grids,
         commit_lists,
-        overviews,
-        overview_doc,
+        diff_changes_views,
+        diff_changes_doc,
     } = ctx;
 
     match &pane.view {
@@ -188,20 +187,20 @@ pub(crate) fn render_pane(
             dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
         },
-        // The overview paints a status row of its own, as the list does.
-        View::Overview(id) => {
-            if let Some(state) = overviews.get_mut(*id) {
-                overview::render_overview(
+        // The changes view paints a status row of its own, as the list does.
+        View::DiffChanges(id) => {
+            if let Some(state) = diff_changes_views.get_mut(*id) {
+                diff_changes::render_diff_changes(
                     pane,
                     is_focused,
                     state,
-                    overview_doc.as_ref(),
+                    diff_changes_doc.as_ref(),
                     frame,
                     buf,
                     &mut *scene,
                 );
                 if let (Some(strip), Some(chrome)) = (state.minimap_rect, frame.minimap_chrome)
-                    && let Some(content_id) = chrome.overview_content
+                    && let Some(content_id) = chrome.diff_changes_content
                 {
                     pane_minimap(pane, chrome, content_id, true, is_focused, frame)
                         .render(strip, buf, scene);
@@ -800,7 +799,7 @@ pub(crate) fn status_row(
     let (_, area) = pane_areas(pane.area, frame.minimap_band);
     if area.width == 0
         || area.height == 0
-        || matches!(pane.view, View::Commits(_) | View::Overview(_))
+        || matches!(pane.view, View::Commits(_) | View::DiffChanges(_))
     {
         return StatusRow::default();
     }
@@ -1755,7 +1754,7 @@ pub(crate) fn screen_segment(
     let (label, default, screen_scope) = match screen? {
         "review" => ("review", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
         "diff" => ("diff", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
-        "overview" => ("overview", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
+        "diff_changes" => ("changes", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
         "commits" => ("commits", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
         "rebase" => ("rebase", Color::Red, scope::UI_STATUSLINE_REBASE),
         "reword" => ("reword", Color::Red, scope::UI_STATUSLINE_REWORD),
@@ -1827,7 +1826,7 @@ fn pane_status_info(
         ),
         View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
         View::Commits(_) => owned("[commits]"),
-        View::Overview(_) => owned("[overview]"),
+        View::DiffChanges(_) => owned("[diff-changes]"),
         View::Label(label) => owned(label),
     }
 }

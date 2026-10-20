@@ -37,6 +37,7 @@ pub mod image_emit;
 mod review_walk;
 // Materializes real sample repositories on disk for the CLI by design.
 pub(crate) mod code_search;
+mod diff_changes;
 #[cfg(feature = "fixture")]
 #[allow(clippy::disallowed_methods)]
 pub mod fixture;
@@ -61,7 +62,6 @@ pub(crate) mod mouse;
 pub mod multi_buffer;
 mod nav_list;
 pub(crate) mod osc_cap;
-mod overview;
 pub mod pane;
 mod paths;
 #[cfg(feature = "perf")]

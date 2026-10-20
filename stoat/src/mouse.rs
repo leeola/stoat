@@ -14,12 +14,12 @@ use crate::{
         WHEEL_BINDING_COOLDOWN,
     },
     buffer::BufferId,
+    diff_changes::DiffChangesId,
     editor_state::{EditorId, ScrollGlide},
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    minimap::{emit::minimap_view_window, overview::row_count, LINES_PER_CELL},
-    overview::OverviewId,
+    minimap::{diff_changes::row_count, emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
@@ -138,7 +138,7 @@ pub(crate) struct ScreenSurfaces {
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ScreenKind {
     Commits,
-    Overview,
+    DiffChanges,
     Rebase,
     RebaseConflict,
 }
@@ -189,15 +189,15 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
                 strip: None,
             })
         },
-        "overview" => {
-            let state = ws.focused_overview()?;
+        "diff_changes" => {
+            let state = ws.focused_diff_changes()?;
             let pane = ws.panes.pane(ws.panes.focus()).area;
             Some(ScreenSurfaces {
-                kind: ScreenKind::Overview,
+                kind: ScreenKind::DiffChanges,
                 pane,
                 list: crate::render::layout::split_pane_status(pane).0,
                 len: ws
-                    .overview_doc
+                    .diff_changes_doc
                     .as_ref()
                     .and_then(|built| built.doc.as_deref())
                     .map_or(0, crate::render::commits::preview_row_count),
@@ -284,7 +284,7 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
             };
             action_handlers::commits::commits_step(stoat, step)
         },
-        ScreenKind::Overview => action_handlers::overview::overview_select(stoat, index),
+        ScreenKind::DiffChanges => action_handlers::diff_changes::diff_changes_select(stoat, index),
         ScreenKind::Rebase => action_handlers::rebase::rebase_select(stoat, index),
         ScreenKind::RebaseConflict => action_handlers::conflict::conflict_select(stoat, index),
     })
@@ -1028,8 +1028,8 @@ pub(crate) fn apply_focused_pane_mouse(
 pub(crate) enum MinimapDrag {
     /// An editor, whose viewport eases to the line under the pointer.
     Editor(EditorId),
-    /// An overview, whose cursor lands on the row under the pointer.
-    Overview(OverviewId),
+    /// A changes view, whose cursor lands on the row under the pointer.
+    DiffChanges(DiffChangesId),
 }
 
 /// Route a left press or drag over a pane's minimap strip to a scrub. Returns
@@ -1037,8 +1037,8 @@ pub(crate) enum MinimapDrag {
 /// focus and the text-area handlers.
 ///
 /// Once a press arms [`Stoat::minimap_drag`], every drag re-scrubs the named
-/// editor or overview and the release clears the field, so the strip owns the
-/// pointer for the whole gesture and the text area never sees it.
+/// editor or changes view and the release clears the field, so the strip owns
+/// the pointer for the whole gesture and the text area never sees it.
 fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     if let Some(drag) = stoat.minimap_drag {
         match mouse.kind {
@@ -1056,8 +1056,8 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
     if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
         let pos = Position::new(mouse.column, mouse.row);
         // Single mode has one shared band that scrubs the focused editor or
-        // overview. Per-pane mode walks the panes to find the strip under the
-        // click.
+        // changes view. Per-pane mode walks the panes to find the strip under
+        // the click.
         let hit = if stoat.minimap_mode() == MinimapMode::Single {
             stoat
                 .single_minimap_rect
@@ -1066,8 +1066,8 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
                     Some((editor_id, _)) => Some(MinimapDrag::Editor(editor_id)),
                     None => stoat
                         .active_workspace()
-                        .focused_overview_id()
-                        .map(MinimapDrag::Overview),
+                        .focused_diff_changes_id()
+                        .map(MinimapDrag::DiffChanges),
                 })
         } else {
             let ws = stoat.active_workspace();
@@ -1077,9 +1077,9 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
                         MinimapDrag::Editor(editor_id),
                         ws.editors.get(editor_id)?.minimap_rect?,
                     ),
-                    View::Overview(id) => (
-                        MinimapDrag::Overview(id),
-                        ws.overviews.get(id)?.minimap_rect?,
+                    View::DiffChanges(id) => (
+                        MinimapDrag::DiffChanges(id),
+                        ws.diff_changes_views.get(id)?.minimap_rect?,
                     ),
                     _ => return None,
                 };
@@ -1099,7 +1099,7 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
 }
 
 /// Resolve the minimap band `drag` scrubs against. In single mode this is the
-/// shared window-right band, otherwise the editor's or the overview's own
+/// shared window-right band, otherwise the editor's or the changes view's own
 /// per-pane strip rect.
 fn minimap_strip_for(stoat: &Stoat, drag: MinimapDrag) -> Option<Rect> {
     if stoat.minimap_mode() == MinimapMode::Single {
@@ -1108,7 +1108,7 @@ fn minimap_strip_for(stoat: &Stoat, drag: MinimapDrag) -> Option<Rect> {
     let ws = stoat.active_workspace();
     match drag {
         MinimapDrag::Editor(editor_id) => ws.editors.get(editor_id)?.minimap_rect,
-        MinimapDrag::Overview(id) => ws.overviews.get(id)?.minimap_rect,
+        MinimapDrag::DiffChanges(id) => ws.diff_changes_views.get(id)?.minimap_rect,
     }
 }
 
@@ -1117,7 +1117,7 @@ fn minimap_strip_for(stoat: &Stoat, drag: MinimapDrag) -> Option<Rect> {
 fn scrub_minimap(stoat: &mut Stoat, drag: MinimapDrag, strip: Rect, screen_row: u16) {
     match drag {
         MinimapDrag::Editor(editor_id) => scrub_minimap_editor(stoat, editor_id, strip, screen_row),
-        MinimapDrag::Overview(id) => scrub_minimap_overview(stoat, id, strip, screen_row),
+        MinimapDrag::DiffChanges(id) => scrub_minimap_diff_changes(stoat, id, strip, screen_row),
     }
 }
 
@@ -1172,21 +1172,21 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
     editor.scroll_glide = ScrollGlide::Page;
 }
 
-/// Put overview `id`'s cursor on the row that the `strip` cell under
+/// Put changes view `id`'s cursor on the row that the `strip` cell under
 /// `screen_row` points at, and scroll that row to the middle of the view.
 ///
-/// The strip holds one line per overview row, so the row resolves with the
+/// The strip holds one line per changes view row, so the row resolves with the
 /// math the strip renders with. The scroll stops at the last page, as an
-/// editor's scrub does, and a document with no rows leaves the overview as it
-/// is.
-fn scrub_minimap_overview(stoat: &mut Stoat, id: OverviewId, strip: Rect, screen_row: u16) {
+/// editor's scrub does, and a document with no rows leaves the changes view as
+/// it is.
+fn scrub_minimap_diff_changes(stoat: &mut Stoat, id: DiffChangesId, strip: Rect, screen_row: u16) {
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     let total = ws
-        .overview_doc
+        .diff_changes_doc
         .as_ref()
         .and_then(|built| built.doc.as_deref())
         .map_or(0, row_count);
-    let Some(state) = ws.overviews.get_mut(id) else {
+    let Some(state) = ws.diff_changes_views.get_mut(id) else {
         return;
     };
     if total == 0 {
@@ -1503,7 +1503,7 @@ pub(crate) fn handle_mouse_scroll(
                     };
                     action_handlers::commits::commits_step(stoat, step)
                 },
-                ScreenKind::Overview => action_handlers::overview::overview_step(
+                ScreenKind::DiffChanges => action_handlers::diff_changes::diff_changes_step(
                     stoat,
                     match steps > 0 {
                         true => by as i32,
@@ -2953,12 +2953,12 @@ mod tests {
         );
     }
 
-    /// `changes` one-line changes under a focused overview at 120 by 24,
+    /// `changes` one-line changes under a focused changes view at 120 by 24,
     /// painted once, with the minimap in `mode`.
     ///
     /// Twenty run the document past the pane, and the width leaves room for a
     /// per-pane minimap strip.
-    fn overview_harness(mode: MinimapMode, changes: usize) -> crate::test_harness::TestHarness {
+    fn diff_changes_harness(mode: MinimapMode, changes: usize) -> crate::test_harness::TestHarness {
         let mut h = crate::test_harness::TestHarness::with_size(120, 24);
         h.stoat.settings.editor_minimap = Some(mode);
         let files: Vec<(String, String, String)> = (0..changes)
@@ -2970,27 +2970,27 @@ mod tests {
             .collect();
         h.stage_review_scenario("/repo", &files);
         h.open_file(Path::new("/repo/f00.txt"));
-        h.cover_with_overview(false);
+        h.cover_with_diff_changes(false);
         h.settle();
         let _ = h.stoat.render();
         h
     }
 
-    /// The focused overview's cursor and scroll.
-    fn overview_place(h: &crate::test_harness::TestHarness) -> (usize, usize) {
+    /// The focused changes view's cursor and scroll.
+    fn diff_changes_place(h: &crate::test_harness::TestHarness) -> (usize, usize) {
         let state = h
             .stoat
             .active_workspace()
-            .focused_overview()
-            .expect("the overview is open");
+            .focused_diff_changes()
+            .expect("the changes view is open");
         (state.cursor, state.scroll_top)
     }
 
-    /// A press on an overview row puts the cursor there, and a wheel notch over
-    /// the hunks steps it.
+    /// A press on a changes view row puts the cursor there, and a wheel notch
+    /// over the hunks steps it.
     #[test]
-    fn a_press_and_a_wheel_over_the_overview_move_its_cursor() {
-        let mut h = overview_harness(MinimapMode::Single, 20);
+    fn a_press_and_a_wheel_over_the_changes_view_move_its_cursor() {
+        let mut h = diff_changes_harness(MinimapMode::Single, 20);
         let list = {
             let ws = h.stoat.active_workspace();
             crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
@@ -3001,28 +3001,30 @@ mod tests {
             list.x + 2,
             list.y + 1,
         ));
-        let pressed = overview_place(&h);
+        let pressed = diff_changes_place(&h);
         h.stoat.update(mouse_event(
             MouseEventKind::ScrollDown,
             list.x + 2,
             list.y + 1,
         ));
-        assert_eq!((pressed, overview_place(&h)), ((1, 0), (2, 0)));
+        assert_eq!((pressed, diff_changes_place(&h)), ((1, 0), (2, 0)));
     }
 
-    /// A press on a per-pane overview's strip puts the cursor on the row under
-    /// it, scrolled toward the middle of the view, and a drag follows the
+    /// A press on a per-pane changes view's strip puts the cursor on the row
+    /// under it, scrolled toward the middle of the view, and a drag follows the
     /// pointer until the release. A wheel notch over the strip steps the
     /// cursor, as one over the rows does.
     #[test]
-    fn the_overview_strip_scrubs_its_overview() {
-        let mut h = overview_harness(MinimapMode::PerPane, 20);
+    fn the_changes_view_strip_scrubs_its_changes_view() {
+        let mut h = diff_changes_harness(MinimapMode::PerPane, 20);
         let (id, strip, rows, view) = {
             let ws = h.stoat.active_workspace();
-            let id = ws.focused_overview_id().expect("the overview is open");
-            let state = &ws.overviews[id];
+            let id = ws
+                .focused_diff_changes_id()
+                .expect("the changes view is open");
+            let state = &ws.diff_changes_views[id];
             let rows = ws
-                .overview_doc
+                .diff_changes_doc
                 .as_ref()
                 .and_then(|built| built.doc.as_deref())
                 .map_or(0, row_count);
@@ -3036,13 +3038,13 @@ mod tests {
             strip.x,
             strip.bottom() - 1,
         ));
-        let pressed = (overview_place(&h), h.stoat.minimap_drag);
+        let pressed = (diff_changes_place(&h), h.stoat.minimap_drag);
         h.stoat.update(mouse_event(
             MouseEventKind::Drag(MouseButton::Left),
             strip.x,
             strip.y,
         ));
-        let dragged = overview_place(&h);
+        let dragged = diff_changes_place(&h);
         h.stoat.update(mouse_event(
             MouseEventKind::Up(MouseButton::Left),
             strip.x,
@@ -3052,9 +3054,9 @@ mod tests {
         h.stoat
             .update(mouse_event(MouseEventKind::ScrollDown, strip.x, strip.y));
         assert_eq!(
-            (pressed, dragged, released, overview_place(&h)),
+            (pressed, dragged, released, diff_changes_place(&h)),
             (
-                ((rows - 1, rows - view), Some(MinimapDrag::Overview(id))),
+                ((rows - 1, rows - view), Some(MinimapDrag::DiffChanges(id))),
                 (top_cell_row, 0),
                 None,
                 (top_cell_row + 1, 0),
@@ -3066,34 +3068,36 @@ mod tests {
     /// scroll, as the strip the terminal draws does, so a drag held on the
     /// strip's last cell walks further down the document.
     #[test]
-    fn a_long_overview_scrubs_against_its_sliding_strip() {
-        let mut h = overview_harness(MinimapMode::PerPane, 100);
+    fn a_long_changes_view_scrubs_against_its_sliding_strip() {
+        let mut h = diff_changes_harness(MinimapMode::PerPane, 100);
         let strip = h
             .stoat
             .active_workspace()
-            .focused_overview()
+            .focused_diff_changes()
             .and_then(|state| state.minimap_rect)
             .expect("the paint reserved a strip");
         let last_cell = |kind| mouse_event(kind, strip.x, strip.bottom() - 1);
 
         h.stoat
             .update(last_cell(MouseEventKind::Down(MouseButton::Left)));
-        let pressed = overview_place(&h);
+        let pressed = diff_changes_place(&h);
         h.stoat
             .update(last_cell(MouseEventKind::Drag(MouseButton::Left)));
-        assert_eq!((pressed, overview_place(&h)), ((180, 169), (195, 177)));
+        assert_eq!((pressed, diff_changes_place(&h)), ((180, 169), (195, 177)));
     }
 
-    /// A press on the strip of an overview with no document arms the scrub
+    /// A press on the strip of a changes view with no document arms the scrub
     /// and moves nothing.
     #[test]
     fn a_strip_press_without_a_document_moves_nothing() {
-        let mut h = overview_harness(MinimapMode::PerPane, 20);
+        let mut h = diff_changes_harness(MinimapMode::PerPane, 20);
         let (id, strip) = {
             let ws = h.stoat.active_workspace_mut();
-            ws.overview_doc = None;
-            let id = ws.focused_overview_id().expect("the overview is open");
-            let strip = ws.overviews[id]
+            ws.diff_changes_doc = None;
+            let id = ws
+                .focused_diff_changes_id()
+                .expect("the changes view is open");
+            let strip = ws.diff_changes_views[id]
                 .minimap_rect
                 .expect("the paint reserved a strip");
             (id, strip)
@@ -3105,16 +3109,16 @@ mod tests {
             strip.bottom() - 1,
         ));
         assert_eq!(
-            (overview_place(&h), h.stoat.minimap_drag),
-            ((0, 0), Some(MinimapDrag::Overview(id))),
+            (diff_changes_place(&h), h.stoat.minimap_drag),
+            ((0, 0), Some(MinimapDrag::DiffChanges(id))),
         );
     }
 
-    /// The single band scrubs a focused overview, as it scrubs a focused
+    /// The single band scrubs a focused changes view, as it scrubs a focused
     /// editor.
     #[test]
-    fn the_single_band_scrubs_a_focused_overview() {
-        let mut h = overview_harness(MinimapMode::Single, 20);
+    fn the_single_band_scrubs_a_focused_changes_view() {
+        let mut h = diff_changes_harness(MinimapMode::Single, 20);
         let band = h
             .stoat
             .single_minimap_rect
@@ -3122,8 +3126,8 @@ mod tests {
         let id = h
             .stoat
             .active_workspace()
-            .focused_overview_id()
-            .expect("the overview is open");
+            .focused_diff_changes_id()
+            .expect("the changes view is open");
 
         h.stoat.update(mouse_event(
             MouseEventKind::Down(MouseButton::Left),
@@ -3131,10 +3135,10 @@ mod tests {
             band.y,
         ));
         assert_eq!(
-            (overview_place(&h), h.stoat.minimap_drag),
+            (diff_changes_place(&h), h.stoat.minimap_drag),
             (
                 (usize::from(LINES_PER_CELL / 2), 0),
-                Some(MinimapDrag::Overview(id))
+                Some(MinimapDrag::DiffChanges(id))
             ),
         );
     }

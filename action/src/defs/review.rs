@@ -20,7 +20,7 @@ define_action_def!(
     ActionKind::DiffFiles,
     "open the per-file diff of working-tree changes",
     "Open the per-file layout of the diff, which shows one changed file at a \
-     time where DiffOverview shows every hunk in one list. It opens the first \
+     time where DiffChanges shows every hunk in one list. It opens the first \
      changed file with a structural diff against the working tree's own \
      base, or against the given revision. That base is the index, \
      with what the index holds over HEAD marked staged in the left column, \

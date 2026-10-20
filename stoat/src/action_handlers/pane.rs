@@ -131,18 +131,18 @@ enum FullWindowScreen {
     Commits,
     Conflict,
     Diff,
-    Overview,
+    DiffChanges,
 }
 
 /// Close the full-window screen in the focused pane, and report whether one was
 /// there.
 ///
-/// The diff view, the commits list, the overview, and the conflict view each
-/// widen their pane over the tab, and the diff view includes a latched review
-/// pane and a pair diff. A split beside such a screen or a focus move off it
-/// leaves the screen narrow in a layout it was not drawn for. So a layout
-/// action on a screen closes the screen, reports it in the status row, and
-/// does nothing else.
+/// The diff view, the commits list, the changes view, and the conflict view
+/// each widen their pane over the tab, and the diff view includes a latched
+/// review pane and a pair diff. A split beside such a screen or a focus move
+/// off it leaves the screen narrow in a layout it was not drawn for. So a
+/// layout action on a screen closes the screen, reports it in the status row,
+/// and does nothing else.
 ///
 /// One layer closes per press. A diff opened from a commits list returns to the
 /// list, as the commits command peels it, and the next press closes the list.
@@ -163,9 +163,9 @@ pub(super) fn close_full_window_screen(stoat: &mut Stoat) -> bool {
             close_diff_screen(stoat);
             "diff closed"
         },
-        FullWindowScreen::Overview => {
-            super::overview::close_overview(stoat);
-            "overview closed"
+        FullWindowScreen::DiffChanges => {
+            super::diff_changes::close_diff_changes(stoat);
+            "changes closed"
         },
     };
     stoat.set_status(status);
@@ -181,7 +181,7 @@ fn focused_screen(ws: &Workspace) -> Option<FullWindowScreen> {
     let pane = ws.panes.pane(ws.panes.focus());
     match pane.view {
         View::Commits(_) => Some(FullWindowScreen::Commits),
-        View::Overview(_) => Some(FullWindowScreen::Overview),
+        View::DiffChanges(_) => Some(FullWindowScreen::DiffChanges),
         View::Editor(id) => {
             let editor = ws.editors.get(id)?;
             if editor.conflict_view.is_some() {
@@ -216,7 +216,7 @@ fn close_diff_screen(stoat: &mut Stoat) {
 /// remains); in that case no state is touched.
 ///
 /// A shell the pane covered ends with it, unless another view shows it. A
-/// commits list or an overview the pane covered ends with it too, since no
+/// commits list or a changes view the pane covered ends with it too, since no
 /// other pane holds one.
 pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
     let executor = stoat.executor.clone();
@@ -240,10 +240,10 @@ pub(crate) fn close_pane_by_id(stoat: &mut Stoat, id: PaneId) -> bool {
         Some(View::Commits(list)) => {
             dispose_view(ws, &executor, View::Commits(list), EditorDisposal::Remove)
         },
-        Some(View::Overview(overview)) => dispose_view(
+        Some(View::DiffChanges(diff_changes)) => dispose_view(
             ws,
             &executor,
-            View::Overview(overview),
+            View::DiffChanges(diff_changes),
             EditorDisposal::Remove,
         ),
         _ => {},
@@ -383,9 +383,13 @@ pub(crate) fn dispose_view(
             Some(covered) => dispose_view(ws, executor, covered, EditorDisposal::GcIfUnreferenced),
             None => {},
         },
-        // The view the overview covered is reachable through the overview
-        // alone, so it goes too, as a list's does.
-        View::Overview(id) => match ws.overviews.remove(id).and_then(|state| state.covered) {
+        // The view the changes view covered is reachable through the changes
+        // view alone, so it goes too, as a list's does.
+        View::DiffChanges(id) => match ws
+            .diff_changes_views
+            .remove(id)
+            .and_then(|state| state.covered)
+        {
             Some(View::Agent(term_id) | View::Terminal(term_id)) if ws.term_shown(term_id) => {},
             Some(covered) => dispose_view(ws, executor, covered, EditorDisposal::GcIfUnreferenced),
             None => {},
@@ -457,10 +461,10 @@ pub(crate) fn retire_parked_pane(
         Some(View::Commits(list)) => {
             dispose_view(ws, executor, View::Commits(list), EditorDisposal::Remove)
         },
-        Some(View::Overview(overview)) => dispose_view(
+        Some(View::DiffChanges(diff_changes)) => dispose_view(
             ws,
             executor,
-            View::Overview(overview),
+            View::DiffChanges(diff_changes),
             EditorDisposal::Remove,
         ),
         _ => {},
@@ -489,7 +493,7 @@ pub(crate) fn view_is_live(ws: &Workspace, view: Option<&View>) -> bool {
         Some(View::Run(id)) => ws.runs.contains_key(*id),
         Some(View::Agent(id) | View::Terminal(id)) => ws.terms.contains_key(*id),
         Some(View::Commits(id)) => ws.commit_lists.contains_key(*id),
-        Some(View::Overview(id)) => ws.overviews.contains_key(*id),
+        Some(View::DiffChanges(id)) => ws.diff_changes_views.contains_key(*id),
         // An image pane refers to nothing that goes away.
         Some(View::Image { .. }) => true,
         Some(View::Label(_)) | None => false,
@@ -522,10 +526,10 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
         }
         return UpdateEffect::Redraw;
     }
-    // An overview belongs to one pane too, for the same reason.
-    if let View::Overview(source) = ws.panes.pane(new_pane_id).view {
+    // A changes view belongs to one pane too, for the same reason.
+    if let View::DiffChanges(source) = ws.panes.pane(new_pane_id).view {
         ws.panes.pane_mut(new_pane_id).view = scratch_editor_view(ws, executor);
-        if let Some(state) = ws.overviews.get_mut(source) {
+        if let Some(state) = ws.diff_changes_views.get_mut(source) {
             state.mode = "normal".into();
         }
         return UpdateEffect::Redraw;

@@ -5,6 +5,7 @@ pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
 pub(crate) mod conflict_view;
+pub(crate) mod diff_changes;
 pub(crate) mod diff_nav;
 pub(crate) mod file;
 mod file_finder;
@@ -16,7 +17,6 @@ pub(crate) mod macro_recording;
 pub(crate) mod marks;
 pub(crate) mod move_nav;
 pub(crate) mod movement;
-pub(crate) mod overview;
 mod palette;
 mod pane;
 pub(crate) mod picker;
@@ -1130,31 +1130,35 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
-        ActionKind::DiffOverview => overview::toggle_overview(stoat),
-        ActionKind::CloseOverview => overview::close_overview(stoat),
-        ActionKind::OverviewNext => {
+        ActionKind::DiffChanges => diff_changes::toggle_diff_changes(stoat),
+        ActionKind::CloseDiffChanges => diff_changes::close_diff_changes(stoat),
+        ActionKind::DiffChangesNext => {
             let step = arming_step(stoat);
-            overview::overview_step(stoat, step)
+            diff_changes::diff_changes_step(stoat, step)
         },
-        ActionKind::OverviewPrev => {
+        ActionKind::DiffChangesPrev => {
             let step = arming_step(stoat);
-            overview::overview_step(stoat, -step)
+            diff_changes::diff_changes_step(stoat, -step)
         },
-        ActionKind::OverviewNextChunk => {
-            overview::overview_chunk_step(stoat, movement::ChangeDir::Next)
+        ActionKind::DiffChangesNextChunk => {
+            diff_changes::diff_changes_chunk_step(stoat, movement::ChangeDir::Next)
         },
-        ActionKind::OverviewPrevChunk => {
-            overview::overview_chunk_step(stoat, movement::ChangeDir::Prev)
+        ActionKind::DiffChangesPrevChunk => {
+            diff_changes::diff_changes_chunk_step(stoat, movement::ChangeDir::Prev)
         },
-        ActionKind::OverviewPageDown => overview::overview_page(stoat, view::PageDir::Down),
-        ActionKind::OverviewPageUp => overview::overview_page(stoat, view::PageDir::Up),
-        ActionKind::OverviewHalfPageDown => {
-            overview::overview_half_page(stoat, view::PageDir::Down)
+        ActionKind::DiffChangesPageDown => {
+            diff_changes::diff_changes_page(stoat, view::PageDir::Down)
         },
-        ActionKind::OverviewHalfPageUp => overview::overview_half_page(stoat, view::PageDir::Up),
-        ActionKind::OverviewFirst => overview::overview_edge(stoat, false),
-        ActionKind::OverviewLast => overview::overview_edge(stoat, true),
-        ActionKind::OverviewOpen => overview::overview_open(stoat),
+        ActionKind::DiffChangesPageUp => diff_changes::diff_changes_page(stoat, view::PageDir::Up),
+        ActionKind::DiffChangesHalfPageDown => {
+            diff_changes::diff_changes_half_page(stoat, view::PageDir::Down)
+        },
+        ActionKind::DiffChangesHalfPageUp => {
+            diff_changes::diff_changes_half_page(stoat, view::PageDir::Up)
+        },
+        ActionKind::DiffChangesFirst => diff_changes::diff_changes_edge(stoat, false),
+        ActionKind::DiffChangesLast => diff_changes::diff_changes_edge(stoat, true),
+        ActionKind::DiffChangesOpen => diff_changes::diff_changes_open(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
         ActionKind::ExecuteRebase => rebase::execute_rebase(stoat),
@@ -1531,11 +1535,12 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             // new palette. Only the colors move, and they ride the strip
             // declaration on the next frame.
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
-            // An overview document bakes its colors at build, and the overview
-            // strip resolves them by color against the class table. A rebuild
-            // bakes the new colors, which the rebuilt table knows.
+            // A changes view document bakes its colors at build, and the
+            // changes view strip resolves them by color against the class
+            // table. A rebuild bakes the new colors, which the rebuilt table
+            // knows.
             for (_, ws) in stoat.workspaces.iter_mut() {
-                ws.overview_epoch += 1;
+                ws.diff_changes_epoch += 1;
             }
             stoat.theme_epoch += 1;
             stoat.paint_generation += 1;

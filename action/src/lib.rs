@@ -12,9 +12,9 @@ pub use action::{Action, ActionDef, ActionPriority};
 // the moment an action is added, and a consumer that fails to find a name at the
 // root deep-paths around the gap instead of noticing it.
 pub use defs::{
-    agent::*, app::*, commits::*, conflict::*, dump::*, editor::*, file::*, file_finder::*,
-    help::*, lsp::*, overview::*, palette::*, pane::*, picker::*, prompt::*, rebase::*, review::*,
-    run::*, set_theme::*, tab::*, terminal::*, walkthrough::*, workspace::*,
+    agent::*, app::*, commits::*, conflict::*, diff_changes::*, dump::*, editor::*, file::*,
+    file_finder::*, help::*, lsp::*, palette::*, pane::*, picker::*, prompt::*, rebase::*,
+    review::*, run::*, set_theme::*, tab::*, terminal::*, walkthrough::*, workspace::*,
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue, ValueSource};

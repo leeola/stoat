@@ -20,8 +20,8 @@ use stoat_text::{
     Rope,
 };
 
+pub(crate) mod diff_changes;
 pub(crate) mod emit;
-pub(crate) mod overview;
 
 /// Minimap columns a line is summarized into, matching the strip's declared
 /// `max_columns`. Display columns past this are dropped.
@@ -173,7 +173,7 @@ pub enum EdgeClass {
     Error,
     Warning,
     Info,
-    /// A chunk header row, in the color the commit preview and the overview
+    /// A chunk header row, in the color the commit preview and the changes view
     /// paint chunk headers in.
     Header,
 }
