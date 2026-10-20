@@ -5,7 +5,7 @@
 //! screen. The keys that cross that line are the same `s` and `S` that drive
 //! the git index elsewhere, so this is where they go instead.
 
-use super::review::{self, HunkStage, StageOutcome};
+use super::review::{self, StageOutcome};
 use crate::{
     app::Stoat, diff_map::line_starts, host::GitRepo, rebase::RebasePause,
     review_apply::base_line_range, review_walk::ReturnRef, workspace::diff::DiffBase,
@@ -126,10 +126,10 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo, path: &Path) -> Ame
 /// between the base and the commit, and taking it out leaves it on disk as an
 /// unstaged change.
 ///
-/// [`HunkStage::Toggle`] has no staged-state signal to read, so it takes
-/// whichever side holds a hunk at the cursor. It tries the amend-in direction
-/// first, which is the preference the index path shows by trying the forward
-/// patch before the reverse one.
+/// The press has no staged-state signal to read, so the cursor's hunk picks the
+/// direction. The amend goes in when that hunk is the working tree's, and out
+/// when it is the commit's own. The amend-in direction goes first, as the index
+/// path tries the forward patch before the reverse one.
 ///
 /// Neither direction writes the working tree, which is what makes an
 /// amended-out hunk read as unstaged rather than disappear.
@@ -141,7 +141,6 @@ pub(super) fn amended_file(
     path: &Path,
     buffer_text: &str,
     cursor_row: u32,
-    mode: HunkStage,
     unit: AmendUnit,
 ) -> Result<(String, &'static str), &'static str> {
     // Read from the commit rather than from HEAD. They name the same content
@@ -174,14 +173,10 @@ pub(super) fn amended_file(
         )
     };
     let (into, out_of, nothing) = unit.messages();
-    let amended = match mode {
-        HunkStage::Stage => amend_in().map(|text| (text, into)),
-        HunkStage::Unstage => amend_out().map(|text| (text, out_of)),
-        HunkStage::Toggle => amend_in()
-            .map(|text| (text, into))
-            .or_else(|| amend_out().map(|text| (text, out_of))),
-    };
-    amended.ok_or(nothing)
+    amend_in()
+        .map(|text| (text, into))
+        .or_else(|| amend_out().map(|text| (text, out_of)))
+        .ok_or(nothing)
 }
 
 /// Write `amended` into the commit at `rel`, rewrite the commit, and carry the
@@ -495,7 +490,7 @@ mod tests {
         let mut h = walking_the_tip();
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         let text = h.focused_buffer_text();
@@ -514,7 +509,7 @@ mod tests {
         let mut h = walking_the_tip();
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         let repo = h
@@ -546,7 +541,7 @@ mod tests {
         let mut h = walking_the_tip();
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         let repo = h
@@ -586,7 +581,7 @@ mod tests {
         }
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewPrevCommit);
         h.settle();
 
@@ -621,7 +616,7 @@ mod tests {
         let mut h = walking_a_root_commit("a\nb\nc\n");
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -646,7 +641,7 @@ mod tests {
             .return_ref = ReturnRef::Detached("c1".to_string());
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -680,7 +675,7 @@ mod tests {
         }
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -708,7 +703,7 @@ mod tests {
         }
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         let repo = h
@@ -732,7 +727,7 @@ mod tests {
 
         for row in [2, 4] {
             cursor_to(&mut h, row);
-            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
             h.settle();
         }
 
@@ -758,7 +753,7 @@ mod tests {
 
         for row in [2, 4] {
             cursor_to(&mut h, row);
-            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
             h.settle();
         }
 
@@ -786,7 +781,7 @@ mod tests {
         cursor_to(&mut h, 2);
         git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
         h.settle();
 
@@ -842,7 +837,7 @@ mod tests {
         }
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -870,7 +865,7 @@ mod tests {
         );
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -891,7 +886,7 @@ mod tests {
         cursor_to(&mut h, 2);
         git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.stoat
             .active_workspace_mut()
             .set_diff_base(Some(DiffBase::parent_of("c3", Some("c2".to_string()))));
@@ -948,7 +943,7 @@ mod tests {
         h.seed_focused_buffer("Z\na\nb\nX\n");
         cursor_to(&mut h, 0);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -966,7 +961,7 @@ mod tests {
         h.seed_focused_buffer("a\nP\nQ\nd\n");
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -983,7 +978,7 @@ mod tests {
         let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -1007,7 +1002,7 @@ mod tests {
             "the map starts current, so staling it is the amend's doing",
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert!(
@@ -1024,7 +1019,7 @@ mod tests {
         let mut h = walking_the_tip_of("a\nb\nc\nd\n", "a\nX\nY\nd\n");
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -1042,7 +1037,7 @@ mod tests {
         h.seed_focused_buffer("a\nP\nQ\nd\n");
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -1061,7 +1056,7 @@ mod tests {
         h.seed_focused_buffer("a\nX\nY\nN1\nN2\nd\n");
         cursor_to(&mut h, 4);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -1085,7 +1080,7 @@ mod tests {
         );
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -1111,7 +1106,7 @@ mod tests {
         h.settle_diff_jobs();
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -1128,7 +1123,7 @@ mod tests {
         h.seed_focused_buffer("y\n  a\n");
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(committed(&h).as_deref(), Some("x1\nx2\n  a\n"));
@@ -1142,7 +1137,7 @@ mod tests {
         h.seed_focused_buffer("a\nd\n");
         cursor_to(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(committed(&h).as_deref(), Some("a\nc\nd\n"));
@@ -1156,7 +1151,7 @@ mod tests {
 
         for row in [1, 2] {
             cursor_to(&mut h, row);
-            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
             h.settle();
         }
 
@@ -1179,7 +1174,7 @@ mod tests {
             h.type_keys("O n e w escape");
             cursor_to(&mut h, row);
 
-            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
             h.settle();
             (committed(&h), h.stoat.pending_message.clone())
         };
@@ -1214,7 +1209,7 @@ mod tests {
         h.settle_diff_jobs();
         cursor_to(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(

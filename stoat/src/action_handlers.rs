@@ -493,12 +493,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             conflict_view::conflict_apply(stoat);
             UpdateEffect::Redraw
         },
-        ActionKind::StageHunk => review::stage_hunk(stoat, review::HunkStage::Stage),
-        ActionKind::UnstageHunk => review::stage_hunk(stoat, review::HunkStage::Unstage),
-        ActionKind::ToggleStageHunk => review::stage_hunk(stoat, review::HunkStage::Toggle),
-        ActionKind::StageLine => review::stage_line(stoat, review::HunkStage::Stage),
-        ActionKind::UnstageLine => review::stage_line(stoat, review::HunkStage::Unstage),
-        ActionKind::ToggleStageLine => review::stage_line(stoat, review::HunkStage::Toggle),
+        ActionKind::ToggleStageHunk => review::stage_hunk(stoat),
+        ActionKind::ToggleStageLine => review::stage_line(stoat),
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => {

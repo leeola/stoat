@@ -808,14 +808,6 @@ fn editor_shows_changes(stoat: &mut Stoat, editor_id: EditorId) -> bool {
         })
 }
 
-/// How [`stage_hunk`] acts on the hunk under the cursor.
-#[derive(Clone, Copy, Debug)]
-pub(super) enum HunkStage {
-    Stage,
-    Unstage,
-    Toggle,
-}
-
 /// What a staging press reports when the review base moved between the press
 /// and its turn in the git queue.
 ///
@@ -840,17 +832,17 @@ pub(super) enum StageOutcome {
     },
 }
 
-/// Stage, unstage, or toggle the git-index state of the diff hunk under the
-/// cursor in the focused editor.
+/// Toggle the git-index state of the diff hunk under the cursor in the focused
+/// editor.
 ///
-/// Staging diffs the git index against the live buffer and takes the change the
-/// gutter draws under the cursor, so the staged unit is the one drawn there.
-/// That is the hunk whose buffer rows hold the cursor. Inside a hunk the tree
-/// pass narrowed, it is the marked run under the cursor, staged against the
-/// index the way a line is. Unstaging diffs the index against HEAD at the
-/// cursor's index rows, and a toggle stages an unstaged change under the cursor
-/// and unstages a staged one. Each reads the index, so a change lands whatever
-/// the index holds above it.
+/// The press stages the hunk when any of it is unstaged, and otherwise unstages
+/// it. Staging diffs the git index against the live buffer and takes the change
+/// the gutter draws under the cursor, so the staged unit is the one drawn
+/// there. That is the hunk whose buffer rows hold the cursor. Inside a hunk the
+/// tree pass narrowed, it is the marked run under the cursor, staged against
+/// the index the way a line is. Unstaging diffs the index against HEAD at the
+/// cursor's index rows. Each reads the index, so a change lands whatever the
+/// index holds above it.
 ///
 /// The action works in any editor view on a file in the repo's workdir. A press
 /// on an untracked file's hunk adds the file to the index. A missing repo, an
@@ -860,14 +852,15 @@ pub(super) enum StageOutcome {
 /// The press captures the cursor row, the text, and the review base. The diff
 /// and the write run as a queued git job, and the status and the gutter follow
 /// when the job lands.
-pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
-    queue_stage(stoat, mode, AmendUnit::Hunk)
+pub(super) fn stage_hunk(stoat: &mut Stoat) -> UpdateEffect {
+    queue_stage(stoat, AmendUnit::Hunk)
 }
 
-/// Stage, unstage, or toggle the git-index state of only the cursor line's
-/// change, in the focused editor on any file in the repo's workdir.
+/// Toggle the git-index state of only the cursor line's change, in the focused
+/// editor on any file in the repo's workdir.
 ///
-/// The emitted patch is restricted to the cursor's line via
+/// The press stages the line when any of its change is unstaged, and otherwise
+/// unstages it. The emitted patch is restricted to the cursor's line via
 /// [`line_restricted_rows`], and staging diffs the git index (not HEAD) against
 /// the live buffer, so sequential single-line stages inside one hunk compose. A
 /// press on an untracked file's line adds the file to the index with that line
@@ -881,8 +874,8 @@ pub(super) fn stage_hunk(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 ///
 /// The press captures the cursor row, the text, and the review base. The status
 /// and the gutter follow when the queued git job lands.
-pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
-    queue_stage(stoat, mode, AmendUnit::Line)
+pub(super) fn stage_line(stoat: &mut Stoat) -> UpdateEffect {
+    queue_stage(stoat, AmendUnit::Line)
 }
 
 /// Capture a staging press and queue its git work.
@@ -894,7 +887,7 @@ pub(super) fn stage_line(stoat: &mut Stoat, mode: HunkStage) -> UpdateEffect {
 /// file. The review base is read now and again at the job's turn. A walk step
 /// or a `:review-done` checkout that lands ahead of the job moves the tree the
 /// captured text and row describe.
-fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEffect {
+fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
     let Some((_editor_id, buffer_id)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
     };
@@ -944,7 +937,6 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
         path = %path.display(),
         cursor_row,
         unit = ?unit,
-        mode = ?mode,
         drawn = ?drawn,
         sides = ?diff::diff_sides(stoat.active_workspace().diff_base()),
         "staging press"
@@ -998,20 +990,17 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
             let buffer_text = text.to_string();
             let rel = path.strip_prefix(&git_root).unwrap_or(&path);
             let outcome = match (target, unit) {
-                (None, AmendUnit::Hunk) => {
-                    index_hunk(&*repo, &path, rel, &buffer_text, cursor_row, mode)
-                },
+                (None, AmendUnit::Hunk) => index_hunk(&*repo, &path, rel, &buffer_text, cursor_row),
                 (None, AmendUnit::Line) => index_rows(
                     &*repo,
                     &path,
                     rel,
                     &buffer_text,
                     cursor_row..cursor_row + 1,
-                    mode,
                     LINE_MESSAGES,
                 ),
                 (None, AmendUnit::Rows(rows)) => {
-                    index_rows(&*repo, &path, rel, &buffer_text, rows, mode, RUN_MESSAGES)
+                    index_rows(&*repo, &path, rel, &buffer_text, rows, RUN_MESSAGES)
                 },
                 (Some(target), unit) => match amend::amended_file(
                     &*repo,
@@ -1019,7 +1008,6 @@ fn queue_stage(stoat: &mut Stoat, mode: HunkStage, unit: AmendUnit) -> UpdateEff
                     &path,
                     &buffer_text,
                     cursor_row,
-                    mode,
                     unit,
                 ) {
                     Ok((amended, message)) => {
@@ -1146,6 +1134,7 @@ fn land_stage(stoat: &mut Stoat, buffer_id: BufferId, path: &Path, outcome: Stag
 
 /// Apply the hunk under `cursor_row` to the index, on whatever thread calls.
 ///
+/// The hunk stages when a forward patch exists, and unstages otherwise.
 /// Staging diffs the index against `buffer_text`, and unstaging diffs the index
 /// against HEAD, so the patch lands whatever the index holds above the hunk.
 /// See [`stage_hunk`].
@@ -1155,7 +1144,6 @@ fn index_hunk(
     rel: &Path,
     buffer_text: &str,
     cursor_row: u32,
-    mode: HunkStage,
 ) -> StageOutcome {
     let nothing = || StageOutcome::Unchanged("no hunk under the cursor".to_string());
     let Some(texts) = read_staging_texts(repo, path, buffer_text) else {
@@ -1172,13 +1160,9 @@ fn index_hunk(
             cursor_row,
         )
     };
-    let patch_and_message = match mode {
-        HunkStage::Stage => stage().map(|patch| (patch, "staged hunk")),
-        HunkStage::Unstage => unstage().map(|patch| (patch, "unstaged hunk")),
-        HunkStage::Toggle => stage()
-            .map(|patch| (patch, "staged hunk"))
-            .or_else(|| unstage().map(|patch| (patch, "unstaged hunk"))),
-    };
+    let patch_and_message = stage()
+        .map(|patch| (patch, "staged hunk"))
+        .or_else(|| unstage().map(|patch| (patch, "unstaged hunk")));
 
     let Some((patch, message)) = patch_and_message else {
         return nothing();
@@ -1362,7 +1346,8 @@ const RUN_MESSAGES: (&str, &str, &str) =
 /// Apply the change on buffer `rows` to the index, on whatever thread calls,
 /// and report it with the `(staged, unstaged, nothing)` statuses.
 ///
-/// The rows are staged against the index rather than HEAD, so sequential
+/// The rows stage when a forward patch exists, and unstage otherwise. They
+/// are staged against the index rather than HEAD, so sequential
 /// stages inside one hunk compose. Rows that meet more than one hunk move with
 /// one patch per hunk, applied in order until one fails. See [`stage_line`]
 /// and [`stage_hunk`].
@@ -1372,7 +1357,6 @@ fn index_rows(
     rel: &Path,
     buffer_text: &str,
     rows: Range<u32>,
-    mode: HunkStage,
     (staged, unstaged, nothing): (&'static str, &'static str, &'static str),
 ) -> StageOutcome {
     let unchanged = || StageOutcome::Unchanged(nothing.to_string());
@@ -1395,13 +1379,9 @@ fn index_rows(
         ))
         .filter(|patches| !patches.is_empty())
     };
-    let patches_and_message = match mode {
-        HunkStage::Stage => stage().map(|patches| (patches, staged)),
-        HunkStage::Unstage => unstage().map(|patches| (patches, unstaged)),
-        HunkStage::Toggle => stage()
-            .map(|patches| (patches, staged))
-            .or_else(|| unstage().map(|patches| (patches, unstaged))),
-    };
+    let patches_and_message = stage()
+        .map(|patches| (patches, staged))
+        .or_else(|| unstage().map(|patches| (patches, unstaged)));
 
     let Some((patches, message)) = patches_and_message else {
         return unchanged();
@@ -3091,7 +3071,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_two_hunk_file_at(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3130,7 +3110,7 @@ mod tests {
             crate::action_handlers::movement::set_cursor_row(editor, 1);
         }
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3151,7 +3131,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_two_hunk_file_at(&mut h, 6);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3224,7 +3204,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_reindent_at(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         assert_eq!(h.fake_git().applied_patches(&workdir), [REINDENT_IF_STAGE]);
     }
@@ -3237,7 +3217,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_reindent_at(&mut h, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -3262,7 +3242,7 @@ mod tests {
             .add_repo(&workdir)
             .fail_apply_with("index locked");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -3278,7 +3258,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_reindent_at(&mut h, 5);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         assert_eq!(
             h.fake_git().applied_patches(&workdir),
@@ -3324,7 +3304,7 @@ mod tests {
     const REINDENT_IF_STOP_UNSTAGE: &str = "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,7 +1,6 @@\n fn f() {\n-    if x {\n-        let a = 1;\n+    let a = 1;\n-        let b = 2;\n+    let b = 2;\n         let c = 4;\n     }\n }\n";
 
     /// Under the HEAD base a staged reindent shows as a narrowed hunk, so
-    /// `UnstageHunk` on its first run unstages that run's stop alone.
+    /// `ToggleStageHunk` on its first run unstages that run's stop alone.
     #[test]
     fn unstaging_a_narrowed_hunk_moves_the_stop_under_the_cursor() {
         let mut h = TestHarness::with_size(80, 14);
@@ -3342,7 +3322,7 @@ mod tests {
             crate::action_handlers::movement::set_cursor_row(editor, 1);
         }
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -3385,7 +3365,7 @@ mod tests {
             crate::action_handlers::movement::set_cursor_row(editor, 1);
         }
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -3402,7 +3382,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_settled_at(&mut h, "a.txt", "a\nb\nc\nd\n", "a\nX\nd\n", 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         assert_eq!(
             h.fake_git().applied_patches(&workdir),
@@ -3462,7 +3442,7 @@ mod tests {
     #[test]
     fn a_line_below_an_unstaged_hunk_stages_at_its_index_row() {
         assert_eq!(
-            press_on_the_second_hunk(SHIFT_HEAD, &stoat_action::StageLine),
+            press_on_the_second_hunk(SHIFT_HEAD, &stoat_action::ToggleStageLine),
             SECOND_HUNK_STAGE
         );
     }
@@ -3472,7 +3452,7 @@ mod tests {
     #[test]
     fn a_hunk_below_an_unstaged_hunk_stages_at_its_index_row() {
         assert_eq!(
-            press_on_the_second_hunk(SHIFT_HEAD, &stoat_action::StageHunk),
+            press_on_the_second_hunk(SHIFT_HEAD, &stoat_action::ToggleStageHunk),
             SECOND_HUNK_STAGE
         );
     }
@@ -3483,7 +3463,10 @@ mod tests {
     #[test]
     fn a_hunk_below_a_staged_hunk_stages_at_its_index_row() {
         assert_eq!(
-            press_on_the_second_hunk("a\nZ1\nZ2\nc\nd\ne\nf\ng\nh\n", &stoat_action::StageHunk),
+            press_on_the_second_hunk(
+                "a\nZ1\nZ2\nc\nd\ne\nf\ng\nh\n",
+                &stoat_action::ToggleStageHunk
+            ),
             "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -5,5 +5,5 @@\n d\n e\n f\n-g\n+Y\n h\n",
         );
     }
@@ -3493,7 +3476,7 @@ mod tests {
     /// press stages the line the cursor is drawn on.
     #[test]
     fn a_cursor_on_a_lines_last_cell_stages_that_line() {
-        let patch = press_with_cursor(SHIFT_HEAD, &stoat_action::StageHunk, |h| {
+        let patch = press_with_cursor(SHIFT_HEAD, &stoat_action::ToggleStageHunk, |h| {
             let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
             let snapshot = editor.display_map.snapshot();
             let bs = snapshot.buffer_snapshot();
@@ -3507,7 +3490,7 @@ mod tests {
     /// press stages the selected line.
     #[test]
     fn a_line_selection_stages_the_selected_line() {
-        let patch = press_with_cursor(SHIFT_HEAD, &stoat_action::StageLine, |h| {
+        let patch = press_with_cursor(SHIFT_HEAD, &stoat_action::ToggleStageLine, |h| {
             let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
             crate::action_handlers::movement::set_cursor_row(editor, 7);
             h.type_keys("x");
@@ -3518,7 +3501,7 @@ mod tests {
     #[test]
     fn a_hunk_below_a_staged_hunk_unstages_at_its_index_row() {
         assert_eq!(
-            press_on_the_second_hunk(SHIFT_BUFFER, &stoat_action::UnstageHunk),
+            press_on_the_second_hunk(SHIFT_BUFFER, &stoat_action::ToggleStageHunk),
             SECOND_HUNK_UNSTAGE
         );
     }
@@ -3550,7 +3533,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_two_hunk_file_at(&mut h, 3);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert_eq!(
@@ -3579,7 +3562,7 @@ mod tests {
             crate::action_handlers::movement::set_cursor_row(editor, 2);
         }
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3604,7 +3587,7 @@ mod tests {
             crate::action_handlers::movement::set_cursor_row(editor, 2);
         }
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3640,7 +3623,7 @@ mod tests {
             "the walk lands on the row after the removed line"
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3656,7 +3639,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3667,6 +3650,59 @@ mod tests {
         );
         assert!(patch.contains("-c\n"), "removes the base line: {patch}");
         assert!(patch.contains("+X\n"), "adds the buffer line: {patch}");
+    }
+
+    /// A press on a hunk the index lacks stages it, and a press once the index
+    /// holds it unstages it, so two presses send the forward patch and then its
+    /// reverse.
+    #[test]
+    fn a_second_toggle_on_a_staged_hunk_sends_the_reverse_patch() {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = open_git_file_at_cursor(&mut h, 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
+        h.settle();
+        h.fake_git()
+            .add_repo(&workdir)
+            .index_file("a.rs", "a\nb\nX\nd\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
+
+        let patch = |from: &str, to: &str| {
+            format!(
+                "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n\
+                 @@ -1,4 +1,4 @@\n a\n b\n-{from}\n+{to}\n d\n"
+            )
+        };
+        assert_eq!(
+            h.fake_git().applied_patches(&workdir),
+            [patch("c", "X"), patch("X", "c")],
+        );
+    }
+
+    /// A line with a staged edit and an unstaged edit on top of it holds both
+    /// a forward and a reverse patch. Each toggle prefers the forward one, so a
+    /// partly staged hunk or line stages its rest.
+    #[test]
+    fn a_partly_staged_change_stages_its_rest() {
+        const FORWARD: &str =
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n a\n-B\n+BB\n c\n";
+        let pressed = |action: &dyn Action| {
+            let mut h = TestHarness::with_size(80, 14);
+            h.stage_index_scenario("/repo", &[("a.rs", "a\nb\nc\n", "a\nB\nc\n", "a\nBB\nc\n")]);
+            h.open_file(Path::new("/repo/a.rs"));
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            crate::action_handlers::movement::set_cursor_row(editor, 1);
+            crate::action_handlers::dispatch(&mut h.stoat, action);
+            h.fake_git().applied_patches(Path::new("/repo"))
+        };
+
+        assert_eq!(
+            [
+                pressed(&stoat_action::ToggleStageHunk),
+                pressed(&stoat_action::ToggleStageLine),
+            ],
+            [[FORWARD], [FORWARD]],
+        );
     }
 
     /// The tree pass marks the changed call alone, so the blank row added below
@@ -3683,7 +3719,7 @@ mod tests {
             1,
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         assert_eq!(
             h.fake_git().applied_patches(&workdir),
@@ -3700,7 +3736,7 @@ mod tests {
         let workdir = open_git_file_at_cursor(&mut h, 2);
         let before = h.blocking_calls();
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         assert_eq!(
             (
                 h.blocking_calls() - before,
@@ -3751,8 +3787,8 @@ mod tests {
         let whole = "@@ -0,0 +1,2 @@\n+x\n+y\n";
         assert_eq!(
             [
-                press_on_untracked("fresh.rs", &stoat_action::StageHunk),
-                press_on_untracked("fresh.txt", &stoat_action::StageHunk),
+                press_on_untracked("fresh.rs", &stoat_action::ToggleStageHunk),
+                press_on_untracked("fresh.txt", &stoat_action::ToggleStageHunk),
             ],
             [
                 (
@@ -3772,7 +3808,7 @@ mod tests {
     #[test]
     fn staging_an_untracked_file_s_line_adds_that_line_alone() {
         assert_eq!(
-            press_on_untracked("fresh.rs", &stoat_action::StageLine),
+            press_on_untracked("fresh.rs", &stoat_action::ToggleStageLine),
             (
                 vec![creating_patch("fresh.rs", "@@ -0,0 +1,1 @@\n+x\n")],
                 Some("staged line".to_string())
@@ -3792,7 +3828,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "exactly one patch applied: {patches:?}");
@@ -3822,7 +3858,7 @@ mod tests {
         h.fake_git().add_repo("/work").index_file("new.rs", "a\n");
 
         assert_eq!(
-            press_in(&mut h, "new.rs", 1, &stoat_action::StageHunk),
+            press_in(&mut h, "new.rs", 1, &stoat_action::ToggleStageHunk),
             ["diff --git a/new.rs b/new.rs\n--- a/new.rs\n+++ b/new.rs\n@@ -1,1 +1,2 @@\n a\n+b\n"],
         );
     }
@@ -3835,7 +3871,7 @@ mod tests {
         h.stage_index_scenario("/work", &[("a.rs", "", "x\n", "x\n")]);
 
         assert_eq!(
-            press_in(&mut h, "a.rs", 0, &stoat_action::UnstageHunk),
+            press_in(&mut h, "a.rs", 0, &stoat_action::ToggleStageHunk),
             ["diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1,1 +1,0 @@\n-x\n"],
         );
     }
@@ -3851,7 +3887,7 @@ mod tests {
             .head_file("gone.rs", "a\nb\n");
 
         assert_eq!(
-            press_in(&mut h, "gone.rs", 0, &stoat_action::StageHunk),
+            press_in(&mut h, "gone.rs", 0, &stoat_action::ToggleStageHunk),
             ["diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1,2 +1,0 @@\n-a\n-b\n"],
         );
     }
@@ -3870,9 +3906,9 @@ mod tests {
 
         assert_eq!(
             (
-                unstage("a\n", 0, &stoat_action::UnstageHunk),
-                unstage("a\n", 0, &stoat_action::UnstageLine),
-                unstage("a\nb\n", 1, &stoat_action::UnstageLine),
+                unstage("a\n", 0, &stoat_action::ToggleStageHunk),
+                unstage("a\n", 0, &stoat_action::ToggleStageLine),
+                unstage("a\nb\n", 1, &stoat_action::ToggleStageLine),
             ),
             (
                 vec![removal.to_string()],
@@ -3893,7 +3929,7 @@ mod tests {
             .index_file("new.rs", "a\nB\n");
 
         assert_eq!(
-            press_in(&mut h, "new.rs", 1, &stoat_action::UnstageHunk),
+            press_in(&mut h, "new.rs", 1, &stoat_action::ToggleStageHunk),
             ["diff --git a/new.rs b/new.rs\n--- a/new.rs\n+++ b/new.rs\n@@ -1,2 +1,2 @@\n a\n-B\n+b\n"],
         );
     }
@@ -3919,7 +3955,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 0);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert!(
@@ -3941,7 +3977,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "one patch: {patches:?}");
@@ -3979,7 +4015,7 @@ mod tests {
             "the map starts current, so staling it is the stage's doing",
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageHunk);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
         h.settle();
 
         assert!(
@@ -4007,7 +4043,7 @@ mod tests {
             "the map starts current, so staling it is the stage's doing",
         );
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert!(
@@ -4023,7 +4059,7 @@ mod tests {
     fn stage_line_under_a_commit_base_amends_rather_than_writing_the_index() {
         let mut h = reviewing_a_commit("a\nP\nQ\nd\n");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -4043,7 +4079,7 @@ mod tests {
     fn unstage_line_under_a_commit_base_amends_rather_than_writing_the_index() {
         let mut h = reviewing_a_commit("a\nX\nY\nd\n");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -4097,7 +4133,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert_eq!(
@@ -4148,7 +4184,7 @@ mod tests {
             crate::action_handlers::movement::set_cursor_row(editor, 1);
         }
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "one patch: {patches:?}");
@@ -4177,7 +4213,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 1);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "one patch: {patches:?}");
@@ -4200,7 +4236,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 4);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         assert_eq!(
             h.fake_git().applied_patches(&workdir),
@@ -4263,7 +4299,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "one patch: {patches:?}");
@@ -4290,7 +4326,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 2);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::UnstageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
 
         let patches = h.fake_git().applied_patches(&workdir);
         assert_eq!(patches.len(), 1, "one patch: {patches:?}");
@@ -4308,7 +4344,7 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 0);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::StageLine);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageLine);
         h.settle();
 
         assert!(

@@ -251,70 +251,17 @@ define_action!(
 );
 
 define_action!(
-    StageHunkDef,
-    StageHunk,
-    "StageHunk",
-    ActionKind::StageHunk,
-    "stage the hunk under the cursor",
-    "Apply the diff hunk under the cursor to the git index, staging just \
-     that change. Inside a hunk the structural diff narrowed, it stages only \
-     the marked run under the cursor. Works in any editor view on a \
-     git-tracked file, and is a no-op with a status message when the cursor \
-     is not on a hunk.",
-    ActionPriority::Common
-);
-
-define_action!(
-    UnstageHunkDef,
-    UnstageHunk,
-    "UnstageHunk",
-    ActionKind::UnstageHunk,
-    "unstage the hunk under the cursor",
-    "Reverse-apply the diff hunk under the cursor against the git index, \
-     unstaging just that change. Inside a hunk the structural diff narrowed, \
-     it unstages only the marked run under the cursor. Works in any editor \
-     view on a git-tracked file, and is a no-op with a status message when \
-     the cursor is not on a hunk.",
-    ActionPriority::Common
-);
-
-define_action!(
     ToggleStageHunkDef,
     ToggleStageHunk,
     "ToggleStageHunk",
     ActionKind::ToggleStageHunk,
     "toggle staging of the hunk under the cursor",
-    "Stage the diff hunk under the cursor when it is unstaged, or unstage \
-     it when it is already staged. Inside a hunk the structural diff \
-     narrowed, it toggles only the marked run under the cursor. Works in \
-     any editor view on a git-tracked file, and is a no-op with a status \
-     message when the cursor is not on a hunk.",
-    ActionPriority::Common
-);
-
-define_action!(
-    StageLineDef,
-    StageLine,
-    "StageLine",
-    ActionKind::StageLine,
-    "stage the line under the cursor",
-    "Apply only the cursor line's change to the git index, staging the \
-     minus/plus pair of a modified line. Works in any editor view on a \
-     git-tracked file, and is a no-op with a status message when the \
-     cursor is on no change.",
-    ActionPriority::Common
-);
-
-define_action!(
-    UnstageLineDef,
-    UnstageLine,
-    "UnstageLine",
-    ActionKind::UnstageLine,
-    "unstage the line under the cursor",
-    "Revert only the cursor line's staged change in the git index back to \
-     HEAD, unstaging the minus/plus pair of a modified line. Works in any \
-     editor view on a git-tracked file, and is a no-op with a status \
-     message when the cursor is on no staged change.",
+    "Apply the diff hunk under the cursor to the git index when any of it is \
+     unstaged, so a partly staged hunk stages its rest. A hunk with nothing \
+     left to stage reverse-applies back to HEAD, which unstages it. Inside a \
+     hunk the structural diff narrowed, it acts on the marked run under the \
+     cursor alone. Works in any editor view on a git-tracked file, and is a \
+     no-op with a status message when the cursor is not on a hunk.",
     ActionPriority::Common
 );
 
@@ -324,9 +271,11 @@ define_action!(
     "ToggleStageLine",
     ActionKind::ToggleStageLine,
     "toggle staging of the line under the cursor",
-    "Stage the cursor line's change when it is unstaged, or unstage it when \
-     it is already staged. Works in any editor view on a git-tracked file, \
-     and is a no-op with a status message when the cursor is on no change.",
+    "Apply the cursor line's change to the git index when any of it is \
+     unstaged, staging the minus/plus pair of a modified line. A line with \
+     nothing left to stage reverts its staged change back to HEAD, which \
+     unstages it. Works in any editor view on a git-tracked file, and is a \
+     no-op with a status message when the cursor is on no change.",
     ActionPriority::Common
 );
 

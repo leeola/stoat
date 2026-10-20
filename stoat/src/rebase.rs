@@ -216,7 +216,7 @@ mod tests {
         workspace::diff::DiffBase,
     };
     use std::path::Path;
-    use stoat_action::{EnterRebase, ExecuteRebase, RebaseContinue, UnstageHunk};
+    use stoat_action::{EnterRebase, ExecuteRebase, RebaseContinue, ToggleStageHunk};
 
     const THREE_COMMITS: &[CommitSpec<'static>] = &[
         ("c1", "c1: root", &[("a.rs", "line1\n")]),
@@ -879,7 +879,7 @@ mod tests {
         movement::set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
         git_jobs::enqueue(&mut h.stoat, git_jobs::idle_job(None));
 
-        dispatch(&mut h.stoat, &UnstageHunk);
+        dispatch(&mut h.stoat, &ToggleStageHunk);
         dispatch(&mut h.stoat, &RebaseContinue);
         h.settle();
 

@@ -116,8 +116,7 @@ use crate::{
             DiffBaseToggle, DiffBold, DiffFiles, DiffForward, DiffPair, DiffSyntax, DiffTintDown,
             DiffTintUp, DiffUnderline, GitReview, JumpToMoveSource, JumpToMoveTarget,
             JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
-            ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
-            ToggleStageLine, UnstageHunk, UnstageLine,
+            ReviewNextCommit, ReviewPrevCommit, ToggleStageHunk, ToggleStageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -365,11 +364,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ConflictNextFile::DEF, |_| Ok(Box::new(ConflictNextFile)));
     add(ConflictPrevFile::DEF, |_| Ok(Box::new(ConflictPrevFile)));
     add(ConflictApply::DEF, |_| Ok(Box::new(ConflictApply)));
-    add(StageHunk::DEF, |_| Ok(Box::new(StageHunk)));
-    add(UnstageHunk::DEF, |_| Ok(Box::new(UnstageHunk)));
     add(ToggleStageHunk::DEF, |_| Ok(Box::new(ToggleStageHunk)));
-    add(StageLine::DEF, |_| Ok(Box::new(StageLine)));
-    add(UnstageLine::DEF, |_| Ok(Box::new(UnstageLine)));
     add(ToggleStageLine::DEF, |_| Ok(Box::new(ToggleStageLine)));
     add(JumpToMoveSource::DEF, |_| Ok(Box::new(JumpToMoveSource)));
     add(JumpToMoveTarget::DEF, |_| Ok(Box::new(JumpToMoveTarget)));
@@ -1877,8 +1872,8 @@ mod tests {
         // + 1 .
         // + 2 .
         // + 1 OpenBuffer.
-        // + 3 StageHunk, UnstageHunk, ToggleStageHunk.
-        // + 3 StageLine, UnstageLine, ToggleStageLine.
+        // + 1 ToggleStageHunk.
+        // + 1 ToggleStageLine.
         // + 1 OpenConfig.
         // + 1 ToggleMinimap.
         // + 1 ToggleWrap.
@@ -1957,7 +1952,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 13 the changes view actions.
-        assert_eq!(all().count(), 454);
+        assert_eq!(all().count(), 450);
     }
 
     #[test]

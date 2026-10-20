@@ -2102,7 +2102,7 @@ mod tests {
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
-    use stoat_action::{DiffAgainstIndex, StageHunk};
+    use stoat_action::{DiffAgainstIndex, ToggleStageHunk};
     use stoat_language::{parse, structural_diff::TreeCache, Language, LanguageRegistry};
 
     /// The bar reads the totals and a file list reads the per-file counts, so
@@ -3666,7 +3666,7 @@ mod tests {
             action_handlers::focused_editor_mut(&mut h.stoat).expect("editor"),
             1,
         );
-        action_handlers::dispatch(&mut h.stoat, &StageHunk);
+        action_handlers::dispatch(&mut h.stoat, &ToggleStageHunk);
         // The fake's patch apply records the patch and writes no index blob, so
         // the test writes the blob a real stage leaves.
         h.fake_git().add_repo("/repo").index_file("a.txt", "a\nc\n");
@@ -3706,7 +3706,7 @@ mod tests {
             action_handlers::focused_editor_mut(&mut h.stoat).expect("editor"),
             1,
         );
-        action_handlers::dispatch(&mut h.stoat, &StageHunk);
+        action_handlers::dispatch(&mut h.stoat, &ToggleStageHunk);
         h.fake_git().add_repo("/repo").index_file("a.txt", "a\nc\n");
         h.stoat.drive_background();
         let after_write = base_moved(&h);
