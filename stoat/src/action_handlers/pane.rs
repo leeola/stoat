@@ -199,7 +199,7 @@ fn focused_screen(ws: &Workspace) -> Option<FullWindowScreen> {
 /// Close the diff view in the focused pane.
 ///
 /// A diff opened from a commits list peels back to the list. Any other diff
-/// closes as the bare `:diff` closes it, which also drops the pair of the
+/// closes as the bare `:diff-files` closes it, which also drops the pair of the
 /// focused file and a revision base.
 fn close_diff_screen(stoat: &mut Stoat) {
     let focus = stoat.active_workspace().panes.focus();

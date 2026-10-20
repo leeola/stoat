@@ -465,7 +465,8 @@ pub(super) fn walk_one_commit(
     UpdateEffect::Redraw
 }
 
-/// Check the walk's current commit out and point `:diff` at what it changed.
+/// Check the walk's current commit out and point `:diff-files` at what it
+/// changed.
 ///
 /// The tree becomes the commit and the base becomes the commit's parent, so the
 /// diff on screen is the commit itself. The buffers stay the real editable

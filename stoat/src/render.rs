@@ -272,8 +272,8 @@ pub(crate) struct FrameCtx<'a> {
     /// leaves the width to the renderer's own formula.
     pub(crate) commits_split: Option<u16>,
     /// The diff view's styling dials, resolved for the commit previews. Those
-    /// previews paint through `:diff`'s own painter, so they answer the same
-    /// session dials rather than carrying a second set.
+    /// previews paint through `:diff-files`'s own painter, so they answer the
+    /// same session dials rather than carrying a second set.
     pub(crate) preview_dials: commits::PreviewDials,
     /// Whether an overview document build is on the pool, so an overview with
     /// no document yet shows that a build runs rather than that nothing

@@ -192,10 +192,10 @@ fn edit_paused(stoat: &Stoat) -> bool {
         .is_some_and(|active| matches!(active.pause, Some(RebasePause::Edit { .. })))
 }
 
-/// Check the just-picked commit out and point `:diff` at what it changed.
+/// Check the just-picked commit out and point `:diff-files` at what it changed.
 ///
 /// The stepper builds commits without moving HEAD or touching the working tree,
-/// so an Edit stop has to do both before the diff means anything: `:diff`
+/// so an Edit stop has to do both before the diff means anything: `:diff-files`
 /// compares live buffers against a base, and the buffers have to be the commit
 /// for that comparison to be the commit. This is also what an interactive
 /// rebase does when it stops to let you edit, so the tree the user lands in is

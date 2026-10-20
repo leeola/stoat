@@ -71,7 +71,7 @@ action_kinds! {
     FileFinderScopeToggle,
     OpenCommandPalette,
     OpenHelp,
-    Diff,
+    DiffFiles,
     ChangeWalkWrap,
     DiffUnderline,
     DiffBold,

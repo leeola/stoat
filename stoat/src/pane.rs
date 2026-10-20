@@ -195,15 +195,15 @@ pub struct Pane {
     /// `DiffForward` start from the plain walk.
     #[serde(skip)]
     pub(crate) change_landing: Option<ChangeLanding>,
-    /// Whether `:diff` has latched review mode on for this pane, surviving the
-    /// `EditorState` swaps a cross-file navigation makes.
+    /// Whether `:diff-files` has latched review mode on for this pane,
+    /// surviving the `EditorState` swaps a cross-file navigation makes.
     ///
     /// The flag the view itself reads lives on the editor, and every navigation
     /// builds a fresh one, so review intent has to be held somewhere the
     /// navigation does not replace. While this is set, a buffer the pane shows
     /// opens as a diff when it has a hunk or a staged mark against the diff
-    /// base. A buffer with neither opens plain. Only an explicit `:diff` clears
-    /// it.
+    /// base. A buffer with neither opens plain. Only an explicit `:diff-files`
+    /// clears it.
     ///
     /// The view follows the buffer's hunks when they land. Until then, the
     /// buffer keeps the view the pane showed before it, so a walk through

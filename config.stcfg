@@ -1461,7 +1461,7 @@ on key {
         G -> PinMode();
 
         git || changes {
-            d -> [Diff(), SetMode(normal)];
+            d -> [DiffFiles(), SetMode(normal)];
             n -> [GotoNextChange(), SetMode(normal)];
             p -> [GotoPrevChange(), SetMode(normal)];
             MouseForward -> [GotoPrevChange(), SetMode(normal)];
@@ -1509,7 +1509,7 @@ on key {
         Escape -> SetMode(normal);
 
         git || changes {
-            d -> [Diff(), SetMode(normal)];
+            d -> [DiffFiles(), SetMode(normal)];
         }
 
         git && !pair_diff {
@@ -1576,7 +1576,7 @@ on key {
         b -> DiffBaseToggle();
 
         git || changes {
-            d -> Diff();
+            d -> DiffFiles();
             n -> GotoNextChange();
             p -> GotoPrevChange();
             MouseBack -> DiffBack();

@@ -517,8 +517,9 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
 
-        // DiffOverview is absent on purpose. Like Diff, it opens a screen from
-        // anywhere, and on the overview it flips back to the per-file diff.
+        // DiffOverview is absent on purpose. Like DiffFiles, it opens a screen
+        // from anywhere, and on the overview it flips back to the per-file
+        // diff.
         CloseOverview | OverviewNext | OverviewPrev | OverviewNextChunk | OverviewPrevChunk
         | OverviewPageDown | OverviewPageUp | OverviewHalfPageDown | OverviewHalfPageUp
         | OverviewFirst | OverviewLast | OverviewOpen => ctx.overview_open,
@@ -1364,7 +1365,7 @@ mod tests {
         for name in [
             "Quit",
             "OpenFile",
-            "Diff",
+            "DiffFiles",
             "DiffOverview",
             "OpenCommits",
             "FocusLeft",

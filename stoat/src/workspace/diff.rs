@@ -3354,8 +3354,8 @@ mod tests {
 
         action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
         h.open_file(Path::new("/pair/a.txt"));
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         assert!(
             h.stoat.active_workspace().diff.current(id, version),
             "the pair's map stays current"

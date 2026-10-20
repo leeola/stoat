@@ -378,7 +378,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stage_review_scenario("/repo", &[("a.rs", "fn a() {}\n", "fn a() { 1 }\n")]);
         dispatch(&mut h, &stoat_action::NewTab);
-        h.type_text(":diff");
+        h.type_text(":diff-files");
         h.type_keys("enter");
         h.settle();
 
@@ -391,7 +391,7 @@ mod tests {
         );
 
         dispatch(&mut h, &stoat_action::PrevTab);
-        h.type_text(":diff");
+        h.type_text(":diff-files");
         h.type_keys("enter");
         h.settle();
         assert_eq!(

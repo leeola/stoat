@@ -65,7 +65,7 @@ pub(crate) use pane::{
 };
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, AutoReloadConfig, Diff, Dump, FocusPane, GitLs, GitReview,
+    Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitLs, GitReview,
     GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab,
     RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
@@ -430,11 +430,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             help::open_help(stoat);
             UpdateEffect::Redraw
         },
-        ActionKind::Diff => {
+        ActionKind::DiffFiles => {
             let action = action
                 .as_any()
-                .downcast_ref::<Diff>()
-                .expect("Diff action downcast");
+                .downcast_ref::<DiffFiles>()
+                .expect("DiffFiles action downcast");
             review::diff(stoat, action.rev.as_deref())
         },
         ActionKind::Conflict => {

@@ -767,7 +767,7 @@ mod tests {
     fn diff_overview_from_the_diff_lands_on_its_line_and_q_returns_to_the_diff() {
         let mut h = deep_files();
         h.open_file(Path::new("/repo/a.txt"));
-        dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
         let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
 

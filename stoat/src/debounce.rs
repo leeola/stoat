@@ -910,8 +910,8 @@ pub(crate) fn arm_pool_settle(stoat: &mut Stoat) {
 ///
 /// Diff maps are keyed by buffer version alone, so nothing else notices that a
 /// commit, reset, or branch switch moved the base under them. Gutter marks and
-/// the per-file `:diff` view then follow each rebase step instead of freezing
-/// at the pre-rebase base.
+/// the per-file `:diff-files` view then follow each rebase step instead of
+/// freezing at the pre-rebase base.
 ///
 /// The background warm is re-armed with them, since every cached base moved.
 ///

@@ -29,10 +29,10 @@ pub(crate) enum CommitStep {
 
 /// Show a commits list in the focused pane, over the view the pane showed.
 ///
-/// The bare command toggles the list, as `:diff` does, and `CommitsRefresh`
-/// stays the reload. A diff opened from the list stands over it, so there the
-/// command leaves the diff, and the covered list returns with its selection and
-/// loaded pages intact.
+/// The bare command toggles the list, as `:diff-files` does, and
+/// `CommitsRefresh` stays the reload. A diff opened from the list stands over
+/// it, so there the command leaves the diff, and the covered list returns with
+/// its selection and loaded pages intact.
 ///
 /// Each pane opens a list of its own, so a list in another pane or another tab
 /// keeps its place. Outside a git repository nothing changes.
@@ -802,7 +802,7 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = "/repo".into();
         h.seed_focused_buffer("changed\n");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
         assert_eq!(
             h.stoat.current_view(),
@@ -1105,7 +1105,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
         walk_from_the_list(&mut h);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
 
         assert_eq!(
             (

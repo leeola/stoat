@@ -77,7 +77,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
-use stoat_action::{Conflict, Diff, OpenFile};
+use stoat_action::{Conflict, DiffFiles, OpenFile};
 use stoat_config::{MinimapMode, Settings, TabBarMode, WrapMode};
 use stoat_language::{self as language, LanguageRegistry};
 use stoat_scheduler::Executor;
@@ -3886,22 +3886,22 @@ impl Stoat {
         action_handlers::dispatch(self, &action);
     }
 
-    /// Toggle the side-by-side diff view on the focused editor, as the `:diff`
-    /// command does.
+    /// Toggle the side-by-side diff view on the focused editor, as the
+    /// `:diff-files` command does.
     pub fn toggle_diff_view(&mut self) {
-        action_handlers::dispatch(self, &Diff { rev: None });
+        action_handlers::dispatch(self, &DiffFiles { rev: None });
     }
 
     /// Open the working-tree diff for the `stoat review` entry point.
     ///
-    /// `Diff` turns the view on for the current editor. On the pathless startup
-    /// scratch, which has no changes of its own, the toggle crosses into the
-    /// first changed file and lands the cursor on its first hunk with the view
-    /// scrolled to it. The file's diff map lands a frame or more later. With no
-    /// changed files it sets the "no more changes" status and stays on the
-    /// scratch.
+    /// `DiffFiles` turns the view on for the current editor. On the pathless
+    /// startup scratch, which has no changes of its own, the toggle crosses
+    /// into the first changed file and lands the cursor on its first hunk with
+    /// the view scrolled to it. The file's diff map lands a frame or more
+    /// later. With no changed files it sets the "no more changes" status and
+    /// stays on the scratch.
     pub fn open_working_tree_diff(&mut self) {
-        action_handlers::dispatch(self, &Diff { rev: None });
+        action_handlers::dispatch(self, &DiffFiles { rev: None });
     }
 
     /// Open the three-way conflict resolve view for the `stoat conflict` entry

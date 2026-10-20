@@ -99,8 +99,8 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
 /// Land an agent's proposed edits as unsaved buffer edits over their own base.
 ///
 /// Each proposal replaces its file's buffer content, and the base texts become
-/// a [`DiffBase::Memory`] override, so `:diff` shows the proposal against what
-/// the agent read. The first edited file opens with the latch armed.
+/// a [`DiffBase::Memory`] override, so `:diff-files` shows the proposal against
+/// what the agent read. The first edited file opens with the latch armed.
 ///
 /// A proposal exists nowhere in git, which is what separates this from the
 /// commit openers. No revision holds what the agent read, so the base travels
@@ -203,8 +203,8 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::named(rev, sha)));
     // Turned on rather than toggled. Naming a revision asks to look at it, so a
-    // second `:diff <rev>` re-targets the view rather than closing it; only the
-    // bare command closes.
+    // second `:diff-files <rev>` re-targets the view rather than closing it;
+    // only the bare command closes.
     reopen_diff_view(stoat);
     UpdateEffect::Redraw
 }
@@ -267,26 +267,28 @@ pub(super) fn toggle_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Open the command palette holding `diff` and the current base, for the
+/// Open the command palette holding `diff-files` and the current base, for the
 /// reader to retype.
 ///
-/// Enter runs the ordinary `:diff <rev>`, so a revision, `index`, or `HEAD`
-/// points the diff at it, and Escape changes nothing. A revision the reader
-/// named seeds as typed, and a review seeds its parent's short sha. A base with
-/// no revision name to retype, the empty parent of a root commit, an agent
-/// proposal, or the focused file's pair, seeds a bare `diff `.
+/// Enter runs the ordinary `:diff-files <rev>`, so a revision, `index`, or
+/// `HEAD` points the diff at it, and Escape changes nothing. A revision the
+/// reader named seeds as typed, and a review seeds its parent's short sha. A
+/// base with no revision name to retype, the empty parent of a root commit, an
+/// agent proposal, or the focused file's pair, seeds a bare `diff-files `.
 pub(super) fn edit_diff_base(stoat: &mut Stoat) -> UpdateEffect {
     let seed = match stoat.active_workspace().diff_base() {
-        _ if focused_file_pair(stoat).is_some() => "diff ".to_string(),
+        _ if focused_file_pair(stoat).is_some() => "diff-files ".to_string(),
         Some(DiffBase::Rev {
             origin: RevOrigin::Named(name),
             ..
-        }) => format!("diff {name}"),
-        Some(DiffBase::Rev { sha: Some(sha), .. }) => format!("diff {}", diff::short_sha(sha)),
-        Some(DiffBase::Rev { sha: None, .. } | DiffBase::Memory { .. } | DiffBase::Pair { .. }) => {
-            "diff ".to_string()
+        }) => format!("diff-files {name}"),
+        Some(DiffBase::Rev { sha: Some(sha), .. }) => {
+            format!("diff-files {}", diff::short_sha(sha))
         },
-        base @ (None | Some(DiffBase::Head)) => format!("diff {}", diff::diff_sides(base).0),
+        Some(DiffBase::Rev { sha: None, .. } | DiffBase::Memory { .. } | DiffBase::Pair { .. }) => {
+            "diff-files ".to_string()
+        },
+        base @ (None | Some(DiffBase::Head)) => format!("diff-files {}", diff::diff_sides(base).0),
     };
     super::palette::open_palette_seeded(stoat, &seed)
 }
@@ -539,7 +541,7 @@ fn drop_other_diff_views(ws: &mut Workspace, keep: PaneId) {
 }
 
 /// Toggle the live per-file diff view on the focused editor, driven by
-/// [`stoat_action::Diff`].
+/// [`stoat_action::DiffFiles`].
 ///
 /// Flips `diff_view` (and the display map's deleted-block splicing) on the
 /// focused editor. Unlike the session review there is no scan, no session, and
@@ -637,8 +639,9 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
     }
 
     // A buffer with no changes of its own has no hunk to land on, so cross into
-    // the first changed file. This makes `:diff` from a scratch or unchanged
-    // buffer open a real diff instead of silently toggling empty columns.
+    // the first changed file. This makes `:diff-files` from a scratch or
+    // unchanged buffer open a real diff instead of silently toggling empty
+    // columns.
     if landing.is_none() {
         let _ = super::movement::goto_change(stoat, ChangeDir::Next);
     }
@@ -1880,7 +1883,7 @@ mod tests {
     fn latched_pair() -> TestHarness {
         let mut h = repo_with_a_clean_file();
         h.open_file(Path::new("/repo/a.rs"));
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
         h
     }
@@ -2149,9 +2152,9 @@ mod tests {
         (h, workdir)
     }
 
-    /// What the three pieces of `:diff <rev>` state currently read: the base
-    /// every buffer diffs against, whether the pane is latched into the diff
-    /// layout, and which file is open.
+    /// What the three pieces of `:diff-files <rev>` state currently read: the
+    /// base every buffer diffs against, whether the pane is latched into the
+    /// diff layout, and which file is open.
     fn diff_state(h: &TestHarness) -> (Option<String>, bool, Option<PathBuf>) {
         let base = match h.stoat.active_workspace().diff_base() {
             Some(DiffBase::Rev { sha, .. }) => sha.clone(),
@@ -2177,7 +2180,7 @@ mod tests {
 
         crate::action_handlers::dispatch(
             &mut h.stoat,
-            &stoat_action::Diff {
+            &stoat_action::DiffFiles {
                 rev: Some("base0".to_string()),
             },
         );
@@ -2199,7 +2202,7 @@ mod tests {
         let sides = ["main", "base0"].map(|rev| {
             crate::action_handlers::dispatch(
                 &mut h.stoat,
-                &stoat_action::Diff {
+                &stoat_action::DiffFiles {
                     rev: Some(rev.to_string()),
                 },
             );
@@ -2294,7 +2297,7 @@ mod tests {
     fn a_bare_diff_close_keeps_the_head_base() {
         let mut h = half_staged_harness();
         run(&mut h, &stoat_action::DiffAgainstHead);
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
 
         assert_eq!(
             head_base_and_view(&mut h),
@@ -2312,7 +2315,7 @@ mod tests {
         h.stoat
             .active_workspace_mut()
             .set_diff_base(Some(DiffBase::named("base0", "base0".into())));
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
 
         assert_eq!(head_base_and_view(&mut h), (true, false));
     }
@@ -2359,7 +2362,7 @@ mod tests {
     #[test]
     fn the_base_toggle_keeps_an_open_view_open() {
         let mut h = half_staged_harness();
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
         run(&mut h, &stoat_action::DiffBaseToggle);
         assert_eq!(head_base_and_view(&mut h), (false, true));
     }
@@ -2388,7 +2391,7 @@ mod tests {
         let mut h = half_staged_harness();
         run(
             &mut h,
-            &stoat_action::Diff {
+            &stoat_action::DiffFiles {
                 rev: Some("HEAD".into()),
             },
         );
@@ -2401,7 +2404,7 @@ mod tests {
         run(&mut h, &stoat_action::DiffAgainstHead);
         run(
             &mut h,
-            &stoat_action::Diff {
+            &stoat_action::DiffFiles {
                 rev: Some("index".into()),
             },
         );
@@ -2433,11 +2436,11 @@ mod tests {
         assert_eq!(
             seeds,
             [
-                "diff HEAD",
-                "diff index",
-                "diff base0",
-                "diff ",
-                "diff main"
+                "diff-files HEAD",
+                "diff-files index",
+                "diff-files base0",
+                "diff-files ",
+                "diff-files main"
             ]
             .map(|seed| Some(seed.to_string())),
         );
@@ -2494,7 +2497,7 @@ mod tests {
     #[test]
     fn a_split_on_the_diff_closes_it_and_splits_nothing() {
         let mut h = half_staged_harness();
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
 
         run(&mut h, &stoat_action::SplitRight);
 
@@ -2507,7 +2510,7 @@ mod tests {
     fn a_focus_move_on_the_diff_closes_it_in_place() {
         let mut h = half_staged_harness();
         run(&mut h, &stoat_action::SplitRight);
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
         let focus = h.stoat.active_workspace().panes.focus();
 
         run(&mut h, &stoat_action::FocusLeft);
@@ -2524,7 +2527,7 @@ mod tests {
     #[test]
     fn a_widen_toggle_on_the_diff_closes_it() {
         let mut h = half_staged_harness();
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
 
         run(&mut h, &stoat_action::TogglePaneWiden);
 
@@ -2532,7 +2535,7 @@ mod tests {
     }
 
     /// A focus move on a pair diff closes the view and drops the pair, as the
-    /// bare `:diff` does.
+    /// bare `:diff-files` does.
     #[test]
     fn a_focus_move_on_a_pair_diff_drops_the_pair() {
         let mut h = pair_harness();
@@ -2558,7 +2561,7 @@ mod tests {
     /// shows, whether the open toggles or latches, so the tab holds one diff.
     #[test]
     fn opening_a_diff_turns_off_the_diff_beside_it() {
-        let toggle: fn(&mut TestHarness) = |h| run(h, &stoat_action::Diff { rev: None });
+        let toggle: fn(&mut TestHarness) = |h| run(h, &stoat_action::DiffFiles { rev: None });
         let latch: fn(&mut TestHarness) = |h| {
             super::latch_diff_view(&mut h.stoat);
             h.settle();
@@ -2595,7 +2598,7 @@ mod tests {
     /// or latches, so the first overview toggle paints one at once.
     #[test]
     fn opening_a_diff_builds_the_overview_document() {
-        let toggle: fn(&mut TestHarness) = |h| run(h, &stoat_action::Diff { rev: None });
+        let toggle: fn(&mut TestHarness) = |h| run(h, &stoat_action::DiffFiles { rev: None });
         let latch: fn(&mut TestHarness) = |h| {
             super::latch_diff_view(&mut h.stoat);
             h.settle();
@@ -2748,8 +2751,8 @@ mod tests {
         let mut h = repo_pair_harness();
         run(&mut h, &stoat_action::NewTab);
         h.open_file(Path::new("/repo/c.txt"));
-        run(&mut h, &stoat_action::Diff { rev: None });
-        run(&mut h, &stoat_action::Diff { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
         run(&mut h, &stoat_action::PrevTab);
 
         assert_eq!(
@@ -2808,7 +2811,8 @@ mod tests {
 
     /// Every diff command over a paired file returns the file to the base the
     /// command names, or to the workspace's base for the bare close. The base
-    /// edit seeds a bare `diff `, since a pair has no revision to retype.
+    /// edit seeds a bare `diff-files `, since a pair has no revision to
+    /// retype.
     #[test]
     fn diff_commands_over_a_paired_file_drop_its_pair() {
         let paired = || {
@@ -2822,7 +2826,7 @@ mod tests {
             run(&mut h, action);
             pair_base(&h, "/repo/b.txt")
         };
-        let named = |rev: &str| stoat_action::Diff {
+        let named = |rev: &str| stoat_action::DiffFiles {
             rev: Some(rev.to_string()),
         };
 
@@ -2831,7 +2835,7 @@ mod tests {
                 pair_base(&paired(), "/repo/b.txt"),
                 base_edit_seed(&mut paired()),
                 [
-                    after(&stoat_action::Diff { rev: None }),
+                    after(&stoat_action::DiffFiles { rev: None }),
                     after(&named("HEAD")),
                     after(&named("index")),
                     after(&named("base0")),
@@ -2840,7 +2844,7 @@ mod tests {
             ),
             (
                 Some(("/repo/a.txt".into(), "one\n".into())),
-                Some("diff ".to_string()),
+                Some("diff-files ".to_string()),
                 [None, None, None, None, None],
             ),
         );
@@ -2926,13 +2930,13 @@ mod tests {
         let (mut h, _) = diff_rev_harness();
         crate::action_handlers::dispatch(
             &mut h.stoat,
-            &stoat_action::Diff {
+            &stoat_action::DiffFiles {
                 rev: Some("base0".to_string()),
             },
         );
         h.settle();
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
 
         let (base, latched, _) = diff_state(&h);
@@ -2941,15 +2945,15 @@ mod tests {
 
     /// Naming a revision asks to look at it, so running it again re-targets the
     /// view rather than closing it. Only the bare command closes, which is what
-    /// keeps `:diff <rev>` from being a toggle whose meaning depends on what
-    /// the reader last did.
+    /// keeps `:diff-files <rev>` from being a toggle whose meaning depends on
+    /// what the reader last did.
     #[test]
     fn a_repeated_diff_rev_keeps_the_view_open() {
         let (mut h, workdir) = diff_rev_harness();
         let open = |h: &mut TestHarness| {
             crate::action_handlers::dispatch(
                 &mut h.stoat,
-                &stoat_action::Diff {
+                &stoat_action::DiffFiles {
                     rev: Some("base0".to_string()),
                 },
             );
@@ -2976,7 +2980,7 @@ mod tests {
 
         crate::action_handlers::dispatch(
             &mut h.stoat,
-            &stoat_action::Diff {
+            &stoat_action::DiffFiles {
                 rev: Some("base".to_string()),
             },
         );
@@ -2999,7 +3003,7 @@ mod tests {
 
         crate::action_handlers::dispatch(
             &mut h.stoat,
-            &stoat_action::Diff {
+            &stoat_action::DiffFiles {
                 rev: Some("nosuch".to_string()),
             },
         );
@@ -3042,7 +3046,7 @@ mod tests {
             .head_file("a.txt", "a\nOLD\nc\n");
         h.stoat.active_workspace_mut().invalidate_all_diffs();
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
 
         assert_eq!(

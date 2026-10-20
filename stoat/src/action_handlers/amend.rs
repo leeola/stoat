@@ -1,7 +1,7 @@
 //! Moving a hunk in or out of the commit the working tree sits on.
 //!
-//! A walk or a rebase edit stop checks a commit out and points `:diff` at its
-//! parent, which makes the commit itself the staged side of every hunk on
+//! A walk or a rebase edit stop checks a commit out and points `:diff-files` at
+//! its parent, which makes the commit itself the staged side of every hunk on
 //! screen. The keys that cross that line are the same `s` and `S` that drive
 //! the git index elsewhere, so this is where they go instead.
 

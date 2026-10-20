@@ -2569,7 +2569,7 @@ mod tests {
         h.settle();
         dispatch(&mut h.stoat, &stoat_action::NewTab);
         h.open_file(Path::new("/repo/c.txt"));
-        dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
 
         let named = |h: &mut crate::test_harness::TestHarness| {

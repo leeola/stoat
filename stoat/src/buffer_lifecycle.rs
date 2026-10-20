@@ -941,7 +941,8 @@ mod tests {
         test_harness::{self, editor, TestHarness},
     };
     use stoat_action::{
-        CloseBuffer, Diff, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark, SplitRight,
+        CloseBuffer, DiffFiles, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark,
+        SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -1700,7 +1701,7 @@ mod tests {
         h.open_file(Path::new("/repo/a.txt"));
         h.open_file(Path::new("/repo/b.txt"));
         h.settle_diff_jobs();
-        dispatch(&mut h.stoat, &Diff { rev: None });
+        dispatch(&mut h.stoat, &DiffFiles { rev: None });
         h.settle();
 
         dispatch(&mut h.stoat, &CloseBuffer);

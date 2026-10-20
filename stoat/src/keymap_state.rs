@@ -1224,7 +1224,7 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffPair);
         h.settle();
         let paired = pair_diff(&h);
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
 
         assert_eq!(
@@ -1661,31 +1661,31 @@ mod tests {
     }
 
     #[test]
-    fn diff_action_toggles_the_diff_view() {
+    fn diff_files_toggles_the_diff_view() {
         let mut h = Stoat::test();
         assert_eq!(
             h.stoat.current_view(),
             Some("file"),
             "a plain editor starts outside the diff view"
         );
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         assert_eq!(
             h.stoat.current_view(),
             Some("diff"),
-            "Diff turns the diff view on"
+            "DiffFiles turns the diff view on"
         );
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         assert_eq!(
             h.stoat.current_view(),
             Some("file"),
-            "Diff again turns it back off"
+            "DiffFiles again turns it back off"
         );
     }
 
     #[test]
     fn escape_in_the_diff_view_stays_in_the_view() {
         let mut h = Stoat::test();
-        action_handlers::dispatch(&mut h.stoat, &stoat_action::Diff { rev: None });
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         assert_eq!(h.stoat.current_view(), Some("diff"));
 
         h.type_keys("Escape");

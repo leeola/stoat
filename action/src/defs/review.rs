@@ -15,12 +15,14 @@ const DIFF_PARAMS: &[ParamDef] = &[ParamDef {
 }];
 
 define_action_def!(
-    DiffDef,
-    "Diff",
-    ActionKind::Diff,
-    "open a diff of working-tree changes",
-    "Open the first changed file with a structural diff against the working \
-     tree's own base, or against the given revision. That base is the index, \
+    DiffFilesDef,
+    "DiffFiles",
+    ActionKind::DiffFiles,
+    "open the per-file diff of working-tree changes",
+    "Open the per-file layout of the diff, which shows one changed file at a \
+     time where DiffOverview shows every hunk in one list. It opens the first \
+     changed file with a structural diff against the working tree's own \
+     base, or against the given revision. That base is the index, \
      with what the index holds over HEAD marked staged in the left column, \
      unless DiffAgainstHead picked HEAD. A revision points the whole \
      workspace at that commit, so every file diffs against it and the change \
@@ -32,16 +34,16 @@ define_action_def!(
 );
 
 #[derive(Debug)]
-pub struct Diff {
+pub struct DiffFiles {
     /// Revision to diff against, or `None` for the working tree's own base.
     pub rev: Option<String>,
 }
 
-impl Diff {
-    pub const DEF: &DiffDef = &DiffDef;
+impl DiffFiles {
+    pub const DEF: &DiffFilesDef = &DiffFilesDef;
 }
 
-impl Action for Diff {
+impl Action for DiffFiles {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }
@@ -512,17 +514,17 @@ mod tests {
 
     #[test]
     fn kind_and_name() {
-        let diff = Diff { rev: None };
-        assert_eq!(diff.kind(), ActionKind::Diff);
-        assert_eq!(diff.def().name(), "Diff");
+        let diff = DiffFiles { rev: None };
+        assert_eq!(diff.kind(), ActionKind::DiffFiles);
+        assert_eq!(diff.def().name(), "DiffFiles");
         assert!(diff.def().palette_visible());
     }
 
-    /// The revision is optional, so `:diff` on its own still means HEAD. A
-    /// required parameter would make the bare command an error.
+    /// The revision is optional, so `:diff-files` on its own still means HEAD.
+    /// With a required parameter, the bare command is an error.
     #[test]
     fn the_revision_is_one_optional_string() {
-        let params = Diff { rev: None }.def().params();
+        let params = DiffFiles { rev: None }.def().params();
         assert_eq!(
             params
                 .iter()
@@ -534,7 +536,7 @@ mod tests {
 
     #[test]
     fn downcast() {
-        let action: Box<dyn Action> = Box::new(Diff { rev: None });
-        assert!(action.as_any().downcast_ref::<Diff>().is_some());
+        let action: Box<dyn Action> = Box::new(DiffFiles { rev: None });
+        assert!(action.as_any().downcast_ref::<DiffFiles>().is_some());
     }
 }

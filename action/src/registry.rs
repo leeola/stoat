@@ -111,12 +111,12 @@ use crate::{
             SetRebaseOpSquash,
         },
         review::{
-            ChangeWalkWrap, Diff, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
-            DiffBaseToggle, DiffBold, DiffForward, DiffPair, DiffSyntax, DiffTintDown, DiffTintUp,
-            DiffUnderline, GitReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
-            JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone, ReviewNextCommit,
-            ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk, ToggleStageLine, UnstageHunk,
-            UnstageLine,
+            ChangeWalkWrap, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
+            DiffBaseToggle, DiffBold, DiffFiles, DiffForward, DiffPair, DiffSyntax, DiffTintDown,
+            DiffTintUp, DiffUnderline, GitReview, JumpToMoveSource, JumpToMoveTarget,
+            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
+            ReviewNextCommit, ReviewPrevCommit, StageHunk, StageLine, ToggleStageHunk,
+            ToggleStageLine, UnstageHunk, UnstageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -313,10 +313,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(FileFinderScopeToggle))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
-    add(Diff::DEF, |params| {
-        // The palette autospaces a submitted command, so a bare `diff` arrives
-        // with an empty argument. That means HEAD, not a revision literally
-        // named "".
+    add(DiffFiles::DEF, |params| {
+        // The palette autospaces a submitted command, so a bare `diff-files`
+        // arrives with an empty argument. That means HEAD, not a revision
+        // literally named "".
         let rev = params
             .first()
             .map(|param| {
@@ -328,7 +328,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             .transpose()?
             .filter(|rev| !rev.is_empty())
             .map(str::to_owned);
-        Ok(Box::new(Diff { rev }))
+        Ok(Box::new(DiffFiles { rev }))
     });
     add(ChangeWalkWrap::DEF, |_| Ok(Box::new(ChangeWalkWrap)));
     add(DiffUnderline::DEF, |_| Ok(Box::new(DiffUnderline)));
@@ -1203,7 +1203,7 @@ mod tests {
         "OpenWorkspaceFileFinder",
         "FileFinderScopeToggle",
         "OpenHelp",
-        "Diff",
+        "DiffFiles",
         "Conflict",
         "CloseConflict",
         "JumpToMoveSource",
@@ -1595,18 +1595,18 @@ mod tests {
         }
     }
 
-    /// `:diff` reaches here as a revision or as nothing, and the palette
+    /// `:diff-files` reaches here as a revision or as nothing, and the palette
     /// autospaces a submitted command, so a bare one arrives as an empty
     /// argument rather than as no argument at all. All three have to land on
     /// the two meanings the action has.
     #[test]
-    fn diff_factory_reads_an_optional_rev() {
-        let entry = lookup("Diff").expect("Diff");
+    fn diff_files_factory_reads_an_optional_rev() {
+        let entry = lookup("DiffFiles").expect("DiffFiles");
         let built = |params: &[ParamValue]| {
             (entry.create)(params)
                 .expect("create")
                 .as_any()
-                .downcast_ref::<Diff>()
+                .downcast_ref::<DiffFiles>()
                 .expect("downcast")
                 .rev
                 .clone()
@@ -1619,6 +1619,19 @@ mod tests {
                 built(&[ParamValue::String("HEAD~2".into())]),
             ),
             (None, None, Some("HEAD~2".to_string())),
+        );
+    }
+
+    /// The per-file diff answers to `diff-files`, and the bare `diff` names no
+    /// command.
+    #[test]
+    fn diff_files_is_the_per_file_diff_command() {
+        assert_eq!(
+            (
+                lookup_alias("diff-files").map(|entry| entry.def.name()),
+                lookup_alias("diff").map(|entry| entry.def.name()),
+            ),
+            (Some("DiffFiles"), None),
         );
     }
 

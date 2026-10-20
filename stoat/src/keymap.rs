@@ -2700,7 +2700,7 @@ mod tests {
                 pressed(KeyCode::Char('c')),
             ),
             (
-                only("Diff"),
+                only("DiffFiles"),
                 only("GotoNextChange"),
                 only("GotoPrevChange"),
                 only("DiffBaseToggle"),
@@ -3476,7 +3476,7 @@ mod tests {
                 &TestState::in_repo("space_diff"),
                 &key_event(KeyCode::Char('d'), KeyModifiers::NONE),
             )),
-            Some(vec!["Diff".to_string(), "SetMode".to_string()]),
+            Some(vec!["DiffFiles".to_string(), "SetMode".to_string()]),
         );
     }
 

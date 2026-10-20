@@ -69,7 +69,7 @@ impl Toggle {
             ActionKind::ToggleLspStatus => Toggle::LspStatus,
             ActionKind::ToggleInlayHints => Toggle::InlayHints,
             ActionKind::RecordMacro => Toggle::MacroRecording,
-            ActionKind::Diff => Toggle::DiffView,
+            ActionKind::DiffFiles => Toggle::DiffView,
             ActionKind::TogglePaneWiden => Toggle::PaneWiden,
             ActionKind::ToggleWrap => Toggle::Wrap,
             ActionKind::ToggleMinimap => Toggle::Minimap,
@@ -189,7 +189,7 @@ mod tests {
     #[test]
     fn binding_toggle_reads_the_action_that_names_the_row() {
         let diff_head = ResolvedAction {
-            name: "Diff".to_string(),
+            name: "DiffFiles".to_string(),
             args: vec![ResolvedArg {
                 name: None,
                 value: Value::String("HEAD".into()),
@@ -201,7 +201,7 @@ mod tests {
                 binding_toggle(&[action("SetMode"), action("ToggleInlayHints")]),
                 binding_toggle(&[action("GotoNextChange")]),
                 binding_toggle(&[action("SetMode")]),
-                binding_toggle(&[action("Diff")]),
+                binding_toggle(&[action("DiffFiles")]),
                 binding_toggle(&[diff_head]),
             ],
             [

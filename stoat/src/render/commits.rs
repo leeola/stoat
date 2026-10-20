@@ -367,9 +367,9 @@ pub(crate) fn preview_row_count(doc: &DiffDocument) -> usize {
 
 /// The diff view's session dials, resolved for one preview paint.
 ///
-/// A commit preview paints through `:diff`'s own painter, so it answers
-/// `:diff`'s dials rather than carrying a second set. One dial serves both
-/// screens, which is what keeps a step on either of them meaning the same
+/// A commit preview paints through `:diff-files`'s own painter, so it answers
+/// `:diff-files`'s dials rather than carrying a second set. One dial serves
+/// both screens, which is what keeps a step on either of them meaning the same
 /// thing.
 #[derive(Copy, Clone)]
 pub(crate) struct PreviewDials {
@@ -399,7 +399,7 @@ impl PreviewDials {
 /// The status color a base-side changed row takes whole under the tint dial.
 ///
 /// A base line is gone from the working tree either way, so moved wins over
-/// deleted on the same test `:diff`'s own base column uses. The two agree
+/// deleted on the same test `:diff-files`'s own base column uses. The two agree
 /// because they read the same rule, not because they were written alike.
 fn base_row_tint(side: &ReviewSide, tints: &DiffTints) -> Color {
     match side.moved_spans.is_empty() {
@@ -412,7 +412,7 @@ fn base_row_tint(side: &ReviewSide, tints: &DiffTints) -> Color {
 ///
 /// The row walk pairs lines by text, so a reformatted line sometimes lands
 /// beside a line it shares no change with. Such a side marks nothing, and it
-/// paints as context, as `:diff` paints the same line as plain text.
+/// paints as context, as `:diff-files` paints the same line as plain text.
 pub(crate) fn side_is_marked(side: &ReviewSide) -> bool {
     !side.change_spans.is_empty() || !side.moved_spans.is_empty()
 }
@@ -421,7 +421,7 @@ pub(crate) fn side_is_marked(side: &ReviewSide) -> bool {
 ///
 /// `no_base` marks a row with nothing beside it on the base side, which is an
 /// addition rather than a modification. Moved outranks both, matching the
-/// status family `:diff`'s right column resolves.
+/// status family `:diff-files`'s right column resolves.
 fn live_row_tint(side: &ReviewSide, no_base: bool, tints: &DiffTints) -> Color {
     if !side.moved_spans.is_empty() {
         return tints.moved;
@@ -432,10 +432,11 @@ fn live_row_tint(side: &ReviewSide, no_base: bool, tints: &DiffTints) -> Color {
     }
 }
 
-/// One side of a preview row, painted the way `:diff`'s base column paints.
+/// One side of a preview row, painted the way `:diff-files`'s base column
+/// paints.
 ///
-/// Parity with `:diff` comes from calling its painter, not from copying its
-/// treatment, so the two surfaces cannot drift.
+/// Parity with `:diff-files` comes from calling its painter, not from copying
+/// its treatment, so the two surfaces cannot drift.
 ///
 /// `tint_row` is the row's own status color, which the tint dial shifts every
 /// char outside a change span toward. `None` leaves the row untinted, which is
@@ -955,7 +956,7 @@ mod tests {
 
     /// A changed span is the one thing on the row that recedes nowhere, and it
     /// carries no color behind it, which is what makes a commit diff read
-    /// like `:diff`.
+    /// like `:diff-files`.
     ///
     /// This fixture's token color sits near the background, so the span takes
     /// the contrast lift as well. What it keeps is the theme's own color,
