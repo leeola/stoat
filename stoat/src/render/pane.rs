@@ -162,9 +162,11 @@ pub(crate) fn render_pane(
                         bg: [0, 0, 0, 0],
                         thumb: [tr, tg, tb, ta],
                         thumb_border: [tr, tg, tb],
-                        palette: match is_focused {
-                            true => chrome.palette,
-                            false => chrome.dimmed_palette,
+                        palette: match (editor.diff_view, is_focused) {
+                            (false, true) => chrome.palette,
+                            (false, false) => chrome.dimmed_palette,
+                            (true, true) => chrome.diff_palette,
+                            (true, false) => chrome.dimmed_diff_palette,
                         },
                     }
                     .render(strip, buf, scene);

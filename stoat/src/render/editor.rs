@@ -167,6 +167,7 @@ pub(crate) fn render_editor_with_overlay(
     editor.text_rect = None;
 
     if editor.diff_view {
+        let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
         // Both columns wrap at the narrower one, so a mirrored segment always
         // fits the side that shows it.
         let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
@@ -383,23 +384,7 @@ pub(crate) fn render_editor_with_overlay(
     };
     editor.gutter_width = gutter_w;
 
-    // Reserve the right-edge minimap strip, recording its screen rect for
-    // pointer mapping. Only the text rect shrinks to clear the space. The
-    // reserved cells stay blank so the terminal's GPU minimap pass owns them.
-    let inner = if minimap_enabled && inner.width >= MINIMAP_MIN_PANE_COLS {
-        editor.minimap_rect = Some(Rect {
-            x: inner.x + inner.width - MINIMAP_STRIP_COLS,
-            y: inner.y,
-            width: MINIMAP_STRIP_COLS,
-            height: inner.height,
-        });
-        Rect {
-            width: inner.width - MINIMAP_STRIP_COLS,
-            ..inner
-        }
-    } else {
-        inner
-    };
+    let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
     editor.text_rect = Some(inner);
 
     let right = inner.x + inner.width;
@@ -588,6 +573,28 @@ pub(crate) fn render_editor_with_overlay(
             fallback_style,
             buf,
         );
+    }
+}
+
+/// Reserve the right-edge minimap strip out of `inner`, and return the rect
+/// the text keeps.
+///
+/// The strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
+/// mapping. The reserved cells stay blank, so the terminal's GPU minimap pass
+/// owns them. A pane narrower than [`MINIMAP_MIN_PANE_COLS`] reserves nothing.
+fn reserve_minimap_strip(editor: &mut EditorState, inner: Rect, minimap_enabled: bool) -> Rect {
+    if !minimap_enabled || inner.width < MINIMAP_MIN_PANE_COLS {
+        return inner;
+    }
+    editor.minimap_rect = Some(Rect {
+        x: inner.x + inner.width - MINIMAP_STRIP_COLS,
+        y: inner.y,
+        width: MINIMAP_STRIP_COLS,
+        height: inner.height,
+    });
+    Rect {
+        width: inner.width - MINIMAP_STRIP_COLS,
+        ..inner
     }
 }
 
@@ -4650,6 +4657,37 @@ mod tests {
         assert!(
             strip.iter().all(|row| row.chars().all(|c| c == ' ')),
             "text never paints into the reserved strip: {strip:?}"
+        );
+    }
+
+    #[test]
+    fn diff_view_reserves_the_minimap_strip() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap-diff");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"one\ntwo\nthree");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .set_diff_view(true);
+
+        let (rect, strip) = render_minimap(&mut h.stoat, true, 120, 3);
+        let text_end = action_handlers::focused_editor_mut(&mut h.stoat)
+            .and_then(|editor| editor.text_rect)
+            .map(|text| text.x + text.width);
+        assert_eq!(
+            (rect, text_end),
+            (
+                Some(Rect::new(112, 0, super::MINIMAP_STRIP_COLS, 3)),
+                Some(112)
+            ),
+            "the strip pins to the right edge, and the live column ends where it starts"
+        );
+        assert!(
+            strip.iter().all(|row| row.chars().all(|c| c == ' ')),
+            "the diff paint never reaches the reserved strip: {strip:?}"
         );
     }
 

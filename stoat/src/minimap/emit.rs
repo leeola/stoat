@@ -18,6 +18,11 @@ use crate::{
     editor_state::EditorId,
     minimap::{EdgeSource, RowMark},
     pane::View,
+    render::{
+        paint,
+        review::{self, DiffDials},
+    },
+    theme::Theme,
     workspace::WorkspaceId,
 };
 use std::{
@@ -25,6 +30,7 @@ use std::{
     collections::hash_map::{DefaultHasher, Entry},
     hash::{Hash, Hasher},
     ops::Range,
+    sync::Arc,
 };
 use stoat_config::MinimapMode;
 use stoat_text::Bias;
@@ -80,6 +86,87 @@ const WEIGHTED_RUN_PROTOCOL: u32 = 4;
 /// prefix.
 pub(crate) const POPULATION_PALETTE_PROTOCOL: u32 = 13;
 
+/// The palettes a frame's minimap strips declare beside the class table's own.
+///
+/// A focused plain strip declares the class table's palette as it is. An
+/// unfocused strip declares its palette blended toward the background at the
+/// inactive dim. A diff view's strip declares [`review::diff_minimap_palette`],
+/// so a dial step reaches the strip through its declaration alone.
+///
+/// Every strip of a kind declares the same palette, so the frame builds them
+/// once and keeps them until the theme, the dim, the dials, or the diff view's
+/// syntax flag moves. See [`Stoat::refresh_minimap_palettes`].
+pub(crate) struct MinimapPalettes {
+    theme: Arc<Theme>,
+    dim: f32,
+    dials: DiffDials,
+    syntax: bool,
+    /// The class table's palette at the inactive dim. `None` when no dim
+    /// applies or the background is not RGB, where an unfocused strip declares
+    /// the palette undimmed.
+    pub(crate) dimmed: Option<Vec<[u8; 3]>>,
+    /// The diff view's palette under the dials and the syntax flag.
+    pub(crate) diff: Vec<[u8; 3]>,
+    /// [`Self::diff`] at the inactive dim, `None` where [`Self::dimmed`] is.
+    pub(crate) diff_dimmed: Option<Vec<[u8; 3]>>,
+}
+
+impl MinimapPalettes {
+    /// Build the palettes for `table` under `theme`, with the diff palette under
+    /// `dials` and `syntax`.
+    pub(crate) fn new(
+        table: &crate::minimap::ClassTable,
+        theme: &Arc<Theme>,
+        dim: f32,
+        dials: DiffDials,
+        syntax: bool,
+    ) -> Self {
+        let diff = review::diff_minimap_palette(table, theme, dials, syntax);
+        let dim_bg = (dim > 0.0)
+            .then(|| {
+                paint::style_rgb(
+                    theme
+                        .try_get(crate::theme::scope::UI_BACKGROUND)
+                        .and_then(|s| s.bg),
+                )
+            })
+            .flatten();
+        let blend = |palette: &[[u8; 3]]| {
+            dim_bg.map(|bg| {
+                palette
+                    .iter()
+                    .map(|&c| paint::dim_rgb(c, bg, dim))
+                    .collect()
+            })
+        };
+
+        Self {
+            theme: theme.clone(),
+            dim,
+            dials,
+            syntax,
+            dimmed: blend(table.palette()),
+            diff_dimmed: blend(&diff),
+            diff,
+        }
+    }
+
+    /// Whether these palettes were built from these inputs, so a frame that
+    /// passes the same ones keeps them.
+    pub(crate) fn built_from(
+        &self,
+        theme: &Arc<Theme>,
+        dim: f32,
+        dials: DiffDials,
+        syntax: bool,
+    ) -> bool {
+        Arc::ptr_eq(&self.theme, theme)
+            && self.dim == dim
+            && self.dials == dials
+            && self.syntax == syntax
+    }
+}
+
 /// Sync each visible minimap strip's buffer and drain its summary changes to
 /// the terminal, retiring content for buffers that closed.
 ///
@@ -98,8 +185,8 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
     let ws_id = stoat.active_workspace;
 
     // Per-pane mode syncs a strip only where one is reserved (minimap_rect).
-    // Single mode has no per-pane rects, so it syncs every visible plain
-    // editor's buffer, keeping all of them warm for instant focus switches.
+    // Single mode has no per-pane rects, so it syncs every visible editor's
+    // buffer, keeping all of them warm for instant focus switches.
     let single = stoat.minimap_mode() == MinimapMode::Single;
     let strips: Vec<(BufferId, EditorId)> = {
         let ws = &stoat.workspaces[ws_id];
@@ -110,11 +197,7 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                     return None;
                 };
                 let editor = ws.editors.get(editor_id)?;
-                let included = if single {
-                    !editor.diff_view
-                } else {
-                    editor.minimap_rect.is_some()
-                };
+                let included = single || editor.minimap_rect.is_some();
                 included.then_some((editor.buffer_id, editor_id))
             })
             .collect()
@@ -1706,26 +1789,27 @@ mod tests {
         );
     }
 
+    /// The run classes of buffer line `n` in the most recent emit that carries
+    /// it.
+    fn line_classes(cmds: &[stoatty_protocol::command::Command], n: u32) -> Option<Vec<u8>> {
+        use stoatty_protocol::command::Command;
+
+        cmds.iter().rev().find_map(|cmd| match cmd {
+            Command::MinimapLines(l) => {
+                let idx = n.checked_sub(l.start)? as usize;
+                l.lines
+                    .get(idx)
+                    .map(|runs| runs.iter().map(|run| run.class).collect())
+            },
+            _ => None,
+        })
+    }
+
     /// A row's content takes its diff status block for a terminal that reads
     /// the population palette, and the plain syntax block for one before it.
     #[test]
     fn a_diff_row_carries_its_status_offset() {
         use crate::{host::DiffStatus, minimap::EdgeClass};
-        use stoatty_protocol::command::Command;
-
-        // The run classes of buffer line `n` in the most recent emit that
-        // carries it.
-        fn classes(cmds: &[Command], n: u32) -> Option<Vec<u8>> {
-            cmds.iter().rev().find_map(|cmd| match cmd {
-                Command::MinimapLines(l) => {
-                    let idx = n.checked_sub(l.start)? as usize;
-                    l.lines
-                        .get(idx)
-                        .map(|runs| runs.iter().map(|run| run.class).collect())
-                },
-                _ => None,
-            })
-        }
 
         let (mut h, mut rx, _) = modified_line_fixture();
         let table = &h.stoat.minimap_class_table;
@@ -1748,14 +1832,211 @@ mod tests {
 
         assert_eq!(
             (
-                classes(&current, 0),
-                classes(&current, 1),
-                classes(&older, 1)
+                line_classes(&current, 0),
+                line_classes(&current, 1),
+                line_classes(&older, 1)
             ),
             (Some(vec![0]), Some(vec![edge, base]), Some(vec![edge, 0])),
             "the modified line's content takes the modified block, then the plain \
              block under the same lane once the terminal predates it",
         );
+    }
+
+    /// Paint a frame, send its scene and its minimap content, and return every
+    /// command the terminal receives.
+    fn emit_frame(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> Vec<stoatty_protocol::command::Command> {
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        drain_apc(rx)
+    }
+
+    /// The single band follows its editor into the diff view. It declares the
+    /// palette the dials derive and declares it again at each dial step and
+    /// theme switch, and the buffer's lines sync with their status blocks.
+    #[test]
+    fn a_diff_view_strip_declares_the_dial_palette() {
+        use crate::{host::DiffStatus, minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
+        use stoat_action::SetTheme;
+        use stoatty_protocol::command::Command;
+
+        let band = |cmds: &[Command]| {
+            cmds.iter().find_map(|c| match c {
+                Command::Minimap(m) if m.strip_id == SINGLE_MINIMAP_STRIP_ID => {
+                    Some(m.palette.clone())
+                },
+                _ => None,
+            })
+        };
+
+        let (mut h, mut rx, _) = modified_line_fixture();
+        h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL;
+        h.stoat.diff_tint = 2;
+        h.resize(120, 24);
+        action_handlers::review::enter_diff_view(&mut h.stoat);
+        let diff = emit_frame(&mut h, &mut rx);
+        h.stoat.diff_tint = 1;
+        let stepped = emit_frame(&mut h, &mut rx);
+        h.stoat.diff_syntax = false;
+        let flat = emit_frame(&mut h, &mut rx);
+
+        let table = &h.stoat.minimap_class_table;
+        let palette_at = |tint: i8, syntax: bool| {
+            let dials = DiffDials {
+                tint_amount: review::diff_tint_amount(tint),
+                ..DiffDials::from_stoat(&h.stoat)
+            };
+            review::diff_minimap_palette(table, &h.stoat.theme, dials, syntax)
+        };
+        let flat_palette = palette_at(1, false);
+        assert_ne!(
+            palette_at(2, true),
+            table.palette(),
+            "the dials move the palette"
+        );
+        assert_eq!(
+            (
+                band(&diff),
+                line_classes(&diff, 1),
+                band(&stepped),
+                band(&flat)
+            ),
+            (
+                Some(palette_at(2, true)),
+                Some(vec![
+                    table.edge_class(EdgeClass::Modified),
+                    table.population_base(DiffStatus::Modified),
+                ]),
+                Some(palette_at(1, true)),
+                Some(flat_palette.clone()),
+            ),
+            "the band declares the dial palette over the diff view's synced lines, \
+             and again at a tint step and a syntax toggle",
+        );
+
+        action_handlers::dispatch(
+            &mut h.stoat,
+            &SetTheme {
+                name: "gruvbox-light".to_string(),
+            },
+        );
+        let themed = emit_frame(&mut h, &mut rx);
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+        let plain = emit_frame(&mut h, &mut rx);
+
+        let table = &h.stoat.minimap_class_table;
+        let themed_palette = review::diff_minimap_palette(
+            table,
+            &h.stoat.theme,
+            DiffDials::from_stoat(&h.stoat),
+            false,
+        );
+        assert_ne!(themed_palette, flat_palette, "the theme moves the palette");
+        assert_eq!(
+            (band(&themed), band(&plain)),
+            (Some(themed_palette), Some(table.palette().to_vec())),
+            "a theme switch declares the dial palette under the new theme, and the \
+             class table's own palette once the view is plain",
+        );
+    }
+
+    /// A strip declares the palette for its view and its focus. A diff view
+    /// takes the dial palette, and an unfocused strip takes its palette at the
+    /// inactive dim. A terminal before the population palette receives each one
+    /// cut to the legacy prefix.
+    #[test]
+    fn a_strip_declares_the_palette_for_its_view_and_focus() {
+        use stoatty_protocol::command::Command;
+
+        // A session per protocol, because a session's terminal changes protocol
+        // only across a handshake, which the pane cache keys on.
+        for protocol in [POPULATION_PALETTE_PROTOCOL, POPULATION_PALETTE_PROTOCOL - 1] {
+            let mut h = Stoat::test();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            h.stoat.set_apc_tx(tx);
+            h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+            h.stoat.stoatty_protocol = protocol;
+            h.stoat.diff_tint = 2;
+            // Wide enough that each vertical split clears the minimap min-width
+            // gate.
+            h.resize(260, 24);
+            let a = h.write_file("a.txt", "alpha\n");
+            let b = h.write_file("b.txt", "bravo\n");
+            // Sorted, because the pair says nothing about which pane declares
+            // first. Each frame holds one diff pane and one plain pane under
+            // opposite focus, so the four palettes keep the pairs apart.
+            let mut declared = |h: &mut crate::test_harness::TestHarness| {
+                let mut palettes: Vec<Vec<[u8; 3]>> = emit_frame(h, &mut rx)
+                    .into_iter()
+                    .filter_map(|c| match c {
+                        Command::Minimap(m) => Some(m.palette),
+                        _ => None,
+                    })
+                    .collect();
+                palettes.sort();
+                palettes.dedup();
+                palettes
+            };
+
+            h.open_file(&a);
+            h.type_action("SplitRight()");
+            h.open_file(&b);
+            h.type_action("FocusNext()");
+            action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .set_diff_view(true);
+            let diff_focused = declared(&mut h);
+
+            // The keys the harness finds for FocusNext leave a diff view rather
+            // than move the focus, so the focus moves through the pane tree.
+            h.stoat.active_workspace_mut().panes.focus_next();
+            let diff_unfocused = declared(&mut h);
+
+            let table = &h.stoat.minimap_class_table;
+            let len = match protocol >= POPULATION_PALETTE_PROTOCOL {
+                true => table.palette().len(),
+                false => table.legacy_palette().len(),
+            };
+            let bg = paint::style_rgb(
+                h.stoat
+                    .theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|s| s.bg),
+            )
+            .expect("the test theme has an rgb background");
+            // 0.25 is the default ui.inactive_dim the test harness resolves.
+            let dimmed = |palette: &[[u8; 3]]| -> Vec<[u8; 3]> {
+                palette
+                    .iter()
+                    .map(|&c| paint::dim_rgb(c, bg, 0.25))
+                    .collect()
+            };
+            let plain = table.palette()[..len].to_vec();
+            let mut diff = review::diff_minimap_palette(
+                table,
+                &h.stoat.theme,
+                DiffDials::from_stoat(&h.stoat),
+                true,
+            );
+            diff.truncate(len);
+            let sorted = |mut pair: Vec<Vec<[u8; 3]>>| {
+                pair.sort();
+                pair
+            };
+            assert_eq!(
+                (diff_focused, diff_unfocused),
+                (
+                    sorted(vec![diff.clone(), dimmed(&plain)]),
+                    sorted(vec![dimmed(&diff), plain]),
+                ),
+                "at protocol {protocol}",
+            );
+        }
     }
 
     /// The style id and interner for the first `THEME_KEYS` scope, as the

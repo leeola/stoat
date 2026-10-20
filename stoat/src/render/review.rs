@@ -1137,8 +1137,6 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
 /// The edge classes stay as `table` gives them. A theme color that is not RGB
 /// enters as its [`minimap::color_to_rgb`] approximation and blends like any
 /// other, where the painter does not blend it.
-// FIXME: No minimap strip declares this palette, so only the tests call it.
-#[allow(dead_code)]
 pub(crate) fn diff_minimap_palette(
     table: &ClassTable,
     theme: &crate::theme::Theme,

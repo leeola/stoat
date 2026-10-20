@@ -42,6 +42,7 @@ use crate::{
     register,
     render::{
         pane_cache::PaneCacheEntry,
+        review::DiffDials,
         sanitize,
         undercurl::{self, UndercurlBatch},
         BlankedBuffer, PRIMARY_MODES,
@@ -2364,17 +2365,16 @@ pub struct Stoat {
         Arc<crate::theme::Theme>,
         crate::render::editor::ResolvedChrome,
     )>,
-    /// [`Self::minimap_class_table`]'s palette pre-blended toward the editor
-    /// background at the inactive dim, for the strips of unfocused panes.
+    /// The palettes the minimap strips declare beside
+    /// [`Self::minimap_class_table`]'s own, or `None` while the minimap is off.
     ///
-    /// Every unfocused strip blends this identically, so the blend is kept
-    /// rather than redone per frame. `None` means no dim applies or the
-    /// background did not resolve, and those strips paint undimmed.
+    /// Every strip of a kind declares the same palette, so the palettes are kept
+    /// rather than built again per frame.
     ///
-    /// Keyed on the theme's identity and the dim, the way [`Self::chrome`] is
-    /// keyed. That covers the class table too, since a config install replaces
+    /// Keyed on the theme's identity, the way [`Self::chrome`] is keyed. That
+    /// covers the class table too, since a config install replaces
     /// [`Self::theme`] and [`Self::minimap_class_table`] together.
-    pub(crate) dimmed_minimap_palette: Option<(Arc<crate::theme::Theme>, f32, Vec<[u8; 3]>)>,
+    pub(crate) minimap_palettes: Option<emit::MinimapPalettes>,
     /// Smooth-scroll pool emit state for the focused editor. Tracks the
     /// last-declared pool region, filled page window, and emitted scroll row
     /// so each frame emits only the deltas.
@@ -2855,7 +2855,7 @@ impl Stoat {
             #[cfg(test)]
             completion_layouts: std::cell::Cell::new(0),
             chrome: None,
-            dimmed_minimap_palette: None,
+            minimap_palettes: None,
             smooth_scroll: SmoothScrollState::default(),
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
@@ -3775,41 +3775,36 @@ impl Stoat {
         }
     }
 
-    /// Settle [`Self::dimmed_minimap_palette`] for the dim now in force.
+    /// Settle [`Self::minimap_palettes`] for the dim, the dials, and the diff
+    /// view's syntax flag now in force.
     ///
-    /// Separate from reading it for the same reason [`Self::refresh_chrome`]
-    /// is. A caller passes `wanted` as `false` to keep the blend from being
-    /// built at all, which is what the minimap being off means.
-    pub(crate) fn refresh_dimmed_minimap_palette(&mut self, wanted: bool, dim: f32) {
-        if !wanted || dim <= 0.0 {
-            self.dimmed_minimap_palette = None;
+    /// Separate from reading them for the same reason [`Self::refresh_chrome`]
+    /// is. A caller passes `wanted` as `false` to keep them from being built at
+    /// all, which is what the minimap being off means.
+    pub(crate) fn refresh_minimap_palettes(&mut self, wanted: bool, dim: f32) {
+        if !wanted {
+            self.minimap_palettes = None;
             return;
         }
+        let dials = DiffDials::from_stoat(self);
+        // A diff view paints syntax colors only under both toggles, as the
+        // frame's sync of each display map applies them.
+        let syntax = self.syntax_highlight && self.diff_syntax;
         let fresh = self
-            .dimmed_minimap_palette
+            .minimap_palettes
             .as_ref()
-            .is_some_and(|(theme, blended_at, _)| {
-                Arc::ptr_eq(theme, &self.theme) && *blended_at == dim
-            });
+            .is_some_and(|palettes| palettes.built_from(&self.theme, dim, dials, syntax));
         if fresh {
             return;
         }
 
-        let Some(bg) = crate::render::paint::style_rgb(
-            self.theme
-                .try_get(crate::theme::scope::UI_BACKGROUND)
-                .and_then(|s| s.bg),
-        ) else {
-            self.dimmed_minimap_palette = None;
-            return;
-        };
-        let blended = self
-            .minimap_class_table
-            .palette()
-            .iter()
-            .map(|&c| crate::render::paint::dim_rgb(c, bg, dim))
-            .collect();
-        self.dimmed_minimap_palette = Some((self.theme.clone(), dim, blended));
+        self.minimap_palettes = Some(emit::MinimapPalettes::new(
+            &self.minimap_class_table,
+            &self.theme,
+            dim,
+            dials,
+            syntax,
+        ));
     }
 
     pub(crate) fn size(&self) -> Rect {

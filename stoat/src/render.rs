@@ -147,9 +147,12 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) workspace: WorkspaceId,
     /// Content stores this session declared, read for each strip's `content_id`.
     pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
-    /// Syntax-scope palette the strip declares and its run summaries index, cut
-    /// to [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)
-    /// for a terminal before protocol 13.
+    /// Syntax-scope palette a plain editor's strip declares and its run
+    /// summaries index.
+    ///
+    /// This and the three palettes below are cut to
+    /// [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)'s
+    /// length for a terminal before protocol 13.
     pub(crate) palette: &'a [[u8; 3]],
     /// [`Self::palette`] pre-blended toward the background at the inactive dim,
     /// for an unfocused pane's strip.
@@ -158,6 +161,11 @@ pub(crate) struct MinimapChrome<'a> {
     /// does it once rather than each pane doing it again. Aliases
     /// [`Self::palette`] when no dim applies.
     pub(crate) dimmed_palette: &'a [[u8; 3]],
+    /// The palette a diff view's strip declares, which follows the diff dials.
+    pub(crate) diff_palette: &'a [[u8; 3]],
+    /// [`Self::diff_palette`] at the inactive dim, for an unfocused diff view's
+    /// strip. Aliases [`Self::diff_palette`] when no dim applies.
+    pub(crate) dimmed_diff_palette: &'a [[u8; 3]],
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
 }
@@ -878,7 +886,7 @@ pub(crate) fn frame(
         .unwrap_or(0.25)
         .clamp(0.0, 1.0) as f32;
 
-    stoat.refresh_dimmed_minimap_palette(minimap_enabled, inactive_dim);
+    stoat.refresh_minimap_palettes(minimap_enabled, inactive_dim);
 
     // Resolved before the field borrows below, because snapshotting the prompt
     // editor's display map takes the whole app mutably. Nothing between here
@@ -888,12 +896,9 @@ pub(crate) fn frame(
     // The last whole-app borrows are behind us, so what the frame reads from
     // here on is field by field and can live alongside the workspace below.
     let mode = stoat.frame_mode.as_str();
-    let dimmed_palette: Option<&[[u8; 3]]> = stoat
-        .dimmed_minimap_palette
-        .as_ref()
-        .map(|(_, _, blended)| blended.as_slice());
 
-    let minimap_chrome = minimap_enabled.then(|| {
+    // The palettes exist exactly while the minimap is on, per the refresh above.
+    let minimap_chrome = stoat.minimap_palettes.as_ref().map(|palettes| {
         let thumb = {
             let bar = stoat.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
             let [r, g, b] = paint::style_rgb(bar.bg).unwrap_or([90, 90, 110]);
@@ -907,11 +912,20 @@ pub(crate) fn frame(
             false => table.legacy_palette().len(),
         };
         let palette = &table.palette()[..declared];
+        let diff_palette = &palettes.diff[..declared];
         MinimapChrome {
             workspace: stoat.active_workspace,
             content: &stoat.minimap_content,
             palette,
-            dimmed_palette: dimmed_palette.map_or(palette, |dimmed| &dimmed[..declared]),
+            dimmed_palette: palettes
+                .dimmed
+                .as_deref()
+                .map_or(palette, |dimmed| &dimmed[..declared]),
+            diff_palette,
+            dimmed_diff_palette: palettes
+                .diff_dimmed
+                .as_deref()
+                .map_or(diff_palette, |dimmed| &dimmed[..declared]),
             thumb,
         }
     });
@@ -1186,7 +1200,6 @@ pub(crate) fn frame(
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view
         && let Some(editor) = ws.editors.get(*editor_id)
-        && !editor.diff_view
         && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
     {
         let [tr, tg, tb, _] = chrome.thumb;
@@ -1198,7 +1211,10 @@ pub(crate) fn frame(
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
             thumb_border: [tr, tg, tb],
-            palette: chrome.palette,
+            palette: match editor.diff_view {
+                true => chrome.diff_palette,
+                false => chrome.palette,
+            },
         }
         .render(band, buf, scene);
     }
