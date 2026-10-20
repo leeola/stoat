@@ -21,6 +21,9 @@ use stoat_text::{
 };
 
 pub(crate) mod emit;
+// FIXME: No emitter reads the overview strip's lines.
+#[allow(dead_code)]
+mod overview;
 
 /// Minimap columns a line is summarized into, matching the strip's declared
 /// `max_columns`. Display columns past this are dropped.

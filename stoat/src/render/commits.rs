@@ -413,7 +413,7 @@ fn base_row_tint(side: &ReviewSide, tints: &DiffTints) -> Color {
 /// The row walk pairs lines by text, so a reformatted line sometimes lands
 /// beside a line it shares no change with. Such a side marks nothing, and it
 /// paints as context, as `:diff` paints the same line as plain text.
-fn side_is_marked(side: &ReviewSide) -> bool {
+pub(crate) fn side_is_marked(side: &ReviewSide) -> bool {
     !side.change_spans.is_empty() || !side.moved_spans.is_empty()
 }
 
