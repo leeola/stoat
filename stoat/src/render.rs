@@ -19,6 +19,7 @@ pub(crate) mod hover;
 pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
 pub(crate) mod location_picker;
+pub(crate) mod overview;
 pub(crate) mod paint;
 pub(crate) mod pane;
 pub(crate) mod pane_cache;
@@ -57,8 +58,10 @@ use crate::{
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
+    overview::{OverviewId, OverviewState},
     pane::{DockVisibility, FocusTarget, PaneId, View},
     rebase::RebasePause,
+    review_session::DiffDocument,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
     toggle::{self, Toggle, ToggleStates},
@@ -91,6 +94,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
@@ -134,6 +138,11 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) term_pool_grids: &'a HashMap<TermId, (u16, u16)>,
     /// Every open commits list, which a [`View::Commits`] pane paints from.
     pub(crate) commit_lists: &'a mut SlotMap<CommitListId, CommitListState>,
+    /// Every open overview, which a [`View::Overview`] pane paints from.
+    pub(crate) overviews: &'a mut SlotMap<OverviewId, OverviewState>,
+    /// The workspace's last overview document, or `None` before the first one
+    /// lands and while the changes stand at none.
+    pub(crate) overview_doc: Option<Arc<DiffDocument>>,
 }
 
 /// The lookup and colors a pane needs to declare its minimap strip.
@@ -262,6 +271,10 @@ pub(crate) struct FrameCtx<'a> {
     /// previews paint through `:diff`'s own painter, so they answer the same
     /// session dials rather than carrying a second set.
     pub(crate) preview_dials: commits::PreviewDials,
+    /// Whether an overview document build is on the pool, so an overview with
+    /// no document yet shows that a build runs rather than that nothing
+    /// changed.
+    pub(crate) overview_building: bool,
     /// The gutter, severity, and diff-mark colors already resolved from
     /// [`Self::theme`], so each pane paints from them rather than re-walking
     /// the scope table for every one.
@@ -1012,6 +1025,7 @@ pub(crate) fn frame(
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
         preview_dials,
+        overview_building: stoat.pending_overview_build.is_some(),
         chrome: &stoat
             .chrome
             .as_ref()
@@ -1153,6 +1167,8 @@ pub(crate) fn frame(
                 terms: &ws.terms,
                 term_pool_grids: &ws.term_pool_grids,
                 commit_lists: &mut ws.commit_lists,
+                overviews: &mut ws.overviews,
+                overview_doc: ws.overview_doc.as_ref().and_then(|built| built.doc.clone()),
             },
             frame,
             buf,
@@ -1289,6 +1305,8 @@ pub(crate) fn frame(
                     terms: &ws.terms,
                     term_pool_grids: &ws.term_pool_grids,
                     commit_lists: &mut ws.commit_lists,
+                    overviews: &mut ws.overviews,
+                    overview_doc: ws.overview_doc.as_ref().and_then(|built| built.doc.clone()),
                 },
                 frame,
                 buf,

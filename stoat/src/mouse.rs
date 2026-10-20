@@ -133,6 +133,7 @@ pub(crate) struct ScreenSurfaces {
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum ScreenKind {
     Commits,
+    Overview,
     Rebase,
     RebaseConflict,
 }
@@ -172,6 +173,25 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
                 selected: state.selected,
                 scroll_top: state.scroll_top,
                 detail: crate::render::commits::commits_detail_rect(pane, stoat.commits_split),
+            })
+        },
+        "overview" => {
+            let state = ws.focused_overview()?;
+            let pane = ws.panes.pane(ws.panes.focus()).area;
+            Some(ScreenSurfaces {
+                kind: ScreenKind::Overview,
+                pane,
+                list: crate::render::layout::split_pane_status(pane).0,
+                len: ws
+                    .overview_doc
+                    .as_ref()
+                    .and_then(|built| built.doc.as_deref())
+                    .map_or(0, crate::render::commits::preview_row_count),
+                selected: state.cursor,
+                scroll_top: state.scroll_top,
+                // The hunk list is the whole screen, with no detail pane beside
+                // it for a notch to land in.
+                detail: None,
             })
         },
         "rebase" => {
@@ -240,6 +260,7 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
             };
             action_handlers::commits::commits_step(stoat, step)
         },
+        ScreenKind::Overview => action_handlers::overview::overview_select(stoat, index),
         ScreenKind::Rebase => action_handlers::rebase::rebase_select(stoat, index),
         ScreenKind::RebaseConflict => action_handlers::conflict::conflict_select(stoat, index),
     })
@@ -1390,6 +1411,13 @@ pub(crate) fn handle_mouse_scroll(
                     };
                     action_handlers::commits::commits_step(stoat, step)
                 },
+                ScreenKind::Overview => action_handlers::overview::overview_step(
+                    stoat,
+                    match steps > 0 {
+                        true => by as i32,
+                        false => -(by as i32),
+                    },
+                ),
                 // The rebase step moves one entry, so a multi-notch report
                 // spends one call per notch rather than carrying a count.
                 ScreenKind::Rebase => {
@@ -2831,6 +2859,41 @@ mod tests {
             h.stoat.pending_hover.is_none(),
             "a mouse focus change closes the hover popup"
         );
+    }
+
+    /// A press on an overview row puts the cursor there, and a wheel notch over
+    /// the hunks steps it.
+    #[test]
+    fn a_press_and_a_wheel_over_the_overview_move_its_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_overview(false);
+        h.settle();
+        let list = {
+            let ws = h.stoat.active_workspace();
+            crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+        let cursor = |h: &crate::test_harness::TestHarness| {
+            h.stoat
+                .active_workspace()
+                .focused_overview()
+                .expect("the overview is open")
+                .cursor
+        };
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + 2,
+            list.y + 1,
+        ));
+        let pressed = cursor(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::ScrollDown,
+            list.x + 2,
+            list.y + 1,
+        ));
+        assert_eq!((pressed, cursor(&h)), (1, 2));
     }
 
     /// Seed a repo with `n` commits, open the commits screen over a long

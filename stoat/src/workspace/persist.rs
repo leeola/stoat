@@ -1026,13 +1026,15 @@ fn stale_replacement(view: &View) -> Option<View> {
     match view {
         View::Run(_) => Some(View::Label("Terminal (closed)".into())),
         View::Agent(_) => Some(View::Label("Agent (closed)".into())),
-        // Terminal and commits panes survive the sweep with a dead id. The app
-        // respawns a fresh shell or a fresh list for each after restore. See
-        // action_handlers::terminal and action_handlers::commits.
+        // Terminal, commits, and overview panes survive the sweep with a dead
+        // id. The app respawns a fresh shell, list, or overview for each after
+        // restore. See action_handlers::terminal, action_handlers::commits, and
+        // action_handlers::overview.
         // An image pane refers to a file rather than a live session, so a
         // restored one is as good as it was.
         View::Terminal(_)
         | View::Commits(_)
+        | View::Overview(_)
         | View::Label(_)
         | View::Editor(_)
         | View::Image { .. } => None,

@@ -23,6 +23,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     host::GitHost,
     input_history::InputHistory,
+    overview::{OverviewDoc, OverviewId, OverviewState},
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, text, walkthrough::SlideParts},
@@ -316,9 +317,15 @@ pub struct Workspace {
     /// [`respawn_commits_panes`](crate::action_handlers::respawn_commits_panes)
     /// gives that pane a live list.
     pub(crate) restored_commit_lists: HashMap<CommitListId, CommitListSnap>,
+    /// Every open overview in the workspace, keyed from the
+    /// [`View::Overview`] pane that shows it.
+    ///
+    /// Held here rather than by the pane, as [`Self::commit_lists`] holds a
+    /// list, so a parked tab's overview keeps its cursor.
+    pub(crate) overviews: SlotMap<OverviewId, OverviewState>,
     /// The last overview document a build finished, kept so an overview paints
     /// at once while the next one builds.
-    pub(crate) overview_doc: Option<crate::overview::OverviewDoc>,
+    pub(crate) overview_doc: Option<OverviewDoc>,
     /// Moves when the diff base or the git state changes. That stales the
     /// overview document even where no buffer text moved.
     pub(crate) overview_epoch: u64,
@@ -537,6 +544,7 @@ impl Workspace {
             conflict: None,
             commit_lists: SlotMap::with_key(),
             restored_commit_lists: HashMap::new(),
+            overviews: SlotMap::with_key(),
             overview_doc: None,
             overview_epoch: 0,
             review_walk: None,
@@ -675,6 +683,29 @@ impl Workspace {
         self.commit_lists.get_mut(id)
     }
 
+    /// The overview the focused split pane shows, or `None` when focus sits on
+    /// a dock or the focused pane shows something else.
+    pub(crate) fn focused_overview_id(&self) -> Option<OverviewId> {
+        let FocusTarget::SplitPane = self.focus else {
+            return None;
+        };
+        match self.panes.pane(self.panes.focus()).view {
+            View::Overview(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// The state of the overview the focused split pane shows.
+    pub(crate) fn focused_overview(&self) -> Option<&OverviewState> {
+        self.overviews.get(self.focused_overview_id()?)
+    }
+
+    /// The state of the overview the focused split pane shows, to change.
+    pub(crate) fn focused_overview_mut(&mut self) -> Option<&mut OverviewState> {
+        let id = self.focused_overview_id()?;
+        self.overviews.get_mut(id)
+    }
+
     /// What tab `idx` calls itself in the tab bar, taken from its focused
     /// pane's view.
     ///
@@ -736,6 +767,7 @@ impl Workspace {
             View::Agent(id) => self.session_tab_title(*id, "agent"),
             View::Terminal(id) => self.session_tab_title(*id, "term"),
             View::Commits(_) => "commits".to_string(),
+            View::Overview(_) => "overview".to_string(),
             View::Run(_) => "run".to_string(),
             View::Image { path, .. } => path
                 .file_name()
@@ -1747,6 +1779,7 @@ impl Workspace {
                 | View::Agent(_)
                 | View::Terminal(_)
                 | View::Commits(_)
+                | View::Overview(_)
                 | View::Image { .. } => {},
             }
         }
@@ -2025,6 +2058,7 @@ pub(crate) fn view_kind(view: &View) -> &'static str {
         View::Agent(_) => "agent",
         View::Terminal(_) => "terminal",
         View::Commits(_) => "commits",
+        View::Overview(_) => "overview",
         View::Image { .. } => "image",
     }
 }
@@ -2037,6 +2071,7 @@ mod tests {
         code_index::build::IndexUpdate,
         commit_list::CommitListId,
         editor_state::EditorId,
+        overview::OverviewId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::RunId,
         term_session::TermId,
@@ -2193,13 +2228,14 @@ mod tests {
             View::Agent(TermId::default()),
             View::Terminal(TermId::default()),
             View::Commits(CommitListId::default()),
+            View::Overview(OverviewId::default()),
         ]
         .iter()
         .map(|view| ws.view_title(view))
         .collect();
         assert_eq!(
             titles,
-            ["pane", "scratch", "cat.png", "run", "agent", "term", "commits"]
+            ["pane", "scratch", "cat.png", "run", "agent", "term", "commits", "overview"]
         );
     }
 

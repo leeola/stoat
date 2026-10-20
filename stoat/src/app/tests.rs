@@ -15,6 +15,7 @@ use crate::{
     input_parse::{self, InputStep},
     input_view::{InputView, SubmitTarget},
     keymap::KeymapState,
+    overview::OverviewState,
     pane::{DockPanel, DockSide},
     render::{
         content_lane, hints::HintRow, pane::pane_areas, review::DiffDials, status_lane,
@@ -3443,6 +3444,35 @@ fn a_session_restored_in_the_background_respawns_its_commits_list_on_the_switch(
     );
 }
 
+/// A restored overview pane names a state that died with the last run. A
+/// restore of the active workspace gives it a live state at once, and a
+/// restore in the background gives it one on the switch.
+#[test]
+fn a_restored_overview_pane_gets_a_live_state_on_either_restore_path() {
+    let restored = |background: bool| {
+        let mut h = Stoat::test();
+        let state_path = save_a_session_with_a_parked_tab(&mut h, |h| {
+            h.cover_with_overview(false);
+        });
+        if background {
+            let target = restore_into_a_background_workspace(&mut h, state_path);
+            h.set_active_workspace(target);
+            h.stoat.drive_background();
+        } else {
+            restore_into_a_fresh_workspace(&mut h, state_path);
+        }
+
+        let ws = h.stoat.active_workspace_mut();
+        ws.switch_tab(1);
+        let live = match ws.panes.pane(ws.panes.focus()).view {
+            View::Overview(id) => ws.overviews.contains_key(id),
+            _ => false,
+        };
+        (live, ws.overviews.len())
+    };
+    assert_eq!([restored(false), restored(true)], [(true, 1); 2]);
+}
+
 /// The selection sits past the first page and above the viewport's last row,
 /// so the restore's search has to read a second page to find it, and the list
 /// has to keep its row rather than scroll it into view from the bottom.
@@ -3497,8 +3527,17 @@ fn a_restored_list_keeps_the_readers_place() {
 /// returns the session file.
 fn save_a_session_with_a_parked_list(h: &mut crate::test_harness::TestHarness) -> PathBuf {
     h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "1\n")])]);
+    save_a_session_with_a_parked_tab(h, |h| h.open_commits("/repo"))
+}
+
+/// Saves a session whose parked tab 1 shows what `open` puts in its pane, and
+/// returns the session file.
+fn save_a_session_with_a_parked_tab(
+    h: &mut crate::test_harness::TestHarness,
+    open: impl FnOnce(&mut crate::test_harness::TestHarness),
+) -> PathBuf {
     action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
-    h.open_commits("/repo");
+    open(h);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::PrevTab);
 
     let state_path = PathBuf::from("/state/session.ron");
@@ -5240,10 +5279,10 @@ fn a_pinned_chord_survives_a_click_into_another_pane() {
     assert_eq!(h.stoat.focused_mode(), "space_goto");
 }
 
-/// A run pane, a commits pane, and a docked terminal end their chords on a
-/// focus move the way an editor pane does.
+/// A run pane, a commits pane, an overview pane, and a docked terminal end
+/// their chords on a focus move the way an editor pane does.
 #[test]
-fn a_click_away_rests_a_run_commits_or_docked_view() {
+fn a_click_away_rests_a_run_commits_overview_or_docked_view() {
     let mut run = Stoat::test();
     let (left, _) = split_editor_pair(&mut run);
     let run_editor = {
@@ -5273,6 +5312,15 @@ fn a_click_away_rests_a_run_commits_or_docked_view() {
         id
     };
 
+    let mut overview = Stoat::test();
+    let (left, _) = split_editor_pair(&mut overview);
+    let overview_id = {
+        let ws = overview.stoat.active_workspace_mut();
+        let id = ws.overviews.insert(OverviewState::default());
+        ws.panes.pane_mut(left).view = View::Overview(id);
+        id
+    };
+
     let mut dock = Stoat::test();
     split_editor_pair(&mut dock);
     let term = {
@@ -5293,9 +5341,10 @@ fn a_click_away_rests_a_run_commits_or_docked_view() {
         [
             mode_after_click_away(&mut run, |ws| &mut ws.editors[run_editor].mode),
             mode_after_click_away(&mut commits, |ws| &mut ws.commit_lists[list].mode),
+            mode_after_click_away(&mut overview, |ws| &mut ws.overviews[overview_id].mode),
             mode_after_click_away(&mut dock, |ws| &mut ws.terms[term].mode),
         ],
-        ["normal"; 3],
+        ["normal"; 4],
     );
 }
 

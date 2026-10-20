@@ -105,6 +105,12 @@ pub(super) fn close_tab(stoat: &mut Stoat) -> UpdateEffect {
                 View::Commits(list),
                 EditorDisposal::GcIfUnreferenced,
             ),
+            View::Overview(overview) => dispose_view(
+                ws,
+                &executor,
+                View::Overview(overview),
+                EditorDisposal::GcIfUnreferenced,
+            ),
             _ => {},
         }
     }

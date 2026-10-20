@@ -452,6 +452,30 @@ impl TestHarness {
         self.capture("open_commits");
     }
 
+    /// Turn the focused pane into an overview over the view it shows, widened
+    /// as a full-window screen, with its document's build started.
+    ///
+    /// `covered_diff` records that the covered editor showed the diff view, so
+    /// a close returns to it. The build is still on the pool, so a test settles
+    /// when it wants the document.
+    pub(crate) fn cover_with_overview(
+        &mut self,
+        covered_diff: bool,
+    ) -> crate::overview::OverviewId {
+        let ws = self.stoat.active_workspace_mut();
+        let focus = ws.panes.focus();
+        let covered = ws.panes.pane(focus).view.clone();
+        let id = ws.overviews.insert(crate::overview::OverviewState {
+            covered: Some(covered),
+            covered_diff,
+            ..Default::default()
+        });
+        ws.panes.pane_mut(focus).view = crate::pane::View::Overview(id);
+        ws.panes.widen(focus);
+        crate::overview::ensure_overview_doc(&mut self.stoat);
+        id
+    }
+
     pub fn with_size(width: u16, height: u16) -> Self {
         Self::new(width, height)
     }

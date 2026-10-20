@@ -90,6 +90,22 @@ impl OverviewState {
     }
 }
 
+impl Default for OverviewState {
+    /// An overview on its first row, in normal mode, that covers no view and
+    /// waits on no landing.
+    fn default() -> Self {
+        Self {
+            cursor: 0,
+            scroll_top: 0,
+            viewport_rows: 0,
+            mode: "normal".to_string(),
+            covered: None,
+            covered_diff: false,
+            pending_landing: None,
+        }
+    }
+}
+
 /// The state of a workspace that an overview document was built from.
 ///
 /// A document is current while its stamp equals the workspace's stamp now.

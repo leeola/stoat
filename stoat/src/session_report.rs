@@ -982,4 +982,17 @@ mod tests {
             (&json!(1), &json!([parked_pane]), true),
         );
     }
+
+    #[test]
+    fn an_overview_pane_reports_its_kind_and_title() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.cover_with_overview(false);
+
+        let report = layout(&h.stoat, h.stoat.active_workspace().uid);
+        let pane = &report["tabs"][0]["panes"][0];
+        assert_eq!(
+            (&pane["kind"], &pane["title"], &pane["widened"]),
+            (&json!("overview"), &json!("overview"), &json!(true)),
+        );
+    }
 }

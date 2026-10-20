@@ -376,6 +376,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
         preview_dials,
+        overview_building: stoat.pending_overview_build.is_some(),
         chrome: &stoat.chrome.as_ref().expect("refresh_chrome ran above").1,
         pending_count: stoat.pending_count,
         recording_register: stoat
@@ -489,6 +490,8 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                         terms: &ws.terms,
                         term_pool_grids: &ws.term_pool_grids,
                         commit_lists: &mut ws.commit_lists,
+                        overviews: &mut ws.overviews,
+                        overview_doc: ws.overview_doc.as_ref().and_then(|built| built.doc.clone()),
                     },
                     frame,
                     &mut buf,
@@ -669,15 +672,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .is_some_and(|(at, _)| stoat.executor.now() < *at);
     stoat.smooth_scroll.set_geometry_unsettled(unsettled);
 
-    // The commits list and the rebase, reword, and conflict screens retire
-    // every editor and modal pool, and the editors beside them paint on the
-    // live grid. None of these screens covers the whole window. The commits
-    // list is a pane view, and the rebase screens paint over the focused pane
-    // alone, so a terminal beside one keeps its pool. The diff screen renders
-    // in the real editor pool, so it is not an overlay.
+    // The commits list, the overview, and the rebase, reword, and conflict
+    // screens retire every editor and modal pool, and the editors beside them
+    // paint on the live grid. None of these screens covers the whole window.
+    // The commits list and the overview are pane views, and the rebase screens
+    // paint over the focused pane alone, so a terminal beside one keeps its
+    // pool. The diff screen renders in the real editor pool, so it is not an
+    // overlay.
     let overlay = matches!(
         crate::keymap_state::view_predicate(stoat.active_workspace()),
-        Some("commits" | "rebase" | "reword" | "rebase_conflict")
+        Some("commits" | "overview" | "rebase" | "reword" | "rebase_conflict")
     );
     let panes = if overlay {
         Vec::new()
@@ -2741,8 +2745,13 @@ pub(crate) fn window_content_version(
             input_view_version(&run.input, ws, &mut hasher)?;
         },
         // An image pane paints one label, so it feeds no pool. A commits list
-        // pools its rows as a surface of its own rather than as a pane.
-        View::Editor(_) | View::Label(_) | View::Image { .. } | View::Commits(_) => return None,
+        // pools its rows as a surface of its own rather than as a pane, and an
+        // overview paints on the live grid.
+        View::Editor(_)
+        | View::Label(_)
+        | View::Image { .. }
+        | View::Commits(_)
+        | View::Overview(_) => return None,
     }
 
     Some(hasher.finish())

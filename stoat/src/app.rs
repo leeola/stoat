@@ -3385,7 +3385,7 @@ impl Stoat {
     fn on_a_diff_surface(&self) -> bool {
         matches!(
             keymap_state::view_predicate(self.active_workspace()),
-            Some("diff" | "commits")
+            Some("diff" | "commits" | "overview")
         )
     }
 
@@ -5060,6 +5060,7 @@ impl Stoat {
         crate::lsp::drain::reopen_buffers(self, None);
         action_handlers::respawn_terminal_panes(self);
         action_handlers::respawn_commits_panes(self);
+        action_handlers::overview::respawn_overview_panes(self);
         if self.active_workspace().remote.is_some() {
             self.remote_pending = true;
             ssh::reconnect_when_ready(self);
@@ -5103,6 +5104,7 @@ impl Stoat {
         }
         action_handlers::respawn_terminal_panes(self);
         action_handlers::respawn_commits_panes(self);
+        action_handlers::overview::respawn_overview_panes(self);
     }
 
     /// Persist a workspace's state, serializing it off this thread.
@@ -6756,9 +6758,9 @@ impl Stoat {
     /// The target is resolved the way [`Self::focused_editor_ids`] resolves it.
     /// A topmost open input modal, or else a focused editor or run pane,
     /// supplies its editor's [`EditorState::mode`]. A focused commits pane
-    /// supplies its list's mode, and a focused terminal or agent pane its
-    /// [`TermSession::mode`]. With no such target the mode falls back to
-    /// [`Self::fallback_mode`].
+    /// supplies its list's mode, a focused overview pane its own, and a
+    /// focused terminal or agent pane its [`TermSession::mode`]. With no such
+    /// target the mode falls back to [`Self::fallback_mode`].
     pub(crate) fn focused_mode(&self) -> &str {
         #[cfg(test)]
         self.focused_mode_reads
@@ -6772,6 +6774,9 @@ impl Stoat {
         }
         if let Some(list) = ws.focused_commits() {
             return &list.mode;
+        }
+        if let Some(overview) = ws.focused_overview() {
+            return &overview.mode;
         }
         if let Some(term_id) = self.focused_term_id()
             && let Some(term) = ws.terms.get(term_id)
@@ -6822,6 +6827,10 @@ impl Stoat {
         }
         if let Some(list) = self.active_workspace_mut().focused_commits_mut() {
             list.mode = mode;
+            return;
+        }
+        if let Some(overview) = self.active_workspace_mut().focused_overview_mut() {
+            overview.mode = mode;
             return;
         }
         if let Some(term_id) = self.focused_term_id()
@@ -6938,8 +6947,9 @@ impl Stoat {
     /// the chord mode, and the chord comes back with focus.
     ///
     /// An editor or run pane keeps a primary mode, `insert` or `select`, and a
-    /// pinned chord, which the reader holds on purpose. A commits, terminal, or
-    /// agent view has no primary mode but normal, so any other mode ends.
+    /// pinned chord, which the reader holds on purpose. A commits, overview,
+    /// terminal, or agent view has no primary mode but normal, so any other mode
+    /// ends.
     ///
     /// `workspace`, `focus`, and `pane` are the active workspace, its focus
     /// target, and its focused split pane, all read before the event.
@@ -6966,6 +6976,14 @@ impl Stoat {
                     && list.mode != "normal"
                 {
                     list.mode = "normal".into();
+                }
+                None
+            },
+            Some(View::Overview(id)) => {
+                if let Some(overview) = ws.overviews.get_mut(*id)
+                    && overview.mode != "normal"
+                {
+                    overview.mode = "normal".into();
                 }
                 None
             },
@@ -8969,6 +8987,11 @@ impl Stoat {
         action_handlers::split_selection::sync_regex_preview(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
+        // Only an overview on screen follows edits, so a keystroke in a plain
+        // pane starts no build.
+        if self.active_workspace().focused_overview_id().is_some() {
+            crate::overview::ensure_overview_doc(self);
+        }
 
         self.drive_pumps();
         // Not gated on the pumps' progress. The `.git` refresh drain stales

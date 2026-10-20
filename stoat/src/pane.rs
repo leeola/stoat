@@ -2,6 +2,7 @@ use crate::{
     commit_list::CommitListId,
     editor_state::EditorId,
     jumplist::{ChangeLanding, JumpList},
+    overview::OverviewId,
     run::RunId,
     term_session::TermId,
 };
@@ -83,6 +84,12 @@ pub enum View {
     /// rather than in the pane, so a parked tab's id stays valid while the tab
     /// is out of sight.
     Commits(CommitListId),
+    /// The diff overview, every change against the diff base as one hunk list.
+    ///
+    /// Its state lives in the workspace's overview collection rather than in
+    /// the pane, as a commits list's does, so a parked tab's id stays valid
+    /// while the tab is out of sight.
+    Overview(OverviewId),
 }
 
 /// How a pane is presented on screen.

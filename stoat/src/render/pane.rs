@@ -9,6 +9,7 @@ use crate::{
         chrome, commits, content_lane,
         editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
+        overview,
         paint::{dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
@@ -75,6 +76,8 @@ pub(crate) fn render_pane(
         terms,
         term_pool_grids,
         commit_lists,
+        overviews,
+        overview_doc,
     } = ctx;
 
     match &pane.view {
@@ -205,6 +208,22 @@ pub(crate) fn render_pane(
         View::Commits(id) => {
             if let Some(state) = commit_lists.get_mut(*id) {
                 commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
+            }
+            dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            return;
+        },
+        // The overview paints a status row of its own, as the list does.
+        View::Overview(id) => {
+            if let Some(state) = overviews.get_mut(*id) {
+                overview::render_overview(
+                    pane,
+                    is_focused,
+                    state,
+                    overview_doc.as_ref(),
+                    frame,
+                    buf,
+                    &mut *scene,
+                );
             }
             dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
@@ -748,7 +767,10 @@ pub(crate) fn status_row(
     terms: &SlotMap<TermId, TermSession>,
 ) -> StatusRow {
     let (_, area) = pane_areas(pane.area, frame.minimap_band);
-    if area.width == 0 || area.height == 0 || matches!(pane.view, View::Commits(_)) {
+    if area.width == 0
+        || area.height == 0
+        || matches!(pane.view, View::Commits(_) | View::Overview(_))
+    {
         return StatusRow::default();
     }
 
@@ -1702,6 +1724,7 @@ pub(crate) fn screen_segment(
     let (label, default, screen_scope) = match screen? {
         "review" => ("review", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
         "diff" => ("diff", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
+        "overview" => ("overview", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
         "commits" => ("commits", Color::Yellow, scope::UI_STATUSLINE_COMMITS),
         "rebase" => ("rebase", Color::Red, scope::UI_STATUSLINE_REBASE),
         "reword" => ("reword", Color::Red, scope::UI_STATUSLINE_REWORD),
@@ -1773,6 +1796,7 @@ fn pane_status_info(
         ),
         View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
         View::Commits(_) => owned("[commits]"),
+        View::Overview(_) => owned("[overview]"),
         View::Label(label) => owned(label),
     }
 }

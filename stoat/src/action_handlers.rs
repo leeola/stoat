@@ -16,6 +16,7 @@ pub(crate) mod macro_recording;
 pub(crate) mod marks;
 pub(crate) mod move_nav;
 pub(crate) mod movement;
+pub(crate) mod overview;
 mod palette;
 mod pane;
 pub(crate) mod picker;
