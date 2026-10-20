@@ -13,8 +13,8 @@ pub use action::{Action, ActionDef, ActionPriority};
 // root deep-paths around the gap instead of noticing it.
 pub use defs::{
     agent::*, app::*, commits::*, conflict::*, dump::*, editor::*, file::*, file_finder::*,
-    help::*, lsp::*, palette::*, pane::*, picker::*, prompt::*, rebase::*, review::*, run::*,
-    set_theme::*, tab::*, terminal::*, walkthrough::*, workspace::*,
+    help::*, lsp::*, overview::*, palette::*, pane::*, picker::*, prompt::*, rebase::*, review::*,
+    run::*, set_theme::*, tab::*, terminal::*, walkthrough::*, workspace::*,
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue, ValueSource};

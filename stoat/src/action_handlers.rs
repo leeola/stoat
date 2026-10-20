@@ -1130,6 +1130,31 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
+        ActionKind::DiffOverview => overview::toggle_overview(stoat),
+        ActionKind::CloseOverview => overview::close_overview(stoat),
+        ActionKind::OverviewNext => {
+            let step = arming_step(stoat);
+            overview::overview_step(stoat, step)
+        },
+        ActionKind::OverviewPrev => {
+            let step = arming_step(stoat);
+            overview::overview_step(stoat, -step)
+        },
+        ActionKind::OverviewNextChunk => {
+            overview::overview_chunk_step(stoat, movement::ChangeDir::Next)
+        },
+        ActionKind::OverviewPrevChunk => {
+            overview::overview_chunk_step(stoat, movement::ChangeDir::Prev)
+        },
+        ActionKind::OverviewPageDown => overview::overview_page(stoat, view::PageDir::Down),
+        ActionKind::OverviewPageUp => overview::overview_page(stoat, view::PageDir::Up),
+        ActionKind::OverviewHalfPageDown => {
+            overview::overview_half_page(stoat, view::PageDir::Down)
+        },
+        ActionKind::OverviewHalfPageUp => overview::overview_half_page(stoat, view::PageDir::Up),
+        ActionKind::OverviewFirst => overview::overview_edge(stoat, false),
+        ActionKind::OverviewLast => overview::overview_edge(stoat, true),
+        ActionKind::OverviewOpen => overview::overview_open(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
         ActionKind::ExecuteRebase => rebase::execute_rebase(stoat),

@@ -79,6 +79,11 @@ use crate::{
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
             OpenWorkspaceSymbolPicker, RenameSymbol,
         },
+        overview::{
+            CloseOverview, DiffOverview, OverviewFirst, OverviewHalfPageDown, OverviewHalfPageUp,
+            OverviewLast, OverviewNext, OverviewNextChunk, OverviewOpen, OverviewPageDown,
+            OverviewPageUp, OverviewPrev, OverviewPrevChunk,
+        },
         palette::OpenCommandPalette,
         pane::{
             CloseOtherPanes, ClosePane, DetachPane, FocusDown, FocusLeft, FocusNext, FocusPane,
@@ -941,6 +946,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
+    add(DiffOverview::DEF, |_| Ok(Box::new(DiffOverview)));
+    add(CloseOverview::DEF, |_| Ok(Box::new(CloseOverview)));
+    add(OverviewNext::DEF, |_| Ok(Box::new(OverviewNext)));
+    add(OverviewPrev::DEF, |_| Ok(Box::new(OverviewPrev)));
+    add(OverviewNextChunk::DEF, |_| Ok(Box::new(OverviewNextChunk)));
+    add(OverviewPrevChunk::DEF, |_| Ok(Box::new(OverviewPrevChunk)));
+    add(OverviewPageDown::DEF, |_| Ok(Box::new(OverviewPageDown)));
+    add(OverviewPageUp::DEF, |_| Ok(Box::new(OverviewPageUp)));
+    add(OverviewHalfPageDown::DEF, |_| {
+        Ok(Box::new(OverviewHalfPageDown))
+    });
+    add(OverviewHalfPageUp::DEF, |_| {
+        Ok(Box::new(OverviewHalfPageUp))
+    });
+    add(OverviewFirst::DEF, |_| Ok(Box::new(OverviewFirst)));
+    add(OverviewLast::DEF, |_| Ok(Box::new(OverviewLast)));
+    add(OverviewOpen::DEF, |_| Ok(Box::new(OverviewOpen)));
     add(GitLs::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `git-ls`
         // arrives with an empty argument. That means HEAD, not a revision
@@ -1296,6 +1318,19 @@ mod tests {
         "CommitsLast",
         "CommitsRefresh",
         "CommitsOpenReview",
+        "DiffOverview",
+        "CloseOverview",
+        "OverviewNext",
+        "OverviewPrev",
+        "OverviewNextChunk",
+        "OverviewPrevChunk",
+        "OverviewPageDown",
+        "OverviewPageUp",
+        "OverviewHalfPageDown",
+        "OverviewHalfPageUp",
+        "OverviewFirst",
+        "OverviewLast",
+        "OverviewOpen",
         "GitLs",
         "EnterRebase",
         "AbortRebase",
@@ -1901,7 +1936,8 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        assert_eq!(all().count(), 441);
+        // + 13 the diff overview actions.
+        assert_eq!(all().count(), 454);
     }
 
     #[test]

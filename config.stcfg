@@ -1118,6 +1118,42 @@ on key {
     view == diff && rebase_exec {
         C -> RebaseContinue();
     }
+    # Ctrl-t flips between the two diff layouts, so both screens bind it. On
+    # the per-file diff it opens the overview on the hunk under the cursor, and
+    # on the overview it opens the per-file diff at the cursor's hunk.
+    view == diff {
+        Ctrl-t -> DiffOverview();
+    }
+    # The overview paints its hunks with the diff view's painter, so the diff
+    # styling dials act on it as they act on the commits screen.
+    view == overview {
+        Cmd-6 -> DiffUnderline();
+        Cmd-7 -> DiffBold();
+        Cmd-8 -> DiffSyntax();
+        Cmd-9 -> DiffTintDown();
+        Cmd-0 -> DiffTintUp();
+    }
+    view == overview && mode == normal {
+        Escape -> CloseOverview();
+        q -> CloseOverview();
+        Ctrl-t -> DiffOverview();
+        Enter -> OverviewOpen();
+        j -> OverviewNext();
+        Down -> OverviewNext();
+        k -> OverviewPrev();
+        Up -> OverviewPrev();
+        n -> OverviewNextChunk();
+        p -> OverviewPrevChunk();
+        g -> OverviewFirst();
+        G -> OverviewLast();
+        Ctrl-f -> OverviewPageDown();
+        PageDown -> OverviewPageDown();
+        Ctrl-b -> OverviewPageUp();
+        PageUp -> OverviewPageUp();
+        Ctrl-d -> OverviewHalfPageDown();
+        Ctrl-u -> OverviewHalfPageUp();
+        : -> OpenCommandPalette();
+    }
     view == conflict && mode == normal {
         Escape -> CloseConflict();
         q -> CloseConflict();

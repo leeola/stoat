@@ -90,7 +90,9 @@ pub(crate) fn render_overview(
 
 #[cfg(test)]
 mod tests {
-    use crate::{render::commits::preview_row_count, test_harness::TestHarness};
+    use crate::{
+        action_handlers::dispatch, render::commits::preview_row_count, test_harness::TestHarness,
+    };
     use std::path::{Path, PathBuf};
 
     /// The first row the overview paints, as text, from one render that runs
@@ -104,6 +106,7 @@ mod tests {
             .to_string()
     }
 
+    /// The cursor row moves with a step to the second chunk.
     #[test]
     fn an_overview_paints_its_document_under_a_cursor_row() {
         let mut h = TestHarness::with_size(100, 16);
@@ -112,6 +115,9 @@ mod tests {
         h.cover_with_overview(false);
         h.settle();
         h.assert_snapshot("overview_two_files");
+
+        dispatch(&mut h.stoat, &stoat_action::OverviewNextChunk);
+        h.assert_snapshot("overview_cursor_on_second_chunk");
     }
 
     /// With no document the overview says that a build runs, or that the last

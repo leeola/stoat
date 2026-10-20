@@ -2488,6 +2488,46 @@ mod tests {
             ),
             "and the list pages on the four keys every list modal pages on"
         );
+        assert_eq!(
+            (
+                plain("overview", KeyCode::Down),
+                plain("overview", KeyCode::Up),
+                bound("overview", KeyCode::Char('d'), KeyModifiers::CONTROL),
+                bound("overview", KeyCode::Char('u'), KeyModifiers::CONTROL),
+            ),
+            (
+                "OverviewNext".to_string(),
+                "OverviewPrev".to_string(),
+                "OverviewHalfPageDown".to_string(),
+                "OverviewHalfPageUp".to_string(),
+            ),
+            "the overview steps on the arrows and half-pages on Ctrl-d and Ctrl-u"
+        );
+    }
+
+    /// Ctrl-t flips between the two diff layouts, so it names one action on the
+    /// per-file diff and on the overview, and no other view binds it.
+    #[test]
+    fn ctrl_t_flips_the_diff_layout_from_either_screen() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let ctrl_t = |view: &str| {
+            let state = TestState::new()
+                .set("mode", StateValue::String("normal".into()))
+                .set("view", StateValue::String(view.into()));
+            keymap
+                .lookup(
+                    &state,
+                    &KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+                )
+                .map(|actions| actions[0].name.clone())
+        };
+
+        let flip = Some("DiffOverview".to_string());
+        assert_eq!(
+            [ctrl_t("diff"), ctrl_t("overview"), ctrl_t("file")],
+            [flip.clone(), flip, None],
+        );
     }
 
     /// A view block scores two atoms against the base block's one, since the

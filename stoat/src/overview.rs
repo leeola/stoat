@@ -260,7 +260,9 @@ pub(crate) fn ensure_overview_doc(stoat: &mut Stoat) {
 /// Store a landed overview build on the workspace that asked for it.
 ///
 /// A build that found no change stores no document, which drops the document
-/// before it. Returns whether a build landed, on the contract every pump in
+/// before it. Each overview cursor of the workspace moves to the row that shows
+/// its chunk in the new document, and each waiting landing lands. Returns
+/// whether a build landed, on the contract every pump in
 /// [`Stoat::drive_pumps`] answers.
 pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
     let Some(pending) = stoat.pending_overview_build.take() else {
@@ -276,12 +278,46 @@ pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
     };
 
     if let Some(ws) = stoat.workspaces.get_mut(pending.workspace) {
+        let doc = doc.map(Arc::new);
+        remap_cursors(ws, doc.as_deref());
         ws.overview_doc = Some(OverviewDoc {
-            doc: doc.map(Arc::new),
+            doc,
             stamp: pending.stamp,
         });
+        land_pending(ws);
     }
     true
+}
+
+/// Move the cursor of each overview in `ws` that waits on a landing onto the
+/// row of its landing in the workspace's document.
+///
+/// A landing waits while the workspace has no document. It also waits while a
+/// stale document holds no change of its file, because the next build holds
+/// the edit that made the change. Otherwise the cursor takes the landing's
+/// row, or the first row when the document holds no change of the file.
+pub(crate) fn land_pending(ws: &mut Workspace) {
+    let Some((doc, stamp)) = ws
+        .overview_doc
+        .as_ref()
+        .map(|built| (built.doc.clone(), built.stamp))
+    else {
+        return;
+    };
+    let current = stamp == OverviewStamp::read(ws);
+    for state in ws.overviews.values_mut() {
+        let Some((rel_path, buffer_row)) = &state.pending_landing else {
+            continue;
+        };
+        let row = doc
+            .as_deref()
+            .and_then(|doc| row_for(doc, rel_path, *buffer_row));
+        if row.is_none() && !current {
+            continue;
+        }
+        state.cursor = row.unwrap_or(0);
+        state.pending_landing = None;
+    }
 }
 
 /// The overview row at `row`, or `None` past the last row.
@@ -477,6 +513,50 @@ fn file_hunks(
         .collect()
 }
 
+/// Move each overview cursor of `ws` onto the row of `new` that shows the part
+/// of a chunk it showed in the workspace's last document.
+///
+/// A cursor whose chunk is gone stays, and the paint holds it inside the rows.
+/// A cursor that waits on a landing moves too, and the landing then places it.
+fn remap_cursors(ws: &mut Workspace, new: Option<&DiffDocument>) {
+    let old = ws.overview_doc.as_ref().and_then(|built| built.doc.clone());
+    let (Some(old), Some(new)) = (old, new) else {
+        return;
+    };
+    for state in ws.overviews.values_mut() {
+        if let Some(row) = remap_row(&old, new, state.cursor) {
+            state.cursor = row;
+        }
+    }
+}
+
+/// The row of `new` that shows the part of a chunk that `row` shows in `old`.
+///
+/// The chunk matches by the path of its file and its place among that file's
+/// chunks, so a rebuild that adds or drops rows above it keeps a cursor on the
+/// chunk. A diff row keeps its offset into the chunk, held inside the new
+/// chunk's rows. `None` when `new` holds no such chunk.
+fn remap_row(old: &DiffDocument, new: &DiffDocument, row: usize) -> Option<usize> {
+    let (placed, kind) = locate(old, row)?;
+    let rel_path = &old.files.get(placed.file_index)?.rel_path;
+    let nth = placed_chunks(old)
+        .filter(|chunk| chunk.file_index == placed.file_index)
+        .position(|chunk| chunk.id == placed.id)?;
+
+    let file_index = new
+        .files
+        .iter()
+        .position(|file| &file.rel_path == rel_path)?;
+    let target = placed_chunks(new)
+        .filter(|chunk| chunk.file_index == file_index)
+        .nth(nth)?;
+    let last = target.chunk.hunk.rows.len().checked_sub(1);
+    Some(match (kind, last) {
+        (RowKind::Diff(index), Some(last)) => target.header + 1 + index.min(last),
+        _ => target.header,
+    })
+}
+
 /// The text of every open buffer with a path, keyed by the path.
 fn open_texts(buffers: &BufferRegistry) -> HashMap<PathBuf, Rope> {
     buffers
@@ -561,8 +641,8 @@ fn right(row: &ReviewRow) -> Option<&ReviewSide> {
 #[cfg(test)]
 mod tests {
     use super::{
-        chunk_starts, ensure_overview_doc, row_at, row_for, target_of, OverviewRow, OverviewStamp,
-        RowKind,
+        chunk_starts, ensure_overview_doc, remap_row, row_at, row_for, target_of, OverviewRow,
+        OverviewStamp, RowKind,
     };
     use crate::{
         action_handlers,
@@ -586,23 +666,33 @@ mod tests {
     /// apart for two chunks. b.txt loses a line between two others. c.txt
     /// loses its only line.
     fn three_files() -> (DiffDocument, Vec<Vec<ReviewChunkId>>) {
-        let input = |path: &str, base: &str, buffer: &str| ReviewFileInput {
-            path: PathBuf::from(path),
-            rel_path: path.to_string(),
-            language: None,
-            base_text: Arc::new(base.to_string()),
-            buffer_text: Arc::new(buffer.to_string()),
-        };
-        let mut doc = DiffDocument::default();
-        let ids = doc.add_files(vec![
-            input(
+        doc_of(&[
+            (
                 "a.txt",
                 "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
                 "1\nX\n2\n3\n4\n5\n6\n7\n8\n9\n",
             ),
-            input("b.txt", "a\nOLD\nb\n", "a\nb\n"),
-            input("c.txt", "gone\n", ""),
-        ]);
+            ("b.txt", "a\nOLD\nb\n", "a\nb\n"),
+            ("c.txt", "gone\n", ""),
+        ])
+    }
+
+    /// A document over `files`, each a path with its base and buffer texts and
+    /// no language, and the chunk ids of each file.
+    fn doc_of(files: &[(&str, &str, &str)]) -> (DiffDocument, Vec<Vec<ReviewChunkId>>) {
+        let mut doc = DiffDocument::default();
+        let ids = doc.add_files(
+            files
+                .iter()
+                .map(|&(path, base, buffer)| ReviewFileInput {
+                    path: PathBuf::from(path),
+                    rel_path: path.to_string(),
+                    language: None,
+                    base_text: Arc::new(base.to_string()),
+                    buffer_text: Arc::new(buffer.to_string()),
+                })
+                .collect(),
+        );
         (doc, ids)
     }
 
@@ -660,6 +750,30 @@ mod tests {
             .map(|(rel_path, buffer_row)| row_for(&doc, rel_path, buffer_row)),
             [Some(2), Some(6), Some(6), Some(0), Some(14), Some(15), None],
         );
+    }
+
+    /// A rebuild keeps a row on its chunk by the chunk's file and its place in
+    /// that file. A header stays a header, and a diff row keeps its offset,
+    /// held inside a chunk that shrank. A chunk gone from the file maps to no
+    /// row. Here a.txt keeps two chunks and the first grows, and the one chunk
+    /// of b.txt shrinks.
+    #[test]
+    fn remap_row_follows_a_chunk_by_its_file_and_place() {
+        let ten = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+        let a_new = ("a.txt", ten, "1\nX\nY\n2\n3\n4\n5\n6\n7\n8\n9\n");
+        let (old, _) = doc_of(&[
+            ("a.txt", ten, "1\nX\n2\n3\n4\n5\n6\n7\n8\n9\n"),
+            ("b.txt", "1\n2\n3\n", "1\nX\nY\nZ\n2\n3\n"),
+        ]);
+        let (new, _) = doc_of(&[a_new, ("b.txt", "1\n2\n3\n", "1\nX\n2\n3\n")]);
+        let (a_only, _) = doc_of(&[a_new]);
+
+        let (before, after) = (chunk_starts(&old), chunk_starts(&new));
+        assert_eq!(
+            [before[1], before[1] + 2, before[2] + 6].map(|row| remap_row(&old, &new, row)),
+            [Some(after[1]), Some(after[1] + 2), Some(after[2] + 4)],
+        );
+        assert_eq!(remap_row(&old, &a_only, before[2]), None);
     }
 
     #[test]
