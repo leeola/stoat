@@ -2037,9 +2037,12 @@ mod tests {
         h.stoat.active_workspace_mut().invalidate_all_diffs();
         h.settle();
         h.settle_diff_jobs();
+        // The diff makes two lookups, one for the resolve the write overtook
+        // and one after it. The overview build that entering the diff view
+        // starts makes the third, when it reads the new file's base.
         assert_eq!(
             h.fake_git().rename_source_calls(Path::new("/repo")),
-            2,
+            3,
             "the next diff of the new file resolves its base again",
         );
     }

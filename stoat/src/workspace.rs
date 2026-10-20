@@ -316,6 +316,12 @@ pub struct Workspace {
     /// [`respawn_commits_panes`](crate::action_handlers::respawn_commits_panes)
     /// gives that pane a live list.
     pub(crate) restored_commit_lists: HashMap<CommitListId, CommitListSnap>,
+    /// The last overview document a build finished, kept so an overview paints
+    /// at once while the next one builds.
+    pub(crate) overview_doc: Option<crate::overview::OverviewDoc>,
+    /// Moves when the diff base or the git state changes. That stales the
+    /// overview document even where no buffer text moved.
+    pub(crate) overview_epoch: u64,
     /// Active commit-by-commit review walk (if any). Outlives the diff view
     /// it opens, so closing a diff leaves the walk in place and only
     /// `ReviewDone` ends it.
@@ -531,6 +537,8 @@ impl Workspace {
             conflict: None,
             commit_lists: SlotMap::with_key(),
             restored_commit_lists: HashMap::new(),
+            overview_doc: None,
+            overview_epoch: 0,
             review_walk: None,
             ending_walk: None,
             walkthrough: None,
@@ -1081,6 +1089,7 @@ impl Workspace {
     /// map against `path`'s fresh blobs. See [`DiffState::invalidate`].
     pub(crate) fn invalidate_diff(&mut self, id: BufferId, path: &Path) {
         self.diff.invalidate(id, Some(path));
+        self.overview_epoch += 1;
     }
 
     /// Mark the repo-wide hunk tally as owed. See [`DiffState::stale_tally`].
@@ -1091,6 +1100,7 @@ impl Workspace {
     /// Stale every buffer's diff map. See [`DiffState::invalidate_all`].
     pub(crate) fn invalidate_all_diffs(&mut self) {
         self.diff.invalidate_all();
+        self.overview_epoch += 1;
     }
 
     /// Whether `id`'s installed diff map was computed for the buffer's current
@@ -1188,6 +1198,7 @@ impl Workspace {
     pub(crate) fn set_diff_base(&mut self, base: Option<DiffBase>) {
         self.diff.base_override = base;
         self.diff.reset_for_new_base();
+        self.overview_epoch += 1;
     }
 
     /// Pick which of its two own bases the working tree diffs against.

@@ -1253,6 +1253,12 @@ pub struct Stoat {
     /// the whole index. Each file then reads its three stages, and the
     /// alignment runs two structural diffs against the ancestor.
     pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
+    /// An overview document building off the UI thread, stored by
+    /// [`crate::overview::pump_overview_build`] when it lands.
+    ///
+    /// The build lists the changed files, reads both sides of each, and diffs
+    /// the files the hunk cache does not hold.
+    pub(crate) pending_overview_build: Option<crate::overview::PendingOverviewBuild>,
     /// The git writes the loop started, run one at a time in press order.
     ///
     /// Two writes on the pool race, so every write the loop starts waits here
@@ -2649,6 +2655,7 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_changed_file_jump: None,
             pending_conflict_file: None,
+            pending_overview_build: None,
             git_jobs: GitJobs::default(),
             pending_diff_nav_jump: None,
             pending_code_search: None,
@@ -9000,6 +9007,7 @@ impl Stoat {
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
         let conflict_file = action_handlers::conflict_view::pump_conflict_file(self);
+        let overview_build = crate::overview::pump_overview_build(self);
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
@@ -9026,6 +9034,7 @@ impl Stoat {
             || changed_file_jump
             || diff_wants
             || conflict_file
+            || overview_build
             || diff_nav_jump
             || lsp
             || followed_change

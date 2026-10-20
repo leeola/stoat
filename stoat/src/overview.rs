@@ -6,16 +6,37 @@
 //! model numbers those same rows. So a cursor row resolves to the file, the
 //! chunk, and the buffer line that the paint puts on that row.
 //!
+//! The workspace builds the document an overview shows on the pool and keeps
+//! the last one, so an overview paints at once while the next one builds.
+//!
 //! See also:
 //! - [`render_commit_preview`](crate::render::commits::render_commit_preview) for the paint that
 //!   lays out these rows.
+//! - [`ensure_overview_doc`] for the build.
 
 use crate::{
+    action_handlers::{self, commits::PreviewHighlights},
+    app::Stoat,
+    buffer_registry::BufferRegistry,
+    diff,
+    diff_cache::{DiffCache, DiffCacheKey},
+    host::{FsHost, GitHost, GitRepo},
     pane::View,
-    review::{ReviewRow, ReviewSide},
+    review::{ReviewFileInput, ReviewHunk, ReviewRow, ReviewSide},
     review_session::{DiffDocument, ReviewChunk, ReviewChunkId},
+    workspace::{self, diff::DiffBase, Workspace, WorkspaceId},
 };
 use slotmap::new_key_type;
+use std::{
+    collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
+    hash::{Hash, Hasher},
+    io,
+    path::{Path, PathBuf},
+    sync::{mpsc, Arc, Mutex},
+};
+use stoat_language::{structural_diff::TreeCache, LanguageRegistry};
+use stoat_scheduler::Task;
+use stoat_text::Rope;
 
 new_key_type! {
     /// Key for one overview pane's [`OverviewState`].
@@ -69,6 +90,60 @@ impl OverviewState {
     }
 }
 
+/// The state of a workspace that an overview document was built from.
+///
+/// A document is current while its stamp equals the workspace's stamp now.
+/// `epoch` moves when the diff base or the git state changes, and `buffers`
+/// moves with the text of every open buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OverviewStamp {
+    epoch: u64,
+    buffers: u64,
+}
+
+impl OverviewStamp {
+    /// Read the stamp of `ws` as it stands.
+    pub(crate) fn read(ws: &Workspace) -> Self {
+        let mut hasher = DefaultHasher::new();
+        for path in ws.buffers.open_paths() {
+            let Some(id) = ws.buffers.id_for_path(&path) else {
+                continue;
+            };
+            let Some(buffer) = ws.buffers.get(id) else {
+                continue;
+            };
+            let version = buffer.read().expect("buffer poisoned").version();
+            (id, version).hash(&mut hasher);
+        }
+        Self {
+            epoch: ws.overview_epoch,
+            buffers: hasher.finish(),
+        }
+    }
+}
+
+/// The last overview document a build finished, with the stamp it was built
+/// from.
+pub(crate) struct OverviewDoc {
+    /// The document, or `None` when the build found no change to show.
+    ///
+    /// An empty build keeps its stamp all the same, so an unchanged tree does
+    /// not build again.
+    pub doc: Option<Arc<DiffDocument>>,
+    pub stamp: OverviewStamp,
+}
+
+/// An overview document building on the pool, which [`pump_overview_build`]
+/// stores when it lands.
+pub(crate) struct PendingOverviewBuild {
+    _task: Task<()>,
+    rx: mpsc::Receiver<Option<DiffDocument>>,
+    /// The workspace that asked for the build, which the document belongs to
+    /// whatever workspace is active when it lands.
+    workspace: WorkspaceId,
+    stamp: OverviewStamp,
+}
+
 /// The chunk that one overview row belongs to, and the part of it the row
 /// shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,12 +161,111 @@ pub(crate) enum RowKind {
     Diff(usize),
 }
 
+/// What an overview build reads, gathered on the run loop.
+///
+/// The build runs on the pool, so it carries owned copies of what it reads.
+/// The hunk cache, the highlight cache, and the parse memo are the exceptions.
+/// The build fills them, and each is shared behind its own lock.
+struct BuildInputs {
+    git_root: PathBuf,
+    base: Option<DiffBase>,
+    /// The text of every open buffer with a path. It wins over the disk, so an
+    /// unsaved edit shows.
+    open: HashMap<PathBuf, Rope>,
+    langs: Arc<LanguageRegistry>,
+    git_host: Arc<dyn GitHost>,
+    fs_host: Arc<dyn FsHost>,
+    cache: Arc<Mutex<DiffCache>>,
+    highlights: PreviewHighlights,
+    /// The base trees the last document parsed, so a rebuild reparses only
+    /// the bases that moved.
+    memo: TreeCache,
+}
+
 /// A chunk the overview shows, with the row its header takes.
 struct PlacedChunk<'a> {
     file_index: usize,
     id: ReviewChunkId,
     chunk: &'a ReviewChunk,
     header: usize,
+}
+
+/// Start a build of the active workspace's overview document, unless one is
+/// pending or the last one is current.
+///
+/// The build diffs every changed file against the base the per-file view uses,
+/// on the pool. [`pump_overview_build`] stores what it finds on the workspace
+/// that asked for it, so the last document paints while the next one builds.
+pub(crate) fn ensure_overview_doc(stoat: &mut Stoat) {
+    if stoat.pending_overview_build.is_some() {
+        return;
+    }
+    let workspace = stoat.active_workspace;
+    let ws = stoat.active_workspace();
+    let stamp = OverviewStamp::read(ws);
+    if ws
+        .overview_doc
+        .as_ref()
+        .is_some_and(|built| built.stamp == stamp)
+    {
+        return;
+    }
+
+    let inputs = BuildInputs {
+        git_root: ws.git_root.clone(),
+        base: ws.diff_base().cloned(),
+        open: open_texts(&ws.buffers),
+        langs: stoat.language_registry.clone(),
+        git_host: stoat.git_host.clone(),
+        fs_host: stoat.fs_host.clone(),
+        cache: stoat.diff_cache.clone(),
+        highlights: PreviewHighlights::from_stoat(stoat),
+        memo: ws
+            .overview_doc
+            .as_ref()
+            .and_then(|built| built.doc.as_ref())
+            .map(|doc| doc.tree_cache.clone())
+            .unwrap_or_default(),
+    };
+    let redraw = stoat.redraw_notify.clone();
+    let (tx, rx) = mpsc::channel();
+    let task = stoat.executor.spawn_blocking(move || {
+        let _ = tx.send(build(inputs));
+        redraw.notify_one();
+    });
+    stoat.pending_overview_build = Some(PendingOverviewBuild {
+        _task: task,
+        rx,
+        workspace,
+        stamp,
+    });
+}
+
+/// Store a landed overview build on the workspace that asked for it.
+///
+/// A build that found no change stores no document, which drops the document
+/// before it. Returns whether a build landed, on the contract every pump in
+/// [`Stoat::drive_pumps`] answers.
+pub(crate) fn pump_overview_build(stoat: &mut Stoat) -> bool {
+    let Some(pending) = stoat.pending_overview_build.take() else {
+        return false;
+    };
+    let doc = match pending.rx.try_recv() {
+        Ok(doc) => doc,
+        Err(mpsc::TryRecvError::Empty) => {
+            stoat.pending_overview_build = Some(pending);
+            return false;
+        },
+        Err(mpsc::TryRecvError::Disconnected) => return false,
+    };
+
+    if let Some(ws) = stoat.workspaces.get_mut(pending.workspace) {
+        ws.overview_doc = Some(OverviewDoc {
+            doc: doc.map(Arc::new),
+            stamp: pending.stamp,
+        });
+    }
+    true
 }
 
 /// The overview row at `row`, or `None` past the last row.
@@ -168,6 +342,138 @@ pub(crate) fn target_of(doc: &DiffDocument, row: usize) -> Option<(String, u32)>
     ))
 }
 
+/// Build the overview document from `inputs`, on whatever thread calls.
+///
+/// `None` when the git root is in no repository, or when no file differs from
+/// its base.
+fn build(inputs: BuildInputs) -> Option<DiffDocument> {
+    let repo = inputs.git_host.discover(&inputs.git_root)?;
+    let workdir = repo.workdir()?;
+    let files = file_inputs(&*repo, &workdir, &inputs);
+    let hunks = file_hunks(&files, &inputs.cache, &inputs.memo);
+
+    let mut doc = DiffDocument::default();
+    doc.add_files_with_hunks(files, hunks);
+    doc.tree_cache = inputs.memo;
+    inputs.highlights.attach(&mut doc);
+    (!doc.order.is_empty()).then_some(doc)
+}
+
+/// One input per changed file, in path order.
+///
+/// The paths are the files the repository lists as changed against the base,
+/// with the untracked files left out, and every open buffer under the workdir,
+/// so an unsaved edit shows. A file whose two texts agree gets no input.
+///
+/// An open buffer takes its own text over the disk's. A file gone from the disk
+/// reads as empty, so its deletion shows. A file whose read fails for another
+/// reason gets no input.
+fn file_inputs(repo: &dyn GitRepo, workdir: &Path, inputs: &BuildInputs) -> Vec<ReviewFileInput> {
+    let listed = match &inputs.base {
+        Some(DiffBase::Rev { sha: Some(sha), .. }) => repo.changed_files_from(sha),
+        _ => repo.changed_files(),
+    };
+    let paths: BTreeSet<PathBuf> = listed
+        .into_iter()
+        .filter(|file| !file.untracked)
+        .map(|file| file.path)
+        .chain(
+            inputs
+                .open
+                .keys()
+                .filter(|path| path.starts_with(workdir))
+                .cloned(),
+        )
+        .collect();
+
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let base = workspace::diff::base_texts(repo, &path, inputs.base.as_ref())?.base;
+            let buffer = match inputs.open.get(&path) {
+                Some(rope) => rope.to_string(),
+                None => match diff::read_utf8(&*inputs.fs_host, &path) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+                    Err(_) => return None,
+                },
+            };
+            if *base == buffer {
+                return None;
+            }
+            Some(ReviewFileInput {
+                rel_path: path
+                    .strip_prefix(workdir)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+                language: inputs.langs.for_path(&path),
+                base_text: base,
+                buffer_text: Arc::new(buffer),
+                path,
+            })
+        })
+        .collect()
+}
+
+/// The hunks of each file in `files`, in the same order.
+///
+/// A file whose two texts the hunk cache holds reuses the cached hunks, so a
+/// rebuild diffs only the files that moved. The rest go through one changeset
+/// pass, which finds the moves between them, and their hunks enter the cache.
+fn file_hunks(
+    files: &[ReviewFileInput],
+    cache: &Mutex<DiffCache>,
+    memo: &TreeCache,
+) -> Vec<Vec<ReviewHunk>> {
+    let keys: Vec<DiffCacheKey> = files
+        .iter()
+        .map(|file| {
+            action_handlers::review::diff_cache_key(
+                &file.base_text,
+                &file.buffer_text,
+                file.language.as_ref(),
+            )
+        })
+        .collect();
+    let mut found: Vec<Option<Arc<Vec<ReviewHunk>>>> = {
+        let mut cache = cache.lock().expect("diff_cache poisoned");
+        keys.iter()
+            .map(|key| cache.lookup(key).map(|(hunks, _)| hunks))
+            .collect()
+    };
+
+    let misses: Vec<usize> = (0..files.len()).filter(|&i| found[i].is_none()).collect();
+    if !misses.is_empty() {
+        let missed: Vec<ReviewFileInput> = misses.iter().map(|&i| files[i].clone()).collect();
+        let computed = diff::extract_review_hunks_changeset(&missed, 3, Some(memo));
+        let mut cache = cache.lock().expect("diff_cache poisoned");
+        for (&i, hunks) in misses.iter().zip(computed) {
+            let hunks = Arc::new(hunks);
+            cache.insert(keys[i].clone(), hunks.clone(), true);
+            found[i] = Some(hunks);
+        }
+    }
+
+    found
+        .into_iter()
+        .map(|hunks| hunks.map(Arc::unwrap_or_clone).unwrap_or_default())
+        .collect()
+}
+
+/// The text of every open buffer with a path, keyed by the path.
+fn open_texts(buffers: &BufferRegistry) -> HashMap<PathBuf, Rope> {
+    buffers
+        .open_paths()
+        .into_iter()
+        .filter_map(|path| {
+            let buffer = buffers.get(buffers.id_for_path(&path)?)?;
+            let rope = buffer.read().expect("buffer poisoned").rope().clone();
+            Some((path, rope))
+        })
+        .collect()
+}
+
 /// The chunk that holds `row`, and the part of the chunk the row shows.
 fn locate(doc: &DiffDocument, row: usize) -> Option<(PlacedChunk<'_>, RowKind)> {
     let placed = placed_chunks(doc)
@@ -238,13 +544,25 @@ fn right(row: &ReviewRow) -> Option<&ReviewSide> {
 
 #[cfg(test)]
 mod tests {
-    use super::{chunk_starts, row_at, row_for, target_of, OverviewRow, RowKind};
-    use crate::{
-        render::commits::preview_row_count,
-        review::ReviewFileInput,
-        review_session::{DiffDocument, ReviewChunkId},
+    use super::{
+        chunk_starts, ensure_overview_doc, row_at, row_for, target_of, OverviewRow, OverviewStamp,
+        RowKind,
     };
-    use std::{iter, path::PathBuf, sync::Arc};
+    use crate::{
+        action_handlers,
+        host::FakeRepoBuilder,
+        render::commits::preview_row_count,
+        review::{ReviewFileInput, ReviewRow, ReviewSide},
+        review_session::{DiffDocument, ReviewChunkId},
+        test_harness::TestHarness,
+        workspace::diff::DiffBase,
+    };
+    use std::{
+        iter,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+    use stoat_action::{DiffAgainstHead, DiffAgainstIndex};
 
     /// Three files with no language, so the line diff cuts the chunks.
     ///
@@ -345,5 +663,239 @@ mod tests {
                 None,
             ],
         );
+    }
+
+    /// The active workspace's overview document, once a build started now
+    /// lands.
+    fn built(h: &mut TestHarness) -> Option<Arc<DiffDocument>> {
+        ensure_overview_doc(&mut h.stoat);
+        h.settle();
+        h.stoat
+            .active_workspace()
+            .overview_doc
+            .as_ref()
+            .and_then(|built| built.doc.clone())
+    }
+
+    /// Each file of `doc` as its path, its base text, its buffer text, and how
+    /// many chunks it has.
+    fn files(doc: &DiffDocument) -> Vec<(&str, &str, &str, usize)> {
+        doc.files
+            .iter()
+            .map(|file| {
+                (
+                    file.rel_path.as_str(),
+                    file.base_text.as_str(),
+                    file.buffer_text.as_str(),
+                    file.chunks.len(),
+                )
+            })
+            .collect()
+    }
+
+    fn stamp(h: &TestHarness) -> OverviewStamp {
+        OverviewStamp::read(h.stoat.active_workspace())
+    }
+
+    fn type_at_start(h: &mut TestHarness, text: &str) {
+        h.type_keys("i");
+        h.type_text(text);
+        h.type_keys("esc");
+    }
+
+    /// The repository at /repo, with the harness's fake files under it.
+    fn repo(h: &mut TestHarness) -> FakeRepoBuilder<'_> {
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo(PathBuf::from("/repo"))
+            .with_fs(h.fake_fs())
+    }
+
+    /// An untracked file stays out, so a scratch file beside the work does not
+    /// fill the overview.
+    #[test]
+    fn a_build_holds_every_tracked_change_in_path_order_with_its_colors() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("b.rs", "fn b() {}\n", "fn b() { 1 }\n"),
+                ("a.rs", "fn a() {}\n", "fn a() { 2 }\n"),
+            ],
+        );
+        repo(&mut h).untracked("z.txt");
+        h.fake_fs()
+            .insert_file(Path::new("/repo/z.txt"), b"scratch\n");
+
+        let doc = built(&mut h).expect("two changed files build a document");
+        let colored: Vec<bool> = doc
+            .files
+            .iter()
+            .map(|file| file.buffer_highlights.is_some())
+            .collect();
+        assert_eq!(
+            (files(&doc), colored),
+            (
+                vec![
+                    ("a.rs", "fn a() {}\n", "fn a() { 2 }\n", 1),
+                    ("b.rs", "fn b() {}\n", "fn b() { 1 }\n", 1),
+                ],
+                vec![true, true],
+            ),
+        );
+    }
+
+    /// The cache answers b.txt with no hunk, so a build that reads the cache
+    /// shows b.txt with no chunk. A build that diffs it shows one chunk.
+    #[test]
+    fn a_rebuild_diffs_only_the_edited_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        let cached = |h: &TestHarness, base: &str, buffer: &str| {
+            h.stoat
+                .diff_cache()
+                .lock()
+                .expect("diff_cache poisoned")
+                .lookup(&action_handlers::review::diff_cache_key(base, buffer, None))
+                .is_some()
+        };
+        h.stoat
+            .diff_cache()
+            .lock()
+            .expect("diff_cache poisoned")
+            .insert(
+                action_handlers::review::diff_cache_key("b\n", "B\n", None),
+                Arc::new(Vec::new()),
+                true,
+            );
+        h.open_file(Path::new("/repo/a.txt"));
+
+        let first = built(&mut h).expect("the first build");
+        let a_cached = cached(&h, "a\n", "A\n");
+        let before = stamp(&h);
+        type_at_start(&mut h, "x");
+        let moved = stamp(&h) != before;
+        let second = built(&mut h).expect("the rebuild");
+        assert_eq!(
+            (files(&first), a_cached, moved, files(&second)),
+            (
+                vec![("a.txt", "a\n", "A\n", 1), ("b.txt", "b\n", "B\n", 0)],
+                true,
+                true,
+                vec![("a.txt", "a\n", "xA\n", 1), ("b.txt", "b\n", "B\n", 0)],
+            ),
+        );
+    }
+
+    #[test]
+    fn an_added_file_reads_as_every_line_added() {
+        let mut h = TestHarness::with_size(80, 24);
+        repo(&mut h).added("c.txt", "one\ntwo\n");
+
+        let doc = built(&mut h).expect("an added file builds a document");
+        let side = |side: Option<&ReviewSide>| side.map(|side| side.text.clone());
+        let rows: Vec<(Option<String>, Option<String>)> = doc
+            .order
+            .iter()
+            .flat_map(|id| doc.chunks[id].hunk.rows.iter())
+            .map(|row| match row {
+                ReviewRow::Context { left, right } => (side(Some(left)), side(Some(right))),
+                ReviewRow::Changed { left, right } => (side(left.as_ref()), side(right.as_ref())),
+            })
+            .collect();
+        assert_eq!(
+            (files(&doc), rows),
+            (
+                vec![("c.txt", "", "one\ntwo\n", 1)],
+                vec![
+                    (None, Some("one".to_string())),
+                    (None, Some("two".to_string())),
+                ],
+            ),
+        );
+    }
+
+    /// A clean tree builds no document and keeps the build's stamp, so asking
+    /// again builds nothing. An unsaved edit then shows, and the clean file
+    /// open beside it stays out.
+    #[test]
+    fn an_unsaved_edit_to_a_clean_file_shows() {
+        let mut h = TestHarness::with_size(80, 24);
+        repo(&mut h)
+            .head_file("d.txt", "same\n")
+            .head_file("f.txt", "kept\n");
+        h.fake_fs().insert_file(Path::new("/repo/d.txt"), b"same\n");
+        h.fake_fs().insert_file(Path::new("/repo/f.txt"), b"kept\n");
+        h.open_file(Path::new("/repo/f.txt"));
+        h.open_file(Path::new("/repo/d.txt"));
+
+        let clean = built(&mut h);
+        ensure_overview_doc(&mut h.stoat);
+        let rebuilt = h.stoat.pending_overview_build.is_some();
+        type_at_start(&mut h, "new ");
+        let edited = built(&mut h).expect("the unsaved edit builds a document");
+        assert_eq!(
+            (clean.is_none(), rebuilt, files(&edited)),
+            (true, false, vec![("d.txt", "same\n", "new same\n", 1)]),
+        );
+    }
+
+    #[test]
+    fn a_base_switch_stales_the_document_and_rebuilds_against_the_new_base() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_index_scenario("/repo", &[("e.txt", "head\n", "index\n", "work\n")]);
+        h.open_file(Path::new("/repo/e.txt"));
+
+        action_handlers::dispatch(&mut h.stoat, &DiffAgainstIndex);
+        let index = built(&mut h).expect("the index build");
+        let before = stamp(&h);
+        action_handlers::dispatch(&mut h.stoat, &DiffAgainstHead);
+        let moved = stamp(&h) != before;
+        let head = built(&mut h).expect("the head build");
+        assert_eq!(
+            (files(&index), moved, files(&head)),
+            (
+                vec![("e.txt", "index\n", "work\n", 1)],
+                true,
+                vec![("e.txt", "head\n", "work\n", 1)],
+            ),
+        );
+    }
+
+    /// A stage and a `.git` event move the base text where no buffer moves, so
+    /// each stales the document.
+    #[test]
+    fn a_stage_and_a_git_event_each_stale_the_document() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+
+        let first = stamp(&h);
+        h.stoat
+            .active_workspace_mut()
+            .invalidate_diff(buffer_id, Path::new("/repo/a.txt"));
+        let staged = stamp(&h);
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+        let refreshed = stamp(&h);
+        assert_eq!((first != staged, staged != refreshed), (true, true));
+    }
+
+    /// Under a revision base the overview lists what changed since that
+    /// revision, which includes a file committed since and clean in the tree.
+    #[test]
+    fn a_revision_base_lists_what_changed_since_the_revision() {
+        let mut h = TestHarness::with_size(80, 24);
+        repo(&mut h)
+            .head_file("committed.txt", "after\n")
+            .commit("base0", &[("committed.txt", "before\n")]);
+        h.fake_fs()
+            .insert_file(Path::new("/repo/committed.txt"), b"after\n");
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::named("base0", "base0".to_string())));
+
+        let doc = built(&mut h).expect("the commit since the revision builds a document");
+        assert_eq!(files(&doc), [("committed.txt", "before\n", "after\n", 1)]);
     }
 }

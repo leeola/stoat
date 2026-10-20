@@ -565,7 +565,7 @@ fn search_history(repo: &dyn crate::host::GitRepo, sha: &str) -> PageLoad {
 /// borrowed. An `attach` with highlighting off is a no-op, which is what makes
 /// a preview match a syntax-off editor.
 #[derive(Clone)]
-pub(super) struct PreviewHighlights {
+pub(crate) struct PreviewHighlights {
     pub(super) styles: SyntaxStyles,
     pub(super) cache: BaseHighlightCache,
     pub(super) enabled: bool,
@@ -573,7 +573,7 @@ pub(super) struct PreviewHighlights {
 
 impl PreviewHighlights {
     /// Read what a preview build needs off `stoat`.
-    pub(super) fn from_stoat(stoat: &Stoat) -> Self {
+    pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
         Self {
             styles: stoat.syntax_styles.clone(),
             cache: stoat.base_highlights_cache.clone(),
@@ -583,7 +583,7 @@ impl PreviewHighlights {
 
     /// Bake both sides' spans into `session`, or nothing when highlighting is
     /// off.
-    pub(super) fn attach(&self, doc: &mut DiffDocument) {
+    pub(crate) fn attach(&self, doc: &mut DiffDocument) {
         if !self.enabled {
             return;
         }
