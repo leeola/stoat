@@ -178,10 +178,18 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
         "overview" => {
             let state = ws.focused_overview()?;
             let pane = ws.panes.pane(ws.panes.focus()).area;
+            // The paint gives the list's right edge to the minimap strip, so a
+            // press there lands on no row.
+            let list = crate::render::layout::split_pane_status(pane).0;
             Some(ScreenSurfaces {
                 kind: ScreenKind::Overview,
                 pane,
-                list: crate::render::layout::split_pane_status(pane).0,
+                list: Rect {
+                    width: list
+                        .width
+                        .saturating_sub(state.minimap_rect.map_or(0, |strip| strip.width)),
+                    ..list
+                },
                 len: ws
                     .overview_doc
                     .as_ref()
@@ -2861,25 +2869,34 @@ mod tests {
         );
     }
 
-    /// A press on an overview row puts the cursor there, and a wheel notch over
-    /// the hunks steps it.
-    #[test]
-    fn a_press_and_a_wheel_over_the_overview_move_its_cursor() {
-        let mut h = crate::test_harness::TestHarness::with_size(100, 24);
+    /// Two staged files under a focused overview at 120 by 24, wide enough for
+    /// a per-pane minimap strip, with the minimap in `mode`.
+    fn overview_harness(mode: MinimapMode) -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+        h.stoat.settings.editor_minimap = Some(mode);
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
         h.open_file(Path::new("/repo/a.txt"));
         h.cover_with_overview(false);
         h.settle();
+        h
+    }
+
+    fn overview_cursor(h: &crate::test_harness::TestHarness) -> usize {
+        h.stoat
+            .active_workspace()
+            .focused_overview()
+            .expect("the overview is open")
+            .cursor
+    }
+
+    /// A press on an overview row puts the cursor there, and a wheel notch over
+    /// the hunks steps it.
+    #[test]
+    fn a_press_and_a_wheel_over_the_overview_move_its_cursor() {
+        let mut h = overview_harness(MinimapMode::Single);
         let list = {
             let ws = h.stoat.active_workspace();
             crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
-        };
-        let cursor = |h: &crate::test_harness::TestHarness| {
-            h.stoat
-                .active_workspace()
-                .focused_overview()
-                .expect("the overview is open")
-                .cursor
         };
 
         h.stoat.update(mouse_event(
@@ -2887,13 +2904,40 @@ mod tests {
             list.x + 2,
             list.y + 1,
         ));
-        let pressed = cursor(&h);
+        let pressed = overview_cursor(&h);
         h.stoat.update(mouse_event(
             MouseEventKind::ScrollDown,
             list.x + 2,
             list.y + 1,
         ));
-        assert_eq!((pressed, cursor(&h)), (1, 2));
+        assert_eq!((pressed, overview_cursor(&h)), (1, 2));
+    }
+
+    /// A press on a per-pane overview's minimap strip selects no row, and a
+    /// press beside the strip selects one.
+    #[test]
+    fn a_press_on_the_overview_strip_selects_no_row() {
+        let mut h = overview_harness(MinimapMode::PerPane);
+        let _ = h.stoat.render();
+        let strip = h
+            .stoat
+            .active_workspace()
+            .focused_overview()
+            .and_then(|state| state.minimap_rect)
+            .expect("the paint reserved a strip");
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            strip.x,
+            strip.y + 1,
+        ));
+        let on_strip = overview_cursor(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            strip.x - 1,
+            strip.y + 1,
+        ));
+        assert_eq!((on_strip, overview_cursor(&h)), (0, 1));
     }
 
     /// Seed a repo with `n` commits, open the commits screen over a long

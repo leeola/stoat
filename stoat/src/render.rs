@@ -175,6 +175,10 @@ pub(crate) struct MinimapChrome<'a> {
     /// [`Self::diff_palette`] at the inactive dim, for an unfocused diff view's
     /// strip. Aliases [`Self::diff_palette`] when no dim applies.
     pub(crate) dimmed_diff_palette: &'a [[u8; 3]],
+    /// The content store of the active workspace's overview strip, which every
+    /// overview pane's strip and the single band over a focused overview show.
+    /// `None` while the workspace holds no overview.
+    pub(crate) overview_content: Option<u32>,
     /// Viewport-thumb fill color, rgba.
     pub(crate) thumb: [u8; 4],
 }
@@ -412,7 +416,8 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.
     pub(crate) images_capable: bool,
-    /// Whether editor panes reserve their own per-pane right-edge minimap strip.
+    /// Whether editor and overview panes reserve their own per-pane right-edge
+    /// minimap strip.
     /// `true` only in [`MinimapMode::PerPane`] under stoatty. Single mode gates
     /// this off and declares one shared strip over the reserved band instead.
     pub(crate) minimap_enabled: bool,
@@ -939,6 +944,10 @@ pub(crate) fn frame(
                 .diff_dimmed
                 .as_deref()
                 .map_or(diff_palette, |dimmed| &dimmed[..declared]),
+            overview_content: stoat
+                .overview_strips
+                .get(&stoat.active_workspace)
+                .map(|strip| strip.content_id()),
             thumb,
         }
     });
@@ -1210,27 +1219,23 @@ pub(crate) fn frame(
         .retain(|(ws_id, pane_id), _| *ws_id == workspace && live.contains(pane_id));
 
     // Single mode declares one strip over the reserved right-edge band for the
-    // focused split pane's buffer. The scene re-stamps every paint, so a focus
-    // switch to another buffer redeclares it. A non-editor focus leaves it empty.
+    // focused split pane's buffer or overview. The scene re-stamps every paint,
+    // so a focus switch to another buffer redeclares it. Any other view leaves
+    // the band empty.
     if !modal_overlay
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
-        && let View::Editor(editor_id) = &ws.panes.pane(ws.panes.focus()).view
-        && let Some(editor) = ws.editors.get(*editor_id)
-        && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
+        && let Some((content_id, palette)) = single_band_content(ws, chrome)
     {
         let [tr, tg, tb, _] = chrome.thumb;
         Minimap {
             strip_id: SINGLE_MINIMAP_STRIP_ID,
-            content_id: content.content_id(),
+            content_id,
             lines_per_cell: pane::MINIMAP_LINES_PER_CELL,
             max_columns: pane::MINIMAP_MAX_COLUMNS,
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
             thumb_border: [tr, tg, tb],
-            palette: match editor.diff_view {
-                true => chrome.diff_palette,
-                false => chrome.palette,
-            },
+            palette,
         }
         .render(band, buf, scene);
     }
@@ -1841,6 +1846,32 @@ pub(crate) fn frame(
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
     }
     scene.end_lane();
+}
+
+/// The content store and palette the single band declares for the focused
+/// split pane of `ws`, or `None` when that pane shows neither a buffer nor an
+/// overview.
+///
+/// An editor's strip shows its buffer, in the diff palette while the diff view
+/// is on. An overview's strip shows the workspace's overview document, always
+/// in the diff palette.
+fn single_band_content<'a>(
+    ws: &Workspace,
+    chrome: MinimapChrome<'a>,
+) -> Option<(u32, &'a [[u8; 3]])> {
+    match ws.panes.pane(ws.panes.focus()).view {
+        View::Editor(editor_id) => {
+            let editor = ws.editors.get(editor_id)?;
+            let content = chrome.content.get(&(chrome.workspace, editor.buffer_id))?;
+            let palette = match editor.diff_view {
+                true => chrome.diff_palette,
+                false => chrome.palette,
+            };
+            Some((content.content_id(), palette))
+        },
+        View::Overview(_) => Some((chrome.overview_content?, chrome.diff_palette)),
+        _ => None,
+    }
 }
 
 /// The scene lane of a pane's content, which holds its gutter, its minimap

@@ -20,7 +20,7 @@ use crate::{
         status_lane,
         term_pane::render_term_pane,
         undercurl::UndercurlBatch,
-        FrameCtx, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
+        FrameCtx, MinimapChrome, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
     },
     term_session::{TermId, TermSession},
     workspace::{
@@ -140,38 +140,14 @@ pub(crate) fn render_pane(
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
                     && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
                 {
-                    let dim = if is_focused { 0.0 } else { frame.inactive_dim };
-                    let dim_bg = (dim > 0.0)
-                        .then(|| {
-                            style_rgb(
-                                theme
-                                    .try_get(crate::theme::scope::UI_BACKGROUND)
-                                    .and_then(|s| s.bg),
-                            )
-                        })
-                        .flatten();
-                    let blend = |c: [u8; 3]| match dim_bg {
-                        Some(bg) => dim_rgb(c, bg, dim),
-                        None => c,
-                    };
-
-                    let [tr, tg, tb, ta] = chrome.thumb;
-                    let [tr, tg, tb] = blend([tr, tg, tb]);
-                    Minimap {
-                        strip_id: pane.index,
-                        content_id: content.content_id(),
-                        lines_per_cell: MINIMAP_LINES_PER_CELL,
-                        max_columns: MINIMAP_MAX_COLUMNS,
-                        bg: [0, 0, 0, 0],
-                        thumb: [tr, tg, tb, ta],
-                        thumb_border: [tr, tg, tb],
-                        palette: match (editor.diff_view, is_focused) {
-                            (false, true) => chrome.palette,
-                            (false, false) => chrome.dimmed_palette,
-                            (true, true) => chrome.diff_palette,
-                            (true, false) => chrome.dimmed_diff_palette,
-                        },
-                    }
+                    pane_minimap(
+                        pane,
+                        chrome,
+                        content.content_id(),
+                        editor.diff_view,
+                        is_focused,
+                        frame,
+                    )
                     .render(strip, buf, scene);
                 }
             }
@@ -224,6 +200,12 @@ pub(crate) fn render_pane(
                     buf,
                     &mut *scene,
                 );
+                if let (Some(strip), Some(chrome)) = (state.minimap_rect, frame.minimap_chrome)
+                    && let Some(content_id) = chrome.overview_content
+                {
+                    pane_minimap(pane, chrome, content_id, true, is_focused, frame)
+                        .render(strip, buf, scene);
+                }
             }
             dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
@@ -343,6 +325,55 @@ pub(crate) fn render_pane(
                 );
             }
         }
+    }
+}
+
+/// The per-pane minimap strip that `pane` declares over content store
+/// `content_id`.
+///
+/// The strip takes the diff palette when `diff` holds, and the syntax palette
+/// otherwise. An unfocused pane's palette and thumb blend toward the theme
+/// background at the inactive dim, as the rest of the pane does.
+fn pane_minimap<'a>(
+    pane: &Pane,
+    chrome: MinimapChrome<'a>,
+    content_id: u32,
+    diff: bool,
+    is_focused: bool,
+    frame: FrameCtx<'_>,
+) -> Minimap<'a> {
+    let dim = if is_focused { 0.0 } else { frame.inactive_dim };
+    let dim_bg = (dim > 0.0)
+        .then(|| {
+            style_rgb(
+                frame
+                    .theme
+                    .try_get(crate::theme::scope::UI_BACKGROUND)
+                    .and_then(|s| s.bg),
+            )
+        })
+        .flatten();
+    let blend = |c: [u8; 3]| match dim_bg {
+        Some(bg) => dim_rgb(c, bg, dim),
+        None => c,
+    };
+
+    let [tr, tg, tb, ta] = chrome.thumb;
+    let [tr, tg, tb] = blend([tr, tg, tb]);
+    Minimap {
+        strip_id: pane.index,
+        content_id,
+        lines_per_cell: MINIMAP_LINES_PER_CELL,
+        max_columns: MINIMAP_MAX_COLUMNS,
+        bg: [0, 0, 0, 0],
+        thumb: [tr, tg, tb, ta],
+        thumb_border: [tr, tg, tb],
+        palette: match (diff, is_focused) {
+            (false, true) => chrome.palette,
+            (false, false) => chrome.dimmed_palette,
+            (true, true) => chrome.diff_palette,
+            (true, false) => chrome.dimmed_diff_palette,
+        },
     }
 }
 

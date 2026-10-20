@@ -580,22 +580,34 @@ pub(crate) fn render_editor_with_overlay(
 /// the text keeps.
 ///
 /// The strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
-/// mapping. The reserved cells stay blank, so the terminal's GPU minimap pass
-/// owns them. A pane narrower than [`MINIMAP_MIN_PANE_COLS`] reserves nothing.
+/// mapping.
 fn reserve_minimap_strip(editor: &mut EditorState, inner: Rect, minimap_enabled: bool) -> Rect {
+    let (inner, strip) = split_minimap_strip(inner, minimap_enabled);
+    editor.minimap_rect = strip;
+    inner
+}
+
+/// Split `inner` into the rect the pane's content keeps and the right-edge
+/// minimap strip.
+///
+/// The reserved cells stay blank, so the terminal's GPU minimap pass owns
+/// them. A pane narrower than [`MINIMAP_MIN_PANE_COLS`], or one with the
+/// minimap off, keeps all of `inner` and reserves no strip.
+pub(crate) fn split_minimap_strip(inner: Rect, minimap_enabled: bool) -> (Rect, Option<Rect>) {
     if !minimap_enabled || inner.width < MINIMAP_MIN_PANE_COLS {
-        return inner;
+        return (inner, None);
     }
-    editor.minimap_rect = Some(Rect {
+    let strip = Rect {
         x: inner.x + inner.width - MINIMAP_STRIP_COLS,
         y: inner.y,
         width: MINIMAP_STRIP_COLS,
         height: inner.height,
-    });
-    Rect {
+    };
+    let content = Rect {
         width: inner.width - MINIMAP_STRIP_COLS,
         ..inner
-    }
+    };
+    (content, Some(strip))
 }
 
 /// Paint every selection of `editor` that reaches the display rows

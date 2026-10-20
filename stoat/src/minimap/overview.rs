@@ -341,7 +341,7 @@ mod tests {
         test_harness::TestHarness,
         theme::Theme,
     };
-    use ratatui::{layout::Rect, style::Color};
+    use ratatui::style::Color;
     use std::{
         ops::Range,
         path::{Path, PathBuf},
@@ -804,15 +804,10 @@ mod tests {
     fn a_per_pane_overview_places_its_thumb_on_its_own_strip() {
         let (mut h, mut rx) = strip_harness(8);
         h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
-        let index = {
-            let ws = h.stoat.active_workspace_mut();
-            let index = ws.panes.pane(ws.panes.focus()).index;
-            if let Some(state) = ws.focused_overview_mut() {
-                state.minimap_rect = Some(Rect::new(92, 0, 8, 9));
-            }
-            index
-        };
+        h.resize(120, 10);
         let (_, views) = strip_frames(&frame(&mut h, &mut rx));
+        let ws = h.stoat.active_workspace();
+        let index = ws.panes.pane(ws.panes.focus()).index;
         let (_, rows) = view_of(&h);
         assert_eq!(views, [(index, 0, rows as u16)]);
     }

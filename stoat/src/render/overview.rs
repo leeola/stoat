@@ -9,6 +9,7 @@ use crate::{
     pane::Pane,
     render::{
         commits::{preview_row_count, render_commit_preview},
+        editor::split_minimap_strip,
         layout::split_pane_status,
         pane::render_overlay_status,
         text::write_str,
@@ -29,6 +30,10 @@ use stoat_widgets::ApcScene;
 ///
 /// With no document the pane says "building overview..." while a build is on
 /// the pool, and "no changes" when the last build found none.
+///
+/// With per-pane minimaps on, a pane wide enough for the minimap strip gives
+/// its right edge to the strip, with or without a document. The strip's rect
+/// lands on [`OverviewState::minimap_rect`].
 pub(crate) fn render_overview(
     pane: &Pane,
     is_focused: bool,
@@ -47,6 +52,8 @@ pub(crate) fn render_overview(
         buf,
         &mut *scene,
     );
+    let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled);
+    state.minimap_rect = strip;
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -91,9 +98,28 @@ pub(crate) fn render_overview(
 #[cfg(test)]
 mod tests {
     use crate::{
-        action_handlers::dispatch, render::commits::preview_row_count, test_harness::TestHarness,
+        action_handlers::dispatch,
+        apc_emit,
+        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
+        render::{
+            commits::preview_row_count,
+            paint,
+            review::{self, DiffDials},
+            themed_blank, SINGLE_MINIMAP_STRIP_ID,
+        },
+        test_fixture::drain_apc,
+        test_harness::TestHarness,
+        theme::scope,
     };
+    use ratatui::{buffer::Buffer, layout::Rect};
     use std::path::{Path, PathBuf};
+    use stoat_config::MinimapMode;
+    use stoatty_protocol::command::Command;
+    use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// The strip id, content id, and palette of a minimap strip that a frame
+    /// declares.
+    type Declared = (u32, u32, Vec<[u8; 3]>);
 
     /// The first row the overview paints, as text, from one render that runs
     /// no pool job.
@@ -168,5 +194,121 @@ mod tests {
             .focused_overview()
             .map(|state| (state.cursor, state.scroll_top + state.viewport_rows));
         assert_eq!(placed, Some((rows - 1, rows)));
+    }
+
+    /// Two staged files under a focused overview at 120 by 24, with the minimap
+    /// in `mode`, on a stoatty of protocol 13.
+    fn strip_harness(mode: MinimapMode) -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
+        let mut h = TestHarness::with_size(120, 24);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty_protocol = 13;
+        h.stoat.settings.editor_minimap = Some(mode);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_overview(false);
+        h.settle();
+        (h, rx)
+    }
+
+    /// Paint one frame, and return its cells, the strip rect the focused
+    /// overview reserved, and every minimap strip the frame declared.
+    fn paint_strips(
+        h: &mut TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> (Buffer, Option<Rect>, Vec<Declared>) {
+        let buf = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        let declared = drain_apc(rx)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Minimap(strip) => Some((strip.strip_id, strip.content_id, strip.palette)),
+                _ => None,
+            })
+            .collect();
+        let reserved = h
+            .stoat
+            .active_workspace()
+            .focused_overview()
+            .and_then(|state| state.minimap_rect);
+        (buf, reserved, declared)
+    }
+
+    /// The workspace's overview strip as `strip_id` declares it, in the diff
+    /// palette that the dials derive, blended toward the background by `dim`.
+    fn overview_strip(h: &TestHarness, strip_id: u32, dim: f32) -> Declared {
+        let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
+            .expect("the test theme has an rgb background");
+        let palette = review::diff_minimap_palette(
+            &h.stoat.minimap_class_table,
+            &h.stoat.theme,
+            DiffDials::from_stoat(&h.stoat),
+            h.stoat.diff_syntax,
+        )
+        .into_iter()
+        .map(|color| paint::dim_rgb(color, bg, dim))
+        .collect();
+        let content_id = h.stoat.overview_strips[&h.stoat.active_workspace].content_id();
+        (strip_id, content_id, palette)
+    }
+
+    fn focused_pane_index(h: &TestHarness) -> u32 {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    }
+
+    /// A per-pane overview gives its right edge to the minimap strip, leaves
+    /// the strip's cells blank, and declares the strip in the diff palette.
+    #[test]
+    fn a_per_pane_overview_declares_its_strip_in_the_diff_palette() {
+        let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
+        let (buf, reserved, declared) = paint_strips(&mut h, &mut rx);
+        let strip = Rect::new(112, 0, 8, 23);
+        let blank = themed_blank(&h.stoat.theme);
+        let painted: Vec<_> = strip
+            .positions()
+            .filter(|&cell| buf[cell] != blank)
+            .collect();
+        assert_eq!(
+            (reserved, painted, declared),
+            (
+                Some(strip),
+                vec![],
+                vec![overview_strip(&h, focused_pane_index(&h), 0.0)]
+            ),
+        );
+    }
+
+    /// A per-pane overview that a dock took focus from declares its strip in
+    /// the diff palette at the inactive dim.
+    #[test]
+    fn an_unfocused_per_pane_overview_dims_its_strip() {
+        let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
+        let index = focused_pane_index(&h);
+        let ws = h.stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Default::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+
+        let (_, _, declared) = paint_strips(&mut h, &mut rx);
+        // 0.25 is the default ui.inactive_dim the test harness resolves.
+        assert_eq!(declared, [overview_strip(&h, index, 0.25)]);
+    }
+
+    /// The single band shows a focused overview's strip in the diff palette,
+    /// and the pane reserves no strip of its own.
+    #[test]
+    fn the_single_band_follows_a_focused_overview() {
+        let (mut h, mut rx) = strip_harness(MinimapMode::Single);
+        let (_, reserved, declared) = paint_strips(&mut h, &mut rx);
+        assert_eq!(
+            (reserved, declared),
+            (None, vec![overview_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]),
+        );
     }
 }
