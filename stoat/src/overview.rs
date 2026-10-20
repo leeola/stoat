@@ -537,11 +537,11 @@ fn remap_cursors(ws: &mut Workspace, new: Option<&DiffDocument>) {
 /// chunk. A diff row keeps its offset into the chunk, held inside the new
 /// chunk's rows. `None` when `new` holds no such chunk.
 fn remap_row(old: &DiffDocument, new: &DiffDocument, row: usize) -> Option<usize> {
-    let (placed, kind) = locate(old, row)?;
-    let rel_path = &old.files.get(placed.file_index)?.rel_path;
+    let at = row_at(old, row)?;
+    let rel_path = &old.files.get(at.file_index)?.rel_path;
     let nth = placed_chunks(old)
-        .filter(|chunk| chunk.file_index == placed.file_index)
-        .position(|chunk| chunk.id == placed.id)?;
+        .filter(|chunk| chunk.file_index == at.file_index)
+        .position(|chunk| chunk.id == at.chunk)?;
 
     let file_index = new
         .files
@@ -551,7 +551,7 @@ fn remap_row(old: &DiffDocument, new: &DiffDocument, row: usize) -> Option<usize
         .filter(|chunk| chunk.file_index == file_index)
         .nth(nth)?;
     let last = target.chunk.hunk.rows.len().checked_sub(1);
-    Some(match (kind, last) {
+    Some(match (at.kind, last) {
         (RowKind::Diff(index), Some(last)) => target.header + 1 + index.min(last),
         _ => target.header,
     })
@@ -642,7 +642,7 @@ fn right(row: &ReviewRow) -> Option<&ReviewSide> {
 mod tests {
     use super::{
         chunk_starts, ensure_overview_doc, remap_row, row_at, row_for, target_of, OverviewRow,
-        OverviewStamp, RowKind,
+        OverviewStamp, OverviewState, RowKind,
     };
     use crate::{
         action_handlers,
@@ -774,6 +774,30 @@ mod tests {
             [Some(after[1]), Some(after[1] + 2), Some(after[2] + 4)],
         );
         assert_eq!(remap_row(&old, &a_only, before[2]), None);
+    }
+
+    /// The scroll moves the least distance that shows the cursor, and stays
+    /// for a cursor already in view or for a viewport of no rows.
+    #[test]
+    fn ensure_cursor_visible_scrolls_the_least_distance() {
+        let scrolled = |cursor, rows| {
+            let mut state = OverviewState {
+                cursor,
+                scroll_top: 5,
+                ..OverviewState::default()
+            };
+            state.ensure_cursor_visible(rows);
+            state.scroll_top
+        };
+        assert_eq!(
+            [
+                scrolled(2, 4),
+                scrolled(9, 4),
+                scrolled(8, 4),
+                scrolled(9, 0)
+            ],
+            [2, 6, 5, 5],
+        );
     }
 
     #[test]
