@@ -1350,7 +1350,8 @@ fn glyph_weight(ch: char) -> u8 {
 /// Class 0 is the theme's default foreground for uncovered text. Class `i + 1` is
 /// the resolved foreground of the `i`-th syntax scope. The emission layer declares
 /// [`Self::palette`] on the strip, and a token's [`HighlightStyleId`] resolves to
-/// its class via [`Self::class_of`].
+/// its class via [`Self::class_of`]. A span whose style was resolved to a color
+/// resolves through [`Self::class_of_fg`].
 ///
 /// A class is therefore a theme-key index, which is the same index under every
 /// theme: the key set is static, and
@@ -1369,6 +1370,7 @@ fn glyph_weight(ch: char) -> u8 {
 pub struct ClassTable {
     palette: Vec<[u8; 3]>,
     by_style: HashMap<HighlightStyleId, u8>,
+    by_fg: HashMap<[u8; 3], u8>,
     edge_base: u8,
     population_base: u8,
 }
@@ -1380,6 +1382,7 @@ impl ClassTable {
 
         let mut palette = vec![default_fg];
         let mut by_style = HashMap::new();
+        let mut by_fg = HashMap::new();
         for index in 0..styles.theme_keys().len() {
             let Some(style_id) = styles.id_for_highlight(HighlightId(index as u32)) else {
                 palette.push(default_fg);
@@ -1387,8 +1390,11 @@ impl ClassTable {
             };
             let class = (index + 1) as u8;
             by_style.insert(style_id, class);
-            let fg = styles.interner[style_id].foreground.unwrap_or(Color::White);
-            palette.push(color_to_rgb(fg));
+            let fg = styles.interner[style_id].foreground;
+            if let Some(rgb) = fg.map(color_to_rgb).filter(|&rgb| rgb != default_fg) {
+                by_fg.entry(rgb).or_insert(class);
+            }
+            palette.push(color_to_rgb(fg.unwrap_or(Color::White)));
         }
 
         // The edge classes follow the syntax scopes, in EdgeClass order, so a
@@ -1416,6 +1422,7 @@ impl ClassTable {
         ClassTable {
             palette,
             by_style,
+            by_fg,
             edge_base,
             population_base,
         }
@@ -1468,6 +1475,19 @@ impl ClassTable {
     /// recognized syntax scope.
     pub fn class_of(&self, style: HighlightStyleId) -> u8 {
         self.by_style.get(&style).copied().unwrap_or(0)
+    }
+
+    /// The class a span drawn in the resolved foreground `fg` maps to, or 0 when
+    /// no theme key paints in that color.
+    ///
+    /// This is the lookup for a span whose style was resolved before it reached
+    /// the strip, as [`BaseHighlights`](crate::diff_map::BaseHighlights) spans
+    /// are. The class draws in the span's own color, because a class's palette
+    /// entry is that color. Keys that share a color share the first key's class,
+    /// and the default foreground maps to class 0, as uncovered text does.
+    pub fn class_of_fg(&self, fg: Option<Color>) -> u8 {
+        fg.and_then(|fg| self.by_fg.get(&color_to_rgb(fg)).copied())
+            .unwrap_or(0)
     }
 
     /// The rgb color of each class, indexed by class.
@@ -3970,6 +3990,41 @@ mod tests {
         assert_eq!(
             table.class_of(styles.id_for_highlight(HighlightId(1)).expect("second key")),
             2,
+        );
+    }
+
+    /// A span with a resolved color maps to the class of the first key that
+    /// paints in that color. The text color, a color no key paints in, and no
+    /// color map to class 0.
+    #[test]
+    fn class_of_fg_maps_a_resolved_color_to_its_first_key_class() {
+        use super::ClassTable;
+        use crate::theme::Theme;
+        use ratatui::style::Color;
+
+        let src = r##"theme fgtest {
+            ui.text.fg = "#ffffff";
+            syntax.keyword.fg = "#ff0000";
+            syntax.string.fg = "#00ff00";
+            syntax.comment.fg = "#00ff00";
+            syntax.function.fg = "#ffffff";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        let theme = Theme::from_config(&config.expect("theme config parses"), "fgtest")
+            .expect("theme builds");
+        let table = ClassTable::from_theme(&theme);
+
+        let rgb = |r, g, b| Some(Color::Rgb(r, g, b));
+        assert_eq!(
+            [
+                rgb(255, 0, 0),
+                rgb(0, 255, 0),
+                rgb(255, 255, 255),
+                rgb(1, 2, 3),
+                None
+            ]
+            .map(|fg| table.class_of_fg(fg)),
+            [1, 3, 0, 0, 0],
         );
     }
 
