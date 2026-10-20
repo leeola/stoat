@@ -147,7 +147,9 @@ pub(crate) struct MinimapChrome<'a> {
     pub(crate) workspace: WorkspaceId,
     /// Content stores this session declared, read for each strip's `content_id`.
     pub(crate) content: &'a HashMap<(WorkspaceId, BufferId), MinimapContent>,
-    /// Syntax-scope palette the strip declares and its run summaries index.
+    /// Syntax-scope palette the strip declares and its run summaries index, cut
+    /// to [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)
+    /// for a terminal before protocol 13.
     pub(crate) palette: &'a [[u8; 3]],
     /// [`Self::palette`] pre-blended toward the background at the inactive dim,
     /// for an unfocused pane's strip.
@@ -897,12 +899,19 @@ pub(crate) fn frame(
             let [r, g, b] = paint::style_rgb(bar.bg).unwrap_or([90, 90, 110]);
             [r, g, b, 96]
         };
-        let palette = stoat.minimap_class_table.palette();
+        // A terminal before the population palette drops a declaration past 64
+        // entries, so it receives the prefix it reads.
+        let table = &stoat.minimap_class_table;
+        let declared = match stoat.stoatty_protocol >= emit::POPULATION_PALETTE_PROTOCOL {
+            true => table.palette().len(),
+            false => table.legacy_palette().len(),
+        };
+        let palette = &table.palette()[..declared];
         MinimapChrome {
             workspace: stoat.active_workspace,
             content: &stoat.minimap_content,
             palette,
-            dimmed_palette: dimmed_palette.unwrap_or(palette),
+            dimmed_palette: dimmed_palette.map_or(palette, |dimmed| &dimmed[..declared]),
             thumb,
         }
     });

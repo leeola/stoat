@@ -16,7 +16,7 @@ use crate::{
     buffer::BufferId,
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::EditorId,
-    minimap::EdgeSource,
+    minimap::{EdgeSource, RowMark},
     pane::View,
     workspace::WorkspaceId,
 };
@@ -73,6 +73,12 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
 /// the frame whole, so the splice goes as `minimap_lines` and its runs draw at
 /// the flat strength that terminal already renders.
 const WEIGHTED_RUN_PROTOCOL: u32 = 4;
+
+/// The protocol version that reads a palette past 64 entries. An older terminal
+/// drops such a declaration whole, so a strip declares it the
+/// [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)
+/// prefix.
+pub(crate) const POPULATION_PALETTE_PROTOCOL: u32 = 13;
 
 /// Sync each visible minimap strip's buffer and drain its summary changes to
 /// the terminal, retiring content for buffers that closed.
@@ -477,8 +483,11 @@ impl<'a> MinimapEdges<'a> {
 }
 
 impl EdgeSource for MinimapEdges<'_> {
-    fn edge_of(&self, row: u32) -> Option<u8> {
-        minimap_edge_class(self.live_hunks(), self.severity_map, self.class_table, row)
+    fn mark_of(&self, row: u32) -> RowMark {
+        RowMark {
+            edge: minimap_edge_class(self.live_hunks(), self.severity_map, self.class_table, row),
+            class_base: 0,
+        }
     }
 
     fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
@@ -833,7 +842,9 @@ mod tests {
                 .and_then(|s| s.bg),
         )
         .expect("test theme has an rgb background");
-        let raw: Vec<[u8; 3]> = h.stoat.minimap_class_table.palette().to_vec();
+        // The harness terminal predates the population palette, so a strip
+        // declares the legacy prefix.
+        let raw: Vec<[u8; 3]> = h.stoat.minimap_class_table.legacy_palette().to_vec();
         let dimmed: Vec<[u8; 3]> = raw.iter().map(|&c| dim_rgb(c, bg, dim)).collect();
         assert_ne!(raw, dimmed, "dim must actually change the palette");
 
@@ -883,6 +894,45 @@ mod tests {
                 .any(|c| matches!(c, Command::Minimap(m) if m.palette == rewidened)),
             "a changed dim re-blends the held palette",
         );
+    }
+
+    /// A strip declares the whole palette to a terminal that reads it, and the
+    /// legacy prefix to one before the population palette.
+    #[test]
+    fn a_strip_declares_the_palette_its_terminal_reads() {
+        use stoatty_protocol::command::Command;
+
+        let declared = |protocol: u32| {
+            let mut h = Stoat::test();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            h.stoat.set_apc_tx(tx);
+            h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+            h.stoat.stoatty_protocol = protocol;
+            h.resize(160, 24);
+            let a = h.write_file("a.txt", "alpha\n");
+            h.open_file(&a);
+            h.settle();
+
+            let _ = h.stoat.render();
+            apc_emit::emit_apc_scene(&mut h.stoat);
+            let palettes: Vec<Vec<[u8; 3]>> = drain_apc(&mut rx)
+                .into_iter()
+                .filter_map(|c| match c {
+                    Command::Minimap(m) => Some(m.palette),
+                    _ => None,
+                })
+                .collect();
+            let table = &h.stoat.minimap_class_table;
+            (
+                palettes,
+                table.palette().to_vec(),
+                table.legacy_palette().to_vec(),
+            )
+        };
+
+        let (current, full, _) = declared(POPULATION_PALETTE_PROTOCOL);
+        let (older, _, legacy) = declared(POPULATION_PALETTE_PROTOCOL - 1);
+        assert_eq!((current, older), (vec![full], vec![legacy]));
     }
 
     #[test]
