@@ -76,7 +76,7 @@ pub(crate) fn luma(rgb: [u8; 3]) -> f32 {
     (0.299 * rgb[0] as f32 + 0.587 * rgb[1] as f32 + 0.114 * rgb[2] as f32) / 255.0
 }
 
-/// Lift `style`'s foreground away from `bg` when it sits too close to read.
+/// Lift `fg` away from `bg` when it sits too close to read.
 ///
 /// A foreground already [`FAINT_CONTRAST_FLOOR`] or further from the background
 /// comes back untouched, which is every ordinary syntax color. A closer one
@@ -84,16 +84,10 @@ pub(crate) fn luma(rgb: [u8; 3]) -> f32 {
 /// field and black on a light one, by the share of the floor it falls short.
 /// The blend is proportional, so a barely-faint color moves barely and one
 /// painted in the background color itself goes the whole way.
-///
-/// A non-RGB foreground has no channels to measure, so it comes back unchanged
-/// the way it does from every other blend here.
-pub(crate) fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
-    let Some(fg) = style_rgb(style.fg) else {
-        return style;
-    };
+pub(crate) fn brighten_rgb(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
     let distance = (luma(fg) - luma(bg)).abs();
     if distance >= FAINT_CONTRAST_FLOOR {
-        return style;
+        return fg;
     }
 
     let pole = match luma(bg) < 0.5 {
@@ -101,7 +95,19 @@ pub(crate) fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
         false => [0, 0, 0],
     };
     let share = (FAINT_CONTRAST_FLOOR - distance) / FAINT_CONTRAST_FLOOR;
-    let [r, g, b] = dim_rgb(fg, pole, share);
+    dim_rgb(fg, pole, share)
+}
+
+/// Lift `style`'s foreground away from `bg` when it sits too close to read, per
+/// [`brighten_rgb`].
+///
+/// A non-RGB foreground has no channels to measure, so it comes back unchanged
+/// the way it does from every other blend here.
+pub(crate) fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
+    let Some(fg) = style_rgb(style.fg) else {
+        return style;
+    };
+    let [r, g, b] = brighten_rgb(fg, bg);
     style.fg(Color::Rgb(r, g, b))
 }
 
