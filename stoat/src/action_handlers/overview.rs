@@ -332,7 +332,7 @@ fn page_delta(rows: usize, dir: PageDir) -> i32 {
 mod tests {
     use super::{document, overview_step, respawn_overview_panes};
     use crate::{
-        action_handlers::{commits, dispatch, focused_editor_mut, pane},
+        action_handlers::{commits, dispatch, focused_editor_mut, pane, review::diff_cache_key},
         overview::{
             chunk_starts, ensure_overview_doc, target_of, OverviewId, OverviewStamp, OverviewState,
         },
@@ -1042,6 +1042,70 @@ mod tests {
             .focused_overview()
             .map(|state| (state.cursor, state.pending_landing.clone()));
         assert_eq!(state, Some((0, None)));
+    }
+
+    /// A second overview after one edit to one open file diffs that file
+    /// alone. Every other file keeps its cache key, so its lookup hits, and
+    /// the rebuild adds the one entry of the edit.
+    ///
+    /// Empty hunks planted under the untouched files' keys tell a hit from a
+    /// fresh diff, because a fresh diff shows each file's one chunk.
+    #[test]
+    fn a_second_overview_after_one_edit_diffs_the_edited_file_alone() {
+        let untouched = [("b\n", "B\n"), ("c\n", "C\n"), ("d\n", "D\n")];
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("a.txt", "a\n", "A\n"),
+                ("b.txt", "b\n", "B\n"),
+                ("c.txt", "c\n", "C\n"),
+                ("d.txt", "d\n", "D\n"),
+            ],
+        );
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        h.settle();
+        h.type_keys("q i x Escape");
+        h.settle();
+        let before = {
+            let cache = h.stoat.diff_cache();
+            let mut cache = cache.lock().expect("diff_cache poisoned");
+            for (base, buffer) in untouched {
+                cache.insert(
+                    diff_cache_key(base, buffer, None),
+                    Arc::new(Vec::new()),
+                    true,
+                );
+            }
+            cache.len()
+        };
+
+        dispatch(&mut h.stoat, &stoat_action::DiffOverview);
+        h.settle();
+        let added = h
+            .stoat
+            .diff_cache()
+            .lock()
+            .expect("diff_cache poisoned")
+            .len()
+            - before;
+        let files: Vec<(String, String, usize)> = doc(&h)
+            .files
+            .iter()
+            .map(|file| {
+                let text = file.buffer_text.to_string();
+                (file.rel_path.clone(), text, file.chunks.len())
+            })
+            .collect();
+        let expected = [
+            ("a.txt", "xA\n", 1),
+            ("b.txt", "B\n", 0),
+            ("c.txt", "C\n", 0),
+            ("d.txt", "D\n", 0),
+        ]
+        .map(|(path, text, chunks)| (path.to_string(), text.to_string(), chunks));
+        assert_eq!((added, files), (1, expected.to_vec()));
     }
 
     /// Track c.txt in the repository with no change.
