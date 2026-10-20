@@ -1857,6 +1857,9 @@ mod tests {
     /// The single band follows its editor into the diff view. It declares the
     /// palette the dials derive and declares it again at each dial step and
     /// theme switch, and the buffer's lines sync with their status blocks.
+    ///
+    /// A dial step sends no line again. The summaries hold no dial, so the
+    /// palette declaration carries the whole step.
     #[test]
     fn a_diff_view_strip_declares_the_dial_palette() {
         use crate::{host::DiffStatus, minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
@@ -1870,6 +1873,11 @@ mod tests {
                 },
                 _ => None,
             })
+        };
+        let splices = |cmds: &[Command]| {
+            cmds.iter()
+                .filter(|c| matches!(c, Command::MinimapLines(_)))
+                .count()
         };
 
         let (mut h, mut rx, _) = modified_line_fixture();
@@ -1902,7 +1910,8 @@ mod tests {
                 band(&diff),
                 line_classes(&diff, 1),
                 band(&stepped),
-                band(&flat)
+                band(&flat),
+                (splices(&stepped), splices(&flat)),
             ),
             (
                 Some(palette_at(2, true)),
@@ -1912,9 +1921,10 @@ mod tests {
                 ]),
                 Some(palette_at(1, true)),
                 Some(flat_palette.clone()),
+                (0, 0),
             ),
             "the band declares the dial palette over the diff view's synced lines, \
-             and again at a tint step and a syntax toggle",
+             and again at a tint step and a syntax toggle with no line splice",
         );
 
         action_handlers::dispatch(
