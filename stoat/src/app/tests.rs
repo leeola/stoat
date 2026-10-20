@@ -10457,7 +10457,7 @@ fn minimap_click_scrolls_to_the_proportional_line() {
     );
     assert_eq!(
         h.stoat.minimap_drag,
-        Some(editor_id),
+        Some(MinimapDrag::Editor(editor_id)),
         "the press arms the scrub"
     );
 }
@@ -10599,7 +10599,7 @@ fn single_band_click_scrubs_the_focused_editor_not_the_pane_under_it() {
     ));
     assert_eq!(
         h.stoat.minimap_drag,
-        Some(focused),
+        Some(MinimapDrag::Editor(focused)),
         "the band press arms a scrub of the focused editor"
     );
     let after_click = h.stoat.active_workspace().editors[focused].scroll_row;

@@ -34,7 +34,7 @@ use crate::{
         watched_files::FileWatchers,
     },
     minimap::emit::{self},
-    mouse::{self, mouse_event_kind},
+    mouse::{self, mouse_event_kind, MinimapDrag},
     pane::{DockId, DockVisibility, FocusTarget, NodeId, PaneId, PaneTree, Placement, View},
     picker::DisplayCache,
     quit_all_confirm::QuitAllConfirm,
@@ -1631,10 +1631,11 @@ pub struct Stoat {
     /// separator and its share has one home.
     pub(crate) commits_separator_drag: bool,
     /// Set on `MouseEventKind::Down(Left)` over a pane's minimap strip. While
-    /// `Some`, `Drag(Left)` scrubs the named editor's viewport to the pointer
-    /// position and `Up(Left)` clears it. Takes over the pointer so the press
-    /// never reaches the text-area cursor or selection handling.
-    pub(crate) minimap_drag: Option<EditorId>,
+    /// `Some`, `Drag(Left)` scrubs the named editor's viewport or overview to
+    /// the pointer position and `Up(Left)` clears it. Takes over the pointer so
+    /// the press never reaches the text-area cursor, the selection handling, or
+    /// an overview's rows.
+    pub(crate) minimap_drag: Option<MinimapDrag>,
     /// The workspace whose documents the language servers hold.
     ///
     /// Every workspace numbers its buffers from the same start, and the LSP
