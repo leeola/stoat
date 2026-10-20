@@ -89,6 +89,11 @@ pub(crate) mod non_pane_pool {
     /// The open modal's preview pane. Modals are mutually exclusive, so one id
     /// serves every preview rather than one per modal.
     pub(crate) const MODAL_PREVIEW: u32 = BASE + 13;
+    /// The overview's minimap thumb, which no pool carries.
+    ///
+    /// It keys the thumb's change gate, so a strip that the overview places a
+    /// thumb on and an editor feeds after it gets the editor's thumb back.
+    pub(crate) const OVERVIEW_THUMB: u32 = BASE + 14;
     /// First id of the per-window status-bar partition. A detached pane's status
     /// row pools at `WINDOW_STATUS + pane.index`, so the partition is offset far
     /// enough above the fixed non-pane ids that pane indices never collide.

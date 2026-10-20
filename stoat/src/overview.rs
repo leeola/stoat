@@ -26,6 +26,7 @@ use crate::{
     review_session::{DiffDocument, ReviewChunk, ReviewChunkId},
     workspace::{self, diff::DiffBase, Workspace, WorkspaceId},
 };
+use ratatui::layout::Rect;
 use slotmap::new_key_type;
 use std::{
     collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
@@ -53,6 +54,9 @@ pub(crate) struct OverviewState {
     pub scroll_top: usize,
     /// Rows visible on the most recent paint. Zero until the first paint.
     pub viewport_rows: usize,
+    /// The minimap strip the most recent paint reserved at the pane's right
+    /// edge, or `None` where no per-pane strip shows.
+    pub minimap_rect: Option<Rect>,
     /// The input mode while the overview's pane is focused.
     ///
     /// Each overview holds its own mode, as a commits list does, so a chord
@@ -98,6 +102,7 @@ impl Default for OverviewState {
             cursor: 0,
             scroll_top: 0,
             viewport_rows: 0,
+            minimap_rect: None,
             mode: "normal".to_string(),
             covered: None,
             covered_diff: false,

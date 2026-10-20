@@ -1531,6 +1531,12 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             // new palette. Only the colors move, and they ride the strip
             // declaration on the next frame.
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
+            // An overview document bakes its colors at build, and the overview
+            // strip resolves them by color against the class table. A rebuild
+            // bakes the new colors, which the rebuilt table knows.
+            for (_, ws) in stoat.workspaces.iter_mut() {
+                ws.overview_epoch += 1;
+            }
             stoat.theme_epoch += 1;
             stoat.paint_generation += 1;
             apc_emit::emit_theme_default_colors(stoat);

@@ -2400,6 +2400,13 @@ pub struct Stoat {
     /// recomputed by [`Self::emit_minimap`]. Keeps the run loop's frame timer
     /// firing so idle frames drive the build to completion.
     pub(crate) minimap_build_pending: bool,
+    /// The minimap strip of each workspace's overview, kept in step with that
+    /// workspace's overview document.
+    ///
+    /// Every overview of a workspace shows the one document, so the workspace
+    /// holds one strip. It exists while the workspace holds an overview.
+    pub(crate) overview_strips:
+        std::collections::HashMap<WorkspaceId, crate::minimap::overview::OverviewStrip>,
     /// Whether a visible run or terminal fed output since the last frame tick, so
     /// the tick repaints once rather than the output arm repainting per PTY chunk.
     /// A terminal that changed its title sets it too, visible or not.
@@ -2867,6 +2874,7 @@ impl Stoat {
             minimap_content: std::collections::HashMap::new(),
             minimap_next_content_id: 0,
             minimap_build_pending: false,
+            overview_strips: std::collections::HashMap::new(),
             pty_dirty: false,
             spinner_clock: 0.0,
             minimap_class_table,

@@ -16,11 +16,16 @@ use crate::{
     buffer::BufferId,
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::EditorId,
-    minimap::{EdgeSource, RowMark},
+    minimap::{
+        overview::{self, OverviewStrip},
+        EdgeSource, RowMark,
+    },
+    overview::OverviewId,
     pane::View,
     render::{
         paint,
         review::{self, DiffDials},
+        SINGLE_MINIMAP_STRIP_ID,
     },
     theme::Theme,
     workspace::WorkspaceId,
@@ -35,8 +40,9 @@ use std::{
 use stoat_config::MinimapMode;
 use stoat_text::Bias;
 
-/// Assign a `content_id` to each visible split-editor buffer a minimap strip
-/// may render, so the declare widget can read the id while the frame paints.
+/// Assign a `content_id` to each visible split-editor buffer that a minimap
+/// strip renders, and to the active workspace's overview strip while an
+/// overview shows, so the declare widget reads the id while the frame paints.
 ///
 /// The summaries themselves sync afterward at the frame seam in
 /// [`emit_minimap`]. A no-op with the minimap off.
@@ -52,6 +58,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
     let Stoat {
         workspaces,
         minimap_content,
+        overview_strips,
         minimap_next_content_id,
         executor,
         ..
@@ -59,8 +66,16 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
     let ws = &workspaces[ws_id];
 
     for (_, pane) in ws.panes.split_panes() {
-        let View::Editor(editor_id) = pane.view else {
-            continue;
+        let editor_id = match pane.view {
+            View::Editor(editor_id) => editor_id,
+            View::Overview(_) => {
+                if let Entry::Vacant(slot) = overview_strips.entry(ws_id) {
+                    slot.insert(OverviewStrip::new(*minimap_next_content_id));
+                    *minimap_next_content_id += 1;
+                }
+                continue;
+            },
+            _ => continue,
         };
         let Some(editor) = ws.editors.get(editor_id) else {
             continue;
@@ -78,7 +93,7 @@ pub(crate) fn ensure_minimap_content_ids(stoat: &mut Stoat) {
 /// The protocol version that decodes a weighted run. An older terminal drops
 /// the frame whole, so the splice goes as `minimap_lines` and its runs draw at
 /// the flat strength that terminal already renders.
-const WEIGHTED_RUN_PROTOCOL: u32 = 4;
+pub(super) const WEIGHTED_RUN_PROTOCOL: u32 = 4;
 
 /// The protocol version that reads a palette past 64 entries. An older terminal
 /// drops such a declaration whole, so a strip declares it the
@@ -203,6 +218,27 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
             .collect()
     };
 
+    // Per-pane mode places an overview's thumb on its own strip where the paint
+    // reserved one. Single mode places the focused overview's thumb on the band.
+    let overviews: Vec<(OverviewId, Option<u32>)> = {
+        let ws = &stoat.workspaces[ws_id];
+        let focused = ws.focused_overview_id();
+        ws.panes
+            .split_panes()
+            .filter_map(|(_, pane)| {
+                let View::Overview(id) = pane.view else {
+                    return None;
+                };
+                let state = ws.overviews.get(id)?;
+                let strip_id = match single {
+                    true => (focused == Some(id)).then_some(SINGLE_MINIMAP_STRIP_ID),
+                    false => state.minimap_rect.is_some().then_some(pane.index),
+                };
+                Some((id, strip_id))
+            })
+            .collect()
+    };
+
     let mut out = Vec::new();
     for (buffer_id, editor_id) in strips {
         sync_minimap_strip(stoat, ws_id, buffer_id, editor_id, &mut out);
@@ -210,6 +246,18 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
             .minimap_content
             .get(&(ws_id, buffer_id))
             .is_some_and(|content| content.build_pending());
+    }
+    if !overviews.is_empty() {
+        overview::sync_overview_strip(stoat, ws_id, &mut out);
+        stoat.minimap_build_pending |= stoat
+            .overview_strips
+            .get(&ws_id)
+            .is_some_and(OverviewStrip::build_pending);
+    }
+    for (id, strip_id) in overviews {
+        if let Some(strip_id) = strip_id {
+            overview::emit_overview_thumb(stoat, ws_id, id, strip_id, &mut out);
+        }
     }
 
     let dropped: Vec<(WorkspaceId, BufferId)> = stoat
@@ -229,6 +277,16 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
                 },
             );
         }
+    }
+    if stoat.workspaces[ws_id].overviews.is_empty()
+        && let Some(strip) = stoat.overview_strips.remove(&ws_id)
+    {
+        stoatty_protocol::command::encode_minimap_drop_into(
+            &mut out,
+            &stoatty_protocol::command::MinimapDropCommand {
+                content_id: strip.content_id(),
+            },
+        );
     }
 
     if !out.is_empty() {
@@ -641,7 +699,9 @@ fn minimap_row_mark(
 }
 
 /// Convert the engine's [`crate::minimap::Run`]s to their wire form.
-fn convert_minimap_runs(runs: crate::minimap::LineRuns) -> stoatty_protocol::command::LineSummary {
+pub(super) fn convert_minimap_runs(
+    runs: crate::minimap::LineRuns,
+) -> stoatty_protocol::command::LineSummary {
     runs.as_slice()
         .iter()
         .map(|run| stoatty_protocol::command::MinimapRun {
