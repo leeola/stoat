@@ -1495,11 +1495,13 @@ on key {
         r -> [ReloadAll(), SetMode(normal)];
         R -> [LiveReload(), SetMode(normal)];
     }
-    # The diff chord. It holds the diff arms the git chord also binds, so the
-    # diff keys sit under the diff letter. Each arm chains SetMode(normal), as
-    # the git chord's arms do, so the chord releases after one key.
+    # The diff chord. It picks a diff layout, and it holds the diff arms the
+    # git chord also binds, so the diff keys sit under the diff letter. Each
+    # arm chains SetMode(normal), as the git chord's arms do, so the chord
+    # releases after one key.
     #
-    # `d` toggles the diff view, as `space G d` does.
+    # `f` opens the per-file diff and `c` opens the changes view, the hunk
+    # list of every change. Once one is open, `Ctrl-t` flips between them.
     #
     # `i` and `h` point the diff at the index or at HEAD, `b` flips the base
     # between them, and `e` opens the base on the command line. A pair diff of
@@ -1509,7 +1511,8 @@ on key {
         Escape -> SetMode(normal);
 
         git || changes {
-            d -> [DiffFiles(), SetMode(normal)];
+            f -> [DiffFiles(), SetMode(normal)];
+            c -> [DiffChanges(), SetMode(normal)];
         }
 
         git && !pair_diff {

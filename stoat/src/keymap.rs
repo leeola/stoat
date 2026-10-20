@@ -3466,17 +3466,25 @@ mod tests {
         );
     }
 
-    /// The one-key diff toggle sits under the chord, as `space G d` spells it.
+    /// The chord picks a diff layout, `f` for the per-file diff and `c` for the
+    /// changes view, and binds no `d` beside them.
     #[test]
-    fn space_d_d_toggles_the_diff() {
+    fn space_d_f_and_space_d_c_pick_a_diff_layout() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        assert_eq!(
+        let pressed = |key| {
             action_names(keymap.lookup(
                 &TestState::in_repo("space_diff"),
-                &key_event(KeyCode::Char('d'), KeyModifiers::NONE),
-            )),
-            Some(vec!["DiffFiles".to_string(), "SetMode".to_string()]),
+                &key_event(KeyCode::Char(key), KeyModifiers::NONE),
+            ))
+        };
+        assert_eq!(
+            [pressed('f'), pressed('c'), pressed('d')],
+            [
+                Some(vec!["DiffFiles".to_string(), "SetMode".to_string()]),
+                Some(vec!["DiffChanges".to_string(), "SetMode".to_string()]),
+                None,
+            ],
         );
     }
 
