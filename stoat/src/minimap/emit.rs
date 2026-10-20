@@ -192,10 +192,14 @@ fn sync_minimap_strip(
         )
     };
 
+    // Part of the decoration, so a terminal that changes protocol re-checks the
+    // marks it was sent.
+    let populations = stoat.stoatty_protocol >= POPULATION_PALETTE_PROTOCOL;
     let decoration_version = {
         let mut hasher = DefaultHasher::new();
         diff_version.hash(&mut hasher);
         diag_version.hash(&mut hasher);
+        populations.hash(&mut hasher);
         hasher.finish()
     };
     let syntax_version = minimap_syntax_version(
@@ -222,6 +226,7 @@ fn sync_minimap_strip(
         diff: OnceCell::new(),
         severity_map: &severity_map,
         class_table,
+        populations,
     };
 
     let content = stoat
@@ -463,11 +468,15 @@ struct MinimapEdges<'a> {
     /// and colors all held still since the last frame takes none of them, so
     /// most frames ask nothing. The resolve is an ordered walk of the buffer's
     /// fragments, which is far too much to spend on a question that is usually
-    /// not put. Held once for the pass, since `edge_of` runs per row and the
+    /// not put. Held once for the pass, since `mark_of` runs per row and the
     /// diff job's own rows are already behind.
     diff: OnceCell<Option<crate::diff_map::LiveHunks<'a>>>,
     severity_map: &'a crate::render::editor::RowSeverity,
     class_table: &'a crate::minimap::ClassTable,
+    /// Whether the terminal reads the population palette, so a row's content
+    /// takes its diff status block. A terminal before it reads no class past
+    /// the legacy prefix, so every row there keeps the plain syntax block.
+    populations: bool,
 }
 
 impl<'a> MinimapEdges<'a> {
@@ -484,10 +493,13 @@ impl<'a> MinimapEdges<'a> {
 
 impl EdgeSource for MinimapEdges<'_> {
     fn mark_of(&self, row: u32) -> RowMark {
-        RowMark {
-            edge: minimap_edge_class(self.live_hunks(), self.severity_map, self.class_table, row),
-            class_base: 0,
-        }
+        minimap_row_mark(
+            self.live_hunks(),
+            self.severity_map,
+            self.class_table,
+            self.populations,
+            row,
+        )
     }
 
     fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
@@ -503,35 +515,45 @@ impl EdgeSource for MinimapEdges<'_> {
     }
 }
 
-/// The minimap edge-lane class for buffer `row`, or `None` when the line carries
-/// no diff or diagnostic mark.
+/// The minimap mark of buffer `row`, its edge-lane class and the offset its
+/// content takes.
 ///
-/// A diagnostic on the row wins over its diff status, mirroring the gutter. The
-/// severity or diff status resolves to a class against `class_table`.
-fn minimap_edge_class(
+/// A diagnostic on the row wins the lane over its diff status, mirroring the
+/// gutter. The severity or diff status resolves to a class against
+/// `class_table`. The offset follows the diff status alone, and stays 0 unless
+/// `populations` holds.
+fn minimap_row_mark(
     diff: Option<&crate::diff_map::LiveHunks<'_>>,
     severity_map: &crate::render::editor::RowSeverity,
     class_table: &crate::minimap::ClassTable,
+    populations: bool,
     row: u32,
-) -> Option<u8> {
+) -> RowMark {
     use crate::{host::DiffStatus, minimap::EdgeClass};
     use lsp_types::DiagnosticSeverity;
 
-    if let Some(severity) = severity_map.at(row) {
-        let kind = match severity {
+    let status = diff.map_or(DiffStatus::Unchanged, |diff| diff.status_for_line(row));
+    let edge = match severity_map.at(row) {
+        Some(severity) => Some(class_table.edge_class(match severity {
             DiagnosticSeverity::ERROR => EdgeClass::Error,
             DiagnosticSeverity::WARNING => EdgeClass::Warning,
             _ => EdgeClass::Info,
-        };
-        return Some(class_table.edge_class(kind));
-    }
-
-    match diff?.status_for_line(row) {
-        DiffStatus::Added => Some(class_table.edge_class(EdgeClass::Added)),
-        DiffStatus::Modified | DiffStatus::Moved => {
-            Some(class_table.edge_class(EdgeClass::Modified))
+        })),
+        None => match status {
+            DiffStatus::Added => Some(class_table.edge_class(EdgeClass::Added)),
+            DiffStatus::Modified | DiffStatus::Moved => {
+                Some(class_table.edge_class(EdgeClass::Modified))
+            },
+            DiffStatus::Unchanged => None,
         },
-        DiffStatus::Unchanged => None,
+    };
+
+    RowMark {
+        edge,
+        class_base: match populations {
+            true => class_table.population_base(status),
+            false => 0,
+        },
     }
 }
 
@@ -1524,36 +1546,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn minimap_marks_diff_and_diagnostic_lines() {
-        use crate::minimap::EdgeClass;
-        use lsp_types::DiagnosticSeverity;
-        use stoatty_protocol::command::{Command, MinimapRun};
-
-        fn diag(line: u32, severity: DiagnosticSeverity) -> lsp_types::Diagnostic {
-            lsp_types::Diagnostic {
-                range: lsp_types::Range {
-                    start: lsp_types::Position { line, character: 0 },
-                    end: lsp_types::Position { line, character: 1 },
-                },
-                severity: Some(severity),
-                ..Default::default()
-            }
-        }
-
-        // The leading run of buffer line `n` in the most recent emit.
-        fn line_lead(cmds: &[Command], n: u32) -> Option<MinimapRun> {
-            cmds.iter().rev().find_map(|cmd| match cmd {
-                Command::MinimapLines(l) => {
-                    let idx = n.checked_sub(l.start)? as usize;
-                    l.lines.get(idx).and_then(|runs| runs.first().copied())
-                },
-                _ => None,
-            })
-        }
-
+    /// A plain text file whose line 1 the diff marks modified, open in an 80x24
+    /// pane, with the receiver of the frames the session sends and the file's
+    /// path.
+    fn modified_line_fixture() -> (
+        crate::test_harness::TestHarness,
+        UnboundedReceiver<Vec<u8>>,
+        PathBuf,
+    ) {
         let mut h = Stoat::test();
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
         let root = PathBuf::from("/minimap-marks");
@@ -1585,6 +1587,39 @@ mod tests {
             .active_workspace_mut()
             .panes
             .resize(Rect::new(0, 0, 80, 24));
+        (h, rx, path)
+    }
+
+    #[test]
+    fn minimap_marks_diff_and_diagnostic_lines() {
+        use crate::minimap::EdgeClass;
+        use lsp_types::DiagnosticSeverity;
+        use stoatty_protocol::command::{Command, MinimapRun};
+
+        fn diag(line: u32, severity: DiagnosticSeverity) -> lsp_types::Diagnostic {
+            lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position { line, character: 0 },
+                    end: lsp_types::Position { line, character: 1 },
+                },
+                severity: Some(severity),
+                ..Default::default()
+            }
+        }
+
+        // The leading run of buffer line `n` in the most recent emit.
+        fn line_lead(cmds: &[Command], n: u32) -> Option<MinimapRun> {
+            cmds.iter().rev().find_map(|cmd| match cmd {
+                Command::MinimapLines(l) => {
+                    let idx = n.checked_sub(l.start)? as usize;
+                    l.lines.get(idx).and_then(|runs| runs.first().copied())
+                },
+                _ => None,
+            })
+        }
+
+        let (mut h, mut rx, path) = modified_line_fixture();
+        let buffer_id = h.stoat.focused_editor_ids().expect("editor").1;
 
         let modified = h.stoat.minimap_class_table.edge_class(EdgeClass::Modified);
         let error = h.stoat.minimap_class_table.edge_class(EdgeClass::Error);
@@ -1668,6 +1703,58 @@ mod tests {
             line_lead(&on_clean, 0).map(|r| r.class),
             Some(error),
             "a diagnostic marks a line no hunk covers, got {on_clean:?}"
+        );
+    }
+
+    /// A row's content takes its diff status block for a terminal that reads
+    /// the population palette, and the plain syntax block for one before it.
+    #[test]
+    fn a_diff_row_carries_its_status_offset() {
+        use crate::{host::DiffStatus, minimap::EdgeClass};
+        use stoatty_protocol::command::Command;
+
+        // The run classes of buffer line `n` in the most recent emit that
+        // carries it.
+        fn classes(cmds: &[Command], n: u32) -> Option<Vec<u8>> {
+            cmds.iter().rev().find_map(|cmd| match cmd {
+                Command::MinimapLines(l) => {
+                    let idx = n.checked_sub(l.start)? as usize;
+                    l.lines
+                        .get(idx)
+                        .map(|runs| runs.iter().map(|run| run.class).collect())
+                },
+                _ => None,
+            })
+        }
+
+        let (mut h, mut rx, _) = modified_line_fixture();
+        let table = &h.stoat.minimap_class_table;
+        let (edge, base) = (
+            table.edge_class(EdgeClass::Modified),
+            table.population_base(DiffStatus::Modified),
+        );
+
+        h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL;
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let current = drain_apc(&mut rx);
+
+        h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL - 1;
+        let _ = h.stoat.render();
+        apc_emit::emit_apc_scene(&mut h.stoat);
+        emit_minimap(&mut h.stoat);
+        let older = drain_apc(&mut rx);
+
+        assert_eq!(
+            (
+                classes(&current, 0),
+                classes(&current, 1),
+                classes(&older, 1)
+            ),
+            (Some(vec![0]), Some(vec![edge, base]), Some(vec![edge, 0])),
+            "the modified line's content takes the modified block, then the plain \
+             block under the same lane once the terminal predates it",
         );
     }
 
