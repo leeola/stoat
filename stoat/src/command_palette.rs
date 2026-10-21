@@ -523,8 +523,6 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         CloseDiffChanges
         | DiffChangesNext
         | DiffChangesPrev
-        | DiffChangesNextChunk
-        | DiffChangesPrevChunk
         | DiffChangesPageDown
         | DiffChangesPageUp
         | DiffChangesHalfPageDown

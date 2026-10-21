@@ -33,7 +33,8 @@ define_action!(
     ActionKind::DiffChangesNext,
     "move to the next changes view row",
     "Move the changes view cursor down one row, or down by the count typed \
-     before the key.",
+     before the key. A step past the last row of a file goes on to the first \
+     row of the next file.",
     ActionPriority::Rare
 );
 
@@ -44,30 +45,8 @@ define_action!(
     ActionKind::DiffChangesPrev,
     "move to the previous changes view row",
     "Move the changes view cursor up one row, or up by the count typed before \
-     the key.",
-    ActionPriority::Rare
-);
-
-define_action!(
-    DiffChangesNextChunkDef,
-    DiffChangesNextChunk,
-    "DiffChangesNextChunk",
-    ActionKind::DiffChangesNextChunk,
-    "move to the next hunk in the changes view",
-    "Move the changes view cursor to the header of the next hunk. At the last \
-     hunk the cursor stays, and the status says \"no more changes\".",
-    ActionPriority::Rare
-);
-
-define_action!(
-    DiffChangesPrevChunkDef,
-    DiffChangesPrevChunk,
-    "DiffChangesPrevChunk",
-    ActionKind::DiffChangesPrevChunk,
-    "move to the previous hunk in the changes view",
-    "Move the changes view cursor to the header of the previous hunk. Inside a \
-     hunk, the first step goes to the header of that hunk. At the first hunk \
-     the cursor stays, and the status says \"no more changes\".",
+     the key. A step past the first row of a file goes on to the last row of \
+     the previous file.",
     ActionPriority::Rare
 );
 

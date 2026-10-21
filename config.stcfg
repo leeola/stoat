@@ -1125,8 +1125,8 @@ on key {
     view == diff {
         Ctrl-t -> DiffChanges();
     }
-    # The changes view paints its hunks with the diff view's painter, so the
-    # diff styling dials act on it as they act on the commits screen.
+    # The changes view paints each excerpt with the per-file diff's painter, so
+    # the diff styling dials act on it as they act on the per-file diff.
     view == diff_changes {
         Cmd-6 -> DiffUnderline();
         Cmd-7 -> DiffBold();
@@ -1134,6 +1134,11 @@ on key {
         Cmd-9 -> DiffTintDown();
         Cmd-0 -> DiffTintUp();
     }
+    # The focused excerpt is an editor, so a normal-mode key that this block
+    # leaves out acts on the excerpt's file. j, k, and the pages cross into the
+    # next file at an excerpt's edge. n, p, the Alt notches, and the side
+    # buttons walk the hunks across the excerpts, as the diff view's walk
+    # crosses into the next changed file.
     view == diff_changes && mode == normal {
         Escape -> CloseDiffChanges();
         q -> CloseDiffChanges();
@@ -1143,16 +1148,18 @@ on key {
         Down -> DiffChangesNext();
         k -> DiffChangesPrev();
         Up -> DiffChangesPrev();
-        n -> DiffChangesNextChunk();
-        p -> DiffChangesPrevChunk();
-        g -> DiffChangesFirst();
-        G -> DiffChangesLast();
+        n -> GotoNextChange();
+        p -> GotoPrevChange();
         Ctrl-f -> DiffChangesPageDown();
         PageDown -> DiffChangesPageDown();
         Ctrl-b -> DiffChangesPageUp();
         PageUp -> DiffChangesPageUp();
         Ctrl-d -> DiffChangesHalfPageDown();
         Ctrl-u -> DiffChangesHalfPageUp();
+        Alt-WheelDown -> GotoNextChange();
+        Alt-WheelUp -> GotoPrevChange();
+        MouseBack -> DiffBack();
+        MouseForward -> DiffForward();
         : -> OpenCommandPalette();
     }
     view == conflict && mode == normal {

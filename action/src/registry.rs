@@ -14,9 +14,8 @@ use crate::{
         },
         diff_changes::{
             CloseDiffChanges, DiffChanges, DiffChangesFirst, DiffChangesHalfPageDown,
-            DiffChangesHalfPageUp, DiffChangesLast, DiffChangesNext, DiffChangesNextChunk,
-            DiffChangesOpen, DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev,
-            DiffChangesPrevChunk,
+            DiffChangesHalfPageUp, DiffChangesLast, DiffChangesNext, DiffChangesOpen,
+            DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev,
         },
         dump::Dump,
         editor::{
@@ -946,12 +945,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseDiffChanges::DEF, |_| Ok(Box::new(CloseDiffChanges)));
     add(DiffChangesNext::DEF, |_| Ok(Box::new(DiffChangesNext)));
     add(DiffChangesPrev::DEF, |_| Ok(Box::new(DiffChangesPrev)));
-    add(DiffChangesNextChunk::DEF, |_| {
-        Ok(Box::new(DiffChangesNextChunk))
-    });
-    add(DiffChangesPrevChunk::DEF, |_| {
-        Ok(Box::new(DiffChangesPrevChunk))
-    });
     add(DiffChangesPageDown::DEF, |_| {
         Ok(Box::new(DiffChangesPageDown))
     });
@@ -1324,8 +1317,6 @@ mod tests {
         "CloseDiffChanges",
         "DiffChangesNext",
         "DiffChangesPrev",
-        "DiffChangesNextChunk",
-        "DiffChangesPrevChunk",
         "DiffChangesPageDown",
         "DiffChangesPageUp",
         "DiffChangesHalfPageDown",
@@ -1951,8 +1942,8 @@ mod tests {
         // + 1 DiffBaseEdit.
         // + 1 DiffPair.
         // + 5 the diff styling dials.
-        // + 13 the changes view actions.
-        assert_eq!(all().count(), 450);
+        // + 11 the changes view actions.
+        assert_eq!(all().count(), 448);
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! The handlers of a [`View::DiffChanges`] pane.
 //!
 //! They open and close the changes view, flip between it and the per-file diff,
-//! move its focused excerpt's cursor, and respawn a pane whose state did not
-//! survive a restore.
+//! move its cursor through the stack, carry the change walk across its
+//! excerpts, and respawn a pane whose state did not survive a restore.
 
 use super::{
+    jump,
     movement::{self, ChangeDir},
     pane, review,
     view::{self, PageDir, ViewAlign},
@@ -14,6 +15,7 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
     diff_changes::{self, DiffChangesState, Landing},
+    display_map::DisplayPoint,
     pane::{PaneId, View},
     workspace::Workspace,
 };
@@ -113,21 +115,46 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Move the focused excerpt's cursor by `delta` display rows, held inside the
-/// excerpt.
+/// Move the focused changes view's cursor by `delta` display rows.
+///
+/// A step past an excerpt's last row goes on to the first row of the next
+/// excerpt, and a step before its first row to the last row of the previous
+/// one, so the steps walk the rows the stack paints. An excerpt that waits on
+/// its diff map paints no row, so a step from it holds still and a crossing
+/// passes over it. At either end of the stack the cursor stays.
 pub(crate) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
-    movement::move_vertical(stoat, delta, false)
+    let down = delta > 0;
+    let mut effect = UpdateEffect::None;
+    for _ in 0..delta.unsigned_abs() {
+        let Some(before) = step_place(stoat) else {
+            break;
+        };
+        if movement::move_vertical(stoat, delta.signum(), false) == UpdateEffect::Redraw {
+            effect = UpdateEffect::Redraw;
+        }
+        if step_place(stoat) != Some(before) {
+            continue;
+        }
+
+        if !cross_excerpt(stoat, down) {
+            break;
+        }
+        effect = UpdateEffect::Redraw;
+    }
+    effect
 }
 
-/// Move the focused changes view's cursor to the start of the next or the
-/// previous hunk.
+/// Carry the change walk past the focused excerpt's last hunk to the first
+/// hunk of the next excerpt, or before its first hunk to the last hunk of the
+/// previous one.
 ///
-/// Past its excerpt's last hunk the cursor moves to the next excerpt's first
-/// hunk, and before its first hunk to the previous excerpt's last one. A step
-/// back from inside a hunk lands on that hunk's own start. At either end of
-/// the stack the cursor stays, and the status row says that no more changes
-/// lie that way, as the change walk of the per-file diff says.
-pub(super) fn diff_changes_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+/// The hop lands as the per-file diff's hop into the next changed file lands,
+/// with the origin on the jumplist and the landing recorded, so `DiffBack` and
+/// `DiffForward` go on walking changes. An excerpt whose diff map holds no hunk
+/// is passed over. At either end of the stack the cursor stays, and the status
+/// row says that no more changes lie that way.
+pub(super) fn hop_excerpt(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+    let origin = super::focused_editor_mut(stoat).map(jump::live_entry);
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;
@@ -140,44 +167,24 @@ pub(super) fn diff_changes_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> Upda
     let Some(state) = diff_changes_views.get_mut(id) else {
         return UpdateEffect::None;
     };
-    let Some(editor) = state
-        .focused_excerpt()
-        .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
-    else {
-        return UpdateEffect::None;
-    };
 
-    let row = diff_changes::cursor_point(editor).row;
-    let starts = diff_changes::hunk_starts(editor);
-    let within = match dir {
-        ChangeDir::Next => starts.into_iter().find(|&start| start > row),
-        ChangeDir::Prev => starts.into_iter().rev().find(|&start| start < row),
-    };
-    if let Some(start) = within {
-        diff_changes::place_cursor(editor, Point::new(start, 0));
-        return UpdateEffect::Redraw;
-    }
-
-    let others: Vec<usize> = match dir {
-        ChangeDir::Next => (state.focused + 1..state.excerpts.len()).collect(),
-        ChangeDir::Prev => (0..state.focused).rev().collect(),
-    };
-    for index in others {
-        let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
-            continue;
-        };
+    let down = matches!(dir, ChangeDir::Next);
+    let target = excerpts_past(state, down).into_iter().find_map(|index| {
+        let editor = editors.get_mut(state.excerpts[index].editor_id)?;
         let starts = diff_changes::hunk_starts(editor);
-        let start = match dir {
-            ChangeDir::Next => starts.first(),
-            ChangeDir::Prev => starts.last(),
+        let start = match down {
+            true => starts.first(),
+            false => starts.last(),
         };
-        if let Some(&start) = start {
-            diff_changes::place_cursor(editor, Point::new(start, 0));
-            state.focused = index;
-            return UpdateEffect::Redraw;
-        }
-    }
-    stoat.set_status("no more changes");
+        start.map(|&start| (index, start))
+    });
+    let Some((index, start)) = target else {
+        stoat.set_status("no more changes");
+        return UpdateEffect::Redraw;
+    };
+    state.focused = index;
+
+    movement::land_file_hop(stoat, dir, origin, false, (start, start..start + 1));
     UpdateEffect::Redraw
 }
 
@@ -400,6 +407,75 @@ fn page_delta(rows: usize, dir: PageDir) -> i32 {
     match dir {
         PageDir::Down => rows,
         PageDir::Up => -rows,
+    }
+}
+
+/// The focused excerpt's index and its cursor's display row.
+///
+/// `None` with no excerpt in focus, and while the focused excerpt waits on its
+/// diff map.
+fn step_place(stoat: &mut Stoat) -> Option<(usize, u32)> {
+    let ws = stoat.active_workspace_mut();
+    let id = ws.focused_diff_changes_id()?;
+    let state = ws.diff_changes_views.get(id)?;
+    let excerpt = state.focused_excerpt()?;
+    excerpt.folded_version?;
+    let editor = ws.editors.get_mut(excerpt.editor_id)?;
+    Some((state.focused, view::cursor_display_row(editor)))
+}
+
+/// Focus the nearest excerpt past the focused one that paints rows, with the
+/// cursor at the start of its first row going down or of its last row going
+/// up, and report whether one lies that way.
+///
+/// A spliced base row maps to no buffer position, so the cursor lands on the
+/// outermost row that maps to one.
+fn cross_excerpt(stoat: &mut Stoat, down: bool) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return false;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return false;
+    };
+    let Some(index) = excerpts_past(state, down)
+        .into_iter()
+        .find(|&index| state.excerpts[index].folded_version.is_some())
+    else {
+        return false;
+    };
+    let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
+        return false;
+    };
+
+    let point = {
+        let snapshot = editor.display_map.snapshot();
+        let landing = |row| snapshot.display_to_buffer(DisplayPoint::new(row, 0));
+        let last = snapshot.max_point().row;
+        match down {
+            true => (0..=last).find_map(landing),
+            false => (0..=last).rev().find_map(landing),
+        }
+    };
+    let Some(point) = point else {
+        return false;
+    };
+    diff_changes::place_cursor(editor, point);
+    state.focused = index;
+    true
+}
+
+/// The indices of the excerpts past the focused one, nearest first: below it
+/// when `down` is set, else above it.
+fn excerpts_past(state: &DiffChangesState, down: bool) -> Vec<usize> {
+    match down {
+        true => (state.focused + 1..state.excerpts.len()).collect(),
+        false => (0..state.focused).rev().collect(),
     }
 }
 
@@ -702,21 +778,34 @@ mod tests {
         assert_eq!(h.stoat.current_view(), Some("diff_changes"));
     }
 
-    /// A step holds the cursor inside the focused excerpt, and a step before
-    /// the stack holds an excerpt moves nothing.
+    /// `j` past an excerpt's last row goes on to the next file's first row, and
+    /// `k` there goes back to the last row. A step before the stack holds an
+    /// excerpt moves nothing, and a step past either end of the stack stays.
     #[test]
-    fn a_changes_view_step_stays_inside_the_focused_excerpt() {
+    fn j_crosses_into_the_next_file_and_k_back() {
         let mut h = deep_files();
         h.cover_with_diff_changes(false);
         let unbuilt = diff_changes_step(&mut h.stoat, 1);
 
         h.settle();
+        let walk: Vec<(String, u32)> = ["j j j j", "j", "k"]
+            .into_iter()
+            .map(|keys| {
+                h.type_keys(keys);
+                place(&mut h)
+            })
+            .collect();
         diff_changes_step(&mut h.stoat, -100);
         let top = place(&mut h);
         diff_changes_step(&mut h.stoat, 100);
         assert_eq!(
-            (unbuilt, top, place(&mut h)),
-            (UpdateEffect::None, at("a.txt", 0), at("a.txt", 9)),
+            (unbuilt, walk, top, place(&mut h)),
+            (
+                UpdateEffect::None,
+                vec![at("a.txt", 9), at("b.txt", 0), at("a.txt", 9)],
+                at("a.txt", 0),
+                at("b.txt", 9),
+            ),
         );
     }
 
@@ -943,8 +1032,9 @@ mod tests {
         );
     }
 
-    /// n and p walk the hunks across the excerpts, and a step past either end
-    /// of the stack stays and says so.
+    /// n and p run the editor's change walk, which goes on from an excerpt's
+    /// last hunk into the next excerpt, and a step past either end of the stack
+    /// stays and says so.
     #[test]
     fn n_and_p_walk_the_hunks_across_excerpts_and_stop_at_either_end() {
         let mut h = deep_files();
@@ -984,10 +1074,11 @@ mod tests {
     }
 
     /// A page steps by the rows of the last paint, a half page by half of them
-    /// and by one row before any paint, and an edge lands on the stack's first
-    /// or last row.
+    /// and by one row before any paint, and either one goes on into the next
+    /// file at an excerpt's edge. An edge lands on the stack's first or last
+    /// row.
     #[test]
-    fn pages_step_by_the_painted_rows_and_edges_reach_the_ends() {
+    fn pages_step_through_the_stack_and_edges_reach_the_ends() {
         let mut h = deep_files();
         h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
         h.cover_with_diff_changes(false);
@@ -1019,12 +1110,44 @@ mod tests {
             places,
             [
                 at("a.txt", 6),
-                at("a.txt", 9),
-                at("a.txt", 9),
-                at("a.txt", 7),
-                at("a.txt", 0),
+                at("b.txt", 0),
+                at("b.txt", 6),
+                at("b.txt", 0),
+                at("a.txt", 6),
                 at("b.txt", 9),
                 at("a.txt", 5)
+            ],
+        );
+    }
+
+    /// The side buttons walk the hunks across the excerpts as n and p do. A
+    /// hop into the next excerpt records its landing, so a later press walks on
+    /// rather than retracing the jumplist out of the changes view.
+    #[test]
+    fn the_side_buttons_walk_the_hunks_across_excerpts() {
+        let mut h = deep_files();
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let presses: [&dyn Action; 4] = [
+            &stoat_action::DiffBack,
+            &stoat_action::DiffBack,
+            &stoat_action::DiffBack,
+            &stoat_action::DiffForward,
+        ];
+        let walk: Vec<(Option<&str>, (String, u32))> = presses
+            .into_iter()
+            .map(|action| {
+                dispatch(&mut h.stoat, action);
+                (h.stoat.current_view(), place(&mut h))
+            })
+            .collect();
+        assert_eq!(
+            walk,
+            [
+                (Some("diff_changes"), at("a.txt", 8)),
+                (Some("diff_changes"), at("b.txt", 8)),
+                (Some("diff_changes"), at("b.txt", 8)),
+                (Some("diff_changes"), at("a.txt", 8)),
             ],
         );
     }

@@ -1136,12 +1136,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             let step = arming_step(stoat);
             diff_changes::diff_changes_step(stoat, -step)
         },
-        ActionKind::DiffChangesNextChunk => {
-            diff_changes::diff_changes_chunk_step(stoat, movement::ChangeDir::Next)
-        },
-        ActionKind::DiffChangesPrevChunk => {
-            diff_changes::diff_changes_chunk_step(stoat, movement::ChangeDir::Prev)
-        },
         ActionKind::DiffChangesPageDown => {
             diff_changes::diff_changes_page(stoat, view::PageDir::Down)
         },

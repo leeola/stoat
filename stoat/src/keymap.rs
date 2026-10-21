@@ -2744,6 +2744,40 @@ mod tests {
         );
     }
 
+    /// The changes view walks the hunks on n, p, the Alt notches, and the side
+    /// buttons, as the diff view does, and leaves g and G to the editor of its
+    /// focused excerpt.
+    #[test]
+    fn the_changes_view_walks_changes_and_leaves_g_to_the_editor() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let changes = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("view", StateValue::String("diff_changes".into()))
+            .set("pane", StateValue::String("editor".into()));
+        let key = |c| {
+            action_names(keymap.lookup(&changes, &key_event(KeyCode::Char(c), KeyModifiers::NONE)))
+        };
+        let button =
+            |button| action_names(keymap.lookup_side_button(&changes, button, KeyModifiers::NONE));
+        let notch = |dir| action_names(keymap.lookup_wheel(&changes, dir, KeyModifiers::ALT));
+
+        assert_eq!(
+            (
+                (key('n'), key('p')),
+                (notch(WheelDirection::Down), notch(WheelDirection::Up)),
+                (button(SideButton::Back), button(SideButton::Forward)),
+                (key('g'), key('G')),
+            ),
+            (
+                (only("GotoNextChange"), only("GotoPrevChange")),
+                (only("GotoNextChange"), only("GotoPrevChange")),
+                (only("DiffBack"), only("DiffForward")),
+                (only("SetMode"), only("GotoLineNumber")),
+            ),
+        );
+    }
+
     /// Every list modal answers the same keys with the same verbs.
     ///
     /// The scheme drifted once already, each picker minting its own actions

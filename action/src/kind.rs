@@ -414,8 +414,6 @@ action_kinds! {
     CloseDiffChanges,
     DiffChangesNext,
     DiffChangesPrev,
-    DiffChangesNextChunk,
-    DiffChangesPrevChunk,
     DiffChangesPageDown,
     DiffChangesPageUp,
     DiffChangesHalfPageDown,

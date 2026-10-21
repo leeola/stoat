@@ -167,7 +167,7 @@ pub(crate) fn render_diff_changes(
 #[cfg(test)]
 mod tests {
     use crate::{
-        apc_emit,
+        action_handlers, apc_emit,
         diff_changes::{self, DiffChangesState},
         editor_state::{EditorId, EditorState},
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
@@ -305,12 +305,12 @@ mod tests {
         );
     }
 
-    /// `G` lands on the last excerpt's last row, and the paint scrolls the stack
+    /// A cursor on the last excerpt's last row makes the paint scroll the stack
     /// so that row is the bottom of the view.
     #[test]
-    fn g_in_the_last_excerpt_scrolls_the_stack_to_its_end() {
+    fn the_last_excerpts_last_row_scrolls_the_stack_to_its_end() {
         let mut h = two_files(4);
-        h.type_keys("G");
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesLast);
         h.render_composited();
 
         let (state, editors) = stack(&mut h);

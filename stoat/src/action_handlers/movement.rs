@@ -4115,6 +4115,11 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     landings.sort_unstable_by_key(|(id, ..)| *id);
 
     if landings.is_empty() {
+        // A changes view holds the changed files as its excerpts, so the walk
+        // goes on into the next excerpt rather than opening the next file.
+        if stoat.active_workspace().focused_diff_changes_id().is_some() {
+            return super::diff_changes::hop_excerpt(stoat, dir);
+        }
         // The repository's changed files are no part of a comparison of two
         // files, so the walk ends where the file's differences end.
         if current_path
