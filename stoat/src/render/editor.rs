@@ -572,11 +572,6 @@ pub(crate) fn render_editor_with_overlay(
     }
 }
 
-/// Reserve the right-edge minimap strip out of `inner`, and return the rect
-/// the text keeps.
-///
-/// The strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
-/// mapping.
 /// Settle the display settings a diff-view editor takes from the width of
 /// `inner`, so the rows a caller measures before the paint are the rows it
 /// paints.
@@ -602,6 +597,11 @@ pub(crate) fn fit_diff_view(
         .set_pair_modified_hunks(inner.width >= DIFF_TWO_COLUMN_MIN);
 }
 
+/// Reserve the right-edge minimap strip out of `inner`, and return the rect
+/// the text keeps.
+///
+/// The strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
+/// mapping.
 fn reserve_minimap_strip(editor: &mut EditorState, inner: Rect, minimap_enabled: bool) -> Rect {
     let (inner, strip) = split_minimap_strip(inner, minimap_enabled);
     editor.minimap_rect = strip;
