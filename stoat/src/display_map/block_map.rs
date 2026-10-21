@@ -998,7 +998,7 @@ impl BlockSnapshot {
         Some(self.wrap_to_buffer(WrapPoint::new(wrap_row, point.column)))
     }
 
-    fn wrap_to_buffer(&self, wrap_point: WrapPoint) -> Point {
+    pub(super) fn wrap_to_buffer(&self, wrap_point: WrapPoint) -> Point {
         let tab_point = self.wrap_snapshot.to_tab_point(wrap_point);
         let fold_point = self
             .wrap_snapshot

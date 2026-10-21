@@ -733,6 +733,7 @@ pub(crate) fn paint_diff_rows(
         .unwrap_or_default();
 
     let mut base_line = base_line_at(snapshot, scroll_row);
+    let mut next_buffer_row = lines_above(snapshot, scroll_row);
     // A moved-away seam's base lines take no row, so the walk adds them when it
     // reaches the buffer row the seam sits before. `base_line_at` already
     // counted the seams above the first visible buffer row.
@@ -825,14 +826,19 @@ pub(crate) fn paint_diff_rows(
                 let last_row = display_row + 1 >= total_rows
                     || !snapshot.is_wrap_continuation(display_row + 1);
                 if !continuation {
+                    // A fold hides unchanged lines, each with one base line, so
+                    // a row below a fold counts the base lines of the lines it
+                    // hid.
+                    base_line += buffer_row.saturating_sub(next_buffer_row);
                     while let Some(&(row, lines)) = seams.get(seam_cursor)
                         && row <= buffer_row
                     {
-                        if row == buffer_row {
+                        if row >= next_buffer_row {
                             base_line += lines;
                         }
                         seam_cursor += 1;
                     }
+                    next_buffer_row = buffer_row + 1;
                     draw_diff_num(
                         &mut rich,
                         buf,
@@ -1950,22 +1956,10 @@ fn paint_base_side(
 /// A moved-away seam removed base lines that take no row at all, so the
 /// seams above the top add their lines on top of that count.
 ///
-/// The wrap map's rows map to buffer rows because the diff view holds no
-/// folds, which is what makes a tab row a buffer row.
+/// A fold hides whole lines, and the diff view folds only unchanged ones, so
+/// each hidden line still counts one base line, as [`lines_above`] counts it.
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
-    let wrap_rows_above = snapshot.buffer_rows_above(scroll_row);
-    // One past the line of the last wrap row above, which counts a continuation
-    // top row's own line and never asks for a wrap row past the end.
-    let lines_above = match wrap_rows_above {
-        0 => 0,
-        rows => {
-            snapshot
-                .wrap_snapshot()
-                .to_tab_point(WrapPoint::new(rows - 1, 0))
-                .row()
-                + 1
-        },
-    };
+    let lines_above = lines_above(snapshot, scroll_row);
     let (changed, seams) = snapshot.diff_map().map_or((0, 0), |dm| {
         (
             dm.rows_without_base_before(lines_above, snapshot.pairs_modified_hunks()),
@@ -1973,6 +1967,23 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
         )
     });
     snapshot.blocks_above(scroll_row) + lines_above.saturating_sub(changed) + seams
+}
+
+/// Buffer lines whose first row is above `scroll_row`.
+///
+/// The count is one past the line of the last wrap row above, which counts a
+/// continuation top row's own line and never asks for a wrap row past the end.
+/// That row resolves to a buffer row from its end, which a fold closes, so the
+/// lines a fold hides count too.
+fn lines_above(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
+    match snapshot.buffer_rows_above(scroll_row) {
+        0 => 0,
+        rows => {
+            let row = rows - 1;
+            let end = WrapPoint::new(row, snapshot.wrap_snapshot().line_len(row));
+            snapshot.wrap_to_buffer(end).row + 1
+        },
+    }
 }
 
 /// Byte span of its buffer line that `display_row` shows.
@@ -2836,6 +2847,96 @@ mod tests {
                 &format!("the moved line, paired={pair}"),
             );
         }
+    }
+
+    /// A fold hides unchanged lines alone, so each row it keeps starts on the
+    /// base line it starts on with no fold, in both layouts.
+    #[test]
+    fn a_fold_keeps_the_base_line_of_every_row_it_keeps() {
+        let base: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let text = base
+            .replace("\n3\n", "\nTHREE\n")
+            .replace("\n16\n", "\n")
+            .replace("\n18\n", "\n18\nNEW\n");
+        for pair in [false, true] {
+            let mut plain = diff_editor(&base, &text);
+            plain.display_map.set_pair_modified_hunks(pair);
+            let mut folded = diff_editor(&base, &text);
+            folded.display_map.set_pair_modified_hunks(pair);
+            folded
+                .display_map
+                .fold(vec![Point::new(5, 1)..Point::new(11, 2)]);
+            let (plain, folded) = (plain.display_map.snapshot(), folded.display_map.snapshot());
+
+            let kept: Vec<(u32, u32, u32)> = (0..folded.line_count())
+                .filter(|&row| !folded.is_wrap_continuation(row))
+                .filter_map(|row| match folded.classify_row(row) {
+                    BlockRowKind::BufferRow { buffer_row } => {
+                        let plain_row = plain.buffer_to_display(Point::new(buffer_row, 0)).row;
+                        Some((
+                            buffer_row,
+                            base_line_at(&folded, row),
+                            base_line_at(&plain, plain_row),
+                        ))
+                    },
+                    BlockRowKind::Block { .. } => None,
+                })
+                .collect();
+            let rows: Vec<u32> = kept.iter().map(|&(row, ..)| row).collect();
+            let (folded_lines, plain_lines): (Vec<_>, Vec<_>) = kept
+                .iter()
+                .map(|&(row, folded, plain)| ((row, folded), (row, plain)))
+                .unzip();
+            assert_eq!(
+                (rows, folded_lines),
+                ((0..=5).chain(12..=20).collect(), plain_lines),
+                "paired={pair}",
+            );
+        }
+    }
+
+    /// The left column numbers a row below a fold by its own base line, as the
+    /// right column numbers its buffer line.
+    #[test]
+    fn a_folded_diff_view_numbers_its_base_lines_past_the_fold() {
+        let base: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let text = base.replace("\n16\n", "\nSIXTEEN\n");
+        let mut editor = diff_editor(&base, &text);
+        editor
+            .display_map
+            .fold(vec![Point::new(0, 0)..Point::new(11, 2)]);
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            None,
+            false,
+            DiffDials::shipped(),
+        );
+
+        let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let num = |x: u16, y: u16| {
+            (x..x + 4)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .trim()
+                .to_string()
+        };
+        let numbers: Vec<(String, String)> = (0..area.height)
+            .map(|y| (num(cols.left_num_x, y), num(cols.right_num_x, y)))
+            .collect();
+        let expected: Vec<(String, String)> = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+            .map(|n| (n.to_string(), n.to_string()))
+            .to_vec();
+        assert_eq!(numbers, expected);
     }
 
     /// A diff-view editor over `text`, diffed against `base`, with the view and

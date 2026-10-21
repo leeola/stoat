@@ -1400,6 +1400,14 @@ impl DisplaySnapshot {
         self.block_snapshot.buffer_rows_above(display_row)
     }
 
+    /// Buffer position of `point`, resolved through the fold layer.
+    ///
+    /// The end of a row that a fold closes resolves to the end of the fold, so
+    /// the lines the fold hides count as lines above the next row.
+    pub(crate) fn wrap_to_buffer(&self, point: WrapPoint) -> Point {
+        self.block_snapshot.wrap_to_buffer(point)
+    }
+
     pub fn row_start_at_or_after(&self, display_row: u32) -> Option<Point> {
         self.block_snapshot.row_start_at_or_after(display_row)
     }
