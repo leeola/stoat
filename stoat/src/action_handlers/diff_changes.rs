@@ -78,11 +78,16 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 /// and its undo history carry over. A stack with no folded excerpt in focus, as
 /// before the first diff map lands, leaves the changes view open and says so in
 /// the status row.
+///
+/// The cursor's line keeps the screen row it held in the stack, where the file
+/// has rows enough above and below it. A cursor off the stack's painted rows
+/// opens with its line centered.
 pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     let Some(((rel_path, point), workdir)) = focused_target(stoat).zip(repo_workdir(stoat)) else {
         stoat.set_status("no change under the cursor");
         return UpdateEffect::Redraw;
     };
+    let screen_row = stack_screen_row(stoat);
 
     if let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() {
         state.covered_diff = false;
@@ -110,7 +115,12 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     }
     review::enter_diff_view(stoat);
     if let Some(editor) = super::focused_editor_mut(stoat) {
-        view::align_view(editor, ViewAlign::Center);
+        match screen_row {
+            Some(row) => editor.held_screen_row = Some(row),
+            None => {
+                view::align_view(editor, ViewAlign::Center);
+            },
+        }
     }
     UpdateEffect::Redraw
 }
@@ -349,7 +359,7 @@ fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// The focused editor's cursor as a landing, with the file relative to the
-/// repository.
+/// repository and the row of the view the cursor sits on.
 ///
 /// `None` when no editor has focus, or when its buffer has no file inside the
 /// repository.
@@ -360,12 +370,17 @@ fn editor_landing(stoat: &mut Stoat) -> Option<Landing> {
         let path = stoat.active_workspace().buffers.path_for(buffer_id)?;
         path.strip_prefix(&workdir).ok()?.display().to_string()
     };
-    let point = diff_changes::cursor_point(super::focused_editor_mut(stoat)?);
+    let editor = super::focused_editor_mut(stoat)?;
+    let point = diff_changes::cursor_point(editor);
+    let screen_row = view::cursor_display_row(editor)
+        .checked_sub(editor.scroll_row)
+        .and_then(|row| u16::try_from(row).ok());
     Some(Landing {
         buffer_id,
         rel_path,
         row: point.row,
         column: point.column,
+        screen_row,
     })
 }
 
@@ -381,6 +396,26 @@ fn focused_target(stoat: &mut Stoat) -> Option<(String, Point)> {
     let rel_path = excerpt.rel_path.clone();
     let editor = ws.editors.get_mut(excerpt.editor_id)?;
     Some((rel_path, diff_changes::cursor_point(editor)))
+}
+
+/// The row of the view that the focused changes view's cursor sits on.
+///
+/// `None` when the cursor lies off the rows the stack's last paint showed.
+fn stack_screen_row(stoat: &mut Stoat) -> Option<u32> {
+    let ws = stoat.active_workspace_mut();
+    let id = ws.focused_diff_changes_id()?;
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let state = diff_changes_views.get_mut(id)?;
+    diff_changes::layout_stack(state, editors);
+    let row = diff_changes::cursor_stack_row(state, editors)?;
+    let screen_row = row
+        .checked_sub(state.scroll)
+        .filter(|&row| row < state.viewport_rows)?;
+    u32::try_from(screen_row).ok()
 }
 
 /// The working directory of the repository that holds the active workspace.
@@ -524,6 +559,28 @@ mod tests {
             ],
         );
         h
+    }
+
+    /// Two changed files of sixty lines in a window `height` rows tall, each
+    /// changed on its forty-first line, so each excerpt folds rows above and
+    /// below its hunk.
+    fn long_files(height: u16) -> TestHarness {
+        let mut h = TestHarness::with_size(100, height);
+        let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
+        let working = base.replace("\n41\n", "\nFORTY-ONE\n");
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", &base, &working), ("b.txt", &base, &working)],
+        );
+        h
+    }
+
+    /// The screen row of the focused editor's cursor after a paint.
+    fn screen_row(h: &mut TestHarness) -> Option<u16> {
+        h.render_composited();
+        focused_editor_mut(&mut h.stoat)?
+            .cursor_screen_cell
+            .map(|(_, row)| row)
     }
 
     /// The focused excerpt's file and the buffer row of its cursor.
@@ -983,29 +1040,39 @@ mod tests {
 
     /// Ctrl-t on the changes view opens the cursor's file in the per-file diff
     /// on the cursor's line, and Ctrl-t there returns to the changes view on
-    /// that line.
+    /// that line. Each flip keeps the line on the screen row it held.
     #[test]
     fn ctrl_t_flips_between_the_changes_view_and_the_diff_on_one_line() {
-        let mut h = deep_files();
+        let mut h = long_files(24);
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n n Ctrl-t");
+        h.type_keys("n n");
+        let stacked = screen_row(&mut h);
+
+        h.type_keys("Ctrl-t");
         h.settle();
         let opened = (
             h.stoat.current_view(),
             focused_path(&h),
             editor::focused_cursor_point(&mut h.stoat).row,
+            screen_row(&mut h),
         );
 
         h.type_keys("Ctrl-t");
         h.settle();
-        let back = (h.stoat.current_view(), place(&mut h));
+        let back = (h.stoat.current_view(), place(&mut h), screen_row(&mut h));
         assert_eq!(
-            (opened, back),
+            (stacked.is_some(), opened, back),
             (
-                (Some("diff"), Some(PathBuf::from("/repo/b.txt")), 8),
-                (Some("diff_changes"), at("b.txt", 8)),
+                true,
+                (
+                    Some("diff"),
+                    Some(PathBuf::from("/repo/b.txt")),
+                    40,
+                    stacked
+                ),
+                (Some("diff_changes"), at("b.txt", 40), stacked),
             ),
         );
     }
@@ -1250,24 +1317,40 @@ mod tests {
         );
     }
 
-    /// The open centers the line of its hunk in the view, as the align command
-    /// centers it.
+    /// The open keeps the cursor's line on the screen row it held in the
+    /// changes view, which the longer file reaches with a scroll.
     #[test]
-    fn an_open_centers_the_hunk_line_in_the_view() {
-        let mut h = TestHarness::with_size(100, 24);
-        let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
-        let working = base.replace("\n41\n", "\nFORTY-ONE\n");
-        h.stage_review_scenario("/repo", &[("long.txt", &base, &working)]);
+    fn an_open_holds_the_cursor_screen_row() {
+        let mut h = long_files(24);
         h.cover_with_diff_changes(false);
         h.settle();
-        let scroll = |h: &mut TestHarness| {
-            focused_editor_mut(&mut h.stoat).map_or(0, |editor| editor.scroll_row)
-        };
+        let stacked = screen_row(&mut h);
 
         dispatch(&mut h.stoat, &stoat_action::DiffChangesOpen);
-        let opened = scroll(&mut h);
-        dispatch(&mut h.stoat, &stoat_action::AlignViewCenter);
-        assert_eq!((opened, opened > 0), (scroll(&mut h), true));
+        let opened = screen_row(&mut h);
+        let scroll = focused_editor_mut(&mut h.stoat).map_or(0, |editor| editor.scroll_row);
+        assert_eq!(
+            (stacked.is_some(), opened, scroll > 0),
+            (true, stacked, true)
+        );
+    }
+
+    /// A landing from a plain editor on a line the stack shows keeps the line
+    /// on the screen row it held in the editor, though the least scroll that
+    /// shows it puts it on the last row.
+    #[test]
+    fn a_landing_from_a_plain_editor_holds_its_screen_row() {
+        let mut h = long_files(12);
+        h.open_file(Path::new("/repo/b.txt"));
+        h.type_keys("4 1 G");
+        let plain = screen_row(&mut h);
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        assert_eq!(
+            (plain.is_some(), place(&mut h), screen_row(&mut h)),
+            (true, at("b.txt", 40), plain),
+        );
     }
 
     /// A landing on a file with no change lands on the first excerpt's first

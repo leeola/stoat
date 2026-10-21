@@ -6279,6 +6279,42 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
     assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
 }
 
+/// A held screen row moves the scroll inside the paint, so the frame that
+/// applies it captures nothing. A later frame back at the scroll the hold left
+/// shows the same rows that a repaint of that scroll paints.
+#[test]
+fn a_held_screen_row_leaves_no_capture_under_the_scroll_it_moved() {
+    let mut h = Stoat::test();
+    let text: String = (1..=60).map(|n| format!("{n}\n")).collect();
+    let path = h.write_file("long.txt", &text);
+    h.open_file(&path);
+    h.type_keys("3 0 G");
+    let _ = h.stoat.render();
+    let _ = h.stoat.render();
+    let scroll = |h: &mut crate::test_harness::TestHarness| {
+        action_handlers::focused_editor_mut(&mut h.stoat).map_or(0, |editor| editor.scroll_row)
+    };
+    let before = scroll(&mut h);
+
+    if let Some(editor) = action_handlers::focused_editor_mut(&mut h.stoat) {
+        editor.held_screen_row = Some(0);
+    }
+    let _ = h.stoat.render();
+    let held = scroll(&mut h);
+    if let Some(editor) = action_handlers::focused_editor_mut(&mut h.stoat) {
+        editor.scroll_row = before;
+    }
+    let replayed = frame_output(&mut h);
+
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(
+        (held != before, &replayed.0),
+        (true, &repainted.0),
+        "the hold moved the scroll, and the frame back at the old scroll matches a repaint",
+    );
+}
+
 /// Render one frame and return each split pane's content lane and status
 /// lane, in pane order.
 fn pane_lanes(h: &mut crate::test_harness::TestHarness) -> Vec<Vec<u8>> {

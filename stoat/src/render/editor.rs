@@ -1,5 +1,6 @@
 use super::TEXT_SCALE_COMPACT;
 use crate::{
+    action_handlers::view,
     diagnostic_spans::{
         build_diagnostic_span_cache, diagnostic_at_offset, severity_rank, DiagnosticSpanCache,
         ResolvedDiag,
@@ -169,6 +170,7 @@ pub(crate) fn render_editor_with_overlay(
     if editor.diff_view {
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
         fit_diff_view(editor, inner, wrap, wrap_column);
+        view::apply_held_screen_row(editor);
         render_diff_view(
             editor,
             inner,
@@ -188,6 +190,7 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.conflict_view.is_some() {
         editor.display_map.set_wrap_width(None);
+        view::apply_held_screen_row(editor);
         // The terminal draws the cursor on the same condition the main editor
         // path delegates on.
         render_conflict_view(
@@ -229,6 +232,7 @@ pub(crate) fn render_editor_with_overlay(
         u32::from(text_width),
         wrap_column,
     ));
+    view::apply_held_screen_row(editor);
 
     let snapshot = editor.display_map.snapshot();
     let visible_rows = inner.height as u32;

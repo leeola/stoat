@@ -126,6 +126,12 @@ pub(crate) struct EditorState {
     /// the render pipeline's layout `Rect`. `None` until the editor has
     /// been rendered at least once; handlers fall back to a default.
     pub(crate) viewport_rows: Option<u32>,
+    /// The row of the text area that the next paint puts the primary cursor's
+    /// row on, once it fits the display to the width.
+    ///
+    /// A layout flip sets it, so the line under the cursor stays on the screen
+    /// row it held in the layout the flip left. Transient, not persisted.
+    pub(crate) held_screen_row: Option<u32>,
     /// Per-editor soft-wrap override, toggled by `ToggleWrap`. `Some` forces this
     /// editor's wrap mode regardless of the global `editor.wrap` setting; `None`
     /// follows the setting. Transient, not persisted.
@@ -288,6 +294,7 @@ impl EditorState {
             scroll_glide: ScrollGlide::None,
             pool_current_line: None,
             viewport_rows: None,
+            held_screen_row: None,
             wrap_override: None,
             diff_view: false,
             conflict_view: None,

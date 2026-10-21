@@ -74,6 +74,13 @@ pub(crate) struct DiffChangesState {
     /// A changes view opens before its excerpts exist, so the editor position
     /// it opened from waits here.
     pub pending_landing: Option<Landing>,
+    /// The row of the view that the next paint puts the cursor's row on, in
+    /// place of the least scroll that shows it.
+    ///
+    /// A landing sets it from the screen row the cursor held in the layout the
+    /// changes view opened from. The paint applies it after it fits each
+    /// excerpt to the width, so the rows it counts are the rows it paints.
+    pub held_screen_row: Option<u16>,
 }
 
 /// One changed file in a changes view's stack.
@@ -103,6 +110,10 @@ pub(crate) struct Landing {
     pub rel_path: String,
     pub row: u32,
     pub column: u32,
+    /// The row of the view the cursor sat on in the layout the landing came
+    /// from, so a flip keeps the line where the eyes are. `None` when the
+    /// cursor sat above the view.
+    pub screen_row: Option<u16>,
 }
 
 /// The state of a workspace that a changes view's excerpts were listed from.
@@ -153,6 +164,7 @@ impl Default for DiffChangesState {
             covered: None,
             covered_diff: false,
             pending_landing: None,
+            held_screen_row: None,
         }
     }
 }
@@ -705,6 +717,10 @@ fn land_pending(ws: &mut Workspace) -> bool {
 /// and column, or on the row [`landing_row`] picks when a fold hides that row.
 /// A file with no excerpt lands, once `settled`, on the first excerpt's first
 /// row, and a stack with no excerpt drops the landing.
+///
+/// A landing on its own row holds its screen row for the next paint. A landing
+/// that a fold or a missing excerpt moved shows another line, so the paint
+/// scrolls the least distance instead.
 fn land(
     state: &mut DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -717,10 +733,10 @@ fn land(
         .excerpts
         .iter()
         .position(|excerpt| excerpt.rel_path == landing.rel_path);
-    let (index, row, column) = match target {
-        Some(index) => (index, landing.row, landing.column),
+    let (index, row, column, screen_row) = match target {
+        Some(index) => (index, landing.row, landing.column, landing.screen_row),
         None if !settled => return false,
-        None => (0, 0, 0),
+        None => (0, 0, 0, None),
     };
     let Some(excerpt) = state.excerpts.get(index) else {
         state.pending_landing = None;
@@ -738,6 +754,7 @@ fn land(
     place_cursor(editor, Point::new(shown, column));
     state.focused = index;
     state.pending_landing = None;
+    state.held_screen_row = screen_row.filter(|_| shown == row);
     true
 }
 
@@ -828,7 +845,10 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fold_range, gaps, kept_runs, landing_row, DiffChangesState, StackStamp};
+    use super::{
+        fold_range, gaps, kept_runs, landing_row, pump_diff_changes_stack, DiffChangesState,
+        Landing, StackStamp,
+    };
     use crate::{
         action_handlers::dispatch,
         diff_map::DiffMap,
@@ -916,6 +936,42 @@ mod tests {
             [3, 0, 6, 10].map(|row| landing_row(&kept, row)),
             [3, 2, 8, 2]
         );
+    }
+
+    /// A landing on a row its excerpt shows holds its screen row for the next
+    /// paint. A landing that a fold moves to another row shows another line,
+    /// so it holds none.
+    #[test]
+    fn only_a_landing_on_a_shown_row_holds_its_screen_row() {
+        let mut h = TestHarness::with_size(100, 24);
+        let base = numbered(20);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", &base, &base.replace("\n10\n", "\nTEN\n"))],
+        );
+        stacked(&mut h);
+        let land_on = |row| {
+            let state = h
+                .stoat
+                .active_workspace_mut()
+                .focused_diff_changes_mut()
+                .expect("a changes view");
+            state.pending_landing = Some(Landing {
+                buffer_id: state.excerpts[0].buffer_id,
+                rel_path: "a.txt".to_string(),
+                row,
+                column: 0,
+                screen_row: Some(3),
+            });
+            pump_diff_changes_stack(&mut h.stoat);
+            h.stoat
+                .active_workspace()
+                .focused_diff_changes()
+                .and_then(|state| state.held_screen_row)
+        };
+        // TEN sits on row 9, inside the shown run of rows 6 to 12, and row 2
+        // lies in the fold above it.
+        assert_eq!([9, 2].map(land_on), [Some(3), None]);
     }
 
     /// The scroll moves the least distance that shows the row, and stays for a

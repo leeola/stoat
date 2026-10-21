@@ -313,6 +313,11 @@ impl PaneCacheEntry {
 /// A focused pane under goto-word labels, the LSP status card, or the LSP
 /// error card always paints as well. The labels last a jump's few frames, and
 /// the status card turns the spinner on every tick.
+///
+/// An editor that holds a screen row always paints too. The paint moves its
+/// scroll, so a key read before the paint names a scroll that the paint left.
+/// A capture under that key replays the moved rows on a later frame back at
+/// that scroll.
 pub(crate) fn pane_cache_key(
     pane: &Pane,
     is_focused: bool,
@@ -326,7 +331,7 @@ pub(crate) fn pane_cache_key(
         return None;
     };
     let editor = editors.get_mut(*editor_id)?;
-    if editor.conflict_view.is_some() {
+    if editor.conflict_view.is_some() || editor.held_screen_row.is_some() {
         return None;
     }
 

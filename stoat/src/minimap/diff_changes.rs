@@ -256,6 +256,9 @@ mod tests {
 
     /// `files` staged as changes under a focused changes view, on a stoatty of
     /// protocol 13, in a window short enough that the changes view scrolls.
+    ///
+    /// The changes view covers the first file's editor with no landing, so no
+    /// held screen row scrolls the first frame off the top of the stack.
     fn strip_harness_of(
         files: &[(String, String, String)],
     ) -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
@@ -269,7 +272,7 @@ mod tests {
             .collect();
         h.stage_review_scenario("/repo", &files);
         h.open_file(Path::new(&format!("/repo/{}", files[0].0)));
-        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.cover_with_diff_changes(false);
         h.settle();
         (h, rx)
     }

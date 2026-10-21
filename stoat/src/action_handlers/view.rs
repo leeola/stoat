@@ -670,6 +670,28 @@ fn center_jump_on_rows(
     editor.scroll_row != prev
 }
 
+/// Scroll `editor` so its primary cursor's row sits on the held screen row,
+/// and drop the hold.
+///
+/// The paint calls this after it fits the display to the width, so the row it
+/// measures is the row it paints. A held row past the view's last row holds on
+/// the last row, and the scroll stops where the last display row reaches the
+/// bottom. The move is a swap, so it clears a glide and the wheel fraction.
+pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
+    let Some(screen_row) = editor.held_screen_row.take() else {
+        return;
+    };
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let cursor_row = cursor_display_row(editor);
+    let line_count = editor.display_map.snapshot().line_count();
+    editor.scroll_row = cursor_row
+        .saturating_sub(screen_row.min(viewport - 1))
+        .min(max_scroll_row(line_count, viewport));
+    editor.scroll_frac = 0.0;
+    editor.scroll_offset = editor.scroll_row as f32;
+    editor.scroll_glide = ScrollGlide::None;
+}
+
 /// The display row the primary cursor's caret sits on.
 ///
 /// Resolves the newest selection's caret to a buffer offset and maps it through

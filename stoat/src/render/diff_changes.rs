@@ -26,12 +26,15 @@ use stoat_widgets::ApcScene;
 
 /// Paint the stack `state` holds into `pane`, with its own status row.
 ///
-/// The stack paints from the scroll of `state`, which first moves the least
-/// distance that keeps the focused excerpt's cursor on screen. Each excerpt
-/// takes a header row in the commit header style and then its rows, painted
-/// from its own scroll row, so an excerpt cut at the top shows its lower rows.
-/// After the paint each excerpt's viewport holds all of its rows, so the
-/// editor's own follow never scrolls an excerpt.
+/// The stack paints from the scroll of `state`, which first moves so the
+/// focused excerpt's cursor shows. A screen row that a landing holds takes the
+/// cursor's row, and otherwise the scroll moves the least distance that keeps
+/// the cursor on screen.
+///
+/// Each excerpt takes a header row in the commit header style and then its
+/// rows, painted from its own scroll row, so an excerpt cut at the top shows
+/// its lower rows. After the paint each excerpt's viewport holds all of its
+/// rows, so the editor's own follow never scrolls an excerpt.
 ///
 /// With no excerpt the pane says "building changes..." while the repository
 /// tally is pending, and "no changes" once it is in.
@@ -91,7 +94,13 @@ pub(crate) fn render_diff_changes(
     }
     let total = diff_changes::layout_stack(state, editors);
     if let Some(row) = diff_changes::cursor_stack_row(state, editors) {
-        state.ensure_row_visible(row, state.viewport_rows);
+        match state.held_screen_row.take() {
+            Some(screen_row) => {
+                let last = state.viewport_rows.saturating_sub(1);
+                state.scroll = row.saturating_sub(usize::from(screen_row).min(last));
+            },
+            None => state.ensure_row_visible(row, state.viewport_rows),
+        }
     }
     state.scroll = state.scroll.min(total.saturating_sub(state.viewport_rows));
 
