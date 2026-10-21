@@ -97,6 +97,62 @@ pub(crate) fn open_file_in_pane_now(
     open_file_in_pane_with(stoat, target, path, origin, false)
 }
 
+/// Open `path` as a buffer of `workspace` that no pane shows, recording
+/// `origin` as how the buffer was reached.
+///
+/// For a view that draws a file's buffer without a pane of its own. The buffer
+/// registers and reaches the language server as it does for a pane open, and no
+/// pane switch or editor swap follows. A path already open answers its buffer.
+///
+/// The read blocks for the size of the file. A missing file opens empty, as it
+/// does in a pane. A read error sets the status and answers [`None`], and so
+/// does an image, which has no buffer.
+// FIXME: Nothing outside the tests opens a buffer that no pane shows.
+#[allow(dead_code)]
+pub(crate) fn open_buffer_unshown(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    path: &Path,
+    origin: OpenOrigin,
+) -> Option<(BufferId, SharedBuffer)> {
+    let absolute = absolute_path(stoat, path);
+    let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
+    let disk_mtime = meta.map(|m| m.modified);
+
+    match read_or_report(stoat, &absolute)? {
+        OpenContent::Text { text, compressed } => register_open(
+            stoat,
+            workspace,
+            None,
+            &absolute,
+            OpenBody::Text {
+                text: &text,
+                read_only: read_only_kind(compressed, meta),
+            },
+            disk_mtime,
+            origin,
+        ),
+        OpenContent::Rope {
+            rope,
+            ending,
+            compressed,
+        } => register_open(
+            stoat,
+            workspace,
+            None,
+            &absolute,
+            OpenBody::Rope {
+                rope,
+                ending,
+                read_only: read_only_kind(compressed, meta),
+            },
+            disk_mtime,
+            origin,
+        ),
+        OpenContent::Image { .. } => None,
+    }
+}
+
 /// The body of [`open_file_in_pane`] and [`open_file_in_pane_now`], which
 /// differ only in `defer_large`.
 fn open_file_in_pane_with(
@@ -116,20 +172,28 @@ fn open_file_in_pane_with(
         return None;
     }
 
-    let content = match read_open_content(&*stoat.fs_host, &absolute) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OpenContent::Text {
-            text: "\n".to_string(),
-            compressed: false,
-        },
-        Err(e) => {
-            tracing::error!("failed to read {}: {}", absolute.display(), e);
-            stoat.set_status(format!("cannot open {}: {e}", display_name(&absolute)));
-            return None;
-        },
-    };
+    let content = read_or_report(stoat, &absolute)?;
     let workspace = stoat.active_workspace;
     install_content(stoat, workspace, target, &absolute, content, meta, origin)
+}
+
+/// The content of `absolute`, read on the calling thread.
+///
+/// A missing file reads as one empty line, so the open shows a new file that a
+/// save creates. Any other read error sets the status and answers [`None`].
+fn read_or_report(stoat: &mut Stoat, absolute: &Path) -> Option<OpenContent> {
+    match read_open_content(&*stoat.fs_host, absolute) {
+        Ok(content) => Some(content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(OpenContent::Text {
+            text: "\n".to_string(),
+            compressed: false,
+        }),
+        Err(e) => {
+            tracing::error!("failed to read {}: {}", absolute.display(), e);
+            stoat.set_status(format!("cannot open {}: {e}", display_name(absolute)));
+            None
+        },
+    }
 }
 
 /// `path` as an absolute path, where a relative one starts at the active
@@ -454,9 +518,8 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
 /// `target`.
 ///
 /// The shared tail of the sync and background open paths. It registers the
-/// buffer (deduping on path), logs a file it newly registers, records `origin`
-/// on it, applies mtime and language, notifies LSP unless the file was
-/// compressed, records the pane switch, and installs the editor.
+/// buffer through [`register_open`], records the pane switch, and installs the
+/// editor.
 ///
 /// `workspace` is named rather than taken as the active one because the
 /// background path installs a read that may have finished after the user
@@ -470,11 +533,41 @@ fn finish_open(
     disk_mtime: Option<SystemTime>,
     origin: OpenOrigin,
 ) -> Option<BufferId> {
-    let lang = stoat.language_registry.for_path(absolute);
     let executor = stoat.executor.clone();
+    let (buffer_id, buffer) = register_open(
+        stoat,
+        workspace,
+        Some(target),
+        absolute,
+        content,
+        disk_mtime,
+        origin,
+    )?;
+
+    jump::record_pane_switch(stoat, workspace, target, buffer_id);
+    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor)
+}
+
+/// Register `content` as the buffer for `absolute` in `workspace`, the half of
+/// an open that needs no pane.
+///
+/// It registers the buffer (deduping on path), logs a file it newly registers
+/// with the pane `target` names, records `origin` on it, applies mtime and
+/// language, and notifies LSP unless the file was compressed. A workspace that
+/// is gone answers [`None`].
+fn register_open(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    target: Option<PaneId>,
+    absolute: &Path,
+    content: OpenBody<'_>,
+    disk_mtime: Option<SystemTime>,
+    origin: OpenOrigin,
+) -> Option<(BufferId, SharedBuffer)> {
+    let lang = stoat.language_registry.for_path(absolute);
 
     let (buffer_id, buffer, read_only, existed) = {
-        let ws = &mut stoat.workspaces[workspace];
+        let ws = stoat.workspaces.get_mut(workspace)?;
         // Opening a path already registered hands back the existing buffer and
         // discards `content`. Everything read alongside it describes a file the
         // buffer never took, so none of it may replace what is already recorded.
@@ -529,7 +622,7 @@ fn finish_open(
             lang = ?ws.buffers.language_for(buffer_id).map(|l| l.name),
             ?origin,
             ?read_only,
-            pane = ws.panes.pane(target).index,
+            pane = ?target.map(|pane| ws.panes.pane(pane).index),
             "opened file"
         );
     }
@@ -544,8 +637,7 @@ fn finish_open(
         crate::lsp::session::notify_buffer_opened(stoat, workspace, buffer_id, absolute, rope);
     }
 
-    jump::record_pane_switch(stoat, workspace, target, buffer_id);
-    show_buffer_in_pane(stoat, workspace, target, buffer_id, buffer, executor)
+    Some((buffer_id, buffer))
 }
 
 /// Show `buffer_id` in `target` by swapping the pane's editor to a fresh
@@ -1037,6 +1129,35 @@ mod tests {
                 h.stoat.lsp_opened.contains(&id)
             ),
             (Some(ReadOnly::Permission), true)
+        );
+    }
+
+    /// An unshown open registers the file and reaches the language server, and
+    /// no pane shows it. A second open of the path answers the same buffer.
+    #[test]
+    fn a_buffer_opens_with_no_pane_to_show_it() {
+        let mut h = Stoat::test();
+        let path = PathBuf::from("/close-test/unshown.txt");
+        h.fake_fs().insert_file(&path, b"unshown\n");
+        let workspace = h.stoat.active_workspace;
+
+        let (id, _) = open_buffer_unshown(&mut h.stoat, workspace, &path, OpenOrigin::Visited)
+            .expect("the file opens");
+        let again = open_buffer_unshown(&mut h.stoat, workspace, &path, OpenOrigin::Visited)
+            .map(|(again, _)| again);
+
+        let ws = h.stoat.active_workspace();
+        let shown = ws.panes.split_panes().any(|(_, pane)| {
+            matches!(pane.view, View::Editor(editor) if ws.editors[editor].buffer_id == id)
+        });
+        assert_eq!(
+            (
+                ws.buffers.id_for_path(&path),
+                h.stoat.lsp_opened.contains(&id),
+                shown,
+                again,
+            ),
+            (Some(id), true, false, Some(id)),
         );
     }
 
