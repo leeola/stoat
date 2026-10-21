@@ -986,9 +986,8 @@ pub(crate) fn open_file(stoat: &mut Stoat, path: &Path, origin: OpenOrigin) -> O
 /// hosting terminal's. Any other target, or a path that does not resolve, only
 /// sets a status message. Delegates the seed-and-open to [`open_config_at`].
 ///
-/// A missing stoat config is created as a commented stub that layers over the
-/// shipped config. A missing stoatty config is created from the shipped
-/// `config.toml`.
+/// A missing config of either target is created as a commented stub that
+/// layers over the shipped file.
 pub(crate) fn open_config(stoat: &mut Stoat, target: Option<&str>) {
     let Some((resolve_path, seed)) = config_target(target) else {
         stoat.set_status("open-config: expected stoat or stoatty");
@@ -1013,7 +1012,7 @@ fn config_target(target: Option<&str>) -> Option<(PathResolver, &'static str)> {
         },
         Some("stoatty") => Some((
             crate::paths::stoatty_config_path,
-            crate::app::DEFAULT_STOATTY_CONFIG,
+            crate::app::STOATTY_CONFIG_SEED,
         )),
         Some(_) => None,
     }
@@ -1131,8 +1130,8 @@ mod tests {
         assert_eq!(h.buffer_text(buffer_id), custom);
     }
 
-    /// Stoat's own target seeds the stub, since a copy of the shipped config
-    /// pins bindings that a later release drops.
+    /// Each target seeds its own stub, since a copy of the shipped file pins
+    /// the values of the release that wrote it.
     #[test]
     fn a_config_target_names_its_seed() {
         let seed = |target| super::config_target(target).map(|(_, seed)| seed);
@@ -1146,7 +1145,7 @@ mod tests {
             [
                 Some(crate::app::USER_CONFIG_SEED),
                 Some(crate::app::USER_CONFIG_SEED),
-                Some(crate::app::DEFAULT_STOATTY_CONFIG),
+                Some(crate::app::STOATTY_CONFIG_SEED),
                 None,
             ],
         );
@@ -1170,23 +1169,35 @@ mod tests {
         );
     }
 
+    /// The stub layers over the shipped stoatty.toml, so it must set no key.
+    /// stoat has no TOML parser, so the test checks that every line is blank
+    /// or a comment. TOML text of that shape sets no key.
     #[test]
-    fn open_config_seeds_the_stoatty_default_when_missing() {
+    fn the_stoatty_config_seed_states_nothing() {
+        let keys: Vec<&str> = crate::app::STOATTY_CONFIG_SEED
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        assert_eq!(keys, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn open_config_seeds_a_stoatty_layering_stub_when_missing() {
         let mut h = TestHarness::with_size(80, 10);
         let path = PathBuf::from("/cfg/stoatty/config.toml");
 
-        super::open_config_at(&mut h.stoat, &path, crate::app::DEFAULT_STOATTY_CONFIG);
+        super::open_config_at(&mut h.stoat, &path, crate::app::STOATTY_CONFIG_SEED);
 
         let mut bytes = Vec::new();
         h.fake_fs()
             .read(&path, &mut bytes)
             .expect("the missing stoatty config was seeded");
-        assert_eq!(bytes, crate::app::DEFAULT_STOATTY_CONFIG.as_bytes());
+        assert_eq!(bytes, crate::app::STOATTY_CONFIG_SEED.as_bytes());
 
         let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .buffer_id;
-        assert_eq!(h.buffer_text(buffer_id), crate::app::DEFAULT_STOATTY_CONFIG);
+        assert_eq!(h.buffer_text(buffer_id), crate::app::STOATTY_CONFIG_SEED);
     }
 
     #[test]
@@ -1196,7 +1207,7 @@ mod tests {
         let custom = "font_size = 22\n";
         h.fake_fs().insert_file(&path, custom.as_bytes());
 
-        super::open_config_at(&mut h.stoat, &path, crate::app::DEFAULT_STOATTY_CONFIG);
+        super::open_config_at(&mut h.stoat, &path, crate::app::STOATTY_CONFIG_SEED);
 
         let mut bytes = Vec::new();
         h.fake_fs()

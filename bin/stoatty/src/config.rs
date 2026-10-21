@@ -530,6 +530,14 @@ mod tests {
     }
 
     #[test]
+    fn comment_only_user_file_keeps_every_default() {
+        assert_eq!(
+            settle(DEFAULT_CONFIG, Some("# only a comment\n")).unwrap(),
+            settle(DEFAULT_CONFIG, None).unwrap()
+        );
+    }
+
+    #[test]
     fn user_shell_override_sets_program_and_args() {
         let config = settle(
             DEFAULT_CONFIG,

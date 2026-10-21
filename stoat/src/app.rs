@@ -128,9 +128,31 @@ pub(crate) const USER_CONFIG_SEED: &str = r"# This is your stoat config. It laye
 # names.
 ";
 
-/// The default stoatty config, embedded so `:open-config stoatty` can seed a
-/// missing one with the same file the terminal ships.
-pub(crate) const DEFAULT_STOATTY_CONFIG: &str = include_str!("../../stoatty.toml");
+/// The text `:config stoatty` writes to a missing stoatty config.
+///
+/// It holds only comments, so it sets no key. stoatty layers the user config
+/// over the `stoatty.toml` it ships, and a copy of that pins every value of
+/// the release that wrote it. A default that a later release changes then
+/// never reaches the user.
+pub(crate) const STOATTY_CONFIG_SEED: &str = r#"# This is your stoatty config. It layers over the config stoatty ships and
+# does not replace it.
+#
+# Only what this file sets changes. A value it sets replaces the shipped value.
+# A [themes.<name>] table it defines merges field by field with the shipped
+# table of that name. Fields it leaves out keep the shipped values, so the
+# defaults of a later release apply to them.
+#
+# To start, uncomment an example below and change it.
+#
+# font_size = 14
+# theme = "one-dark"
+#
+# [shell]
+# program = "/bin/bash"
+# args = ["--login"]
+#
+# The stoatty.toml file in the stoat repository documents every field.
+"#;
 
 /// [`DEFAULT_KEYMAP`] parsed, once for the process.
 static EMBEDDED_CONFIG: OnceLock<stoat_config::Config> = OnceLock::new();

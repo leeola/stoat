@@ -1,8 +1,8 @@
 # Default stoatty configuration.
 #
-# Copy this file to <XDG_CONFIG_HOME>/stoatty/config.toml (usually
-# ~/.config/stoatty/config.toml) and edit it to override these defaults. Fields
-# left out there keep the values below.
+# Set only the fields you change in <XDG_CONFIG_HOME>/stoatty/config.toml
+# (usually ~/.config/stoatty/config.toml). Every field left out there keeps the
+# value below.
 
 # Font size in logical points. The renderer scales it by the display's scale
 # factor for the physical rasterization size, so it looks the same on a HiDPI
