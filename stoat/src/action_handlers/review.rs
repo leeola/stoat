@@ -548,6 +548,9 @@ fn drop_other_diff_views(ws: &mut Workspace, keep: PaneId) {
 /// no scratch buffer -- the editor stays the real, editable file buffer, so
 /// re-pressing toggles the two columns off again.
 ///
+/// On a focused changes view it opens the per-file diff at the cursor's hunk,
+/// the mirror of [`stoat_action::DiffChanges`] on the diff.
+///
 /// Opening the view lands the cursor once the file's hunks are in, which takes
 /// a frame or more when they are not current, so the loop paints the view
 /// first. [`land_toggle_jump`] places the cursor. Toggling the view off leaves
@@ -557,6 +560,11 @@ fn drop_other_diff_views(ws: &mut Workspace, keep: PaneId) {
 /// - [`enter_diff_view`], the entry half, which turns the view on where the reader stands.
 /// - [`exit_diff_view`], the exit half, which other screens reuse.
 pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
+    if stoat.active_workspace().focused_diff_changes_id().is_some() {
+        super::diff_changes::diff_changes_open(stoat);
+        return;
+    }
+
     let origin = super::focused_editor_mut(stoat).map(super::jump::live_entry);
     if super::focused_editor_mut(stoat).is_none() {
         return;

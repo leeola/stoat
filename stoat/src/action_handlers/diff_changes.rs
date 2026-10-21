@@ -842,6 +842,28 @@ mod tests {
         );
     }
 
+    /// DiffFiles on the changes view opens the cursor's file in the per-file
+    /// diff on the row's line, as Ctrl-t does.
+    #[test]
+    fn diff_files_on_the_changes_view_opens_the_cursor_hunk_in_the_diff() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("n");
+
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                focused_path(&h),
+                editor::focused_cursor_point(&mut h.stoat).row,
+            ),
+            (Some("diff"), Some(PathBuf::from("/repo/b.txt")), 8),
+        );
+    }
+
     /// n and p walk the chunk headers, and j and k step one row. A p from
     /// inside a chunk lands on that chunk's header, and a step past either end
     /// stays and says so.

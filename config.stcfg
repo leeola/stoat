@@ -1121,6 +1121,7 @@ on key {
     # Ctrl-t flips between the two diff layouts, so both screens bind it. On
     # the per-file diff it opens the changes view on the hunk under the cursor,
     # and on the changes view it opens the per-file diff at the cursor's hunk.
+    # DiffFiles() on the changes view does the same, so space d f flips too.
     view == diff {
         Ctrl-t -> DiffChanges();
     }

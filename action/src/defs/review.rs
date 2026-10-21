@@ -28,7 +28,8 @@ define_action_def!(
      workspace at that commit, so every file diffs against it and the change \
      list spans everything committed since. `index` and `HEAD` name the \
      working tree's two bases rather than revisions. Running it again closes \
-     the diff, and a revision gives way to the working tree's base.",
+     the diff, and a revision gives way to the working tree's base. On the \
+     changes view it opens the per-file diff at the cursor's hunk.",
     ActionPriority::Common,
     params = DIFF_PARAMS
 );
