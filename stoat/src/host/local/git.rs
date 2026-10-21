@@ -217,14 +217,21 @@ impl GitRepo for LocalGitRepo {
                 count_hunks(&diff, &mut |_, _| {})
             });
         let mut unstaged_per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
+        let mut untracked: Vec<PathBuf> = Vec::new();
         let unstaged = repo
             .diff_index_to_workdir(None, Some(&mut with_untracked()))
             .map_or(0, |mut diff| {
                 let _ = diff.find_similar(Some(&mut rename_detection(true)));
+                untracked.extend(
+                    diff.deltas()
+                        .filter(|delta| delta.status() == Delta::Untracked)
+                        .filter_map(|delta| delta.new_file().path().map(Path::to_path_buf)),
+                );
                 count_hunks(&diff, &mut |path, hunks| {
                     *unstaged_per_file.entry(path).or_default() += hunks;
                 })
             });
+        untracked.sort();
 
         let mut per_file: BTreeMap<PathBuf, usize> = BTreeMap::new();
         if let Ok(mut diff) =
@@ -235,12 +242,15 @@ impl GitRepo for LocalGitRepo {
                 *per_file.entry(path).or_default() += hunks;
             });
         }
+        // An empty untracked file holds no hunk, so `per_file` leaves it out.
+        untracked.retain(|path| per_file.contains_key(path));
 
         HunkTallies {
             staged,
             unstaged,
             per_file: per_file.into_iter().collect(),
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
+            untracked,
         }
     }
 

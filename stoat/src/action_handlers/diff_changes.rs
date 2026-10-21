@@ -1,7 +1,8 @@
 //! The handlers of a [`View::DiffChanges`] pane.
 //!
 //! They open and close the changes view, flip between it and the per-file diff,
-//! step its cursor, and respawn a pane whose state did not survive a restore.
+//! move its focused excerpt's cursor, and respawn a pane whose state did not
+//! survive a restore.
 
 use super::{
     movement::{self, ChangeDir},
@@ -12,13 +13,11 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
-    diff_changes::{self, DiffChangesState},
+    diff_changes::{self, DiffChangesState, Landing},
     pane::{PaneId, View},
-    render::commits::preview_row_count,
-    review_session::DiffDocument,
     workspace::Workspace,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 use stoat_text::Point;
 
 /// Flip between the changes view and the per-file diff.
@@ -35,23 +34,26 @@ pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 /// Close the changes view the focused pane shows and put back the view it
 /// covered.
 ///
+/// The excerpts close with it, and so does each buffer only the stack opened.
 /// A covered view that is gone closes the pane instead, and a last pane gets a
 /// fresh scratch editor. A changes view opened from a per-file diff returns to
 /// that diff, so a close peels back one layer.
 pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let Some(id) = ws.focused_diff_changes_id() else {
+    let Some(state) = ws
+        .focused_diff_changes_id()
+        .and_then(|id| ws.diff_changes_views.remove(id))
+    else {
         return UpdateEffect::None;
     };
-    let (covered, covered_diff) = ws
-        .diff_changes_views
-        .remove(id)
-        .map_or((None, false), |state| (state.covered, state.covered_diff));
+    let (covered, covered_diff) = (state.covered, state.covered_diff);
+    diff_changes::release_excerpts(stoat, state.excerpts);
+
+    let ws = stoat.active_workspace_mut();
     let focus = ws.panes.focus();
     if ws.panes.widened() == Some(focus) {
         ws.panes.unwiden();
     }
-
     let live = pane::view_is_live(ws, covered.as_ref());
     let rediff = live && covered_diff && matches!(covered, Some(View::Editor(_)));
     if live {
@@ -66,27 +68,26 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Close the changes view and open the file its cursor row shows in the
-/// per-file diff, on the line that the row shows.
+/// Close the changes view and open its focused excerpt's file in the per-file
+/// diff, at the excerpt's cursor.
 ///
 /// The file opens in the pane after the changes view's close puts back the view
-/// it covered. A row with no file under it, as before the first document
-/// lands, leaves the changes view open and says so in the status row.
+/// it covered, over the excerpt's own buffer, so an edit made in the excerpt
+/// and its undo history carry over. A stack with no folded excerpt in focus, as
+/// before the first diff map lands, leaves the changes view open and says so in
+/// the status row.
 pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
-    let target = {
-        let ws = stoat.active_workspace();
-        let cursor = ws.focused_diff_changes().map(|state| state.cursor);
-        cursor
-            .zip(document(ws))
-            .and_then(|(cursor, doc)| diff_changes::target_of(&doc, cursor))
-    };
-    let Some(((rel_path, row), workdir)) = target.zip(repo_workdir(stoat)) else {
+    let Some(((rel_path, point), workdir)) = focused_target(stoat).zip(repo_workdir(stoat)) else {
         stoat.set_status("no change under the cursor");
         return UpdateEffect::Redraw;
     };
 
     if let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() {
         state.covered_diff = false;
+        let focused = state.focused;
+        if let Some(excerpt) = state.excerpts.get_mut(focused) {
+            excerpt.owns_buffer = false;
+        }
     }
     close_diff_changes(stoat);
 
@@ -98,7 +99,9 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
 
     let offset = super::focused_editor_mut(stoat).map(|editor| {
         let buffer = editor.display_map.buffer_snapshot();
-        buffer.rope().point_to_offset(Point::new(row, 0))
+        let rope = buffer.rope();
+        let row = point.row.min(rope.max_point().row);
+        rope.point_to_offset(Point::new(row, point.column.min(rope.line_len(row))))
     });
     if let Some(offset) = offset {
         movement::jump_to_offset(stoat, offset);
@@ -110,89 +113,150 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Move the focused changes view's cursor by `delta` rows, held inside the
-/// document's rows.
+/// Move the focused excerpt's cursor by `delta` display rows, held inside the
+/// excerpt.
 pub(crate) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    movement::move_vertical(stoat, delta, false)
+}
+
+/// Move the focused changes view's cursor to the start of the next or the
+/// previous hunk.
+///
+/// Past its excerpt's last hunk the cursor moves to the next excerpt's first
+/// hunk, and before its first hunk to the previous excerpt's last one. A step
+/// back from inside a hunk lands on that hunk's own start. At either end of
+/// the stack the cursor stays, and the status row says that no more changes
+/// lie that way, as the change walk of the per-file diff says.
+pub(super) fn diff_changes_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let rows = document(ws).map_or(0, |doc| preview_row_count(&doc));
-    let Some(state) = ws.focused_diff_changes_mut() else {
+    let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;
     };
-    if rows == 0 {
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
         return UpdateEffect::None;
+    };
+    let Some(editor) = state
+        .focused_excerpt()
+        .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
+    else {
+        return UpdateEffect::None;
+    };
+
+    let row = diff_changes::cursor_point(editor).row;
+    let starts = diff_changes::hunk_starts(editor);
+    let within = match dir {
+        ChangeDir::Next => starts.into_iter().find(|&start| start > row),
+        ChangeDir::Prev => starts.into_iter().rev().find(|&start| start < row),
+    };
+    if let Some(start) = within {
+        diff_changes::place_cursor(editor, Point::new(start, 0));
+        return UpdateEffect::Redraw;
     }
-    state.cursor = state
-        .cursor
-        .saturating_add_signed(delta as isize)
-        .min(rows - 1);
+
+    let others: Vec<usize> = match dir {
+        ChangeDir::Next => (state.focused + 1..state.excerpts.len()).collect(),
+        ChangeDir::Prev => (0..state.focused).rev().collect(),
+    };
+    for index in others {
+        let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
+            continue;
+        };
+        let starts = diff_changes::hunk_starts(editor);
+        let start = match dir {
+            ChangeDir::Next => starts.first(),
+            ChangeDir::Prev => starts.last(),
+        };
+        if let Some(&start) = start {
+            diff_changes::place_cursor(editor, Point::new(start, 0));
+            state.focused = index;
+            return UpdateEffect::Redraw;
+        }
+    }
+    stoat.set_status("no more changes");
     UpdateEffect::Redraw
 }
 
-/// Move the focused changes view's cursor to the header of the next or the
-/// previous chunk.
-///
-/// A step back from inside a chunk lands on that chunk's own header. At either
-/// end the cursor stays, and the status row says that no more changes lie that
-/// way, as the change walk of the per-file diff says.
-pub(super) fn diff_changes_chunk_step(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
-    let target = {
-        let ws = stoat.active_workspace();
-        let cursor = ws.focused_diff_changes().map(|state| state.cursor);
-        let Some((cursor, doc)) = cursor.zip(document(ws)) else {
-            return UpdateEffect::None;
-        };
-        let starts = diff_changes::chunk_starts(&doc);
-        match dir {
-            ChangeDir::Next => starts.into_iter().find(|&start| start > cursor),
-            ChangeDir::Prev => starts.into_iter().rev().find(|&start| start < cursor),
-        }
-    };
-    let Some(row) = target else {
-        stoat.set_status("no more changes");
-        return UpdateEffect::Redraw;
-    };
-    diff_changes_select(stoat, row)
-}
-
-/// Move the focused changes view's cursor by the rows of its last paint.
+/// Move the focused excerpt's cursor by the rows of the stack's last paint.
 pub(super) fn diff_changes_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
     let rows = viewport_rows(stoat);
     diff_changes_step(stoat, page_delta(rows, dir))
 }
 
-/// Move the focused changes view's cursor by half the rows of its last paint,
-/// and by one row at least.
+/// Move the focused excerpt's cursor by half the rows of the stack's last
+/// paint, and by one row at least.
 pub(super) fn diff_changes_half_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
     let rows = (viewport_rows(stoat) / 2).max(1);
     diff_changes_step(stoat, page_delta(rows, dir))
 }
 
-/// Put the focused changes view's cursor on the first row, or on the last row
-/// when `last` is set.
+/// Put the focused changes view's cursor on the first excerpt's first row, or
+/// on the last excerpt's last row when `last` is set.
 pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let rows = document(ws).map_or(0, |doc| preview_row_count(&doc));
-    let Some(state) = ws.focused_diff_changes_mut() else {
+    let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;
     };
-    state.cursor = match last {
-        true => rows.saturating_sub(1),
-        false => 0,
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return UpdateEffect::None;
     };
+    let index = match last {
+        true => state.excerpts.len().checked_sub(1),
+        false => (!state.excerpts.is_empty()).then_some(0),
+    };
+    let Some(index) = index else {
+        return UpdateEffect::None;
+    };
+    let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
+        return UpdateEffect::None;
+    };
+
+    let kept = diff_changes::kept_rows(editor);
+    let row = match last {
+        true => kept.last().map_or(0, |run| run.end - 1),
+        false => kept.first().map_or(0, |run| run.start),
+    };
+    diff_changes::place_cursor(editor, Point::new(row, 0));
+    state.focused = index;
     UpdateEffect::Redraw
 }
 
-/// Put the focused changes view's cursor on `row`, as a press on that row does.
+/// Put the focused changes view's cursor on stack row `row`, as a press on
+/// that row does.
+///
+/// The row's excerpt takes the focus, and its cursor goes to the start of the
+/// row. A header row puts the cursor on its excerpt's first row.
 pub(crate) fn diff_changes_select(stoat: &mut Stoat, row: usize) -> UpdateEffect {
-    let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() else {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;
     };
-    state.cursor = row;
-    UpdateEffect::Redraw
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    diff_changes::layout_stack(state, editors);
+    match diff_changes::select_row(state, editors, row) {
+        true => UpdateEffect::Redraw,
+        false => UpdateEffect::None,
+    }
 }
 
 /// Give a fresh state to every changes view pane of the active workspace whose
-/// state did not survive, then start the document's build.
+/// state did not survive, then list each stack's files.
 ///
 /// The panes of every tab count, a parked one included, so a tab shows a live
 /// changes view when the reader next switches to it.
@@ -232,13 +296,13 @@ pub(crate) fn respawn_diff_changes_panes(stoat: &mut Stoat) {
             panes.pane_mut(pane_id).view = View::DiffChanges(id);
         }
     }
-    diff_changes::ensure_diff_changes_doc(stoat);
+    diff_changes::pump_diff_changes_stack(stoat);
 }
 
 /// Show a changes view in the focused pane, over the view the pane showed.
 ///
-/// A focused editor's cursor line waits as the landing, so the changes view
-/// opens on that line's chunk once a document exists. An editor in the diff
+/// A focused editor's cursor waits as the landing, so the changes view opens
+/// on that position once its file's excerpt is folded. An editor in the diff
 /// view leaves it first, so the editor comes back plain beneath the changes
 /// view, and the close returns to the diff.
 fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
@@ -255,6 +319,12 @@ fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
         (pane.view.clone(), in_diff)
     };
     review::exit_diff_view(stoat);
+    // No pane shows the covered editor's buffer beneath the changes view, so
+    // its diff map is wanted here. An unsaved edit then reaches the map, and
+    // its file joins the list the landing waits on.
+    if let Some(landing) = &landing {
+        review::ensure_diff_map(stoat, landing.buffer_id, None);
+    }
 
     let ws = stoat.active_workspace_mut();
     let focus = ws.panes.focus();
@@ -267,34 +337,43 @@ fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     ws.panes.pane_mut(focus).view = View::DiffChanges(id);
     ws.panes.widen(focus);
 
-    diff_changes::ensure_diff_changes_doc(stoat);
-    diff_changes::land_pending(stoat.active_workspace_mut());
+    diff_changes::pump_diff_changes_stack(stoat);
     UpdateEffect::Redraw
 }
 
-/// The focused editor's file, relative to the repository, and the row of its
-/// cursor.
+/// The focused editor's cursor as a landing, with the file relative to the
+/// repository.
 ///
 /// `None` when no editor has focus, or when its buffer has no file inside the
 /// repository.
-fn editor_landing(stoat: &mut Stoat) -> Option<(String, u32)> {
+fn editor_landing(stoat: &mut Stoat) -> Option<Landing> {
     let workdir = repo_workdir(stoat)?;
     let (_, buffer_id) = stoat.focused_editor_ids()?;
     let rel_path = {
         let path = stoat.active_workspace().buffers.path_for(buffer_id)?;
         path.strip_prefix(&workdir).ok()?.display().to_string()
     };
+    let point = diff_changes::cursor_point(super::focused_editor_mut(stoat)?);
+    Some(Landing {
+        buffer_id,
+        rel_path,
+        row: point.row,
+        column: point.column,
+    })
+}
 
-    let editor = super::focused_editor_mut(stoat)?;
-    let snapshot = editor.display_map.snapshot();
-    let buffer = snapshot.buffer_snapshot();
-    let selection = editor.selections.newest_anchor();
-    let cursor = stoat_text::cursor_offset(
-        buffer.rope(),
-        buffer.resolve_anchor(&selection.tail()),
-        buffer.resolve_anchor(&selection.head()),
-    );
-    Some((rel_path, buffer.rope().offset_to_point(cursor).row))
+/// The focused excerpt's file, relative to the repository, and the buffer
+/// position of its cursor.
+///
+/// `None` with no folded excerpt in focus.
+fn focused_target(stoat: &mut Stoat) -> Option<(String, Point)> {
+    let ws = stoat.active_workspace_mut();
+    let id = ws.focused_diff_changes_id()?;
+    let excerpt = ws.diff_changes_views.get(id)?.focused_excerpt()?;
+    excerpt.folded_version?;
+    let rel_path = excerpt.rel_path.clone();
+    let editor = ws.editors.get_mut(excerpt.editor_id)?;
+    Some((rel_path, diff_changes::cursor_point(editor)))
 }
 
 /// The working directory of the repository that holds the active workspace.
@@ -305,14 +384,6 @@ fn repo_workdir(stoat: &Stoat) -> Option<PathBuf> {
         .git_host
         .discover(&stoat.active_workspace().git_root)?
         .workdir()
-}
-
-/// The workspace's last changes view document, which every changes view pane
-/// shows.
-fn document(ws: &Workspace) -> Option<Arc<DiffDocument>> {
-    ws.diff_changes_doc
-        .as_ref()
-        .and_then(|built| built.doc.clone())
 }
 
 /// The rows of the focused changes view's last paint, zero before the first.
@@ -334,25 +405,20 @@ fn page_delta(rows: usize, dir: PageDir) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{diff_changes_step, document, respawn_diff_changes_panes};
+    use super::{diff_changes_step, respawn_diff_changes_panes};
     use crate::{
-        action_handlers::{commits, dispatch, focused_editor_mut, pane, review::diff_cache_key},
-        diff_changes::{
-            chunk_starts, ensure_diff_changes_doc, target_of, DiffChangesId, DiffChangesStamp,
-            DiffChangesState,
-        },
+        action_handlers::{commits, dispatch, focused_editor_mut, pane},
+        app::UpdateEffect,
+        diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
-        render::commits::preview_row_count,
-        review_session::DiffDocument,
         run::pty::PtyNotification,
         term_session::TermId,
         test_harness::{editor, TestHarness},
     };
-    use std::{
-        path::{Path, PathBuf},
-        sync::Arc,
-    };
+    use std::path::{Path, PathBuf};
     use stoat_action::Action;
+    use stoat_config::MinimapMode;
+    use stoat_text::Point;
 
     /// Two changed files, with `a.txt` open in the focused pane.
     fn two_files() -> TestHarness {
@@ -363,7 +429,7 @@ mod tests {
     }
 
     /// Two changed files whose one change sits on the last of nine lines, so
-    /// the lines above the change lie outside its chunk.
+    /// the lines above the change lie outside its context.
     fn deep_files() -> TestHarness {
         let mut h = TestHarness::with_size(100, 24);
         h.stage_review_scenario(
@@ -384,18 +450,22 @@ mod tests {
         h
     }
 
-    /// The active workspace's changes view document.
-    fn doc(h: &TestHarness) -> Arc<DiffDocument> {
-        document(h.stoat.active_workspace()).expect("a built changes view document")
+    /// The focused excerpt's file and the buffer row of its cursor.
+    fn place(h: &mut TestHarness) -> (String, u32) {
+        let ws = h.stoat.active_workspace_mut();
+        let (rel_path, editor_id) = {
+            let excerpt = ws
+                .focused_diff_changes()
+                .and_then(DiffChangesState::focused_excerpt)
+                .expect("a focused excerpt");
+            (excerpt.rel_path.clone(), excerpt.editor_id)
+        };
+        let editor = ws.editors.get_mut(editor_id).expect("an excerpt editor");
+        (rel_path, diff_changes::cursor_point(editor).row)
     }
 
-    /// The row of the focused changes view's cursor.
-    fn cursor(h: &TestHarness) -> usize {
-        h.stoat
-            .active_workspace()
-            .focused_diff_changes()
-            .expect("a focused changes view")
-            .cursor
+    fn at(rel_path: &str, row: u32) -> (String, u32) {
+        (rel_path.to_string(), row)
     }
 
     /// The file of the focused editor.
@@ -423,27 +493,31 @@ mod tests {
         (h, shell)
     }
 
-    /// The changes view's keys read its own mode, which starts at normal, and
-    /// the diff dials step on it as on the diff view.
+    /// The changes view's keys read its focused excerpt's mode, which starts at
+    /// normal whatever chord the covered editor held, and the diff dials step
+    /// on it as on the diff view.
     #[test]
-    fn a_changes_view_pane_holds_its_own_mode_and_answers_the_dials() {
+    fn a_changes_view_takes_its_focused_excerpts_mode_and_answers_the_dials() {
         let mut h = two_files();
+        h.stoat.set_focused_mode("space".to_string());
         h.cover_with_diff_changes(false);
+        h.settle();
         let fresh = h.stoat.focused_mode().to_string();
         h.stoat.set_focused_mode("space".to_string());
         let mode = h.stoat.focused_mode().to_string();
         h.stoat.handle_diff_tint_step(1);
-        let state_mode = h
-            .stoat
-            .active_workspace()
-            .focused_diff_changes()
-            .map(|state| state.mode.clone());
+        let excerpt_mode = {
+            let ws = h.stoat.active_workspace();
+            ws.focused_diff_changes()
+                .and_then(DiffChangesState::focused_excerpt)
+                .map(|excerpt| ws.editors[excerpt.editor_id].mode.clone())
+        };
         assert_eq!(
             (
                 h.stoat.current_view(),
                 fresh,
                 mode,
-                state_mode,
+                excerpt_mode,
                 h.stoat.diff_tint
             ),
             (
@@ -517,13 +591,14 @@ mod tests {
     }
 
     /// The changes view belongs to its pane. A split off it opens a scratch
-    /// editor and rests the changes view's chord, and a close of its pane drops
-    /// it with the editor it covered.
+    /// editor and rests the chord of the changes view's focused excerpt, and a
+    /// close of its pane drops it with the editor it covered.
     #[test]
     fn a_changes_view_stays_with_its_own_pane() {
         let mut h = two_files();
         let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
         let id = h.cover_with_diff_changes(false);
+        h.settle();
         h.stoat.set_focused_mode("space".to_string());
         let source = h.stoat.active_workspace().panes.focus();
         h.stoat.active_workspace_mut().panes.unwiden();
@@ -531,10 +606,13 @@ mod tests {
         pane::split_pane(&mut h.stoat, Axis::Vertical);
         let (kept, split_view, mode) = {
             let ws = h.stoat.active_workspace();
+            let mode = ws.diff_changes_views[id]
+                .focused_excerpt()
+                .map(|excerpt| ws.editors[excerpt.editor_id].mode.clone());
             (
                 ws.panes.pane(source).view.clone(),
                 ws.panes.pane(ws.panes.focus()).view.clone(),
-                ws.diff_changes_views[id].mode.clone(),
+                mode,
             )
         };
         pane::close_pane_by_id(&mut h.stoat, source);
@@ -547,7 +625,13 @@ mod tests {
                 ws.diff_changes_views.len(),
                 ws.editors.contains_key(editor),
             ),
-            (View::DiffChanges(id), true, "normal".to_string(), 0, false),
+            (
+                View::DiffChanges(id),
+                true,
+                Some("normal".to_string()),
+                0,
+                false
+            ),
         );
     }
 
@@ -618,35 +702,53 @@ mod tests {
         assert_eq!(h.stoat.current_view(), Some("diff_changes"));
     }
 
-    /// A step holds the cursor inside the document's rows, and a step before
-    /// the first document lands moves nothing.
+    /// A step holds the cursor inside the focused excerpt, and a step before
+    /// the stack holds an excerpt moves nothing.
     #[test]
-    fn a_changes_view_step_stays_inside_the_document() {
-        let cursor = |h: &TestHarness| {
-            h.stoat
-                .active_workspace()
-                .focused_diff_changes()
-                .map(|state| state.cursor)
-        };
-        let mut h = two_files();
+    fn a_changes_view_step_stays_inside_the_focused_excerpt() {
+        let mut h = deep_files();
         h.cover_with_diff_changes(false);
-        diff_changes_step(&mut h.stoat, 1);
-        let unbuilt = cursor(&h);
+        let unbuilt = diff_changes_step(&mut h.stoat, 1);
 
         h.settle();
-        let rows = h
-            .stoat
-            .active_workspace()
-            .diff_changes_doc
-            .as_ref()
-            .and_then(|built| built.doc.as_deref())
-            .map_or(0, preview_row_count);
-        diff_changes_step(&mut h.stoat, -1);
-        let above_first = cursor(&h);
+        diff_changes_step(&mut h.stoat, -100);
+        let top = place(&mut h);
         diff_changes_step(&mut h.stoat, 100);
         assert_eq!(
-            (unbuilt, above_first, cursor(&h)),
-            (Some(0), Some(0), Some(rows - 1)),
+            (unbuilt, top, place(&mut h)),
+            (UpdateEffect::None, at("a.txt", 0), at("a.txt", 9)),
+        );
+    }
+
+    /// The editor's word motion acts on the focused excerpt, so `w` moves its
+    /// cursor along the file's own line.
+    #[test]
+    fn w_moves_the_excerpt_cursor_by_a_word() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "one two\n")]);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let before = editor::focused_cursor_point(&mut h.stoat);
+
+        h.type_keys("w");
+        assert_eq!(
+            (before, editor::focused_cursor_point(&mut h.stoat)),
+            (Point::new(0, 0), Point::new(0, 3)),
+        );
+    }
+
+    /// A changes view with no excerpt has no focused editor, so the editor
+    /// keys find nothing to act on.
+    #[test]
+    fn an_empty_stack_has_no_focused_editor() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git().add_repo(PathBuf::from("/repo"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        assert_eq!(
+            (h.stoat.current_view(), h.stoat.focused_editor_ids()),
+            (Some("diff_changes"), None),
         );
     }
 
@@ -656,6 +758,7 @@ mod tests {
     fn a_focused_dock_takes_no_mode_from_the_changes_view() {
         let mut h = two_files();
         h.cover_with_diff_changes(false);
+        h.settle();
         h.stoat.set_focused_mode("space".to_string());
         let ws = h.stoat.active_workspace_mut();
         let dock = ws.docks.insert(DockPanel {
@@ -670,15 +773,15 @@ mod tests {
     }
 
     /// A restore brings back the pane with a dead id, which gets a live state
-    /// of its own and a document, though another pane holds focus. A live
-    /// changes view keeps its state, and a respawn that finds no dead pane
-    /// builds nothing.
+    /// of its own and a stack, though another pane holds focus. A live changes
+    /// view keeps its state, and a respawn that finds no dead pane opens no
+    /// changes view.
     #[test]
-    fn a_restored_changes_view_pane_gets_a_fresh_state_and_a_document() {
+    fn a_restored_changes_view_pane_gets_a_fresh_state_and_a_stack() {
         let mut h = two_files();
         respawn_diff_changes_panes(&mut h.stoat);
         h.settle();
-        let built_for_no_pane = h.stoat.active_workspace().diff_changes_doc.is_some();
+        let opened_for_no_pane = h.stoat.active_workspace().diff_changes_views.len();
 
         let restored = h.stoat.active_workspace().panes.focus();
         pane::split_pane(&mut h.stoat, Axis::Vertical);
@@ -696,63 +799,53 @@ mod tests {
             ws.diff_changes_views.len(),
         );
         let state = match ws.panes.pane(restored).view {
-            View::DiffChanges(id) => ws
-                .diff_changes_views
-                .get(id)
-                .map(|state| (state.cursor, state.covered.clone())),
+            View::DiffChanges(id) => ws.diff_changes_views.get(id).map(|state| {
+                let files: Vec<&str> = state
+                    .excerpts
+                    .iter()
+                    .map(|excerpt| excerpt.rel_path.as_str())
+                    .collect();
+                (state.covered.clone(), files)
+            }),
             _ => None,
         };
-        let files: Vec<&str> = ws
-            .diff_changes_doc
-            .as_ref()
-            .and_then(|built| built.doc.as_deref())
-            .map(|doc| {
-                doc.files
-                    .iter()
-                    .map(|file| file.rel_path.as_str())
-                    .collect()
-            })
-            .unwrap_or_default();
         assert_eq!(
-            (built_for_no_pane, kept, state, files),
+            (opened_for_no_pane, kept, state),
             (
-                false,
+                0,
                 (View::DiffChanges(live_id), 2),
-                Some((0, None)),
-                vec!["a.txt", "b.txt"]
+                Some((None, vec!["a.txt", "b.txt"]))
             ),
         );
     }
 
-    /// Only a changes view on screen follows the tree. After a git event a
-    /// frame rebuilds the document under one and leaves it stale under a plain
-    /// pane.
+    /// A git event moves the stamp, and the stack lists its files anew at the
+    /// new stamp.
     #[test]
-    fn a_focused_changes_view_rebuilds_when_the_tree_moves() {
-        let current = |h: &TestHarness| {
+    fn a_changes_view_relists_when_the_tree_moves() {
+        let synced = |h: &TestHarness| {
             let ws = h.stoat.active_workspace();
-            ws.diff_changes_doc
-                .as_ref()
-                .is_some_and(|built| built.stamp == DiffChangesStamp::read(ws))
+            let state = ws.focused_diff_changes().expect("a changes view");
+            (state.synced, Some(StackStamp::read(ws)))
         };
         let mut h = two_files();
-        ensure_diff_changes_doc(&mut h.stoat);
-        h.settle();
-        h.stoat.active_workspace_mut().invalidate_all_diffs();
-        h.stoat.drive_background();
-        let plain = current(&h);
-
         h.cover_with_diff_changes(false);
         h.settle();
+        let (before, _) = synced(&h);
+
         h.stoat.active_workspace_mut().invalidate_all_diffs();
-        h.stoat.drive_background();
-        let focused = current(&h);
-        assert_eq!((plain, focused), (false, true));
+        let (_, moved) = synced(&h);
+        h.settle();
+        let (after, current) = synced(&h);
+        assert_eq!(
+            (before != moved, after != before, after == current),
+            (true, true, true)
+        );
     }
 
-    /// From a plain editor the changes view opens on the editor's line once the
-    /// first document lands. A line above every change of its file lands on
-    /// the header of the chunk below it.
+    /// From a plain editor the changes view lands on the editor's line once its
+    /// file's excerpt is folded. A line that a fold hides lands on the first
+    /// row of the next shown run below it.
     #[test]
     fn diff_changes_from_a_plain_editor_lands_below_its_line() {
         let mut h = deep_files();
@@ -764,13 +857,13 @@ mod tests {
             (
                 h.stoat.current_view(),
                 h.stoat.active_workspace().panes.widened().is_some(),
-                cursor(&h),
+                place(&mut h),
             ),
-            (Some("diff_changes"), true, chunk_starts(&doc(&h))[1]),
+            (Some("diff_changes"), true, at("b.txt", 5)),
         );
     }
 
-    /// From the per-file diff the changes view opens on the diff's line, with
+    /// From the per-file diff the changes view lands on the diff's line, with
     /// the editor plain beneath it, and a close returns to the diff.
     #[test]
     fn diff_changes_from_the_diff_lands_on_its_line_and_q_returns_to_the_diff() {
@@ -781,10 +874,8 @@ mod tests {
         let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
 
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
-        let landed = {
-            let (doc, at) = (doc(&h), cursor(&h));
-            (target_of(&doc, at), chunk_starts(&doc).contains(&at))
-        };
+        h.settle();
+        let landed = place(&mut h);
         let plain = {
             let ws = h.stoat.active_workspace();
             !ws.editors[editor].diff_view && !ws.panes.pane(ws.panes.focus()).diff_mode
@@ -797,25 +888,20 @@ mod tests {
                 h.stoat.current_view(),
                 h.stoat.focused_editor_ids().map(|(id, _)| id),
             ),
-            (
-                (Some(("a.txt".to_string(), 8)), false),
-                true,
-                Some("diff"),
-                Some(editor),
-            ),
+            (at("a.txt", 8), true, Some("diff"), Some(editor)),
         );
     }
 
     /// Ctrl-t on the changes view opens the cursor's file in the per-file diff
-    /// on the row's line, and Ctrl-t there returns to the changes view on that
-    /// line.
+    /// on the cursor's line, and Ctrl-t there returns to the changes view on
+    /// that line.
     #[test]
     fn ctrl_t_flips_between_the_changes_view_and_the_diff_on_one_line() {
         let mut h = deep_files();
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n Ctrl-t");
+        h.type_keys("n n Ctrl-t");
         h.settle();
         let opened = (
             h.stoat.current_view(),
@@ -825,32 +911,25 @@ mod tests {
 
         h.type_keys("Ctrl-t");
         h.settle();
-        let back = {
-            let (doc, at) = (doc(&h), cursor(&h));
-            (
-                h.stoat.current_view(),
-                target_of(&doc, at),
-                chunk_starts(&doc).contains(&at),
-            )
-        };
+        let back = (h.stoat.current_view(), place(&mut h));
         assert_eq!(
             (opened, back),
             (
                 (Some("diff"), Some(PathBuf::from("/repo/b.txt")), 8),
-                (Some("diff_changes"), Some(("b.txt".to_string(), 8)), false),
+                (Some("diff_changes"), at("b.txt", 8)),
             ),
         );
     }
 
     /// DiffFiles on the changes view opens the cursor's file in the per-file
-    /// diff on the row's line, as Ctrl-t does.
+    /// diff on the cursor's line, as Ctrl-t does.
     #[test]
     fn diff_files_on_the_changes_view_opens_the_cursor_hunk_in_the_diff() {
         let mut h = deep_files();
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n");
+        h.type_keys("n n");
 
         dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
@@ -864,34 +943,29 @@ mod tests {
         );
     }
 
-    /// n and p walk the chunk headers, and j and k step one row. A p from
-    /// inside a chunk lands on that chunk's header, and a step past either end
-    /// stays and says so.
+    /// n and p walk the hunks across the excerpts, and a step past either end
+    /// of the stack stays and says so.
     #[test]
-    fn n_and_p_walk_the_chunk_headers_and_stop_at_either_end() {
+    fn n_and_p_walk_the_hunks_across_excerpts_and_stop_at_either_end() {
         let mut h = deep_files();
         h.cover_with_diff_changes(false);
         h.settle();
-        let starts = chunk_starts(&doc(&h));
-        let walk: Vec<usize> = ["n", "n", "j", "j", "k", "p", "p", "p"]
+        let walk: Vec<(String, u32)> = ["n", "n", "n", "p", "p"]
             .into_iter()
             .map(|key| {
                 h.type_keys(key);
-                cursor(&h)
+                place(&mut h)
             })
             .collect();
         assert_eq!(
             (walk, h.stoat.pending_message.as_deref()),
             (
                 vec![
-                    starts[1],
-                    starts[1],
-                    starts[1] + 1,
-                    starts[1] + 2,
-                    starts[1] + 1,
-                    starts[1],
-                    starts[0],
-                    starts[0]
+                    at("a.txt", 8),
+                    at("b.txt", 8),
+                    at("b.txt", 8),
+                    at("a.txt", 8),
+                    at("a.txt", 8)
                 ],
                 Some("no more changes"),
             ),
@@ -899,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_before_the_first_document_keeps_the_changes_view() {
+    fn an_open_before_the_first_excerpt_keeps_the_changes_view() {
         let mut h = deep_files();
         h.cover_with_diff_changes(false);
         dispatch(&mut h.stoat, &stoat_action::DiffChangesOpen);
@@ -910,14 +984,15 @@ mod tests {
     }
 
     /// A page steps by the rows of the last paint, a half page by half of them
-    /// and by one row before any paint, and an edge lands on the first or the
-    /// last row.
+    /// and by one row before any paint, and an edge lands on the stack's first
+    /// or last row.
     #[test]
     fn pages_step_by_the_painted_rows_and_edges_reach_the_ends() {
         let mut h = deep_files();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
         h.cover_with_diff_changes(false);
         h.settle();
-        let rows = preview_row_count(&doc(&h));
+        h.render_composited();
         let set_viewport = |h: &mut TestHarness, rows: usize| {
             if let Some(state) = h.stoat.active_workspace_mut().focused_diff_changes_mut() {
                 state.viewport_rows = rows;
@@ -926,7 +1001,7 @@ mod tests {
 
         set_viewport(&mut h, 0);
         dispatch(&mut h.stoat, &stoat_action::DiffChangesHalfPageDown);
-        let mut cursors = vec![cursor(&h)];
+        let mut places = vec![place(&mut h)];
         set_viewport(&mut h, 4);
         let actions: [&dyn Action; 6] = [
             &stoat_action::DiffChangesPageDown,
@@ -938,45 +1013,61 @@ mod tests {
         ];
         for action in actions {
             dispatch(&mut h.stoat, action);
-            cursors.push(cursor(&h));
+            places.push(place(&mut h));
         }
-        assert_eq!(cursors, [1, 5, 7, 5, 1, rows - 1, 0]);
+        assert_eq!(
+            places,
+            [
+                at("a.txt", 6),
+                at("a.txt", 9),
+                at("a.txt", 9),
+                at("a.txt", 7),
+                at("a.txt", 0),
+                at("b.txt", 9),
+                at("a.txt", 5)
+            ],
+        );
     }
 
-    /// A rebuild keeps the cursor on its chunk though a grown chunk above it
-    /// moves the chunk's rows down, and the landing the changes view opened on
-    /// does not pull the cursor back.
+    /// `space G s` on an excerpt's hunk stages it, and the refold that follows
+    /// the stage keeps the cursor on its buffer position.
     #[test]
-    fn a_rebuild_keeps_the_cursor_on_its_chunk() {
-        let last_start = |h: &TestHarness| *chunk_starts(&doc(h)).last().expect("a chunk");
+    fn space_g_s_stages_an_excerpt_hunk_and_the_refold_keeps_the_cursor() {
         let mut h = deep_files();
+        h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/b.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        let before = last_start(&h);
-        if let Some(state) = h.stoat.active_workspace_mut().focused_diff_changes_mut() {
-            state.cursor = before + 2;
-        }
+        h.type_keys("n");
+        let folded = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .focused_diff_changes()
+                .and_then(DiffChangesState::focused_excerpt)
+                .and_then(|excerpt| excerpt.folded_version)
+        };
+        let before = (place(&mut h), folded(&h));
 
-        h.fake_fs().insert_file(
-            Path::new("/repo/a.txt"),
-            b"1\n2\n3\n4\nFIVE\n6\n7\n8\nNINE\n",
+        h.type_keys("space G s");
+        h.settle_diff_jobs();
+        let patches = h.fake_git().applied_patches(Path::new("/repo")).len();
+        assert_eq!(
+            (
+                before.0.clone(),
+                patches,
+                place(&mut h),
+                folded(&h) != before.1
+            ),
+            (at("b.txt", 8), 1, before.0, true),
         );
-        h.stoat.active_workspace_mut().invalidate_all_diffs();
-        h.stoat.drive_background();
-        h.settle();
-        let after = last_start(&h);
-        assert_eq!((after > before, cursor(&h)), (true, after + 2));
     }
 
-    /// A landing on an unsaved edit waits out the document built before the
-    /// edit, and lands on the edit once the next build holds it.
+    /// A landing on an unsaved edit waits for the diff map that holds the edit,
+    /// and lands on the edit once its file's excerpt is folded.
     #[test]
-    fn a_landing_on_a_fresh_edit_waits_for_the_build_that_holds_it() {
+    fn a_landing_on_a_fresh_edit_waits_for_the_map_that_holds_it() {
         let mut h = deep_files();
         track_clean_c(&mut h);
-        ensure_diff_changes_doc(&mut h.stoat);
-        h.settle();
         h.open_file(Path::new("/repo/c.txt"));
         h.type_keys("j i Z Escape");
 
@@ -985,14 +1076,12 @@ mod tests {
             .stoat
             .active_workspace()
             .focused_diff_changes()
-            .and_then(|state| state.pending_landing.clone());
+            .and_then(|state| state.pending_landing.as_ref())
+            .map(|landing| (landing.rel_path.clone(), landing.row));
         h.settle();
         assert_eq!(
-            (waiting, target_of(&doc(&h), cursor(&h))),
-            (
-                Some(("c.txt".to_string(), 1)),
-                Some(("c.txt".to_string(), 1)),
-            ),
+            (waiting, place(&mut h)),
+            (Some(("c.txt".to_string(), 1)), at("c.txt", 1)),
         );
     }
 
@@ -1058,8 +1147,8 @@ mod tests {
         assert_eq!((opened, opened > 0), (scroll(&mut h), true));
     }
 
-    /// A landing on a file with no change lands on the first row once a
-    /// current document shows that the file has none.
+    /// A landing on a file with no change lands on the first excerpt's first
+    /// shown row once the list shows that the file has none.
     #[test]
     fn a_landing_on_a_clean_file_lands_on_the_first_row() {
         let mut h = deep_files();
@@ -1068,76 +1157,12 @@ mod tests {
         h.type_keys("j");
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        let state = h
+        let pending = h
             .stoat
             .active_workspace()
             .focused_diff_changes()
-            .map(|state| (state.cursor, state.pending_landing.clone()));
-        assert_eq!(state, Some((0, None)));
-    }
-
-    /// A second changes view after one edit to one open file diffs that file
-    /// alone. Every other file keeps its cache key, so its lookup hits, and
-    /// the rebuild adds the one entry of the edit.
-    ///
-    /// Empty hunks planted under the untouched files' keys tell a hit from a
-    /// fresh diff, because a fresh diff shows each file's one chunk.
-    #[test]
-    fn a_second_changes_view_after_one_edit_diffs_the_edited_file_alone() {
-        let untouched = [("b\n", "B\n"), ("c\n", "C\n"), ("d\n", "D\n")];
-        let mut h = TestHarness::with_size(100, 24);
-        h.stage_review_scenario(
-            "/repo",
-            &[
-                ("a.txt", "a\n", "A\n"),
-                ("b.txt", "b\n", "B\n"),
-                ("c.txt", "c\n", "C\n"),
-                ("d.txt", "d\n", "D\n"),
-            ],
-        );
-        h.open_file(Path::new("/repo/a.txt"));
-        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
-        h.settle();
-        h.type_keys("q i x Escape");
-        h.settle();
-        let before = {
-            let cache = h.stoat.diff_cache();
-            let mut cache = cache.lock().expect("diff_cache poisoned");
-            for (base, buffer) in untouched {
-                cache.insert(
-                    diff_cache_key(base, buffer, None),
-                    Arc::new(Vec::new()),
-                    true,
-                );
-            }
-            cache.len()
-        };
-
-        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
-        h.settle();
-        let added = h
-            .stoat
-            .diff_cache()
-            .lock()
-            .expect("diff_cache poisoned")
-            .len()
-            - before;
-        let files: Vec<(String, String, usize)> = doc(&h)
-            .files
-            .iter()
-            .map(|file| {
-                let text = file.buffer_text.to_string();
-                (file.rel_path.clone(), text, file.chunks.len())
-            })
-            .collect();
-        let expected = [
-            ("a.txt", "xA\n", 1),
-            ("b.txt", "B\n", 0),
-            ("c.txt", "C\n", 0),
-            ("d.txt", "D\n", 0),
-        ]
-        .map(|(path, text, chunks)| (path.to_string(), text.to_string(), chunks));
-        assert_eq!((added, files), (1, expected.to_vec()));
+            .map(|state| state.pending_landing.clone());
+        assert_eq!((place(&mut h), pending), (at("a.txt", 5), Some(None)));
     }
 
     /// Track c.txt in the repository with no change.

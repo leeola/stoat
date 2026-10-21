@@ -376,7 +376,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
         preview_dials,
-        diff_changes_building: stoat.pending_diff_changes_build.is_some(),
+        diff_changes_building: ws.tally_pending(),
         chrome: &stoat.chrome.as_ref().expect("refresh_chrome ran above").1,
         pending_count: stoat.pending_count,
         recording_register: stoat
@@ -491,10 +491,6 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                         term_pool_grids: &ws.term_pool_grids,
                         commit_lists: &mut ws.commit_lists,
                         diff_changes_views: &mut ws.diff_changes_views,
-                        diff_changes_doc: ws
-                            .diff_changes_doc
-                            .as_ref()
-                            .and_then(|built| built.doc.clone()),
                     },
                     frame,
                     &mut buf,

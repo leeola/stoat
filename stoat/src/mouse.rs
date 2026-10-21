@@ -14,17 +14,18 @@ use crate::{
         WHEEL_BINDING_COOLDOWN,
     },
     buffer::BufferId,
-    diff_changes::DiffChangesId,
+    diff_changes::{self, DiffChangesId},
     editor_state::{EditorId, ScrollGlide},
     host::ClipboardKind,
     keymap::WheelDirection,
     keymap_state::{active_modal, ActiveModal, StoatKeymapState},
-    minimap::{diff_changes::row_count, emit::minimap_view_window, LINES_PER_CELL},
+    minimap::{emit::minimap_view_window, LINES_PER_CELL},
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
     run::GridSelection,
     term_session::{TermId, TermSelection},
+    workspace::Workspace,
 };
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
@@ -172,7 +173,7 @@ impl ScreenSurfaces {
 ///
 /// The rects come from the same layout the paint reads, so a clicked row is
 /// the row drawn under the pointer.
-pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
+pub(crate) fn screen_surfaces(stoat: &mut Stoat) -> Option<ScreenSurfaces> {
     let ws = stoat.active_workspace();
     match crate::keymap_state::view_predicate(ws)? {
         "commits" => {
@@ -190,21 +191,25 @@ pub(crate) fn screen_surfaces(stoat: &Stoat) -> Option<ScreenSurfaces> {
             })
         },
         "diff_changes" => {
-            let state = ws.focused_diff_changes()?;
+            let ws = stoat.active_workspace_mut();
+            let id = ws.focused_diff_changes_id()?;
             let pane = ws.panes.pane(ws.panes.focus()).area;
+            let Workspace {
+                diff_changes_views,
+                editors,
+                ..
+            } = ws;
+            let state = diff_changes_views.get_mut(id)?;
+            let len = diff_changes::layout_stack(state, editors);
             Some(ScreenSurfaces {
                 kind: ScreenKind::DiffChanges,
                 pane,
                 list: crate::render::layout::split_pane_status(pane).0,
-                len: ws
-                    .diff_changes_doc
-                    .as_ref()
-                    .and_then(|built| built.doc.as_deref())
-                    .map_or(0, crate::render::commits::preview_row_count),
-                selected: state.cursor,
-                scroll_top: state.scroll_top,
-                // The hunk list is the whole screen, with no detail pane beside
-                // it for a notch to land in.
+                len,
+                selected: diff_changes::cursor_stack_row(state, editors).unwrap_or(0),
+                scroll_top: state.scroll,
+                // The stack is the whole screen, with no detail pane beside it
+                // for a notch to land in.
                 detail: None,
                 strip: state.minimap_rect,
             })
@@ -1055,19 +1060,21 @@ fn handle_minimap_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEf
 
     if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
         let pos = Position::new(mouse.column, mouse.row);
-        // Single mode has one shared band that scrubs the focused editor or
-        // changes view. Per-pane mode walks the panes to find the strip under
-        // the click.
+        // Single mode has one shared band that scrubs the focused changes view
+        // or editor. The changes view comes first, since its focused excerpt
+        // is the focused editor and the band shows the stack. Per-pane mode
+        // walks the panes to find the strip under the click.
         let hit = if stoat.minimap_mode() == MinimapMode::Single {
             stoat
                 .single_minimap_rect
                 .filter(|band| band.contains(pos))
-                .and_then(|_| match stoat.focused_editor_ids() {
-                    Some((editor_id, _)) => Some(MinimapDrag::Editor(editor_id)),
-                    None => stoat
-                        .active_workspace()
-                        .focused_diff_changes_id()
-                        .map(MinimapDrag::DiffChanges),
+                .and_then(|_| {
+                    let diff_changes = stoat.active_workspace().focused_diff_changes_id();
+                    match (diff_changes, stoat.focused_editor_ids()) {
+                        (Some(id), _) => Some(MinimapDrag::DiffChanges(id)),
+                        (None, Some((editor_id, _))) => Some(MinimapDrag::Editor(editor_id)),
+                        (None, None) => None,
+                    }
                 })
         } else {
             let ws = stoat.active_workspace();
@@ -1172,23 +1179,22 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
     editor.scroll_glide = ScrollGlide::Page;
 }
 
-/// Put changes view `id`'s cursor on the row that the `strip` cell under
+/// Put changes view `id`'s cursor on the stack row that the `strip` cell under
 /// `screen_row` points at, and scroll that row to the middle of the view.
 ///
-/// The strip holds one line per changes view row, so the row resolves with the
-/// math the strip renders with. The scroll stops at the last page, as an
-/// editor's scrub does, and a document with no rows leaves the changes view as
-/// it is.
+/// The strip holds one line per stack row, so the row resolves with the math
+/// the strip renders with. The scroll stops at the last page, as an editor's
+/// scrub does, and a stack with no rows leaves the changes view as it is.
 fn scrub_minimap_diff_changes(stoat: &mut Stoat, id: DiffChangesId, strip: Rect, screen_row: u16) {
-    let ws = &mut stoat.workspaces[stoat.active_workspace];
-    let total = ws
-        .diff_changes_doc
-        .as_ref()
-        .and_then(|built| built.doc.as_deref())
-        .map_or(0, row_count);
-    let Some(state) = ws.diff_changes_views.get_mut(id) else {
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = &mut stoat.workspaces[stoat.active_workspace];
+    let Some(state) = diff_changes_views.get_mut(id) else {
         return;
     };
+    let total = diff_changes::layout_stack(state, editors);
     if total == 0 {
         return;
     }
@@ -1198,12 +1204,12 @@ fn scrub_minimap_diff_changes(stoat: &mut Stoat, id: DiffChangesId, strip: Rect,
         LINES_PER_CELL,
         screen_row.saturating_sub(strip.y),
         total as f32,
-        state.scroll_top as f32,
+        state.scroll as f32,
         state.viewport_rows.max(1) as f32,
     ) as usize;
-    state.cursor = target.min(total - 1);
-    state.scroll_top = state
-        .cursor
+    let row = target.min(total - 1);
+    diff_changes::select_row(state, editors, row);
+    state.scroll = row
         .saturating_sub(state.viewport_rows / 2)
         .min(total.saturating_sub(state.viewport_rows));
 }
@@ -2278,8 +2284,13 @@ pub(crate) fn focus_at(stoat: &mut Stoat, column: u16, row: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixture::{mouse_event, open_scratch_file};
+    use crate::{
+        diff_changes::DiffChangesState,
+        editor_state::EditorState,
+        test_fixture::{mouse_event, open_scratch_file},
+    };
     use crossterm::event::KeyModifiers;
+    use slotmap::SlotMap;
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -2976,14 +2987,28 @@ mod tests {
         h
     }
 
-    /// The focused changes view's cursor and scroll.
-    fn diff_changes_place(h: &crate::test_harness::TestHarness) -> (usize, usize) {
-        let state = h
-            .stoat
-            .active_workspace()
-            .focused_diff_changes()
+    /// The focused changes view's cursor as a stack row, and its scroll.
+    fn diff_changes_place(h: &mut crate::test_harness::TestHarness) -> (usize, usize) {
+        let (state, editors) = diff_changes_stack(h);
+        diff_changes::layout_stack(state, editors);
+        let cursor = diff_changes::cursor_stack_row(state, editors).expect("a cursor");
+        (cursor, state.scroll)
+    }
+
+    /// The focused changes view's state, with the editors its excerpts are.
+    fn diff_changes_stack(
+        h: &mut crate::test_harness::TestHarness,
+    ) -> (&mut DiffChangesState, &mut SlotMap<EditorId, EditorState>) {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws
+            .focused_diff_changes_id()
             .expect("the changes view is open");
-        (state.cursor, state.scroll_top)
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        (&mut diff_changes_views[id], editors)
     }
 
     /// A press on a changes view row puts the cursor there, and a wheel notch
@@ -3001,13 +3026,13 @@ mod tests {
             list.x + 2,
             list.y + 1,
         ));
-        let pressed = diff_changes_place(&h);
+        let pressed = diff_changes_place(&mut h);
         h.stoat.update(mouse_event(
             MouseEventKind::ScrollDown,
             list.x + 2,
             list.y + 1,
         ));
-        assert_eq!((pressed, diff_changes_place(&h)), ((1, 0), (2, 0)));
+        assert_eq!((pressed, diff_changes_place(&mut h)), ((1, 0), (2, 0)));
     }
 
     /// A press on a per-pane changes view's strip puts the cursor on the row
@@ -3017,19 +3042,16 @@ mod tests {
     #[test]
     fn the_changes_view_strip_scrubs_its_changes_view() {
         let mut h = diff_changes_harness(MinimapMode::PerPane, 20);
-        let (id, strip, rows, view) = {
-            let ws = h.stoat.active_workspace();
-            let id = ws
-                .focused_diff_changes_id()
-                .expect("the changes view is open");
-            let state = &ws.diff_changes_views[id];
-            let rows = ws
-                .diff_changes_doc
-                .as_ref()
-                .and_then(|built| built.doc.as_deref())
-                .map_or(0, row_count);
+        let id = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes_id()
+            .expect("the changes view is open");
+        let (strip, rows, view) = {
+            let (state, editors) = diff_changes_stack(&mut h);
+            let rows = diff_changes::layout_stack(state, editors);
             let strip = state.minimap_rect.expect("the paint reserved a strip");
-            (id, strip, rows, state.viewport_rows)
+            (strip, rows, state.viewport_rows)
         };
         let top_cell_row = usize::from(LINES_PER_CELL / 2);
 
@@ -3038,13 +3060,13 @@ mod tests {
             strip.x,
             strip.bottom() - 1,
         ));
-        let pressed = (diff_changes_place(&h), h.stoat.minimap_drag);
+        let pressed = (diff_changes_place(&mut h), h.stoat.minimap_drag);
         h.stoat.update(mouse_event(
             MouseEventKind::Drag(MouseButton::Left),
             strip.x,
             strip.y,
         ));
-        let dragged = diff_changes_place(&h);
+        let dragged = diff_changes_place(&mut h);
         h.stoat.update(mouse_event(
             MouseEventKind::Up(MouseButton::Left),
             strip.x,
@@ -3054,7 +3076,7 @@ mod tests {
         h.stoat
             .update(mouse_event(MouseEventKind::ScrollDown, strip.x, strip.y));
         assert_eq!(
-            (pressed, dragged, released, diff_changes_place(&h)),
+            (pressed, dragged, released, diff_changes_place(&mut h)),
             (
                 ((rows - 1, rows - view), Some(MinimapDrag::DiffChanges(id))),
                 (top_cell_row, 0),
@@ -3064,9 +3086,10 @@ mod tests {
         );
     }
 
-    /// A document longer than the strip slides the strip's window with the
+    /// A stack longer than the strip slides the strip's window with the
     /// scroll, as the strip the terminal draws does, so a drag held on the
-    /// strip's last cell walks further down the document.
+    /// strip's last cell walks further down the stack. A press that lands on a
+    /// header row puts the cursor on its excerpt's first row.
     #[test]
     fn a_long_changes_view_scrubs_against_its_sliding_strip() {
         let mut h = diff_changes_harness(MinimapMode::PerPane, 100);
@@ -3080,27 +3103,29 @@ mod tests {
 
         h.stoat
             .update(last_cell(MouseEventKind::Down(MouseButton::Left)));
-        let pressed = diff_changes_place(&h);
+        let pressed = diff_changes_place(&mut h);
         h.stoat
             .update(last_cell(MouseEventKind::Drag(MouseButton::Left)));
-        assert_eq!((pressed, diff_changes_place(&h)), ((180, 169), (195, 177)));
+        assert_eq!(
+            (pressed, diff_changes_place(&mut h)),
+            ((181, 169), (250, 239))
+        );
     }
 
-    /// A press on the strip of a changes view with no document arms the scrub
+    /// A press on the strip of a changes view with no excerpt arms the scrub
     /// and moves nothing.
     #[test]
-    fn a_strip_press_without_a_document_moves_nothing() {
+    fn a_strip_press_without_an_excerpt_moves_nothing() {
         let mut h = diff_changes_harness(MinimapMode::PerPane, 20);
-        let (id, strip) = {
-            let ws = h.stoat.active_workspace_mut();
-            ws.diff_changes_doc = None;
-            let id = ws
-                .focused_diff_changes_id()
-                .expect("the changes view is open");
-            let strip = ws.diff_changes_views[id]
-                .minimap_rect
-                .expect("the paint reserved a strip");
-            (id, strip)
+        let id = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes_id()
+            .expect("the changes view is open");
+        let strip = {
+            let (state, _) = diff_changes_stack(&mut h);
+            state.excerpts.clear();
+            state.minimap_rect.expect("the paint reserved a strip")
         };
 
         h.stoat.update(mouse_event(
@@ -3108,9 +3133,11 @@ mod tests {
             strip.x,
             strip.bottom() - 1,
         ));
+        let drag = h.stoat.minimap_drag;
+        let (state, _) = diff_changes_stack(&mut h);
         assert_eq!(
-            (diff_changes_place(&h), h.stoat.minimap_drag),
-            ((0, 0), Some(MinimapDrag::DiffChanges(id))),
+            (state.scroll, state.excerpts.len(), drag),
+            (0, 0, Some(MinimapDrag::DiffChanges(id))),
         );
     }
 
@@ -3135,7 +3162,7 @@ mod tests {
             band.y,
         ));
         assert_eq!(
-            (diff_changes_place(&h), h.stoat.minimap_drag),
+            (diff_changes_place(&mut h), h.stoat.minimap_drag),
             (
                 (usize::from(LINES_PER_CELL / 2), 0),
                 Some(MinimapDrag::DiffChanges(id))

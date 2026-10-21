@@ -1,109 +1,155 @@
-//! The changes view, which shows every change against the diff base as one
-//! side-by-side list of hunks.
+//! The changes view, which shows every change against the diff base as a
+//! stack of per-file diff excerpts.
 //!
-//! A changes view row is a row of the commit preview's layout. Each chunk takes
-//! a header row and then its diff rows, with files in document order. The row
-//! model numbers those same rows. So a cursor row resolves to the file, the
-//! chunk, and the buffer line that the paint puts on that row.
-//!
-//! The workspace builds the document a changes view shows on the pool and keeps
-//! the last one, so a changes view paints at once while the next one builds.
+//! Each changed file gets one editor in the per-file diff view, over the
+//! workspace's own buffer of the file. The editor folds every unchanged run
+//! that lies more than three rows from a hunk, so the excerpt shows the file's
+//! hunks with their context. The stack paints the excerpts in path order, each
+//! under a header row that names its file. The focused excerpt's editor is the
+//! focused editor, so every editor key acts on the real file at the real line
+//! and column.
 //!
 //! See also:
-//! - [`render_commit_preview`](crate::render::commits::render_commit_preview) for the paint that
-//!   lays out these rows.
-//! - [`ensure_diff_changes_doc`] for the build.
+//! - [`pump_diff_changes_stack`] for the list of files, the folds, and the landings.
+//! - [`layout_stack`] for the rows the paint lays the excerpts on.
 
 use crate::{
-    action_handlers::{self, commits::PreviewHighlights},
+    action_handlers::{review, view},
     app::Stoat,
-    buffer_registry::BufferRegistry,
-    diff,
-    diff_cache::{DiffCache, DiffCacheKey},
-    host::{FsHost, GitHost, GitRepo},
+    buffer::BufferId,
+    buffer_lifecycle,
+    buffer_registry::{BufferRegistry, OpenOrigin},
+    diff_map::DiffMap,
+    editor_state::{EditorId, EditorState},
     pane::View,
-    review::{ReviewFileInput, ReviewHunk, ReviewRow, ReviewSide},
-    review_session::{DiffDocument, ReviewChunk, ReviewChunkId},
-    workspace::{self, diff::DiffBase, Workspace, WorkspaceId},
+    workspace::{diff::DiffBase, Workspace},
 };
 use ratatui::layout::Rect;
-use slotmap::new_key_type;
+use slotmap::{new_key_type, SlotMap};
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
+    collections::{hash_map::DefaultHasher, BTreeMap},
     hash::{Hash, Hasher},
-    io,
+    mem,
+    ops::Range,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
 };
-use stoat_language::{structural_diff::TreeCache, LanguageRegistry};
-use stoat_scheduler::Task;
-use stoat_text::Rope;
+use stoat_text::{Point, Rope};
+
+/// Rows of unchanged context an excerpt shows on each side of a hunk.
+const CONTEXT_ROWS: u32 = 3;
 
 new_key_type! {
     /// Key for one changes view pane's [`DiffChangesState`].
     pub struct DiffChangesId;
 }
 
-/// One changes view pane's cursor, scroll, and input mode, and the view the
+/// One changes view pane's stack of excerpts, its scroll, and the view the
 /// changes view replaced in that pane.
 pub(crate) struct DiffChangesState {
-    /// The row under the cursor, in the rows
-    /// [`preview_row_count`](crate::render::commits::preview_row_count) counts.
-    pub cursor: usize,
-    /// The first row on screen, in the same rows as [`Self::cursor`].
-    pub scroll_top: usize,
+    /// One excerpt per changed file, in path order.
+    pub excerpts: Vec<Excerpt>,
+    /// The index in [`Self::excerpts`] of the excerpt whose editor has focus.
+    pub focused: usize,
+    /// The first stack row on screen.
+    ///
+    /// A stack row is a header row or a display row of an excerpt, in the
+    /// order [`layout_stack`] lays them out.
+    pub scroll: usize,
+    /// The workspace stamp the excerpts were listed at, or `None` before the
+    /// first list.
+    pub synced: Option<StackStamp>,
     /// Rows visible on the most recent paint. Zero until the first paint.
     pub viewport_rows: usize,
     /// The minimap strip the most recent paint reserved at the pane's right
     /// edge, or `None` where no per-pane strip shows.
     pub minimap_rect: Option<Rect>,
-    /// The input mode while the changes view's pane is focused.
-    ///
-    /// Each changes view holds its own mode, as a commits list does, so a chord
-    /// left pending on another pane never carries into the changes view.
-    pub mode: String,
     /// The view the changes view replaced in its pane, which closing the
     /// changes view puts back.
     pub covered: Option<View>,
     /// True when the covered editor showed the diff view, so closing the
     /// changes view returns to the per-file diff it came from.
     pub covered_diff: bool,
-    /// The `(rel_path, buffer_row)` the cursor moves onto once a document
-    /// exists.
+    /// The place the cursor moves to once its file's excerpt is folded.
     ///
-    /// A changes view opens before its first document builds, so the editor
-    /// line it opened from waits here.
-    pub pending_landing: Option<(String, u32)>,
+    /// A changes view opens before its excerpts exist, so the editor position
+    /// it opened from waits here.
+    pub pending_landing: Option<Landing>,
+}
+
+/// One changed file in a changes view's stack.
+pub(crate) struct Excerpt {
+    pub buffer_id: BufferId,
+    /// The editor that shows the file in the diff view, which no pane shows.
+    pub editor_id: EditorId,
+    /// The file's path relative to the repository's working directory, which
+    /// the header row shows and the stack sorts by.
+    pub rel_path: String,
+    /// The version of the buffer's diff map the folds were cut from, or `None`
+    /// until the map lands.
+    pub folded_version: Option<usize>,
+    /// The stack row of the excerpt's header, which [`layout_stack`] writes.
+    pub top: usize,
+    /// Whether the stack opened the buffer, so the buffer closes with the
+    /// excerpt. A buffer that was open before the excerpt stays open.
+    pub owns_buffer: bool,
+}
+
+/// The editor position a changes view lands its cursor on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Landing {
+    /// The buffer the position is in, whose diff map decides whether the file
+    /// is still to join the list.
+    pub buffer_id: BufferId,
+    pub rel_path: String,
+    pub row: u32,
+    pub column: u32,
+}
+
+/// The state of a workspace that a changes view's excerpts were listed from.
+///
+/// A list is current while its stamp equals the workspace's stamp now.
+/// `epoch` moves when the diff base, the git state, or the repository tally
+/// changes, and `maps` moves with the diff map of every open buffer, which
+/// decides whether an unsaved edit puts its file in the list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct StackStamp {
+    epoch: u64,
+    maps: u64,
 }
 
 impl DiffChangesState {
-    /// Scrolls the least distance that keeps [`Self::cursor`] on screen in a
+    /// Scrolls the least distance that keeps stack row `row` on screen in a
     /// viewport of `rows` rows.
     ///
     /// A zero-row viewport, as before the first paint, leaves the scroll as it
     /// is.
-    pub(crate) fn ensure_cursor_visible(&mut self, rows: usize) {
+    pub(crate) fn ensure_row_visible(&mut self, row: usize, rows: usize) {
         if rows == 0 {
             return;
         }
-        if self.cursor < self.scroll_top {
-            self.scroll_top = self.cursor;
-        } else if self.cursor >= self.scroll_top + rows {
-            self.scroll_top = self.cursor + 1 - rows;
+        if row < self.scroll {
+            self.scroll = row;
+        } else if row >= self.scroll + rows {
+            self.scroll = row + 1 - rows;
         }
+    }
+
+    /// The excerpt whose editor has focus, or `None` on an empty stack.
+    pub(crate) fn focused_excerpt(&self) -> Option<&Excerpt> {
+        self.excerpts.get(self.focused)
     }
 }
 
 impl Default for DiffChangesState {
-    /// A changes view on its first row, in normal mode, that covers no view and
-    /// waits on no landing.
+    /// An empty stack at its top, that covers no view and waits on no landing.
     fn default() -> Self {
         Self {
-            cursor: 0,
-            scroll_top: 0,
+            excerpts: Vec::new(),
+            focused: 0,
+            scroll: 0,
+            synced: None,
             viewport_rows: 0,
             minimap_rect: None,
-            mode: "normal".to_string(),
             covered: None,
             covered_diff: false,
             pending_landing: None,
@@ -111,18 +157,7 @@ impl Default for DiffChangesState {
     }
 }
 
-/// The state of a workspace that a changes view document was built from.
-///
-/// A document is current while its stamp equals the workspace's stamp now.
-/// `epoch` moves when the diff base or the git state changes, and `buffers`
-/// moves with the text of every open buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DiffChangesStamp {
-    epoch: u64,
-    buffers: u64,
-}
-
-impl DiffChangesStamp {
+impl StackStamp {
     /// Read the stamp of `ws` as it stands.
     pub(crate) fn read(ws: &Workspace) -> Self {
         let mut hasher = DefaultHasher::new();
@@ -130,673 +165,770 @@ impl DiffChangesStamp {
             let Some(id) = ws.buffers.id_for_path(&path) else {
                 continue;
             };
-            let Some(buffer) = ws.buffers.get(id) else {
-                continue;
-            };
-            let version = buffer.read().expect("buffer poisoned").version();
-            (id, version).hash(&mut hasher);
+            (id, map_version(&ws.buffers, id)).hash(&mut hasher);
         }
         Self {
             epoch: ws.diff_changes_epoch,
-            buffers: hasher.finish(),
+            maps: hasher.finish(),
         }
     }
 }
 
-/// The last changes view document a build finished, with the stamp it was built
-/// from.
-pub(crate) struct DiffChangesDoc {
-    /// The document, or `None` when the build found no change to show.
-    ///
-    /// An empty build keeps its stamp all the same, so an unchanged tree does
-    /// not build again.
-    pub doc: Option<Arc<DiffDocument>>,
-    pub stamp: DiffChangesStamp,
-}
-
-/// A changes view document building on the pool, which
-/// [`pump_diff_changes_build`] stores when it lands.
-pub(crate) struct PendingDiffChangesBuild {
-    _task: Task<()>,
-    rx: mpsc::Receiver<Option<DiffDocument>>,
-    /// The workspace that asked for the build, which the document belongs to
-    /// whatever workspace is active when it lands.
-    workspace: WorkspaceId,
-    stamp: DiffChangesStamp,
-}
-
-/// The chunk that one changes view row belongs to, and the part of it the row
-/// shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DiffChangesRow {
-    pub file_index: usize,
-    pub chunk: ReviewChunkId,
-    pub kind: RowKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RowKind {
-    /// The chunk's header row, which names its file and its place in the file.
-    Header,
-    /// A diff row, as an index into the chunk's `hunk.rows`.
-    Diff(usize),
-}
-
-/// What a changes view build reads, gathered on the run loop.
+/// Bring every changes view of the active workspace in step with the
+/// workspace, and report whether anything moved.
 ///
-/// The build runs on the pool, so it carries owned copies of what it reads.
-/// The hunk cache, the highlight cache, and the parse memo are the exceptions.
-/// The build fills them, and each is shared behind its own lock.
-struct BuildInputs {
-    git_root: PathBuf,
-    base: Option<DiffBase>,
-    /// The text of every open buffer with a path. It wins over the disk, so an
-    /// unsaved edit shows.
-    open: HashMap<PathBuf, Rope>,
-    langs: Arc<LanguageRegistry>,
-    git_host: Arc<dyn GitHost>,
-    fs_host: Arc<dyn FsHost>,
-    cache: Arc<Mutex<DiffCache>>,
-    highlights: PreviewHighlights,
-    /// The base trees the last document parsed, so a rebuild reparses only
-    /// the bases that moved.
-    memo: TreeCache,
-}
-
-/// A chunk the changes view shows, with the row its header takes.
-struct PlacedChunk<'a> {
-    file_index: usize,
-    id: ReviewChunkId,
-    chunk: &'a ReviewChunk,
-    header: usize,
-}
-
-/// Start a build of the active workspace's changes view document, unless one is
-/// pending or the last one is current.
-///
-/// The build diffs every changed file against the base the per-file view uses,
-/// on the pool. [`pump_diff_changes_build`] stores what it finds on the
-/// workspace that asked for it, so the last document paints while the next one
-/// builds.
-pub(crate) fn ensure_diff_changes_doc(stoat: &mut Stoat) {
-    if stoat.pending_diff_changes_build.is_some() {
-        return;
+/// A moved stamp lists each stale stack's files anew. An excerpt whose file
+/// left the list goes, and a file with no excerpt gets one. An excerpt whose
+/// buffer's diff map moved refolds, and each waiting landing lands once its
+/// excerpt is folded. The list reads the repository tally, which the pump
+/// drives too, and the buffers a disposed changes view released close here.
+/// Answers on the contract every pump in [`Stoat::drive_pumps`] answers.
+pub(crate) fn pump_diff_changes_stack(stoat: &mut Stoat) -> bool {
+    let released = mem::take(&mut stoat.active_workspace_mut().diff_changes_released);
+    for &buffer_id in &released {
+        buffer_lifecycle::close_released_buffer(stoat, buffer_id);
     }
-    let workspace = stoat.active_workspace;
-    let ws = stoat.active_workspace();
-    let stamp = DiffChangesStamp::read(ws);
-    if ws
-        .diff_changes_doc
-        .as_ref()
-        .is_some_and(|built| built.stamp == stamp)
-    {
-        return;
+    if stoat.active_workspace().diff_changes_views.is_empty() {
+        return !released.is_empty();
     }
 
-    let inputs = BuildInputs {
-        git_root: ws.git_root.clone(),
-        base: ws.diff_base().cloned(),
-        open: open_texts(&ws.buffers),
-        langs: stoat.language_registry.clone(),
-        git_host: stoat.git_host.clone(),
-        fs_host: stoat.fs_host.clone(),
-        cache: stoat.diff_cache.clone(),
-        highlights: PreviewHighlights::from_stoat(stoat),
-        memo: ws
-            .diff_changes_doc
-            .as_ref()
-            .and_then(|built| built.doc.as_ref())
-            .map(|doc| doc.tree_cache.clone())
-            .unwrap_or_default(),
+    let tallied = {
+        let executor = stoat.executor.clone();
+        let git_host = stoat.git_host.clone();
+        let redraw = stoat.redraw_notify.clone();
+        stoat
+            .active_workspace_mut()
+            .pump_tally(&executor, &git_host, &redraw)
     };
-    let redraw = stoat.redraw_notify.clone();
-    let (tx, rx) = mpsc::channel();
-    let task = stoat.executor.spawn_blocking(move || {
-        let _ = tx.send(build(inputs));
-        redraw.notify_one();
-    });
-    stoat.pending_diff_changes_build = Some(PendingDiffChangesBuild {
-        _task: task,
-        rx,
-        workspace,
-        stamp,
-    });
+    let relisted = relist(stoat);
+    let ws = stoat.active_workspace_mut();
+    let refolded = refold(ws);
+    let landed = land_pending(ws);
+    !released.is_empty() || tallied || relisted || refolded || landed
 }
 
-/// Store a landed changes view build on the workspace that asked for it.
+/// Lay the excerpts of `state` out in stack rows, and answer the total.
 ///
-/// A build that found no change stores no document, which drops the document
-/// before it. Each changes view cursor of the workspace moves to the row that
-/// shows its chunk in the new document, and each waiting landing lands. Returns
-/// whether a build landed, on the contract every pump in [`Stoat::drive_pumps`]
-/// answers.
-pub(crate) fn pump_diff_changes_build(stoat: &mut Stoat) -> bool {
-    let Some(pending) = stoat.pending_diff_changes_build.take() else {
+/// Each excerpt takes a header row and then its display rows, and
+/// [`Excerpt::top`] records its header's row. An excerpt that waits on its
+/// diff map takes its header row alone, so the stack never shows a whole
+/// unfolded file.
+pub(crate) fn layout_stack(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+) -> usize {
+    let mut row = 0;
+    for excerpt in &mut state.excerpts {
+        excerpt.top = row;
+        row += 1 + excerpt_rows(excerpt, editors);
+    }
+    row
+}
+
+/// The display rows `excerpt` shows, zero while it waits on its diff map.
+pub(crate) fn excerpt_rows(
+    excerpt: &Excerpt,
+    editors: &mut SlotMap<EditorId, EditorState>,
+) -> usize {
+    if excerpt.folded_version.is_none() {
+        return 0;
+    }
+    editors.get_mut(excerpt.editor_id).map_or(0, |editor| {
+        editor.display_map.snapshot().line_count() as usize
+    })
+}
+
+/// The stack row of the focused excerpt's cursor, as of the last
+/// [`layout_stack`].
+///
+/// `None` on an empty stack, and while the focused excerpt waits on its diff
+/// map.
+pub(crate) fn cursor_stack_row(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+) -> Option<usize> {
+    let excerpt = state.focused_excerpt()?;
+    excerpt.folded_version?;
+    let editor = editors.get_mut(excerpt.editor_id)?;
+    Some(excerpt.top + 1 + view::cursor_display_row(editor) as usize)
+}
+
+/// Focus the excerpt that stack row `row` falls in and put its cursor at the
+/// start of the row, as of the last [`layout_stack`], and report whether the
+/// row held one.
+///
+/// A header row puts the cursor on its excerpt's first row, and a row past the
+/// stack on the last row.
+pub(crate) fn select_row(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+) -> bool {
+    let Some((index, display_row)) = excerpt_at(state, editors, row) else {
         return false;
     };
-    let doc = match pending.rx.try_recv() {
-        Ok(doc) => doc,
-        Err(mpsc::TryRecvError::Empty) => {
-            stoat.pending_diff_changes_build = Some(pending);
-            return false;
-        },
-        Err(mpsc::TryRecvError::Disconnected) => return false,
+    let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
+        return false;
+    };
+    let Some(point) = editor
+        .display_map
+        .snapshot()
+        .row_start_at_or_after(display_row)
+    else {
+        return false;
+    };
+    place_cursor(editor, point);
+    state.focused = index;
+    true
+}
+
+/// The excerpt that stack row `row` falls in, as an index, and the display row
+/// of that excerpt the row shows, as of the last [`layout_stack`].
+///
+/// A header row answers its excerpt's first display row, and a row past the
+/// stack answers the last row. `None` on a stack with no row to show.
+fn excerpt_at(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+) -> Option<(usize, u32)> {
+    let index = state
+        .excerpts
+        .iter()
+        .rposition(|excerpt| excerpt.top <= row)?;
+    let excerpt = &state.excerpts[index];
+    let rows = excerpt_rows(excerpt, editors);
+    if rows == 0 {
+        return None;
+    }
+    let display_row = row.saturating_sub(excerpt.top + 1).min(rows - 1);
+    Some((index, display_row as u32))
+}
+
+/// Scroll the focused changes view so its cursor sits inside the scrolloff
+/// band, as an editor follows its cursor, and report whether the scroll moved.
+///
+/// The band is `scrolloff` rows at each edge, capped to half the viewport, and
+/// the scroll stops at the stack's last page.
+pub(crate) fn follow_cursor(stoat: &mut Stoat, scrolloff: u32) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return false;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return false;
+    };
+    let total = layout_stack(state, editors);
+    let Some(row) = cursor_stack_row(state, editors) else {
+        return false;
     };
 
-    if let Some(ws) = stoat.workspaces.get_mut(pending.workspace) {
-        let doc = doc.map(Arc::new);
-        remap_cursors(ws, doc.as_deref());
-        ws.diff_changes_doc = Some(DiffChangesDoc {
-            doc,
-            stamp: pending.stamp,
-        });
-        land_pending(ws);
+    let viewport = state.viewport_rows.max(1);
+    let scrolloff = scrolloff as usize;
+    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(viewport / 2);
+    let before = state.scroll;
+    if row < state.scroll + top {
+        state.scroll = row.saturating_sub(top);
+    } else if row + bottom >= state.scroll + viewport {
+        state.scroll = (row + bottom + 1)
+            .saturating_sub(viewport)
+            .min(total.saturating_sub(viewport));
+    }
+    state.scroll != before
+}
+
+/// Remove `excerpts`' editors, and close each buffer the stack opened when
+/// nothing else needs it.
+pub(crate) fn release_excerpts(stoat: &mut Stoat, excerpts: Vec<Excerpt>) {
+    for excerpt in excerpts {
+        drop_excerpt(stoat, excerpt);
+    }
+}
+
+/// Remove `excerpts`' editors from `ws`, and queue each buffer the stack
+/// opened for [`pump_diff_changes_stack`] to close.
+///
+/// For a caller that holds the workspace alone, since a buffer's close reaches
+/// the language servers.
+pub(crate) fn dispose_excerpts(ws: &mut Workspace, excerpts: Vec<Excerpt>) {
+    for excerpt in excerpts {
+        ws.editors.remove(excerpt.editor_id);
+        if excerpt.owns_buffer {
+            ws.diff_changes_released.push(excerpt.buffer_id);
+        }
+    }
+}
+
+/// Put `editor`'s one cursor on `point`, held inside the buffer.
+pub(crate) fn place_cursor(editor: &mut EditorState, point: Point) {
+    let snapshot = editor.display_map.snapshot();
+    let buffer = snapshot.buffer_snapshot();
+    let rope = buffer.rope();
+    let row = point.row.min(rope.max_point().row);
+    let column = point.column.min(rope.line_len(row));
+    let offset = rope.point_to_offset(Point::new(row, column));
+    editor.selections.set_block_cursor(offset, buffer);
+}
+
+/// The buffer position of `editor`'s cursor.
+pub(crate) fn cursor_point(editor: &mut EditorState) -> Point {
+    let snapshot = editor.display_map.snapshot();
+    let buffer = snapshot.buffer_snapshot();
+    let selection = editor.selections.newest_anchor();
+    let offset = stoat_text::cursor_offset(
+        buffer.rope(),
+        buffer.resolve_anchor(&selection.tail()),
+        buffer.resolve_anchor(&selection.head()),
+    );
+    buffer.rope().offset_to_point(offset)
+}
+
+/// The buffer row each hunk of `editor`'s diff map starts on, in buffer order.
+pub(crate) fn hunk_starts(editor: &mut EditorState) -> Vec<u32> {
+    let snapshot = editor.display_map.snapshot();
+    snapshot.diff_map().map_or_else(Vec::new, |map| {
+        map.hunks().map(|hunk| hunk.buffer_start_line).collect()
+    })
+}
+
+/// The rows `editor`'s folds leave showing, from its buffer's diff map.
+pub(crate) fn kept_rows(editor: &mut EditorState) -> Vec<Range<u32>> {
+    let snapshot = editor.display_map.snapshot();
+    let line_count = snapshot.buffer_snapshot().rope().max_point().row + 1;
+    snapshot
+        .diff_map()
+        .map_or_else(Vec::new, |map| kept_runs(map, line_count))
+}
+
+/// The row a landing on `row` takes in an excerpt that shows `kept`.
+///
+/// A row the excerpt shows stays. A row a fold hides moves to the first row of
+/// the next shown run below it, and below the last run to the first row of
+/// the first run.
+pub(crate) fn landing_row(kept: &[Range<u32>], row: u32) -> u32 {
+    if kept.iter().any(|run| run.contains(&row)) {
+        return row;
+    }
+    kept.iter()
+        .find(|run| run.start > row)
+        .or(kept.first())
+        .map_or(row, |run| run.start)
+}
+
+/// List the changed files anew for every changes view whose list is stale, and
+/// report whether any was.
+fn relist(stoat: &mut Stoat) -> bool {
+    let stale: Vec<DiffChangesId> = {
+        let ws = stoat.active_workspace();
+        let stamp = StackStamp::read(ws);
+        ws.diff_changes_views
+            .iter()
+            .filter(|(_, state)| state.synced != Some(stamp))
+            .map(|(id, _)| id)
+            .collect()
+    };
+    if stale.is_empty() {
+        return false;
+    }
+
+    let listed = changed_files(stoat);
+    for &id in &stale {
+        sync_excerpts(stoat, id, &listed);
+    }
+
+    // Read after the sync, since an excerpt that opens a buffer moves the
+    // stamp.
+    let ws = stoat.active_workspace_mut();
+    let stamp = StackStamp::read(ws);
+    for id in stale {
+        if let Some(state) = ws.diff_changes_views.get_mut(id) {
+            state.synced = Some(stamp);
+        }
     }
     true
 }
 
-/// Move the cursor of each changes view in `ws` that waits on a landing onto
-/// the row of its landing in the workspace's document.
+/// The files a changes view lists, keyed by their path relative to the working
+/// directory, so the keys run in path order.
 ///
-/// A landing waits while the workspace has no document. It also waits while a
-/// stale document holds no change of its file, because the next build holds
-/// the edit that made the change. Otherwise the cursor takes the landing's
-/// row, or the first row when the document holds no change of the file.
-pub(crate) fn land_pending(ws: &mut Workspace) {
-    let Some((doc, stamp)) = ws
-        .diff_changes_doc
-        .as_ref()
-        .map(|built| (built.doc.clone(), built.stamp))
+/// The repository's tally names the files changed against the base: the files
+/// with an unstaged hunk under the index base, and the files that differ from
+/// HEAD under any other base. Under a revision base the files changed since
+/// the revision take the tally's place. An untracked file stays out, so a
+/// scratch file beside the work does not fill the stack.
+///
+/// Every open buffer under the working directory whose diff map holds a hunk
+/// joins the list, so an unsaved edit shows. Under the index base only an
+/// unstaged hunk counts, as the tally counts.
+///
+/// Outside a repository the list is empty.
+fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
+    let ws = stoat.active_workspace();
+    let Some(workdir) = stoat
+        .git_host
+        .discover(&ws.git_root)
+        .and_then(|repo| repo.workdir())
     else {
-        return;
+        return BTreeMap::new();
     };
-    let current = stamp == DiffChangesStamp::read(ws);
-    for state in ws.diff_changes_views.values_mut() {
-        let Some((rel_path, buffer_row)) = &state.pending_landing else {
-            continue;
-        };
-        let row = doc
-            .as_deref()
-            .and_then(|doc| row_for(doc, rel_path, *buffer_row));
-        if row.is_none() && !current {
-            continue;
-        }
-        state.cursor = row.unwrap_or(0);
-        state.pending_landing = None;
-    }
-}
-
-/// The changes view row at `row`, or `None` past the last row.
-pub(crate) fn row_at(doc: &DiffDocument, row: usize) -> Option<DiffChangesRow> {
-    let (placed, kind) = locate(doc, row)?;
-    Some(DiffChangesRow {
-        file_index: placed.file_index,
-        chunk: placed.id,
-        kind,
-    })
-}
-
-/// The header row of every chunk, in row order.
-pub(crate) fn chunk_starts(doc: &DiffDocument) -> Vec<usize> {
-    placed_chunks(doc).map(|placed| placed.header).collect()
-}
-
-/// The changes view row that shows line `buffer_row` of the file at `rel_path`.
-///
-/// A line inside a chunk lands on its own row. A line outside every chunk
-/// lands on the header of the next chunk below it. A line below the file's
-/// last chunk lands on the file's first chunk header. The answer is `None`
-/// when the document holds no chunk of the file.
-pub(crate) fn row_for(doc: &DiffDocument, rel_path: &str, buffer_row: u32) -> Option<usize> {
-    let file_index = doc
-        .files
-        .iter()
-        .position(|file| file.rel_path == rel_path)?;
-
-    let mut first_header = None;
-    let mut next_below = None;
-    for placed in placed_chunks(doc).filter(|placed| placed.file_index == file_index) {
-        let on_line = placed.chunk.hunk.rows.iter().position(|row| {
-            right(row).is_some_and(|side| side.line_num.saturating_sub(1) == buffer_row)
-        });
-        if let Some(index) = on_line {
-            return Some(placed.header + 1 + index);
-        }
-
-        first_header.get_or_insert(placed.header);
-        if next_below.is_none() && buffer_start(placed.chunk) >= buffer_row {
-            next_below = Some(placed.header);
-        }
-    }
-    next_below.or(first_header)
-}
-
-/// The file and the buffer row that the changes view row at `row` opens on.
-///
-/// A row with a buffer side opens on its own line. A deletion row has no
-/// buffer side, so it opens on the next buffer line of its chunk, or on the
-/// line above when the deletion ends the chunk. A header row opens where the
-/// chunk's first change does. A chunk with no buffer line at all, from a file
-/// emptied to nothing, opens on the file's first row.
-pub(crate) fn target_of(doc: &DiffDocument, row: usize) -> Option<(String, u32)> {
-    let (placed, kind) = locate(doc, row)?;
-    let rows = &placed.chunk.hunk.rows;
-    let index = match kind {
-        RowKind::Header => rows
-            .iter()
-            .position(|row| matches!(row, ReviewRow::Changed { .. }))
-            .unwrap_or(0),
-        RowKind::Diff(index) => index,
-    };
-
-    let side = rows[index..]
-        .iter()
-        .find_map(right)
-        .or_else(|| rows[..index].iter().rev().find_map(right));
-    let rel_path = doc.files.get(placed.file_index)?.rel_path.clone();
-    Some((
-        rel_path,
-        side.map_or(0, |side| side.line_num.saturating_sub(1)),
-    ))
-}
-
-/// Build the changes view document from `inputs`, on whatever thread calls.
-///
-/// `None` when the git root is in no repository, or when no file differs from
-/// its base.
-fn build(inputs: BuildInputs) -> Option<DiffDocument> {
-    let repo = inputs.git_host.discover(&inputs.git_root)?;
-    let workdir = repo.workdir()?;
-    let files = file_inputs(&*repo, &workdir, &inputs);
-    let hunks = file_hunks(&files, &inputs.cache, &inputs.memo);
-
-    let mut doc = DiffDocument::default();
-    doc.add_files_with_hunks(files, hunks);
-    doc.tree_cache = inputs.memo;
-    inputs.highlights.attach(&mut doc);
-    (!doc.order.is_empty()).then_some(doc)
-}
-
-/// One input per changed file, in path order.
-///
-/// The paths are the files the repository lists as changed against the base,
-/// with the untracked files left out, and every open buffer under the workdir,
-/// so an unsaved edit shows. A file whose two texts agree gets no input.
-///
-/// An open buffer takes its own text over the disk's. A file gone from the disk
-/// reads as empty, so its deletion shows. A file whose read fails for another
-/// reason gets no input.
-fn file_inputs(repo: &dyn GitRepo, workdir: &Path, inputs: &BuildInputs) -> Vec<ReviewFileInput> {
-    let listed = match &inputs.base {
-        Some(DiffBase::Rev { sha: Some(sha), .. }) => repo.changed_files_from(sha),
-        _ => repo.changed_files(),
-    };
-    let paths: BTreeSet<PathBuf> = listed
-        .into_iter()
-        .filter(|file| !file.untracked)
-        .map(|file| file.path)
-        .chain(
-            inputs
-                .open
-                .keys()
-                .filter(|path| path.starts_with(workdir))
-                .cloned(),
-        )
-        .collect();
-
-    paths
-        .into_iter()
-        .filter_map(|path| {
-            let base = workspace::diff::base_texts(repo, &path, inputs.base.as_ref())?.base;
-            let buffer = match inputs.open.get(&path) {
-                Some(rope) => rope.to_string(),
-                None => match diff::read_utf8(&*inputs.fs_host, &path) {
-                    Ok(text) => text,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-                    Err(_) => return None,
-                },
+    let index_base = ws.diff_base().is_none();
+    let listed: Vec<PathBuf> = match ws.diff_base() {
+        Some(DiffBase::Rev { sha: Some(_), .. }) => ws
+            .rev_changed_files()
+            .map(<[PathBuf]>::to_vec)
+            .unwrap_or_default(),
+        _ => {
+            let totals = match index_base {
+                true => ws.repo_unstaged_hunk_totals(),
+                false => ws.repo_hunk_totals(),
             };
-            if *base == buffer {
-                return None;
-            }
-            Some(ReviewFileInput {
-                rel_path: path
-                    .strip_prefix(workdir)
-                    .unwrap_or(&path)
-                    .display()
-                    .to_string(),
-                language: inputs.langs.for_path(&path),
-                base_text: base,
-                buffer_text: Arc::new(buffer),
-                path,
-            })
+            let untracked = ws.repo_untracked_files().unwrap_or_default();
+            totals
+                .unwrap_or_default()
+                .iter()
+                .filter(|(path, count)| *count > 0 && untracked.binary_search(path).is_err())
+                .map(|(path, _)| workdir.join(path))
+                .collect()
+        },
+    };
+    let open = ws.buffers.open_paths().into_iter().filter(|path| {
+        path.starts_with(&workdir)
+            && ws
+                .buffers
+                .id_for_path(path)
+                .and_then(|id| ws.buffers.get(id))
+                .is_some_and(|buffer| {
+                    let buffer = buffer.read().expect("buffer poisoned");
+                    buffer
+                        .diff_map
+                        .as_ref()
+                        .is_some_and(|map| map.hunks().any(|hunk| !index_base || !hunk.staged()))
+                })
+    });
+
+    listed
+        .into_iter()
+        .chain(open)
+        .filter_map(|path| {
+            let rel_path = path.strip_prefix(&workdir).ok()?.display().to_string();
+            Some((rel_path, path))
         })
         .collect()
 }
 
-/// The hunks of each file in `files`, in the same order.
+/// Bring the excerpts of changes view `id` in step with `listed`.
 ///
-/// A file whose two texts the hunk cache holds reuses the cached hunks, so a
-/// rebuild diffs only the files that moved. The rest go through one changeset
-/// pass, which finds the moves between them, and their hunks enter the cache.
-fn file_hunks(
-    files: &[ReviewFileInput],
-    cache: &Mutex<DiffCache>,
-    memo: &TreeCache,
-) -> Vec<Vec<ReviewHunk>> {
-    let keys: Vec<DiffCacheKey> = files
-        .iter()
-        .map(|file| {
-            action_handlers::review::diff_cache_key(
-                &file.base_text,
-                &file.buffer_text,
-                file.language.as_ref(),
-            )
-        })
-        .collect();
-    let mut found: Vec<Option<Arc<Vec<ReviewHunk>>>> = {
-        let mut cache = cache.lock().expect("diff_cache poisoned");
-        keys.iter()
-            .map(|key| cache.lookup(key).map(|(hunks, _)| hunks))
+/// An excerpt whose file left the list goes, as [`drop_excerpt`] drops it. A
+/// listed file with no excerpt gets one. The excerpts sort by path, and the
+/// focus stays on its file while the file stays listed.
+fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String, PathBuf>) {
+    let Some(state) = stoat.active_workspace_mut().diff_changes_views.get_mut(id) else {
+        return;
+    };
+    let focused_path = state
+        .focused_excerpt()
+        .map(|excerpt| excerpt.rel_path.clone());
+    let (kept, gone): (Vec<Excerpt>, Vec<Excerpt>) = mem::take(&mut state.excerpts)
+        .into_iter()
+        .partition(|excerpt| listed.contains_key(&excerpt.rel_path));
+    state.excerpts = kept;
+    release_excerpts(stoat, gone);
+
+    let missing: Vec<(&String, &PathBuf)> = {
+        let held = stoat
+            .active_workspace()
+            .diff_changes_views
+            .get(id)
+            .map(|state| &state.excerpts[..])
+            .unwrap_or_default();
+        listed
+            .iter()
+            .filter(|(rel_path, _)| !held.iter().any(|excerpt| &excerpt.rel_path == *rel_path))
             .collect()
     };
-
-    let misses: Vec<usize> = (0..files.len()).filter(|&i| found[i].is_none()).collect();
-    if !misses.is_empty() {
-        let missed: Vec<ReviewFileInput> = misses.iter().map(|&i| files[i].clone()).collect();
-        let computed = diff::extract_review_hunks_changeset(&missed, 3, Some(memo));
-        let mut cache = cache.lock().expect("diff_cache poisoned");
-        for (&i, hunks) in misses.iter().zip(computed) {
-            let hunks = Arc::new(hunks);
-            cache.insert(keys[i].clone(), hunks.clone(), true);
-            found[i] = Some(hunks);
+    for (rel_path, path) in missing {
+        let Some(excerpt) = open_excerpt(stoat, rel_path.clone(), path) else {
+            continue;
+        };
+        match stoat.active_workspace_mut().diff_changes_views.get_mut(id) {
+            Some(state) => state.excerpts.push(excerpt),
+            None => drop_excerpt(stoat, excerpt),
         }
     }
 
-    found
-        .into_iter()
-        .map(|hunks| hunks.map(Arc::unwrap_or_clone).unwrap_or_default())
-        .collect()
-}
-
-/// Move each changes view cursor of `ws` onto the row of `new` that shows the
-/// part of a chunk it showed in the workspace's last document.
-///
-/// A cursor whose chunk is gone stays, and the paint holds it inside the rows.
-/// A cursor that waits on a landing moves too, and the landing then places it.
-fn remap_cursors(ws: &mut Workspace, new: Option<&DiffDocument>) {
-    let old = ws
-        .diff_changes_doc
-        .as_ref()
-        .and_then(|built| built.doc.clone());
-    let (Some(old), Some(new)) = (old, new) else {
+    let Some(state) = stoat.active_workspace_mut().diff_changes_views.get_mut(id) else {
         return;
     };
-    for state in ws.diff_changes_views.values_mut() {
-        if let Some(row) = remap_row(&old, new, state.cursor) {
-            state.cursor = row;
-        }
-    }
+    state.excerpts.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    state.focused = focused_path
+        .and_then(|path| {
+            state
+                .excerpts
+                .iter()
+                .position(|excerpt| excerpt.rel_path == path)
+        })
+        .unwrap_or(state.focused)
+        .min(state.excerpts.len().saturating_sub(1));
 }
 
-/// The row of `new` that shows the part of a chunk that `row` shows in `old`.
+/// An excerpt of the file at `path`, in the diff view, with its diff map
+/// wanted.
 ///
-/// The chunk matches by the path of its file and its place among that file's
-/// chunks, so a rebuild that adds or drops rows above it keeps a cursor on the
-/// chunk. A diff row keeps its offset into the chunk, held inside the new
-/// chunk's rows. `None` when `new` holds no such chunk.
-fn remap_row(old: &DiffDocument, new: &DiffDocument, row: usize) -> Option<usize> {
-    let at = row_at(old, row)?;
-    let rel_path = &old.files.get(at.file_index)?.rel_path;
-    let nth = placed_chunks(old)
-        .filter(|chunk| chunk.file_index == at.file_index)
-        .position(|chunk| chunk.id == at.chunk)?;
-
-    let file_index = new
-        .files
-        .iter()
-        .position(|file| &file.rel_path == rel_path)?;
-    let target = placed_chunks(new)
-        .filter(|chunk| chunk.file_index == file_index)
-        .nth(nth)?;
-    let last = target.chunk.hunk.rows.len().checked_sub(1);
-    Some(match (at.kind, last) {
-        (RowKind::Diff(index), Some(last)) => target.header + 1 + index.min(last),
-        _ => target.header,
+/// `None` when the file reads as no buffer, as an image or an unreadable file
+/// does.
+fn open_excerpt(stoat: &mut Stoat, rel_path: String, path: &Path) -> Option<Excerpt> {
+    let workspace = stoat.active_workspace;
+    let owns_buffer = stoat.active_workspace().buffers.id_for_path(path).is_none();
+    let (buffer_id, buffer) =
+        buffer_lifecycle::open_buffer_unshown(stoat, workspace, path, OpenOrigin::Visited)?;
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
+    editor.set_diff_view(true);
+    let editor_id = ws.editors.insert(editor);
+    review::ensure_diff_map(stoat, buffer_id, None);
+    Some(Excerpt {
+        buffer_id,
+        editor_id,
+        rel_path,
+        folded_version: None,
+        top: 0,
+        owns_buffer,
     })
 }
 
-/// The text of every open buffer with a path, keyed by the path.
-fn open_texts(buffers: &BufferRegistry) -> HashMap<PathBuf, Rope> {
-    buffers
-        .open_paths()
-        .into_iter()
-        .filter_map(|path| {
-            let buffer = buffers.get(buffers.id_for_path(&path)?)?;
-            let rope = buffer.read().expect("buffer poisoned").rope().clone();
-            Some((path, rope))
-        })
-        .collect()
+/// Remove `excerpt`'s editor, and close its buffer when the stack opened it
+/// and nothing else needs it.
+fn drop_excerpt(stoat: &mut Stoat, excerpt: Excerpt) {
+    stoat
+        .active_workspace_mut()
+        .editors
+        .remove(excerpt.editor_id);
+    if excerpt.owns_buffer {
+        buffer_lifecycle::close_released_buffer(stoat, excerpt.buffer_id);
+    }
 }
 
-/// The chunk that holds `row`, and the part of the chunk the row shows.
-fn locate(doc: &DiffDocument, row: usize) -> Option<(PlacedChunk<'_>, RowKind)> {
-    let placed = placed_chunks(doc)
-        .take_while(|placed| placed.header <= row)
-        .last()?;
-    let kind = match row - placed.header {
-        0 => RowKind::Header,
-        offset if offset <= placed.chunk.hunk.rows.len() => RowKind::Diff(offset - 1),
-        _ => return None,
-    };
-    Some((placed, kind))
-}
-
-/// Every chunk in paint order, with the row its header takes.
+/// Cut the folds of every excerpt whose buffer's diff map moved since its
+/// folds were cut, and report whether any did.
 ///
-/// The walk is the one
-/// [`render_commit_preview`](crate::render::commits::render_commit_preview)
-/// paints. Files go in document order and each file's chunks in its order, and
-/// each chunk takes one header row and then its hunk's rows. A chunk id the
-/// document does not hold paints nothing, so it takes no rows here either.
-fn placed_chunks(doc: &DiffDocument) -> impl Iterator<Item = PlacedChunk<'_>> {
-    doc.files
+/// An excerpt cut for the first time puts its cursor on a row it shows, by
+/// [`landing_row`], unless a landing waits on its file.
+fn refold(ws: &mut Workspace) -> bool {
+    let Workspace {
+        diff_changes_views,
+        editors,
+        buffers,
+        ..
+    } = ws;
+    let mut any = false;
+    for state in diff_changes_views.values_mut() {
+        for excerpt in &mut state.excerpts {
+            let Some(version) = map_version(buffers, excerpt.buffer_id) else {
+                continue;
+            };
+            if excerpt.folded_version == Some(version) {
+                continue;
+            }
+            let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+                continue;
+            };
+            let Some((folded, kept)) = fold_excerpt(editor) else {
+                continue;
+            };
+            let first = excerpt.folded_version.is_none();
+            excerpt.folded_version = Some(folded);
+            any = true;
+
+            let landing_waits = state
+                .pending_landing
+                .as_ref()
+                .is_some_and(|landing| landing.rel_path == excerpt.rel_path);
+            if first && !landing_waits {
+                let row = cursor_point(editor).row;
+                place_cursor(editor, Point::new(landing_row(&kept, row), 0));
+            }
+        }
+    }
+    any
+}
+
+/// Land the cursor of each changes view of `ws` that waits on a landing, and
+/// report whether any landed.
+///
+/// A landing waits until the excerpt of its file is folded. A landing whose
+/// file has no excerpt waits until the list is settled for the file. The list
+/// is settled when it is current, the tally is in, and the file's buffer has a
+/// current diff map. The landing then lands on the first excerpt's first row.
+fn land_pending(ws: &mut Workspace) -> bool {
+    let stamp = StackStamp::read(ws);
+    let tally_pending = ws.tally_pending();
+    let waiting: Vec<(DiffChangesId, bool)> = ws
+        .diff_changes_views
         .iter()
-        .enumerate()
-        .flat_map(move |(file_index, file)| {
-            file.chunks
-                .iter()
-                .filter_map(move |&id| doc.chunks.get(&id).map(|chunk| (file_index, id, chunk)))
-        })
-        .scan(0, |next_header, (file_index, id, chunk)| {
-            let header = *next_header;
-            *next_header += 1 + chunk.hunk.rows.len();
-            Some(PlacedChunk {
-                file_index,
+        .filter_map(|(id, state)| {
+            let buffer_id = state.pending_landing.as_ref()?.buffer_id;
+            let map_settled = ws.buffers.get(buffer_id).is_none()
+                || ws.diff_map_current(buffer_id)
+                || ws.hunks_installed(buffer_id);
+            Some((
                 id,
-                chunk,
-                header,
-            })
+                state.synced == Some(stamp) && !tally_pending && map_settled,
+            ))
         })
+        .collect();
+
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let mut landed = false;
+    for (id, settled) in waiting {
+        if let Some(state) = diff_changes_views.get_mut(id) {
+            landed |= land(state, editors, settled);
+        }
+    }
+    landed
 }
 
-/// The buffer row where a chunk's change starts.
+/// Land `state`'s waiting landing if its excerpt is ready, and report whether
+/// it landed.
 ///
-/// A pure deletion has no buffer rows, so its `buffer_line_range` is empty and
-/// names no place. Its change sits on the row below its leading context.
-fn buffer_start(chunk: &ReviewChunk) -> u32 {
-    if !chunk.buffer_line_range.is_empty() {
-        return chunk.buffer_line_range.start;
-    }
-    // A 1-based line number is the 0-based row below that line.
-    chunk
-        .hunk
-        .rows
+/// The landing focuses the excerpt of its file and puts the cursor on its row
+/// and column, or on the row [`landing_row`] picks when a fold hides that row.
+/// A file with no excerpt lands, once `settled`, on the first excerpt's first
+/// row, and a stack with no excerpt drops the landing.
+fn land(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    settled: bool,
+) -> bool {
+    let Some(landing) = state.pending_landing.clone() else {
+        return false;
+    };
+    let target = state
+        .excerpts
         .iter()
-        .take_while(|row| matches!(row, ReviewRow::Context { .. }))
-        .last()
-        .and_then(right)
-        .map_or(0, |side| side.line_num)
+        .position(|excerpt| excerpt.rel_path == landing.rel_path);
+    let (index, row, column) = match target {
+        Some(index) => (index, landing.row, landing.column),
+        None if !settled => return false,
+        None => (0, 0, 0),
+    };
+    let Some(excerpt) = state.excerpts.get(index) else {
+        state.pending_landing = None;
+        return true;
+    };
+    if excerpt.folded_version.is_none() {
+        return false;
+    }
+    let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+        return false;
+    };
+
+    let shown = landing_row(&kept_rows(editor), row);
+    let column = if shown == row { column } else { 0 };
+    place_cursor(editor, Point::new(shown, column));
+    state.focused = index;
+    state.pending_landing = None;
+    true
 }
 
-/// The buffer side of a diff row, which a deletion row lacks.
-fn right(row: &ReviewRow) -> Option<&ReviewSide> {
-    match row {
-        ReviewRow::Context { right, .. } => Some(right),
-        ReviewRow::Changed { right, .. } => right.as_ref(),
+/// Fold every unchanged run of `editor`'s buffer that lies more than
+/// [`CONTEXT_ROWS`] rows from a hunk, and answer the diff map version the folds
+/// were cut from with the rows left showing.
+///
+/// `None`, with nothing folded, while the buffer has no diff map.
+fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
+    let (version, kept, folds, max_point) = {
+        let snapshot = editor.display_map.snapshot();
+        let map = snapshot.diff_map()?;
+        let rope = snapshot.buffer_snapshot().rope();
+        let line_count = rope.max_point().row + 1;
+        let kept = kept_runs(map, line_count);
+        let folds: Vec<Range<Point>> = gaps(&kept, line_count)
+            .into_iter()
+            .map(|gap| fold_range(rope, gap))
+            .collect();
+        (map.version(), kept, folds, rope.max_point())
+    };
+    editor.display_map.unfold(vec![Point::new(0, 0)..max_point]);
+    editor.display_map.fold(folds);
+    Some((version, kept))
+}
+
+/// The rows an excerpt shows, as runs in buffer order.
+///
+/// Each hunk's rows widen by [`CONTEXT_ROWS`] on each side, stay inside the
+/// buffer's `line_count` rows, and merge with a run they touch. A deletion's
+/// rows are empty, so it keeps the row it sits on.
+fn kept_runs(map: &DiffMap, line_count: u32) -> Vec<Range<u32>> {
+    let mut runs: Vec<Range<u32>> = Vec::new();
+    for hunk in map.hunks() {
+        let rows = match hunk.buffer_line_range.is_empty() {
+            true => hunk.buffer_start_line..hunk.buffer_start_line + 1,
+            false => hunk.buffer_line_range.clone(),
+        };
+        let run =
+            rows.start.saturating_sub(CONTEXT_ROWS)..(rows.end + CONTEXT_ROWS).min(line_count);
+        if run.is_empty() {
+            continue;
+        }
+        match runs.last_mut() {
+            Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
+            _ => runs.push(run),
+        }
     }
+    runs
+}
+
+/// The rows of `0..line_count` that no run of `kept` holds, as runs.
+fn gaps(kept: &[Range<u32>], line_count: u32) -> Vec<Range<u32>> {
+    let mut gaps = Vec::new();
+    let mut start = 0;
+    for run in kept {
+        if run.start > start {
+            gaps.push(start..run.start);
+        }
+        start = run.end;
+    }
+    if start < line_count {
+        gaps.push(start..line_count);
+    }
+    gaps
+}
+
+/// The fold that hides the rows of `gap`.
+///
+/// A gap below a shown row folds from the end of that row, so the row ends in
+/// the fold's placeholder and the row below the gap starts the next display
+/// row. A gap at the top folds from the buffer's start, so its placeholder
+/// takes a display row of its own.
+fn fold_range(rope: &Rope, gap: Range<u32>) -> Range<Point> {
+    let end = Point::new(gap.end - 1, rope.line_len(gap.end - 1));
+    match gap.start {
+        0 => Point::new(0, 0)..end,
+        start => Point::new(start - 1, rope.line_len(start - 1))..end,
+    }
+}
+
+/// The version of buffer `id`'s diff map, or `None` while it has none.
+fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
+    let buffer = buffers.get(id)?;
+    let buffer = buffer.read().expect("buffer poisoned");
+    buffer.diff_map.as_ref().map(DiffMap::version)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        chunk_starts, ensure_diff_changes_doc, remap_row, row_at, row_for, target_of,
-        DiffChangesRow, DiffChangesStamp, DiffChangesState, RowKind,
-    };
+    use super::{fold_range, gaps, kept_runs, landing_row, DiffChangesState, StackStamp};
     use crate::{
-        action_handlers,
+        action_handlers::dispatch,
+        diff_map::DiffMap,
+        display_map::DisplayPoint,
         host::FakeRepoBuilder,
-        render::commits::preview_row_count,
-        review::{ReviewFileInput, ReviewRow, ReviewSide},
-        review_session::{DiffDocument, ReviewChunkId},
         test_harness::TestHarness,
-        workspace::diff::DiffBase,
+        workspace::diff::{DiffBase, WorktreeBase},
     };
     use std::{
-        iter,
         path::{Path, PathBuf},
         sync::Arc,
     };
-    use stoat_action::{DiffAgainstHead, DiffAgainstIndex};
+    use stoat_action::CloseDiffChanges;
+    use stoat_language::structural_diff;
+    use stoat_text::{Point, Rope};
 
-    /// Three files with no language, so the line diff cuts the chunks.
-    ///
-    /// a.txt gains a line near its top and loses its last line, far enough
-    /// apart for two chunks. b.txt loses a line between two others. c.txt
-    /// loses its only line.
-    fn three_files() -> (DiffDocument, Vec<Vec<ReviewChunkId>>) {
-        doc_of(&[
-            (
-                "a.txt",
-                "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n",
-                "1\nX\n2\n3\n4\n5\n6\n7\n8\n9\n",
-            ),
-            ("b.txt", "a\nOLD\nb\n", "a\nb\n"),
-            ("c.txt", "gone\n", ""),
-        ])
+    /// The map a structural diff of `base` against `text` gives.
+    fn map_of(base: &str, text: &str) -> DiffMap {
+        DiffMap::from_structural_changes(
+            structural_diff::diff(base, text),
+            Arc::new(base.to_string()),
+            text,
+        )
     }
 
-    /// A document over `files`, each a path with its base and buffer texts and
-    /// no language, and the chunk ids of each file.
-    fn doc_of(files: &[(&str, &str, &str)]) -> (DiffDocument, Vec<Vec<ReviewChunkId>>) {
-        let mut doc = DiffDocument::default();
-        let ids = doc.add_files(
-            files
-                .iter()
-                .map(|&(path, base, buffer)| ReviewFileInput {
-                    path: PathBuf::from(path),
-                    rel_path: path.to_string(),
-                    language: None,
-                    base_text: Arc::new(base.to_string()),
-                    buffer_text: Arc::new(buffer.to_string()),
-                })
-                .collect(),
-        );
-        (doc, ids)
+    /// Lines `1` to `n`, one per line.
+    fn numbered(n: u32) -> String {
+        (1..=n).map(|line| format!("{line}\n")).collect()
     }
 
-    fn at(rel_path: &str, buffer_row: u32) -> Option<(String, u32)> {
-        Some((rel_path.to_string(), buffer_row))
-    }
-
+    /// A hunk keeps three rows each side, a run held at the buffer's ends, and
+    /// two runs that touch merge into one. A deletion keeps the row it sits on.
     #[test]
-    fn rows_number_each_chunk_header_then_its_diff_rows() {
-        let (doc, ids) = three_files();
-        let expected: Vec<_> = [
-            (0, ids[0][0], 5),
-            (0, ids[0][1], 4),
-            (1, ids[1][0], 3),
-            (2, ids[2][0], 1),
-        ]
-        .into_iter()
-        .flat_map(|(file_index, chunk, diff_rows)| {
-            let row = move |kind| {
-                Some(DiffChangesRow {
-                    file_index,
-                    chunk,
-                    kind,
-                })
-            };
-            iter::once(row(RowKind::Header))
-                .chain((0..diff_rows).map(move |i| row(RowKind::Diff(i))))
-        })
-        .chain([None])
-        .collect();
-
+    fn kept_runs_widen_each_hunk_and_merge_where_they_touch() {
+        let base = numbered(30);
+        let text = base
+            .replace("\n2\n", "\nTWO\n")
+            .replace("\n9\n", "\nNINE\n")
+            .replace("\n20\n", "\n")
+            .replace("\n30\n", "\nTHIRTY\n");
+        // TWO sits on row 1, NINE on row 8, the deletion of 20 before row 19,
+        // and THIRTY on row 28. The buffer has 30 rows, the empty last one
+        // included.
         assert_eq!(
-            (0..=preview_row_count(&doc))
-                .map(|row| row_at(&doc, row))
-                .collect::<Vec<_>>(),
-            expected,
-            "each chunk's header then its diff rows, and nothing past the paint"
+            kept_runs(&map_of(&base, &text), 30),
+            [0..12, 16..23, 25..30],
         );
-        assert_eq!(chunk_starts(&doc), [0, 6, 11, 15]);
     }
 
+    /// The gaps are every row no run holds, at the top, between runs, and at
+    /// the bottom.
     #[test]
-    fn row_for_lands_on_the_line_else_the_next_chunk_below_else_the_first() {
-        let (doc, _) = three_files();
+    fn gaps_are_the_rows_between_and_around_the_runs() {
+        let every_row = |line_count: u32| 0..line_count;
         assert_eq!(
             [
-                ("a.txt", 1),
-                ("a.txt", 5),
-                ("a.txt", 10),
-                ("a.txt", 20),
-                ("b.txt", 1),
-                ("c.txt", 0),
-                ("d.txt", 0),
-            ]
-            .map(|(rel_path, buffer_row)| row_for(&doc, rel_path, buffer_row)),
-            [Some(2), Some(6), Some(6), Some(0), Some(14), Some(15), None],
+                gaps(&[2..5, 8..9], 12),
+                gaps(&[every_row(12)], 12),
+                gaps(&[], 3)
+            ],
+            [vec![0..2, 5..8, 9..12], vec![], vec![every_row(3)]],
         );
     }
 
-    /// A rebuild keeps a row on its chunk by the chunk's file and its place in
-    /// that file. A header stays a header, and a diff row keeps its offset,
-    /// held inside a chunk that shrank. A chunk gone from the file maps to no
-    /// row. Here a.txt keeps two chunks and the first grows, and the one chunk
-    /// of b.txt shrinks.
+    /// A gap below a shown row folds from that row's end, and a gap at the top
+    /// folds from the buffer's start.
     #[test]
-    fn remap_row_follows_a_chunk_by_its_file_and_place() {
-        let ten = "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
-        let a_new = ("a.txt", ten, "1\nX\nY\n2\n3\n4\n5\n6\n7\n8\n9\n");
-        let (old, _) = doc_of(&[
-            ("a.txt", ten, "1\nX\n2\n3\n4\n5\n6\n7\n8\n9\n"),
-            ("b.txt", "1\n2\n3\n", "1\nX\nY\nZ\n2\n3\n"),
-        ]);
-        let (new, _) = doc_of(&[a_new, ("b.txt", "1\n2\n3\n", "1\nX\n2\n3\n")]);
-        let (a_only, _) = doc_of(&[a_new]);
-
-        let (before, after) = (chunk_starts(&old), chunk_starts(&new));
+    fn a_fold_starts_at_the_end_of_the_row_above_its_gap() {
+        let rope = Rope::from("one\ntwo\nthree\nfour\n");
         assert_eq!(
-            [before[1], before[1] + 2, before[2] + 6].map(|row| remap_row(&old, &new, row)),
-            [Some(after[1]), Some(after[1] + 2), Some(after[2] + 4)],
+            [fold_range(&rope, 1..3), fold_range(&rope, 0..2)],
+            [
+                Point::new(0, 3)..Point::new(2, 5),
+                Point::new(0, 0)..Point::new(1, 3)
+            ],
         );
-        assert_eq!(remap_row(&old, &a_only, before[2]), None);
     }
 
-    /// The scroll moves the least distance that shows the cursor, and stays
-    /// for a cursor already in view or for a viewport of no rows.
+    /// A shown row stays, a hidden row moves to the next run below, and a
+    /// row below every run moves to the first run.
     #[test]
-    fn ensure_cursor_visible_scrolls_the_least_distance() {
-        let scrolled = |cursor, rows| {
+    fn a_landing_on_a_hidden_row_moves_to_a_shown_one() {
+        let kept = [2..5, 8..9];
+        assert_eq!(
+            [3, 0, 6, 10].map(|row| landing_row(&kept, row)),
+            [3, 2, 8, 2]
+        );
+    }
+
+    /// The scroll moves the least distance that shows the row, and stays for a
+    /// row already in view or for a viewport of no rows.
+    #[test]
+    fn ensure_row_visible_scrolls_the_least_distance() {
+        let scrolled = |row, rows| {
             let mut state = DiffChangesState {
-                cursor,
-                scroll_top: 5,
+                scroll: 5,
                 ..DiffChangesState::default()
             };
-            state.ensure_cursor_visible(rows);
-            state.scroll_top
+            state.ensure_row_visible(row, rows);
+            state.scroll
         };
         assert_eq!(
             [
@@ -809,63 +941,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn target_of_opens_the_buffer_line_a_row_shows() {
-        let (doc, _) = three_files();
-        assert_eq!(
-            [0, 1, 6, 10, 11, 13, 15, 16, 17].map(|row| target_of(&doc, row)),
-            [
-                at("a.txt", 1),
-                at("a.txt", 0),
-                at("a.txt", 9),
-                at("a.txt", 9),
-                at("b.txt", 1),
-                at("b.txt", 1),
-                at("c.txt", 0),
-                at("c.txt", 0),
-                None,
-            ],
-        );
-    }
-
-    /// The active workspace's changes view document, once a build started now
-    /// lands.
-    fn built(h: &mut TestHarness) -> Option<Arc<DiffDocument>> {
-        ensure_diff_changes_doc(&mut h.stoat);
-        h.settle();
-        h.stoat
-            .active_workspace()
-            .diff_changes_doc
-            .as_ref()
-            .and_then(|built| built.doc.clone())
-    }
-
-    /// Each file of `doc` as its path, its base text, its buffer text, and how
-    /// many chunks it has.
-    fn files(doc: &DiffDocument) -> Vec<(&str, &str, &str, usize)> {
-        doc.files
-            .iter()
-            .map(|file| {
-                (
-                    file.rel_path.as_str(),
-                    file.base_text.as_str(),
-                    file.buffer_text.as_str(),
-                    file.chunks.len(),
-                )
-            })
-            .collect()
-    }
-
-    fn stamp(h: &TestHarness) -> DiffChangesStamp {
-        DiffChangesStamp::read(h.stoat.active_workspace())
-    }
-
-    fn type_at_start(h: &mut TestHarness, text: &str) {
-        h.type_keys("i");
-        h.type_text(text);
-        h.type_keys("esc");
-    }
-
     /// The repository at /repo, with the harness's fake files under it.
     fn repo(h: &mut TestHarness) -> FakeRepoBuilder<'_> {
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
@@ -874,116 +949,82 @@ mod tests {
             .with_fs(h.fake_fs())
     }
 
-    /// An untracked file stays out, so a scratch file beside the work does not
-    /// fill the changes view.
+    /// The focused changes view's excerpts as each file's path and whether its
+    /// folds are cut.
+    fn excerpts(h: &TestHarness) -> Vec<(String, bool)> {
+        h.stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .expect("a focused changes view")
+            .excerpts
+            .iter()
+            .map(|excerpt| (excerpt.rel_path.clone(), excerpt.folded_version.is_some()))
+            .collect()
+    }
+
+    fn listed(paths: &[&str]) -> Vec<(String, bool)> {
+        paths.iter().map(|path| (path.to_string(), true)).collect()
+    }
+
+    /// A changes view over the harness's focused view, settled.
+    fn stacked(h: &mut TestHarness) {
+        h.cover_with_diff_changes(false);
+        h.settle();
+    }
+
+    /// Each changed file gets an excerpt, folded, in path order, and an
+    /// untracked file beside them gets none.
     #[test]
-    fn a_build_holds_every_tracked_change_in_path_order_with_its_colors() {
-        let mut h = TestHarness::with_size(80, 24);
+    fn changed_files_build_folded_excerpts_in_path_order() {
+        let mut h = TestHarness::with_size(100, 24);
         h.stage_review_scenario(
             "/repo",
             &[
-                ("b.rs", "fn b() {}\n", "fn b() { 1 }\n"),
-                ("a.rs", "fn a() {}\n", "fn a() { 2 }\n"),
+                ("c.txt", "c\n", "C\n"),
+                ("a.txt", "a\n", "A\n"),
+                ("b.txt", "b\n", "B\n"),
             ],
         );
         repo(&mut h).untracked("z.txt");
         h.fake_fs()
             .insert_file(Path::new("/repo/z.txt"), b"scratch\n");
 
-        let doc = built(&mut h).expect("two changed files build a document");
-        let colored: Vec<bool> = doc
-            .files
-            .iter()
-            .map(|file| file.buffer_highlights.is_some())
+        stacked(&mut h);
+        assert_eq!(excerpts(&h), listed(&["a.txt", "b.txt", "c.txt"]));
+    }
+
+    /// An excerpt shows its hunk with three rows of context each side, and the
+    /// rows beyond them fold away.
+    #[test]
+    fn an_excerpt_folds_every_row_beyond_the_context_of_its_hunks() {
+        let mut h = TestHarness::with_size(100, 24);
+        let base = numbered(20);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", &base, &base.replace("\n10\n", "\nTEN\n"))],
+        );
+        stacked(&mut h);
+
+        let ws = h.stoat.active_workspace_mut();
+        let excerpt = &ws.focused_diff_changes().expect("a changes view").excerpts[0];
+        let editor = ws.editors.get_mut(excerpt.editor_id).expect("an editor");
+        let snapshot = editor.display_map.snapshot();
+        let shown: Vec<u32> = (0..snapshot.line_count())
+            .filter_map(|row| snapshot.display_to_buffer(DisplayPoint::new(row, 0)))
+            .map(|point| point.row)
             .collect();
-        assert_eq!(
-            (files(&doc), colored),
-            (
-                vec![
-                    ("a.rs", "fn a() {}\n", "fn a() { 2 }\n", 1),
-                    ("b.rs", "fn b() {}\n", "fn b() { 1 }\n", 1),
-                ],
-                vec![true, true],
-            ),
-        );
+        // The placeholder row holds the folded top, then rows 6 to 12 show the
+        // hunk at row 9 with its context, and the rows below fold into row 12.
+        // The base line the hunk replaced takes a row with no buffer row.
+        assert_eq!(shown, [0, 6, 7, 8, 9, 10, 11, 12]);
     }
 
-    /// The cache answers b.txt with no hunk, so a build that reads the cache
-    /// shows b.txt with no chunk. A build that diffs it shows one chunk.
+    /// An unsaved edit to a clean open file puts the file in the list, which
+    /// reads the open buffer's diff map.
     #[test]
-    fn a_rebuild_diffs_only_the_edited_file() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
-        let cached = |h: &TestHarness, base: &str, buffer: &str| {
-            h.stoat
-                .diff_cache()
-                .lock()
-                .expect("diff_cache poisoned")
-                .lookup(&action_handlers::review::diff_cache_key(base, buffer, None))
-                .is_some()
-        };
-        h.stoat
-            .diff_cache()
-            .lock()
-            .expect("diff_cache poisoned")
-            .insert(
-                action_handlers::review::diff_cache_key("b\n", "B\n", None),
-                Arc::new(Vec::new()),
-                true,
-            );
-        h.open_file(Path::new("/repo/a.txt"));
-
-        let first = built(&mut h).expect("the first build");
-        let a_cached = cached(&h, "a\n", "A\n");
-        let before = stamp(&h);
-        type_at_start(&mut h, "x");
-        let moved = stamp(&h) != before;
-        let second = built(&mut h).expect("the rebuild");
-        assert_eq!(
-            (files(&first), a_cached, moved, files(&second)),
-            (
-                vec![("a.txt", "a\n", "A\n", 1), ("b.txt", "b\n", "B\n", 0)],
-                true,
-                true,
-                vec![("a.txt", "a\n", "xA\n", 1), ("b.txt", "b\n", "B\n", 0)],
-            ),
-        );
-    }
-
-    #[test]
-    fn an_added_file_reads_as_every_line_added() {
-        let mut h = TestHarness::with_size(80, 24);
-        repo(&mut h).added("c.txt", "one\ntwo\n");
-
-        let doc = built(&mut h).expect("an added file builds a document");
-        let side = |side: Option<&ReviewSide>| side.map(|side| side.text.clone());
-        let rows: Vec<(Option<String>, Option<String>)> = doc
-            .order
-            .iter()
-            .flat_map(|id| doc.chunks[id].hunk.rows.iter())
-            .map(|row| match row {
-                ReviewRow::Context { left, right } => (side(Some(left)), side(Some(right))),
-                ReviewRow::Changed { left, right } => (side(left.as_ref()), side(right.as_ref())),
-            })
-            .collect();
-        assert_eq!(
-            (files(&doc), rows),
-            (
-                vec![("c.txt", "", "one\ntwo\n", 1)],
-                vec![
-                    (None, Some("one".to_string())),
-                    (None, Some("two".to_string())),
-                ],
-            ),
-        );
-    }
-
-    /// A clean tree builds no document and keeps the build's stamp, so asking
-    /// again builds nothing. An unsaved edit then shows, and the clean file
-    /// open beside it stays out.
-    #[test]
-    fn an_unsaved_edit_to_a_clean_file_shows() {
-        let mut h = TestHarness::with_size(80, 24);
+    fn an_unsaved_edit_to_a_clean_file_gets_an_excerpt() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
         repo(&mut h)
             .head_file("d.txt", "same\n")
             .head_file("f.txt", "kept\n");
@@ -991,48 +1032,55 @@ mod tests {
         h.fake_fs().insert_file(Path::new("/repo/f.txt"), b"kept\n");
         h.open_file(Path::new("/repo/f.txt"));
         h.open_file(Path::new("/repo/d.txt"));
+        h.type_keys("i n e w Escape");
+        h.settle_diff_jobs();
 
-        let clean = built(&mut h);
-        ensure_diff_changes_doc(&mut h.stoat);
-        let rebuilt = h.stoat.pending_diff_changes_build.is_some();
-        type_at_start(&mut h, "new ");
-        let edited = built(&mut h).expect("the unsaved edit builds a document");
-        assert_eq!(
-            (clean.is_none(), rebuilt, files(&edited)),
-            (true, false, vec![("d.txt", "same\n", "new same\n", 1)]),
-        );
+        stacked(&mut h);
+        assert_eq!(excerpts(&h), listed(&["d.txt"]));
     }
 
+    /// A base switch moves every excerpt's diff map, so each excerpt cuts its
+    /// folds again.
     #[test]
-    fn a_base_switch_stales_the_document_and_rebuilds_against_the_new_base() {
-        let mut h = TestHarness::with_size(80, 24);
+    fn a_base_switch_refolds_the_excerpts() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
         h.stage_index_scenario("/repo", &[("e.txt", "head\n", "index\n", "work\n")]);
-        h.open_file(Path::new("/repo/e.txt"));
+        // Set straight on the workspace, since the base actions also turn the
+        // diff view on in the focused pane.
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        stacked(&mut h);
+        let folded = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .focused_diff_changes()
+                .and_then(|state| state.excerpts.first())
+                .and_then(|excerpt| excerpt.folded_version)
+        };
+        let index = folded(&h);
 
-        action_handlers::dispatch(&mut h.stoat, &DiffAgainstIndex);
-        let index = built(&mut h).expect("the index build");
-        let before = stamp(&h);
-        action_handlers::dispatch(&mut h.stoat, &DiffAgainstHead);
-        let moved = stamp(&h) != before;
-        let head = built(&mut h).expect("the head build");
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.settle_diff_jobs();
+        let head = folded(&h);
         assert_eq!(
-            (files(&index), moved, files(&head)),
-            (
-                vec![("e.txt", "index\n", "work\n", 1)],
-                true,
-                vec![("e.txt", "head\n", "work\n", 1)],
-            ),
+            (index.is_some(), head.is_some(), index != head),
+            (true, true, true)
         );
     }
 
-    /// A stage and a `.git` event move the base text where no buffer moves, so
-    /// each stales the document.
+    /// A stage and a `.git` event move the base where no diff map moved yet,
+    /// so each moves the stamp, and the list follows.
     #[test]
-    fn a_stage_and_a_git_event_each_stale_the_document() {
-        let mut h = TestHarness::with_size(80, 24);
+    fn a_stage_and_a_git_event_each_move_the_stamp() {
+        let mut h = TestHarness::with_size(100, 24);
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
         h.open_file(Path::new("/repo/a.txt"));
         let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        let stamp = |h: &TestHarness| StackStamp::read(h.stoat.active_workspace());
 
         let first = stamp(&h);
         h.stoat
@@ -1040,15 +1088,14 @@ mod tests {
             .invalidate_diff(buffer_id, Path::new("/repo/a.txt"));
         let staged = stamp(&h);
         h.stoat.active_workspace_mut().invalidate_all_diffs();
-        let refreshed = stamp(&h);
-        assert_eq!((first != staged, staged != refreshed), (true, true));
+        assert_eq!((first != staged, staged != stamp(&h)), (true, true));
     }
 
-    /// Under a revision base the changes view lists what changed since that
-    /// revision, which includes a file committed since and clean in the tree.
+    /// Under a revision base the stack lists what changed since the revision,
+    /// a file committed since and clean in the tree included.
     #[test]
     fn a_revision_base_lists_what_changed_since_the_revision() {
-        let mut h = TestHarness::with_size(80, 24);
+        let mut h = TestHarness::with_size(100, 24);
         repo(&mut h)
             .head_file("committed.txt", "after\n")
             .commit("base0", &[("committed.txt", "before\n")]);
@@ -1058,7 +1105,31 @@ mod tests {
             .active_workspace_mut()
             .set_diff_base(Some(DiffBase::named("base0", "base0".to_string())));
 
-        let doc = built(&mut h).expect("the commit since the revision builds a document");
-        assert_eq!(files(&doc), [("committed.txt", "before\n", "after\n", 1)]);
+        stacked(&mut h);
+        assert_eq!(excerpts(&h), listed(&["committed.txt"]));
+    }
+
+    /// A close drops the buffers only the stack opened, and keeps the one a
+    /// pane opened before.
+    #[test]
+    fn a_close_drops_the_buffers_only_the_stack_opened() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        stacked(&mut h);
+        let open = |h: &TestHarness, path: &str| {
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(Path::new(path))
+                .is_some()
+        };
+        let before = (open(&h, "/repo/a.txt"), open(&h, "/repo/b.txt"));
+
+        dispatch(&mut h.stoat, &CloseDiffChanges);
+        assert_eq!(
+            (before, open(&h, "/repo/a.txt"), open(&h, "/repo/b.txt")),
+            ((true, true), true, false),
+        );
     }
 }

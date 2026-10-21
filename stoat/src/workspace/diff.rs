@@ -28,7 +28,6 @@ use crate::{
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
     multi_buffer::MultiBuffer,
-    pane::View,
     syntax_parse,
 };
 use codegraph::FileId;
@@ -196,6 +195,13 @@ pub(crate) enum WorktreeBase {
 /// promotion.
 static HEAD_BASE: DiffBase = DiffBase::Head;
 
+/// What one repository tally job reads.
+struct RepoTally {
+    tallies: HunkTallies,
+    /// The files changed since the revision base, `None` under any other base.
+    rev_changed: Option<Vec<PathBuf>>,
+}
+
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
 /// last one read.
 ///
@@ -296,9 +302,16 @@ pub(crate) struct DiffState {
     /// unsaved edit has not touched, so re-walking the repository per keystroke
     /// costs a full three-diff repo scan for an answer that never changed.
     pub(super) repo_hunk_tallies: Option<HunkTallies>,
+    /// The files changed since the revision base, absolute, as the last tally
+    /// read them under one. `None` under any other base.
+    ///
+    /// The tally counts against HEAD, but under a revision base the changes
+    /// view lists everything changed since that revision, a file committed
+    /// since and clean in the tree included.
+    pub(super) rev_changed: Option<Vec<PathBuf>>,
     /// The in-flight repo-wide tally, held so it is not cancelled before its
     /// answer lands.
-    pub(super) tally_job: Option<Task<Option<HunkTallies>>>,
+    tally_job: Option<Task<Option<RepoTally>>>,
     /// Whether the stored tally is known to match what is on disk.
     ///
     /// Starts `false`, because a fresh workspace has read no tally and the first
@@ -839,6 +852,9 @@ impl DiffState {
     /// coalescing rapid edits by re-queuing only after the in-flight job
     /// completes. A buffer with no path, no repo, or no HEAD content records its
     /// version with a cleared map, so it is not retried until the next edit.
+    ///
+    /// Answers whether a repository tally landed, which moves the files a
+    /// changes view lists.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn drive(
         &mut self,
@@ -851,7 +867,7 @@ impl DiffState {
         syntax_styles: &SyntaxStyles,
         base_cache: &BaseHighlightCache,
         redraw_notify: &Arc<Notify>,
-    ) {
+    ) -> bool {
         self.refresh_pair_bases(buffers, executor, redraw_notify);
 
         let waker = futures::task::noop_waker();
@@ -887,30 +903,7 @@ impl DiffState {
             self.diffed.insert(buffer_id, target_version);
         }
 
-        if let Some(job) = &mut self.tally_job {
-            let mut cx = Context::from_waker(&waker);
-            if let Poll::Ready(tallies) = Pin::new(job).poll(&mut cx) {
-                // A `None` answer means the root is outside a repo now, which
-                // says nothing about the last tally that was read inside one.
-                if tallies.is_some() {
-                    self.repo_hunk_tallies = tallies;
-                }
-                self.tally_job = None;
-            }
-        }
-        if !self.tally_current && self.tally_job.is_none() {
-            self.tally_current = true;
-            self.tally_job = Some(executor.spawn_blocking({
-                let git_host = git_host.clone();
-                let git_root = git_root.to_path_buf();
-                let redraw = redraw_notify.clone();
-                move || {
-                    let tallies = git_host.discover(&git_root).map(|repo| repo.hunk_tallies());
-                    redraw.notify_one();
-                    tallies
-                }
-            }));
-        }
+        let tally_landed = self.drive_tally(git_root, executor, git_host, redraw_notify);
 
         // The staleness checks come first so a settled buffer costs one lock
         // acquisition and nothing else. Its path would otherwise be cloned and
@@ -1010,6 +1003,68 @@ impl DiffState {
                 },
             );
         }
+        tally_landed
+    }
+
+    /// Install the repository tally when its job lands, spawn one when a tally
+    /// is owed, and report whether one landed.
+    ///
+    /// Under a revision base the job also lists the files changed since the
+    /// revision, which the changes view lists in the tally's place.
+    pub(super) fn drive_tally(
+        &mut self,
+        git_root: &Path,
+        executor: &Executor,
+        git_host: &Arc<dyn GitHost>,
+        redraw_notify: &Arc<Notify>,
+    ) -> bool {
+        let mut landed = false;
+        if let Some(job) = &mut self.tally_job {
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            if let Poll::Ready(tally) = Pin::new(job).poll(&mut cx) {
+                // A `None` answer means the root is outside a repo now, which
+                // says nothing about the last tally that was read inside one.
+                if let Some(tally) = tally {
+                    self.repo_hunk_tallies = Some(tally.tallies);
+                    self.rev_changed = tally.rev_changed;
+                    landed = true;
+                }
+                self.tally_job = None;
+            }
+        }
+        if !self.tally_current && self.tally_job.is_none() {
+            self.tally_current = true;
+            let rev = match self.effective_base() {
+                Some(DiffBase::Rev { sha: Some(sha), .. }) => Some(sha.clone()),
+                _ => None,
+            };
+            self.tally_job = Some(executor.spawn_blocking({
+                let git_host = git_host.clone();
+                let git_root = git_root.to_path_buf();
+                let redraw = redraw_notify.clone();
+                move || {
+                    let tally = git_host.discover(&git_root).map(|repo| RepoTally {
+                        tallies: repo.hunk_tallies(),
+                        rev_changed: rev.map(|sha| {
+                            repo.changed_files_from(&sha)
+                                .into_iter()
+                                .filter(|file| !file.untracked)
+                                .map(|file| file.path)
+                                .collect()
+                        }),
+                    });
+                    redraw.notify_one();
+                    tally
+                }
+            }));
+        }
+        landed
+    }
+
+    /// Whether the repository tally is owed or on the pool.
+    pub(super) fn tally_pending(&self) -> bool {
+        !self.tally_current || self.tally_job.is_some()
     }
 
     /// Install `out`'s map on its buffer, and file the blobs it read unless a
@@ -1305,6 +1360,8 @@ pub(crate) struct HunkPosition {
 /// and hunks, or `None` when the focused pane is not a diff view over a file
 /// the repo tracks.
 ///
+/// A changes view counts through its focused excerpt, which is a diff view.
+///
 /// The hunk total counts the focused file through its live diff map rather
 /// than through the stored tally, because the map is what the reader is
 /// looking at and the tally is refreshed a beat later. A file counts as
@@ -1314,9 +1371,7 @@ pub(crate) struct HunkPosition {
 /// file and in the tally. Those hunks are the stops the diff view's walk makes.
 /// Under every other base the tally counts from HEAD.
 pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
-    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
-        return None;
-    };
+    let (editor_id, _) = ws.focused_editor()?;
     let editor = ws.editors.get(editor_id)?;
     if !editor.diff_view {
         return None;

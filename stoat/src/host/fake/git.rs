@@ -1068,11 +1068,16 @@ impl GitRepo for FakeGitRepo {
             *unstaged_per_file.entry(relative(path)).or_default() += 1;
         }
 
+        let mut untracked: Vec<PathBuf> =
+            state.untracked.iter().map(|path| relative(path)).collect();
+        untracked.sort();
+
         HunkTallies {
             staged: side(true),
             unstaged: side(false) + state.untracked.len(),
             per_file: per_file.into_iter().collect(),
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
+            untracked,
         }
     }
 

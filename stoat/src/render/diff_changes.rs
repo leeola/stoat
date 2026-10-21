@@ -1,44 +1,54 @@
 //! The paint of a [`View::DiffChanges`](crate::pane::View::DiffChanges) pane.
 //!
-//! The changes view shows its document through the commit preview's painter, so
-//! a hunk reads the same here as in a commit's preview. A cursor row marks
-//! where the changes view's keys act.
+//! The changes view paints its excerpts one under another through the
+//! per-file diff's painter, so a hunk reads the same here as in the per-file
+//! diff. A header row names each excerpt's file, and the focused excerpt
+//! paints the cursor where the changes view's keys act.
 
 use crate::{
-    diff_changes::DiffChangesState,
+    buffer_registry::BufferRegistry,
+    diff_changes::{self, DiffChangesState},
+    editor_state::{EditorId, EditorState},
     pane::Pane,
     render::{
-        commits::{preview_row_count, render_commit_preview},
-        editor::split_minimap_strip,
+        editor::{fit_diff_view, render_editor_with_overlay, split_minimap_strip},
         layout::split_pane_status,
         pane::render_overlay_status,
-        text::write_str,
+        text::{write_str, write_str_clipped},
+        undercurl::UndercurlBatch,
         FrameCtx,
     },
-    review_session::DiffDocument,
     theme::scope,
 };
-use ratatui::buffer::Buffer;
-use std::sync::Arc;
+use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use slotmap::SlotMap;
 use stoat_widgets::ApcScene;
 
-/// Paint the changes view `state` shows into `pane`, with its own status row.
+/// Paint the stack `state` holds into `pane`, with its own status row.
 ///
-/// With `doc` the hunks paint from the scroll of `state`, and the cursor row
-/// takes the selection background under the diff colors. The cursor clamps to
-/// the document's last row, so a smaller rebuild never leaves it past the end.
+/// The stack paints from the scroll of `state`, which first moves the least
+/// distance that keeps the focused excerpt's cursor on screen. Each excerpt
+/// takes a header row in the commit header style and then its rows, painted
+/// from its own scroll row, so an excerpt cut at the top shows its lower rows.
+/// After the paint each excerpt's viewport holds all of its rows, so the
+/// editor's own follow never scrolls an excerpt.
 ///
-/// With no document the pane says "building changes..." while a build is on
-/// the pool, and "no changes" when the last build found none.
+/// With no excerpt the pane says "building changes..." while the repository
+/// tally is pending, and "no changes" once it is in.
 ///
 /// With per-pane minimaps on, a pane wide enough for the minimap strip gives
-/// its right edge to the strip, with or without a document. The strip's rect
-/// lands on [`DiffChangesState::minimap_rect`].
+/// its right edge to the strip, with or without excerpts. The strip's rect
+/// lands on [`DiffChangesState::minimap_rect`], and no excerpt reserves a strip
+/// of its own.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_changes(
     pane: &Pane,
     is_focused: bool,
     state: &mut DiffChangesState,
-    doc: Option<&Arc<DiffDocument>>,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    text_style: Style,
+    undercurls: &mut UndercurlBatch,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -58,7 +68,7 @@ pub(crate) fn render_diff_changes(
         return;
     }
 
-    let Some(doc) = doc else {
+    if state.excerpts.is_empty() {
         let text = match frame.diff_changes_building {
             true => "building changes...",
             false => "no changes",
@@ -71,49 +81,112 @@ pub(crate) fn render_diff_changes(
             frame.theme.get(scope::UI_TEXT_MUTED),
         );
         return;
-    };
+    }
 
     state.viewport_rows = inner.height as usize;
-    state.cursor = state.cursor.min(preview_row_count(doc).saturating_sub(1));
-    state.ensure_cursor_visible(state.viewport_rows);
-    render_commit_preview(
-        doc,
-        frame.theme,
-        inner,
-        state.scroll_top,
-        frame.preview_dials,
-        buf,
-        scene,
-    );
-
-    // The background alone changes, so the row keeps its diff colors.
-    if let Some(bg) = frame.theme.get(scope::UI_SELECTION).bg {
-        let y = inner.y + (state.cursor - state.scroll_top) as u16;
-        for x in inner.x..inner.x + inner.width {
-            buf[(x, y)].set_bg(bg);
+    for excerpt in &state.excerpts {
+        if let Some(editor) = editors.get_mut(excerpt.editor_id) {
+            fit_diff_view(editor, inner, frame.wrap_mode, frame.wrap_column);
         }
+    }
+    let total = diff_changes::layout_stack(state, editors);
+    if let Some(row) = diff_changes::cursor_stack_row(state, editors) {
+        state.ensure_row_visible(row, state.viewport_rows);
+    }
+    state.scroll = state.scroll.min(total.saturating_sub(state.viewport_rows));
+
+    let header_style = frame.theme.get(scope::VCS_COMMIT_SHA);
+    let (scroll, rows_on_screen) = (state.scroll, state.viewport_rows);
+    for (index, excerpt) in state.excerpts.iter().enumerate() {
+        let rows = diff_changes::excerpt_rows(excerpt, editors);
+        let top = excerpt.top;
+        if top + 1 + rows <= scroll || top >= scroll + rows_on_screen {
+            continue;
+        }
+        if top >= scroll {
+            let y = inner.y + (top - scroll) as u16;
+            let end_x = inner.x + inner.width;
+            write_str_clipped(buf, inner.x, y, &excerpt.rel_path, header_style, end_x);
+        }
+
+        // The screen row of the excerpt's first row, past its header.
+        let first = (top + 1).saturating_sub(scroll);
+        let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+            continue;
+        };
+        if rows == 0 || first >= rows_on_screen {
+            continue;
+        }
+        editor.scroll_row = scroll.saturating_sub(top + 1) as u32;
+        let height = (rows - editor.scroll_row as usize).min(rows_on_screen - first);
+        let area = Rect {
+            x: inner.x,
+            y: inner.y + first as u16,
+            width: inner.width,
+            height: height as u16,
+        };
+        let focused = is_focused && index == state.focused;
+        let diagnostic_info = buffers
+            .path_for(editor.buffer_id)
+            .map(|path| (path, frame.diagnostics));
+        render_editor_with_overlay(
+            editor,
+            area,
+            text_style,
+            frame.theme,
+            frame.chrome,
+            buf,
+            focused,
+            false,
+            frame.line_numbers,
+            frame.mode == "insert",
+            if focused { frame.hover_cell } else { None },
+            if focused {
+                frame.goto_word_labels
+            } else {
+                None
+            },
+            frame.search_query,
+            frame.search_smart_case,
+            diagnostic_info,
+            match scene.live() {
+                true => Some(&mut *scene),
+                false => None,
+            },
+            frame.terminal_cursor_editor == Some(excerpt.editor_id),
+            Some(&mut *undercurls),
+            0.0,
+            frame.diff_dials,
+            frame.wrap_mode,
+            frame.wrap_column,
+        );
+        editor.viewport_rows = Some(rows as u32);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
-        action_handlers::dispatch,
         apc_emit,
+        diff_changes::{self, DiffChangesState},
+        editor_state::{EditorId, EditorState},
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
-            commits::preview_row_count,
+            layout::split_pane_status,
             paint,
-            review::{self, DiffDials},
+            review::{self, DiffColumns, DiffDials, DiffLayout},
             themed_blank, SINGLE_MINIMAP_STRIP_ID,
         },
         test_fixture::drain_apc,
         test_harness::TestHarness,
         theme::scope,
+        workspace::Workspace,
     };
     use ratatui::{buffer::Buffer, layout::Rect};
+    use slotmap::SlotMap;
     use std::path::{Path, PathBuf};
     use stoat_config::MinimapMode;
+    use stoat_text::Point;
     use stoatty_protocol::command::Command;
     use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -132,24 +205,90 @@ mod tests {
             .to_string()
     }
 
-    /// The cursor row moves with a step to the second chunk.
-    #[test]
-    fn a_changes_view_paints_its_document_under_a_cursor_row() {
-        let mut h = TestHarness::with_size(100, 16);
-        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+    /// The focused changes view's state, with the editors its excerpts are.
+    fn stack(h: &mut TestHarness) -> (&mut DiffChangesState, &mut SlotMap<EditorId, EditorState>) {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws
+            .focused_diff_changes_id()
+            .expect("the changes view is open");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        (&mut diff_changes_views[id], editors)
+    }
+
+    /// The text in columns `x` to `x + width` of row `y`, trimmed.
+    fn cells(buf: &Buffer, x: u16, width: u16, y: u16) -> String {
+        (x..x + width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    /// Two changed files under a focused changes view with no minimap, at a
+    /// width that pairs each modified line with its base line, settled.
+    fn two_files(height: u16) -> TestHarness {
+        let mut h = TestHarness::with_size(120, height);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", "a\nx\n", "A\nx\n"), ("b.txt", "b\n", "B\n")],
+        );
         h.open_file(Path::new("/repo/a.txt"));
         h.cover_with_diff_changes(false);
         h.settle();
-        h.assert_snapshot("diff_changes_two_files");
-
-        dispatch(&mut h.stoat, &stoat_action::DiffChangesNextChunk);
-        h.assert_snapshot("diff_changes_cursor_on_second_chunk");
+        h
     }
 
-    /// With no document the changes view says that a build runs, or that the
-    /// last build found no change.
+    /// Each excerpt paints under a header row that names its file, with its
+    /// rows numbered in the per-file diff's gutters, and only the focused
+    /// excerpt paints a cursor.
     #[test]
-    fn a_changes_view_with_no_document_says_why() {
+    fn a_changes_view_paints_its_excerpts_under_their_file_headers() {
+        let mut h = two_files(16);
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+        let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+
+        // a.txt's three rows sit under its header on row 0, and b.txt's first
+        // row under its header on row 4.
+        let headers = [inner.y, inner.y + 4].map(|y| cells(&buf, inner.x, 8, y));
+        let numbers: Vec<(String, String)> = [1, 2, 3, 5]
+            .into_iter()
+            .map(|row| {
+                (
+                    cells(&buf, cols.left_num_x, 4, inner.y + row),
+                    cells(&buf, cols.right_num_x, 4, inner.y + row),
+                )
+            })
+            .collect();
+        let (state, editors) = stack(&mut h);
+        let cursors: Vec<Option<(u16, u16)>> = state
+            .excerpts
+            .iter()
+            .map(|excerpt| editors[excerpt.editor_id].cursor_screen_cell)
+            .collect();
+        let pair = |n: &str| (n.to_string(), n.to_string());
+        assert_eq!(
+            (headers, numbers, cursors),
+            (
+                ["a.txt".to_string(), "b.txt".to_string()],
+                vec![pair("1"), pair("2"), pair("3"), pair("1")],
+                vec![Some((cols.right_text_x, inner.y + 1)), None],
+            ),
+        );
+    }
+
+    /// With no excerpt the changes view says that its list builds, or that the
+    /// list holds no change.
+    #[test]
+    fn a_changes_view_with_no_excerpt_says_why() {
         let mut building = TestHarness::with_size(100, 16);
         building.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
         building.cover_with_diff_changes(false);
@@ -166,34 +305,54 @@ mod tests {
         );
     }
 
-    /// A cursor past the document's end, as a smaller rebuild leaves it, lands
-    /// on the last row, and the scroll puts that row at the bottom of the view.
+    /// `G` lands on the last excerpt's last row, and the paint scrolls the stack
+    /// so that row is the bottom of the view.
     #[test]
-    fn a_cursor_past_the_end_lands_on_the_last_row_in_view() {
-        let mut h = TestHarness::with_size(100, 4);
-        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+    fn g_in_the_last_excerpt_scrolls_the_stack_to_its_end() {
+        let mut h = two_files(4);
+        h.type_keys("G");
+        h.render_composited();
+
+        let (state, editors) = stack(&mut h);
+        let total = diff_changes::layout_stack(state, editors);
+        let cursor = diff_changes::cursor_stack_row(state, editors);
+        assert_eq!(
+            (state.focused, cursor, state.scroll + state.viewport_rows),
+            (1, Some(total - 1), total),
+        );
+    }
+
+    /// An excerpt whose header scrolled above the view paints from its own
+    /// scroll row, so the top row shows the excerpt's row under the scroll.
+    #[test]
+    fn an_excerpt_cut_at_the_top_paints_from_its_scroll_row() {
+        let mut h = TestHarness::with_size(120, 6);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        let base: String = (1..=8).map(|n| format!("{n}\n")).collect();
+        let text: String = (1..=8).map(|n| format!("{n}!\n")).collect();
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &text)]);
         h.cover_with_diff_changes(false);
         h.settle();
-        let rows = h
-            .stoat
-            .active_workspace()
-            .diff_changes_doc
-            .as_ref()
-            .and_then(|built| built.doc.as_deref())
-            .map_or(0, preview_row_count);
-        h.stoat
-            .active_workspace_mut()
-            .focused_diff_changes_mut()
-            .expect("the changes view is open")
-            .cursor = 99;
+        {
+            let (state, editors) = stack(&mut h);
+            let editor = &mut editors[state.excerpts[0].editor_id];
+            diff_changes::place_cursor(editor, Point::new(4, 0));
+            state.scroll = 3;
+        }
 
-        h.render_composited();
-        let placed = h
-            .stoat
-            .active_workspace()
-            .focused_diff_changes()
-            .map(|state| (state.cursor, state.scroll_top + state.viewport_rows));
-        assert_eq!(placed, Some((rows - 1, rows)));
+        let buf = h.render_composited();
+        let (state, editors) = stack(&mut h);
+        let scroll_row = editors[state.excerpts[0].editor_id].scroll_row;
+        let inner = Rect::new(0, 0, 120, 5);
+        let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+        assert_eq!(
+            (
+                state.scroll,
+                scroll_row,
+                cells(&buf, cols.right_num_x, 4, inner.y)
+            ),
+            (3, 2, "3".to_string()),
+        );
     }
 
     /// Two staged files under a focused changes view at 120 by 24, with the

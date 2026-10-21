@@ -279,7 +279,7 @@ pub(crate) fn render_diff_view(
 /// Minimum inner width for the two-column diff layout. Below this each text
 /// half falls under about 43 columns after its gutters, too cramped to read
 /// code, so the view collapses to a single unified column.
-const DIFF_TWO_COLUMN_MIN: u16 = 100;
+pub(crate) const DIFF_TWO_COLUMN_MIN: u16 = 100;
 
 /// What one display row is, without borrowing the snapshot it came from.
 ///

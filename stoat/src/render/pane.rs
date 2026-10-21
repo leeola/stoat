@@ -76,7 +76,6 @@ pub(crate) fn render_pane(
         term_pool_grids,
         commit_lists,
         diff_changes_views,
-        diff_changes_doc,
     } = ctx;
 
     match &pane.view {
@@ -194,7 +193,10 @@ pub(crate) fn render_pane(
                     pane,
                     is_focused,
                     state,
-                    diff_changes_doc.as_ref(),
+                    editors,
+                    buffers,
+                    text_style,
+                    undercurls,
                     frame,
                     buf,
                     &mut *scene,

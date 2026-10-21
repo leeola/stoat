@@ -7,7 +7,6 @@ use crate::{
     buffer::BufferId,
     buffer_registry::OpenOrigin,
     diff_cache::{DiffCache, DiffCacheKey},
-    diff_changes,
     diff_map::{hunk_base_lines, line_starts},
     display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot},
     editor_state::EditorId,
@@ -405,8 +404,7 @@ pub(super) fn reopen_diff_view(stoat: &mut Stoat) {
 /// the way a latched pane shows any clean file it navigates to.
 ///
 /// A diff in any other split pane of the tab turns off, so the tab holds one
-/// diff. The changes view document starts its build, as [`enter_diff_view`]
-/// starts it.
+/// diff.
 pub(super) fn latch_diff_view(stoat: &mut Stoat) {
     {
         let ws = stoat.active_workspace_mut();
@@ -420,18 +418,15 @@ pub(super) fn latch_diff_view(stoat: &mut Stoat) {
         return;
     };
     ensure_diff_map(stoat, buffer_id, Some(DiffLanding::LatchedView { editor }));
-    diff_changes::ensure_diff_changes_doc(stoat);
 }
 
 /// Turn the diff view on for the focused editor where it stands.
 ///
 /// Sets the editor's flag, latches the focused pane and widens it, and wants
 /// the hunks the view reads. The view paints at once, and hunks that are not
-/// current land a frame or more later. It also starts the changes view
-/// document's build, so the first changes view toggle paints a document at
-/// once. The cursor stays where it is, and the jump to the first change is what
-/// [`toggle_diff_view`] adds on top of this. A caller that places the cursor
-/// itself calls this rather than the toggle.
+/// current land a frame or more later. The cursor stays where it is, and the
+/// jump to the first change is what [`toggle_diff_view`] adds on top of this.
+/// A caller that places the cursor itself calls this rather than the toggle.
 ///
 /// The widen makes the view a full-window screen. A layout action pressed on it
 /// closes the view rather than leaving it narrow beside a split. A diff in any
@@ -473,7 +468,6 @@ pub(crate) fn enter_diff_view(stoat: &mut Stoat) {
             "entered diff view"
         );
     }
-    diff_changes::ensure_diff_changes_doc(stoat);
 }
 
 /// Leave the diff view, reporting whether there was one to leave.
@@ -2578,38 +2572,6 @@ mod tests {
                 ),
                 (false, false, true),
                 "after the {name}, only the right pane shows a diff",
-            );
-        }
-    }
-
-    /// Opening a diff builds the changes view document, whether the open
-    /// toggles or latches, so the first changes view toggle paints one at once.
-    #[test]
-    fn opening_a_diff_builds_the_changes_view_document() {
-        let toggle: fn(&mut TestHarness) = |h| run(h, &stoat_action::DiffFiles { rev: None });
-        let latch: fn(&mut TestHarness) = |h| {
-            super::latch_diff_view(&mut h.stoat);
-            h.settle();
-        };
-        for (name, open) in [("toggle", toggle), ("latch", latch)] {
-            let mut h = half_staged_harness();
-            open(&mut h);
-            let files: Option<Vec<(String, String)>> = h
-                .stoat
-                .active_workspace()
-                .diff_changes_doc
-                .as_ref()
-                .and_then(|built| built.doc.as_ref())
-                .map(|doc| {
-                    doc.files
-                        .iter()
-                        .map(|file| (file.rel_path.clone(), file.buffer_text.to_string()))
-                        .collect()
-                });
-            assert_eq!(
-                files,
-                Some(vec![("f.txt".to_string(), "a\nB\nc\nD\n".to_string())]),
-                "after the {name}",
             );
         }
     }

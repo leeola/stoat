@@ -14,7 +14,7 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         paint::{brighten_style, dim_rgb, style_rgb},
-        review::{render_diff_view, DiffColumns, DiffDials, DiffLayout},
+        review::{render_diff_view, DiffColumns, DiffDials, DiffLayout, DIFF_TWO_COLUMN_MIN},
         undercurl::UndercurlBatch,
     },
     theme::Theme,
@@ -168,15 +168,7 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.diff_view {
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
-        // Both columns wrap at the narrower one, so a mirrored segment always
-        // fits the side that shows it.
-        let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
-        let text_width = cols.left_content_w.min(cols.right_content_w) as u32;
-        editor.display_map.set_wrap_width(wrap_width_for(
-            editor.wrap_override.unwrap_or(wrap),
-            text_width,
-            wrap_column,
-        ));
+        fit_diff_view(editor, inner, wrap, wrap_column);
         render_diff_view(
             editor,
             inner,
@@ -581,6 +573,31 @@ pub(crate) fn render_editor_with_overlay(
 ///
 /// The strip's screen rect lands on [`EditorState::minimap_rect`] for pointer
 /// mapping.
+/// Settle the display settings a diff-view editor takes from the width of
+/// `inner`, so the rows a caller measures before the paint are the rows it
+/// paints.
+///
+/// Both columns wrap at the narrower one, so a mirrored segment always fits
+/// the side that shows it. A width that fits two columns pairs each modified
+/// line with the base line it replaced, on one row.
+pub(crate) fn fit_diff_view(
+    editor: &mut EditorState,
+    inner: Rect,
+    wrap: WrapMode,
+    wrap_column: u32,
+) {
+    let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+    let text_width = cols.left_content_w.min(cols.right_content_w) as u32;
+    editor.display_map.set_wrap_width(wrap_width_for(
+        editor.wrap_override.unwrap_or(wrap),
+        text_width,
+        wrap_column,
+    ));
+    editor
+        .display_map
+        .set_pair_modified_hunks(inner.width >= DIFF_TWO_COLUMN_MIN);
+}
+
 fn reserve_minimap_strip(editor: &mut EditorState, inner: Rect, minimap_enabled: bool) -> Rect {
     let (inner, strip) = split_minimap_strip(inner, minimap_enabled);
     editor.minimap_rect = strip;

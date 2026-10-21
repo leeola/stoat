@@ -453,11 +453,11 @@ impl TestHarness {
     }
 
     /// Turn the focused pane into a changes view over the view it shows,
-    /// widened as a full-window screen, with its document's build started.
+    /// widened as a full-window screen, with its stack listed.
     ///
     /// `covered_diff` records that the covered editor showed the diff view, so
-    /// a close returns to it. The build is still on the pool, so a test settles
-    /// when it wants the document.
+    /// a close returns to it. The tally and the excerpts' diff maps are still
+    /// on the pool, so a test settles when it wants the excerpts folded.
     pub(crate) fn cover_with_diff_changes(
         &mut self,
         covered_diff: bool,
@@ -474,7 +474,7 @@ impl TestHarness {
             });
         ws.panes.pane_mut(focus).view = crate::pane::View::DiffChanges(id);
         ws.panes.widen(focus);
-        crate::diff_changes::ensure_diff_changes_doc(&mut self.stoat);
+        crate::diff_changes::pump_diff_changes_stack(&mut self.stoat);
         id
     }
 

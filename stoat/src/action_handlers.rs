@@ -1531,13 +1531,6 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
             // new palette. Only the colors move, and they ride the strip
             // declaration on the next frame.
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
-            // A changes view document bakes its colors at build, and the
-            // changes view strip resolves them by color against the class
-            // table. A rebuild bakes the new colors, which the rebuilt table
-            // knows.
-            for (_, ws) in stoat.workspaces.iter_mut() {
-                ws.diff_changes_epoch += 1;
-            }
             stoat.theme_epoch += 1;
             stoat.paint_generation += 1;
             apc_emit::emit_theme_default_colors(stoat);
@@ -1584,6 +1577,10 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     };
     match view {
         View::Editor(id) => ws.editors.get_mut(id),
+        View::DiffChanges(id) => {
+            let editor_id = ws.diff_changes_views.get(id)?.focused_excerpt()?.editor_id;
+            ws.editors.get_mut(editor_id)
+        },
         _ => None,
     }
 }

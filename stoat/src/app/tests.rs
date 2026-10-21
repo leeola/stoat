@@ -9,7 +9,7 @@ use crate::{
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     commit_list::CommitListState,
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
-    diff_changes::DiffChangesState,
+    diff_changes::{DiffChangesState, Excerpt},
     display_map::{DisplayPoint, PaintVersion},
     editor_state::EditorState,
     host::{FsEventKind, LspNotification},
@@ -5312,13 +5312,29 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
         id
     };
 
+    // A changes view's mode is its focused excerpt's, so the left editor turns
+    // into the one excerpt of a changes view over the pane.
     let mut diff_changes = Stoat::test();
     let (left, _) = split_editor_pair(&mut diff_changes);
-    let diff_changes_id = {
+    let excerpt_editor = {
         let ws = diff_changes.stoat.active_workspace_mut();
-        let id = ws.diff_changes_views.insert(DiffChangesState::default());
+        let View::Editor(editor_id) = ws.panes.pane(left).view else {
+            panic!("the left pane shows an editor");
+        };
+        let excerpt = Excerpt {
+            buffer_id: ws.editors[editor_id].buffer_id,
+            editor_id,
+            rel_path: "a.txt".into(),
+            folded_version: Some(1),
+            top: 0,
+            owns_buffer: false,
+        };
+        let id = ws.diff_changes_views.insert(DiffChangesState {
+            excerpts: vec![excerpt],
+            ..DiffChangesState::default()
+        });
         ws.panes.pane_mut(left).view = View::DiffChanges(id);
-        id
+        editor_id
     };
 
     let mut dock = Stoat::test();
@@ -5341,9 +5357,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
         [
             mode_after_click_away(&mut run, |ws| &mut ws.editors[run_editor].mode),
             mode_after_click_away(&mut commits, |ws| &mut ws.commit_lists[list].mode),
-            mode_after_click_away(&mut diff_changes, |ws| &mut ws.diff_changes_views
-                [diff_changes_id]
-                .mode),
+            mode_after_click_away(&mut diff_changes, |ws| &mut ws.editors[excerpt_editor].mode),
             mode_after_click_away(&mut dock, |ws| &mut ws.terms[term].mode),
         ],
         ["normal"; 4],

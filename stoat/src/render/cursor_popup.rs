@@ -38,8 +38,12 @@ pub(crate) fn focused_editor_popup_ctx(
     };
     let pane_id = ws.panes.focus();
     let pane = ws.panes.pane(pane_id);
-    let View::Editor(editor_id) = pane.view else {
-        return None;
+    // A changes view's popup anchors on its focused excerpt's cursor, which
+    // that excerpt's paint placed on screen.
+    let editor_id = match pane.view {
+        View::Editor(editor_id) => editor_id,
+        View::DiffChanges(_) => ws.focused_editor()?.0,
+        _ => return None,
     };
     let (content_area, _) = split_pane_status(pane.area);
 

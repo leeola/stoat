@@ -48,6 +48,11 @@ pub struct HunkTallies {
     /// The diff view against the index walks these, where a change the index
     /// holds is not a stop.
     pub unstaged_per_file: Vec<(PathBuf, usize)>,
+    /// The untracked files among [`Self::per_file`], sorted and repo-relative.
+    ///
+    /// The tally counts an untracked file as a change, but a list of the work
+    /// in the tree leaves a scratch file out.
+    pub untracked: Vec<PathBuf>,
 }
 
 /// One changed path in a repository's working tree or index.

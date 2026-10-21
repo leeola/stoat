@@ -467,6 +467,25 @@ fn hunk_tallies_count_an_empty_untracked_file_as_nothing() {
     );
 }
 
+/// The tally names its untracked files apart from its tracked edits. A list of
+/// the work in the tree uses the names to leave a scratch file out.
+#[test]
+fn hunk_tallies_list_only_the_untracked_files_as_untracked() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\n");
+    tr.write("a.rs", "two\n");
+    tr.write("new.rs", "fresh\n");
+
+    let tallies = LocalGit::new().discover(tr.path()).unwrap().hunk_tallies();
+    assert_eq!(
+        (tallies.per_file, tallies.untracked),
+        (
+            vec![(PathBuf::from("a.rs"), 1), (PathBuf::from("new.rs"), 1)],
+            vec![PathBuf::from("new.rs")],
+        ),
+    );
+}
+
 #[test]
 fn hunk_tallies_are_zero_on_a_clean_repo() {
     let tr = TestRepo::new();

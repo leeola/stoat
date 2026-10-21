@@ -1275,12 +1275,6 @@ pub struct Stoat {
     /// the whole index. Each file then reads its three stages, and the
     /// alignment runs two structural diffs against the ancestor.
     pub(crate) pending_conflict_file: Option<action_handlers::conflict_view::PendingConflictFile>,
-    /// A changes view document building off the UI thread, stored by
-    /// [`crate::diff_changes::pump_diff_changes_build`] when it lands.
-    ///
-    /// The build lists the changed files, reads both sides of each, and diffs
-    /// the files the hunk cache does not hold.
-    pub(crate) pending_diff_changes_build: Option<crate::diff_changes::PendingDiffChangesBuild>,
     /// The git writes the loop started, run one at a time in press order.
     ///
     /// Two writes on the pool race, so every write the loop starts waits here
@@ -2686,7 +2680,6 @@ impl Stoat {
             perf: crate::perf::PerfStats::default(),
             pending_changed_file_jump: None,
             pending_conflict_file: None,
-            pending_diff_changes_build: None,
             git_jobs: GitJobs::default(),
             pending_diff_nav_jump: None,
             pending_code_search: None,
@@ -5354,12 +5347,18 @@ impl Stoat {
                 // Re-follow the cursor when a key moved it, pulling the view
                 // along so a count jump past the margin lands the view on the
                 // cursor rather than stranding it on the edge. A keyboard scroll
-                // (z j / z k) never moves the cursor, so its view stays put.
-                let scrolled = match action_handlers::focused_editor_mut(self) {
-                    Some(editor) => {
-                        cursor_moved && action_handlers::view::follow_jump(editor, scrolloff)
-                    },
-                    None => false,
+                // (z j / z k) never moves the cursor, so its view stays put. A
+                // changes view scrolls its stack, since each excerpt paints at
+                // the stack rows the layout gives it.
+                let scrolled = if self.active_workspace().focused_diff_changes_id().is_some() {
+                    cursor_moved && crate::diff_changes::follow_cursor(self, scrolloff)
+                } else {
+                    match action_handlers::focused_editor_mut(self) {
+                        Some(editor) => {
+                            cursor_moved && action_handlers::view::follow_jump(editor, scrolloff)
+                        },
+                        None => false,
+                    }
                 };
 
                 if scrolled {
@@ -6788,11 +6787,12 @@ impl Stoat {
     /// The mode of the focused input target.
     ///
     /// The target is resolved the way [`Self::focused_editor_ids`] resolves it.
-    /// A topmost open input modal, or else a focused editor or run pane,
-    /// supplies its editor's [`EditorState::mode`]. A focused commits pane
-    /// supplies its list's mode, a focused changes view pane its own, and a
-    /// focused terminal or agent pane its [`TermSession::mode`]. With no such
-    /// target the mode falls back to [`Self::fallback_mode`].
+    /// A topmost open input modal, or else a focused editor, run pane, or
+    /// changes view, supplies its editor's [`EditorState::mode`]. A changes
+    /// view's editor is its focused excerpt's. A focused commits pane supplies
+    /// its list's mode, and a focused terminal or agent pane its
+    /// [`TermSession::mode`]. With no such target the mode falls back to
+    /// [`Self::fallback_mode`].
     pub(crate) fn focused_mode(&self) -> &str {
         #[cfg(test)]
         self.focused_mode_reads
@@ -6806,9 +6806,6 @@ impl Stoat {
         }
         if let Some(list) = ws.focused_commits() {
             return &list.mode;
-        }
-        if let Some(diff_changes) = ws.focused_diff_changes() {
-            return &diff_changes.mode;
         }
         if let Some(term_id) = self.focused_term_id()
             && let Some(term) = ws.terms.get(term_id)
@@ -6859,10 +6856,6 @@ impl Stoat {
         }
         if let Some(list) = self.active_workspace_mut().focused_commits_mut() {
             list.mode = mode;
-            return;
-        }
-        if let Some(diff_changes) = self.active_workspace_mut().focused_diff_changes_mut() {
-            diff_changes.mode = mode;
             return;
         }
         if let Some(term_id) = self.focused_term_id()
@@ -6978,10 +6971,11 @@ impl Stoat {
     /// focus with no switch at all. Without this reset, the view it left keeps
     /// the chord mode, and the chord comes back with focus.
     ///
-    /// An editor or run pane keeps a primary mode, `insert` or `select`, and a
-    /// pinned chord, which the reader holds on purpose. A commits, changes
-    /// view, terminal, or agent view has no primary mode but normal, so any
-    /// other mode ends.
+    /// An editor, a run pane, or a changes view's focused excerpt keeps a
+    /// primary mode, `insert` or `select`, and a pinned chord, which the reader
+    /// holds on purpose. A commits, terminal, or agent view has no primary mode
+    /// but normal, so any other mode ends. A changes view with no excerpt holds
+    /// its chord on the fallback mode, which ends the same way.
     ///
     /// `workspace`, `focus`, and `pane` are the active workspace, its focus
     /// target, and its focused split pane, all read before the event.
@@ -7012,12 +7006,15 @@ impl Stoat {
                 None
             },
             Some(View::DiffChanges(id)) => {
-                if let Some(diff_changes) = ws.diff_changes_views.get_mut(*id)
-                    && diff_changes.mode != "normal"
-                {
-                    diff_changes.mode = "normal".into();
+                let editor = ws
+                    .diff_changes_views
+                    .get(*id)
+                    .and_then(|state| state.focused_excerpt())
+                    .map(|excerpt| excerpt.editor_id);
+                if editor.is_none() && self.fallback_mode != "normal" {
+                    self.fallback_mode = "normal".into();
                 }
-                None
+                editor
             },
             Some(View::Terminal(id) | View::Agent(id)) => {
                 if let Some(term) = ws.terms.get_mut(*id)
@@ -9019,11 +9016,6 @@ impl Stoat {
         action_handlers::split_selection::sync_regex_preview(self);
         self.drive_parse_jobs();
         self.drive_diff_jobs();
-        // Only a changes view on screen follows edits, so a keystroke in a
-        // plain pane starts no build.
-        if self.active_workspace().focused_diff_changes_id().is_some() {
-            crate::diff_changes::ensure_diff_changes_doc(self);
-        }
 
         self.drive_pumps();
         // Not gated on the pumps' progress. The `.git` refresh drain stales
@@ -9062,7 +9054,7 @@ impl Stoat {
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
         let conflict_file = action_handlers::conflict_view::pump_conflict_file(self);
-        let diff_changes_build = crate::diff_changes::pump_diff_changes_build(self);
+        let diff_changes_stack = crate::diff_changes::pump_diff_changes_stack(self);
         let diff_nav_jump = crate::code_index::nav::pump_diff_nav_jump(self);
         let lsp = crate::lsp::pump_all(self);
         action_handlers::workspace::sync_workspace_picker(self);
@@ -9089,7 +9081,7 @@ impl Stoat {
             || changed_file_jump
             || diff_wants
             || conflict_file
-            || diff_changes_build
+            || diff_changes_stack
             || diff_nav_jump
             || lsp
             || followed_change

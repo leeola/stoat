@@ -464,10 +464,14 @@ pub(crate) fn focused_pane_pinned(ws: &Workspace) -> bool {
 /// Resolve the focused split pane to its editor and buffer, the shared lookup
 /// [`cursor_token`] and [`focus_flags`] both derive their fields from.
 ///
-/// `None` when the focused pane is not an editor or its editor is gone.
+/// A changes view resolves to its focused excerpt, so the editor's chords,
+/// staging keys included, bind there. `None` when the focused pane shows no
+/// editor or its editor is gone.
 pub(crate) fn resolve_focus(ws: &Workspace) -> Option<(&EditorState, BufferId)> {
-    let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
-        return None;
+    let editor_id = match ws.panes.pane(ws.panes.focus()).view {
+        View::Editor(editor_id) => editor_id,
+        View::DiffChanges(id) => ws.diff_changes_views.get(id)?.focused_excerpt()?.editor_id,
+        _ => return None,
     };
     let editor = ws.editors.get(editor_id)?;
     let buffer_id = editor.buffer_id;
@@ -565,8 +569,21 @@ fn focused_view(ws: &Workspace) -> Option<&View> {
 }
 
 /// The focused pane's kind as a `pane` predicate value.
+///
+/// A changes view with an excerpt answers `editor`, since its focused
+/// excerpt's editor takes the keys, so the editor's chords bind there. The
+/// `view` predicate still names the changes view, so its own block applies.
 pub(crate) fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
-    focused_view(ws).map(workspace::view_kind)
+    let view = focused_view(ws)?;
+    if let View::DiffChanges(id) = view
+        && ws
+            .diff_changes_views
+            .get(*id)
+            .is_some_and(|state| !state.excerpts.is_empty())
+    {
+        return Some("editor");
+    }
+    Some(workspace::view_kind(view))
 }
 
 /// The active `view` predicate value, naming the app screen in the foreground.

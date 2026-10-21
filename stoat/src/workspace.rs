@@ -19,7 +19,7 @@ use crate::{
     commit_list::{CommitListId, CommitListSnap, CommitListState},
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
-    diff_changes::{DiffChangesDoc, DiffChangesId, DiffChangesState},
+    diff_changes::{DiffChangesId, DiffChangesState},
     display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
     host::GitHost,
@@ -323,11 +323,15 @@ pub struct Workspace {
     /// Held here rather than by the pane, as [`Self::commit_lists`] holds a
     /// list, so a parked tab's changes view keeps its cursor.
     pub(crate) diff_changes_views: SlotMap<DiffChangesId, DiffChangesState>,
-    /// The last changes view document a build finished, kept so a changes view
-    /// paints at once while the next one builds.
-    pub(crate) diff_changes_doc: Option<DiffChangesDoc>,
-    /// Moves when the diff base or the git state changes. That stales the
-    /// changes view document even where no buffer text moved.
+    /// The buffers a disposed changes view opened, which the stack's pump
+    /// closes when nothing else needs them.
+    ///
+    /// A pane or a tab disposes its views with the workspace alone in hand,
+    /// and a buffer's close reaches the language servers.
+    pub(crate) diff_changes_released: Vec<BufferId>,
+    /// Moves when the diff base, the git state, or the repository tally
+    /// changes. That stales every changes view's list of files even where no
+    /// diff map moved.
     pub(crate) diff_changes_epoch: u64,
     /// Active commit-by-commit review walk (if any). Outlives the diff view
     /// it opens, so closing a diff leaves the walk in place and only
@@ -545,7 +549,7 @@ impl Workspace {
             commit_lists: SlotMap::with_key(),
             restored_commit_lists: HashMap::new(),
             diff_changes_views: SlotMap::with_key(),
-            diff_changes_doc: None,
+            diff_changes_released: Vec::new(),
             diff_changes_epoch: 0,
             review_walk: None,
             ending_walk: None,
@@ -789,8 +793,9 @@ impl Workspace {
 
     /// The editor in the focused pane or dock, and the buffer it shows.
     ///
-    /// A run pane counts through its input editor. A modal or a paused rebase
-    /// takes input ahead of the pane but is not part of it, so
+    /// A run pane counts through its input editor, and a changes view through
+    /// its focused excerpt, so an empty stack has none. A modal or a paused
+    /// rebase takes input ahead of the pane but is not part of it, so
     /// [`crate::app::Stoat::focused_editor_ids`] checks those first.
     pub(crate) fn focused_editor(&self) -> Option<(EditorId, BufferId)> {
         let view = match self.focus {
@@ -802,6 +807,10 @@ impl Workspace {
             View::Run(id) => {
                 let input = &self.runs.get(*id)?.input;
                 Some((input.editor_id, input.buffer_id))
+            },
+            View::DiffChanges(id) => {
+                let excerpt = self.diff_changes_views.get(*id)?.focused_excerpt()?;
+                Some((excerpt.editor_id, excerpt.buffer_id))
             },
             _ => None,
         }
@@ -834,12 +843,20 @@ impl Workspace {
             .collect()
     }
 
-    /// Whether any pane, in any tab, shows `editor_id`.
+    /// Whether any pane, in any tab, shows `editor_id`, or a changes view holds
+    /// it as an excerpt.
     pub(crate) fn editor_referenced(&self, editor_id: EditorId) -> bool {
-        self.pane_trees().any(|tree| {
+        let in_pane = self.pane_trees().any(|tree| {
             tree.split_panes()
                 .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == editor_id))
-        })
+        });
+        in_pane
+            || self.diff_changes_views.values().any(|state| {
+                state
+                    .excerpts
+                    .iter()
+                    .any(|excerpt| excerpt.editor_id == editor_id)
+            })
     }
 
     /// Whether a pane in any tab, detached into a window or not, or a dock shows
@@ -1351,6 +1368,48 @@ impl Workspace {
             .map(|tallies| tallies.unstaged_per_file.as_slice())
     }
 
+    /// The untracked files the tally counts, sorted by repo-relative path, or
+    /// `None` before the first tally lands and outside a repo.
+    pub(crate) fn repo_untracked_files(&self) -> Option<&[PathBuf]> {
+        self.diff
+            .repo_hunk_tallies
+            .as_ref()
+            .map(|tallies| tallies.untracked.as_slice())
+    }
+
+    /// Files changed since the revision base, absolute, as the last tally read
+    /// them, or `None` under any other base.
+    pub(crate) fn rev_changed_files(&self) -> Option<&[PathBuf]> {
+        self.diff.rev_changed.as_deref()
+    }
+
+    /// Whether the repository tally is owed or on the pool, so the per-file
+    /// totals are not yet the disk's.
+    pub(crate) fn tally_pending(&self) -> bool {
+        self.diff.tally_pending()
+    }
+
+    /// Install the repository tally when it lands and spawn one when a tally
+    /// is owed, and report whether one landed.
+    ///
+    /// The changes view lists its files from the tally, so its pump drives the
+    /// tally between frames as well as each frame's [`Self::drive_diff_jobs`].
+    /// A landed tally stales every changes view's list.
+    pub(crate) fn pump_tally(
+        &mut self,
+        executor: &Executor,
+        git_host: &Arc<dyn GitHost>,
+        redraw_notify: &Arc<Notify>,
+    ) -> bool {
+        let landed = self
+            .diff
+            .drive_tally(&self.git_root, executor, git_host, redraw_notify);
+        if landed {
+            self.diff_changes_epoch += 1;
+        }
+        landed
+    }
+
     /// Install `diff_map` on `id` as if a job had produced it. See
     /// [`DiffState::install_test`].
     #[cfg(test)]
@@ -1375,7 +1434,7 @@ impl Workspace {
         let mut visible = std::mem::take(&mut self.visible_buffers);
         self.collect_visible_buffer_ids(&mut visible);
 
-        self.diff.drive(
+        let tally_landed = self.diff.drive(
             &self.buffers,
             &self.git_root,
             &visible,
@@ -1386,6 +1445,10 @@ impl Workspace {
             base_cache,
             redraw_notify,
         );
+        // The changes view lists its files from the tally.
+        if tally_landed {
+            self.diff_changes_epoch += 1;
+        }
         self.visible_buffers = visible;
     }
 
@@ -1774,12 +1837,24 @@ impl Workspace {
                         visible.push(editor.buffer_id);
                     }
                 },
+                // An excerpt's diff map has to follow its buffer's edits and
+                // stages, since the excerpt refolds when the map moves.
+                View::DiffChanges(id) => {
+                    let excerpts = self
+                        .diff_changes_views
+                        .get(id)
+                        .map_or(&[][..], |state| &state.excerpts);
+                    for excerpt in excerpts {
+                        if !visible.contains(&excerpt.buffer_id) {
+                            visible.push(excerpt.buffer_id);
+                        }
+                    }
+                },
                 View::Label(_)
                 | View::Run(_)
                 | View::Agent(_)
                 | View::Terminal(_)
                 | View::Commits(_)
-                | View::DiffChanges(_)
                 | View::Image { .. } => {},
             }
         }

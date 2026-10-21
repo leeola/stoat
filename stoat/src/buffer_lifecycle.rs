@@ -107,8 +107,6 @@ pub(crate) fn open_file_in_pane_now(
 /// The read blocks for the size of the file. A missing file opens empty, as it
 /// does in a pane. A read error sets the status and answers [`None`], and so
 /// does an image, which has no buffer.
-// FIXME: Nothing outside the tests opens a buffer that no pane shows.
-#[allow(dead_code)]
 pub(crate) fn open_buffer_unshown(
     stoat: &mut Stoat,
     workspace: WorkspaceId,

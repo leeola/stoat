@@ -384,15 +384,21 @@ pub(crate) fn dispose_view(
             None => {},
         },
         // The view the changes view covered is reachable through the changes
-        // view alone, so it goes too, as a list's does.
-        View::DiffChanges(id) => match ws
-            .diff_changes_views
-            .remove(id)
-            .and_then(|state| state.covered)
-        {
-            Some(View::Agent(term_id) | View::Terminal(term_id)) if ws.term_shown(term_id) => {},
-            Some(covered) => dispose_view(ws, executor, covered, EditorDisposal::GcIfUnreferenced),
-            None => {},
+        // view alone, so it goes too, as a list's does. The excerpts' editors
+        // go with it, and the buffers the stack opened wait for its pump.
+        View::DiffChanges(id) => {
+            let Some(state) = ws.diff_changes_views.remove(id) else {
+                return;
+            };
+            crate::diff_changes::dispose_excerpts(ws, state.excerpts);
+            match state.covered {
+                Some(View::Agent(term_id) | View::Terminal(term_id)) if ws.term_shown(term_id) => {
+                },
+                Some(covered) => {
+                    dispose_view(ws, executor, covered, EditorDisposal::GcIfUnreferenced)
+                },
+                None => {},
+            }
         },
         // An image pane owns nothing to dispose. It holds a path and a size.
         View::Label(_) | View::Image { .. } => {},
@@ -529,8 +535,14 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     // A changes view belongs to one pane too, for the same reason.
     if let View::DiffChanges(source) = ws.panes.pane(new_pane_id).view {
         ws.panes.pane_mut(new_pane_id).view = scratch_editor_view(ws, executor);
-        if let Some(state) = ws.diff_changes_views.get_mut(source) {
-            state.mode = "normal".into();
+        if let Some(editor_id) = ws
+            .diff_changes_views
+            .get(source)
+            .and_then(|state| state.focused_excerpt())
+            .map(|excerpt| excerpt.editor_id)
+            && let Some(editor) = ws.editors.get_mut(editor_id)
+        {
+            editor.mode = "normal".into();
         }
         return UpdateEffect::Redraw;
     }

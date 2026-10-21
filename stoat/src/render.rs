@@ -61,7 +61,6 @@ use crate::{
     minimap::{emit, MinimapContent},
     pane::{DockVisibility, FocusTarget, PaneId, View},
     rebase::RebasePause,
-    review_session::DiffDocument,
     run::{RunId, RunState},
     term_session::{TermId, TermSession},
     toggle::{self, Toggle, ToggleStates},
@@ -94,7 +93,6 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
@@ -140,9 +138,6 @@ pub(crate) struct PaneCtx<'a> {
     pub(crate) commit_lists: &'a mut SlotMap<CommitListId, CommitListState>,
     /// Every open changes view, which a [`View::DiffChanges`] pane paints from.
     pub(crate) diff_changes_views: &'a mut SlotMap<DiffChangesId, DiffChangesState>,
-    /// The workspace's last changes view document, or `None` before the first
-    /// one lands and while the changes stand at none.
-    pub(crate) diff_changes_doc: Option<Arc<DiffDocument>>,
 }
 
 /// The lookup and colors a pane needs to declare its minimap strip.
@@ -275,8 +270,8 @@ pub(crate) struct FrameCtx<'a> {
     /// previews paint through `:diff-files`'s own painter, so they answer the
     /// same session dials rather than carrying a second set.
     pub(crate) preview_dials: commits::PreviewDials,
-    /// Whether a changes view document build is on the pool, so a changes view
-    /// with no document yet shows that a build runs rather than that nothing
+    /// Whether the repository tally is owed or on the pool, so a changes view
+    /// with no excerpt shows that its list builds rather than that nothing
     /// changed.
     pub(crate) diff_changes_building: bool,
     /// The gutter, severity, and diff-mark colors already resolved from
@@ -1034,7 +1029,7 @@ pub(crate) fn frame(
         theme: &stoat.theme,
         commits_split: stoat.commits_split,
         preview_dials,
-        diff_changes_building: stoat.pending_diff_changes_build.is_some(),
+        diff_changes_building: ws.tally_pending(),
         chrome: &stoat
             .chrome
             .as_ref()
@@ -1177,10 +1172,6 @@ pub(crate) fn frame(
                 term_pool_grids: &ws.term_pool_grids,
                 commit_lists: &mut ws.commit_lists,
                 diff_changes_views: &mut ws.diff_changes_views,
-                diff_changes_doc: ws
-                    .diff_changes_doc
-                    .as_ref()
-                    .and_then(|built| built.doc.clone()),
             },
             frame,
             buf,
@@ -1314,10 +1305,6 @@ pub(crate) fn frame(
                     term_pool_grids: &ws.term_pool_grids,
                     commit_lists: &mut ws.commit_lists,
                     diff_changes_views: &mut ws.diff_changes_views,
-                    diff_changes_doc: ws
-                        .diff_changes_doc
-                        .as_ref()
-                        .and_then(|built| built.doc.clone()),
                 },
                 frame,
                 buf,
