@@ -132,7 +132,7 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
 /// one, so the steps walk the rows the stack paints. An excerpt that waits on
 /// its diff map paints no row, so a step from it holds still and a crossing
 /// passes over it. At either end of the stack the cursor stays.
-pub(crate) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+pub(super) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     let down = delta > 0;
     let mut effect = UpdateEffect::None;
     for _ in 0..delta.unsigned_abs() {
@@ -247,12 +247,13 @@ pub(super) fn diff_changes_edge(stoat: &mut Stoat, last: bool) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Put the focused changes view's cursor on stack row `row`, as a press on
-/// that row does.
+/// Put the focused changes view's cursor on the cell a press lands on, at
+/// stack row `row` and screen column `column`.
 ///
-/// The row's excerpt takes the focus, and its cursor goes to the start of the
-/// row. A header row puts the cursor on its excerpt's first row.
-pub(crate) fn diff_changes_select(stoat: &mut Stoat, row: usize) -> UpdateEffect {
+/// The row's excerpt takes the focus, and its cursor goes to the cell, as a
+/// press in an editor puts it. A header row puts the cursor at the start of
+/// its excerpt's first row.
+pub(crate) fn diff_changes_press(stoat: &mut Stoat, row: usize, column: u16) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
         return UpdateEffect::None;
@@ -266,10 +267,41 @@ pub(crate) fn diff_changes_select(stoat: &mut Stoat, row: usize) -> UpdateEffect
         return UpdateEffect::None;
     };
     diff_changes::layout_stack(state, editors);
-    match diff_changes::select_row(state, editors, row) {
+    match diff_changes::press_cell(state, editors, row, column) {
         true => UpdateEffect::Redraw,
         false => UpdateEffect::None,
     }
+}
+
+/// Scroll the focused changes view's stack by `delta` rows and leave its
+/// cursor, as a wheel scrolls an editor.
+///
+/// The scroll stays between the stack's top and its last page. The cursor
+/// stays off screen until it moves, since only a moved cursor pulls the stack
+/// back.
+pub(crate) fn diff_changes_scroll(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return UpdateEffect::None;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    let total = diff_changes::layout_stack(state, editors);
+    let scroll = state
+        .scroll
+        .saturating_add_signed(delta as isize)
+        .min(total.saturating_sub(state.viewport_rows));
+    if scroll == state.scroll {
+        return UpdateEffect::None;
+    }
+    state.scroll = scroll;
+    UpdateEffect::Redraw
 }
 
 /// Give a fresh state to every changes view pane of the active workspace whose

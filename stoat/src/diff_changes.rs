@@ -22,6 +22,7 @@ use crate::{
     diff_map::DiffMap,
     editor_state::{EditorId, EditorState},
     pane::View,
+    render,
     workspace::{diff::DiffBase, Workspace},
 };
 use ratatui::layout::Rect;
@@ -81,6 +82,12 @@ pub(crate) struct DiffChangesState {
     /// changes view opened from. The paint applies it after it fits each
     /// excerpt to the width, so the rows it counts are the rows it paints.
     pub held_screen_row: Option<u16>,
+    /// The focused excerpt's editor and its cursor as of the last paint.
+    ///
+    /// The paint scrolls to the cursor only when the cursor moved since, so a
+    /// wheel scroll leaves the cursor off screen as an editor's wheel does,
+    /// while a cursor move that no key made still comes into view.
+    pub followed_cursor: Option<(EditorId, Point)>,
 }
 
 /// One changed file in a changes view's stack.
@@ -165,6 +172,7 @@ impl Default for DiffChangesState {
             covered_diff: false,
             pending_landing: None,
             held_screen_row: None,
+            followed_cursor: None,
         }
     }
 }
@@ -292,6 +300,58 @@ pub(crate) fn select_row(
     place_cursor(editor, point);
     state.focused = index;
     true
+}
+
+/// Focus the excerpt that stack row `row` falls in and put its cursor on the
+/// cell at screen column `column` of the row, as a press in an editor does,
+/// and report whether the row held one.
+///
+/// The column maps against the excerpt's text column as of its last paint, so
+/// a press left of the text lands at the start of the row. A header row puts
+/// the cursor at the start of its excerpt's first row, and a row that shows
+/// no buffer line, as a base row spliced in for a removal, at the start of the
+/// first row below it that does.
+pub(crate) fn press_cell(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    row: usize,
+    column: u16,
+) -> bool {
+    let Some((index, display_row)) = excerpt_at(state, editors, row) else {
+        return false;
+    };
+    let header = row == state.excerpts[index].top;
+    let Some(editor) = editors.get_mut(state.excerpts[index].editor_id) else {
+        return false;
+    };
+
+    let snapshot = editor.display_map.snapshot();
+    let cell = editor
+        .text_rect
+        .filter(|_| !header)
+        .and_then(|text| {
+            let column = column.saturating_sub(text.x);
+            render::editor::display_cell_to_offset(&snapshot, display_row, 0, column, 0)
+        })
+        .map(|offset| snapshot.buffer_snapshot().rope().offset_to_point(offset));
+    let Some(point) = cell.or_else(|| snapshot.row_start_at_or_after(display_row)) else {
+        return false;
+    };
+    place_cursor(editor, point);
+    state.focused = index;
+    true
+}
+
+/// The focused excerpt's editor and its cursor's buffer position.
+///
+/// `None` on an empty stack.
+pub(crate) fn focused_cursor(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+) -> Option<(EditorId, Point)> {
+    let editor_id = state.focused_excerpt()?.editor_id;
+    let editor = editors.get_mut(editor_id)?;
+    Some((editor_id, cursor_point(editor)))
 }
 
 /// The excerpt that stack row `row` falls in, as an index, and the display row

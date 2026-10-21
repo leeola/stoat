@@ -28,8 +28,9 @@ use stoat_widgets::ApcScene;
 ///
 /// The stack paints from the scroll of `state`, which first moves so the
 /// focused excerpt's cursor shows. A screen row that a landing holds takes the
-/// cursor's row, and otherwise the scroll moves the least distance that keeps
-/// the cursor on screen.
+/// cursor's row. Otherwise a cursor that moved since the last paint takes the
+/// least scroll that keeps it on screen, and a cursor that stayed leaves the
+/// scroll, so a wheel scroll leaves the cursor off screen.
 ///
 /// Each excerpt takes a header row in the commit header style and then its
 /// rows, painted from its own scroll row, so an excerpt cut at the top shows
@@ -93,14 +94,19 @@ pub(crate) fn render_diff_changes(
         }
     }
     let total = diff_changes::layout_stack(state, editors);
+    let cursor = diff_changes::focused_cursor(state, editors);
     if let Some(row) = diff_changes::cursor_stack_row(state, editors) {
         match state.held_screen_row.take() {
             Some(screen_row) => {
                 let last = state.viewport_rows.saturating_sub(1);
                 state.scroll = row.saturating_sub(usize::from(screen_row).min(last));
             },
-            None => state.ensure_row_visible(row, state.viewport_rows),
+            None if cursor != state.followed_cursor => {
+                state.ensure_row_visible(row, state.viewport_rows);
+            },
+            None => {},
         }
+        state.followed_cursor = cursor;
     }
     state.scroll = state.scroll.min(total.saturating_sub(state.viewport_rows));
 

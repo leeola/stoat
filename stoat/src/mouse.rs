@@ -128,7 +128,7 @@ pub(crate) struct ScreenSurfaces {
     detail: Option<Rect>,
     /// The minimap strip at the list's right edge, when the screen reserves
     /// one. A left press here scrubs through the minimap routing instead of
-    /// selecting a row, and a wheel steps the list as it does over the rows.
+    /// selecting a row, and a wheel acts as it does over the rows.
     strip: Option<Rect>,
 }
 
@@ -289,7 +289,9 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
             };
             action_handlers::commits::commits_step(stoat, step)
         },
-        ScreenKind::DiffChanges => action_handlers::diff_changes::diff_changes_select(stoat, index),
+        ScreenKind::DiffChanges => {
+            action_handlers::diff_changes::diff_changes_press(stoat, index, mouse.column)
+        },
         ScreenKind::Rebase => action_handlers::rebase::rebase_select(stoat, index),
         ScreenKind::RebaseConflict => action_handlers::conflict::conflict_select(stoat, index),
     })
@@ -1490,8 +1492,9 @@ pub(crate) fn handle_mouse_scroll(
 
     // A pane-overlay screen owns the wheel inside its pane, the same way a
     // boxed modal owns it everywhere. Over the list the notches step the
-    // selection. Anywhere else in the pane they are spent and dropped, so the
-    // wheel never reaches the editor the screen covers.
+    // selection, and over the changes view they scroll its stack. Anywhere
+    // else in the pane they are spent and dropped, so the wheel never reaches
+    // the editor the screen covers.
     if let Some(surfaces) = screen_surfaces(stoat).filter(|s| s.holds(mouse)) {
         let steps = take_whole_notches(stoat, lines);
         if steps == 0 {
@@ -1509,13 +1512,9 @@ pub(crate) fn handle_mouse_scroll(
                     };
                     action_handlers::commits::commits_step(stoat, step)
                 },
-                ScreenKind::DiffChanges => action_handlers::diff_changes::diff_changes_step(
-                    stoat,
-                    match steps > 0 {
-                        true => by as i32,
-                        false => -(by as i32),
-                    },
-                ),
+                ScreenKind::DiffChanges => {
+                    action_handlers::diff_changes::diff_changes_scroll(stoat, steps)
+                },
                 // The rebase step moves one entry, so a multi-notch report
                 // spends one call per notch rather than carrying a count.
                 ScreenKind::Rebase => {
@@ -2296,6 +2295,7 @@ mod tests {
         sync::Arc,
     };
     use stoat_action::{MoveDown, NewTab, OpenFile, SplitDown, SplitRight, TogglePaneWiden};
+    use stoat_text::Point;
     /// A buffer with `count` single-line diagnostics on consecutive rows,
     /// painted once so the pane areas and the render's span cache exist.
     fn hover_diagnostics_harness(count: u32) -> (crate::test_harness::TestHarness, EditorId) {
@@ -3011,34 +3011,84 @@ mod tests {
         (&mut diff_changes_views[id], editors)
     }
 
-    /// A press on a changes view row puts the cursor there, and a wheel notch
-    /// over the hunks steps it.
-    #[test]
-    fn a_press_and_a_wheel_over_the_changes_view_move_its_cursor() {
-        let mut h = diff_changes_harness(MinimapMode::Single, 20);
+    /// The focused excerpt's file and its cursor's buffer position.
+    fn diff_changes_cursor(h: &mut crate::test_harness::TestHarness) -> (String, Point) {
+        let (state, editors) = diff_changes_stack(h);
+        let excerpt = state.focused_excerpt().expect("a focused excerpt");
+        let editor = editors
+            .get_mut(excerpt.editor_id)
+            .expect("an excerpt editor");
+        (excerpt.rel_path.clone(), diff_changes::cursor_point(editor))
+    }
+
+    /// The changes view's rows, and the first column of an excerpt's text.
+    fn diff_changes_columns(h: &mut crate::test_harness::TestHarness) -> (Rect, u16) {
         let list = {
             let ws = h.stoat.active_workspace();
             crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
         };
+        let (state, editors) = diff_changes_stack(h);
+        let text = editors[state.excerpts[0].editor_id]
+            .text_rect
+            .expect("the paint wrote the excerpt's text column");
+        (list, text.x)
+    }
 
-        h.stoat.update(mouse_event(
-            MouseEventKind::Down(MouseButton::Left),
-            list.x + 2,
-            list.y + 1,
-        ));
-        let pressed = diff_changes_place(&mut h);
-        h.stoat.update(mouse_event(
-            MouseEventKind::ScrollDown,
-            list.x + 2,
-            list.y + 1,
-        ));
-        assert_eq!((pressed, diff_changes_place(&mut h)), ((1, 0), (2, 0)));
+    /// A press on an excerpt row puts that file's cursor on the cell under the
+    /// pointer, a press on a header row at the start of its excerpt's first
+    /// row, and a press left of the text at the start of the row.
+    #[test]
+    fn a_press_over_the_changes_view_puts_the_cursor_on_its_cell() {
+        let mut h = diff_changes_harness(MinimapMode::Single, 20);
+        let (list, text_x) = diff_changes_columns(&mut h);
+        let mut press = |x, y| {
+            h.stoat
+                .update(mouse_event(MouseEventKind::Down(MouseButton::Left), x, y));
+            diff_changes_cursor(&mut h)
+        };
+
+        // Each one-line file takes a header row, its changed row, and the empty
+        // row after its newline, so f01's header sits on row 3.
+        let pressed = [
+            press(text_x + 1, list.y + 4),
+            press(text_x + 1, list.y + 3),
+            press(list.x, list.y + 1),
+        ];
+        let at = |path: &str, column| (path.to_string(), Point::new(0, column));
+        assert_eq!(
+            pressed,
+            [at("f01.txt", 1), at("f01.txt", 0), at("f00.txt", 0)]
+        );
+    }
+
+    /// A wheel notch over the stack scrolls it and leaves the cursor, which
+    /// stays off screen through the next paint as an editor's wheel strands
+    /// its cursor.
+    #[test]
+    fn a_wheel_over_the_changes_view_scrolls_the_stack_and_strands_the_cursor() {
+        let mut h = diff_changes_harness(MinimapMode::Single, 20);
+        let (list, _) = diff_changes_columns(&mut h);
+        let before = diff_changes_place(&mut h);
+
+        for _ in 0..2 {
+            h.stoat.update(mouse_event(
+                MouseEventKind::ScrollDown,
+                list.x + 2,
+                list.y + 1,
+            ));
+        }
+        let _ = h.stoat.render();
+        assert_eq!(
+            (before, diff_changes_place(&mut h)),
+            ((1, 0), (1, 2)),
+            "two notches scroll two rows past the cursor's row, and the paint leaves them",
+        );
     }
 
     /// A press on a per-pane changes view's strip puts the cursor on the row
     /// under it, scrolled toward the middle of the view, and a drag follows the
-    /// pointer until the release. A wheel notch over the strip steps the
-    /// cursor, as one over the rows does.
+    /// pointer until the release. A wheel notch over the strip scrolls the
+    /// stack and leaves the cursor, as one over the rows does.
     #[test]
     fn the_changes_view_strip_scrubs_its_changes_view() {
         let mut h = diff_changes_harness(MinimapMode::PerPane, 20);
@@ -3081,7 +3131,7 @@ mod tests {
                 ((rows - 1, rows - view), Some(MinimapDrag::DiffChanges(id))),
                 (top_cell_row, 0),
                 None,
-                (top_cell_row + 1, 0),
+                (top_cell_row, 1),
             ),
         );
     }
