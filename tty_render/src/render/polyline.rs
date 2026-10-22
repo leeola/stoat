@@ -240,7 +240,7 @@ impl PolylinePass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<PolylineInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     // Six vec4s carry the twelve points, then the bounds, the
@@ -259,7 +259,7 @@ impl PolylinePass {
                         9 => Float32x4,
                         10 => Uint32,
                     ],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,

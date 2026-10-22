@@ -175,7 +175,7 @@ impl PanelPass {
                     module: &shader,
                     entry_point: Some(vertex),
                     compilation_options: Default::default(),
-                    buffers: &[VertexBufferLayout {
+                    buffers: &[Some(VertexBufferLayout {
                         array_stride: size_of::<PanelInstance>() as u64,
                         step_mode: VertexStepMode::Instance,
                         attributes: &vertex_attr_array![
@@ -191,7 +191,7 @@ impl PanelPass {
                             9 => Float32,
                             10 => Float32,
                         ],
-                    }],
+                    })],
                 },
                 fragment: Some(FragmentState {
                     module: &shader,

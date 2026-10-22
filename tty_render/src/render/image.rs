@@ -179,7 +179,7 @@ impl ImagePass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<ImageInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: &vertex_attr_array![
@@ -188,7 +188,7 @@ impl ImagePass {
                         2 => Float32x2,
                         3 => Float32x2,
                     ],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,
@@ -869,7 +869,11 @@ mod tests {
         device
             .poll(PollType::wait_indefinitely())
             .expect("poll readback");
-        let bytes = readback.slice(..).get_mapped_range().to_vec();
+        let bytes = readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("the buffer is mapped")
+            .to_vec();
         bytes
             .chunks(COPY_BYTES_PER_ROW_ALIGNMENT as usize)
             .flat_map(|row| row.as_chunks::<4>().0[..side as usize].iter().copied())

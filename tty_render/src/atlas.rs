@@ -782,6 +782,10 @@ mod tests {
         device
             .poll(PollType::wait_indefinitely())
             .expect("poll readback");
-        buffer.slice(..).get_mapped_range().to_vec()
+        buffer
+            .slice(..)
+            .get_mapped_range()
+            .expect("the buffer is mapped")
+            .to_vec()
     }
 }

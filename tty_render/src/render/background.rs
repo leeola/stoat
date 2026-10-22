@@ -287,11 +287,11 @@ impl BackgroundPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<BgInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: &vertex_attr_array![0 => Uint32],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,
@@ -1328,7 +1328,11 @@ mod tests {
         device
             .poll(PollType::wait_indefinitely())
             .expect("poll readback");
-        let bytes = readback.slice(..).get_mapped_range().to_vec();
+        let bytes = readback
+            .slice(..)
+            .get_mapped_range()
+            .expect("the buffer is mapped")
+            .to_vec();
         bytes.as_chunks::<4>().0.to_vec()
     }
 

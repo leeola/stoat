@@ -952,7 +952,7 @@ impl TextPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<TextInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: &vertex_attr_array![
@@ -964,7 +964,7 @@ impl TextPass {
                         5 => Uint32,
                         6 => Uint32,
                     ],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,
@@ -4440,7 +4440,7 @@ fn build_underline_pipeline(
             module: shader,
             entry_point: Some("vs_underline"),
             compilation_options: Default::default(),
-            buffers: &[VertexBufferLayout {
+            buffers: &[Some(VertexBufferLayout {
                 array_stride: size_of::<UnderlineInstance>() as u64,
                 step_mode: VertexStepMode::Instance,
                 attributes: &vertex_attr_array![
@@ -4449,7 +4449,7 @@ fn build_underline_pipeline(
                     2 => Uint32,
                     3 => Uint32,
                 ],
-            }],
+            })],
         },
         fragment: Some(FragmentState {
             module: shader,
@@ -4493,7 +4493,7 @@ fn build_rect_pipeline(
             module: shader,
             entry_point: Some("vs_rect"),
             compilation_options: Default::default(),
-            buffers: &[VertexBufferLayout {
+            buffers: &[Some(VertexBufferLayout {
                 array_stride: size_of::<RectInstance>() as u64,
                 step_mode: VertexStepMode::Instance,
                 attributes: &vertex_attr_array![
@@ -4503,7 +4503,7 @@ fn build_rect_pipeline(
                     3 => Uint32,
                     4 => Uint32,
                 ],
-            }],
+            })],
         },
         fragment: Some(FragmentState {
             module: shader,

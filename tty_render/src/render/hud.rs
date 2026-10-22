@@ -104,7 +104,7 @@ impl HudPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<HudInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: &vertex_attr_array![
@@ -112,7 +112,7 @@ impl HudPass {
                         1 => Float32x2,
                         2 => Float32x4,
                     ],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,

@@ -49,8 +49,8 @@ use wgpu::{
     Adapter, Backends, Color, CommandEncoder, CommandEncoderDescriptor, CompositeAlphaMode,
     CurrentSurfaceTexture, Device, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
     Operations, PowerPreference, PresentMode, Queue, RenderPass, RenderPassColorAttachment,
-    RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceConfiguration,
-    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceColorSpace,
+    SurfaceConfiguration, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
 };
 #[cfg(feature = "perf")]
 use {
@@ -161,7 +161,11 @@ impl GpuTimer {
             return None;
         }
         let ticks: [u64; 2] = {
-            let view = slot.map.slice(..).get_mapped_range();
+            let view = slot
+                .map
+                .slice(..)
+                .get_mapped_range()
+                .expect("the buffer is mapped");
             bytemuck::pod_read_unaligned(&view[..TIMESTAMP_BYTES as usize])
         };
         slot.map.unmap();
@@ -1654,6 +1658,7 @@ impl GpuContext {
                     power_preference: PowerPreference::HighPerformance,
                     compatible_surface: Some(&surface),
                     force_fallback_adapter,
+                    apply_limit_buckets: false,
                 }))
             };
 
@@ -1717,6 +1722,7 @@ impl GpuContext {
             alpha_mode: CompositeAlphaMode::Auto,
             view_formats,
             desired_maximum_frame_latency: 1,
+            color_space: SurfaceColorSpace::Auto,
         };
         let t_surface = Instant::now();
         surface.configure(&device, &config);
@@ -1833,6 +1839,7 @@ impl GpuContext {
                 false => vec![view_format],
             },
             desired_maximum_frame_latency: 1,
+            color_space: SurfaceColorSpace::Auto,
         };
         surface.configure(&shared.device, &config);
 
@@ -2014,7 +2021,7 @@ impl GpuContext {
         }
 
         self.perf.mark_submitted();
-        surface_frame.present();
+        self.queue.present(surface_frame);
         self.perf.end_frame();
         #[cfg(feature = "perf")]
         if let Some(gpu) = self.renderer.take_gpu_time() {
@@ -2184,7 +2191,7 @@ impl GpuContext {
             .finish_frame(&self.device, &self.queue, encoder, timing);
 
         self.perf.mark_submitted();
-        surface_frame.present();
+        self.queue.present(surface_frame);
         self.perf.end_frame();
         #[cfg(feature = "perf")]
         if let Some(gpu) = self.renderer.take_gpu_time() {
@@ -2451,6 +2458,7 @@ pub fn headless_device() -> Option<(Device, Queue)> {
         power_preference: PowerPreference::HighPerformance,
         compatible_surface: None,
         force_fallback_adapter: false,
+        apply_limit_buckets: false,
     }))
     .ok()?;
 
@@ -2462,7 +2470,7 @@ mod tests {
     use super::{
         build_font_system, clamp_scissor, covered_rects, needs_configure, surface_formats,
         CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, PoolComposite, Renderer,
-        SharedFonts, SurfaceConfiguration, TextureFormat, MAX_COVERED,
+        SharedFonts, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
     use crate::test_support::{pixel, read_back, require_headless_device, still_frame};
     use std::iter;
@@ -3105,6 +3113,7 @@ mod tests {
             height: 600,
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
+            color_space: SurfaceColorSpace::Auto,
             alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             view_formats: Vec::new(),
         };

@@ -137,7 +137,7 @@ impl IconPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<IconInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     attributes: &vertex_attr_array![
@@ -148,7 +148,7 @@ impl IconPass {
                         4 => Float32x2,
                         5 => Uint32,
                     ],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,

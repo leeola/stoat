@@ -348,7 +348,7 @@ impl SketchPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[VertexBufferLayout {
+                buffers: &[Some(VertexBufferLayout {
                     array_stride: size_of::<SketchInstance>() as u64,
                     step_mode: VertexStepMode::Instance,
                     // The bounds, the color with its alpha, the half width
@@ -360,7 +360,7 @@ impl SketchPass {
                         2 => Float32x4,
                         3 => Uint32x4,
                     ],
-                }],
+                })],
             },
             fragment: Some(FragmentState {
                 module: &shader,
