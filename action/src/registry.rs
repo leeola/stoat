@@ -130,7 +130,7 @@ use crate::{
         },
         workspace::{
             CloseWorkspace, CopyWorkspace, Mosh, NewWorkspace, ReloadEnv, RenameWorkspace, SetCwd,
-            ShowCwd, Ssh, SwitchWorkspace, WorkspacePickerScopeToggle,
+            ShowCwd, Ssh, SwitchWorkspace, WorkspacePickerCreateSub, WorkspacePickerScopeToggle,
         },
     },
     param::{MissingSnafu, ParseFailureSnafu, WrongKindSnafu},
@@ -926,6 +926,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(WorkspacePickerScopeToggle::DEF, |_| {
         Ok(Box::new(WorkspacePickerScopeToggle))
     });
+    add(WorkspacePickerCreateSub::DEF, |_| {
+        Ok(Box::new(WorkspacePickerCreateSub))
+    });
     add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
@@ -1386,6 +1389,7 @@ mod tests {
         "ReloadEnv",
         "HelpScopeToggle",
         "WorkspacePickerScopeToggle",
+        "WorkspacePickerCreateSub",
         "SubmitPromptInput",
         "CancelPromptInput",
         "PromptInsertNewline",
@@ -1929,6 +1933,7 @@ mod tests {
         // + 1 PickerDelete.
         // + 1 PickerRename.
         // + 1 WorkspacePickerScopeToggle.
+        // + 1 WorkspacePickerCreateSub.
         // + 1 PinMode.
         // + 1 Ssh.
         // + 1 Mosh.
@@ -1943,7 +1948,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 448);
+        assert_eq!(all().count(), 449);
     }
 
     #[test]

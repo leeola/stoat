@@ -581,9 +581,63 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         },
     }
 
-    // The omit rule judged the workspace active when the picker opened, so the
-    // drop names that workspace rather than the one active now. Its freshness
-    // is read again, because a workspace that holds something is no orphan.
+    drop_omitted_fresh_workspace(stoat, &picker);
+    UpdateEffect::Redraw
+}
+
+/// Create a session named by the picker's query, tied to the active
+/// workspace's family, and enter it.
+///
+/// The family is the one the picker's family scope lists, so the new session
+/// shows there. A fresh launch workspace whose row the picker omitted leaves
+/// with the create, and a sub-session of it names a parent that no row shows,
+/// so from there the create makes a root session.
+///
+/// An empty query and a rename in progress do nothing, and the picker stays
+/// open.
+pub(super) fn workspace_picker_create_sub(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.workspace_picker.as_ref() else {
+        return UpdateEffect::None;
+    };
+    if picker.renaming() {
+        return UpdateEffect::None;
+    }
+    let query = picker
+        .input
+        .text(stoat.active_workspace())
+        .trim()
+        .to_owned();
+    if query.is_empty() {
+        return UpdateEffect::None;
+    }
+    let Some(picker) = stoat.workspace_picker.take() else {
+        return UpdateEffect::None;
+    };
+    picker.dispose(stoat.active_workspace_mut());
+
+    let launch_leaves = picker.omitted_workspace == Some(stoat.active_workspace)
+        && stoat.active_workspace().is_fresh();
+    let parent = match launch_leaves {
+        true => None,
+        false => Some(stoat.active_workspace().family_root()),
+    };
+    create_workspace(stoat, parent);
+    stoat.active_workspace_mut().name = query.clone();
+    stoat.set_status(match parent {
+        Some(_) => format!("created sub-session {query}"),
+        None => format!("created session {query}"),
+    });
+    drop_omitted_fresh_workspace(stoat, &picker);
+    UpdateEffect::Redraw
+}
+
+/// Close the untouched workspace whose row `picker` omitted, once a switch or
+/// a create left it behind.
+///
+/// The omit rule judged the workspace active when the picker opened, so the
+/// drop names that workspace rather than the one active now. Its freshness is
+/// read again, because a workspace that holds something is no orphan.
+fn drop_omitted_fresh_workspace(stoat: &mut Stoat, picker: &WorkspacePicker) {
     let orphan = picker
         .omitted_workspace
         .filter(|&id| id != stoat.active_workspace)
@@ -593,7 +647,6 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         release_workspace(stoat, id);
         stoat.workspaces.remove(id);
     }
-    UpdateEffect::Redraw
 }
 
 /// Bring a persisted-but-closed workspace back into the running instance and
@@ -1937,6 +1990,120 @@ mod tests {
                 true,
             ),
             "the query names a new root session rooted where the active one is"
+        );
+    }
+
+    /// Alt-Enter names a sub-session of the active session's family, the one
+    /// the picker's family scope lists. The edit keeps the active workspace
+    /// from reading as a fresh launch, which leaves with the create.
+    #[test]
+    fn alt_enter_on_a_query_creates_a_sub_session_of_the_family() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        harness.edit_focused(0..0, "x");
+        let root = harness.stoat.active_workspace().uid;
+        let before = harness.stoat.workspaces.len();
+
+        harness.type_action("SwitchWorkspace()");
+        harness.type_text("notes");
+        harness.type_keys("alt-enter");
+
+        let active = harness.stoat.active_workspace();
+        assert_eq!(
+            (
+                harness.stoat.workspaces.len(),
+                active.name.as_str(),
+                active.parent,
+                harness.stoat.pending_message.as_deref(),
+                harness.stoat.workspace_picker.is_none(),
+            ),
+            (
+                before + 1,
+                "notes",
+                Some(root),
+                Some("created sub-session notes"),
+                true,
+            ),
+            "the query names a sub-session of the active family"
+        );
+    }
+
+    /// An empty query gives Alt-Enter no name, so the picker stays open.
+    #[test]
+    fn alt_enter_on_an_empty_query_keeps_the_picker_open() {
+        let mut harness = Stoat::test();
+        let before = harness.stoat.workspaces.len();
+
+        harness.type_action("SwitchWorkspace()");
+        harness.type_keys("alt-enter");
+
+        assert_eq!(
+            (
+                harness.stoat.workspace_picker.is_some(),
+                harness.stoat.workspaces.len(),
+            ),
+            (true, before),
+            "the picker stays open and no session appears"
+        );
+    }
+
+    /// A rename holds the row's new name in the input, so Alt-Enter leaves it
+    /// alone and the rename goes on.
+    #[test]
+    fn alt_enter_during_a_rename_creates_nothing() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        stoat.workspace_picker = Some(WorkspacePicker::new(
+            &stoat.workspaces,
+            stoat.active_workspace,
+            vec![saved_session(WorkspaceUid(7), "proj")],
+            input,
+        ));
+        let before = stoat.workspaces.len();
+
+        workspace_picker_rename_start(stoat);
+        replace_picker_text(stoat, "renamed");
+        let effect = workspace_picker_create_sub(stoat);
+
+        assert_eq!(
+            (
+                effect,
+                stoat
+                    .workspace_picker
+                    .as_ref()
+                    .map(WorkspacePicker::renaming),
+                stoat.workspaces.len(),
+            ),
+            (UpdateEffect::None, Some(true), before),
+            "the rename goes on and no session appears"
+        );
+    }
+
+    /// A fresh launch workspace leaves with the create, and a sub-session of it
+    /// names a parent that no row shows. So the create makes a root session.
+    #[test]
+    fn alt_enter_from_a_fresh_launch_creates_a_root_session() {
+        let mut harness = Stoat::test();
+        let launch = harness.stoat.active_workspace;
+        open_workspace_picker_over(
+            &mut harness.stoat,
+            vec![saved_session(WorkspaceUid(424242), "proj")],
+        );
+        harness.type_text("notes");
+        harness.type_keys("alt-enter");
+
+        let stoat = &harness.stoat;
+        assert_eq!(
+            (
+                stoat.workspaces.len(),
+                stoat.workspaces.contains_key(launch),
+                stoat.active_workspace().name.as_str(),
+                stoat.active_workspace().parent,
+                stoat.pending_message.as_deref(),
+            ),
+            (1, false, "notes", None, Some("created session notes")),
+            "the created session replaces the launch workspace as a root session"
         );
     }
 

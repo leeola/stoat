@@ -45,6 +45,17 @@ define_action!(
 );
 
 define_action!(
+    WorkspacePickerCreateSubDef,
+    WorkspacePickerCreateSub,
+    "WorkspacePickerCreateSub",
+    ActionKind::WorkspacePickerCreateSub,
+    "create a sub-session from the picker query",
+    "Create a session named by the workspace picker's query inside the active session's family, the one the picker's family scope lists, and enter it. An empty query does nothing.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     CloseWorkspaceDef,
     CloseWorkspace,
     "CloseWorkspace",

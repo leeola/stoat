@@ -441,6 +441,9 @@ on key {
         # in the same input, and Enter applies it.
         Ctrl-r -> PickerRename();
         Enter -> SubmitPromptInput();
+        # Shadows the input's newline insert. The query becomes a sub-session
+        # of the active session's family.
+        Alt-Enter -> WorkspacePickerCreateSub();
         Escape -> CancelPromptInput();
     }
     modal == quit_confirm {

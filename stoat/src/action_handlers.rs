@@ -986,6 +986,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RunHistoryNext => run::run_history_next(stoat),
         ActionKind::HelpScopeToggle => help::help_scope_toggle(stoat),
         ActionKind::WorkspacePickerScopeToggle => workspace::workspace_picker_scope_toggle(stoat),
+        ActionKind::WorkspacePickerCreateSub => workspace::workspace_picker_create_sub(stoat),
         ActionKind::CloseHelp => help::help_cancel(stoat),
         ActionKind::Run => {
             let cmd = action
