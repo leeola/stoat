@@ -71,13 +71,8 @@ use crate::{
     },
 };
 use crossterm::{
-    cursor::MoveTo,
     queue,
-    style::{
-        Attribute, Colors, Print, SetAttribute, SetBackgroundColor, SetColors, SetForegroundColor,
-        SetUnderlineColor,
-    },
-    terminal::{Clear, ClearType},
+    style::{Attribute, Color as CrosstermColor, Colored, SetAttribute},
 };
 use ratatui::{
     backend::IntoCrossterm,
@@ -480,6 +475,11 @@ impl PerfSegment {
 /// same state as it draws, so a cell goes out as the bytes that backend writes
 /// for it.
 ///
+/// The pen formats the parameters of its sequences itself. crossterm's
+/// commands format each number through `core::fmt` and each attribute code
+/// through a new `String`, and on a full page that costs more than the rest of
+/// the encode. The bytes are the ones those commands write.
+///
 /// See also:
 /// - [`serialize_rows`], the page stream this state follows.
 struct PagePen {
@@ -503,27 +503,30 @@ impl PagePen {
 
     /// Write `cell` at column `x` of row `y`, after the state changes it needs.
     fn paint(&mut self, out: &mut Vec<u8>, x: u16, y: u16, cell: &Cell) -> io::Result<()> {
-        self.move_to(out, x, y)?;
+        self.move_to(out, x, y);
 
         if cell.modifier != self.modifier {
             self.set_modifier(out, cell.modifier)?;
         }
-        self.set_colors(out, cell.fg, cell.bg)?;
+        self.set_colors(out, cell.fg, cell.bg);
         if cell.underline_color != self.underline_color {
-            queue!(
+            push_color_sgr(
                 out,
-                SetUnderlineColor(cell.underline_color.into_crossterm())
-            )?;
+                &[Colored::UnderlineColor(
+                    cell.underline_color.into_crossterm(),
+                )],
+            );
             self.underline_color = cell.underline_color;
         }
 
-        queue!(out, Print(cell.symbol()))
+        out.extend_from_slice(cell.symbol().as_bytes());
+        Ok(())
     }
 
     /// Clear from column `x` of row `y` to the end of the line under the colors
     /// of `blank`.
     fn erase(&mut self, out: &mut Vec<u8>, x: u16, y: u16, blank: &Cell) -> io::Result<()> {
-        self.move_to(out, x, y)?;
+        self.move_to(out, x, y);
         // The erase leaves the cursor at `x`, not past a painted cell.
         self.last = None;
 
@@ -531,45 +534,52 @@ impl PagePen {
         // erase runs with none. SGR 0 also resets the colors, to the state of a
         // new pen.
         if !self.modifier.is_empty() {
-            queue!(out, SetAttribute(Attribute::Reset))?;
+            set_attribute(out, Attribute::Reset)?;
             *self = PagePen::new();
         }
-        self.set_colors(out, blank.fg, blank.bg)?;
+        self.set_colors(out, blank.fg, blank.bg);
 
-        queue!(out, Clear(ClearType::UntilNewLine))
+        out.extend_from_slice(b"\x1b[K");
+        Ok(())
     }
 
     /// Reset the colors and attributes, so the stream ends in the state a new
     /// pen starts from.
     fn finish(self, out: &mut Vec<u8>) -> io::Result<()> {
-        let reset = Color::Reset.into_crossterm();
-        queue!(
-            out,
-            SetForegroundColor(reset),
-            SetBackgroundColor(reset),
-            SetUnderlineColor(reset),
-            SetAttribute(Attribute::Reset),
-        )
+        let reset = CrosstermColor::Reset;
+        for colored in [
+            Colored::ForegroundColor(reset),
+            Colored::BackgroundColor(reset),
+            Colored::UnderlineColor(reset),
+        ] {
+            push_color_sgr(out, &[colored]);
+        }
+        set_attribute(out, Attribute::Reset)
     }
 
-    fn move_to(&mut self, out: &mut Vec<u8>, x: u16, y: u16) -> io::Result<()> {
+    fn move_to(&mut self, out: &mut Vec<u8>, x: u16, y: u16) {
         if self.last.map(|(last_x, last_y)| (last_x + 1, last_y)) != Some((x, y)) {
-            queue!(out, MoveTo(x, y))?;
+            out.extend_from_slice(b"\x1b[");
+            push_u16(out, y + 1);
+            out.push(b';');
+            push_u16(out, x + 1);
+            out.push(b'H');
         }
         self.last = Some((x, y));
-        Ok(())
     }
 
-    fn set_colors(&mut self, out: &mut Vec<u8>, fg: Color, bg: Color) -> io::Result<()> {
+    fn set_colors(&mut self, out: &mut Vec<u8>, fg: Color, bg: Color) {
         if (fg, bg) != (self.fg, self.bg) {
-            queue!(
+            push_color_sgr(
                 out,
-                SetColors(Colors::new(fg.into_crossterm(), bg.into_crossterm()))
-            )?;
+                &[
+                    Colored::ForegroundColor(fg.into_crossterm()),
+                    Colored::BackgroundColor(bg.into_crossterm()),
+                ],
+            );
             self.fg = fg;
             self.bg = bg;
         }
-        Ok(())
     }
 
     /// Change the attributes to `to`.
@@ -583,7 +593,7 @@ impl PagePen {
         self.modifier = to;
 
         if removed.contains(Modifier::REVERSED) {
-            queue!(out, SetAttribute(Attribute::NoReverse))?;
+            set_attribute(out, Attribute::NoReverse)?;
         }
 
         // SGR 22 clears bold and dim together, so the one of them that stays
@@ -591,12 +601,12 @@ impl PagePen {
         let intensity = Modifier::BOLD | Modifier::DIM;
         let reset_intensity = removed.intersects(intensity);
         if reset_intensity {
-            queue!(out, SetAttribute(Attribute::NormalIntensity))?;
+            set_attribute(out, Attribute::NormalIntensity)?;
             if to.contains(Modifier::DIM) {
-                queue!(out, SetAttribute(Attribute::Dim))?;
+                set_attribute(out, Attribute::Dim)?;
             }
             if to.contains(Modifier::BOLD) {
-                queue!(out, SetAttribute(Attribute::Bold))?;
+                set_attribute(out, Attribute::Bold)?;
             }
         }
 
@@ -607,11 +617,11 @@ impl PagePen {
             (Modifier::HIDDEN, Attribute::NoHidden),
         ] {
             if removed.contains(modifier) {
-                queue!(out, SetAttribute(off))?;
+                set_attribute(out, off)?;
             }
         }
         if removed.intersects(Modifier::SLOW_BLINK | Modifier::RAPID_BLINK) {
-            queue!(out, SetAttribute(Attribute::NoBlink))?;
+            set_attribute(out, Attribute::NoBlink)?;
         }
 
         for (modifier, on) in [
@@ -627,11 +637,104 @@ impl PagePen {
         ] {
             let restored = reset_intensity && intensity.contains(modifier);
             if added.contains(modifier) && !restored {
-                queue!(out, SetAttribute(on))?;
+                set_attribute(out, on)?;
             }
         }
         Ok(())
     }
+}
+
+/// Append one SGR sequence that sets `colors`, as crossterm's color commands
+/// write it.
+fn push_color_sgr(out: &mut Vec<u8>, colors: &[Colored]) {
+    out.extend_from_slice(b"\x1b[");
+    for (i, &colored) in colors.iter().enumerate() {
+        if i > 0 {
+            out.push(b';');
+        }
+        push_colored(out, colored);
+    }
+    out.push(b'm');
+}
+
+/// Append the SGR parameters that crossterm writes for `colored`.
+///
+/// A named color takes its parameters from crossterm's own table. Under
+/// `NO_COLOR`, crossterm writes no color parameters at all, and neither does
+/// this, so a page keeps matching the live grid.
+fn push_colored(out: &mut Vec<u8>, colored: Colored) {
+    if Colored::ansi_color_disabled_memoized() {
+        return;
+    }
+
+    let (layer, color) = match colored {
+        Colored::ForegroundColor(color) => (38, color),
+        Colored::BackgroundColor(color) => (48, color),
+        Colored::UnderlineColor(color) => (58, color),
+    };
+    match color {
+        CrosstermColor::Reset => push_u16(out, layer + 1),
+        CrosstermColor::Rgb { r, g, b } => {
+            push_u16(out, layer);
+            out.extend_from_slice(b";2;");
+            push_u16(out, r.into());
+            out.push(b';');
+            push_u16(out, g.into());
+            out.push(b';');
+            push_u16(out, b.into());
+        },
+        CrosstermColor::AnsiValue(index) => {
+            push_u16(out, layer);
+            out.extend_from_slice(b";5;");
+            push_u16(out, index.into());
+        },
+        _ => out.extend_from_slice(colored.to_string().as_bytes()),
+    }
+}
+
+/// Append the SGR sequence that crossterm writes for `attribute`.
+///
+/// An attribute the pen never writes goes through crossterm.
+fn set_attribute(out: &mut Vec<u8>, attribute: Attribute) -> io::Result<()> {
+    let code = match attribute {
+        Attribute::Reset => 0,
+        Attribute::Bold => 1,
+        Attribute::Dim => 2,
+        Attribute::Italic => 3,
+        Attribute::Underlined => 4,
+        Attribute::SlowBlink => 5,
+        Attribute::RapidBlink => 6,
+        Attribute::Reverse => 7,
+        Attribute::Hidden => 8,
+        Attribute::CrossedOut => 9,
+        Attribute::NormalIntensity => 22,
+        Attribute::NoItalic => 23,
+        Attribute::NoUnderline => 24,
+        Attribute::NoBlink => 25,
+        Attribute::NoReverse => 27,
+        Attribute::NoHidden => 28,
+        Attribute::NotCrossedOut => 29,
+        other => return queue!(out, SetAttribute(other)),
+    };
+    out.extend_from_slice(b"\x1b[");
+    push_u16(out, code);
+    out.push(b'm');
+    Ok(())
+}
+
+/// Append the decimal digits of `n`.
+fn push_u16(out: &mut Vec<u8>, mut n: u16) {
+    let mut digits = [0; 5];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[start..]);
 }
 
 /// Format a [`PerfSegment`] for the status bar, padded like the other
@@ -2872,6 +2975,64 @@ mod serialize_tests {
         );
         buf.set_string(5, 1, " ", Style::new().add_modifier(Modifier::REVERSED));
         buf.set_string(3, 2, "end", Style::new().fg(Color::Gray));
+
+        assert_eq!(
+            String::from_utf8_lossy(&serialize_buffer(&buf)),
+            String::from_utf8_lossy(&backend_bytes(&buf)),
+        );
+    }
+
+    /// Every escape sequence the pen writes for itself matches the backend's.
+    ///
+    /// The page sits far from the origin, and two wide glyphs make the cursor
+    /// jump past column 10000, so the moves carry four- and five-digit
+    /// coordinates. The colors cover RGB, indexed, reset, and named values on
+    /// all three layers, and the first row turns every attribute on and off.
+    #[test]
+    fn a_page_of_every_written_sequence_serializes_as_the_backend_does() {
+        let (left, top) = (9_996, 65_530);
+        let mut buf = Buffer::filled(Rect::new(left, top, 14, 3), Cell::EMPTY);
+        for y in top..top + 3 {
+            buf.set_string(left, y, "abcdefghijklmn", Style::new());
+        }
+
+        let modifiers = [
+            Modifier::all(),
+            Modifier::empty(),
+            Modifier::BOLD | Modifier::DIM,
+            Modifier::DIM,
+            Modifier::BOLD,
+            Modifier::empty(),
+            Modifier::SLOW_BLINK,
+            Modifier::RAPID_BLINK,
+            Modifier::REVERSED,
+            Modifier::HIDDEN,
+            Modifier::CROSSED_OUT,
+            Modifier::ITALIC | Modifier::UNDERLINED,
+        ];
+        for (x, modifier) in (left..).zip(modifiers) {
+            buf[(x, top)].modifier = modifier;
+        }
+
+        let colors = [
+            (Color::Rgb(0, 7, 255), Color::Indexed(200), Color::Reset),
+            (
+                Color::Indexed(5),
+                Color::Rgb(10, 100, 250),
+                Color::Rgb(1, 22, 133),
+            ),
+            (Color::Reset, Color::Reset, Color::Indexed(255)),
+            (Color::Rgb(1, 22, 133), Color::Reset, Color::Reset),
+            (Color::LightBlue, Color::Rgb(4, 5, 6), Color::LightRed),
+            (Color::Reset, Color::Indexed(0), Color::Reset),
+        ];
+        for (x, (fg, bg, underline)) in (left..).zip(colors) {
+            let cell = &mut buf[(x, top + 1)];
+            (cell.fg, cell.bg, cell.underline_color) = (fg, bg, underline);
+        }
+
+        buf.set_string(left + 2, top + 2, "\u{4e2d}", Style::new());
+        buf.set_string(left + 6, top + 2, "\u{4e2d}", Style::new());
 
         assert_eq!(
             String::from_utf8_lossy(&serialize_buffer(&buf)),
