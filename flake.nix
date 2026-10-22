@@ -249,7 +249,7 @@
                 noto-fonts-color-emoji
 
               ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 # GUI runtime libraries
                 wayland
                 libxkbcommon
@@ -264,7 +264,7 @@
             # Library path for GUI applications
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
               buildInputs
-              ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
                 # Wayland runtime libraries
                 pkgs.wayland
                 pkgs.libxkbcommon
@@ -293,7 +293,7 @@
             # difftastic line-based diffing for TUI snapshots.
             DFT_OVERRIDE = "stoat/src/snapshots/*.snap:text";
           }
-          // pkgs.lib.optionalAttrs pkgs.stdenv.isLinux {
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             # Lavapipe, Mesa's software rasterizer. The renderer's headless
             # tests ask Vulkan for an adapter and fail when none answers, so
             # on a machine with no GPU driver lavapipe is what answers in this
