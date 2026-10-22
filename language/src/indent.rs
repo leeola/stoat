@@ -358,7 +358,7 @@ fn collect_indent_ranges(
     while let Some(m) = matches.next() {
         let mut start: Option<usize> = None;
         let mut end: Option<usize> = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             if cap.index == indent_ix {
                 start.get_or_insert(cap.node.start_byte());
                 end.get_or_insert(cap.node.end_byte());

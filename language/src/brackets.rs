@@ -62,7 +62,7 @@ fn matching_bracket_scanning(
     while let Some(m) = matches.next() {
         let mut open: Option<Range<usize>> = None;
         let mut close: Option<Range<usize>> = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             if cap.index == open_ix {
                 open.get_or_insert_with(|| cap.node.start_byte()..cap.node.end_byte());
             } else if cap.index == close_ix {
@@ -166,7 +166,7 @@ fn pair_within(node: &Node<'_>, rope: &Rope, offset: usize) -> Option<usize> {
         return None;
     }
     let (open_at, open) = single_char(&node.child(0)?, rope)?;
-    let (close_at, close) = single_char(&node.child((node.child_count() - 1) as u32)?, rope)?;
+    let (close_at, close) = single_char(&node.child(node.child_count() - 1)?, rope)?;
     if !TREE_PAIRS.contains(&(open, close)) || offset < open_at || offset > close_at {
         return None;
     }

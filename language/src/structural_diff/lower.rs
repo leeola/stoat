@@ -20,7 +20,11 @@ use super::{
 };
 #[cfg(test)]
 use std::cell::Cell;
-use std::{ops::Range, sync::Arc};
+use std::{
+    collections::HashSet,
+    ops::Range,
+    sync::{Arc, LazyLock, Mutex, PoisonError},
+};
 use tree_sitter::TreeCursor;
 
 #[cfg(test)]
@@ -66,6 +70,9 @@ pub fn lower_tree(tree: &tree_sitter::Tree, source: Arc<str>) -> (SyntaxArena, S
 struct Scratch {
     ids: Vec<SyntaxId>,
     cids: Vec<ContentId>,
+    /// The interned name of each node kind id the lowering met, so the
+    /// process-wide set is consulted once per kind.
+    kinds: Vec<Option<&'static str>>,
 }
 
 fn lower_node(
@@ -75,7 +82,7 @@ fn lower_node(
     scratch: &mut Scratch,
 ) -> SyntaxId {
     let node = cursor.node();
-    let kind = node.kind();
+    let kind = static_kind(&node, &mut scratch.kinds);
 
     if node.named_child_count() == 0 {
         // Leaf: emit as an atom over its byte range. The content id hashes the
@@ -121,6 +128,42 @@ fn lower_node(
         content_id,
         next_sibling: None,
     }))
+}
+
+/// The kind name of `node`, as the `'static` name the arena keeps.
+///
+/// A node's kind borrows its tree, while the arena outlives the tree it was
+/// lowered from. `kinds` caches each kind id's name for the lowering, so a node
+/// costs one lookup and [`intern`] runs once per kind.
+fn static_kind(
+    node: &tree_sitter::Node<'_>,
+    kinds: &mut Vec<Option<&'static str>>,
+) -> &'static str {
+    let id = usize::from(node.kind_id());
+    if let Some(Some(kind)) = kinds.get(id) {
+        return kind;
+    }
+    let kind = intern(node.kind());
+    if kinds.len() <= id {
+        kinds.resize(id + 1, None);
+    }
+    kinds[id] = Some(kind);
+    kind
+}
+
+/// `kind` as a `'static` name, one shared copy per distinct name.
+///
+/// The first sight of a name leaks one copy of it. The grammars' fixed symbol
+/// tables bound the names, so the leak stays bounded for the process.
+fn intern(kind: &str) -> &'static str {
+    static KINDS: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Mutex::default);
+    let mut kinds = KINDS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(kind) = kinds.get(kind) {
+        return kind;
+    }
+    let kind: &'static str = Box::leak(kind.into());
+    kinds.insert(kind);
+    kind
 }
 
 /// Byte ranges of `node`'s opening and closing delimiters.
@@ -175,6 +218,15 @@ const BRACKET_PAIRS: [(&str, &str); 4] = [("(", ")"), ("[", "]"), ("{", "}"), ("
 mod tests {
     use super::*;
     use crate::{parse, test_util::rust_lang};
+    use std::ptr;
+
+    /// Equal kind names share one interned copy, so the copies stay one per
+    /// distinct name however many trees a process lowers.
+    #[test]
+    fn equal_kind_names_share_one_copy() {
+        let owned = String::from("call_expression");
+        assert!(ptr::eq(intern("call_expression"), intern(&owned)));
+    }
 
     #[test]
     fn lower_simple_function() {

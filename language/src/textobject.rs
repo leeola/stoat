@@ -283,7 +283,7 @@ pub fn collect_capture_starts(
     let mut matches = cursor_h.matches(query, root, provider);
     while let Some(m) = matches.next() {
         let mut union: Option<Range<usize>> = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             if cap.index != cap_idx {
                 continue;
             }
@@ -344,7 +344,7 @@ fn find_smallest_capture_scanning(
     let mut best: Option<Range<usize>> = None;
     while let Some(m) = matches.next() {
         let mut union: Option<Range<usize>> = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             if cap.index != cap_idx {
                 continue;
             }
@@ -431,7 +431,7 @@ fn collect_unions(
 /// Byte span covering every capture of `cap_idx` in `m`, or `None` when the
 /// match holds no such capture.
 fn capture_union(m: &QueryMatch<'_, '_>, cap_idx: u32) -> Option<Range<usize>> {
-    m.captures
+    m.captures()
         .iter()
         .filter(|cap| cap.index == cap_idx)
         .map(|cap| cap.node.byte_range())

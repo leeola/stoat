@@ -257,7 +257,7 @@ impl SyntaxSnapshot {
             while let Some(item) = iter.next() {
                 let pattern_match = &item.0;
                 let cap_index = item.1;
-                let cap = pattern_match.captures[cap_index];
+                let cap = pattern_match.captures()[cap_index];
                 all.push(SyntaxMapCapture {
                     node: cap.node,
                     index: cap.index,
@@ -703,7 +703,7 @@ impl SyntaxMap {
                             let Some(inner_lang) = language.get() else {
                                 continue;
                             };
-                            for capture in m.captures {
+                            for capture in m.captures() {
                                 // An empty range is kept here and dropped after
                                 // grouping. A bare `///` line captures nothing,
                                 // and dropping it now breaks the row adjacency
@@ -743,7 +743,7 @@ impl SyntaxMap {
                             let names = injection_query.capture_names();
                             let mut has_token = false;
                             let mut content: Option<Range<usize>> = None;
-                            for capture in m.captures {
+                            for capture in m.captures() {
                                 match names.get(capture.index as usize).copied() {
                                     Some("injection.language") => {
                                         fence_token.clear();

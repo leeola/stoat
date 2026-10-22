@@ -446,7 +446,7 @@ pub fn extract_highlights(language: &Language, tree: &Tree, text: &str) -> Vec<H
 
     while let Some(m) = matches.next() {
         let pattern = m.pattern_index;
-        for capture in m.captures {
+        for capture in m.captures() {
             let start = capture.node.start_byte();
             let end = capture.node.end_byte();
             if start == end {

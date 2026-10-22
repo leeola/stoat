@@ -5362,7 +5362,7 @@ impl SkipZones {
                 ranges.push(range);
                 continue;
             }
-            for i in 0..node.child_count() as u32 {
+            for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
                     pending.push(child);
                 }

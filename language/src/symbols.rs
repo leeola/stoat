@@ -153,7 +153,7 @@ pub fn extract_symbols(
     while let Some(m) = matches.next() {
         let mut item_node = None;
         let mut name_node = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             if cap.index == item_idx {
                 item_node = Some(cap.node);
             } else if cap.index == name_idx {
@@ -216,7 +216,7 @@ pub fn extract_references(
     }
     let mut matches = cursor_h.matches(query, root, provider);
     while let Some(m) = matches.next() {
-        for cap in m.captures {
+        for cap in m.captures() {
             if let Some(&(_, kind)) = kinds.iter().find(|&&(idx, _)| idx == cap.index) {
                 out.push(RefSite {
                     name: text_of(cap.node, rope),

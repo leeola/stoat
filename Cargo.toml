@@ -36,7 +36,7 @@ unused_lifetimes = "warn"
 unused_qualifications = "warn"
 
 [workspace.dependencies]
-ast-grep-core = "0.44"
+ast-grep-core = "0.51"
 emojis = "0.9"
 snafu = "0.9"
 percent-encoding = "2.3"
@@ -68,7 +68,7 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 async-task = "4"
 parking_lot = "0.12"
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 cc = "1"
 lsp-types = "0.97"
 async-trait = "0.1"
