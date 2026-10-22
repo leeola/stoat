@@ -85,7 +85,6 @@ pub(super) fn shape_char(
     let mut encoded = [0u8; 4];
     let text = ch.encode_utf8(&mut encoded);
     buffer.set_text(
-        font_system,
         text,
         &Attrs::new().family(family).weight(weight),
         shaping,
@@ -1096,13 +1095,7 @@ pub(super) fn probe_baseline(
 ) -> f32 {
     let mut buffer =
         CosmicBuffer::new(font_system, Metrics::new(metrics.font_size, metrics.height));
-    buffer.set_text(
-        font_system,
-        "M",
-        &Attrs::new().family(family),
-        Shaping::Advanced,
-        None,
-    );
+    buffer.set_text("M", &Attrs::new().family(family), Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     buffer
         .layout_runs()
@@ -1334,7 +1327,6 @@ mod tests {
             );
             let mut encoded = [0u8; 4];
             buffer.set_text(
-                &mut font_system,
                 uncovered.encode_utf8(&mut encoded),
                 &Attrs::new()
                     .family(Family::Name(SYMBOLS_FAMILY))

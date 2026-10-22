@@ -49,13 +49,13 @@ tracing-subscriber = { version = "0.3", features = [
 ] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
-toml = "0.8"
+toml = "1.1"
 etcetera = "0.11"
 ratatui = "0.30.0"
 crossterm = { version = "0.29", features = ["bracketed-paste", "event-stream"] }
 tokio = { version = "1", features = ["rt", "macros", "sync"] }
 futures = { version = "0.3", default-features = false }
-compact_str = "0.9"
+compact_str = "0.10"
 arrayvec = "0.7"
 smallvec = { version = "1", features = ["const_generics"] }
 imara-diff = "0.2"
@@ -67,7 +67,7 @@ slotmap = { version = "1", features = ["serde"] }
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 async-task = "4"
-parking_lot = "0.12"
+parking_lot = "0.13"
 tree-sitter = "0.27"
 cc = "1"
 lsp-types = "0.97"
@@ -92,7 +92,7 @@ time = { version = "0.3", features = [
 blake3 = "1"
 postcard = { version = "1", features = ["alloc"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
-base64 = "0.22"
+base64 = "0.23"
 regex = "1"
 regex-cursor = { version = "0.1", default-features = false, features = [
   "perf-inline",
@@ -102,12 +102,12 @@ wgpu = "30"
 bytemuck = { version = "1.25", features = ["derive"] }
 raw-window-handle = "0.6"
 winit = "0.30"
-cosmic-text = "0.18"
+cosmic-text = "0.19"
 sys-locale = "0.3"
 swash = "0.2.7"
 ttf-parser = "0.25"
 etagere = "0.3"
-lru = { version = "0.16", default-features = false }
+lru = { version = "0.19", default-features = false }
 rustc-hash = "2"
 image = { version = "0.25", default-features = false, features = [
   "png",
