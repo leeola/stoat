@@ -4348,9 +4348,10 @@ fn wheel_glide_defers_the_relative_line_refill_to_settle() {
 }
 
 /// Buffer the pool window of a 400-line file for a terminal at `protocol`,
-/// with the rich gutter on, then move the cursor and the scroll row one line
-/// down and report the pages each kind of fill in that move named.
-fn relative_line_scroll_fills(protocol: u32) -> (Vec<u64>, Vec<u64>) {
+/// with the rich gutter on and the editor in the diff view when `diff_view`
+/// is set, then move the cursor and the scroll row one line down and report
+/// the pages each kind of fill in that move named.
+fn relative_line_scroll_fills(protocol: u32, diff_view: bool) -> (Vec<u64>, Vec<u64>) {
     use stoatty_protocol::command::{Command, FillCommand};
 
     let mut h = Stoat::test();
@@ -4368,6 +4369,9 @@ fn relative_line_scroll_fills(protocol: u32) -> (Vec<u64>, Vec<u64>) {
     h.settle();
     let size = h.stoat.size();
     h.stoat.active_workspace_mut().layout(size);
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("focused editor")
+        .set_diff_view(diff_view);
     emit_smooth_scroll(&mut h.stoat);
     h.settle();
     let _ = drain_apc(&mut rx);
@@ -4397,9 +4401,20 @@ fn relative_line_scroll_fills(protocol: u32) -> (Vec<u64>, Vec<u64>) {
 #[test]
 fn a_relative_line_scroll_redecorates_the_window_instead_of_refilling_it() {
     assert_eq!(
-        relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION),
+        relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION, false),
         (Vec::new(), vec![0, 1, 2, 3, 4]),
         "the buffered pages keep their cells and take the new gutter runs"
+    );
+}
+
+/// A diff page draws absolute line numbers, so the cursor's line is in
+/// neither of its versions and the move refills none of its held pages.
+#[test]
+fn a_relative_line_scroll_in_the_diff_view_refills_no_page() {
+    assert_eq!(
+        relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION, true),
+        (Vec::new(), Vec::new()),
+        "the diff pages keep their cells and their decorations"
     );
 }
 
@@ -4573,7 +4588,7 @@ fn a_page_glide_redecorates_no_page_above_its_start() {
 #[test]
 fn an_older_terminal_refills_the_composited_pages_whole() {
     assert_eq!(
-        relative_line_scroll_fills(4),
+        relative_line_scroll_fills(4, false),
         (vec![0, 1], Vec::new()),
         "a terminal without decorations-only fills repaints the pages the move \
          composites"

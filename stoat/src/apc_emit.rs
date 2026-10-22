@@ -1113,8 +1113,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // The rich gutter lays its numbers over the page as runs, so a
         // terminal that reads decorations-only fills takes a cursor line change
         // as new runs over cells it keeps. The fallback gutter paints numbers
-        // into cells, and diff and conflict pages paint gutters of their own, so
-        // those keep the line in the cell version.
+        // into cells, so it keeps the line in the cell version, and so does a
+        // conflict page. A diff page's gutters number rows absolutely, so the
+        // line reaches neither of its versions.
+        //
+        // FIXME: A conflict page numbers its rows absolutely too, so the line
+        // in its cell version refills pages whose cells did not change.
         let split_gutter = decorate_pages
             && base_rich.is_some()
             && !editor.diff_view
@@ -1136,7 +1140,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             editor_syntax(editor.diff_view),
             editor.gutter_width,
             editor.display_map.wrap_width(),
-            current_line.filter(|_| !split_gutter),
+            current_line.filter(|_| !split_gutter && !editor.diff_view),
             editor
                 .gutter_severity_cache
                 .as_ref()
@@ -2800,9 +2804,12 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// A page stays cached while the surface scrolls, but must repaint when the
 /// syntax-highlight toggle recolors every row, a diagnostics change restyles
 /// the gutter, a gutter-width or wrap-width change reflows the text, the
-/// cursor's buffer line moves under relative numbering, any of the diff
-/// view's dials moves, the theme changes every color on the page, or the
-/// walkthrough spotlight's dim comes on, goes out, or changes.
+/// cursor's buffer line moves under relative numbers that the page paints
+/// into its cells, any of the diff view's dials moves, the theme changes
+/// every color on the page, or the walkthrough spotlight's dim comes on, goes
+/// out, or changes.
+///
+/// A diff page draws absolute line numbers, so it takes no `current_line`.
 ///
 /// Where the spotlight lights is no part of this. It recolors only the rows it
 /// lights, so [`spotlight_page_version`] carries it in each page's own
