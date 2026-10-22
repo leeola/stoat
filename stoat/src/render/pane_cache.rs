@@ -26,10 +26,17 @@
 //! The diff view's branch returns before its selection pass as well. Past what
 //! a plain pane reads, it reads the diff dials and the names on its sides bar.
 //! No version moves with either, so the key holds both.
+//!
+//! A changes view paints one diff view per excerpt its window shows. Its key
+//! holds the parts an editor key holds for the focused excerpt, and it folds
+//! the placement and the versions of every shown excerpt into one hash. An
+//! excerpt outside the window paints nothing, so a parse that lands there
+//! replays the pane.
 
 use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
+    diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::PaintVersion,
     editor_state::{EditorId, EditorState},
     pane::{Pane, View},
@@ -144,6 +151,10 @@ pub(crate) struct PaneCacheKey {
     /// matches the pane paints. Read off the settings like the dim, so no
     /// generation moves with it.
     pub(crate) search_smart_case: bool,
+    /// The excerpts a changes view's window shows, hashed with the focused
+    /// index and the window's rows. Each one counts its buffer, placement,
+    /// rows, path, fold, versions, and diagnostics. Zero for an editor pane.
+    pub(crate) stack: u64,
 }
 
 /// One pane's last content paint, held so a frame whose key still matches puts
@@ -307,8 +318,9 @@ impl PaneCacheEntry {
 /// The key for `pane`, or `None` when the pane is not one this cache covers.
 ///
 /// An editor pane qualifies, focused or not, whether it shows a document or
-/// the diff view. The conflict view takes its own branch out of the editor
-/// render and reads state the key does not cover, so it always paints.
+/// the diff view, and so does a changes view pane. The conflict view takes its
+/// own branch out of the editor render and reads state the key does not cover,
+/// so it always paints.
 ///
 /// A focused pane under goto-word labels, the LSP status card, or the LSP
 /// error card always paints as well. The labels last a jump's few frames, and
@@ -318,19 +330,35 @@ impl PaneCacheEntry {
 /// scroll, so a key read before the paint names a scroll that the paint left.
 /// A capture under that key replays the moved rows on a later frame back at
 /// that scroll.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_cache_key(
     pane: &Pane,
     is_focused: bool,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
+    diff_changes_views: &mut SlotMap<DiffChangesId, DiffChangesState>,
     frame: FrameCtx<'_>,
     paint_generation: u64,
     scene_live: bool,
 ) -> Option<PaneCacheKey> {
-    let View::Editor(editor_id) = &pane.view else {
-        return None;
+    let editor_id = match pane.view {
+        View::Editor(editor_id) => editor_id,
+        View::DiffChanges(id) => {
+            let state = diff_changes_views.get_mut(id)?;
+            return stack_cache_key(
+                pane,
+                is_focused,
+                state,
+                editors,
+                buffers,
+                frame,
+                paint_generation,
+                scene_live,
+            );
+        },
+        _ => return None,
     };
-    let editor = editors.get_mut(*editor_id)?;
+    let editor = editors.get_mut(editor_id)?;
     if editor.conflict_view.is_some() || editor.held_screen_row.is_some() {
         return None;
     }
@@ -343,33 +371,13 @@ pub(crate) fn pane_cache_key(
     }
 
     let buffer = editor.buffer_id;
-    let diff_version = {
-        let shared = buffers.get(buffer)?;
-        let guard = shared.read().ok()?;
-        guard.diff_map.as_ref().map_or(0, |dm| dm.version())
-    };
+    let diff_version = diff_version(buffers, buffer)?;
 
-    // The dials destructure whole, so a further dial fails to compile here
-    // until the key holds it.
     let (diff_dials, diff_sides) = match editor.diff_view {
         true => {
-            let DiffDials {
-                soften_scale,
-                tint_amount,
-                bold,
-                underline,
-            } = frame.diff_dials;
             let mut sides = DefaultHasher::new();
             diff_sides_for(buffers.path_for(buffer), frame).hash(&mut sides);
-            (
-                (
-                    soften_scale.to_bits(),
-                    tint_amount.to_bits(),
-                    bold,
-                    underline,
-                ),
-                sides.finish(),
-            )
+            (dial_bits(frame.diff_dials), sides.finish())
         },
         false => ((0, 0, false, false), 0),
     };
@@ -391,9 +399,7 @@ pub(crate) fn pane_cache_key(
         paint_generation,
         inactive_dim_bits: frame.inactive_dim.to_bits(),
         line_numbers: frame.line_numbers,
-        diagnostics_version: buffers
-            .path_for(buffer)
-            .map_or(0, |path| frame.diagnostics.version_for(path)),
+        diagnostics_version: diagnostics_version(buffers, buffer, frame),
         diff_version,
         diff_view: editor.diff_view,
         diff_dials,
@@ -405,9 +411,148 @@ pub(crate) fn pane_cache_key(
         insert_mode: is_focused && frame.mode == "insert",
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
-        terminal_cursor: frame.terminal_cursor_editor == Some(*editor_id),
+        terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
         search_smart_case: frame.search_smart_case,
+        stack: 0,
     })
+}
+
+/// The key for a changes view pane over `state`, or `None` on a frame whose
+/// paint moves the stack's scroll.
+///
+/// The common parts come from the focused excerpt, the one excerpt that
+/// paints selections, the cursor, and the hover. `stack` folds in what every
+/// excerpt the window shows paints from, and their placement, which an
+/// excerpt above the window moves when its rows change.
+///
+/// A held screen row, a pending landing, a cursor that moved since the last
+/// paint, and a scroll past the stack's last page each move the scroll inside
+/// the paint, so a key read before it names a scroll that the paint leaves. An
+/// empty stack paints one line of text, and goto-word labels over the focused
+/// excerpt last a jump's few frames, so neither gets a key.
+#[allow(clippy::too_many_arguments)]
+fn stack_cache_key(
+    pane: &Pane,
+    is_focused: bool,
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    frame: FrameCtx<'_>,
+    paint_generation: u64,
+    scene_live: bool,
+) -> Option<PaneCacheKey> {
+    if state.held_screen_row.is_some()
+        || state.pending_landing.is_some()
+        || (is_focused && frame.goto_word_labels.is_some())
+    {
+        return None;
+    }
+    let focused_excerpt = state.focused_excerpt()?;
+    let (editor_id, buffer) = (focused_excerpt.editor_id, focused_excerpt.buffer_id);
+    if diff_changes::focused_cursor(state, editors) != state.followed_cursor {
+        return None;
+    }
+    let total = diff_changes::layout_stack(state, editors);
+    if state.scroll > total.saturating_sub(state.viewport_rows) {
+        return None;
+    }
+
+    let window = state.scroll..state.scroll + state.viewport_rows;
+    let mut stack = DefaultHasher::new();
+    (state.focused, state.viewport_rows).hash(&mut stack);
+    let ends = state
+        .excerpts
+        .iter()
+        .skip(1)
+        .map(|excerpt| excerpt.top)
+        .chain([total]);
+    for (excerpt, end) in state.excerpts.iter().zip(ends) {
+        if end <= window.start || excerpt.top >= window.end {
+            continue;
+        }
+        let shown = editors.get_mut(excerpt.editor_id)?;
+        (
+            excerpt.buffer_id,
+            excerpt.top,
+            end,
+            &excerpt.rel_path,
+            excerpt.folded_version,
+            shown.display_map.buffer_snapshot().version(),
+            shown.display_map.snapshot().paint_version(),
+            diff_version(buffers, excerpt.buffer_id)?,
+            diagnostics_version(buffers, excerpt.buffer_id, frame),
+        )
+            .hash(&mut stack);
+    }
+
+    let editor = editors.get_mut(editor_id)?;
+    Some(PaneCacheKey {
+        buffer,
+        buffer_version: editor.display_map.buffer_snapshot().version(),
+        paint_version: editor.display_map.snapshot().paint_version(),
+        wrap: (editor.wrap_override, frame.wrap_mode, frame.wrap_column),
+        scroll_row: state.scroll as u32,
+        area: pane.area,
+        pane_index: pane.index as usize,
+        paint_generation,
+        inactive_dim_bits: frame.inactive_dim.to_bits(),
+        line_numbers: frame.line_numbers,
+        diagnostics_version: diagnostics_version(buffers, buffer, frame),
+        diff_version: diff_version(buffers, buffer)?,
+        diff_view: true,
+        diff_dials: dial_bits(frame.diff_dials),
+        diff_sides: 0,
+        minimap_content_id: frame
+            .minimap_chrome
+            .as_ref()
+            .and_then(|chrome| chrome.diff_changes_content)
+            .unwrap_or(0),
+        minimap_enabled: frame.minimap_enabled,
+        focused: is_focused,
+        selections: editor.selections.identity(),
+        insert_mode: is_focused && frame.mode == "insert",
+        hover_cell: frame.hover_cell.filter(|_| is_focused),
+        scene_live,
+        terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
+        search_smart_case: frame.search_smart_case,
+        stack: stack.finish(),
+    })
+}
+
+/// The version of `buffer`'s diff map, zero while it has none, or `None` when
+/// the buffer is gone or its lock is poisoned.
+fn diff_version(buffers: &BufferRegistry, buffer: BufferId) -> Option<usize> {
+    let shared = buffers.get(buffer)?;
+    let guard = shared.read().ok()?;
+    Some(guard.diff_map.as_ref().map_or(0, |dm| dm.version()))
+}
+
+/// The version of the diagnostics published for `buffer`'s path, zero for a
+/// buffer with no path.
+fn diagnostics_version(buffers: &BufferRegistry, buffer: BufferId, frame: FrameCtx<'_>) -> u64 {
+    buffers
+        .path_for(buffer)
+        .map_or(0, |path| frame.diagnostics.version_for(path))
+}
+
+/// The diff view's dials as the key holds them.
+///
+/// The soften scale and the tint amount go in as bits, then the bold and the
+/// underline flags. The dials destructure whole, so a further dial fails to compile here until
+/// the key holds it.
+fn dial_bits(dials: DiffDials) -> (u32, u32, bool, bool) {
+    let DiffDials {
+        soften_scale,
+        tint_amount,
+        bold,
+        underline,
+    } = dials;
+    (
+        soften_scale.to_bits(),
+        tint_amount.to_bits(),
+        bold,
+        underline,
+    )
 }
 
 /// Copy `rect`'s cells into `out`, row-major, reusing whatever it already
@@ -459,6 +604,7 @@ mod tests {
             scene_live: false,
             terminal_cursor: false,
             search_smart_case: false,
+            stack: 0,
         }
     }
 
@@ -471,7 +617,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 23] = [
+        let moved: [(&str, PaneCacheKey); 24] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -633,6 +779,7 @@ mod tests {
                     ..base
                 },
             ),
+            ("stack", PaneCacheKey { stack: 1, ..base }),
         ];
 
         for (field, other) in moved {

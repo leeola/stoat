@@ -245,6 +245,22 @@ pub(crate) fn layout_stack(
     row
 }
 
+/// The display rows of `excerpt`'s editor that the stack's window shows, as of
+/// the last [`layout_stack`], or `None` when the window shows none of them.
+///
+/// `rows` is the excerpt's display row count, from [`excerpt_rows`]. The
+/// header row above them is no row of the excerpt's editor.
+pub(crate) fn shown_excerpt_rows(
+    state: &DiffChangesState,
+    excerpt: &Excerpt,
+    rows: usize,
+) -> Option<Range<u32>> {
+    let first = excerpt.top + 1;
+    let start = state.scroll.max(first);
+    let end = (state.scroll + state.viewport_rows).min(first + rows);
+    (start < end).then(|| (start - first) as u32..(end - first) as u32)
+}
+
 /// The display rows `excerpt` shows, zero while it waits on its diff map.
 pub(crate) fn excerpt_rows(
     excerpt: &Excerpt,

@@ -1232,13 +1232,14 @@ pub(crate) fn frame(
             lsp_badge_rect = status_row.badge;
         }
 
-        // Only an editor pane is replayable. A run, terminal or label pane reads
-        // state this never audited.
+        // Only an editor pane and a changes view pane are replayable. A run,
+        // terminal or label pane reads state this never audited.
         let key = pane_cache::pane_cache_key(
             pane,
             is_focused,
             &mut ws.editors,
             &ws.buffers,
+            &mut ws.diff_changes_views,
             frame,
             paint_generation,
             scene.live(),

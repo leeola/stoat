@@ -6319,6 +6319,12 @@ fn a_held_screen_row_leaves_no_capture_under_the_scroll_it_moved() {
 /// lane, in pane order.
 fn pane_lanes(h: &mut crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
     let _ = h.stoat.render();
+    split_lanes(h)
+}
+
+/// Each split pane's content lane and status lane as the last frame left
+/// them, in pane order.
+fn split_lanes(h: &crate::test_harness::TestHarness) -> Vec<Vec<u8>> {
     let indices: Vec<u32> = h
         .stoat
         .active_workspace()
@@ -6578,6 +6584,229 @@ fn a_collapsed_selection_repaints_the_focused_pane() {
         h.stoat.pane_paints - painted_before,
         1,
         "the collapse repaints the focused pane"
+    );
+}
+
+/// A focused changes view over `count` changed Rust files, in a window that
+/// shows the first few, with every excerpt parsed and painted until the
+/// pane's key holds.
+///
+/// Each file opens with a comment, so a character typed at the comment's end
+/// restyles that row once the file's parse lands. `minimap` decides whether
+/// the changes strip shows the stack.
+fn changes_view(count: usize, minimap: bool) -> crate::test_harness::TestHarness {
+    let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+    h.stoat.stoatty = true;
+    h.stoat.minimap_override = Some(minimap);
+    h.stoat.set_diff_warm_auto(true);
+    let files: Vec<(String, String, String)> = (0..count)
+        .map(|i| {
+            (
+                format!("f{i}.rs"),
+                format!("// file {i}\nfn f() {{}}\n"),
+                format!("// file {i}\nfn g() {{}}\n"),
+            )
+        })
+        .collect();
+    let files: Vec<(&str, &str, &str)> = files
+        .iter()
+        .map(|(path, base, work)| (path.as_str(), base.as_str(), work.as_str()))
+        .collect();
+    h.stage_review_scenario("/repo", &files);
+    h.open_file(Path::new("/repo/f0.rs"));
+    h.cover_with_diff_changes(false);
+    h.settle_diff_jobs();
+    finish_parse(&mut h);
+    h.stoat.drive_parse_jobs();
+    for _ in 0..4 {
+        let _ = h.stoat.render();
+    }
+    h
+}
+
+/// The focused changes view's state.
+fn changes_state(h: &mut crate::test_harness::TestHarness) -> &mut DiffChangesState {
+    let ws = h.stoat.active_workspace_mut();
+    let id = ws
+        .focused_diff_changes_id()
+        .expect("a focused changes view");
+    &mut ws.diff_changes_views[id]
+}
+
+/// Move the tokens of excerpt `index`'s editor, as a landed parse does.
+fn restyle_excerpt(h: &mut crate::test_harness::TestHarness, index: usize) {
+    let (editor_id, buffer) = {
+        let excerpt = &changes_state(h).excerpts[index];
+        (excerpt.editor_id, excerpt.buffer_id)
+    };
+    h.stoat.active_workspace_mut().editors[editor_id]
+        .display_map
+        .invalidate_semantic_highlights(buffer);
+}
+
+/// A changes view whose content stands still replays it under a fresh status
+/// row, and the frame matches a repaint lane by lane. The row rides the
+/// pane's status lane, so the replayed content holds none of it.
+#[test]
+fn a_replayed_changes_view_paints_what_repainting_it_would() {
+    let mut h = changes_view(8, true);
+    h.stoat.pending_message = Some("saved".to_owned());
+
+    let painted_before = h.stoat.pane_paints;
+    let replayed = frame_output(&mut h);
+    let replayed_lanes = split_lanes(&h);
+    let replay_paints = h.stoat.pane_paints - painted_before;
+
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(replay_paints, 0, "the status message replays the content");
+    assert_eq!(replayed.0, repainted.0, "the cells match");
+    assert_eq!(replayed.1, repainted.1, "the scene bytes match");
+    assert_eq!(replayed_lanes, split_lanes(&h), "each lane matches");
+    assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+}
+
+/// Each input the changes view paints from repaints the pane. A landing in an
+/// excerpt below the window paints nothing there, so the pane replays.
+#[test]
+fn a_changes_view_repaints_only_when_what_it_shows_moves() {
+    type Change = fn(&mut crate::test_harness::TestHarness);
+    let changes: [(&str, Change, u64); 5] = [
+        (
+            "a move to the next file",
+            |h| {
+                action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+            },
+            1,
+        ),
+        ("a landing in a shown excerpt", |h| restyle_excerpt(h, 1), 1),
+        ("a scroll", |h| changes_state(h).scroll += 1, 1),
+        (
+            "a dial step",
+            |h| {
+                action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffTintUp);
+            },
+            1,
+        ),
+        ("a landing below the window", |h| restyle_excerpt(h, 7), 0),
+    ];
+
+    for (change, apply, paints) in changes {
+        let mut h = changes_view(8, false);
+        let painted_before = h.stoat.pane_paints;
+        apply(&mut h);
+        let _ = h.stoat.render();
+        assert_eq!(h.stoat.pane_paints - painted_before, paints, "{change}");
+    }
+}
+
+/// A cursor move past the window scrolls the stack inside the paint, so that
+/// frame captures nothing. A later frame back at the scroll the move left
+/// shows what a repaint of that scroll shows.
+#[test]
+fn a_cursor_follow_leaves_no_capture_under_the_scroll_it_moved() {
+    let mut h = changes_view(8, false);
+    let before = changes_state(&mut h).scroll;
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesLast);
+    let _ = h.stoat.render();
+    let followed = changes_state(&mut h).scroll;
+
+    changes_state(&mut h).scroll = before;
+    let replayed = frame_output(&mut h);
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(
+        (followed != before, &replayed.0),
+        (true, &repainted.0),
+        "the move scrolled, and the frame back at the old scroll matches a repaint",
+    );
+}
+
+/// A held screen row scrolls the stack inside the paint, so the frame that
+/// applies it captures nothing. A later frame back at the scroll the hold
+/// left shows what a repaint of that scroll shows.
+#[test]
+fn a_held_stack_row_leaves_no_capture_under_the_scroll_it_moved() {
+    let mut h = changes_view(8, false);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+    for _ in 0..3 {
+        let _ = h.stoat.render();
+    }
+    let before = changes_state(&mut h).scroll;
+
+    changes_state(&mut h).held_screen_row = Some(0);
+    let _ = h.stoat.render();
+    let held = changes_state(&mut h).scroll;
+    changes_state(&mut h).scroll = before;
+    let replayed = frame_output(&mut h);
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h);
+    assert_eq!(
+        (held != before, &replayed.0),
+        (true, &repainted.0),
+        "the hold scrolled, and the frame back at the old scroll matches a repaint",
+    );
+}
+
+/// A scroll past the stack's last page is clamped by the paint, so no frame
+/// replays over it and leaves the scroll unclamped.
+#[test]
+fn a_scroll_past_the_last_page_is_clamped_on_every_frame() {
+    let mut h = changes_view(8, false);
+    let clamped: Vec<usize> = (0..2)
+        .map(|_| {
+            changes_state(&mut h).scroll = 10_000;
+            let _ = h.stoat.render();
+            changes_state(&mut h).scroll
+        })
+        .collect();
+    assert_eq!(
+        (clamped[0] < 10_000, clamped[1]),
+        (true, clamped[0]),
+        "each frame clamps the scroll to the last page",
+    );
+}
+
+/// A parse that restyles an excerpt scrolled out of the changes view's window
+/// earns a frame only through the changes strip, which shows every excerpt's
+/// rows. The pane replays on that frame.
+#[test]
+fn a_landing_in_a_scrolled_off_excerpt_earns_a_frame_only_for_the_strip() {
+    let outcomes: Vec<(bool, u64)> = [false, true]
+        .into_iter()
+        .map(|minimap| {
+            let mut h = changes_view(8, minimap);
+            // The last excerpt paints once and then scrolls off, so its
+            // editor keeps the viewport that paint left.
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesLast);
+            let _ = h.stoat.render();
+            action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesFirst);
+            for _ in 0..3 {
+                let _ = h.stoat.render();
+            }
+
+            let ws = h.stoat.active_workspace();
+            let last = ws
+                .buffers
+                .id_for_path(Path::new("/repo/f7.rs"))
+                .expect("the stack opens the last file");
+            ws.buffers
+                .get(last)
+                .expect("buffer")
+                .write()
+                .expect("buffer poisoned")
+                .edit(9..9, "x");
+            finish_parse(&mut h);
+            let earned = h.stoat.drive_parse_jobs();
+            let painted_before = h.stoat.pane_paints;
+            let _ = h.stoat.render();
+            (earned, h.stoat.pane_paints - painted_before)
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        [(false, 0), (true, 0)],
+        "(earned, panes painted) without and with the changes strip",
     );
 }
 

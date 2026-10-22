@@ -8879,12 +8879,24 @@ impl Stoat {
         // no strip yet needs nothing, since a strip's initial build reads
         // whatever tokens are current by the time it runs.
         let ws_id = self.active_workspace;
+        // The changes strip summarizes every excerpt's rows, so a landing in an
+        // excerpt the window does not show still recolors the strip, while the
+        // pane replays.
+        let stacked: Vec<BufferId> = match self.diff_changes_strips.contains_key(&ws_id) {
+            true => self
+                .active_workspace()
+                .diff_changes_views
+                .values()
+                .flat_map(|state| state.excerpts.iter().map(|excerpt| excerpt.buffer_id))
+                .collect(),
+            false => Vec::new(),
+        };
         let mut earned = false;
         for landing in installed {
             let strip = self.minimap_content.get_mut(&(ws_id, landing.buffer_id));
             earned |= match landing.restyle {
                 ParseRestyle::Unchanged => false,
-                ParseRestyle::Offscreen => strip.is_some(),
+                ParseRestyle::Offscreen => strip.is_some() || stacked.contains(&landing.buffer_id),
                 ParseRestyle::Onscreen => true,
             };
             if let Some(content) = strip {

@@ -13,7 +13,6 @@ use crate::{
     render::{
         editor::{fit_diff_view, render_editor_with_overlay, split_minimap_strip},
         layout::split_pane_status,
-        pane::render_overlay_status,
         text::{write_str, write_str_clipped},
         undercurl::UndercurlBatch,
         FrameCtx,
@@ -24,7 +23,11 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use slotmap::SlotMap;
 use stoat_widgets::ApcScene;
 
-/// Paint the stack `state` holds into `pane`, with its own status row.
+/// Paint the stack `state` holds into `pane`'s rows above its status row.
+///
+/// [`render_pane_status`](crate::render::pane::render_pane_status) paints the
+/// status row, into the pane's status lane, so a replay of this paint keeps a
+/// fresh row.
 ///
 /// The stack paints from the scroll of `state`, which first moves so the
 /// focused excerpt's cursor shows. A screen row that a landing holds takes the
@@ -57,15 +60,7 @@ pub(crate) fn render_diff_changes(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let (inner, status_area) = split_pane_status(pane.area);
-    render_overlay_status(
-        status_area,
-        is_focused,
-        Some("diff_changes"),
-        frame,
-        buf,
-        &mut *scene,
-    );
+    let (inner, _) = split_pane_status(pane.area);
     let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled);
     state.minimap_rect = strip;
     if inner.width == 0 || inner.height == 0 {

@@ -19,7 +19,7 @@ use crate::{
     commit_list::{CommitListId, CommitListSnap, CommitListState},
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
-    diff_changes::{DiffChangesId, DiffChangesState},
+    diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
     host::GitHost,
@@ -1759,20 +1759,47 @@ impl Workspace {
             return ParseRestyle::Onscreen;
         }
 
-        for editor in self.editors.values_mut() {
+        // A changes view paints each excerpt at the stack rows its layout gives
+        // it, so an excerpt's editor shows the part of its rows inside the
+        // stack's window, which its own viewport does not track.
+        let Workspace {
+            editors,
+            diff_changes_views,
+            ..
+        } = self;
+        let mut stacked: Vec<(EditorId, Option<Range<u32>>)> = Vec::new();
+        for state in diff_changes_views.values() {
+            for excerpt in &state.excerpts {
+                if excerpt.buffer_id == buffer_id {
+                    let rows = diff_changes::excerpt_rows(excerpt, editors);
+                    let shown = diff_changes::shown_excerpt_rows(state, excerpt, rows);
+                    stacked.push((excerpt.editor_id, shown));
+                }
+            }
+        }
+
+        for (id, editor) in editors.iter_mut() {
             if editor.buffer_id != buffer_id {
                 continue;
             }
-            let Some(height) = editor.viewport_rows else {
-                continue;
+            let (first, last) = match stacked
+                .iter()
+                .find(|(excerpt_editor, _)| *excerpt_editor == id)
+            {
+                Some((_, Some(shown))) => (shown.start, shown.end - 1),
+                Some((_, None)) => continue,
+                None => {
+                    let Some(height) = editor.viewport_rows else {
+                        continue;
+                    };
+                    let last = editor.scroll_row.saturating_add(height.saturating_sub(1));
+                    (editor.scroll_row, last)
+                },
             };
             let snapshot = editor.display_map.snapshot();
-            let last = editor
-                .scroll_row
-                .saturating_add(height.saturating_sub(1))
-                .min(snapshot.max_point().row);
+            let last = last.min(snapshot.max_point().row);
             let shown = snapshot
-                .display_to_buffer(DisplayPoint::new(editor.scroll_row, 0))
+                .display_to_buffer(DisplayPoint::new(first, 0))
                 .zip(snapshot.display_to_buffer(DisplayPoint::new(last, 0)));
             match shown {
                 Some((top, bottom)) if rows.start > bottom.row || rows.end <= top.row => {},

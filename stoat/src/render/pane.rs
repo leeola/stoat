@@ -186,7 +186,8 @@ pub(crate) fn render_pane(
             dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
         },
-        // The changes view paints a status row of its own, as the list does.
+        // The changes view's status row names its screen, as the list's does.
+        // The row rides the status lane, so a replay of the content keeps it.
         View::DiffChanges(id) => {
             if let Some(state) = diff_changes_views.get_mut(*id) {
                 diff_changes::render_diff_changes(
@@ -209,6 +210,7 @@ pub(crate) fn render_pane(
                 }
             }
             dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            render_pane_status(pane, is_focused, frame, editors, status, buf, scene);
             return;
         },
     }
@@ -737,6 +739,13 @@ pub(crate) fn render_pane_status(
     scene: &mut ApcScene,
 ) {
     scene.set_lane(status_lane(pane.index));
+    // A changes view paints the bar a list paints, which names its screen, in
+    // place of the segments the frame builds for an editor.
+    if matches!(pane.view, View::DiffChanges(_)) {
+        let (_, area) = split_pane_status(pane.area);
+        render_overlay_status(area, is_focused, Some("diff_changes"), frame, buf, scene);
+        return;
+    }
     let (_, area) = pane_areas(pane.area, frame.minimap_band);
     if area.width == 0 || area.height == 0 {
         return;
