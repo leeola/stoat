@@ -649,6 +649,9 @@ fn register_open(
 /// The displaced buffer becomes the pane's last accessed one, which is what
 /// [`goto_last_accessed`] switches back to.
 ///
+/// A changes view in the pane comes down first, and the buffer opens over the
+/// view the changes view covered, so that view is the one displaced.
+///
 /// A pinned mode on the displaced editor carries onto the new one, and the pin
 /// travels with it, so a chord the user still holds survives the swap. Every
 /// other mode is dropped, since the new editor starts on a different buffer.
@@ -665,6 +668,10 @@ pub(crate) fn show_buffer_in_pane(
     executor: Executor,
 ) -> Option<BufferId> {
     let ws = &mut stoat.workspaces[workspace];
+    // A buffer that lands on a changes view opens over the view the changes
+    // view covered, which the editor swap below then records as the pane's
+    // last accessed buffer.
+    crate::action_handlers::diff_changes::close_diff_changes_for_open(ws, &executor, target);
     ws.buffers.mark_shown(buffer_id);
     if let View::Editor(eid) = ws.panes.pane(target).view
         && ws

@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use stoat_action::OpenFile;
+use stoat_text::Point;
 
 /// The layout reads the stored width instead of measuring, so it has to be
 /// what measuring would have found. The fixture puts the widest line in the
@@ -771,6 +772,121 @@ fn type_and_enter_in_one_burst(h: &mut TestHarness, text: &str) {
     for code in text.chars().map(KeyCode::Char).chain([KeyCode::Enter]) {
         h.stoat.update(Event::Key(keys::key(code)));
     }
+}
+
+/// A request from the changes view names the focused excerpt's file and its
+/// cursor, so hover, goto, and the rest ask about the real file.
+#[test]
+fn a_request_from_a_changes_view_names_the_excerpts_file_and_cursor() {
+    let mut h = TestHarness::with_size(100, 24);
+    h.stage_review_scenario("/repo", &[("main.rs", "abc\ndef\n", "abc\nDEF\n")]);
+    h.cover_with_diff_changes(false);
+    h.settle();
+    if let Some(editor) = crate::action_handlers::focused_editor_mut(&mut h.stoat) {
+        crate::diff_changes::place_cursor(editor, Point::new(1, 2));
+    }
+
+    let site = super::lsp_request_site(&mut h.stoat).expect("a request site");
+    assert_eq!(
+        (site.path, site.rope.offset_to_point(site.offset)),
+        (PathBuf::from("/repo/main.rs"), Point::new(1, 2)),
+    );
+}
+
+/// The file the changes view covers in [`goto_from_a_changes_view`], outside
+/// the repository, so the stack lists no excerpt for it.
+const COVERED: &str = "/notes.txt";
+
+/// Ask for a definition from a changes view over [`COVERED`]'s editor and
+/// `files`, answered by `target`'s path and row from the focused excerpt's
+/// first row, and settle the answer.
+fn goto_from_a_changes_view(
+    files: &[(&str, &str, &str)],
+    source: &str,
+    target: (&str, u32),
+) -> TestHarness {
+    let mut h = TestHarness::with_size(100, 24);
+    enable_goto_definition(&h);
+    h.stage_review_scenario("/repo", files);
+    h.fake_fs().insert_file(Path::new(COVERED), b"notes\n");
+    h.open_file(Path::new(COVERED));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.fake_lsp()
+        .set_definition(source, 0, 0, target.0, target.1, 0);
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+    h.settle();
+    h
+}
+
+/// The view, the file and cursor of the focused editor, and the changes views
+/// left, after a jump.
+fn landed(h: &mut TestHarness) -> (Option<&'static str>, PathBuf, Point, usize) {
+    (
+        h.stoat.current_view(),
+        focused_buffer_path(h),
+        crate::test_harness::editor::focused_cursor_point(&mut h.stoat),
+        h.stoat.active_workspace().diff_changes_views.len(),
+    )
+}
+
+/// A definition in another file, asked from the changes view, takes the
+/// changes view down and opens the file in its pane at the definition, over
+/// the editor the changes view covered, which a switch back shows again.
+#[test]
+fn a_definition_from_a_changes_view_opens_its_file_over_the_view() {
+    let mut h = goto_from_a_changes_view(
+        &[
+            ("lib.rs", "x\ny\n", "x\nY\n"),
+            ("main.rs", "abc\ndef\n", "abc\nDEF\n"),
+        ],
+        "/repo/lib.rs",
+        ("/repo/main.rs", 1),
+    );
+    let jumped = landed(&mut h);
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoLastAccessed);
+    assert_eq!(
+        (jumped, focused_buffer_path(&h)),
+        (
+            (
+                Some("file"),
+                PathBuf::from("/repo/main.rs"),
+                Point::new(1, 0),
+                0
+            ),
+            PathBuf::from(COVERED),
+        ),
+    );
+}
+
+/// A definition in the excerpt's own file lands in a file editor at the
+/// definition, and the file's buffer stays open though the changes view
+/// opened it.
+#[test]
+fn a_definition_in_the_excerpts_own_file_lands_in_a_file_editor() {
+    let mut h = goto_from_a_changes_view(
+        &[("main.rs", "abc\ndef\nghi\n", "abc\nDEF\nghi\n")],
+        "/repo/main.rs",
+        ("/repo/main.rs", 2),
+    );
+    let open = h
+        .stoat
+        .active_workspace()
+        .buffers
+        .id_for_path(Path::new("/repo/main.rs"))
+        .is_some();
+    assert_eq!(
+        (landed(&mut h), open),
+        (
+            (
+                Some("file"),
+                PathBuf::from("/repo/main.rs"),
+                Point::new(2, 0),
+                0
+            ),
+            true
+        ),
+    );
 }
 
 #[test]

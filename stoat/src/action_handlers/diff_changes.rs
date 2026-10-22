@@ -20,6 +20,7 @@ use crate::{
     workspace::Workspace,
 };
 use std::path::PathBuf;
+use stoat_scheduler::Executor;
 use stoat_text::Point;
 
 /// Flip between the changes view and the per-file diff.
@@ -42,20 +43,17 @@ pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 /// that diff, so a close peels back one layer.
 pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
-    let Some(state) = ws
-        .focused_diff_changes_id()
-        .and_then(|id| ws.diff_changes_views.remove(id))
-    else {
+    if ws.focused_diff_changes_id().is_none() {
+        return UpdateEffect::None;
+    }
+    let focus = ws.panes.focus();
+    let Some(state) = take_down(ws, focus) else {
         return UpdateEffect::None;
     };
     let (covered, covered_diff) = (state.covered, state.covered_diff);
     diff_changes::release_excerpts(stoat, state.excerpts);
 
-    let ws = stoat.active_workspace_mut();
-    let focus = ws.panes.focus();
-    if ws.panes.widened() == Some(focus) {
-        ws.panes.unwiden();
-    }
+    let ws = stoat.active_workspace();
     let live = pane::view_is_live(ws, covered.as_ref());
     let rediff = live && covered_diff && matches!(covered, Some(View::Editor(_)));
     if live {
@@ -68,6 +66,39 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
         review::enter_diff_view(stoat);
     }
     UpdateEffect::Redraw
+}
+
+/// Take down the changes view that pane `pane_id` of `ws` shows, before a
+/// buffer opens in the pane, and put back the view it covered.
+///
+/// The buffer then opens as a file over the covered view, which comes back in
+/// normal mode. A covered view that is gone leaves a scratch editor for the
+/// buffer's editor to replace, so the pane never closes under the open.
+///
+/// The excerpt editors go at once, and each buffer only the stack opened waits
+/// for [`diff_changes::pump_diff_changes_stack`] to close it. A jump to an
+/// excerpt's own file therefore finds that buffer still open, and the pump
+/// keeps the buffer once the jump's editor holds it.
+pub(crate) fn close_diff_changes_for_open(
+    ws: &mut Workspace,
+    executor: &Executor,
+    pane_id: PaneId,
+) {
+    let Some(state) = take_down(ws, pane_id) else {
+        return;
+    };
+    diff_changes::dispose_excerpts(ws, state.excerpts);
+    let view = state
+        .covered
+        .filter(|view| pane::view_is_live(ws, Some(view)))
+        .unwrap_or_else(|| pane::scratch_editor_view(ws, executor.clone()));
+    if let View::Editor(editor_id) = view
+        && let Some(editor) = ws.editors.get_mut(editor_id)
+    {
+        editor.mode = "normal".to_string();
+        editor.pinned = false;
+    }
+    ws.panes.pane_mut(pane_id).view = view;
 }
 
 /// Close the changes view and open its focused excerpt's file in the per-file
@@ -475,6 +506,21 @@ fn page_delta(rows: usize, dir: PageDir) -> i32 {
         PageDir::Down => rows,
         PageDir::Up => -rows,
     }
+}
+
+/// Remove the changes view that pane `pane_id` of `ws` shows, with the widen
+/// it took, and answer its state.
+///
+/// `None` when the pane shows no changes view.
+fn take_down(ws: &mut Workspace, pane_id: PaneId) -> Option<DiffChangesState> {
+    let View::DiffChanges(id) = ws.panes.pane(pane_id).view else {
+        return None;
+    };
+    let state = ws.diff_changes_views.remove(id)?;
+    if ws.panes.widened() == Some(pane_id) {
+        ws.panes.unwiden();
+    }
+    Some(state)
 }
 
 /// The focused excerpt's index and its cursor's display row.
