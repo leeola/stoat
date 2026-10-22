@@ -51,7 +51,7 @@ enum PickerScope {
 ///
 /// The picker opens on the row after the active one, the session focused
 /// before it, so Enter at once returns there. Enter on a query with no row
-/// creates a session of that name.
+/// creates a root session of that name.
 ///
 /// [`Self::toggle_scope`] narrows the list to the active workspace's family and
 /// back.

@@ -19,8 +19,17 @@ use time::OffsetDateTime;
 use tracing::field;
 
 pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
-    let git_root = stoat.active_workspace().git_root.clone();
     let parent = Some(stoat.active_workspace().family_root());
+    create_workspace(stoat, parent);
+    UpdateEffect::Redraw
+}
+
+/// Create a workspace rooted where the active one is, tied to the family of
+/// `parent`, save the active workspace, and switch to the new one.
+///
+/// `None` makes a root session, in no family.
+fn create_workspace(stoat: &mut Stoat, parent: Option<WorkspaceUid>) -> WorkspaceId {
+    let git_root = stoat.active_workspace().git_root.clone();
     stoat.save_workspace(stoat.active_workspace);
 
     let mut ws = Workspace::new(git_root, &stoat.executor, stoat.redraw_notify.clone());
@@ -30,7 +39,7 @@ pub(super) fn new_workspace(stoat: &mut Stoat) -> UpdateEffect {
     stoat.workspaces[id].id = id;
     log_created(&stoat.workspaces[id]);
     switch_active_workspace(stoat, id);
-    UpdateEffect::Redraw
+    id
 }
 
 pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
@@ -520,8 +529,8 @@ pub(crate) fn sync_workspace_picker(stoat: &mut Stoat) {
 /// already-active workspace, or an empty query with no row, just closes the
 /// picker.
 ///
-/// A query with no row names a new session, rooted where the active one is,
-/// and the picker enters it.
+/// A query with no row names a new root session, in no family, rooted where
+/// the active one is, and the picker enters it.
 ///
 /// An untouched active workspace whose row the picker omitted leaves the
 /// instance with the switch or the create, since no row shows it and no save
@@ -549,7 +558,7 @@ pub(super) fn workspace_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     match picker.selected_entry() {
         None if query.is_empty() => return UpdateEffect::Redraw,
         None => {
-            new_workspace(stoat);
+            create_workspace(stoat, None);
             stoat.active_workspace_mut().name = query.clone();
             stoat.set_status(format!("created session {query}"));
         },
@@ -1667,7 +1676,7 @@ mod tests {
         );
     }
 
-    /// Every create inside a session joins the active family, so a session
+    /// A new or copied workspace joins the active family, so a session
     /// created from a sub-session ties to the root and a family never nests.
     /// The copy goes first, from the root, because a copy of a sub-session
     /// inherits the parent of its source either way. The test clock moves only
@@ -1688,8 +1697,8 @@ mod tests {
         assert_eq!(parents, [Some(root); 3], "each create ties to the root");
     }
 
-    /// Every create inside a session joins the active family, so the session
-    /// outside it is a saved one.
+    /// A new workspace joins the active family, so the session outside it is a
+    /// saved one.
     #[test]
     fn shift_tab_in_the_picker_narrows_to_the_family() {
         let mut harness = Stoat::test();
@@ -1915,6 +1924,7 @@ mod tests {
                 harness.stoat.workspaces.len(),
                 active.name.as_str(),
                 active.git_root.as_path(),
+                active.parent,
                 harness.stoat.pending_message.as_deref(),
                 harness.stoat.workspace_picker.is_none(),
             ),
@@ -1922,10 +1932,11 @@ mod tests {
                 before + 1,
                 "notes",
                 Path::new("/proj"),
+                None,
                 Some("created session notes"),
                 true,
             ),
-            "the query names a new session rooted where the active one is"
+            "the query names a new root session rooted where the active one is"
         );
     }
 
