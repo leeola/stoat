@@ -596,9 +596,13 @@ impl FoldMap {
         let mut new_folds = SumTree::default();
         let mut removed_any = false;
         for fold in self.folds.iter() {
+            // One resolve per fold, not one per range tested. A caller that
+            // unfolds a range per fold otherwise pays two root descents for
+            // every fold and range.
+            let folded = fold.range.to_offset_range(&resolve);
             if ranges
                 .iter()
-                .any(|r| fold.range.overlaps_range(r, &resolve))
+                .any(|r| folded.start < r.end && r.start < folded.end)
             {
                 removed_any = true;
             } else {
@@ -3736,6 +3740,32 @@ mod tests {
         assert_eq!(
             fold_map.version, after_fold,
             "row 0 holds no fold, so the one on row 2 is retained and nothing changed",
+        );
+    }
+
+    #[test]
+    fn an_unfold_range_that_only_touches_a_fold_leaves_it() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(shared);
+
+        let snap = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(snap.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+
+        let start_off = snap.rope().point_to_offset(stoat_text::Point::new(1, 0));
+        let end_off = snap.rope().point_to_offset(stoat_text::Point::new(1, 5));
+        fold_map.fold(
+            vec![snap.anchor_at(start_off, Bias::Right)..snap.anchor_at(end_off, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap,
+        );
+
+        let after_fold = fold_map.version;
+        fold_map.unfold(vec![0..start_off, end_off..snap.rope().len()], &snap);
+        assert_eq!(
+            fold_map.version, after_fold,
+            "a range ending at the fold's start or starting at its end leaves the fold",
         );
     }
 

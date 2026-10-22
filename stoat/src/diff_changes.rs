@@ -20,6 +20,7 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::DiffMap,
+    display_map::{FoldSnapshot, InlayPoint},
     editor_state::{EditorId, EditorState},
     pane::View,
     render,
@@ -838,23 +839,65 @@ fn land(
 /// [`CONTEXT_ROWS`] rows from a hunk, and answer the diff map version the folds
 /// were cut from with the rows left showing.
 ///
+/// A fold that already hides a wanted gap stays. Only the gaps that opened or
+/// closed since the last cut change the display map, so a landing that moves no
+/// gap changes nothing.
+///
 /// `None`, with nothing folded, while the buffer has no diff map.
 fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
-    let (version, kept, folds, max_point) = {
+    let (version, kept, stale, fresh) = {
         let snapshot = editor.display_map.snapshot();
         let map = snapshot.diff_map()?;
         let rope = snapshot.buffer_snapshot().rope();
         let line_count = rope.max_point().row + 1;
         let kept = kept_runs(map, line_count);
-        let folds: Vec<Range<Point>> = gaps(&kept, line_count)
+        let wanted: Vec<Range<Point>> = gaps(&kept, line_count)
             .into_iter()
             .map(|gap| fold_range(rope, gap))
             .collect();
-        (map.version(), kept, folds, rope.max_point())
+
+        // The folds sit where their anchors carried them across every edit
+        // since their cut, so a gap whose rows moved still finds its fold.
+        let held = folded_ranges(snapshot.fold_snapshot());
+        let stale: Vec<Range<Point>> = held
+            .iter()
+            .filter(|fold| !holds(&wanted, fold))
+            .cloned()
+            .collect();
+        let fresh: Vec<Range<Point>> = wanted
+            .into_iter()
+            .filter(|fold| !holds(&held, fold))
+            .collect();
+        (map.version(), kept, stale, fresh)
     };
-    editor.display_map.unfold(vec![Point::new(0, 0)..max_point]);
-    editor.display_map.fold(folds);
+    if !stale.is_empty() {
+        editor.display_map.unfold(stale);
+    }
+    if !fresh.is_empty() {
+        editor.display_map.fold(fresh);
+    }
     Some((version, kept))
+}
+
+/// The buffer range each fold of `folds` hides, sorted by start and then end.
+fn folded_ranges(folds: &FoldSnapshot) -> Vec<Range<Point>> {
+    let inlays = folds.inlay_snapshot();
+    let mut ranges: Vec<Range<Point>> = folds
+        .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
+        .into_iter()
+        .map(|fold| {
+            inlays.to_buffer_point(fold.range.start)..inlays.to_buffer_point(fold.range.end)
+        })
+        .collect();
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    ranges
+}
+
+/// Whether `ranges`, sorted by start and then end, holds `range`.
+fn holds(ranges: &[Range<Point>], range: &Range<Point>) -> bool {
+    ranges
+        .binary_search_by_key(&(range.start, range.end), |probe| (probe.start, probe.end))
+        .is_ok()
 }
 
 /// The rows an excerpt shows, as runs in buffer order.
@@ -928,12 +971,13 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         diff_map::DiffMap,
-        display_map::DisplayPoint,
+        display_map::{DisplayPoint, InlayPoint},
         host::FakeRepoBuilder,
         test_harness::TestHarness,
         workspace::diff::{DiffBase, WorktreeBase},
     };
     use std::{
+        ops::Range,
         path::{Path, PathBuf},
         sync::Arc,
     };
@@ -1201,6 +1245,159 @@ mod tests {
         assert_eq!(
             (index.is_some(), head.is_some(), index != head),
             (true, true, true)
+        );
+    }
+
+    /// One excerpt's folds: the diff map version they were cut from, the fold
+    /// snapshot's version, and each fold's id with the buffer rows it hides.
+    #[derive(Debug, PartialEq)]
+    struct Cut {
+        map: Option<usize>,
+        version: usize,
+        folds: Vec<(usize, Range<u32>)>,
+    }
+
+    /// A changes view over a file of 60 numbered lines with a hunk on rows 10,
+    /// 30, and 50, so its folds hide rows 0..7, 14..27, 34..47, and 54..61.
+    /// Diff maps stay warm, as in the app, so an edit refolds the excerpt.
+    fn three_hunk_stack() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        let base = numbered(60);
+        let text = base
+            .replace("\n11\n", "\nELEVEN\n")
+            .replace("\n31\n", "\nTHIRTY-ONE\n")
+            .replace("\n51\n", "\nFIFTY-ONE\n");
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &text)]);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle_diff_jobs();
+        h
+    }
+
+    /// Replace the first `from` in /repo/a.txt with `to`, and let the changes
+    /// view refold over the diff map that follows.
+    fn edit(h: &mut TestHarness, from: &str, to: &str) {
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/a.txt"))
+            .expect("an open buffer");
+        let start = h
+            .buffer_text(buffer_id)
+            .find(from)
+            .expect("the replaced text");
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("a buffer")
+            .write()
+            .expect("buffer poisoned")
+            .edit(start..start + from.len(), to);
+        h.settle_diff_jobs();
+    }
+
+    /// The folds of the focused changes view's first excerpt.
+    fn cut(h: &mut TestHarness) -> Cut {
+        let ws = h.stoat.active_workspace_mut();
+        let excerpt = &ws.focused_diff_changes().expect("a changes view").excerpts[0];
+        let map = excerpt.folded_version;
+        let editor = ws.editors.get_mut(excerpt.editor_id).expect("an editor");
+        let snapshot = editor.display_map.snapshot();
+        let folds = snapshot.fold_snapshot();
+        let inlays = folds.inlay_snapshot();
+        let hidden = |range: &Range<InlayPoint>| {
+            let start = inlays.to_buffer_point(range.start);
+            let first = if start == Point::new(0, 0) {
+                0
+            } else {
+                start.row + 1
+            };
+            first..inlays.to_buffer_point(range.end).row + 1
+        };
+        Cut {
+            map,
+            version: folds.version(),
+            folds: folds
+                .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
+                .into_iter()
+                .map(|fold| (fold.id.0, hidden(&fold.range)))
+                .collect(),
+        }
+    }
+
+    /// The rows each fold of `after` hides, with whether `before` held it.
+    fn survivors(before: &Cut, after: &Cut) -> Vec<(bool, Range<u32>)> {
+        after
+            .folds
+            .iter()
+            .map(|(id, rows)| {
+                (
+                    before.folds.iter().any(|(held, _)| held == id),
+                    rows.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// A landing whose map shows the same rows leaves every fold, so the
+    /// display map does no work for it.
+    #[test]
+    fn a_landing_that_keeps_the_shown_rows_toggles_no_fold() {
+        let mut h = three_hunk_stack();
+        let before = cut(&mut h);
+        edit(&mut h, "ELEVEN", "ELEVEN!");
+        let after = cut(&mut h);
+        assert_eq!(
+            (after.map != before.map, after.version, after.folds),
+            (true, before.version, before.folds),
+        );
+    }
+
+    /// A hunk that lands in a gap refolds that gap, and the other folds stay.
+    #[test]
+    fn a_hunk_landing_in_a_gap_refolds_that_gap_only() {
+        let mut h = three_hunk_stack();
+        let before = cut(&mut h);
+        // Row 36 lies three rows below the run around row 30, so the run grows
+        // to row 40 and the gap below it shrinks.
+        edit(&mut h, "\n37\n", "\nTHIRTY-SEVEN\n");
+        assert_eq!(
+            survivors(&before, &cut(&mut h)),
+            [
+                (true, 0..7),
+                (true, 14..27),
+                (false, 40..47),
+                (true, 54..61)
+            ],
+        );
+    }
+
+    /// A run whose only hunk goes leaves one fold over both gaps around it,
+    /// and the other folds stay.
+    #[test]
+    fn a_run_whose_hunk_goes_joins_the_gaps_around_it() {
+        let mut h = three_hunk_stack();
+        let before = cut(&mut h);
+        edit(&mut h, "THIRTY-ONE", "31");
+        assert_eq!(
+            survivors(&before, &cut(&mut h)),
+            [(true, 0..7), (false, 14..47), (true, 54..61)],
+        );
+    }
+
+    /// A row added inside a hunk moves the folds below it a row down, and every
+    /// fold stays.
+    #[test]
+    fn a_row_added_inside_a_hunk_keeps_every_fold() {
+        let mut h = three_hunk_stack();
+        let before = cut(&mut h);
+        edit(&mut h, "ELEVEN", "ELEVEN\nMORE");
+        assert_eq!(
+            survivors(&before, &cut(&mut h)),
+            [(true, 0..7), (true, 15..28), (true, 35..48), (true, 55..62)],
         );
     }
 
