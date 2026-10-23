@@ -23,6 +23,39 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use slotmap::SlotMap;
 use stoat_widgets::ApcScene;
 
+/// What a paint records on an excerpt's editor about where it laid the
+/// excerpt out.
+///
+/// The terminal cursor, cursor popups, and pointer hits read these back from
+/// the live paint, so a page paint puts them back as it found them.
+struct PaintLayout {
+    scroll_row: u32,
+    viewport_rows: Option<u32>,
+    cursor_screen_cell: Option<(u16, u16)>,
+    text_rect: Option<Rect>,
+    minimap_rect: Option<Rect>,
+}
+
+impl PaintLayout {
+    fn of(editor: &EditorState) -> Self {
+        Self {
+            scroll_row: editor.scroll_row,
+            viewport_rows: editor.viewport_rows,
+            cursor_screen_cell: editor.cursor_screen_cell,
+            text_rect: editor.text_rect,
+            minimap_rect: editor.minimap_rect,
+        }
+    }
+
+    fn restore(self, editor: &mut EditorState) {
+        editor.scroll_row = self.scroll_row;
+        editor.viewport_rows = self.viewport_rows;
+        editor.cursor_screen_cell = self.cursor_screen_cell;
+        editor.text_rect = self.text_rect;
+        editor.minimap_rect = self.minimap_rect;
+    }
+}
+
 /// Paint the stack `state` holds into `pane`'s rows above its status row.
 ///
 /// [`render_pane_status`](crate::render::pane::render_pane_status) paints the
@@ -116,8 +149,37 @@ pub(crate) fn render_diff_changes(
     }
     state.scroll = state.scroll.min(total.saturating_sub(state.viewport_rows));
 
+    let first_row = state.scroll;
+    paint_stack_rows(
+        state, editors, buffers, is_focused, text_style, undercurls, frame, buf, scene, first_row,
+        inner,
+    );
+}
+
+/// Paint stack rows `first_row..first_row + area.height` of the stack `state`
+/// holds into `area` of `buf`.
+///
+/// Each excerpt the rows reach takes a header row in the commit header style
+/// and then its rows, painted from its own scroll row, so an excerpt cut at
+/// the top of `area` shows its lower rows. A painted excerpt's editor records
+/// where this paint laid it out: its scroll row, its viewport, its text rect,
+/// and the cell of its cursor.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_stack_rows(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    is_focused: bool,
+    text_style: Style,
+    undercurls: &mut UndercurlBatch,
+    frame: FrameCtx<'_>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+    first_row: usize,
+    area: Rect,
+) {
     let header_style = frame.theme.get(scope::VCS_COMMIT_SHA);
-    let (scroll, rows_on_screen) = (state.scroll, state.viewport_rows);
+    let (scroll, rows_on_screen) = (first_row, usize::from(area.height));
     for (index, excerpt) in state.excerpts.iter().enumerate() {
         let rows = diff_changes::excerpt_rows(excerpt, editors);
         let top = excerpt.top;
@@ -125,9 +187,9 @@ pub(crate) fn render_diff_changes(
             continue;
         }
         if top >= scroll {
-            let y = inner.y + (top - scroll) as u16;
-            let end_x = inner.x + inner.width;
-            write_str_clipped(buf, inner.x, y, &excerpt.rel_path, header_style, end_x);
+            let y = area.y + (top - scroll) as u16;
+            let end_x = area.x + area.width;
+            write_str_clipped(buf, area.x, y, &excerpt.rel_path, header_style, end_x);
         }
 
         // The screen row of the excerpt's first row, past its header.
@@ -140,10 +202,10 @@ pub(crate) fn render_diff_changes(
         }
         editor.scroll_row = scroll.saturating_sub(top + 1) as u32;
         let height = (rows - editor.scroll_row as usize).min(rows_on_screen - first);
-        let area = Rect {
-            x: inner.x,
-            y: inner.y + first as u16,
-            width: inner.width,
+        let excerpt_area = Rect {
+            x: area.x,
+            y: area.y + first as u16,
+            width: area.width,
             height: height as u16,
         };
         let focused = is_focused && index == state.focused;
@@ -152,7 +214,7 @@ pub(crate) fn render_diff_changes(
             .map(|path| (path, frame.diagnostics));
         render_editor_with_overlay(
             editor,
-            area,
+            excerpt_area,
             text_style,
             frame.theme,
             frame.chrome,
@@ -182,6 +244,48 @@ pub(crate) fn render_diff_changes(
             frame.wrap_column,
         );
         editor.viewport_rows = Some(rows as u32);
+    }
+}
+
+/// Paint the stack rows from `first_row` over the whole of `page`, as a page of
+/// the changes view's pool holds them.
+///
+/// The rows paint as [`paint_stack_rows`] paints them, with selections, search
+/// matches, and diagnostics. Each excerpt's editor keeps the layout the live
+/// paint recorded, so a page painted after the live frame leaves the terminal
+/// cursor and pointer hits on the live rows.
+// FIXME: The changes view's pool fills no page through this, so only tests
+// call it.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(crate) fn paint_stack_page(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    is_focused: bool,
+    text_style: Style,
+    undercurls: &mut UndercurlBatch,
+    frame: FrameCtx<'_>,
+    page: &mut Buffer,
+    scene: &mut ApcScene,
+    first_row: usize,
+) {
+    let live: Vec<(EditorId, PaintLayout)> = state
+        .excerpts
+        .iter()
+        .filter_map(|excerpt| {
+            let editor = editors.get(excerpt.editor_id)?;
+            Some((excerpt.editor_id, PaintLayout::of(editor)))
+        })
+        .collect();
+    let area = page.area;
+    paint_stack_rows(
+        state, editors, buffers, is_focused, text_style, undercurls, frame, page, scene, first_row,
+        area,
+    );
+    for (editor_id, layout) in live {
+        if let Some(editor) = editors.get_mut(editor_id) {
+            layout.restore(editor);
+        }
     }
 }
 
@@ -254,27 +358,39 @@ pub(crate) fn replay_cursor(
 
 #[cfg(test)]
 mod tests {
+    use super::{paint_stack_page, paint_stack_rows};
     use crate::{
         action_handlers, apc_emit,
+        app::Stoat,
+        buffer_registry::BufferRegistry,
         diff_changes::{self, DiffChangesState},
         editor_state::{EditorId, EditorState},
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
+            commits::PreviewDials,
             layout::split_pane_status,
             paint,
             review::{self, DiffColumns, DiffDials, DiffLayout},
-            themed_blank, SINGLE_MINIMAP_STRIP_ID,
+            themed_blank,
+            undercurl::UndercurlBatch,
+            FrameCtx, SINGLE_MINIMAP_STRIP_ID,
         },
         test_fixture::drain_apc,
         test_harness::TestHarness,
         theme::scope,
         workspace::Workspace,
     };
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use slotmap::SlotMap;
-    use std::path::{Path, PathBuf};
-    use stoat_config::MinimapMode;
+    use std::{
+        collections::HashMap,
+        mem,
+        path::{Path, PathBuf},
+        sync::LazyLock,
+    };
+    use stoat_config::{LineNumbers, MinimapMode, WrapMode};
     use stoat_text::Point;
+    use stoat_widgets::ApcScene;
     use stoatty_protocol::command::Command;
     use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -440,6 +556,196 @@ mod tests {
                 cells(&buf, cols.right_num_x, 4, inner.y)
             ),
             (3, 2, "3".to_string()),
+        );
+    }
+
+    /// The pair names of a frame with no pair open.
+    static NO_PAIRS: LazyLock<HashMap<PathBuf, (String, String)>> = LazyLock::new(HashMap::new);
+
+    /// A frame context that paints the stack as the live frame of `stoat`
+    /// paints it, under no prompt, popup, or search.
+    fn live_frame(stoat: &Stoat) -> FrameCtx<'_> {
+        FrameCtx {
+            workspace_name: "",
+            workspace_root: Path::new(""),
+            mode: "normal",
+            screen: None,
+            theme: &stoat.theme,
+            commits_split: None,
+            preview_dials: PreviewDials::from_stoat(stoat),
+            diff_changes_building: false,
+            chrome: &stoat
+                .chrome
+                .as_ref()
+                .expect("a render resolved the chrome")
+                .1,
+            pending_count: None,
+            recording_register: None,
+            held_buffers: &[],
+            lsp_status_open: false,
+            lsp_progress_entries: &[],
+            spinner_phase: 0,
+            lsp_servers: &[],
+            diff_warm_busy: false,
+            repo_change_counts: None,
+            hunk_position: None,
+            diff_base: None,
+            diff_sides: ("", ""),
+            pair_sides: &NO_PAIRS,
+            lsp_pending: None,
+            lsp_message: None,
+            status_message: None,
+            goto_word_labels: None,
+            mode_label: ("", Color::Reset),
+            diagnostics: &stoat.diagnostics,
+            search_query: None,
+            search_smart_case: true,
+            status_prompt: None,
+            terminal_cursor_editor: stoat.focused_editor_ids().map(|(id, _)| id),
+            line_numbers: LineNumbers::Relative,
+            wrap_mode: WrapMode::EditorWidth,
+            wrap_column: 80,
+            inactive_dim: 0.0,
+            diff_dials: DiffDials::from_stoat(stoat),
+            images_capable: false,
+            minimap_enabled: false,
+            minimap_chrome: None,
+            minimap_band: None,
+            badge_cover: None,
+            hover_cell: None,
+            home: None,
+            #[cfg(feature = "perf")]
+            perf: None,
+        }
+    }
+
+    /// Run `draw` over the focused changes view's stack beside a frame context
+    /// that paints as the live frame does, with a live scene.
+    ///
+    /// The context borrows the whole `Stoat`, so the editors leave the
+    /// workspace for the paint and return after it.
+    fn paint_directly<R>(
+        h: &mut TestHarness,
+        draw: impl FnOnce(
+            &DiffChangesState,
+            &mut SlotMap<EditorId, EditorState>,
+            &BufferRegistry,
+            FrameCtx<'_>,
+            &mut ApcScene,
+        ) -> R,
+    ) -> R {
+        let mut editors = mem::take(&mut h.stoat.active_workspace_mut().editors);
+        let mut scene = ApcScene::new();
+        scene.set_live(true);
+        let out = {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .focused_diff_changes_id()
+                .expect("the changes view is open");
+            draw(
+                &ws.diff_changes_views[id],
+                &mut editors,
+                &ws.buffers,
+                live_frame(&h.stoat),
+                &mut scene,
+            )
+        };
+        h.stoat.active_workspace_mut().editors = editors;
+        out
+    }
+
+    /// A run of stack rows painted on its own shows what the live paint shows
+    /// on those rows. The run starts inside a.txt, so that excerpt paints from
+    /// its second row, and b.txt's header falls inside the run.
+    #[test]
+    fn a_run_of_stack_rows_paints_what_the_live_paint_shows() {
+        let mut h = two_files(16);
+        let live = h.stoat.render();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+        let run = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+            let mut run = Buffer::empty(Rect::new(0, 0, inner.width, 4));
+            let area = run.area;
+            let text_style = frame.theme.get(scope::UI_TEXT);
+            let mut undercurls = UndercurlBatch::default();
+            paint_stack_rows(
+                state,
+                editors,
+                buffers,
+                true,
+                text_style,
+                &mut undercurls,
+                frame,
+                &mut run,
+                scene,
+                2,
+                area,
+            );
+            run
+        });
+
+        let rows = |buf: &Buffer, x: u16, y: u16| -> Vec<String> {
+            (y..y + 4).map(|y| cells(buf, x, inner.width, y)).collect()
+        };
+        let expected = rows(&live, inner.x, inner.y + 2);
+        assert_eq!(
+            (rows(&run, 0, 0), expected[2].as_str()),
+            (expected.clone(), "b.txt"),
+        );
+    }
+
+    /// A page painted after the live frame leaves each excerpt's editor laid
+    /// out as the live paint left it, so the terminal cursor and pointer hits
+    /// stay on the live rows. The page starts at a.txt's second row, where the
+    /// paint lays a.txt out from another scroll row and cuts its cursor's row.
+    #[test]
+    fn a_stack_page_leaves_the_live_layout() {
+        let mut h = two_files(16);
+        h.stoat.render();
+        let layouts = |h: &mut TestHarness| {
+            let (state, editors) = stack(h);
+            state
+                .excerpts
+                .iter()
+                .map(|excerpt| {
+                    let editor = &editors[excerpt.editor_id];
+                    (
+                        editor.scroll_row,
+                        editor.viewport_rows,
+                        editor.cursor_screen_cell,
+                        editor.text_rect,
+                        editor.minimap_rect,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let live = layouts(&mut h);
+
+        let header = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+            let mut page = Buffer::empty(Rect::new(0, 0, 120, 4));
+            let text_style = frame.theme.get(scope::UI_TEXT);
+            let mut undercurls = UndercurlBatch::default();
+            paint_stack_page(
+                state,
+                editors,
+                buffers,
+                true,
+                text_style,
+                &mut undercurls,
+                frame,
+                &mut page,
+                scene,
+                2,
+            );
+            cells(&page, 0, 120, 2)
+        });
+
+        assert_eq!(
+            (live[0].2.is_some(), header.as_str(), layouts(&mut h)),
+            (true, "b.txt", live.clone()),
+            "the live cursor cell, the page's header row, and every layout field",
         );
     }
 
