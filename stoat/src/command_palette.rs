@@ -666,11 +666,12 @@ impl CommandPalette {
 
     /// The trailing argument text in picker-argument mode, or `None` otherwise.
     /// Drives the inline picker's filter. The tail is everything after the
-    /// command token, so a path argument may contain spaces.
+    /// command's head, as [`split_head`] finds it, so a path argument keeps
+    /// its spaces.
     pub(crate) fn arg_tail(&self, ws: &Workspace) -> Option<String> {
         self.arg_source()?;
         let text = self.input.text(ws);
-        let (_, tail) = text.split_once(' ')?;
+        let (_, _, tail) = split_head(&text, &self.availability)?;
         Some(tail.to_string())
     }
 
@@ -921,20 +922,41 @@ fn resolve_conditional(
 
 /// Split palette input into a resolved command and its trailing argument text.
 ///
-/// Returns `Some((entry, arg))` only when the text is a command token followed
-/// by a space. The token is a command name or alias (resolved by
-/// [`registry::lookup_alias`]) and the command must take at least one
-/// parameter. `arg` is everything after the first space, so a path argument may
-/// itself contain spaces. Returns `None` for plain filter text, an unknown
-/// head, or a zero-argument command, keeping the palette in command-filter
-/// mode.
+/// Returns `Some((entry, arg))` only when the text is a command head followed
+/// by a space, as [`split_head`] finds it, and the command takes at least one
+/// parameter. `arg` is everything after the head, so a path argument keeps its
+/// own spaces. Returns `None` for plain filter text, an unknown head, or a
+/// zero-argument command, keeping the palette in command-filter mode.
 fn parse_command<'a>(
     text: &'a str,
     ctx: &Availability,
 ) -> Option<(&'static registry::RegistryEntry, &'a str)> {
-    let (head, arg) = text.split_once(' ')?;
-    let entry = resolve_conditional(head, ctx).or_else(|| registry::lookup_alias(head))?;
+    let (entry, _, arg) = split_head(text, ctx)?;
     (!entry.def.params().is_empty()).then_some((entry, arg))
+}
+
+/// Split palette input into the command its head names, the head, and the text
+/// after the space that ends the head.
+///
+/// A command name such as `git log` holds a space, so the head is the longest
+/// run of leading tokens that names a command, with two tokens tried before
+/// one. A head resolves as a conditional command first, then through
+/// [`registry::lookup_alias`]. Returns `None` when no space ends a head that
+/// names a command.
+pub(crate) fn split_head<'a>(
+    text: &'a str,
+    ctx: &Availability,
+) -> Option<(&'static registry::RegistryEntry, &'a str, &'a str)> {
+    let resolve =
+        |head: &str| resolve_conditional(head, ctx).or_else(|| registry::lookup_alias(head));
+    let (first, rest) = text.split_once(' ')?;
+    if let Some((second, tail)) = rest.split_once(' ') {
+        let head = &text[..first.len() + 1 + second.len()];
+        if let Some(entry) = resolve(head) {
+            return Some((entry, head, tail));
+        }
+    }
+    resolve(first).map(|entry| (entry, first, rest))
 }
 
 /// Whether submitting `entry`'s bare name runs it, rather than opening argument
@@ -1287,6 +1309,46 @@ mod tests {
             names_for("o").first().copied(),
             Some("open"),
             "`o` is OpenFile's alias and must pin to the top",
+        );
+    }
+
+    /// The full name and the alias of a two-token command each pin it, by its
+    /// full name, to the top row.
+    #[test]
+    fn a_two_token_name_and_its_alias_pin_the_command() {
+        assert_eq!(
+            ["git log", "git ls"].map(|text| names_for(text).first().copied()),
+            [Some("git log"); 2],
+        );
+    }
+
+    /// A two-token head reads its argument after the second token. A head with
+    /// no command behind it parses to none, and a one-token head keeps every
+    /// later space in its argument.
+    #[test]
+    fn a_two_token_head_parses_ahead_of_its_first_token() {
+        let parsed = |text: &'static str| {
+            parse_command(text, &Availability::default())
+                .map(|(entry, tail)| (entry.def.name(), tail))
+        };
+        assert_eq!(
+            [
+                "git log main",
+                "git ls main",
+                "git ls ",
+                "git",
+                "git ",
+                "o src/a b"
+            ]
+            .map(parsed),
+            [
+                Some(("GitLs", "main")),
+                Some(("GitLs", "main")),
+                Some(("GitLs", "")),
+                None,
+                None,
+                Some(("OpenFile", "src/a b")),
+            ],
         );
     }
 
@@ -2190,6 +2252,18 @@ mod tests {
             "quit-all",
             "a parameterless command completes bare, ready for Enter"
         );
+    }
+
+    /// Tab in the argument of a two-token command keeps both tokens of its
+    /// head.
+    #[test]
+    fn tab_in_a_two_token_command_keeps_its_head() {
+        let mut h = Stoat::test();
+        h.type_text(":git ls fe");
+        let _ = h.snapshot();
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        assert_eq!(palette_text(&h), "git ls fe");
     }
 
     /// An argument list is a whole workspace walk, so its ranking is handed

@@ -962,7 +962,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DiffChangesLast::DEF, |_| Ok(Box::new(DiffChangesLast)));
     add(DiffChangesOpen::DEF, |_| Ok(Box::new(DiffChangesOpen)));
     add(GitLs::DEF, |params| {
-        // The palette autospaces a submitted command, so a bare `git-ls`
+        // The palette autospaces a submitted command, so a bare `git log`
         // arrives with an empty argument. That means HEAD, not a revision
         // literally named "".
         let rev = params

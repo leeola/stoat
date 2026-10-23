@@ -1294,14 +1294,14 @@ mod tests {
     ///
     /// Worth pinning because an unresolvable action name in config.stcfg is
     /// silently dropped, so a mistyped binding would leave the modal inert with
-    /// nothing else to catch it. Opening through `:git-ls` rather than
+    /// nothing else to catch it. Opening through `:git ls` rather than
     /// installing the picker by hand is what makes that real. The block is
     /// gated on insert mode, and only the true open path proves the picker
     /// lands there.
     #[test]
     fn the_keymap_block_drives_the_picker() {
         let mut h = seeded_repo_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
         let selected = |h: &crate::test_harness::TestHarness| {
@@ -1353,7 +1353,7 @@ mod tests {
     #[test]
     fn the_keymap_block_jumps_between_branch_tips() {
         let mut h = seeded_repo_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
         let selected = |h: &crate::test_harness::TestHarness| {
@@ -1408,7 +1408,7 @@ mod tests {
         );
 
         let mut h = seeded_repo_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
         h.snapshot();
@@ -2291,7 +2291,7 @@ mod tests {
     }
 
     /// [`seeded_repo_harness`] with a PickBase picker installed over that
-    /// history, which is the role a review walk starts from and `:git-ls`
+    /// history, which is the role a review walk starts from and `:git ls`
     /// cannot produce.
     /// The walk arrives filtered by whatever was typed while it ran.
     ///

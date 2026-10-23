@@ -384,7 +384,7 @@ fn a_foreign_terminal_receives_nothing_but_the_hello_probe() {
     let listed = "add api endpoints";
 
     let mut session = Session::start(120, 40);
-    session.send(":git-ls\r");
+    session.send(":git ls\r");
     let opened = session.settles(|screen| screen.contains(listed));
     session.send("\x1b[B");
     thread::sleep(KEY_SETTLE);

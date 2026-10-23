@@ -1262,7 +1262,7 @@ mod tests {
     #[test]
     fn drilling_into_a_merge_leaves_the_walk_to_a_worker() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1468,7 +1468,7 @@ mod tests {
     #[test]
     fn git_ls_browses_head_history() {
         let mut h = harness();
-        h.type_text(":git-ls");
+        h.type_text(":git log");
         h.type_keys("enter");
         h.settle();
 
@@ -1491,7 +1491,7 @@ mod tests {
         use futures::FutureExt;
 
         let mut h = harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1524,7 +1524,7 @@ mod tests {
     #[test]
     fn stepping_the_selection_twice_leaves_one_build_running() {
         let mut h = harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1561,7 +1561,7 @@ mod tests {
     }
 
     /// A harness whose `/repo` has a two-commit `feature` branch merged back
-    /// into `main`, with the merge on the tip so `:git-ls` opens on it.
+    /// into `main`, with the merge on the tip so `:git ls` opens on it.
     fn merged_harness() -> TestHarness {
         let mut h = Stoat::test();
         {
@@ -1600,7 +1600,7 @@ mod tests {
         h
     }
 
-    /// Every row `:git-ls` lists over [`merged_harness`], newest seeded first.
+    /// Every row `:git ls` lists over [`merged_harness`], newest seeded first.
     /// The browser walks the whole DAG, so the merged branch is in here.
     const MERGED_DAG: [&str; 5] = ["m9999999", "b2c3d4e5", "f2222222", "f1111111", "a1b2c3d4"];
 
@@ -1630,7 +1630,7 @@ mod tests {
     #[test]
     fn browsing_lists_merged_branches_while_a_base_pick_does_not() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
         assert_eq!(
@@ -1654,7 +1654,7 @@ mod tests {
     #[test]
     fn drilling_a_merge_lists_only_the_branch_it_brought_in() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
         assert_eq!(picker_shas(&h), MERGED_DAG);
@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     fn leaving_a_drilled_scope_restores_the_list_and_the_query() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1720,7 +1720,7 @@ mod tests {
     #[test]
     fn a_back_press_while_a_drill_walks_cancels_the_drill() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
         h.type_text("9999");
@@ -1751,7 +1751,7 @@ mod tests {
     #[test]
     fn drilling_a_row_that_is_not_a_merge_badges_and_leaves_the_list_alone() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1773,7 +1773,7 @@ mod tests {
     #[test]
     fn leaving_the_outermost_scope_does_nothing() {
         let mut h = merged_harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn selecting_while_browsing_changes_nothing() {
         let mut h = harness();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1865,7 +1865,7 @@ mod tests {
     fn git_ls_outside_a_repository_badges() {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().git_root = "/elsewhere".into();
-        h.type_text(":git-ls");
+        h.type_text(":git ls");
         h.type_keys("enter");
         h.settle();
 
@@ -1876,7 +1876,7 @@ mod tests {
     #[test]
     fn git_ls_with_a_rev_roots_the_list_there_and_says_so() {
         let mut h = harness();
-        h.type_text(":git-ls feature");
+        h.type_text(":git ls feature");
         h.type_keys("enter");
         h.settle();
 
@@ -1893,7 +1893,7 @@ mod tests {
     #[test]
     fn git_ls_with_an_unknown_rev_badges_without_opening_anything() {
         let mut h = harness();
-        h.type_text(":git-ls junk");
+        h.type_text(":git ls junk");
         h.type_keys("enter");
         h.settle();
 

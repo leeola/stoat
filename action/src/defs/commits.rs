@@ -140,7 +140,8 @@ define_action_def!(
      current branch when given no revision. Selecting a row dismisses the \
      picker without changing the working tree.",
     ActionPriority::Rare,
-    command_name = "git-ls",
+    aliases = &["git ls"],
+    command_name = "git log",
     params = GIT_LS_PARAMS
 );
 

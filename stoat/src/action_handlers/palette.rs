@@ -1,6 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    command_palette::{Availability, CommandPalette, PaletteOutcome},
+    command_palette::{self, Availability, CommandPalette, PaletteOutcome},
     file_finder::Browse,
     host::FsHost,
     picker::{PathPicker, PendingScan},
@@ -590,7 +590,8 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
         }
         let ws = &stoat.workspaces[active_idx];
         let text = palette.input.text(ws);
-        let Some((head, typed_tail)) = text.split_once(' ') else {
+        let Some((_, head, typed_tail)) = command_palette::split_head(&text, &palette.availability)
+        else {
             return UpdateEffect::None;
         };
 
