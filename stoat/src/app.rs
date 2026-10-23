@@ -8881,7 +8881,7 @@ impl Stoat {
         let ws_id = self.active_workspace;
         // The changes strip summarizes every excerpt's rows, so a landing in an
         // excerpt the window does not show still recolors the strip, while the
-        // pane replays.
+        // pane replays. The strip resends only the rows the landing reports.
         let stacked: Vec<BufferId> = match self.diff_changes_strips.contains_key(&ws_id) {
             true => self
                 .active_workspace()
@@ -8900,7 +8900,16 @@ impl Stoat {
                 ParseRestyle::Onscreen => true,
             };
             if let Some(content) = strip {
-                content.note_syntax_rows(landing.changed_rows);
+                content.note_syntax_rows(landing.changed_rows.clone());
+            }
+            if stacked.contains(&landing.buffer_id) {
+                let version = self
+                    .active_workspace()
+                    .buffers
+                    .syntax_version(landing.buffer_id);
+                if let Some(strip) = self.diff_changes_strips.get_mut(&ws_id) {
+                    strip.note_syntax_rows(landing.buffer_id, landing.changed_rows, version);
+                }
             }
         }
         earned

@@ -7,22 +7,25 @@
 //! change, or the base line that the diff view splices in for a removal.
 //!
 //! A workspace holds one strip for its changes views. It follows the stack of
-//! the focused changes view, else the first one in pane order. A change in one
-//! excerpt resends that excerpt's lines, and a long stack fills over frames
-//! under a time budget, as a freshly opened file fills its own strip.
+//! the focused changes view, else the first one in pane order. An edit, a
+//! parse, or a diff landing that keeps an excerpt's layout resends the lines
+//! of the rows it touched, and a layout change resends the excerpt's lines. A
+//! long stack fills over frames under a time budget, as a freshly opened file
+//! fills its own strip.
 
 use super::{
     emit::{
         convert_minimap_runs, minimap_line_tokens, POPULATION_PALETTE_PROTOCOL,
         WEIGHTED_RUN_PROTOCOL,
     },
-    summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, MAX_COLUMNS,
-    SYNC_BUDGET, SYNC_SLICE,
+    summarize_line, ClassTable, EdgeClass, LineRuns, LineToken, RowMark, Run, SweepRows,
+    MAX_COLUMNS, SYNC_BUDGET, SYNC_SLICE,
 };
 use crate::{
     app::Stoat,
     buffer::BufferId,
     diff_changes::{self, DiffChangesId, DiffChangesState},
+    diff_map::{DiffHunkStatus, DiffMap},
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
     host::DiffStatus,
@@ -31,7 +34,14 @@ use crate::{
     workspace::{Workspace, WorkspaceId},
 };
 use slotmap::SlotMap;
-use std::{collections::HashMap, ops::Range, time::Duration};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
+    hash::{Hash, Hasher},
+    ops::Range,
+    sync::Arc,
+    time::Duration,
+};
+use stoat_text::Point;
 use stoat_widgets::pool::MinimapWindowInputs;
 use stoatty_protocol::command::{self, MinimapLinesCommand};
 
@@ -39,8 +49,8 @@ use stoatty_protocol::command::{self, MinimapLinesCommand};
 /// stack it follows.
 ///
 /// The terminal holds the lines already sent, which `held` mirrors excerpt by
-/// excerpt. A sync splices the lines of the excerpts whose key moved and leaves
-/// the rest, since the lines above an excerpt place it.
+/// excerpt. A sync splices the lines that changed since the last one and
+/// leaves the rest, since the lines above an excerpt place it.
 pub(crate) struct DiffChangesStrip {
     content_id: u32,
     /// Time one sync spends sending slices before it leaves the rest for the
@@ -55,6 +65,12 @@ pub(crate) struct DiffChangesStrip {
     syntax_on: bool,
     /// Whether the last sync left lines of the followed stack unsent.
     pending: bool,
+    /// The rows each stacked buffer's parses changed since its excerpt's lines
+    /// were summarized.
+    parsed: HashMap<BufferId, ParsedRows>,
+    /// Each stacked buffer's [`hunk_marks`] and the version of the diff map
+    /// they come from, so a frame reads the hunks of a map that moved alone.
+    marks: HashMap<BufferId, (usize, Arc<[HunkMark]>)>,
 }
 
 /// The lines the terminal holds for one excerpt of the stack.
@@ -65,27 +81,71 @@ struct HeldExcerpt {
     /// Lines held from the excerpt's header row on, fewer than its rows while
     /// its fill is in flight.
     lines: usize,
+    /// The hunks whose marks and removed base lines the lines show.
+    hunks: Arc<[HunkMark]>,
 }
 
 /// What one excerpt's strip lines show, as of the layout and the versions
 /// they were summarized at.
 ///
-/// An excerpt whose key moves gets its lines again. Where the excerpt sits is
-/// no part of it, so a change above that only moves it sends nothing for it.
+/// An excerpt whose layout moves gets its lines again. One whose layout holds
+/// while its text, its parse, or its hunks moved gets the lines of the rows
+/// those touched, since every other row shows what it showed. Where the
+/// excerpt sits is no part of it, so a change above that only moves it sends
+/// nothing for it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ExcerptKey {
     buffer_id: BufferId,
+    layout: ExcerptLayout,
+    /// The buffer version whose text the rows summarize.
+    buffer_version: u64,
+    /// The parse that colors the excerpt's rows.
+    syntax_version: Option<u64>,
+    /// The diff map whose hunks mark the rows.
+    map_version: Option<usize>,
+}
+
+/// What decides the buffer row each display row of an excerpt shows.
+///
+/// Under one layout, an edit, a parse, or a diff landing changes only the lines
+/// of the rows it touched. A removed base line sits beside the hunk that
+/// removed it, so a landing that keeps the stack rows moves none of them.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct ExcerptLayout {
     /// The excerpt's stack rows, its header row included.
     rows: usize,
-    /// The diff map version the excerpt's folds were cut from.
-    folded_version: Option<usize>,
-    /// The parse that colors the excerpt's rows.
-    ///
-    /// A parse lands with no fold of its own, so the colors need a version of
-    /// their own.
-    syntax_version: Option<u64>,
-    /// The LSP semantic tokens that color the excerpt's rows.
+    /// The buffer's row count, which an edit that adds or joins rows moves.
+    buffer_rows: u32,
+    /// The fold snapshot's version, which moves with each fold toggle.
+    folds: usize,
+    wrap_width: Option<u32>,
+    /// The version of the inlay set, since a hint rewraps its row with no
+    /// edit to the row.
+    inlay_set_version: usize,
+    pairs_modified_hunks: bool,
+    /// The LSP semantic tokens that color the excerpt's rows, which report no
+    /// rows they changed.
     lsp_token_version: Option<u64>,
+}
+
+/// One hunk as an excerpt's strip lines show it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct HunkMark {
+    /// The buffer rows the hunk marks, empty for a deletion, which keeps the
+    /// row it was deleted before.
+    rows: Range<u32>,
+    status: DiffHunkStatus,
+    /// A hash of the base text the hunk removed, which removed-line rows show.
+    removed: u64,
+}
+
+/// The rows the parses of one buffer changed between two syntax versions.
+struct ParsedRows {
+    /// The syntax version the rows count changes from.
+    since: Option<u64>,
+    /// The syntax version after the last parse the rows count.
+    through: Option<u64>,
+    rows: SweepRows,
 }
 
 /// One splice that brings a strip's held lines closer to its stack.
@@ -113,7 +173,30 @@ impl DiffChangesStrip {
             populations: false,
             syntax_on: false,
             pending: false,
+            parsed: HashMap::new(),
+            marks: HashMap::new(),
         }
+    }
+
+    /// Record the rows a parse of `buffer_id` changed, `None` when unknown,
+    /// and the buffer's syntax version once the parse installed.
+    ///
+    /// The rows of the parses since an excerpt's lines were summarized bound
+    /// the lines its next sync resends. The rows of a parse before any excerpt
+    /// of the buffer held lines stay unknown.
+    pub(crate) fn note_syntax_rows(
+        &mut self,
+        buffer_id: BufferId,
+        rows: Option<Range<u32>>,
+        version: Option<u64>,
+    ) {
+        let parsed = self.parsed.entry(buffer_id).or_insert(ParsedRows {
+            since: None,
+            through: None,
+            rows: SweepRows::All,
+        });
+        parsed.rows.union(rows);
+        parsed.through = version;
     }
 
     /// The id naming the strip's content store on the terminal.
@@ -132,7 +215,86 @@ impl DiffChangesStrip {
         let lines = self.held.iter().map(|held| held.lines).sum();
         self.held.clear();
         if lines > 0 {
-            self.held.push(HeldExcerpt { key: None, lines });
+            self.held.push(HeldExcerpt {
+                key: None,
+                lines,
+                hunks: Arc::from([]),
+            });
+        }
+    }
+
+    /// The splices that resend the touched rows of each excerpt whose layout
+    /// held while its text, its parse, or its hunks moved, with each such
+    /// excerpt's held key and hunks moved to its target's.
+    ///
+    /// A splice is the line of the terminal's store it starts at, the lines it
+    /// removes, and the stack rows whose lines replace them. It starts from the
+    /// held lines, since the full splices that follow it in the same sync start
+    /// from the lines it leaves. An excerpt whose touched rows are unknown, or
+    /// more than one slice, keeps its held key, so a full splice resends it.
+    ///
+    /// A fill in flight resends only the touched rows the terminal holds. The
+    /// fill summarizes the rows past them from the text as it stands when it
+    /// reaches them.
+    fn touched_splices(
+        &mut self,
+        target: &[ExcerptKey],
+        target_hunks: &[Arc<[HunkMark]>],
+        state: &DiffChangesState,
+        editors: &mut SlotMap<EditorId, EditorState>,
+    ) -> Vec<(usize, usize, Range<usize>)> {
+        let Self { held, parsed, .. } = self;
+        let mut splices = Vec::new();
+        let mut at = 0;
+        let targets = target.iter().zip(target_hunks).zip(&state.excerpts);
+        for (held, ((key, hunks), excerpt)) in held.iter_mut().zip(targets) {
+            let first = at + 1;
+            at += held.lines;
+            let Some(have) = held.key.filter(|have| {
+                have != key && have.buffer_id == key.buffer_id && have.layout == key.layout
+            }) else {
+                continue;
+            };
+            let counted = parsed.get(&key.buffer_id).filter(|counted| {
+                counted.since == have.syntax_version && counted.through == key.syntax_version
+            });
+            let Some(rows) = editors
+                .get_mut(excerpt.editor_id)
+                .and_then(|editor| touched_rows(&have, key, counted, (&held.hunks, hunks), editor))
+            else {
+                continue;
+            };
+
+            let held_rows = held.lines.saturating_sub(1) as u32;
+            let rows = rows.start.min(held_rows)..rows.end.min(held_rows);
+            if !rows.is_empty() {
+                let top = excerpt.top + 1;
+                let (start, end) = (rows.start as usize, rows.end as usize);
+                splices.push((first + start, end - start, top + start..top + end));
+            }
+            held.key = Some(*key);
+            held.hunks = hunks.clone();
+            parsed.insert(key.buffer_id, ParsedRows::from_key(key));
+        }
+        splices
+    }
+
+    /// Drop the parse rows and the hunk marks of the buffers that no excerpt
+    /// of `target` shows.
+    fn prune(&mut self, target: &[ExcerptKey]) {
+        let shown = |id: &BufferId| target.iter().any(|key| key.buffer_id == *id);
+        self.parsed.retain(|id, _| shown(id));
+        self.marks.retain(|id, _| shown(id));
+    }
+}
+
+impl ParsedRows {
+    /// No rows yet, counted from the parse that colors `key`'s lines.
+    fn from_key(key: &ExcerptKey) -> Self {
+        Self {
+            since: key.syntax_version,
+            through: key.syntax_version,
+            rows: SweepRows::NONE,
         }
     }
 }
@@ -205,12 +367,13 @@ pub(crate) fn summarize_rows(
 /// Bring the changes view strip of workspace `ws_id` in step with the stack it
 /// follows, and append its splices to `out`.
 ///
-/// An excerpt whose key moved, a new excerpt, and an excerpt that left the
-/// stack each splice that excerpt's lines alone. A protocol that changes
-/// whether lines carry population blocks, and a syntax switch, replace every
-/// line. Each call sends slices of at most [`SYNC_SLICE`] lines until its time
-/// budget runs out, so a long stack fills over idle frames. A stack with no
-/// rows empties the strip.
+/// An excerpt whose text, parse, or hunks moved under a held layout splices
+/// the lines of the rows those touched. An excerpt whose layout moved, a new
+/// excerpt, and an excerpt that left the stack each splice that excerpt's
+/// lines alone. A protocol that changes whether lines carry population blocks,
+/// and a syntax switch, replace every line. Each call sends slices of at most
+/// [`SYNC_SLICE`] lines until its time budget runs out, so a long stack fills
+/// over idle frames. A stack with no rows empties the strip.
 pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
     let populations = stoat.stoatty_protocol >= POPULATION_PALETTE_PROTOCOL;
     let weighted = stoat.stoatty_protocol >= WEIGHTED_RUN_PROTOCOL;
@@ -231,7 +394,10 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
 
     let started = executor.now();
     let followed = followed_view(ws);
-    let target = followed.map_or_else(Vec::new, |id| excerpt_keys(ws, id));
+    let (target, target_hunks) = followed.map_or_else(Default::default, |id| {
+        excerpt_keys(ws, id, &mut strip.marks)
+    });
+    strip.prune(&target);
     if (strip.populations, strip.syntax_on) != (populations, syntax_on) {
         strip.forget_held();
         strip.populations = populations;
@@ -244,14 +410,47 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         ..
     } = ws;
     let state = followed.and_then(|id| diff_changes_views.get(id));
+    let content_id = strip.content_id;
+    let send = |out: &mut Vec<u8>, start: usize, removed: usize, lines: Vec<LineRuns>| {
+        let splice = MinimapLinesCommand {
+            content_id,
+            start: start as u32,
+            removed: removed as u32,
+            lines: lines.into_iter().map(convert_minimap_runs).collect(),
+        };
+        match weighted {
+            true => command::encode_minimap_runs_into(out, &splice),
+            false => command::encode_minimap_lines_into(out, &splice),
+        }
+    };
+    if let Some(state) = state {
+        for (start, removed, rows) in strip.touched_splices(&target, &target_hunks, state, editors)
+        {
+            let lines = summarize_rows(
+                state,
+                editors,
+                rows,
+                minimap_class_table,
+                populations,
+                syntax_on,
+            );
+            send(out, start, removed, lines);
+        }
+    }
     loop {
         let Some(step) = next_step(&strip.held, &target) else {
             strip.pending = false;
             return;
         };
 
-        let top: usize = target[..step.target.start].iter().map(|key| key.rows).sum();
-        let run: usize = target[step.target.clone()].iter().map(|key| key.rows).sum();
+        let top: usize = target[..step.target.start]
+            .iter()
+            .map(|key| key.layout.rows)
+            .sum();
+        let run: usize = target[step.target.clone()]
+            .iter()
+            .map(|key| key.layout.rows)
+            .sum();
         let first = top + step.skip;
         let rows = first..first + (run - step.skip).min(SYNC_SLICE as usize);
         let lines = state.map_or_else(Vec::new, |state| {
@@ -264,17 +463,13 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
                 syntax_on,
             )
         });
-        let splice = MinimapLinesCommand {
-            content_id: strip.content_id,
-            start: first as u32,
-            removed: step.removed as u32,
-            lines: lines.into_iter().map(convert_minimap_runs).collect(),
-        };
-        match weighted {
-            true => command::encode_minimap_runs_into(out, &splice),
-            false => command::encode_minimap_lines_into(out, &splice),
+        send(out, first, step.removed, lines);
+        hold(&mut strip.held, &target, &target_hunks, &step, rows.len());
+        for key in &target[step.target.clone()] {
+            strip
+                .parsed
+                .insert(key.buffer_id, ParsedRows::from_key(key));
         }
-        hold(&mut strip.held, &target, &step, rows.len());
 
         // The clock is read after each slice, so a sync that arrives with the
         // budget spent still sends one.
@@ -331,9 +526,16 @@ fn followed_view(ws: &Workspace) -> Option<DiffChangesId> {
     })
 }
 
-/// The key of each excerpt of changes view `id` in `ws`, in stack order, after
-/// a fresh layout of its stack.
-fn excerpt_keys(ws: &mut Workspace, id: DiffChangesId) -> Vec<ExcerptKey> {
+/// The key of each excerpt of changes view `id` in `ws` and the hunks its
+/// lines show, in stack order, after a fresh layout of its stack.
+///
+/// `marks` keeps each buffer's [`hunk_marks`] by diff map version, so only a
+/// map that moved since the last sync gets read.
+fn excerpt_keys(
+    ws: &mut Workspace,
+    id: DiffChangesId,
+    marks: &mut HashMap<BufferId, (usize, Arc<[HunkMark]>)>,
+) -> (Vec<ExcerptKey>, Vec<Arc<[HunkMark]>>) {
     let Workspace {
         diff_changes_views,
         editors,
@@ -341,7 +543,7 @@ fn excerpt_keys(ws: &mut Workspace, id: DiffChangesId) -> Vec<ExcerptKey> {
         ..
     } = ws;
     let Some(state) = diff_changes_views.get_mut(id) else {
-        return Vec::new();
+        return Default::default();
     };
     let total = diff_changes::layout_stack(state, editors);
     let ends = state
@@ -350,18 +552,160 @@ fn excerpt_keys(ws: &mut Workspace, id: DiffChangesId) -> Vec<ExcerptKey> {
         .skip(1)
         .map(|excerpt| excerpt.top)
         .chain([total]);
-    state
-        .excerpts
-        .iter()
-        .zip(ends)
-        .map(|(excerpt, end)| ExcerptKey {
+
+    let mut keys = Vec::with_capacity(state.excerpts.len());
+    let mut hunks = Vec::with_capacity(state.excerpts.len());
+    for (excerpt, end) in state.excerpts.iter().zip(ends) {
+        let rows = end - excerpt.top;
+        let lsp_token_version = buffers.lsp_token_version(excerpt.buffer_id);
+        let snapshot = editors
+            .get_mut(excerpt.editor_id)
+            .map(|editor| editor.display_map.snapshot());
+        let map = snapshot.as_ref().and_then(DisplaySnapshot::diff_map);
+        let layout = match &snapshot {
+            Some(snapshot) => ExcerptLayout {
+                rows,
+                buffer_rows: snapshot.buffer_line_count(),
+                folds: snapshot.fold_snapshot().version(),
+                wrap_width: snapshot.wrap_width(),
+                inlay_set_version: snapshot.inlay_snapshot().inlay_set_version,
+                pairs_modified_hunks: snapshot.pairs_modified_hunks(),
+                lsp_token_version,
+            },
+            None => ExcerptLayout {
+                rows,
+                lsp_token_version,
+                ..ExcerptLayout::default()
+            },
+        };
+        keys.push(ExcerptKey {
             buffer_id: excerpt.buffer_id,
-            rows: end - excerpt.top,
-            folded_version: excerpt.folded_version,
+            layout,
+            buffer_version: snapshot
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.buffer_snapshot().version()),
             syntax_version: buffers.syntax_version(excerpt.buffer_id),
-            lsp_token_version: buffers.lsp_token_version(excerpt.buffer_id),
+            map_version: map.map(DiffMap::version),
+        });
+        hunks.push(map.map_or_else(
+            || Arc::from([]),
+            |map| cached_hunk_marks(marks, excerpt.buffer_id, map),
+        ));
+    }
+    (keys, hunks)
+}
+
+/// The [`hunk_marks`] of `map`, the diff map of buffer `buffer_id`, read
+/// afresh only when `marks` holds none for the map's version.
+fn cached_hunk_marks(
+    marks: &mut HashMap<BufferId, (usize, Arc<[HunkMark]>)>,
+    buffer_id: BufferId,
+    map: &DiffMap,
+) -> Arc<[HunkMark]> {
+    match marks.get(&buffer_id) {
+        Some((version, hunks)) if *version == map.version() => hunks.clone(),
+        _ => {
+            let hunks = hunk_marks(map);
+            marks.insert(buffer_id, (map.version(), hunks.clone()));
+            hunks
+        },
+    }
+}
+
+/// The hunks of `map` as an excerpt's strip lines show them, in buffer order.
+fn hunk_marks(map: &DiffMap) -> Arc<[HunkMark]> {
+    let base = map.base_text().map(|text| text.as_str());
+    map.hunks()
+        .map(|hunk| {
+            let mut hasher = DefaultHasher::new();
+            base.and_then(|text| text.get(hunk.base_byte_range.clone()))
+                .hash(&mut hasher);
+            HunkMark {
+                rows: hunk.buffer_line_range.clone(),
+                status: hunk.status,
+                removed: hasher.finish(),
+            }
         })
         .collect()
+}
+
+/// The display rows of an excerpt whose lines show `have` that differ under
+/// `key`, which kept `have`'s layout, or `None` when they are unknown or more
+/// than one slice.
+///
+/// The rows are those of the edits since `have`'s buffer version, those
+/// `counted` holds for the parses since `have`'s syntax version, and those of
+/// each hunk that one of `hunks`, the held hunks and the target's, holds and
+/// the other lacks. Buffer rows `a..b` take the display rows from the first
+/// one of row `a` through the last one of row `b - 1`. A hunk also takes the
+/// removed base lines beside it, which sit after the last display row of the
+/// row above it and before the first display row of the row below it.
+fn touched_rows(
+    have: &ExcerptKey,
+    key: &ExcerptKey,
+    counted: Option<&ParsedRows>,
+    (held_hunks, hunks): (&[HunkMark], &[HunkMark]),
+    editor: &mut EditorState,
+) -> Option<Range<u32>> {
+    let mut rows = SweepRows::NONE;
+    if have.syntax_version != key.syntax_version {
+        rows = counted?.rows.clone();
+    }
+    let snapshot = editor.display_map.snapshot();
+    let buffer = snapshot.buffer_snapshot();
+    let rope = buffer.rope();
+    if have.buffer_version != key.buffer_version {
+        for edit in buffer.edits_since(have.buffer_version).edits() {
+            let first = rope.offset_to_point(edit.new.start).row;
+            let last = rope.offset_to_point(edit.new.end).row;
+            rows.union(Some(first..last + 1));
+        }
+    }
+    let SweepRows::Rows(rows) = rows else {
+        return None;
+    };
+
+    let buffer_rows = rope.max_point().row + 1;
+    let first_of = |row: u32| match row < buffer_rows {
+        true => snapshot.buffer_to_display(Point::new(row, 0)).row,
+        false => snapshot.line_count(),
+    };
+    let past = |row: u32| {
+        snapshot
+            .buffer_to_display(Point::new(row, rope.line_len(row)))
+            .row
+            + 1
+    };
+    let mut touched: Option<Range<u32>> = None;
+    let mut cover = |span: Range<u32>| {
+        if !span.is_empty() {
+            touched = Some(match touched.take() {
+                Some(have) => have.start.min(span.start)..have.end.max(span.end),
+                None => span,
+            });
+        }
+    };
+
+    let rows = rows.start.min(buffer_rows)..rows.end.min(buffer_rows);
+    if !rows.is_empty() {
+        cover(first_of(rows.start)..past(rows.end - 1));
+    }
+    if have.map_version != key.map_version && held_hunks != hunks {
+        let held: HashSet<&HunkMark> = held_hunks.iter().collect();
+        let target: HashSet<&HunkMark> = hunks.iter().collect();
+        let gone = held_hunks.iter().filter(|mark| !target.contains(mark));
+        for mark in gone.chain(hunks.iter().filter(|mark| !held.contains(mark))) {
+            let start = mark.rows.start.min(buffer_rows);
+            let after_above = match start {
+                0 => 0,
+                row => past(row - 1),
+            };
+            cover(after_above..first_of(mark.rows.end.min(buffer_rows)));
+        }
+    }
+
+    let touched = touched.unwrap_or(0..0);
+    (touched.len() as u32 <= SYNC_SLICE).then_some(touched)
 }
 
 /// The next splice that brings `held` toward `target`, or `None` once the
@@ -377,7 +721,7 @@ fn next_step(held: &[HeldExcerpt], target: &[ExcerptKey]) -> Option<Step> {
     let synced = held
         .iter()
         .zip(target)
-        .take_while(|(held, key)| agree(held, key) && held.lines == key.rows)
+        .take_while(|(held, key)| agree(held, key) && held.lines == key.layout.rows)
         .count();
     let (held_rest, target_rest) = (&held[synced..], &target[synced..]);
     let step = |held_len: usize, target_len: usize, skip: usize, removed: usize| Step {
@@ -415,17 +759,27 @@ fn next_step(held: &[HeldExcerpt], target: &[ExcerptKey]) -> Option<Step> {
 }
 
 /// Record in `held` that the first `sent` lines past `step.skip` of `step`'s
-/// target run went out.
-fn hold(held: &mut Vec<HeldExcerpt>, target: &[ExcerptKey], step: &Step, sent: usize) {
+/// target run went out, with the hunks `target_hunks` gives them.
+fn hold(
+    held: &mut Vec<HeldExcerpt>,
+    target: &[ExcerptKey],
+    target_hunks: &[Arc<[HunkMark]>],
+    step: &Step,
+    sent: usize,
+) {
     let mut through = step.skip + sent;
-    let entries = target[step.target.clone()].iter().map(|&key| {
-        let lines = through.min(key.rows);
-        through -= lines;
-        HeldExcerpt {
-            key: Some(key),
-            lines,
-        }
-    });
+    let entries = target[step.target.clone()]
+        .iter()
+        .zip(&target_hunks[step.target.clone()])
+        .map(|(&key, hunks)| {
+            let lines = through.min(key.layout.rows);
+            through -= lines;
+            HeldExcerpt {
+                key: Some(key),
+                lines,
+                hunks: hunks.clone(),
+            }
+        });
     held.splice(step.held.clone(), entries);
 }
 
@@ -565,7 +919,7 @@ mod tests {
         test_fixture::drain_apc,
         test_harness::TestHarness,
         theme::Theme,
-        workspace::Workspace,
+        workspace::{diff::WorktreeBase, Workspace},
     };
     use std::{
         ops::Range,
@@ -866,11 +1220,7 @@ mod tests {
     fn strip_harness_of(
         files: &[(String, String, String)],
     ) -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
-        let mut h = TestHarness::with_size(100, 10);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        h.stoat.set_apc_tx(tx);
-        h.stoat.stoatty_protocol = 13;
-        h.stoat.set_diff_warm_auto(true);
+        let (mut h, rx) = strip_terminal();
         let (changed, clean): (Vec<(&str, &str, &str)>, Vec<_>) = files
             .iter()
             .map(|(path, base, buffer)| (path.as_str(), base.as_str(), buffer.as_str()))
@@ -881,10 +1231,27 @@ mod tests {
             h.fake_fs()
                 .insert_file(Path::new(&format!("/repo/{path}")), text.as_bytes());
         }
-        h.open_file(Path::new(&format!("/repo/{}", files[0].0)));
+        stack_over(&mut h, &files[0].0);
+        (h, rx)
+    }
+
+    /// A harness on a stoatty of protocol 13 with warm diff maps, in a window
+    /// short enough that the changes view scrolls.
+    fn strip_terminal() -> (TestHarness, UnboundedReceiver<Vec<u8>>) {
+        let mut h = TestHarness::with_size(100, 10);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.stoatty_protocol = 13;
+        h.stoat.set_diff_warm_auto(true);
+        (h, rx)
+    }
+
+    /// Open /repo/`first` and cover its editor with a changes view, with the
+    /// excerpts folded.
+    fn stack_over(h: &mut TestHarness, first: &str) {
+        h.open_file(Path::new(&format!("/repo/{first}")));
         h.cover_with_diff_changes(false);
         h.settle_diff_jobs();
-        (h, rx)
     }
 
     /// `count` changed one-line files under a focused changes view.
@@ -973,6 +1340,13 @@ mod tests {
     /// Replace `range` in the open buffer of `file` with `text`, then let the
     /// changes view refold over the diff map that follows.
     fn edit_and_refold(h: &mut TestHarness, file: &str, range: Range<usize>, text: &str) {
+        edit_buffer(h, file, range, text);
+        h.settle_diff_jobs();
+    }
+
+    /// Replace `range` in the open buffer of `file` with `text`, with its diff
+    /// map left as it was.
+    fn edit_buffer(h: &mut TestHarness, file: &str, range: Range<usize>, text: &str) {
         let ws = h.stoat.active_workspace();
         let buffer_id = ws
             .buffers
@@ -984,7 +1358,15 @@ mod tests {
             .write()
             .expect("buffer poisoned")
             .edit(range, text);
-        h.settle_diff_jobs();
+    }
+
+    /// `store` with each of `commands`' strip splices applied, as the terminal
+    /// applies them.
+    fn apply(store: &mut Vec<LineSummary>, commands: &[Command]) {
+        for (_, start, removed, lines) in strip_frames(commands).0 {
+            let start = start as usize;
+            store.splice(start..start + removed as usize, lines);
+        }
     }
 
     /// Pin the strip's time budget to zero, so each frame sends one slice.
@@ -1068,24 +1450,238 @@ mod tests {
         );
     }
 
-    /// A refold that keeps an excerpt's rows still resends them, since the
-    /// edit behind the refold changed their text.
+    /// An edit that keeps an excerpt's layout resends the line of the row it
+    /// touched alone, and the diff landing after it, whose hunks keep their
+    /// rows, sends nothing.
     #[test]
-    fn a_refold_that_keeps_the_rows_resends_them() {
+    fn an_edit_that_keeps_the_layout_resends_its_row_alone() {
         let (mut h, mut rx) = strip_harness(8);
         frame(&mut h, &mut rx);
+
+        edit_buffer(&mut h, "/repo/f000.txt", 1..2, "!!!!");
+        let edited = strip_frames(&frame(&mut h, &mut rx)).0;
+        h.settle_diff_jobs();
+        let landed = strip_frames(&frame(&mut h, &mut rx)).0;
+        assert_eq!(
+            (edited, landed),
+            (vec![(strip_id(&h), 1, 1, wire_lines(&mut h, 1..2))], vec![]),
+        );
+    }
+
+    /// A parse resends the rows it reported alone, whether it lands before its
+    /// edit's frame or after it, and after an earlier parse the strip took.
+    #[test]
+    fn a_parse_resends_the_rows_it_reported_alone() {
+        let base = "fn a() {}\nfn b() {}\nfn c() {}\n";
+        let text = base.replace("b()", "b2()");
+        let at = text.find("b2").expect("the hunk") + 1;
+        let (mut h, mut rx) = strip_harness_of(&[("a.rs".to_string(), base.to_string(), text)]);
+        let mut store = Vec::new();
+        apply(&mut store, &frame(&mut h, &mut rx));
+        let parse = |h: &mut TestHarness| {
+            for _ in 0..2 {
+                h.stoat.drive_background();
+                h.settle();
+            }
+        };
+        let mut spans = Vec::new();
+        let mut take = |h: &mut TestHarness, rx: &mut UnboundedReceiver<Vec<u8>>| {
+            let commands = frame(h, rx);
+            apply(&mut store, &commands);
+            spans.push(
+                strip_frames(&commands)
+                    .0
+                    .into_iter()
+                    .map(|(_, start, removed, lines)| (start, removed, lines.len()))
+                    .collect::<Vec<_>>(),
+            );
+        };
+
+        edit_buffer(&mut h, "/repo/a.rs", at..at + 1, "3");
+        parse(&mut h);
+        take(&mut h, &mut rx);
+        edit_buffer(&mut h, "/repo/a.rs", at..at + 1, "4");
+        take(&mut h, &mut rx);
+        parse(&mut h);
+        take(&mut h, &mut rx);
+
+        let (_, total) = layout(&mut h);
+        assert_eq!(
+            (spans, store),
+            (vec![vec![(2, 1, 1)]; 3], wire_lines(&mut h, 0..total)),
+        );
+    }
+
+    /// A frame that resends one excerpt's touched rows and grows the excerpt
+    /// above it leaves the terminal's lines equal to the stack's, with the
+    /// touched rows sent alone.
+    #[test]
+    fn touched_rows_below_a_grown_excerpt_land_on_their_lines() {
+        let files: Vec<(String, String, String)> = [
+            ("a.txt", "a\nb\n", "a\nB\n"),
+            ("b.txt", "c\nd\ne\n", "c\nD\ne\n"),
+        ]
+        .map(|(path, base, buffer)| (path.to_string(), base.to_string(), buffer.to_string()))
+        .into();
+        let (mut h, mut rx) = strip_harness_of(&files);
+        let mut store = Vec::new();
+        apply(&mut store, &frame(&mut h, &mut rx));
         let (tops, _) = layout(&mut h);
 
-        edit_and_refold(&mut h, "/repo/f000.txt", 1..2, "!!!!");
+        // "c\nD\ne\n" holds "D\ne" at bytes 2 to 5, the last two rows.
+        edit_buffer(&mut h, "/repo/b.txt", 2..5, "DD\nEE");
+        edit_buffer(&mut h, "/repo/a.txt", 0..0, "z\n");
+        let commands = frame(&mut h, &mut rx);
+        apply(&mut store, &commands);
+        let (grown, total) = layout(&mut h);
+        let spans: Vec<(u32, u32, usize)> = strip_frames(&commands)
+            .0
+            .into_iter()
+            .map(|(_, start, removed, lines)| (start, removed, lines.len()))
+            .collect();
+        assert_eq!(
+            (spans, store),
+            (
+                vec![(tops[1] as u32 + 2, 2, 2), (0, tops[1] as u32, grown[1])],
+                wire_lines(&mut h, 0..total),
+            ),
+        );
+    }
+
+    /// An edit while a long excerpt fills resends the touched rows the
+    /// terminal holds, and the fill sends the rows past them as they stand.
+    #[test]
+    fn an_edit_during_a_fill_resends_only_the_rows_held() {
+        let lines = SYNC_SLICE as usize + 40;
+        let base: String = (0..lines).map(|n| format!("{n}\n")).collect();
+        let buffer: String = (0..lines).map(|n| format!("{n}!\n")).collect();
+        let (mut h, mut rx) = strip_harness_of(&[("long.txt".to_string(), base, buffer.clone())]);
+        one_slice_per_frame(&mut h);
+        let mut store = Vec::new();
+        apply(&mut store, &frame(&mut h, &mut rx));
+
+        let past_held = buffer.find("\n530!").expect("row 530") + 1;
+        edit_buffer(&mut h, "/repo/long.txt", past_held..past_held, "x");
+        let commands = frame(&mut h, &mut rx);
+        apply(&mut store, &commands);
+        // "0!\n1!\n2!\n3!\n4!\n5!" puts the 5 of row 5 at byte 15.
+        edit_buffer(&mut h, "/repo/long.txt", 15..15, "y");
+        let held = frame(&mut h, &mut rx);
+        apply(&mut store, &held);
+
+        let (_, total) = layout(&mut h);
+        let spans = |commands: &[Command]| {
+            strip_frames(commands)
+                .0
+                .into_iter()
+                .map(|(_, start, removed, lines)| (start, removed, lines.len() as u32))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            (spans(&commands), spans(&held), store),
+            (
+                vec![(SYNC_SLICE, 0, total as u32 - SYNC_SLICE)],
+                vec![(6, 1, 1)],
+                wire_lines(&mut h, 0..total),
+            ),
+        );
+    }
+
+    /// A base switch that moves no text resends the rows of the hunks it
+    /// changed alone. Under the index only C is unstaged, and under HEAD one
+    /// hunk marks B and C, so the rows of B and C go out.
+    #[test]
+    fn a_base_switch_resends_the_rows_of_the_hunks_it_changed() {
+        let (mut h, mut rx) = strip_terminal();
+        h.stage_index_scenario("/repo", &[("e.txt", "a\nb\nc\n", "a\nB\nc\n", "a\nB\nC\n")]);
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        stack_over(&mut h, "e.txt");
+        frame(&mut h, &mut rx);
+
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.settle_diff_jobs();
         let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
-        let (moved, _) = layout(&mut h);
-        let expected = vec![(
-            strip_id(&h),
-            0,
-            tops[1] as u32,
-            wire_lines(&mut h, 0..tops[1]),
-        )];
-        assert_eq!((moved, splices), (tops, expected));
+        assert_eq!(splices, [(strip_id(&h), 2, 2, wire_lines(&mut h, 2..4))]);
+    }
+
+    /// A hunk that lands inside the rows an excerpt already shows resends its
+    /// row alone when it lands with its edit, and so does its revert, on its
+    /// edit's frame and on the landing that takes the mark away.
+    #[test]
+    fn a_hunk_inside_the_shown_rows_resends_its_row_alone() {
+        let base: String = (0..12).map(|n| format!("{n}\n")).collect();
+        let buffer = base
+            .replace("\n3\n", "\nTHREE\n")
+            .replace("\n8\n", "\nEIGHT\n");
+        let at = buffer.find("\n5\n").expect("row 5") + 1;
+        let (mut h, mut rx) = strip_harness_of(&[("a.txt".to_string(), base, buffer)]);
+        let mut store = Vec::new();
+        apply(&mut store, &frame(&mut h, &mut rx));
+        let mut spans = Vec::new();
+        let mut take = |h: &mut TestHarness, rx: &mut UnboundedReceiver<Vec<u8>>| {
+            let commands = frame(h, rx);
+            apply(&mut store, &commands);
+            spans.push(
+                strip_frames(&commands)
+                    .0
+                    .into_iter()
+                    .map(|(_, start, removed, lines)| (start, removed, lines.len()))
+                    .collect::<Vec<_>>(),
+            );
+        };
+
+        // Row 5 lies between the hunks on rows 3 and 8, whose runs already
+        // show rows 0 to 11, so neither the hunk nor its revert toggles a fold.
+        edit_buffer(&mut h, "/repo/a.txt", at..at + 1, "FIVE");
+        h.settle_diff_jobs();
+        take(&mut h, &mut rx);
+        edit_buffer(&mut h, "/repo/a.txt", at..at + 4, "5");
+        take(&mut h, &mut rx);
+        h.settle_diff_jobs();
+        take(&mut h, &mut rx);
+
+        let (_, total) = layout(&mut h);
+        assert_eq!(
+            (spans, store),
+            (vec![vec![(6, 1, 1)]; 3], wire_lines(&mut h, 0..total)),
+        );
+    }
+
+    /// A base switch that changes the text of a removed base line resends
+    /// that line's row alone. The index removed X before c, and HEAD removed
+    /// b there.
+    #[test]
+    fn a_base_switch_that_changes_a_removed_line_resends_its_row() {
+        let (mut h, mut rx) = strip_terminal();
+        h.stage_index_scenario(
+            "/repo",
+            &[("d.txt", "a\nb\nc\nd\n", "a\nX\nc\nd\n", "a\nc\nd\n")],
+        );
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        stack_over(&mut h, "d.txt");
+        let mut store = Vec::new();
+        apply(&mut store, &frame(&mut h, &mut rx));
+
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Head);
+        h.settle_diff_jobs();
+        let commands = frame(&mut h, &mut rx);
+        apply(&mut store, &commands);
+        let (_, total) = layout(&mut h);
+        assert_eq!(
+            (strip_frames(&commands).0, store),
+            (
+                vec![(strip_id(&h), 2, 1, wire_lines(&mut h, 2..3))],
+                wire_lines(&mut h, 0..total),
+            ),
+        );
     }
 
     /// A stack past one slice fills over several frames, and the frames
