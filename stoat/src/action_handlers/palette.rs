@@ -36,8 +36,9 @@ pub(super) enum ArgCandidates {
 /// the workspace, and otherwise streams workspace paths via the same
 /// background walk the file finder uses. `Directories` derives the workspace's
 /// directories from that same list or walk. `Buffers` returns the
-/// currently-open buffer paths. `Values` returns the argument's accepted
-/// spellings. `None` yields no picker.
+/// currently-open buffer paths. `Branches` returns the local branch names with
+/// HEAD's first, and none outside a repository. `Values` returns the argument's
+/// accepted spellings. `None` yields no picker.
 ///
 /// The non-path sources still ride [`ArgCandidates::Paths`]: the picker filters
 /// and displays a relative path by its text, so a bare name passes through it
@@ -83,6 +84,10 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
                 .collect();
             Some(ArgCandidates::Paths(slugs))
         },
+        ValueSource::Branches => Some(ArgCandidates::Paths(branch_candidates(
+            stoat,
+            &stoat.active_workspace().git_root,
+        ))),
         ValueSource::Values(values) => Some(ArgCandidates::Paths(
             values.iter().map(PathBuf::from).collect(),
         )),
@@ -100,6 +105,28 @@ fn cached_workspace_paths(stoat: &Stoat, git_root: &Path) -> Option<Arc<Vec<Path
         .as_ref()
         .filter(|cache| cache.root == git_root && cache.epoch == stoat.finder_path_epoch)
         .map(|cache| Arc::clone(&cache.paths))
+}
+
+/// The local branch names of the repository holding `git_root`, sorted, with
+/// the branch HEAD is attached to moved to the front. Empty outside a
+/// repository.
+fn branch_candidates(stoat: &Stoat, git_root: &Path) -> Vec<PathBuf> {
+    let Some(repo) = stoat.git_host.discover(git_root) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = repo
+        .local_branches()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    names.sort_unstable();
+    if let Some(at) = repo
+        .head_branch()
+        .and_then(|head| names.iter().position(|name| *name == head))
+    {
+        names[..=at].rotate_right(1);
+    }
+    names.into_iter().map(PathBuf::from).collect()
 }
 
 /// Open the command palette with `seed` already typed.

@@ -39,6 +39,10 @@ pub enum ValueSource {
     Themes,
     /// Slugs of the walkthroughs stored in the workspace, for the player.
     Walkthroughs,
+    /// Local branch names, HEAD's branch first. A typed revision that names no
+    /// listed branch, such as a sha or `HEAD~2`, passes through as typed, so
+    /// the list suggests values rather than restricting them.
+    Branches,
     /// A closed set of accepted values, listed verbatim. Arguments that read
     /// as an enum (`on`, `off`, `follow`) carry their spellings here so the
     /// picker can offer them instead of leaving the user to recall them.

@@ -125,7 +125,7 @@ define_action!(
 const GIT_LS_PARAMS: &[ParamDef] = &[ParamDef {
     name: "rev",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Branches,
     required: false,
     description: "Branch, tag, sha, or revspec to list. Defaults to HEAD.",
 }];

@@ -141,6 +141,7 @@ impl ArgPicker {
     ) -> Self {
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = all_paths;
+        core.picklist.keeps_base_order = source == ValueSource::Branches;
         Self {
             source,
             core,
@@ -357,9 +358,9 @@ impl ArgPicker {
 
     /// Sync the preview pane per this picker's source. A buffer source previews
     /// the live in-memory buffer, falling back to the disk file when the path
-    /// has none. A directory source shows nothing, as does a fixed value set,
-    /// whose rows name accepted values rather than readable files. Every other
-    /// source reads the file from disk.
+    /// has none. A directory source shows nothing, as do a fixed value set and
+    /// a branch list, whose rows name values rather than readable files. Every
+    /// other source reads the file from disk.
     fn sync_preview(
         &mut self,
         ws: &mut Workspace,
@@ -369,9 +370,10 @@ impl ArgPicker {
         let policy = match self.source {
             ValueSource::Buffers => PreviewPolicy::LiveBufferThenFile,
             ValueSource::Directories => PreviewPolicy::Directory,
-            ValueSource::Themes | ValueSource::Walkthroughs | ValueSource::Values(_) => {
-                PreviewPolicy::NoPreview
-            },
+            ValueSource::Themes
+            | ValueSource::Walkthroughs
+            | ValueSource::Branches
+            | ValueSource::Values(_) => PreviewPolicy::NoPreview,
             _ => PreviewPolicy::File,
         };
         self.active_core()
@@ -671,10 +673,10 @@ impl CommandPalette {
 
     /// The value source of the current command's first argument when it drives
     /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
-    /// [`ValueSource::Buffers`], [`ValueSource::Themes`], or
-    /// [`ValueSource::Values`], e.g. `:o `, `:cd `, `:b `, `:SetTheme `, or
-    /// `:auto-reload `), or `None` otherwise. Gates rendering the picker and
-    /// routing selection keys to it.
+    /// [`ValueSource::Buffers`], [`ValueSource::Themes`],
+    /// [`ValueSource::Branches`], or [`ValueSource::Values`], e.g. `:o `,
+    /// `:cd `, `:b `, `:SetTheme `, `:git log `, or `:auto-reload `), or `None`
+    /// otherwise. Gates rendering the picker and routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
         let param = self.command?.def.params().first()?;
         match param.value_source {
@@ -1153,6 +1155,7 @@ pub(crate) fn refilter(
 mod tests {
     use super::*;
     use crate::{
+        badge::BadgeSource,
         buffer_registry::AutoReloadMode,
         host::FakeFsOp,
         input_history::InputHistory,
@@ -1183,17 +1186,43 @@ mod tests {
         h
     }
 
+    /// A harness rooted in `/repo`, with HEAD on `main` at the second of two
+    /// commits and `feature` at the first.
+    fn branch_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n")]),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "b2c3d4e5")
+            .branch("feature", "a1b2c3d4")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h
+    }
+
     /// The arg picker's filtered rows as the text they display, sorted so an
     /// assertion pins the row set without pinning the fuzzy ranker's order.
     fn arg_rows(h: &TestHarness) -> Vec<String> {
+        let mut rows = listed_arg_rows(h);
+        rows.sort();
+        rows
+    }
+
+    /// The arg picker's filtered rows as the text they display, in the order
+    /// they display.
+    fn listed_arg_rows(h: &TestHarness) -> Vec<String> {
         let picklist = &arg_picker(h).active_core_ref().picklist;
-        let mut rows: Vec<String> = picklist
+        picklist
             .filtered
             .iter()
             .map(|i| picklist.base[*i].display().to_string())
-            .collect();
-        rows.sort();
-        rows
+            .collect()
     }
 
     fn arg_picker(h: &TestHarness) -> &ArgPicker {
@@ -2478,16 +2507,16 @@ mod tests {
         );
     }
 
-    /// Tab in the argument of a two-token command keeps both tokens of its
-    /// head.
+    /// Tab in the argument of a two-token command completes the highlighted
+    /// branch and keeps both tokens of its head.
     #[test]
     fn tab_in_a_two_token_command_keeps_its_head() {
-        let mut h = Stoat::test();
+        let mut h = branch_harness();
         h.type_text(":git ls fe");
         let _ = h.snapshot();
         h.type_keys("tab");
         let _ = h.snapshot();
-        assert_eq!(palette_text(&h), "git ls fe");
+        assert_eq!(palette_text(&h), "git ls feature");
     }
 
     /// An argument list is a whole workspace walk, so its ranking is handed
@@ -3886,6 +3915,84 @@ mod tests {
         h.type_text(":auto-reload ff");
         h.snapshot();
         assert_eq!(arg_rows(&h), ["off"]);
+    }
+
+    /// A ref argument lists the local branches with HEAD's first, and previews
+    /// nothing, since a branch row names no file. Outside a repository it lists
+    /// nothing, and the typed tail still dispatches.
+    #[test]
+    fn a_ref_argument_lists_the_branches_with_heads_first() {
+        let shown = |mut h: TestHarness, text: &str| {
+            h.type_text(text);
+            h.snapshot();
+            h.settle();
+            (listed_arg_rows(&h), arg_preview_text(&h))
+        };
+        let branches = vec!["main".to_string(), "feature".to_string()];
+        assert_eq!(
+            [
+                shown(branch_harness(), ":git log "),
+                shown(branch_harness(), ":git review "),
+                shown(Stoat::test(), ":git log "),
+            ],
+            [
+                (branches.clone(), String::new()),
+                (branches, String::new()),
+                (Vec::new(), String::new()),
+            ],
+        );
+    }
+
+    /// A typed prefix narrows the branches, and Enter takes the highlighted
+    /// branch rather than the prefix.
+    #[test]
+    fn enter_on_a_narrowed_ref_takes_the_highlighted_branch() {
+        let mut h = branch_harness();
+        h.type_text(":git log feat");
+        h.snapshot();
+        let narrowed = listed_arg_rows(&h);
+        h.type_keys("enter");
+        h.settle();
+        let label = h
+            .stoat
+            .commit_picker
+            .as_ref()
+            .and_then(|picker| picker.scope_label.clone());
+        assert_eq!(
+            (narrowed, label.as_deref()),
+            (vec!["feature".to_string()], Some("git log feature")),
+        );
+    }
+
+    /// A revision that matches no branch dispatches as typed. A sha opens its
+    /// history, and a name that resolves to nothing badges and opens nothing.
+    #[test]
+    fn a_ref_matching_no_branch_dispatches_as_typed() {
+        let submit = |tail: &str| {
+            let mut h = branch_harness();
+            h.type_text(&format!(":git ls {tail}"));
+            h.type_keys("enter");
+            h.settle();
+            let label = h
+                .stoat
+                .commit_picker
+                .as_ref()
+                .and_then(|picker| picker.scope_label.clone());
+            let ws = h.stoat.active_workspace();
+            let badge = ws
+                .badges
+                .find_by_source(BadgeSource::Review)
+                .and_then(|id| ws.badges.get(id))
+                .map(|badge| badge.label.clone());
+            (label, badge)
+        };
+        assert_eq!(
+            [submit("a1b2c3d4"), submit("junk")],
+            [
+                (Some("git log a1b2c3d4".to_string()), None),
+                (None, Some("unknown revision".to_string())),
+            ],
+        );
     }
 
     #[test]

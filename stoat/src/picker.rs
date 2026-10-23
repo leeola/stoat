@@ -251,6 +251,13 @@ pub(crate) struct PickList {
     /// single `git_root`. Set for the cross-workspace scope. `None` leaves every
     /// existing finder git-root-relative.
     pub(crate) display_roots: Option<Vec<PathBuf>>,
+    /// Whether a query with no pattern lists [`Self::base`] in its own order
+    /// rather than alphabetically.
+    ///
+    /// For a candidate set whose order carries meaning, such as branches with
+    /// HEAD's first, where Enter on an empty query takes the first row. A
+    /// pattern still ranks by score.
+    pub(crate) keeps_base_order: bool,
     /// Rendered display string per base path, or `None` before the first
     /// [`Self::refilter`].
     ///
@@ -590,6 +597,7 @@ impl Default for PickList {
             viewport_rows: None,
             filter_generation: next_generation(),
             display_roots: None,
+            keeps_base_order: false,
             display: None,
             last_filter: None,
             last_pattern: None,
@@ -622,7 +630,7 @@ impl PickList {
     /// Re-run the matcher over `base` for `query` via
     /// [`crate::fuzzy::match_and_rank`], ordering matches by score descending,
     /// ties alphabetical. Empty or whitespace-only input lists every candidate
-    /// alphabetically.
+    /// alphabetically, or in base order under [`Self::keeps_base_order`].
     ///
     /// A leading `./` token anchors to the workspace root. Candidates are first
     /// restricted to those whose display path starts with the token's prefix,
@@ -674,20 +682,26 @@ impl PickList {
             self.order_display();
             let cache = self.display.as_ref().expect("ensure_display builds one");
 
-            // Byte-lexicographic order keeps every row that shares a prefix
-            // contiguous, so the anchor's rows are one range of the order.
-            let (start, end) = match anchor {
-                None => (0, cache.sorted.len()),
-                Some(prefix) => {
-                    let start = cache
-                        .sorted
-                        .partition_point(|&idx| &*cache.rows[idx] < prefix);
-                    let len = cache.sorted[start..]
-                        .partition_point(|&idx| cache.rows[idx].starts_with(prefix));
-                    (start, start + len)
-                },
+            let listed: Vec<usize> = if self.keeps_base_order {
+                (0..cache.rows.len())
+                    .filter(|&idx| anchor.is_none_or(|prefix| cache.rows[idx].starts_with(prefix)))
+                    .collect()
+            } else {
+                // Byte-lexicographic order keeps every row that shares a prefix
+                // contiguous, so the anchor's rows are one range of the order.
+                let (start, end) = match anchor {
+                    None => (0, cache.sorted.len()),
+                    Some(prefix) => {
+                        let start = cache
+                            .sorted
+                            .partition_point(|&idx| &*cache.rows[idx] < prefix);
+                        let len = cache.sorted[start..]
+                            .partition_point(|&idx| cache.rows[idx].starts_with(prefix));
+                        (start, start + len)
+                    },
+                };
+                cache.sorted[start..end].to_vec()
             };
-            let listed = cache.sorted[start..end].to_vec();
 
             self.match_indices = vec![(0..anchor_len).collect(); listed.len().min(INDEXED_ROWS)];
             self.indexed = self.match_indices.len();
@@ -2898,6 +2912,32 @@ mod tests {
         let git_root = p("/r");
         let base = vec![p("/r/b.rs"), p("/r/a.rs")];
         assert_eq!(names("   ", base, &git_root), vec!["a.rs", "b.rs"]);
+    }
+
+    /// A list that keeps its base order lists a query with no pattern in that
+    /// order, anchored or not, and still ranks a pattern by score.
+    #[test]
+    fn a_kept_base_order_lists_unsorted_and_ranks_a_pattern() {
+        let listed = |query: &str| {
+            let mut list = PickList {
+                base: vec![p("zeta"), p("alpha"), p("zed")],
+                keeps_base_order: true,
+                ..PickList::default()
+            };
+            list.refilter(query, &p("/r"));
+            list.filtered
+                .iter()
+                .map(|i| list.base[*i].display().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            [listed(""), listed("./z"), listed("a")],
+            [
+                vec!["zeta", "alpha", "zed"],
+                vec!["zeta", "zed"],
+                vec!["alpha", "zeta"],
+            ],
+        );
     }
 
     #[test]

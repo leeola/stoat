@@ -379,7 +379,7 @@ define_action!(
 const GIT_REVIEW_PARAMS: &[ParamDef] = &[ParamDef {
     name: "reference",
     kind: ParamKind::String,
-    value_source: ValueSource::None,
+    value_source: ValueSource::Branches,
     required: true,
     description: "Branch, tag, sha, or revspec whose history to review from.",
 }];
