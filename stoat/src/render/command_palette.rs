@@ -12,7 +12,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders},
 };
-use std::path::Path;
+use std::{borrow::Cow, path::Path};
 use stoat_action::registry::RegistryEntry;
 
 const LIST_ROWS: u16 = 10;
@@ -178,6 +178,7 @@ pub(crate) fn render_command_palette(
         &palette.match_indices,
         palette.selected,
         scope,
+        palette.group,
         content_rows,
         zoom,
         ws,
@@ -412,6 +413,7 @@ fn render_palette_filter(
     match_indices: &[Vec<u32>],
     selected: usize,
     scope: PaletteScope,
+    group: Option<&str>,
     content_rows: u16,
     zoom: i8,
     ws: &mut Workspace,
@@ -421,13 +423,15 @@ fn render_palette_filter(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let title = match scope {
-        PaletteScope::Active => " command palette (applicable) ",
-        PaletteScope::All => " command palette (all) ",
+    let title: Cow<'static, str> = match (group, scope) {
+        (Some(group), _) => Cow::Owned(format!(" {group} ")),
+        (None, PaletteScope::Active) => Cow::Borrowed(" command palette (applicable) "),
+        (None, PaletteScope::All) => Cow::Borrowed(" command palette (all) "),
     };
+    let name_offset = group.map_or(0, |group| group.len() + 1);
     let Some(layout) = render_palette_prelude(
         input,
-        title,
+        &title,
         content_rows,
         ws,
         theme,
@@ -445,7 +449,16 @@ fn render_palette_filter(
 
     let list = layout.list;
     let scroll = selected.saturating_sub(list.height.saturating_sub(1) as usize);
-    paint_palette_rows(filtered, match_indices, selected, list, scroll, theme, buf);
+    paint_palette_rows(
+        filtered,
+        match_indices,
+        selected,
+        name_offset,
+        list,
+        scroll,
+        theme,
+        buf,
+    );
 
     let doc = layout.doc;
     if doc.height > 0 {
@@ -476,10 +489,16 @@ fn render_palette_filter(
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
 /// identical rows.
+///
+/// Each name leaves out its first `name_offset` bytes, the group token and
+/// space a grouped list's title already shows. A match position indexes the
+/// whole name, so one inside the left-out part paints nothing.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_palette_rows(
     filtered: &[&'static RegistryEntry],
     match_indices: &[Vec<u32>],
     selected: usize,
+    name_offset: usize,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
@@ -499,7 +518,7 @@ pub(crate) fn paint_palette_rows(
         .iter()
         .skip(start_row)
         .take(rows)
-        .map(|e| e.command_name.len())
+        .map(|e| shown_name(e, name_offset).len())
         .max()
         .unwrap_or(0);
 
@@ -520,7 +539,7 @@ pub(crate) fn paint_palette_rows(
             buf[(col, row)].set_char(' ').set_style(style);
         }
 
-        let name = entry.command_name.as_str();
+        let name = shown_name(entry, name_offset);
         let name_x = area.x + 1;
         write_str_clipped(buf, name_x, row, name, style, end_x);
         let indices = match_indices.get(abs).unwrap_or(&empty_indices);
@@ -529,7 +548,10 @@ pub(crate) fn paint_palette_rows(
             if col >= end_x {
                 break;
             }
-            if indices.binary_search(&(name_col as u32)).is_ok() {
+            if indices
+                .binary_search(&((name_offset + name_col) as u32))
+                .is_ok()
+            {
                 buf[(col, row)].set_style(match_style);
             }
         }
@@ -546,6 +568,12 @@ pub(crate) fn paint_palette_rows(
             );
         }
     }
+}
+
+/// The part of `entry`'s command name a row shows, past its first `offset`
+/// bytes.
+fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
+    entry.command_name.get(offset..).unwrap_or("")
 }
 
 #[cfg(test)]
@@ -572,6 +600,7 @@ mod tests {
         paint_palette_rows(
             &[entry],
             &[Vec::new()],
+            0,
             0,
             list,
             0,

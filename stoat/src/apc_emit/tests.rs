@@ -3289,6 +3289,34 @@ fn palette_filter_to_arg_flip_repools() {
     );
 }
 
+/// A grouped palette's pooled list prints each command by its subcommand
+/// token, as the live list does.
+#[test]
+fn a_grouped_palette_pool_prints_subcommand_tokens() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    h.type_text(":git ");
+    h.snapshot();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    emit_smooth_scroll(&mut h.stoat);
+
+    let raw: Vec<u8> = std::iter::from_fn(|| rx.try_recv().ok())
+        .flatten()
+        .collect();
+    let text = String::from_utf8_lossy(&raw);
+    let short = stoat_action::registry::lookup_alias("git log")
+        .expect("git log is a command")
+        .def
+        .short_desc();
+    assert_eq!(
+        (text.contains(short), text.contains("git log")),
+        (true, false)
+    );
+}
+
 #[test]
 fn completion_popup_is_pooled_and_retired() {
     use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};

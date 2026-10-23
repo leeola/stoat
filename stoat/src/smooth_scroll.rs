@@ -633,12 +633,16 @@ pub(crate) fn render_symbol_finder_page(
 /// row `page * region_height` into a fresh region-sized [`Buffer`], returning
 /// the page's self-contained VT byte stream.
 ///
-/// Mirrors [`render_finder_page`] but paints palette result rows; the page
-/// index alone selects the rows, and the list is read-only here.
+/// Mirrors [`render_finder_page`] but paints palette result rows. The page
+/// index alone selects the rows, and the list is read-only here. Each name
+/// leaves out its first `name_offset` bytes, as the live list does under a
+/// group.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_palette_page(
     filtered: &[&'static RegistryEntry],
     match_indices: &[Vec<u32>],
     selected: usize,
+    name_offset: usize,
     page: u64,
     theme: &crate::theme::Theme,
     region_width: u16,
@@ -654,6 +658,7 @@ pub(crate) fn render_palette_page(
                 filtered,
                 match_indices,
                 selected,
+                name_offset,
                 area,
                 start_row,
                 theme,
@@ -2026,6 +2031,39 @@ mod tests {
             unique.len(),
             ids.len(),
             "non-pane pool ids must be pairwise distinct: {ids:?}"
+        );
+    }
+
+    /// A pooled palette page leaves the group token out of each name, as the
+    /// live list does under a group.
+    #[test]
+    fn a_palette_page_leaves_the_group_token_out() {
+        use super::render_palette_page;
+        use crate::theme::Theme;
+        use stoat_action::registry;
+
+        let entry = registry::lookup_alias("git log").expect("git log is a command");
+        let page = |name_offset| {
+            let bytes = render_palette_page(
+                &[entry],
+                &[Vec::new()],
+                0,
+                name_offset,
+                0,
+                &Theme::empty(),
+                60,
+                1,
+            );
+            String::from_utf8_lossy(&bytes).into_owned()
+        };
+        let (whole, grouped) = (page(0), page("git ".len()));
+        assert_eq!(
+            (
+                whole.contains("git log"),
+                grouped.contains("git log"),
+                grouped.contains(entry.def.short_desc()),
+            ),
+            (true, false, true),
         );
     }
 }

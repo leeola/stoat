@@ -37,6 +37,10 @@ pub struct CommandPalette {
     /// the palette is collecting that command's trailing argument inline. The
     /// argument text is the input tail after the command token.
     pub(crate) command: Option<&'static registry::RegistryEntry>,
+    /// The command group the input's first token names while no command
+    /// parses, such as `git` for `:git `. The list then holds only that
+    /// group's commands, and the text after the token narrows them.
+    pub(crate) group: Option<&'static str>,
     /// Which subset of actions the palette currently lists. Captured at
     /// open time and toggled by `PaletteScopeToggle` (Shift-Tab).
     pub(crate) scope: PaletteScope,
@@ -569,6 +573,7 @@ impl CommandPalette {
         let mut selected = 0;
         refilter(
             "",
+            None,
             scope,
             &availability,
             &mut filtered,
@@ -584,6 +589,7 @@ impl CommandPalette {
             match_indices,
             selected,
             command: None,
+            group: None,
             scope,
             availability,
             viewport_rows: None,
@@ -609,6 +615,13 @@ impl CommandPalette {
 
     pub(crate) fn scope(&self) -> PaletteScope {
         self.scope
+    }
+
+    /// The bytes at the start of each listed command name that the group's
+    /// title already shows, the group token and its space, which the rows
+    /// leave out. Zero outside a group.
+    pub(crate) fn name_offset(&self) -> usize {
+        self.group.map_or(0, |group| group.len() + 1)
     }
 
     /// Flip the palette's [`PaletteScope`] and re-run the current-input
@@ -757,6 +770,7 @@ impl CommandPalette {
         self.generation = picker::next_generation();
 
         self.command = parse_command(&text, &self.availability).map(|(entry, _)| entry);
+        self.group = input_group(&text, &self.availability);
         if self.command.is_some() {
             self.filtered.clear();
             self.match_indices.clear();
@@ -764,6 +778,7 @@ impl CommandPalette {
         } else {
             refilter(
                 &text,
+                self.group,
                 self.scope,
                 &self.availability,
                 &mut self.filtered,
@@ -959,6 +974,16 @@ pub(crate) fn split_head<'a>(
     resolve(first).map(|entry| (entry, first, rest))
 }
 
+/// The command group the palette lists for `text`, which the text's first token
+/// names while the text parses as no command.
+fn input_group(text: &str, ctx: &Availability) -> Option<&'static str> {
+    if parse_command(text, ctx).is_some() {
+        return None;
+    }
+    let (token, _) = text.split_once(' ')?;
+    registry::group_of(token)
+}
+
 /// Whether submitting `entry`'s bare name runs it, rather than opening argument
 /// entry.
 ///
@@ -1015,9 +1040,16 @@ fn rows_of(count: usize) -> u16 {
     u16::try_from(count).unwrap_or(u16::MAX)
 }
 
+/// Rank the commands `scope` offers for palette input `input` into `filtered`
+/// and `match_indices`, and clamp `selected` to the result.
+///
+/// Under `group` only the group's commands appear, and the text after the
+/// group token narrows them. Each match position indexes the whole command
+/// name either way.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     input: &str,
+    group: Option<&str>,
     scope: PaletteScope,
     availability: &Availability,
     filtered: &mut Vec<&'static registry::RegistryEntry>,
@@ -1026,16 +1058,33 @@ pub(crate) fn refilter(
 ) {
     let visible: Vec<&'static registry::RegistryEntry> = registry::all()
         .filter(|entry| offers(entry, scope, availability))
+        .filter(|entry| {
+            group.is_none_or(|group| {
+                entry
+                    .command_name
+                    .split_once(' ')
+                    .is_some_and(|(head, _)| head == group)
+            })
+        })
         .collect();
 
     filtered.clear();
     match_indices.clear();
 
+    // A group's members match by their subcommand token, since the letters of
+    // the group token, which every member shares, narrow nothing.
+    let (query, offset) = match group {
+        Some(group) => (
+            input.split_once(' ').map_or("", |(_, rest)| rest),
+            group.len() + 1,
+        ),
+        None => (input, 0),
+    };
     let items = visible
         .iter()
         .copied()
-        .map(|entry| (entry, entry.command_name.as_str()));
-    let Some(mut matches) = fuzzy::match_and_rank(input, items) else {
+        .map(|entry| (entry, &entry.command_name[offset..]));
+    let Some(mut matches) = fuzzy::match_and_rank(query, items) else {
         let mut all = visible;
         all.sort_by_key(|e| (e.def.priority().ord(), e.command_name.as_str()));
         for entry in all {
@@ -1058,7 +1107,12 @@ pub(crate) fn refilter(
     });
     for m in matches {
         filtered.push(m.item);
-        match_indices.push(m.matched_indices);
+        match_indices.push(
+            m.matched_indices
+                .into_iter()
+                .map(|index| index + offset as u32)
+                .collect(),
+        );
     }
 
     // Pin an exact name or alias match to the top so the displayed list agrees
@@ -1171,6 +1225,7 @@ mod tests {
         let mut selected = 0;
         refilter(
             text,
+            input_group(text, availability),
             scope,
             availability,
             &mut filtered,
@@ -1322,6 +1377,111 @@ mod tests {
         );
     }
 
+    /// A group token and a space list every command of the group, by priority
+    /// and then name, and nothing outside it.
+    #[test]
+    fn a_group_token_lists_only_its_commands() {
+        let mut members: Vec<&registry::RegistryEntry> = registry::all()
+            .filter(|entry| entry.def.palette_visible() && entry.command_name.starts_with("git "))
+            .collect();
+        members.sort_by_key(|entry| (entry.def.priority().ord(), entry.command_name.as_str()));
+        let members: Vec<&str> = members
+            .iter()
+            .map(|entry| entry.command_name.as_str())
+            .collect();
+        assert_eq!((members.len() >= 2, names_for("git ")), (true, members));
+    }
+
+    /// The text after a group token narrows the group by each member's
+    /// subcommand token, so `i`, a letter of the group token, leaves out
+    /// `log`. A member's alias pins the member, the group token ignores case,
+    /// and a token with no space lists outside the group. A match position
+    /// indexes the whole name, so the `l` of `git log` sits at 4.
+    #[test]
+    fn the_text_after_a_group_token_narrows_the_group() {
+        let narrowed = names_for("git l");
+        let outside = names_for("gi");
+        let positions = {
+            let (mut filtered, mut match_indices, mut selected) = (Vec::new(), Vec::new(), 0);
+            let ctx = Availability::default();
+            let group = input_group("git l", &ctx);
+            refilter(
+                "git l",
+                group,
+                PaletteScope::All,
+                &ctx,
+                &mut filtered,
+                &mut match_indices,
+                &mut selected,
+            );
+            filtered
+                .iter()
+                .position(|entry| entry.command_name == "git log")
+                .map(|at| match_indices[at].clone())
+        };
+        assert_eq!(
+            (
+                narrowed.iter().all(|name| name.starts_with("git ")),
+                narrowed.contains(&"git log"),
+                names_for("git i").contains(&"git log"),
+                names_for("git ls").first().copied(),
+                names_for("GIT ") == names_for("git "),
+                outside.iter().any(|name| !name.starts_with("git ")),
+                positions,
+            ),
+            (
+                true,
+                true,
+                false,
+                Some("git log"),
+                true,
+                true,
+                Some(vec![4])
+            ),
+        );
+    }
+
+    /// A group titles the list with its token and lists each command by its
+    /// subcommand token alone. Narrowed to `l`, the row paints the `l` of `log`
+    /// as a match and the `o` beside it as plain text.
+    #[test]
+    fn a_group_titles_the_list_and_drops_its_token_from_each_row() {
+        let mut h = Stoat::test();
+        h.type_text(":git ");
+        let _ = h.snapshot();
+        let text = h.rendered_text();
+        let short = registry::lookup_alias("git log")
+            .expect("git log is a command")
+            .def
+            .short_desc();
+        let row = text
+            .lines()
+            .find(|line| line.contains(short))
+            .unwrap_or_default();
+        let titled = text
+            .lines()
+            .any(|line| line.contains("\u{250c} git \u{2500}"));
+        let shown = (row.contains(" log "), row.contains("git log"));
+
+        h.type_text("l");
+        let _ = h.snapshot();
+        let narrowed = h.rendered_text();
+        let (y, line) = narrowed
+            .lines()
+            .enumerate()
+            .find(|(_, line)| line.contains(short))
+            .expect("the git log row");
+        let x = line[..line.find(" log ").expect("the log token") + 1]
+            .chars()
+            .count();
+        let buf = h.rendered_buffer();
+        let style = |x: usize| buf[(x as u16, y as u16)].style();
+        assert_eq!(
+            (titled, shown, style(x) == style(x + 1)),
+            (true, (true, false), false),
+        );
+    }
+
     /// A two-token head reads its argument after the second token. A head with
     /// no command behind it parses to none, and a one-token head keeps every
     /// later space in its argument.
@@ -1371,6 +1531,7 @@ mod tests {
         let mut selected = 7;
         refilter(
             "quit",
+            None,
             PaletteScope::All,
             &Availability::default(),
             &mut filtered,

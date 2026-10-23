@@ -1166,6 +1166,19 @@ pub fn lookup_alias(token: &str) -> Option<&'static RegistryEntry> {
     })
 }
 
+/// The command group palette token `token` names, or `None` when no command
+/// name opens with it and a space.
+///
+/// A group is the first token of command names such as `git log` and `git
+/// review`. The match ignores case, and the answer is spelled as the command
+/// names spell it.
+pub fn group_of(token: &str) -> Option<&'static str> {
+    all().find_map(|entry| {
+        let (head, _) = entry.command_name.split_once(' ')?;
+        head.eq_ignore_ascii_case(token).then_some(head)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
