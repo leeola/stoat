@@ -756,15 +756,11 @@ pub(crate) fn paint_selections(
         }
 
         let display = snapshot.buffer_to_display(cursor_point);
-        if display.row >= editor.scroll_row && display.row < end_row {
-            let y = inner.y + (display.row - editor.scroll_row) as u16;
-            let x = inner.x + display.column as u16;
-            if x < right && y < bottom {
-                if delegates_cursor && selection.id == primary_id {
-                    primary_cell = Some((x, y));
-                } else {
-                    cursor_cells.push((cursor, x, y));
-                }
+        if let Some((x, y)) = screen_cell(display, editor.scroll_row, end_row, inner) {
+            if delegates_cursor && selection.id == primary_id {
+                primary_cell = Some((x, y));
+            } else {
+                cursor_cells.push((cursor, x, y));
             }
         }
     }
@@ -792,6 +788,27 @@ pub(crate) fn paint_selections(
     }
 
     editor.cursor_screen_cell = primary_cell;
+}
+
+/// The screen cell of display point `display` in an editor painted from display
+/// row `scroll_row` into `text`, or `None` off the rows `scroll_row..end_row` or
+/// off `text`.
+///
+/// [`paint_selections`] places its cursors by this, and a changes view that
+/// replays its last paint places the recorded cursor by it, so the two land on
+/// one cell.
+pub(crate) fn screen_cell(
+    display: DisplayPoint,
+    scroll_row: u32,
+    end_row: u32,
+    text: Rect,
+) -> Option<(u16, u16)> {
+    if display.row < scroll_row || display.row >= end_row {
+        return None;
+    }
+    let y = text.y + (display.row - scroll_row) as u16;
+    let x = text.x + display.column as u16;
+    (x < text.x + text.width && y < text.y + text.height).then_some((x, y))
 }
 
 /// Wash every match of `query` that reaches the display rows

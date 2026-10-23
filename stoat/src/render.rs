@@ -1250,6 +1250,11 @@ pub(crate) fn frame(
             && entry.key == Some(key)
         {
             entry.replay(buf, scene, undercurls);
+            if let View::DiffChanges(view) = pane.view
+                && let Some(state) = ws.diff_changes_views.get_mut(view)
+            {
+                diff_changes::replay_cursor(pane, state, &mut ws.editors, frame, scene.live());
+            }
             pane::render_pane_status(
                 pane,
                 is_focused,

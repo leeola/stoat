@@ -131,7 +131,11 @@ pub(crate) struct PaneCacheKey {
     pub(crate) focused: bool,
     /// The selection set the pane paints, by its identity. The cursor and
     /// every selection move with it.
-    pub(crate) selections: u64,
+    ///
+    /// `None` for a changes view whose focused excerpt holds one bare cursor
+    /// that the terminal draws. That cursor paints no cell, so a move of it
+    /// inside the window replays the pane.
+    pub(crate) selections: Option<u64>,
     /// Whether a focused pane is in insert mode, where relative numbering
     /// gives way to absolute numbers. `false` for an unfocused pane, which
     /// numbers its lines absolutely in any mode.
@@ -407,7 +411,7 @@ pub(crate) fn pane_cache_key(
         minimap_content_id,
         minimap_enabled: frame.minimap_enabled,
         focused: is_focused,
-        selections: editor.selections.identity(),
+        selections: Some(editor.selections.identity()),
         insert_mode: is_focused && frame.mode == "insert",
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
@@ -425,11 +429,16 @@ pub(crate) fn pane_cache_key(
 /// excerpt the window shows paints from, and their placement, which an
 /// excerpt above the window moves when its rows change.
 ///
-/// A held screen row, a pending landing, a cursor that moved since the last
-/// paint, and a scroll past the stack's last page each move the scroll inside
-/// the paint, so a key read before it names a scroll that the paint leaves. An
-/// empty stack paints one line of text, and goto-word labels over the focused
-/// excerpt last a jump's few frames, so neither gets a key.
+/// A held screen row, a pending landing, a cursor that moved out of the window
+/// since the last paint, and a scroll past the stack's last page each move the
+/// scroll inside the paint, so a key read before it names a scroll that the
+/// paint leaves. An empty stack paints one line of text, and goto-word labels
+/// over the focused excerpt last a jump's few frames, so neither gets a key.
+///
+/// A bare cursor that the terminal draws paints no cell, so its key leaves the
+/// selections out, and a move of it inside the window replays the pane. The
+/// replay then records the cursor where the paint records it, through
+/// [`replay_cursor`](crate::render::diff_changes::replay_cursor).
 #[allow(clippy::too_many_arguments)]
 fn stack_cache_key(
     pane: &Pane,
@@ -449,15 +458,18 @@ fn stack_cache_key(
     }
     let focused_excerpt = state.focused_excerpt()?;
     let (editor_id, buffer) = (focused_excerpt.editor_id, focused_excerpt.buffer_id);
-    if diff_changes::focused_cursor(state, editors) != state.followed_cursor {
-        return None;
-    }
     let total = diff_changes::layout_stack(state, editors);
     if state.scroll > total.saturating_sub(state.viewport_rows) {
         return None;
     }
-
     let window = state.scroll..state.scroll + state.viewport_rows;
+    let moved = diff_changes::focused_cursor(state, editors) != state.followed_cursor;
+    if moved
+        && diff_changes::cursor_stack_row(state, editors).is_some_and(|row| !window.contains(&row))
+    {
+        return None;
+    }
+
     let mut stack = DefaultHasher::new();
     (state.focused, state.viewport_rows).hash(&mut stack);
     let ends = state
@@ -509,7 +521,13 @@ fn stack_cache_key(
             .unwrap_or(0),
         minimap_enabled: frame.minimap_enabled,
         focused: is_focused,
-        selections: editor.selections.identity(),
+        selections: match frame.terminal_cursor_editor == Some(editor_id)
+            && scene_live
+            && bare_cursor(editor)
+        {
+            true => None,
+            false => Some(editor.selections.identity()),
+        },
         insert_mode: is_focused && frame.mode == "insert",
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
@@ -517,6 +535,29 @@ fn stack_cache_key(
         search_smart_case: frame.search_smart_case,
         stack: stack.finish(),
     })
+}
+
+/// Whether `editor` holds one selection that covers nothing past its cursor's
+/// grapheme.
+///
+/// The selection pass washes a selection's cells but its cursor's, so such a
+/// selection paints no cell once the terminal draws its cursor. A second
+/// cursor paints a block, which is why one selection is the bound.
+fn bare_cursor(editor: &EditorState) -> bool {
+    let [selection] = editor.selections.all_anchors() else {
+        return false;
+    };
+    let buffer = editor.display_map.buffer_snapshot();
+    let rope = buffer.rope();
+    let [start, end, tail, head] = [
+        selection.start,
+        selection.end,
+        selection.tail(),
+        selection.head(),
+    ]
+    .map(|anchor| buffer.resolve_anchor(&anchor));
+    let cursor = stoat_text::cursor_offset(rope, tail, head);
+    start == cursor && end <= rope.next_grapheme_boundary(cursor)
 }
 
 /// The version of `buffer`'s diff map, zero while it has none, or `None` when
@@ -598,7 +639,7 @@ mod tests {
             minimap_content_id: 0,
             minimap_enabled: false,
             focused: false,
-            selections: 0,
+            selections: Some(0),
             insert_mode: false,
             hover_cell: None,
             scene_live: false,
@@ -740,7 +781,7 @@ mod tests {
             (
                 "selections",
                 PaneCacheKey {
-                    selections: 1,
+                    selections: Some(1),
                     ..base
                 },
             ),

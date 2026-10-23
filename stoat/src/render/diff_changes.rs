@@ -11,7 +11,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::Pane,
     render::{
-        editor::{fit_diff_view, render_editor_with_overlay, split_minimap_strip},
+        editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         layout::split_pane_status,
         text::{write_str, write_str_clipped},
         undercurl::UndercurlBatch,
@@ -172,6 +172,67 @@ pub(crate) fn render_diff_changes(
         );
         editor.viewport_rows = Some(rows as u32);
     }
+}
+
+/// Record the stack's cursor on a frame that replays the pane's last paint, as
+/// [`render_diff_changes`] records it when it paints.
+///
+/// The paint records which cursor the stack followed. It also lays the focused
+/// excerpt out at the stack's scroll and records the cell where the terminal
+/// draws its cursor. A replay puts back the cells of an earlier paint at the
+/// same scroll. A paint under no key between the two leaves the excerpt laid
+/// out at the scroll that paint used, which differs when it scrolled. So the
+/// replay lays the excerpt out again from the stack's scroll and the excerpt's
+/// place in it, and records the cell there.
+pub(crate) fn replay_cursor(
+    pane: &Pane,
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    frame: FrameCtx<'_>,
+    scene_live: bool,
+) {
+    if diff_changes::cursor_stack_row(state, editors).is_some() {
+        state.followed_cursor = diff_changes::focused_cursor(state, editors);
+    }
+    let Some(excerpt) = state.focused_excerpt() else {
+        return;
+    };
+    if !scene_live || frame.terminal_cursor_editor != Some(excerpt.editor_id) {
+        return;
+    }
+
+    let (top, scroll, viewport) = (excerpt.top, state.scroll, state.viewport_rows);
+    let rows = diff_changes::excerpt_rows(excerpt, editors);
+    let first = (top + 1).saturating_sub(scroll);
+    if rows == 0 || top + 1 + rows <= scroll || top >= scroll + viewport || first >= viewport {
+        return;
+    }
+    let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+        return;
+    };
+    let Some(text) = editor.text_rect else {
+        return;
+    };
+    let (inner, _) = split_pane_status(pane.area);
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled);
+    let scroll_row = scroll.saturating_sub(top + 1);
+    let text = Rect {
+        y: inner.y + first as u16,
+        height: (rows - scroll_row).min(viewport - first) as u16,
+        ..text
+    };
+    editor.scroll_row = scroll_row as u32;
+    editor.text_rect = Some(text);
+
+    let point = diff_changes::cursor_point(editor);
+    let snapshot = editor.display_map.snapshot();
+    let end_row = (editor.scroll_row + u32::from(text.height)).min(snapshot.line_count());
+    editor.cursor_screen_cell = screen_cell(
+        snapshot.buffer_to_display(point),
+        editor.scroll_row,
+        end_row,
+        text,
+    );
 }
 
 #[cfg(test)]

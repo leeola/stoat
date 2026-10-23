@@ -43,6 +43,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stoat_config::LineNumbers;
+use stoat_text::Point;
 use stoatty_protocol::command::{self, PoolKind, PoolRegionCommand};
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
@@ -6675,7 +6676,10 @@ fn a_changes_view_repaints_only_when_what_it_shows_moves() {
         (
             "a move to the next file",
             |h| {
-                action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+                // f0.rs shows three rows, so the third step crosses into f1.rs.
+                for _ in 0..3 {
+                    action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+                }
             },
             1,
         ),
@@ -6698,6 +6702,171 @@ fn a_changes_view_repaints_only_when_what_it_shows_moves() {
         let _ = h.stoat.render();
         assert_eq!(h.stoat.pane_paints - painted_before, paints, "{change}");
     }
+}
+
+/// The focused excerpt's editor.
+fn stack_editor(h: &mut crate::test_harness::TestHarness) -> &mut EditorState {
+    let editor_id = {
+        let state = changes_state(h);
+        state.excerpts[state.focused].editor_id
+    };
+    &mut h.stoat.active_workspace_mut().editors[editor_id]
+}
+
+/// The focused excerpt's cursor cell, the cursor the stack last followed, and
+/// the screen rect of the excerpt's text, which cursor popups place against.
+type StackCursor = (Option<(u16, u16)>, Option<(EditorId, Point)>, Option<Rect>);
+
+fn stack_cursor(h: &mut crate::test_harness::TestHarness) -> StackCursor {
+    let followed = changes_state(h).followed_cursor;
+    let editor = stack_editor(h);
+    (editor.cursor_screen_cell, followed, editor.text_rect)
+}
+
+/// A step inside the window moves a bare cursor that the terminal draws, which
+/// paints no cell, so the changes view replays its paint. The replay records
+/// the cursor's cell and the cursor the stack followed as a repaint does.
+#[test]
+fn a_step_inside_the_window_replays_and_records_the_cursor() {
+    let mut h = changes_view(8, false);
+    let painted = h.stoat.pane_paints;
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+    let _ = h.stoat.render();
+    let replayed = (h.stoat.pane_paints - painted, stack_cursor(&mut h));
+    h.stoat.pane_cache.clear();
+    let _ = h.stoat.render();
+    let repainted = stack_cursor(&mut h);
+    assert_eq!(
+        (replayed, repainted.0.is_some()),
+        ((0, repainted), true),
+        "the step replays, with the cell and the followed cursor a repaint records",
+    );
+}
+
+/// Select the first four characters of the focused excerpt's file, with the
+/// cursor at the start of the selection when `reversed` is set and at its end
+/// otherwise.
+fn widen_stack_selection(h: &mut crate::test_harness::TestHarness, reversed: bool) {
+    let editor = stack_editor(h);
+    let buffer = editor.display_map.buffer_snapshot();
+    let (start, end) = (
+        buffer.anchor_at(0, Bias::Left),
+        buffer.anchor_at(4, Bias::Right),
+    );
+    editor
+        .selections
+        .set_single_range(start, end, reversed, SelectionGoal::None);
+}
+
+/// A cursor move repaints the changes view where it paints a cell. A selection
+/// wider than its cursor washes the cells past the cursor on either side, and
+/// a second cursor paints a block. So does the one cursor without a live
+/// scene, and under a modal that takes the terminal cursor.
+#[test]
+fn a_cursor_move_that_paints_a_cell_repaints_the_changes_view() {
+    type Change = fn(&mut crate::test_harness::TestHarness);
+    let changes: [(&str, Change, Change); 5] = [
+        (
+            "a selection past its cursor",
+            |_| {},
+            |h| widen_stack_selection(h, true),
+        ),
+        (
+            "a selection before its cursor",
+            |_| {},
+            |h| widen_stack_selection(h, false),
+        ),
+        (
+            "a second cursor",
+            |_| {},
+            |h| {
+                let editor = stack_editor(h);
+                let buffer = editor.display_map.buffer_snapshot();
+                editor.selections.add_range(10..11, false, &buffer);
+            },
+        ),
+        (
+            "a step with the cursor in the cells",
+            |h| h.stoat.stoatty = false,
+            |h| {
+                action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+            },
+        ),
+        (
+            "a cursor under a modal that takes the terminal cursor",
+            |h| {
+                action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenCommandPalette);
+            },
+            |h| crate::diff_changes::place_cursor(stack_editor(h), Point::new(1, 0)),
+        ),
+    ];
+
+    for (change, setup, apply) in changes {
+        let mut h = changes_view(8, false);
+        setup(&mut h);
+        for _ in 0..3 {
+            let _ = h.stoat.render();
+        }
+        let painted = h.stoat.pane_paints;
+        apply(&mut h);
+        let _ = h.stoat.render();
+        assert_eq!(h.stoat.pane_paints - painted, 1, "{change}");
+    }
+}
+
+/// A replay with the focused excerpt scrolled out of the window leaves the
+/// excerpt's cursor as a repaint leaves it, since neither lays that excerpt
+/// out.
+#[test]
+fn a_replay_with_the_focused_excerpt_scrolled_off_leaves_its_cursor() {
+    let mut h = changes_view(8, false);
+    changes_state(&mut h).scroll = 8;
+    for _ in 0..3 {
+        let _ = h.stoat.render();
+    }
+    let painted = h.stoat.pane_paints;
+
+    h.stoat.pending_message = Some("saved".to_owned());
+    let _ = h.stoat.render();
+    let replayed = (h.stoat.pane_paints - painted, stack_cursor(&mut h));
+    h.stoat.pane_cache.clear();
+    let _ = h.stoat.render();
+    assert_eq!(
+        replayed,
+        (0, stack_cursor(&mut h)),
+        "the frame replays and leaves the cursor as a repaint does",
+    );
+}
+
+/// A bare cursor placed below the window paints no cell, but the paint
+/// scrolls the stack to show it, so that frame paints rather than replays.
+#[test]
+fn a_bare_cursor_placed_past_the_window_scrolls_the_stack_in_a_paint() {
+    let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+    h.stoat.stoatty = true;
+    h.stoat.minimap_override = Some(false);
+    h.stoat.set_diff_warm_auto(true);
+    let base: String = (0..40).map(|n| format!("line {n}\n")).collect();
+    h.stage_review_scenario("/repo", &[("a.rs", &base, &base.replace("line", "LINE"))]);
+    h.open_file(Path::new("/repo/a.rs"));
+    h.cover_with_diff_changes(false);
+    h.settle_diff_jobs();
+    for _ in 0..4 {
+        let _ = h.stoat.render();
+    }
+    let (painted, before) = (h.stoat.pane_paints, changes_state(&mut h).scroll);
+
+    crate::diff_changes::place_cursor(stack_editor(&mut h), Point::new(30, 0));
+    let _ = h.stoat.render();
+    assert_eq!(
+        (
+            h.stoat.pane_paints - painted,
+            changes_state(&mut h).scroll > before
+        ),
+        (1, true),
+        "the frame paints and scrolls to the cursor",
+    );
 }
 
 /// A cursor move past the window scrolls the stack inside the paint, so that
@@ -6738,13 +6907,14 @@ fn a_held_stack_row_leaves_no_capture_under_the_scroll_it_moved() {
     let _ = h.stoat.render();
     let held = changes_state(&mut h).scroll;
     changes_state(&mut h).scroll = before;
-    let replayed = frame_output(&mut h);
+    let replayed = (frame_output(&mut h), stack_cursor(&mut h));
     h.stoat.pane_cache.clear();
     let repainted = frame_output(&mut h);
     assert_eq!(
-        (held != before, &replayed.0),
-        (true, &repainted.0),
-        "the hold scrolled, and the frame back at the old scroll matches a repaint",
+        (held != before, &replayed.0 .0, replayed.1),
+        (true, &repainted.0, stack_cursor(&mut h)),
+        "the hold scrolled, and the frame back at the old scroll matches a repaint, cursor \
+         included",
     );
 }
 
