@@ -5,7 +5,7 @@ use crate::{
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
-            CommitsRefresh, GitLs, OpenCommits,
+            CommitsRefresh, GitCheckout, GitLs, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -978,6 +978,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             .map(str::to_owned);
         Ok(Box::new(GitLs { rev }))
     });
+    add(GitCheckout::DEF, |params| {
+        let reference = params
+            .first()
+            .context(MissingSnafu { name: "reference" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "reference",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(GitCheckout {
+            reference: reference.to_owned(),
+        }))
+    });
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
@@ -1930,6 +1943,7 @@ mod tests {
         // + 1 GitReview.
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
+        // + 1 GitCheckout.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
@@ -1961,7 +1975,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 449);
+        assert_eq!(all().count(), 450);
     }
 
     #[test]

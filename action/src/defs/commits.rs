@@ -165,6 +165,50 @@ impl Action for GitLs {
     }
 }
 
+const GIT_CHECKOUT_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "reference",
+    kind: ParamKind::String,
+    value_source: ValueSource::Branches,
+    required: true,
+    description: "Local branch to attach HEAD to, or a commit to detach at.",
+}];
+
+define_action_def!(
+    GitCheckoutDef,
+    "GitCheckout",
+    ActionKind::GitCheckout,
+    "check out a branch or commit",
+    "Check out a local branch and attach HEAD to it, or check out any other \
+     revision and detach HEAD at its commit. The open buffers, the diffs, \
+     and the commits lists follow the new tree. Refuses while a review walk \
+     or a rebase holds HEAD, and when the checkout has to overwrite a \
+     tracked file's local edit.",
+    ActionPriority::Common,
+    aliases = &["git co"],
+    command_name = "git checkout",
+    params = GIT_CHECKOUT_PARAMS
+);
+
+#[derive(Debug)]
+pub struct GitCheckout {
+    /// Local branch to attach HEAD to, or any other revision to detach at.
+    pub reference: String,
+}
+
+impl GitCheckout {
+    pub const DEF: &GitCheckoutDef = &GitCheckoutDef;
+}
+
+impl Action for GitCheckout {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,

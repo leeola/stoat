@@ -543,7 +543,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        GitLs | GitReview => ctx.in_repo,
+        GitLs | GitReview | GitCheckout => ctx.in_repo,
 
         // WalkthroughOpen is absent on purpose. A reader opens a tour when none
         // plays, so a gate on one hides it exactly when it is wanted.
@@ -1737,7 +1737,7 @@ mod tests {
             names.sort_unstable();
             names
         };
-        let group = vec!["GitLs", "GitReview"];
+        let group = vec!["GitCheckout", "GitLs", "GitReview"];
         assert_eq!(
             [
                 git_group(PaletteScope::Active, false),
@@ -3564,13 +3564,13 @@ mod tests {
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 
-    /// `:git ` with `log` selected opens the doc with the usage line `git log
-    /// [rev]`, then the alias, the parameter, and the description.
+    /// `:git log` narrows the group to `log`, whose doc opens with the usage
+    /// line `git log [rev]`, then the alias, the parameter, and the
+    /// description.
     #[test]
     fn snapshot_command_palette_group_doc() {
         let mut h = repo_harness();
-        h.type_text(":git ");
-        h.type_keys("ctrl-n");
+        h.type_text(":git log");
         h.assert_snapshot("command_palette_group_doc");
     }
 

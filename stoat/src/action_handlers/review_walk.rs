@@ -91,6 +91,102 @@ pub(crate) fn git_ls(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     )
 }
 
+/// Check `reference` out, attaching HEAD when it names a local branch and
+/// detaching HEAD at the commit it resolves to otherwise.
+///
+/// The checkout runs behind every git write queued before the press, and the
+/// open buffers, the diffs, and the commits lists follow the tree it leaves. A
+/// review walk or a rebase owns HEAD until it ends, so either one refuses the
+/// checkout at its turn.
+pub(crate) fn git_checkout(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
+    let reference = reference.to_string();
+    let job = GitJob::new("checkout", None, move |stoat: &mut Stoat| {
+        let repo = checkout_repo(stoat)?;
+        Some(Box::new(move || {
+            let checked_out = check_out(&*repo, &reference);
+            Box::new(move |stoat: &mut Stoat| land_checkout(stoat, checked_out)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// The repository a checkout acts on at its turn, or `None` after badging why
+/// the checkout does not run.
+fn checkout_repo(stoat: &mut Stoat) -> Option<Arc<dyn crate::host::GitRepo>> {
+    let ws = stoat.active_workspace();
+    let refusal = if ws.review_walk.is_some() {
+        Some(("a review walk is open", Some("run :done first".to_string())))
+    } else if ws.rebase_active.is_some() {
+        Some(("a rebase is in progress", None))
+    } else {
+        None
+    };
+    if let Some((label, detail)) = refusal {
+        review_error(stoat, label, detail);
+        return None;
+    }
+
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        review_error(stoat, "not in a git repository", None);
+        return None;
+    };
+    if repo.workdir().is_none() {
+        review_error(stoat, "git repo has no working tree", None);
+        return None;
+    }
+    Some(repo)
+}
+
+/// Check `reference` out in `repo`, on whatever thread calls.
+///
+/// Answers the status line for the landing, or the badge label and detail
+/// when HEAD did not move.
+fn check_out(
+    repo: &dyn crate::host::GitRepo,
+    reference: &str,
+) -> Result<String, (&'static str, Option<String>)> {
+    let refused = |err: crate::host::GitApplyError| ("checkout failed", Some(err.to_string()));
+    if repo
+        .local_branches()
+        .iter()
+        .any(|(name, _)| name == reference)
+    {
+        repo.checkout_ref(reference).map_err(refused)?;
+        return Ok(format!("checked out {reference}"));
+    }
+
+    let Some(sha) = repo.resolve_rev(reference) else {
+        return Err((
+            "unknown revision",
+            Some(format!("no revision named {reference}")),
+        ));
+    };
+    repo.checkout_detached(&sha).map_err(refused)?;
+    Ok(format!("HEAD detached at {}", &sha[..sha.len().min(7)]))
+}
+
+/// Bring the editor to the tree a checkout left, or badge why HEAD did not
+/// move.
+///
+/// Clean buffers re-read their files, every diff recomputes against the new
+/// HEAD, and each commits list reloads from it.
+fn land_checkout(stoat: &mut Stoat, checked_out: Result<String, (&'static str, Option<String>)>) {
+    let status = match checked_out {
+        Ok(status) => status,
+        Err((label, detail)) => {
+            review_error(stoat, label, detail);
+            return;
+        },
+    };
+
+    auto_reload::reload_clean_buffers(stoat);
+    stoat.active_workspace_mut().invalidate_all_diffs();
+    super::commits::reload_every_list(stoat);
+    stoat.set_status(status);
+}
+
 /// Build and install a picker over `ref_sha`'s first-parent history.
 ///
 /// The editor underneath is dropped to normal mode first, so a chord that
@@ -1112,6 +1208,7 @@ mod tests {
         commit_picker::CommitPickerRole,
         git_jobs::{self, GitJobKey},
         host::FakeFsOp,
+        rebase::{ActiveRebase, RebaseState},
         test_harness::TestHarness,
         workspace::diff::{self, DiffBase},
     };
@@ -1901,8 +1998,159 @@ mod tests {
         assert_eq!(review_badge(&h).as_deref(), Some("unknown revision"));
     }
 
+    /// A branch name attaches HEAD to the branch, any other revision detaches
+    /// HEAD at its commit, and a name that resolves to nothing moves nothing.
+    #[test]
+    fn git_checkout_attaches_a_branch_and_detaches_any_other_revision() {
+        let check_out = |text: &str| {
+            let mut h = harness();
+            h.type_text(text);
+            h.type_keys("enter");
+            h.settle();
+            (
+                checkouts(&h),
+                head_branch(&h),
+                h.stoat.pending_message.clone(),
+                review_badge(&h),
+            )
+        };
+        assert_eq!(
+            [
+                check_out(":git checkout feature"),
+                check_out(":git co a1b2c3d4"),
+                check_out(":git co junk"),
+            ],
+            [
+                (
+                    vec!["ref:feature".to_string()],
+                    Some("feature".to_string()),
+                    Some("checked out feature".to_string()),
+                    None,
+                ),
+                (
+                    vec!["detached:a1b2c3d4".to_string()],
+                    None,
+                    Some("HEAD detached at a1b2c3d".to_string()),
+                    None,
+                ),
+                (
+                    Vec::new(),
+                    Some("main".to_string()),
+                    None,
+                    Some("unknown revision".to_string()),
+                ),
+            ],
+        );
+    }
+
+    /// A review walk or a rebase owns HEAD until it ends, so a checkout during
+    /// either one moves nothing.
+    #[test]
+    fn git_checkout_during_a_walk_or_a_rebase_moves_nothing() {
+        let refused = |h: &mut TestHarness| {
+            let before = checkouts(h);
+            h.type_text(":git checkout feature");
+            h.type_keys("enter");
+            h.settle();
+            (checkouts(h) == before, review_badge(h))
+        };
+        let mut walking = harness();
+        start_walk(&mut walking);
+        let mut rebasing = harness();
+        rebasing.stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(
+            RebaseState::new("/repo".into(), "a1b2c3d4".into(), Vec::new()),
+            None,
+        ));
+        assert_eq!(
+            [refused(&mut walking), refused(&mut rebasing)],
+            [
+                (true, Some("a review walk is open".to_string())),
+                (true, Some("a rebase is in progress".to_string())),
+            ],
+        );
+    }
+
+    /// The checkout moves HEAD under the diffs, so each one recomputes against
+    /// the new HEAD, even over a file whose text on disk stays the same.
+    #[test]
+    fn git_checkout_rediffs_against_the_new_head() {
+        let mut h = harness();
+        h.fake_git()
+            .add_repo("/repo")
+            .head_file("a.rs", "fn a() {}\nfn a2() {}\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        let buffer_id = h.stoat.focused_editor_ids().expect("an editor").1;
+        let base = |h: &TestHarness| {
+            let buffer = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            let guard = buffer.read().expect("poisoned");
+            let map = guard.diff_map.as_ref().expect("a diff map");
+            map.base_text().map(|text| text.to_string())
+        };
+        let before = base(&h);
+
+        // The fake host moves HEAD without its tree, so the test moves the tree.
+        h.fake_git()
+            .add_repo("/repo")
+            .head_file("a.rs", "fn a() {}\n");
+        h.type_text(":git co a1b2c3d4");
+        h.type_keys("enter");
+        h.settle();
+        h.settle_diff_jobs();
+        assert_eq!(
+            (before.as_deref(), base(&h).as_deref()),
+            (Some("fn a() {}\nfn a2() {}\n"), Some("fn a() {}\n")),
+        );
+    }
+
+    /// The checkout rewrites the tree under the open buffers, so they show it
+    /// rather than the commit HEAD left.
+    #[test]
+    fn git_checkout_re_reads_open_files() {
+        let mut h = harness();
+        h.open_file(Path::new("/repo/a.rs"));
+        h.fake_fs().insert_file("/repo/a.rs", CHECKED_OUT_A);
+        h.type_text(":git checkout feature");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(open_text(&h), (CHECKED_OUT_A.to_string(), false));
+    }
+
+    /// Every commits list reloads from the HEAD the checkout left.
+    #[test]
+    fn git_checkout_reloads_the_commits_lists() {
+        let mut h = harness();
+        h.open_commits("/repo");
+        h.type_text(":git checkout feature");
+        h.type_keys("enter");
+        h.settle();
+        let listed: Vec<String> = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("a commits list")
+            .commits
+            .iter()
+            .map(|commit| commit.sha.clone())
+            .collect();
+        assert_eq!(listed, ["b2c3d4e5", "a1b2c3d4"]);
+    }
+
     fn checkouts(h: &TestHarness) -> Vec<String> {
         h.fake_git().checkouts(Path::new("/repo"))
+    }
+
+    fn head_branch(h: &TestHarness) -> Option<String> {
+        h.stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .and_then(|repo| repo.head_branch())
     }
 
     fn walk_shas(h: &TestHarness) -> Vec<String> {

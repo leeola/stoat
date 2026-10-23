@@ -394,6 +394,7 @@ action_kinds! {
     Format,
     GitReview,
     GitLs,
+    GitCheckout,
     ReviewNextCommit,
     ReviewPrevCommit,
     ReviewDone,

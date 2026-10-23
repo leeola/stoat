@@ -65,9 +65,9 @@ pub(crate) use pane::{
 };
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
-    Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitLs, GitReview,
-    GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab,
-    RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
+    Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitCheckout,
+    GitLs, GitReview, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs,
+    OpenReviewAgentEdits, RenameTab, RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -765,6 +765,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .downcast_ref::<GitLs>()
                 .expect("GitLs action downcast");
             review_walk::git_ls(stoat, action.rev.as_deref())
+        },
+        ActionKind::GitCheckout => {
+            let action = action
+                .as_any()
+                .downcast_ref::<GitCheckout>()
+                .expect("GitCheckout action downcast");
+            review_walk::git_checkout(stoat, &action.reference)
         },
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
