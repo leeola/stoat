@@ -2999,6 +2999,7 @@ fn declare_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16) {
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }));
 }
 
@@ -3020,6 +3021,7 @@ fn declare_window_pool(terminal: &mut Terminal, id: u32, window: u32) {
         window,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }));
 }
 
@@ -3060,6 +3062,7 @@ fn declare_terminal_pool(terminal: &mut Terminal, id: u32, rows: u16, cols: u16,
         window: 0,
         kind: PoolKind::Terminal,
         dim,
+        resident: true,
     }));
 }
 
@@ -3610,6 +3613,23 @@ fn a_redeclare_that_changes_only_the_dim_keeps_the_pages() {
         (64, Some(filled_rows()), true),
         "the region takes the dim, page 0 keeps its rows, and the page painted \
          across the declare lands",
+    );
+}
+
+/// A declared pool's stored region keeps the resident byte its frame carried.
+#[test]
+fn a_declared_region_keeps_its_resident_byte() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    declare_pool(&mut terminal, 1, 2, 4);
+    declare_terminal_pool(&mut terminal, 2, 2, 4, 0);
+
+    assert_eq!(
+        (
+            terminal.pools[&1].region.resident,
+            terminal.pools[&2].region.resident
+        ),
+        (false, true),
+        "the grid pool is not resident and the terminal pool is",
     );
 }
 
@@ -4743,6 +4763,7 @@ fn a_pool_declared_after_its_drop_takes_a_new_serial() {
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }));
     terminal.advance(&batch);
     let second = serial(&terminal).expect("pool 1 is declared again");
@@ -4918,6 +4939,7 @@ fn a_pool_region_past_the_viewport_is_clamped() {
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     });
     stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
     stream.extend_from_slice(&encode_fill_end());
@@ -4956,6 +4978,7 @@ fn a_page_smaller_than_its_slot_shows_none_of_the_page_before_it() {
         window: 1,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }));
 
     let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
@@ -5005,6 +5028,7 @@ fn a_fill_is_clamped_when_a_resize_shrinks_the_viewport_under_it() {
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }));
 
     terminal.resize(2, 2);
@@ -5033,6 +5057,7 @@ fn project_pool_composes_into_the_declared_pool_region() {
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     });
     stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 0 }));
     stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
@@ -6215,6 +6240,7 @@ fn a_graphics_frame_applies_during_a_page_fill() {
         height: 4,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }));
     terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
 

@@ -105,9 +105,16 @@
 /// entries whole, so an emitter declares at most 64 entries to it and names no
 /// class past them.
 ///
+/// Version 14 reads a fixed 19-byte `pool_region` head for every kind, which
+/// ends in the kind byte, the dim, and a resident byte. A resident pool's pages
+/// are the region's content at rest, so the terminal keeps the pool's
+/// composite when a glide settles. A terminal that predates it reads the kind
+/// and the dim it knows and ignores the resident byte. This version drops a
+/// shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 pub mod command;
 pub mod detect;

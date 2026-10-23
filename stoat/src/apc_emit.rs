@@ -455,6 +455,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             window,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         // A view whose render reads from a source that counts its own
         // changes answers "nothing moved" from the counter, and skipping on
@@ -583,6 +584,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             window,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
 
         // The segments are the row's content, so hashing them answers
@@ -1397,6 +1399,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let core = finder.active_core_ref();
         let scroll_row = core
@@ -1458,6 +1461,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let active_idx = stoat.active_workspace;
         if let Some(editor) = stoat.workspaces[active_idx].editors.get_mut(editor_id) {
@@ -1546,6 +1550,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let scroll_row =
             crate::render::picker::window_start(finder.selected, list.height.max(1) as usize)
@@ -1598,6 +1603,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let scroll_row =
             crate::render::picker::window_start(finder.selected, list.height.max(1) as usize)
@@ -1650,6 +1656,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let scroll_row = selected.saturating_sub(list.height.saturating_sub(1) as usize) as u32;
         // The visible row set is the filtered entries, so a hash of their
@@ -1706,6 +1713,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let core = picker.active_core_ref();
         let scroll_row = core
@@ -1771,6 +1779,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let scroll_row = state.scroll_top as u32;
         // Commits stream in lazily, so the length and the load and end flags
@@ -1824,6 +1833,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let lanes = picker.graph_lanes;
         let scroll_row =
@@ -1882,6 +1892,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         // Clamped through the same helper the renderer uses, so the pool
         // scrolls to the row the diff actually lands on.
@@ -1941,6 +1952,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let scroll_row = layout.viewport_top as u32;
         // The item list is replaced wholesale on a re-query, which bumps
@@ -1990,6 +2002,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let list_scroll =
             help.selected()
@@ -2035,6 +2048,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let detail_scroll = help.detail_scroll() as u32;
         // The detail body is the selected entry's, so a hash of its name is
@@ -2078,6 +2092,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let interior = inner.height.max(1) as usize;
         let half_page = (interior / 2).max(1);
@@ -2374,6 +2389,7 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
                     window: 0,
                     kind: PoolKind::Grid,
                     dim: 0,
+                    resident: false,
                 },
             ))
         })
@@ -2442,6 +2458,7 @@ fn terminal_pool_panes(
                         true => (fade * 255.0).round() as u8,
                         false => 0,
                     },
+                    resident: true,
                 },
                 is_focused,
                 dim: match region_fades {
@@ -2658,6 +2675,7 @@ fn windowed_editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegionCo
                     window,
                     kind: PoolKind::Grid,
                     dim: 0,
+                    resident: false,
                 },
             ))
         })

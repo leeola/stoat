@@ -8732,6 +8732,7 @@ fn window_region() -> PoolRegionCommand {
         window: 2,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }
 }
 
@@ -16642,6 +16643,7 @@ fn pool_region(pool: u32) -> PoolRegionCommand {
         window: 0,
         kind: PoolKind::Grid,
         dim: 0,
+        resident: false,
     }
 }
 

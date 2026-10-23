@@ -4547,6 +4547,7 @@ mod tests {
             window: 1,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         }));
         // A two-row page, and the one below it, since the compose spans a row
         // more than the region is tall.
@@ -4564,6 +4565,7 @@ mod tests {
                 height: 2,
                 kind: PoolKind::Grid,
                 dim: 0,
+                resident: false,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -4606,6 +4608,7 @@ mod tests {
             height: 12,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let pool = PoolView {
             id: 1,
@@ -4669,6 +4672,7 @@ mod tests {
             height: 4,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let rides: Vec<_> = projection
             .rides
@@ -4735,6 +4739,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         }));
         batch.extend(encode_scroll(&ScrollCommand {
             pool: 1,
@@ -4983,6 +4988,7 @@ mod tests {
                     height: 2,
                     kind,
                     dim,
+                    resident: kind == PoolKind::Terminal,
                 },
                 frac: 0.0,
                 content_changed: true,
@@ -5033,6 +5039,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Terminal,
             dim: 0,
+            resident: true,
         }));
         let declared = tiles(&project(&mut terminal, &mut frame));
 
@@ -5066,6 +5073,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Terminal,
             dim,
+            resident: true,
         }));
     }
 
@@ -5100,6 +5108,7 @@ mod tests {
                 window: 0,
                 kind: PoolKind::Grid,
                 dim: 0,
+                resident: false,
             }));
             for page in 0..3 {
                 fill_page(&mut terminal, pool, page, b"....");

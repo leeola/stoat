@@ -1598,6 +1598,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         }));
         let view = PoolView {
             id: 1,
@@ -1610,6 +1611,7 @@ mod tests {
                 height: 8,
                 kind: PoolKind::Grid,
                 dim: 0,
+                resident: false,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -1840,6 +1842,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         let at = |col, row| {
             cursor_in_region(
@@ -1909,6 +1912,7 @@ mod tests {
                 height: 40,
                 kind: PoolKind::Grid,
                 dim: 0,
+                resident: false,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,

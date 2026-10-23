@@ -774,6 +774,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         }
     }
 
@@ -1786,6 +1787,7 @@ mod tests {
         let terminal = |dim| PoolRegionCommand {
             kind: PoolKind::Terminal,
             dim,
+            resident: true,
             ..region(1, 20)
         };
         let mut state = SmoothScrollState::default();

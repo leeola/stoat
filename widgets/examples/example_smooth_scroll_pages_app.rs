@@ -139,6 +139,7 @@ impl Pool {
                 window: 0,
                 kind: PoolKind::Grid,
                 dim: 0,
+                resident: false,
             },
             bg,
             label,

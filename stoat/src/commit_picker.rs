@@ -1571,6 +1571,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         assert!(
             drained_apc(&mut rx).contains(&Command::PoolRegion(expected)),
@@ -1652,6 +1653,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
+            resident: false,
         };
         assert!(
             drained_apc(&mut rx).contains(&Command::PoolRegion(expected)),

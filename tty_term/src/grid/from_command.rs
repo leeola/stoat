@@ -121,6 +121,7 @@ pub(crate) fn pool_region_from_command(command: PoolRegionCommand) -> PoolRegion
         height: command.height,
         kind: command.kind,
         dim: command.dim,
+        resident: command.resident,
     }
 }
 

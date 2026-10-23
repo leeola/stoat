@@ -147,7 +147,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `fill` | P | 12 B | + streamed page, closed by `fill_end` |
 | `fill_rows` | P | 20 B | + streamed rows, closed by `fill_end` |
 | `fill_end` | P | -- | Commits the page onto its pool slot |
-| `pool_region` | P | 16 B, 18 B with kind and dim | Declares a smooth-scroll pool |
+| `pool_region` | P | 19 B | Declares a smooth-scroll pool |
 | `scroll` | P | 14 B | Pool scroll target, page plus fraction |
 | `pool_cursor` | P | 14 B | Anchors the cursor to a gliding pool |
 | `pool_cursor_release` | P | 4 B | Takes the cursor anchor off a pool |
@@ -171,8 +171,8 @@ session control. "Head" is the fixed prefix of the first argument.
 From protocol version 9, a `pool_region` for a terminal pane appends a kind
 byte of 1. The terminal composites that pool every frame at the terminal font
 size and reports the cell grid it holds as a `pool_sized` line on the window
-socket. A grid pool omits the byte, so its frame stays the 16-byte head an
-older terminal reads.
+socket. Before version 14 a grid pool omits the byte, so its frame stays the
+16-byte head an older terminal reads.
 
 From protocol version 10, a `fill_rows` scope repaints whole rows of a
 buffered page and keeps its other rows. Its head names the pool, the page, the
@@ -200,6 +200,15 @@ other lanes alone. An emitter thus re-declares only the lane that changed, with
 no `reset` and no re-send of the whole scene. Lanes do not nest, and a `reset`
 still clears every lane and closes an open one. A terminal below version 12
 ignores both markers, so send lanes only to a terminal at version 12 or later.
+
+From protocol version 14, every `pool_region` carries a fixed 19-byte head:
+the 16 bytes of placement, a kind byte (0 for a grid pool, 1 for a terminal
+pool), the dim, and a resident byte (0 or 1). A resident pool's pages are the
+region's content at rest, so the terminal keeps the pool's composite when a
+glide settles, instead of handing the region back to the live grid. A terminal
+pool is resident by kind. A terminal below version 14 reads the kind and the
+dim it knows and ignores the resident byte. A terminal at version 14 or later
+drops a shorter head.
 
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.

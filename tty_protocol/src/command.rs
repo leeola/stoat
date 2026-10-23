@@ -584,6 +584,7 @@ mod tests {
                     window: 6,
                     kind: PoolKind::Grid,
                     dim: 0,
+                    resident: false,
                 }),
             ),
             (

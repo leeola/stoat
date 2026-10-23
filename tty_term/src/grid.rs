@@ -1904,6 +1904,9 @@ pub struct PoolRegion {
     /// No page reads it, so a re-declare that changes only the dim keeps the
     /// pool's pages.
     pub dim: u8,
+    /// Whether the pool's pages are the region's content at rest, so the
+    /// renderer keeps the pool composited when a glide settles.
+    pub resident: bool,
 }
 
 /// A fixed renderer-drawn status icon composited above the cells.
