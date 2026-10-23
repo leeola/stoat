@@ -2422,7 +2422,7 @@ pub struct Stoat {
     ///
     /// Every changes view of a workspace shows the one document, so the
     /// workspace holds one strip. It exists while the workspace holds a changes
-    /// view.
+    /// view or a parked stack.
     pub(crate) diff_changes_strips:
         std::collections::HashMap<WorkspaceId, crate::minimap::diff_changes::DiffChangesStrip>,
     /// Whether a visible run or terminal fed output since the last frame tick, so
@@ -8886,11 +8886,14 @@ impl Stoat {
         // The changes strip summarizes every excerpt's rows, so a landing in an
         // excerpt the window does not show still recolors the strip, while the
         // pane replays. The strip resends only the rows the landing reports.
+        // The strip keeps a parked stack's lines for the flip back, so its
+        // excerpts count too.
         let stacked: Vec<BufferId> = match self.diff_changes_strips.contains_key(&ws_id) {
             true => self
                 .active_workspace()
                 .diff_changes_views
                 .values()
+                .chain(&self.active_workspace().parked_diff_changes)
                 .flat_map(|state| state.excerpts.iter().map(|excerpt| excerpt.buffer_id))
                 .collect(),
             false => Vec::new(),

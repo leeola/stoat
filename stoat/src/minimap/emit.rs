@@ -280,9 +280,11 @@ pub(crate) fn emit_minimap(stoat: &mut Stoat) {
             );
         }
     }
-    if stoat.workspaces[ws_id].diff_changes_views.is_empty()
-        && let Some(strip) = stoat.diff_changes_strips.remove(&ws_id)
-    {
+    // A parked stack keeps the strip, so the flip back finds the lines of
+    // every excerpt that did not move still held and sends none of them.
+    let ws = &stoat.workspaces[ws_id];
+    let stackless = ws.diff_changes_views.is_empty() && ws.parked_diff_changes.is_none();
+    if stackless && let Some(strip) = stoat.diff_changes_strips.remove(&ws_id) {
         stoatty_protocol::command::encode_minimap_drop_into(
             &mut out,
             &stoatty_protocol::command::MinimapDropCommand {

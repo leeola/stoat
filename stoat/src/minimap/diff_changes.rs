@@ -1747,6 +1747,78 @@ mod tests {
         );
     }
 
+    /// The strip lives across a flip to the per-file diff and back, so the
+    /// flip back sends no line of a stack that did not move. A close after it
+    /// drops the strip, since no changes view and no parked stack remain.
+    #[test]
+    fn the_strip_lives_across_a_flip_until_a_close() {
+        let (mut h, mut rx) = strip_harness(8);
+        frame(&mut h, &mut rx);
+        let content_id = strip_id(&h);
+        let mut press = |h: &mut TestHarness, key: &str| {
+            h.type_keys(key);
+            h.settle();
+            let commands = frame(h, &mut rx);
+            let splices: Vec<Splice> = strip_frames(&commands)
+                .0
+                .into_iter()
+                .filter(|splice| splice.0 == content_id)
+                .collect();
+            let drops: Vec<u32> = commands
+                .iter()
+                .filter_map(|command| match command {
+                    Command::MinimapDrop(drop) => Some(drop.content_id),
+                    _ => None,
+                })
+                .collect();
+            let held = h
+                .stoat
+                .diff_changes_strips
+                .get(&h.stoat.active_workspace)
+                .map(|strip| strip.content_id());
+            (held, splices, drops)
+        };
+
+        let pressed = ["Ctrl-t", "Ctrl-t", "Escape"].map(|key| press(&mut h, key));
+        assert_eq!(
+            pressed,
+            [
+                (Some(content_id), vec![], vec![]),
+                (Some(content_id), vec![], vec![]),
+                (None, vec![], vec![content_id]),
+            ],
+        );
+    }
+
+    /// An edit and its parse while the stack is parked resend the edited row
+    /// alone on the flip back, since the strip counts the parse's rows for a
+    /// parked excerpt as for a live one.
+    #[test]
+    fn an_edit_during_a_park_resends_its_row_alone_on_the_flip_back() {
+        let base = "fn a() {}\nfn b() {}\nfn c() {}\n";
+        let text = base.replace("b()", "b2()");
+        let at = text.find("b2").expect("the hunk") + 1;
+        let (mut h, mut rx) = strip_harness_of(&[("a.rs".to_string(), base.to_string(), text)]);
+        frame(&mut h, &mut rx);
+
+        h.type_keys("Ctrl-t");
+        h.settle();
+        frame(&mut h, &mut rx);
+        edit_buffer(&mut h, "/repo/a.rs", at..at + 1, "3");
+        for _ in 0..2 {
+            h.stoat.drive_background();
+            h.settle();
+        }
+
+        h.type_keys("Ctrl-t");
+        h.settle();
+        let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
+        assert_eq!(
+            splices,
+            vec![(strip_id(&h), 2, 1, wire_lines(&mut h, 2..3))]
+        );
+    }
+
     /// In per-pane mode a changes view places its thumb on its own strip, where
     /// the paint reserved one.
     #[test]
