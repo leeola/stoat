@@ -2,7 +2,7 @@ use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
     agent_status::AgentStatus,
-    apc_emit::{self, PoolOwner, TerminalPage, WindowPage},
+    apc_emit::{self, HeldStackPage, PoolOwner, TerminalPage, WindowPage},
     badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::OpenOrigin,
@@ -1237,6 +1237,10 @@ pub struct Stoat {
     /// window, by pane index. [`apc_emit::emit_smooth_scroll`] compares a new
     /// render against it so that only the changed rows go out.
     pub(crate) window_pages: std::collections::HashMap<u32, WindowPage>,
+    /// Each page that a changes view's pool filled, by pool id and page index,
+    /// which [`apc_emit::emit_smooth_scroll`] compares a page painted after a
+    /// selection change against, so that only the changed rows go out.
+    pub(crate) diff_changes_pages: std::collections::HashMap<(u32, u64), HeldStackPage>,
     /// Cold-build worker, held only to keep the spawned scan alive while it
     /// runs. Progress arrives through [`Self::index_update_rx`].
     _index_build_task: Option<stoat_scheduler::Task<()>>,
@@ -2680,6 +2684,7 @@ impl Stoat {
             pool_owners: std::collections::BTreeMap::new(),
             terminal_pages: std::collections::HashMap::new(),
             window_pages: std::collections::HashMap::new(),
+            diff_changes_pages: std::collections::HashMap::new(),
             _index_build_task: None,
             redraw_notify,
             drain_notify,

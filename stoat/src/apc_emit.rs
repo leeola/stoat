@@ -133,6 +133,19 @@ pub(crate) struct WindowPage {
     spare: Buffer,
 }
 
+/// A page that a changes view's pool filled, held to send only the rows that a
+/// selection change moves.
+///
+/// The focused excerpt's selections stay out of the page version, so a step
+/// of a selection refills no page. The step paints the pages it touches again,
+/// and a row compare against the held page finds the rows that changed.
+pub(crate) struct HeldStackPage {
+    /// The page stoatty holds.
+    page: Buffer,
+    /// The selections the page shows, as [`painted_selection`] stamps them.
+    selection: Option<u64>,
+}
+
 /// The surface whose pages a pane pool holds.
 ///
 /// A pane pool takes its pane's index as its id, and the root pane of every
@@ -548,7 +561,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
                 && held.page.area == held.spare.area
                 && stoat.smooth_scroll.holds_region(index, &region);
             if paints_patches && held_by_stoatty {
-                patch_batches.extend(row_patches(index, &held.page, &held.spare));
+                patch_batches.extend(row_patches(index, 0, &held.page, &held.spare));
                 stoat
                     .smooth_scroll
                     .record_content_version(index, content_version);
@@ -1383,6 +1396,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // lays every excerpt's editor out. The pool is resident, so the terminal
     // shows its pages at rest too, and no live grid shows a change sooner.
     let mut stack_anchor: Option<(u32, u64, u16)> = None;
+    let mut stack_patches: Vec<Vec<u8>> = Vec::new();
     if !stack_panes.is_empty() {
         let focused_index = matches!(ws.focus, FocusTarget::SplitPane)
             .then(|| ws.panes.pane(ws.panes.focus()).index);
@@ -1461,9 +1475,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 theme_epoch,
                 paint_generation,
             );
+            let selection = painted_selection(state, &ws.editors, is_focused, frame);
 
             let state = &*state;
             let editors = &mut ws.editors;
+            let pages = &mut stoat.diff_changes_pages;
             pool::emit_pages_into(
                 &mut out,
                 &mut stoat.smooth_scroll,
@@ -1477,7 +1493,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 |_| 0,
                 false,
                 |index| {
-                    render_stack_page(
+                    let (page, scene) = paint_pool_page(
                         state,
                         editors,
                         &ws.buffers,
@@ -1486,16 +1502,51 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         frame,
                         region,
                         index,
-                    )
+                    );
+                    let mut bytes = crate::render::serialize_buffer(&page);
+                    bytes.extend_from_slice(scene.bytes());
+                    pages.insert((region.pool, index), HeldStackPage { page, selection });
+                    bytes
                 },
             );
+
+            // A selection that changed paints again the pages the composite
+            // reads and the page its cursor left, and sends the rows that
+            // differ from what the terminal holds.
+            let cursor_row = diff_changes::cursor_stack_row(state, &mut ws.editors);
+            let left = state
+                .last_cursor_row
+                .map(|row| row as u64 / u64::from(region.height.max(1)));
+            for index in composited_pages(state.scroll as f32, region.height).chain(left) {
+                if !stoat.smooth_scroll.holds_page(region.pool, index) {
+                    continue;
+                }
+                let Some(held) = stoat.diff_changes_pages.get_mut(&(region.pool, index)) else {
+                    continue;
+                };
+                if held.selection == selection {
+                    continue;
+                }
+                let (page, _) = paint_pool_page(
+                    state,
+                    &mut ws.editors,
+                    &ws.buffers,
+                    is_focused,
+                    fallback_style,
+                    frame,
+                    region,
+                    index,
+                );
+                stack_patches.extend(row_patches(region.pool, index, &held.page, &page));
+                *held = HeldStackPage { page, selection };
+            }
 
             let anchored = state
                 .focused_excerpt()
                 .map(|excerpt| excerpt.editor_id)
                 .filter(|editor_id| is_focused && focused_editor == Some(*editor_id));
             if let Some(editor_id) = anchored
-                && let Some(row) = diff_changes::cursor_stack_row(state, &mut ws.editors)
+                && let Some(row) = cursor_row
                 && let Some((col, _)) = ws
                     .editors
                     .get(editor_id)
@@ -1503,8 +1554,17 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             {
                 stack_anchor = Some((region.pool, row as u64, col));
             }
+            if let Some(state) = ws.diff_changes_views.get_mut(*id) {
+                state.last_cursor_row = cursor_row;
+            }
         }
     }
+    // A held page describes a slot that stoatty keeps only while the pool
+    // buffers it at the content it was painted from.
+    stoat.diff_changes_pages.retain(|&(pool, index), _| {
+        stack_panes.iter().any(|(stacked, _, _)| *stacked == pool)
+            && stoat.smooth_scroll.holds_page(pool, index)
+    });
 
     // A resident pool composites at rest, and the terminal draws the cursor at
     // the anchor of every pool it composites. So the focused changes view
@@ -2334,10 +2394,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let _ = apc_tx.send(out);
     }
 
-    // Each terminal page and window patch rides a batch of its own, so a
-    // backed-up link that supersedes one drops nothing else. The batch above
-    // declared their pools.
-    for batch in page_batches.into_iter().chain(window_patches) {
+    // Each terminal page and each window or stack patch rides a batch of its
+    // own, so a backed-up link that supersedes one drops nothing else. The
+    // batch above declared their pools.
+    for batch in page_batches
+        .into_iter()
+        .chain(window_patches)
+        .chain(stack_patches)
+    {
         let _ = apc_tx.send(batch);
     }
 
@@ -2852,7 +2916,7 @@ fn emit_terminal_pool(
         return Vec::new();
     }
     if patches && held_by_stoatty {
-        let batches = row_patches(pool, &held.page, &held.spare);
+        let batches = row_patches(pool, 0, &held.page, &held.spare);
         state.record_content_version(pool, version);
         std::mem::swap(&mut held.page, &mut held.spare);
         return batches;
@@ -2875,11 +2939,11 @@ fn emit_terminal_pool(
     vec![batch]
 }
 
-/// The `fill_rows` batches that bring `held`, the page stoatty holds for
-/// `pool`, to `page`, one batch for each run of adjacent rows that differ.
+/// The `fill_rows` batches that bring `held`, page `index` that stoatty holds
+/// for `pool`, to `page`, one batch for each run of adjacent rows that differ.
 ///
 /// Both pages share one area, which is the grid each patch names.
-fn row_patches(pool: u32, held: &Buffer, page: &Buffer) -> Vec<Vec<u8>> {
+fn row_patches(pool: u32, index: u64, held: &Buffer, page: &Buffer) -> Vec<Vec<u8>> {
     let area = page.area;
     let width = usize::from(area.width);
     let differs = |row: u16| {
@@ -2901,7 +2965,7 @@ fn row_patches(pool: u32, held: &Buffer, page: &Buffer) -> Vec<Vec<u8>> {
 
         let patch = FillRowsCommand {
             pool,
-            index: 0,
+            index,
             first_row: first,
             rows: row - first,
             grid_rows: area.height,
@@ -3183,10 +3247,13 @@ pub(crate) fn editor_page_content_version(
 
 /// The cells version of every page of a changes view's pool.
 ///
-/// It folds in the frame's inputs, each excerpt's place in the stack and the
-/// versions of its text, folds, and diff, and the focused excerpt's selections
-/// where they paint a cell. A bare cursor that the terminal draws paints none,
-/// so a cursor move under it refills no page.
+/// It folds in the frame's inputs, and each excerpt's place in the stack and
+/// the versions of its text, folds, and diff. Which excerpt holds the focus,
+/// its selections, and its goto labels stay out, since a change of them reaches
+/// the pages it touches as row patches.
+///
+/// See also:
+/// - [`painted_selection`] for the stamp those patches follow.
 fn stack_page_version(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -3199,7 +3266,7 @@ fn stack_page_version(
     let mut hasher = DefaultHasher::new();
     (theme_epoch, paint_generation, region.width, region.height).hash(&mut hasher);
     crate::render::pane_cache::dial_bits(frame.diff_dials).hash(&mut hasher);
-    (is_focused, state.focused).hash(&mut hasher);
+    is_focused.hash(&mut hasher);
     if !is_focused {
         frame.inactive_dim.to_bits().hash(&mut hasher);
     }
@@ -3221,28 +3288,53 @@ fn stack_page_version(
         )
             .hash(&mut hasher);
     }
-
-    if is_focused
-        && let Some(excerpt) = state.focused_excerpt()
-        && let Some(editor) = editors.get(excerpt.editor_id)
-    {
-        let delegated = frame.terminal_cursor_editor == Some(excerpt.editor_id);
-        delegated.hash(&mut hasher);
-        if !(delegated && crate::render::pane_cache::bare_cursor(editor)) {
-            editor.selections.identity().hash(&mut hasher);
-        }
-        frame.goto_word_labels.hash(&mut hasher);
-    }
     hasher.finish()
 }
 
-/// Paint page `index` of a changes view's pool, as its cells followed by the
-/// decorations the terminal keeps on the page.
+/// The focused excerpt's selections as a page of a changes view's pool paints
+/// them, or `None` where they paint no cell.
+///
+/// An unfocused pane paints none. Neither does a focused one whose one
+/// selection is a bare cursor that the terminal draws, while no goto label
+/// shows. Otherwise the stamp moves with the focused excerpt, its selections,
+/// whether the terminal draws its cursor, and the labels.
+fn painted_selection(
+    state: &DiffChangesState,
+    editors: &SlotMap<EditorId, EditorState>,
+    is_focused: bool,
+    frame: crate::render::FrameCtx<'_>,
+) -> Option<u64> {
+    if !is_focused {
+        return None;
+    }
+    let excerpt = state.focused_excerpt()?;
+    let editor = editors.get(excerpt.editor_id)?;
+    let delegated = frame.terminal_cursor_editor == Some(excerpt.editor_id);
+    if delegated
+        && frame.goto_word_labels.is_none()
+        && crate::render::pane_cache::bare_cursor(editor)
+    {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    (
+        state.focused,
+        delegated,
+        editor.selections.identity(),
+        frame.goto_word_labels,
+    )
+        .hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Paint page `index` of a changes view's pool, and answer its cells and the
+/// scene of the decorations the terminal keeps on the page.
 ///
 /// The page shows what the live paint shows on the same rows, with the fade of
 /// an unfocused pane.
 #[allow(clippy::too_many_arguments)]
-fn render_stack_page(
+fn paint_pool_page(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
@@ -3251,7 +3343,7 @@ fn render_stack_page(
     frame: crate::render::FrameCtx<'_>,
     region: PoolRegionCommand,
     index: u64,
-) -> Vec<u8> {
+) -> (Buffer, ApcScene) {
     let area = Rect::new(0, 0, region.width, region.height);
     let mut page = crate::smooth_scroll::page_buffer(area, frame.theme);
     let mut scene = ApcScene::new();
@@ -3268,10 +3360,7 @@ fn render_stack_page(
         crate::smooth_scroll::page_top_row(index, region.height) as usize,
     );
     crate::render::pane::dim_unfocused_pane(area, is_focused, frame, &mut page);
-
-    let mut bytes = crate::render::serialize_buffer(&page);
-    bytes.extend_from_slice(scene.bytes());
-    bytes
+    (page, scene)
 }
 
 /// The cells version the walkthrough spotlight gives editor page `index` of a

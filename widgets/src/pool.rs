@@ -202,6 +202,21 @@ impl SmoothScrollState {
             .is_some_and(|entry| entry.region.is_some_and(|held| held.same_placement(region)))
     }
 
+    /// Whether the terminal holds page `index` of `pool` at the content
+    /// version that the pool's last emit carried.
+    ///
+    /// A caller that patches rows of a page it filled asks this first, since a
+    /// patch lands only on a page the terminal still buffers. A page outside
+    /// the buffered window and one a content change left stale answer false.
+    pub fn holds_page(&self, pool: u32, index: u64) -> bool {
+        self.pools.get(&pool).is_some_and(|entry| {
+            entry
+                .pages
+                .iter()
+                .any(|stamp| stamp.page == index && stamp.surface == entry.content_version)
+        })
+    }
+
     /// Declare `region` for a pool whose placement the terminal holds, and
     /// keep the pool's pages.
     ///
@@ -1493,6 +1508,48 @@ mod tests {
             Vec::new()
         });
         assert_eq!(entered, vec![2]);
+    }
+
+    /// A page counts as held while it sits in the buffered window at the
+    /// content version of the pool's last emit.
+    #[test]
+    fn holds_page_answers_the_buffered_pages_at_the_current_content() {
+        let mut state = SmoothScrollState::default();
+        let held = |state: &SmoothScrollState| {
+            (0..6)
+                .map(|page| state.holds_page(1, page))
+                .collect::<Vec<_>>()
+        };
+        emit_into(
+            &mut Vec::new(),
+            &mut state,
+            region(1, 20),
+            40.0,
+            0,
+            false,
+            |_| Vec::new(),
+        );
+        let filled = held(&state);
+        emit_into(
+            &mut Vec::new(),
+            &mut state,
+            region(1, 20),
+            40.0,
+            1,
+            false,
+            |_| Vec::new(),
+        );
+
+        // The change at rest refills page 2, under the composite, and leaves
+        // the rest of the window stale.
+        assert_eq!(
+            (filled, held(&state), state.holds_page(2, 2)),
+            (
+                vec![true, true, true, true, true, false],
+                vec![false, false, true, false, false, false],
+                false
+            ),
+        );
     }
 
     /// A resident pool composites at a rest on a whole row, so a content change

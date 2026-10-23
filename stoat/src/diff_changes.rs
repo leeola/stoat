@@ -88,6 +88,12 @@ pub(crate) struct DiffChangesState {
     /// wheel scroll leaves the cursor off screen as an editor's wheel does,
     /// while a cursor move that no key made still comes into view.
     pub followed_cursor: Option<(EditorId, Point)>,
+    /// The stack row of the focused excerpt's cursor as of the last emit to
+    /// stoatty, or `None` before one.
+    ///
+    /// A selection step patches the page that the cursor left, so that page
+    /// sheds the old selection even when no composite reads it.
+    pub last_cursor_row: Option<usize>,
 }
 
 /// One changed file in a changes view's stack.
@@ -177,6 +183,7 @@ impl Default for DiffChangesState {
             pending_landing: None,
             held_screen_row: None,
             followed_cursor: None,
+            last_cursor_row: None,
         }
     }
 }

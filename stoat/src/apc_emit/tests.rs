@@ -2639,6 +2639,7 @@ fn pool_verbs(bytes: &[u8], pool: u32) -> Vec<&'static str> {
             Command::PoolDrop(drop) if drop.pool == pool => Some("drop"),
             Command::PoolRegion(region) if region.pool == pool => Some("declare"),
             Command::Fill(fill) if fill.pool == pool => Some("fill"),
+            Command::FillRows(patch) if patch.pool == pool => Some("patch"),
             Command::Scroll(scroll) if scroll.pool == pool => Some("scroll"),
             Command::Reposition(jump) if jump.pool == pool => Some("reposition"),
             Command::PoolCursor(cursor) if cursor.pool == pool => Some("cursor"),
@@ -3122,6 +3123,198 @@ fn a_search_refills_the_composited_page() {
     h.type_keys("enter");
     h.stoat.render();
     assert_eq!(pool_fills(&emit_raw(&mut h, &mut rx), pool), [0]);
+}
+
+/// One file of `lines` lines, each changed, as `(head, working)` texts, so its
+/// excerpt shows one paired row per line.
+fn changed_lines(lines: usize) -> (String, String) {
+    let head = (1..=lines).map(|line| format!("{line}\n")).collect();
+    let working = (1..=lines).map(|line| format!("L{line}\n")).collect();
+    (head, working)
+}
+
+/// A focused changes view over `lines` changed lines, emitted once, with a
+/// select-mode selection one character wide painted and emitted.
+fn selecting_stack(
+    lines: usize,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    u32,
+) {
+    let (head, working) = changed_lines(lines);
+    let (mut h, mut rx, pool) = resident_stack(&[("a.txt", &head, &working)], MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    h.type_keys("v l");
+    h.stoat.render();
+    emit_raw(&mut h, &mut rx);
+    (h, rx, pool)
+}
+
+/// A select-mode step inside the window patches the two rows whose cells the
+/// selection changed, and fills no page.
+#[test]
+fn a_selection_step_inside_the_window_patches_its_two_rows() {
+    let (mut h, mut rx, pool) = selecting_stack(30);
+    let before = h.stoat.render();
+    h.type_keys("j");
+    let after = h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let content = focused_content(&h);
+    let row = |buf: &Buffer, row: u16| {
+        let rect = Rect {
+            y: content.y + row,
+            height: 1,
+            ..content
+        };
+        buffer_cells(buf, rect)
+    };
+    let changed: Vec<u16> = (0..content.height)
+        .filter(|&r| row(&before, r) != row(&after, r))
+        .collect();
+    assert_eq!(
+        (
+            changed,
+            pool_patches(&bytes, pool),
+            pool_fills(&bytes, pool)
+        ),
+        (vec![1, 2], vec![(1, 2)], vec![]),
+        "the live rows the step changed, the patches, and the fills",
+    );
+}
+
+/// A select-mode step that scrolls the stack ships the scroll, the cursor
+/// anchor, and patches of the two rows it changed, and fills no page.
+///
+/// The step that puts the selection's head on the first row of page 1 changes
+/// the last row of page 0 too, so each page takes a patch of its own.
+#[test]
+fn a_selection_step_that_scrolls_patches_its_two_rows() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx, pool) = selecting_stack(60);
+    let rows = focused_content(&h).height;
+    let crossing = (0..60).find_map(|_| {
+        h.type_keys("j");
+        h.stoat.render();
+        let bytes = emit_raw(&mut h, &mut rx);
+        let state = h.stoat.active_workspace().focused_diff_changes();
+        let head = state.expect("the changes view").last_cursor_row;
+        (head == Some(usize::from(rows))).then_some(bytes)
+    });
+
+    let bytes = crossing.expect("a step puts the head on page 1");
+    let patches: Vec<(u64, u16, u16)> = command::decode_stream(&bytes)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::FillRows(patch) if patch.pool == pool => {
+                Some((patch.index, patch.first_row, patch.rows))
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (pool_verbs(&bytes, pool), patches),
+        (
+            vec!["scroll", "cursor", "patch", "patch"],
+            vec![(0, rows - 1, 1), (1, 0, 1)]
+        ),
+    );
+}
+
+/// A bare cursor that the terminal draws steps into the next excerpt and fills
+/// no page, since the focused excerpt paints no cell either side.
+#[test]
+fn a_bare_step_into_the_next_excerpt_fills_nothing() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    let steps: Vec<(usize, Vec<u64>)> = (0..6)
+        .map(|_| {
+            h.type_action("DiffChangesNext()");
+            h.stoat.render();
+            let fills = pool_fills(&emit_raw(&mut h, &mut rx), pool);
+            let state = h.stoat.active_workspace().focused_diff_changes();
+            (state.expect("the changes view").focused, fills)
+        })
+        .collect();
+    assert_eq!(
+        (
+            steps.iter().any(|(focused, _)| *focused == 1),
+            steps.iter().all(|(_, fills)| fills.is_empty())
+        ),
+        (true, true),
+        "the focused excerpt and the fills of each step: {steps:?}",
+    );
+}
+
+/// A select-mode jump patches the page its cursor left while the terminal
+/// holds that page, and patches none once the page leaves the window.
+///
+/// The first jump moves the composite off page 0, which the window still
+/// holds. The second moves the window off page 2, where the head sat.
+#[test]
+fn a_selection_jump_patches_the_page_it_left_while_it_is_held() {
+    let (mut h, mut rx, pool) = selecting_stack(200);
+    let mut jump = |keys: &str| {
+        h.type_keys(keys);
+        h.stoat.render();
+        let bytes = emit_raw(&mut h, &mut rx);
+        let state = h.stoat.active_workspace().focused_diff_changes();
+        let scroll = state.expect("the changes view").scroll;
+        let mut pages: Vec<u64> = pool_patches_by_page(&bytes, pool);
+        pages.dedup();
+        (scroll, pages)
+    };
+    let (near, near_pages) = jump("4 5 j");
+    let (far, far_pages) = jump("1 0 0 j");
+
+    let height = focused_content(&h).height;
+    assert_eq!(
+        (
+            composited_pages(near as f32, height).contains(&0),
+            near_pages.contains(&0),
+            composited_pages(far as f32, height).contains(&2),
+            far_pages
+        ),
+        (false, true, false, vec![]),
+        "the scrolls {near} and {far}, and the pages patched after the first jump {near_pages:?}",
+    );
+}
+
+/// The page index of each row patch that `bytes` gives pool `pool`, in wire
+/// order.
+fn pool_patches_by_page(bytes: &[u8], pool: u32) -> Vec<u64> {
+    use stoatty_protocol::command::Command;
+
+    command::decode_stream(bytes)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::FillRows(patch) if patch.pool == pool => Some(patch.index),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A page that enters the window after a selection change fills whole with
+/// that selection, so no patch follows it under the composite.
+#[test]
+fn a_page_entering_after_a_selection_change_fills_whole() {
+    let (mut h, mut rx, pool) = selecting_stack(200);
+    action_handlers::diff_changes::diff_changes_scroll(&mut h.stoat, 150);
+    h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let fills = pool_fills(&bytes, pool);
+    let shown = composited_pages(150.0, focused_content(&h).height);
+    assert_eq!(
+        (
+            shown.clone().all(|page| fills.contains(&page)),
+            pool_patches(&bytes, pool)
+        ),
+        (true, vec![]),
+        "pages {shown:?} under the composite, filled {fills:?}",
+    );
 }
 
 /// A rebase screen paints over the focused pane alone. The terminal under it
