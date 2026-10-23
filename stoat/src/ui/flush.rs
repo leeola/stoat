@@ -7,13 +7,24 @@
 //! a single row of the grid. [`ShownFrame`] keeps the last flushed frame and
 //! diffs the next one against it a row at a time, so a row that did not change
 //! costs one comparison and is never copied.
+//!
+//! [`FrameBackend`] holds a frame's bytes until the flush that ends the frame,
+//! so the frame reaches the terminal in one write.
 
+use crossterm::{
+    cursor::{Hide, MoveTo, Show},
+    queue,
+};
 use ratatui::{
-    backend::Backend,
+    backend::{Backend, ClearType, CrosstermBackend, WindowSize},
     buffer::{Buffer, Cell, CellDiffOption, CellWidth},
-    layout::Rect,
+    layout::{Position, Rect, Size},
     style::{Color, Modifier},
     Terminal,
+};
+use std::{
+    io::{self, BufWriter, Write},
+    thread,
 };
 
 /// Modifiers that paint a blank cell, so a wide cell that carried one leaves it
@@ -23,6 +34,9 @@ const VISIBLE_ON_BLANK: Modifier = Modifier::REVERSED
     .union(Modifier::SLOW_BLINK)
     .union(Modifier::RAPID_BLINK)
     .union(Modifier::CROSSED_OUT);
+
+/// The bytes [`FrameBackend`] holds before they go out in one write.
+const FRAME_WRITE_CAPACITY: usize = 64 * 1024;
 
 /// The frame the terminal shows, as the cells last flushed to it.
 ///
@@ -44,6 +58,10 @@ impl ShownFrame {
     /// A frame of the shown frame's size, on a terminal of that size, writes
     /// only the cells that differ, as ratatui's own diff picks them. Any other
     /// frame clears the screen and writes every cell, clamped to the terminal.
+    ///
+    /// A frame that writes only the cells that differ leaves its bytes in the
+    /// backend. The caller's flush sends them with what the caller writes after
+    /// them.
     pub(super) fn flush<B: Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
@@ -68,7 +86,6 @@ impl ShownFrame {
                 },
                 None => terminal.hide_cursor()?,
             }
-            terminal.backend_mut().flush()?;
 
             let width = usize::from(frame.area.width);
             for row in changed {
@@ -109,6 +126,109 @@ impl ShownFrame {
         self.buffer = None;
         let size = terminal.size()?;
         terminal.resize(size.into())
+    }
+}
+
+/// The terminal backend the UI thread draws through, which holds a frame's
+/// bytes until the flush that ends the frame.
+///
+/// The bytes collect in a buffer of [`FRAME_WRITE_CAPACITY`], so a frame
+/// reaches the terminal in one write per buffer rather than one per kilobyte.
+/// [`CrosstermBackend`] flushes its writer after each cursor command, so this
+/// backend queues those commands and leaves every flush to its caller.
+///
+/// A thread that panics drops what the buffer holds. The panic hook has already
+/// restored the terminal by then, and the bytes belong to the alternate screen
+/// that the hook left.
+pub(super) struct FrameBackend<W: Write>(CrosstermBackend<BufWriter<DiscardOnPanic<W>>>);
+
+impl<W: Write> FrameBackend<W> {
+    pub(super) fn new(out: W) -> Self {
+        Self(CrosstermBackend::new(BufWriter::with_capacity(
+            FRAME_WRITE_CAPACITY,
+            DiscardOnPanic(out),
+        )))
+    }
+}
+
+impl<W: Write> Write for FrameBackend<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Write::flush(&mut self.0)
+    }
+}
+
+impl<W: Write> Backend for FrameBackend<W> {
+    type Error = io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.0.draw(content)
+    }
+
+    fn append_lines(&mut self, n: u16) -> io::Result<()> {
+        self.0.append_lines(n)
+    }
+
+    fn hide_cursor(&mut self) -> io::Result<()> {
+        queue!(self.0, Hide)
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        queue!(self.0, Show)
+    }
+
+    fn get_cursor_position(&mut self) -> io::Result<Position> {
+        self.0.get_cursor_position()
+    }
+
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
+        let Position { x, y } = position.into();
+        queue!(self.0, MoveTo(x, y))
+    }
+
+    fn clear(&mut self) -> io::Result<()> {
+        self.0.clear()
+    }
+
+    fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
+        self.0.clear_region(clear_type)
+    }
+
+    fn size(&self) -> io::Result<Size> {
+        self.0.size()
+    }
+
+    fn window_size(&mut self) -> io::Result<WindowSize> {
+        self.0.window_size()
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Backend::flush(&mut self.0)
+    }
+}
+
+/// A writer that drops what it is given while its thread panics.
+///
+/// [`FrameBackend`] buffers through it, so the unwind that drops a half-written
+/// frame sends none of it.
+struct DiscardOnPanic<W>(W);
+
+impl<W: Write> Write for DiscardOnPanic<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if thread::panicking() {
+            return Ok(bytes.len());
+        }
+        self.0.write(bytes)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
     }
 }
 
@@ -329,11 +449,15 @@ fn copy_clamped(dst: &mut Buffer, src: &Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::{
-        backend::{ClearType, TestBackend, WindowSize},
-        layout::{Position, Size},
+    use ratatui::backend::TestBackend;
+    use std::{
+        cell::RefCell,
+        convert::Infallible,
+        mem,
+        num::NonZeroU16,
+        panic::{self, AssertUnwindSafe},
+        rc::Rc,
     };
-    use std::{convert::Infallible, mem, num::NonZeroU16};
 
     /// One call a flush made on the terminal.
     #[derive(Debug, PartialEq)]
@@ -452,7 +576,8 @@ mod tests {
     }
 
     /// A frame writes the cells that differ from the frame flushed before it,
-    /// and the cursor, and nothing of the rows it left alone.
+    /// and the cursor, and nothing of the rows it left alone. It leaves the
+    /// flush to its caller.
     #[test]
     fn a_frame_writes_only_what_differs_from_the_frame_before() {
         let mut terminal = recorder(3, 2);
@@ -461,17 +586,12 @@ mod tests {
 
         assert_eq!(
             flush(&mut shown, &mut terminal, &["abc", "dxf"], Some((1, 1))),
-            [
-                draw(&[(1, 1, "x")]),
-                Op::ShowCursor,
-                Op::MoveCursor(1, 1),
-                Op::Flush
-            ],
+            [draw(&[(1, 1, "x")]), Op::ShowCursor, Op::MoveCursor(1, 1)],
             "one changed cell",
         );
         assert_eq!(
             flush(&mut shown, &mut terminal, &["abz", "dxf"], None),
-            [draw(&[(2, 0, "z")]), Op::HideCursor, Op::Flush],
+            [draw(&[(2, 0, "z")]), Op::HideCursor],
             "the second row holds what the frame before wrote",
         );
         terminal
@@ -579,6 +699,76 @@ mod tests {
             .backend()
             .screen
             .assert_buffer_lines(["ab ", "   "]);
+    }
+
+    /// A writer that counts the writes it takes and keeps their bytes, shared
+    /// with the test that reads them.
+    #[derive(Clone, Default)]
+    struct Tally(Rc<RefCell<(usize, Vec<u8>)>>);
+
+    impl Write for Tally {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let mut tally = self.0.borrow_mut();
+            tally.0 += 1;
+            tally.1.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Put a frame of two changed rows on `backend`, with each cursor command.
+    fn queue_frame<B: Backend>(backend: &mut B) -> Result<(), B::Error> {
+        let shown = Buffer::with_lines(["abc", "def"]);
+        let frame = Buffer::with_lines(["xbc", "dyf"]);
+        backend.draw(FrameDiff::new(&shown, &frame, &mut Vec::new()))?;
+        backend.hide_cursor()?;
+        backend.show_cursor()?;
+        backend.set_cursor_position(Position::new(1, 1))
+    }
+
+    /// A frame reaches the terminal in one write, at the flush that ends it,
+    /// with the bytes the crossterm backend writes unbuffered.
+    #[test]
+    fn a_frame_reaches_the_terminal_in_one_write_at_its_flush() {
+        let (buffered, unbuffered) = (Tally::default(), Tally::default());
+        let mut backend = FrameBackend::new(buffered.clone());
+        queue_frame(&mut backend).unwrap();
+        let before_flush = buffered.0.borrow().0;
+        Backend::flush(&mut backend).unwrap();
+        queue_frame(&mut CrosstermBackend::new(unbuffered.clone())).unwrap();
+
+        let (writes, bytes) = buffered.0.take();
+        assert_eq!(
+            (before_flush, writes, bytes),
+            (0, 1, unbuffered.0.take().1),
+            "nothing before the flush, then the frame's bytes in one write",
+        );
+    }
+
+    /// The bytes a frame left in the buffer of a thread that panics never reach
+    /// the terminal, and a backend that drops in the normal way sends them.
+    #[test]
+    fn a_panicking_thread_drops_the_bytes_its_frame_buffered() {
+        let write_frame = |tally: &Tally| {
+            let mut backend = FrameBackend::new(tally.clone());
+            backend.write_all(b"frame").unwrap();
+            backend
+        };
+        let (panicked, dropped) = (Tally::default(), Tally::default());
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            let _backend = write_frame(&panicked);
+            panic!("a panic in the middle of a frame");
+        }));
+        drop(write_frame(&dropped));
+
+        assert_eq!(
+            (unwound.is_err(), panicked.0.take().1, dropped.0.take().1),
+            (true, Vec::new(), b"frame".to_vec()),
+            "the panic drops the frame, and a plain drop sends it",
+        );
     }
 
     /// The row diff writes what ratatui's whole-grid diff writes, over random

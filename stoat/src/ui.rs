@@ -22,20 +22,23 @@ use crate::{
     tty, vt_input,
 };
 use crossterm::{
+    cursor::Show,
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
     },
     execute, queue,
-    terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen},
+    terminal::{
+        enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen,
+    },
 };
-use flush::ShownFrame;
+use flush::{FrameBackend, ShownFrame};
 use futures::FutureExt;
-use ratatui::{buffer::Buffer, DefaultTerminal};
+use ratatui::{buffer::Buffer, Terminal};
 #[cfg(feature = "perf")]
 use std::time::Instant;
 use std::{
     backtrace::Backtrace,
-    io::{self, PipeReader, Read, Write},
+    io::{self, PipeReader, Read, Stdout, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     panic,
     sync::{Arc, Once},
@@ -94,6 +97,10 @@ pub fn install_panic_hook() {
             let _ = execute!(io::stdout(), DisableMouseCapture);
             let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();
+            // When the UI thread's terminal drops, it shows a hidden cursor
+            // through its frame buffer, and a panicking thread discards that
+            // buffer. After a main-thread panic, that terminal never drops.
+            let _ = execute!(io::stdout(), Show);
 
             let panic_message = match info.payload().downcast_ref::<&'static str>() {
                 Some(message) => *message,
@@ -151,7 +158,7 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
             .map_err(io::Error::other)?;
 
         rt.block_on(async move {
-            let mut terminal = ratatui::init();
+            let mut terminal = init_terminal().expect("failed to initialize terminal");
             // Without this a paste arrives as its characters, which normal mode
             // would run as commands. Bracketed, it arrives whole as one event.
             execute!(io::stdout(), EnableBracketedPaste)?;
@@ -159,6 +166,10 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
                 execute!(io::stdout(), EnableMouseCapture)?;
             }
             let result = run(&mut channels, &mut terminal, mouse_captured).await;
+            // When an error ends the loop in the middle of a frame, the frame's
+            // bytes go out here, onto the alternate screen, and not after the
+            // restore below.
+            let _ = terminal.backend_mut().flush();
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
@@ -169,9 +180,20 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
     })
 }
 
+/// Raw mode, the alternate screen, and a terminal whose backend holds each
+/// frame's bytes until the frame's flush.
+///
+/// This is what [`ratatui::try_init`] does, over [`FrameBackend`] and without
+/// ratatui's own panic hook, which [`install_panic_hook`] makes redundant.
+fn init_terminal() -> io::Result<Terminal<FrameBackend<Stdout>>> {
+    enable_raw_mode()?;
+    execute!(io::stdout(), EnterAlternateScreen)?;
+    Terminal::new(FrameBackend::new(io::stdout()))
+}
+
 async fn run(
     channels: &mut UiChannels,
-    terminal: &mut DefaultTerminal,
+    terminal: &mut Terminal<FrameBackend<Stdout>>,
     mouse_captured: bool,
 ) -> io::Result<()> {
     let UiChannels {
@@ -272,6 +294,9 @@ async fn run(
             // alternate screen is back lands on the shell's screen with nothing
             // to redraw it.
             Some(ctl) = ui_rx.recv() => {
+                // These arms write to stdout directly, so the bytes that wait in
+                // the frame buffer go out first.
+                terminal.backend_mut().flush()?;
                 match ctl {
                     // No synchronized-update wrapper. The remote frames its own,
                     // and a local wrapper closing mid-frame tears it.
@@ -302,7 +327,7 @@ async fn run(
                 // and APC batch below commit as one frame. Queued rather than
                 // flushed, so the frame's own flush carries it ahead of the cell
                 // diff in the same write.
-                queue!(io::stdout(), BeginSynchronizedUpdate)?;
+                queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
                 // Clone the latest frame's Arc out of the watch and drop the
                 // borrow before drawing, so the slow terminal flush never holds
                 // the lock the render thread needs to publish the next frame.
@@ -338,17 +363,16 @@ async fn run(
                 if let Some(bytes) = undercurl
                     && !bytes.is_empty()
                 {
-                    let mut stdout = io::stdout();
-                    stdout.write_all(bytes)?;
-                    stdout.flush()?;
+                    terminal.backend_mut().write_all(bytes)?;
                 }
                 // Write any stoatty APC byte batches the app pushed for this
                 // frame to the same stdout, after the grid frame so the pool
                 // composites over the content just drawn.
-                drain_apc(None, apc_rx)?;
+                drain_apc(None, apc_rx, terminal.backend_mut())?;
                 // Close the synchronized update so the cell diff, undercurl, and
-                // APC batch commit as one atomic frame.
-                execute!(io::stdout(), EndSynchronizedUpdate)?;
+                // APC batch commit as one atomic frame. Its flush sends the
+                // whole frame, which the backend held until now.
+                execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
                 // The frame's bytes are out, so stop the input-to-flush clock.
                 #[cfg(feature = "perf")]
                 if let Some(started) = input_time {
@@ -364,11 +388,10 @@ async fn run(
                 let Some(batch) = batch else { break };
                 // Wrap the batch, and any it drains alongside it, in a
                 // synchronized update so an async scene re-emit or multi-KB pool
-                // fill commits atomically. The drain flush carries the ESU.
-                queue!(io::stdout(), BeginSynchronizedUpdate)?;
-                drain_apc(Some(batch), apc_rx)?;
-                queue!(io::stdout(), EndSynchronizedUpdate)?;
-                io::stdout().flush()?;
+                // fill commits atomically. The ESU's flush carries the batches.
+                queue!(terminal.backend_mut(), BeginSynchronizedUpdate)?;
+                drain_apc(Some(batch), apc_rx, terminal.backend_mut())?;
+                execute!(terminal.backend_mut(), EndSynchronizedUpdate)?;
             }
         }
     }
@@ -753,7 +776,9 @@ fn forward_event(
 }
 
 /// Write `first`, then every APC byte batch already queued on `apc_rx`, to
-/// stdout, and flush if anything went out.
+/// `out`.
+///
+/// The caller flushes `out`, so the batches leave with the frame they join.
 ///
 /// Drains only the currently-queued batches. A batch arriving mid-drain is
 /// handled on the next loop wake.
@@ -761,7 +786,11 @@ fn forward_event(
 /// Ordered, and lossless for everything whose content this cannot reason
 /// about. The exception is a pool fill superseded by a later queued one for the
 /// same page, which [`supersede_stale_fills`] drops.
-fn drain_apc(first: Option<Vec<u8>>, apc_rx: &mut UnboundedReceiver<Vec<u8>>) -> io::Result<()> {
+fn drain_apc(
+    first: Option<Vec<u8>>,
+    apc_rx: &mut UnboundedReceiver<Vec<u8>>,
+    out: &mut impl Write,
+) -> io::Result<()> {
     let mut queued: Vec<Vec<u8>> = first.into_iter().collect();
     while let Ok(batch) = apc_rx.try_recv() {
         queued.push(batch);
@@ -772,11 +801,10 @@ fn drain_apc(first: Option<Vec<u8>>, apc_rx: &mut UnboundedReceiver<Vec<u8>>) ->
 
     supersede_stale_fills(&mut queued);
 
-    let mut stdout = io::stdout();
     for batch in &queued {
-        stdout.write_all(batch)?;
+        out.write_all(batch)?;
     }
-    stdout.flush()
+    Ok(())
 }
 
 /// Drop each queued pool fill or row patch that a later whole fill of the same
