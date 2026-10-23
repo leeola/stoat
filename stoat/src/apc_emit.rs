@@ -12,11 +12,13 @@
 //! the pages that moved.
 
 use crate::{
-    action_handlers::view,
+    action_handlers::{search, view},
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
+    buffer_registry::BufferRegistry,
     commit_list::Preview,
+    diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::{highlights::HighlightEndpoints, DisplayPoint, DisplaySnapshot, PaintVersion},
-    editor_state::{EditorId, ScrollGlide},
+    editor_state::{EditorId, EditorState, ScrollGlide},
     input_view::InputView,
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, PaneId, Placement, View},
@@ -29,7 +31,12 @@ use crate::{
     term_session::{TermId, TermSession},
     workspace::{diff, Workspace, WorkspaceId},
 };
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+};
+use slotmap::SlotMap;
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
@@ -67,6 +74,10 @@ const POOL_DIM_PROTOCOL: u32 = 11;
 /// scene lanes that changed. Under an older terminal any change sends the
 /// whole scene behind a reset.
 const LANE_PROTOCOL: u32 = 12;
+
+/// The protocol version that keeps a resident pool composited at rest. Under
+/// an older terminal a changes view paints its stack on the live grid.
+const RESIDENT_POOL_PROTOCOL: u32 = 14;
 
 /// A split pane showing a terminal or an agent, as the terminal-kind pool that
 /// draws it at the terminal font size.
@@ -132,6 +143,7 @@ pub(crate) struct WindowPage {
 pub(crate) enum PoolOwner {
     Editor(WorkspaceId, EditorId),
     Terminal(WorkspaceId, TermId),
+    DiffChanges(WorkspaceId, DiffChangesId),
 }
 
 /// Flush the frame's APC decoration scene to the channel, when it changed.
@@ -651,6 +663,11 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
 /// the region and refills the page window. A terminal pane keeps its pool
 /// beside those screens.
 ///
+/// Under a terminal that keeps a resident pool composited at rest, each split
+/// changes view pools its stack as one. Its pages paint here, and its cursor
+/// anchor follows every move of the cursor, since the terminal draws the
+/// cursor there at rest too.
+///
 /// A pool that took the cursor anchor is released with `pool_cursor_release` in
 /// the first pass after its pane stops being the focused editor.
 ///
@@ -673,18 +690,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .is_some_and(|(at, _)| stoat.executor.now() < *at);
     stoat.smooth_scroll.set_geometry_unsettled(unsettled);
 
-    // The commits list, the changes view, and the rebase, reword, conflict, and
-    // commit message screens retire every editor and modal pool, and the editors
-    // beside them paint on the live grid. None of these screens covers the whole
-    // window. The commits list and the changes view are pane views, and the
-    // other screens paint over the focused pane alone, so a terminal beside one
-    // keeps its pool. The diff screen renders in the real editor pool, so it is
-    // not an overlay.
+    // The commits list and the rebase, reword, conflict, and commit message
+    // screens retire every editor and modal pool, and the editors beside them
+    // paint on the live grid. None of these screens covers the whole window.
+    // The commits list is a pane view, and the other screens paint over the
+    // focused pane alone, so a terminal or a changes view beside one keeps its
+    // pool. The diff screen renders in the real editor pool, and the changes
+    // view pools its own stack, so neither is an overlay.
     let overlay = matches!(
         crate::keymap_state::view_predicate(stoat.active_workspace()),
-        Some(
-            "commits" | "diff_changes" | "rebase" | "reword" | "rebase_conflict" | "commit_message"
-        )
+        Some("commits" | "rebase" | "reword" | "rebase_conflict" | "commit_message")
     );
     let panes = if overlay {
         Vec::new()
@@ -907,11 +922,24 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         },
     };
 
+    // A changes view keeps its stack composited at rest as a resident pool,
+    // which a terminal before that protocol does not know, and its live grid
+    // shows the stack instead. Like a terminal pane, the pool stays beside an
+    // overlay screen and gives way only under one.
+    let stack_panes = match stoat.stoatty_protocol < RESIDENT_POOL_PROTOCOL {
+        true => Vec::new(),
+        false => {
+            let covered = crate::render::overlay_pane(stoat.active_workspace());
+            diff_changes_pool_panes(stoat, covered)
+        },
+    };
+
     let mut out = Vec::new();
-    drop_reowned_pools(stoat, &mut out, &panes, &terminal_panes);
+    drop_reowned_pools(stoat, &mut out, &panes, &terminal_panes, &stack_panes);
 
     let mut active: Vec<u32> = panes.iter().map(|(pool, _, _)| *pool).collect();
     active.extend(terminal_panes.iter().map(|pane| pane.region.pool));
+    active.extend(stack_panes.iter().map(|(pool, _, _)| *pool));
     // Each detached pane also keeps a one-row status pool alive.
     for (pool, _, region) in &panes {
         if region.window != 0 {
@@ -1018,6 +1046,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // Found before the closures below borrow `stoat` for the rest of the emit,
     // because the search measures the focused editor through a mutable borrow.
     let spotlight = walkthrough::spotlight_of(stoat);
+    // A changes view's pages paint under the live frame's search query, which
+    // only a search prompt types. Found here for the same reason, since the
+    // prompt editor's snapshot takes the whole app mutably.
+    let typed_query = match !stack_panes.is_empty() && stoat.search_input.is_some() {
+        true => search::prompt_display(stoat).map(|prompt| prompt.text),
+        false => None,
+    };
+    let search_smart_case = search::smart_case(stoat);
+    let preview_dials = crate::render::commits::PreviewDials::from_stoat(stoat);
+    let paint_generation = stoat.paint_generation;
     let syntax_highlight = stoat.syntax_highlight;
     // What each editor actually paints with, which is what a page's hash has to
     // carry. The diff toggle only subtracts, and only from a diff view.
@@ -1339,6 +1377,151 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 });
             }
         }
+    }
+
+    // A changes view's pages paint here on the run loop, since the stack paint
+    // lays every excerpt's editor out. The pool is resident, so the terminal
+    // shows its pages at rest too, and no live grid shows a change sooner.
+    let mut stack_anchor: Option<(u32, u64, u16)> = None;
+    if !stack_panes.is_empty() {
+        let focused_index = matches!(ws.focus, FocusTarget::SplitPane)
+            .then(|| ws.panes.pane(ws.panes.focus()).index);
+        let no_pairs = std::collections::HashMap::new();
+        // The fields the stack paint reads take the live frame's values, so a
+        // page shows what the live paint shows on its rows. A page holds no
+        // status row or chrome, so the rest stay empty.
+        let frame = crate::render::FrameCtx {
+            workspace_name: "",
+            workspace_root: &ws.git_root,
+            mode: &stoat.frame_mode,
+            screen: None,
+            theme,
+            commits_split: None,
+            preview_dials,
+            diff_changes_building: false,
+            chrome: &stoat
+                .chrome
+                .as_ref()
+                .expect("refresh_chrome ran at the top of the emit")
+                .1,
+            pending_count: None,
+            recording_register: None,
+            held_buffers: &[],
+            lsp_status_open: false,
+            lsp_progress_entries: &[],
+            spinner_phase: 0,
+            lsp_servers: &[],
+            diff_warm_busy: false,
+            repo_change_counts: None,
+            hunk_position: None,
+            diff_base: None,
+            diff_sides: ("", ""),
+            pair_sides: &no_pairs,
+            lsp_pending: None,
+            lsp_message: None,
+            status_message: None,
+            goto_word_labels: stoat.pending_goto_word.as_ref(),
+            mode_label: ("", Color::Reset),
+            diagnostics: &stoat.diagnostics,
+            search_query: typed_query
+                .as_deref()
+                .or(stoat.last_search.as_ref().map(|last| last.query.as_str())),
+            search_smart_case,
+            status_prompt: None,
+            terminal_cursor_editor: focused_editor,
+            line_numbers,
+            wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
+            wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
+            inactive_dim,
+            diff_dials,
+            images_capable: false,
+            minimap_enabled: false,
+            minimap_chrome: None,
+            minimap_band: None,
+            badge_cover: None,
+            hover_cell: None,
+            home: None,
+            #[cfg(feature = "perf")]
+            perf: None,
+        };
+
+        for (_, id, region) in &stack_panes {
+            let region = *region;
+            let Some(state) = ws.diff_changes_views.get_mut(*id) else {
+                continue;
+            };
+            let is_focused = focused_index == Some(region.pool);
+            let content_rows = diff_changes::layout_stack(state, &mut ws.editors) as u64;
+            let cells = stack_page_version(
+                state,
+                &mut ws.editors,
+                region,
+                is_focused,
+                frame,
+                theme_epoch,
+                paint_generation,
+            );
+
+            let state = &*state;
+            let editors = &mut ws.editors;
+            pool::emit_pages_into(
+                &mut out,
+                &mut stoat.smooth_scroll,
+                region,
+                state.scroll as f32,
+                content_rows,
+                PageVersions {
+                    cells,
+                    decorations: 0,
+                },
+                |_| 0,
+                false,
+                |index| {
+                    render_stack_page(
+                        state,
+                        editors,
+                        &ws.buffers,
+                        is_focused,
+                        fallback_style,
+                        frame,
+                        region,
+                        index,
+                    )
+                },
+            );
+
+            let anchored = state
+                .focused_excerpt()
+                .map(|excerpt| excerpt.editor_id)
+                .filter(|editor_id| is_focused && focused_editor == Some(*editor_id));
+            if let Some(editor_id) = anchored
+                && let Some(row) = diff_changes::cursor_stack_row(state, &mut ws.editors)
+                && let Some((col, _)) = ws
+                    .editors
+                    .get(editor_id)
+                    .and_then(|editor| editor.cursor_screen_cell)
+            {
+                stack_anchor = Some((region.pool, row as u64, col));
+            }
+        }
+    }
+
+    // A resident pool composites at rest, and the terminal draws the cursor at
+    // the anchor of every pool it composites. So the focused changes view
+    // ships each move of its anchor, not only a glide's, and an idle frame
+    // ships nothing. An anchor that goes away falls to the release below.
+    if stack_anchor != stoat.stack_cursor {
+        if let Some((pool, row, col)) = stack_anchor {
+            stoatty_protocol::command::encode_pool_cursor_into(
+                &mut out,
+                &stoatty_protocol::command::PoolCursorCommand { pool, row, col },
+            );
+        }
+        stoat.stack_cursor = stack_anchor;
+    }
+    let focused_pool = focused_pool.or(stack_anchor.map(|(pool, _, _)| pool));
+    if let Some((pool, _, _)) = stack_anchor {
+        anchored_pool = Some(pool);
     }
 
     // Ship the focused detached pane's cursor when it moved. An idle frame,
@@ -2297,13 +2480,15 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
 /// view, because [`emit_window_content`] keeps the same id active for the
 /// content pool of the other view.
 ///
-/// The cursor record of a focused detached pane names its pool. A drop clears
-/// that record, so the pass ships the cursor to the declared pool.
+/// The cursor records of a focused detached pane and of a focused changes view
+/// name their pools. A drop clears such a record, so the pass ships the cursor
+/// to the declared pool.
 fn drop_reowned_pools(
     stoat: &mut Stoat,
     out: &mut Vec<u8>,
     panes: &[(u32, EditorId, PoolRegionCommand)],
     terminal_panes: &[TerminalPoolPane],
+    stack_panes: &[(u32, DiffChangesId, PoolRegionCommand)],
 ) {
     let workspace = stoat.active_workspace;
     let owners: std::collections::BTreeMap<u32, PoolOwner> = panes
@@ -2315,6 +2500,11 @@ fn drop_reowned_pools(
                 PoolOwner::Terminal(workspace, pane.term_id),
             )
         }))
+        .chain(
+            stack_panes
+                .iter()
+                .map(|(pool, id, _)| (*pool, PoolOwner::DiffChanges(workspace, *id))),
+        )
         .collect();
 
     let held = std::mem::take(&mut stoat.pool_owners);
@@ -2333,6 +2523,12 @@ fn drop_reowned_pools(
             .is_some_and(|(cursor_pool, _, _)| cursor_pool == pool)
         {
             stoat.aux_cursor = None;
+        }
+        if stoat
+            .stack_cursor
+            .is_some_and(|(cursor_pool, _, _)| cursor_pool == pool)
+        {
+            stoat.stack_cursor = None;
         }
     }
 
@@ -2394,6 +2590,114 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
             ))
         })
         .collect()
+}
+
+/// Every visible split pane showing a changes view, as `(pool id, view id,
+/// pool region)`.
+///
+/// The region is the pane's content area less its minimap strip, the rect the
+/// stack paints into. It is resident, so the terminal keeps the stack's pages
+/// composited at rest. A view with no excerpts pools nothing, since the line of
+/// text it paints is no stack row. Neither does the pane that `covered` names,
+/// which an overlay screen paints over.
+pub(crate) fn diff_changes_pool_panes(
+    stoat: &Stoat,
+    covered: Option<PaneId>,
+) -> Vec<(u32, DiffChangesId, PoolRegionCommand)> {
+    let ws = stoat.active_workspace();
+    ws.panes
+        .split_panes()
+        .filter_map(|(pane_id, pane)| {
+            if pane.placement != Placement::Split || covered == Some(pane_id) {
+                return None;
+            }
+            let View::DiffChanges(id) = pane.view else {
+                return None;
+            };
+            let state = ws.diff_changes_views.get(id)?;
+            if state.excerpts.is_empty() {
+                return None;
+            }
+
+            let (content, _) = crate::render::layout::split_pane_status(pane.area);
+            let strip_cols = state.minimap_rect.map_or(0, |rect| rect.width);
+            let width = content.width.saturating_sub(strip_cols);
+            if width == 0 || content.height == 0 {
+                return None;
+            }
+
+            Some((
+                pane.index,
+                id,
+                PoolRegionCommand {
+                    pool: pane.index,
+                    top: content.y,
+                    left: content.x,
+                    width,
+                    height: content.height,
+                    window: 0,
+                    kind: PoolKind::Grid,
+                    dim: 0,
+                    resident: true,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The rects where resident pools composite over the live grid this frame,
+/// which the UI thread's row diff leaves alone.
+///
+/// A pool's rect counts once the terminal holds its region, so the frame that
+/// first declares a pool still writes its cells. The rect of every panel the
+/// frame declares is cut out, since a pane pool's composite shows the live grid
+/// under a panel. Empty under a terminal that keeps no pool composited at rest.
+pub(crate) fn resident_pool_rects(stoat: &Stoat) -> Vec<Rect> {
+    if !stoat.stoatty || stoat.stoatty_protocol < RESIDENT_POOL_PROTOCOL {
+        return Vec::new();
+    }
+    let covered = crate::render::overlay_pane(stoat.active_workspace());
+    let pools: Vec<Rect> = diff_changes_pool_panes(stoat, covered)
+        .into_iter()
+        .filter(|(_, _, region)| stoat.smooth_scroll.holds_region(region.pool, region))
+        .map(|(_, _, region)| Rect::new(region.left, region.top, region.width, region.height))
+        .collect();
+    if pools.is_empty() {
+        return pools;
+    }
+
+    // FIXME: A modal whose border color is not RGB draws a cell border and no
+    // panel, so the composite of a resident pool under it covers the modal.
+    stoat.apc_scene.panels().fold(pools, |rects, panel| {
+        let hole = Rect::new(panel.left, panel.top, panel.width, panel.height);
+        rects
+            .into_iter()
+            .flat_map(|rect| subtract_rect(rect, hole))
+            .collect()
+    })
+}
+
+/// The cells of `rect` outside `hole`, as up to four rects.
+///
+/// The rects are the bands above and below the overlap, then the parts left
+/// and right of it.
+fn subtract_rect(rect: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
+    let cut = rect.intersection(hole);
+    let parts = match cut.is_empty() {
+        true => [rect, Rect::ZERO, Rect::ZERO, Rect::ZERO],
+        false => [
+            Rect::new(rect.x, rect.y, rect.width, cut.y - rect.y),
+            Rect::new(
+                rect.x,
+                cut.bottom(),
+                rect.width,
+                rect.bottom() - cut.bottom(),
+            ),
+            Rect::new(rect.x, cut.y, cut.x - rect.x, cut.height),
+            Rect::new(cut.right(), cut.y, rect.right() - cut.right(), cut.height),
+        ],
+    };
+    parts.into_iter().filter(|part| !part.is_empty())
 }
 
 /// Every visible split pane showing a terminal or an agent, as the pool that
@@ -2875,6 +3179,99 @@ pub(crate) fn editor_page_content_version(
         .map(|spotlight| (spotlight.dim * 1000.0) as u32)
         .hash(&mut hasher);
     hasher.finish()
+}
+
+/// The cells version of every page of a changes view's pool.
+///
+/// It folds in the frame's inputs, each excerpt's place in the stack and the
+/// versions of its text, folds, and diff, and the focused excerpt's selections
+/// where they paint a cell. A bare cursor that the terminal draws paints none,
+/// so a cursor move under it refills no page.
+fn stack_page_version(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    region: PoolRegionCommand,
+    is_focused: bool,
+    frame: crate::render::FrameCtx<'_>,
+    theme_epoch: u64,
+    paint_generation: u64,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (theme_epoch, paint_generation, region.width, region.height).hash(&mut hasher);
+    crate::render::pane_cache::dial_bits(frame.diff_dials).hash(&mut hasher);
+    (is_focused, state.focused).hash(&mut hasher);
+    if !is_focused {
+        frame.inactive_dim.to_bits().hash(&mut hasher);
+    }
+
+    for excerpt in &state.excerpts {
+        let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+            continue;
+        };
+        let buffer_version = editor.display_map.buffer_snapshot().version();
+        let paint_version = editor.display_map.snapshot().paint_version();
+        (
+            excerpt.buffer_id,
+            excerpt.top,
+            &excerpt.rel_path,
+            excerpt.folded_version,
+            editor.display_map.wrap_width(),
+            display_map_stamp(buffer_version, paint_version),
+            editor.display_map.diff_version(),
+        )
+            .hash(&mut hasher);
+    }
+
+    if is_focused
+        && let Some(excerpt) = state.focused_excerpt()
+        && let Some(editor) = editors.get(excerpt.editor_id)
+    {
+        let delegated = frame.terminal_cursor_editor == Some(excerpt.editor_id);
+        delegated.hash(&mut hasher);
+        if !(delegated && crate::render::pane_cache::bare_cursor(editor)) {
+            editor.selections.identity().hash(&mut hasher);
+        }
+        frame.goto_word_labels.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Paint page `index` of a changes view's pool, as its cells followed by the
+/// decorations the terminal keeps on the page.
+///
+/// The page shows what the live paint shows on the same rows, with the fade of
+/// an unfocused pane.
+#[allow(clippy::too_many_arguments)]
+fn render_stack_page(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    is_focused: bool,
+    text_style: Style,
+    frame: crate::render::FrameCtx<'_>,
+    region: PoolRegionCommand,
+    index: u64,
+) -> Vec<u8> {
+    let area = Rect::new(0, 0, region.width, region.height);
+    let mut page = crate::smooth_scroll::page_buffer(area, frame.theme);
+    let mut scene = ApcScene::new();
+    crate::render::diff_changes::paint_stack_page(
+        state,
+        editors,
+        buffers,
+        is_focused,
+        text_style,
+        &mut UndercurlBatch::default(),
+        frame,
+        &mut page,
+        &mut scene,
+        crate::smooth_scroll::page_top_row(index, region.height) as usize,
+    );
+    crate::render::pane::dim_unfocused_pane(area, is_focused, frame, &mut page);
+
+    let mut bytes = crate::render::serialize_buffer(&page);
+    bytes.extend_from_slice(scene.bytes());
+    bytes
 }
 
 /// The cells version the walkthrough spotlight gives editor page `index` of a

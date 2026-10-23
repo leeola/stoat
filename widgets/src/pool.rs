@@ -537,12 +537,16 @@ pub fn emit_pages_into(
     }
 
     let region_height = region.height.max(1) as u64;
-    let page = scroll_offset.floor() as u64 / region_height;
+    let top = scroll_offset.floor() as u64;
+    let page = top / region_height;
     // A composite reads `region.height + 1` rows from the floored top row, so a
-    // rest between two rows reads into the page after the visible one.
-    let needed = match scroll_offset.fract() == 0.0 {
-        true => page..page + 1,
-        false => page..page + 2,
+    // rest between two rows reads into the page after the visible one. A
+    // resident pool composites at a rest on a whole row too, which shows rows
+    // of the next page unless the top row starts a page.
+    let needed = match (scroll_offset.fract() == 0.0, region.resident) {
+        (false, _) => page..page + 2,
+        (true, true) => page..top.div_ceil(region_height) + 1,
+        (true, false) => page..page + 1,
     };
     let last_page = (content_rows / region_height).max(page + 1);
     let composited = match last_target {
@@ -1489,6 +1493,39 @@ mod tests {
             Vec::new()
         });
         assert_eq!(entered, vec![2]);
+    }
+
+    /// A resident pool composites at a rest on a whole row, so a content change
+    /// there refills every page the rest shows.
+    #[test]
+    fn a_resting_resident_pool_refills_every_page_its_rest_shows() {
+        let changed_at_rest = |offset: f32| {
+            let mut state = SmoothScrollState::default();
+            let resident = PoolRegionCommand {
+                resident: true,
+                ..region(1, 20)
+            };
+            let mut emit = |version| {
+                emit_into(
+                    &mut Vec::new(),
+                    &mut state,
+                    resident,
+                    offset,
+                    version,
+                    false,
+                    |_| Vec::new(),
+                )
+            };
+            emit(0);
+            emit(1)
+        };
+
+        // A top row of 45 shows rows 45 to 64 of the 20-row pages, on pages 2
+        // and 3. A top row of 40 starts page 2 and shows no row past it.
+        assert_eq!(
+            (changed_at_rest(45.0), changed_at_rest(40.0)),
+            (vec![2, 3], vec![2])
+        );
     }
 
     #[test]

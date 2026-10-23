@@ -73,7 +73,7 @@ pub use minimap::{
     encode_minimap_view_into, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
     MinimapRun, MinimapViewCommand,
 };
-pub use panel::{encode_panel, encode_panel_into, PanelCommand, PanelShadow};
+pub use panel::{decode_panels, encode_panel, encode_panel_into, PanelCommand, PanelShadow};
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
 pub use pool::{
     encode_fill, encode_fill_decorations_into, encode_fill_decorations_scope, encode_fill_end,

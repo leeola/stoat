@@ -382,7 +382,12 @@ fn pane_minimap<'a>(
 
 /// Dim `area` toward the theme background when the pane is unfocused, so the
 /// focused pane reads as the one keys reach.
-fn dim_unfocused_pane(area: Rect, is_focused: bool, frame: FrameCtx<'_>, buf: &mut Buffer) {
+pub(crate) fn dim_unfocused_pane(
+    area: Rect,
+    is_focused: bool,
+    frame: FrameCtx<'_>,
+    buf: &mut Buffer,
+) {
     if !is_focused
         && frame.inactive_dim > 0.0
         && let Some(bg) = style_rgb(

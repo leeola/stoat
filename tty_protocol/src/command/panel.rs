@@ -3,8 +3,12 @@
 //! Unlike a border, the frame floats under the grid text, so the cells it
 //! surrounds keep drawing their own content.
 
-use super::border::{decode_style, style_code, BorderStyle};
+use super::{
+    border::{decode_style, style_code, BorderStyle},
+    decode, Command,
+};
 use crate::frame;
+use memchr::memmem;
 
 /// How a panel's shadow is drawn.
 ///
@@ -101,6 +105,25 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
     frame::end(out);
 }
 
+/// The bytes that open every frame [`encode_panel_into`] writes.
+const PANEL_HEAD: &[u8] = b"\x1b_Gstoatty;panel;";
+
+/// Every panel that a run of emitted frames declares, in emission order.
+///
+/// An emitter reads its own scene back with this when it needs the rects its
+/// panels cover. Only the panel frames decode, so a scene of text runs and bars
+/// costs one search of its bytes.
+pub fn decode_panels(bytes: &[u8]) -> impl Iterator<Item = PanelCommand> {
+    memmem::find_iter(bytes, PANEL_HEAD).filter_map(|at| {
+        let frame = &bytes[at..];
+        let end = frame::first_frame_end(frame)?;
+        match decode(&frame[..end])? {
+            Command::Panel(panel) => Some(panel),
+            _ => None,
+        }
+    })
+}
+
 pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
     let arg = args.first()?;
     if arg.len() < 19 {
@@ -151,7 +174,7 @@ fn decode_shadow(code: u8) -> PanelShadow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{decode, Command};
+    use crate::command::{encode_pool_drop_into, encode_reset_into};
 
     #[test]
     fn panel_round_trips() {
@@ -276,6 +299,32 @@ mod tests {
             PanelShadow::Drop,
             "unknown code is a drop shadow"
         );
+    }
+
+    #[test]
+    fn decode_panels_reads_each_panel_among_other_frames() {
+        let panel = |top, anchor| PanelCommand {
+            top,
+            left: 2,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor,
+        };
+        let (first, second) = (panel(1, None), panel(9, Some((3, 1.5))));
+        let mut stream = Vec::new();
+        encode_reset_into(&mut stream);
+        encode_panel_into(&mut stream, &first);
+        encode_pool_drop_into(&mut stream, 7);
+        encode_panel_into(&mut stream, &second);
+
+        assert_eq!(decode_panels(&stream).collect::<Vec<_>>(), [first, second]);
     }
 
     #[test]

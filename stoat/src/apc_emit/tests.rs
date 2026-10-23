@@ -2594,35 +2594,534 @@ fn a_terminal_beside_the_commits_list_keeps_its_pool() {
     );
 }
 
-/// The changes view is a screen like the commits list, so every editor pool
-/// retires under it, and an editor beside it paints on the live grid.
+/// Two changed files, whose excerpts fit a 24-row screen.
+const TWO_FILES: &[(&str, &str, &str)] = &[("a.txt", "a\nx\n", "A\nx\n"), ("b.txt", "b\n", "B\n")];
+
+/// A focused changes view over `files` staged in /repo, at 120 by 24 under a
+/// stoatty that keeps resident pools composited, painted once. Answers the
+/// pool id its pane takes.
+fn resident_stack(
+    files: &[(&str, &str, &str)],
+    minimap: MinimapMode,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    u32,
+) {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.settings.editor_minimap = Some(minimap);
+    h.stage_review_scenario("/repo", files);
+    h.open_file(&PathBuf::from("/repo/a.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    let ws = h.stoat.active_workspace();
+    let pool = ws.panes.pane(ws.panes.focus()).index;
+    (h, rx, pool)
+}
+
+/// The content area of the focused pane.
+fn focused_content(h: &crate::test_harness::TestHarness) -> Rect {
+    let ws = h.stoat.active_workspace();
+    crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+}
+
+/// What `bytes` sends pool `pool`, by command, in wire order.
+fn pool_verbs(bytes: &[u8], pool: u32) -> Vec<&'static str> {
+    use stoatty_protocol::command::Command;
+
+    command::decode_stream(bytes)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::PoolDrop(drop) if drop.pool == pool => Some("drop"),
+            Command::PoolRegion(region) if region.pool == pool => Some("declare"),
+            Command::Fill(fill) if fill.pool == pool => Some("fill"),
+            Command::Scroll(scroll) if scroll.pool == pool => Some("scroll"),
+            Command::Reposition(jump) if jump.pool == pool => Some("reposition"),
+            Command::PoolCursor(cursor) if cursor.pool == pool => Some("cursor"),
+            Command::PoolCursorRelease(release) if release.pool == pool => Some("release"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The cursor anchors `bytes` gives pool `pool` as `(row, col)`, and its
+/// releases as `None`, in wire order.
+fn pool_cursors(bytes: &[u8], pool: u32) -> Vec<Option<(u64, u16)>> {
+    use stoatty_protocol::command::Command;
+
+    command::decode_stream(bytes)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::PoolCursor(cursor) if cursor.pool == pool => {
+                Some(Some((cursor.row, cursor.col)))
+            },
+            Command::PoolCursorRelease(release) if release.pool == pool => Some(None),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A changes view pools its stack as one resident grid pool over its content
+/// area less the minimap strip.
 #[test]
-fn a_changes_view_retires_the_pool_of_an_editor_beside_it() {
-    let mut h = Stoat::test();
+fn a_changes_view_declares_a_resident_pool_over_its_stack() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::PerPane);
+    let content = focused_content(&h);
+    let strip = h
+        .stoat
+        .active_workspace()
+        .focused_diff_changes()
+        .and_then(|state| state.minimap_rect)
+        .expect("a strip at 120 columns");
+
+    let declared: Vec<PoolRegionCommand> = command::decode_stream(&emit_raw(&mut h, &mut rx))
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::PoolRegion(region) if region.pool == pool => Some(region),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        declared,
+        [PoolRegionCommand {
+            pool,
+            top: content.y,
+            left: content.x,
+            width: content.width - strip.width,
+            height: content.height,
+            window: 0,
+            kind: PoolKind::Grid,
+            dim: 0,
+            resident: true,
+        }]
+    );
+}
+
+/// A step that scrolls the stack ships the scroll and the cursor anchor and no
+/// page, since a bare cursor that the terminal draws paints no cell.
+#[test]
+fn a_scrolling_step_sends_the_scroll_and_no_held_page() {
+    let base: String = (1..=30).map(|i| format!("{i}\n")).collect();
+    let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+    let (mut h, mut rx, pool) = resident_stack(&[("a.txt", &base, &text)], MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+
+    let scrolled = (0..30).find_map(|_| {
+        h.type_action("DiffChangesNext()");
+        h.stoat.render();
+        let bytes = emit_raw(&mut h, &mut rx);
+        let state = h.stoat.active_workspace().focused_diff_changes();
+        (state.expect("the changes view").scroll > 0).then_some(bytes)
+    });
+    assert_eq!(
+        scrolled.map(|bytes| pool_verbs(&bytes, pool)),
+        Some(vec!["scroll", "cursor"])
+    );
+}
+
+/// A landing that moves an excerpt's folds refills the page that the resting
+/// composite reads, and leaves the other pages the terminal holds.
+#[test]
+fn a_landing_refills_the_composited_page() {
+    let base: String = (1..=60).map(|i| format!("{i}\n")).collect();
+    let text = base
+        .replace("\n11\n", "\nELEVEN\n")
+        .replace("\n51\n", "\nFIFTY-ONE\n");
+    let (mut h, mut rx, pool) = resident_stack(&[("a.txt", &base, &text)], MinimapMode::Off);
+    h.stoat.set_diff_warm_auto(true);
+    let held = pool_fills(&emit_raw(&mut h, &mut rx), pool);
+    let folds = |h: &crate::test_harness::TestHarness| {
+        let state = h.stoat.active_workspace().focused_diff_changes();
+        state.expect("the changes view").excerpts[0].folded_version
+    };
+    let before = folds(&h);
+
+    let buffer_id = h
+        .stoat
+        .active_workspace()
+        .buffers
+        .id_for_path(&PathBuf::from("/repo/a.txt"))
+        .expect("an open buffer");
+    let start = h.buffer_text(buffer_id).find("ELEVEN").expect("the hunk");
+    h.stoat
+        .active_workspace()
+        .buffers
+        .get(buffer_id)
+        .expect("a buffer")
+        .write()
+        .expect("buffer poisoned")
+        .edit(start..start + "ELEVEN".len(), "ELEVEN!");
+    h.settle_diff_jobs();
+    h.stoat.render();
+
+    let refilled = pool_fills(&emit_raw(&mut h, &mut rx), pool);
+    assert_eq!(
+        (folds(&h) != before, held.len() > 1, refilled),
+        (true, true, vec![0]),
+        "the folds moved, the terminal held more than the page under the rest, and only that page refills",
+    );
+}
+
+/// An editor beside a changes view keeps its pool, and the pane the changes
+/// view covers trades its editor pool for the stack's.
+#[test]
+fn an_editor_beside_a_changes_view_keeps_its_pool() {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stage_review_scenario("/repo", TWO_FILES);
+    h.open_file(&PathBuf::from("/repo/a.txt"));
     h.type_action("SplitRight()");
     h.settle();
-    let size = h.stoat.size();
-    h.stoat.active_workspace_mut().layout(size);
+    h.stoat.render();
     emit_raw(&mut h, &mut rx);
-    let pools: Vec<u32> = editor_pool_panes(&h.stoat)
-        .iter()
-        .map(|(_, _, region)| region.pool)
-        .collect();
+    let (covered, beside) = {
+        let ws = h.stoat.active_workspace();
+        let focus = ws.panes.focus();
+        let other = ws
+            .panes
+            .split_panes()
+            .find(|(id, _)| *id != focus)
+            .expect("two panes");
+        (ws.panes.pane(focus).index, other.1.index)
+    };
 
     h.cover_with_diff_changes(false);
-    let ws = h.stoat.active_workspace_mut();
-    ws.panes.unwiden();
-    ws.layout(size);
+    h.stoat.active_workspace_mut().panes.unwiden();
+    h.settle();
+    h.stoat.render();
     let bytes = emit_raw(&mut h, &mut rx);
     assert_eq!(
-        pools
-            .iter()
-            .map(|&pool| pool_lifecycle(&bytes, pool))
-            .collect::<Vec<_>>(),
-        [["drop"]; 2],
+        (
+            pool_lifecycle(&bytes, covered),
+            pool_lifecycle(&bytes, beside)
+        ),
+        (vec!["drop", "declare"], vec![]),
     );
+}
+
+/// A stack pool's rect reaches the UI thread's mask once the terminal holds
+/// the pool, and only under a stoatty that keeps it composited.
+#[test]
+fn resident_rects_name_a_held_stack_pool() {
+    let (mut h, mut rx, _) = resident_stack(TWO_FILES, MinimapMode::Off);
+    let content = focused_content(&h);
+    let first = resident_pool_rects(&h.stoat);
+    emit_raw(&mut h, &mut rx);
+    let held = resident_pool_rects(&h.stoat);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL - 1;
+    let older = resident_pool_rects(&h.stoat);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.stoatty = false;
+    let plain = resident_pool_rects(&h.stoat);
+
+    assert_eq!(
+        (first, held, older, plain),
+        (vec![], vec![content], vec![], vec![])
+    );
+}
+
+/// A panel over a stack pool leaves the mask, since the terminal shows the
+/// live grid under every panel.
+#[test]
+fn a_panel_over_a_stack_pool_leaves_the_mask() {
+    let (mut h, mut rx, _) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    let rect = focused_content(&h);
+    let hole = Rect::new(rect.x + 10, rect.y + 2, 20, 5);
+    command::encode_panel_into(
+        h.stoat.apc_scene.buffer(),
+        &command::PanelCommand {
+            top: hole.y,
+            left: hole.x,
+            width: hole.width,
+            height: hole.height,
+            style: command::BorderStyle::Rounded,
+            border: [1, 2, 3],
+            corner_radius: 6,
+            fill: None,
+            shadow: command::PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+        },
+    );
+
+    assert_eq!(
+        resident_pool_rects(&h.stoat),
+        [
+            Rect::new(rect.x, rect.y, rect.width, 2),
+            Rect::new(
+                rect.x,
+                hole.bottom(),
+                rect.width,
+                rect.bottom() - hole.bottom()
+            ),
+            Rect::new(rect.x, hole.y, 10, hole.height),
+            Rect::new(
+                hole.right(),
+                hole.y,
+                rect.right() - hole.right(),
+                hole.height
+            ),
+        ]
+    );
+}
+
+/// The focused changes view anchors the cursor on its stack pool, follows each
+/// move of it, sends nothing while it holds still, and releases the pool when
+/// focus leaves for a modal.
+#[test]
+fn the_stack_pool_holds_the_cursor_anchor_while_focused() {
+    use stoat_action::OpenFileFinder;
+
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    let col = h
+        .stoat
+        .primary_cursor_screen_pos()
+        .expect("a terminal cursor")
+        .0;
+    let first = pool_cursors(&emit_raw(&mut h, &mut rx), pool);
+    h.type_action("DiffChangesNext()");
+    h.stoat.render();
+    let stepped = pool_cursors(&emit_raw(&mut h, &mut rx), pool);
+    let idle = pool_cursors(&emit_raw(&mut h, &mut rx), pool);
+    action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+    h.settle();
+    h.stoat.render();
+    let left = pool_cursors(&emit_raw(&mut h, &mut rx), pool);
+
+    assert_eq!(
+        (first, stepped, idle, left),
+        (
+            vec![Some((1, col))],
+            vec![Some((2, col))],
+            vec![],
+            vec![None]
+        ),
+    );
+}
+
+/// A changes view with no excerpts paints a line of text that no page holds,
+/// so it pools nothing.
+#[test]
+fn a_changes_view_with_no_excerpts_pools_nothing() {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    assert_eq!(diff_changes_pool_panes(&h.stoat, None), []);
+}
+
+/// A rebase screen paints over the focused pane, so the stack pool under it
+/// retires and leaves the mask.
+#[test]
+fn a_rebase_screen_retires_the_stack_pool_it_covers() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+
+    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+        PathBuf::from("/repo"),
+        "onto".into(),
+        vec![],
+    ));
+    let rects = resident_pool_rects(&h.stoat);
+    let bytes = emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (rects, pool_lifecycle(&bytes, pool)),
+        (vec![], vec!["drop"])
+    );
+}
+
+/// A pane whose changes view gives way to another one keeps the pool id, so
+/// the pool drops, declares again, and takes the cursor anchor again.
+#[test]
+fn a_pane_that_swaps_its_changes_view_starts_its_pool_over() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    let col = h
+        .stoat
+        .primary_cursor_screen_pos()
+        .expect("a terminal cursor")
+        .0;
+    let bytes = emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (pool_lifecycle(&bytes, pool), pool_cursors(&bytes, pool)),
+        (vec!["drop", "declare"], vec![Some((1, col))])
+    );
+}
+
+/// A terminal that comes back holds no pool, so the stack pool's next emit
+/// declares it and anchors the cursor on it again.
+#[test]
+fn a_returned_terminal_takes_the_stack_anchor_again() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    let first = emit_raw(&mut h, &mut rx);
+    crate::ssh::retire_terminal_state(&mut h.stoat);
+    let again = emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (pool_cursors(&again, pool), pool_cursors(&first, pool).len()),
+        (pool_cursors(&first, pool), 1)
+    );
+}
+
+/// The bytes that `bytes` fills page `index` of pool `pool` with, between its
+/// fill frame and the frame that closes it.
+fn fill_payload(bytes: &[u8], pool: u32, index: u64) -> &[u8] {
+    use stoatty_protocol::command::Command;
+
+    let (mut at, mut begun) = (0, None);
+    while let Some(span) = stoatty_protocol::frame::apc_span(&bytes[at..]) {
+        let (start, end) = (at + span.start, at + span.end);
+        match (command::decode(&bytes[start..end]), begun) {
+            (Some(Command::Fill(fill)), None) if fill.pool == pool && fill.index == index => {
+                begun = Some(end);
+            },
+            (Some(Command::FillEnd), Some(from)) => return &bytes[from..start],
+            _ => {},
+        }
+        at = end;
+    }
+    panic!("no fill of page {index} of pool {pool}");
+}
+
+/// The symbol, foreground, and background of each cell in a run of rows, by
+/// row.
+type CellRows = Vec<Vec<(char, Option<Color>, Option<Color>)>>;
+
+/// The cells a `width` by `height` page payload paints, as a terminal reads
+/// them back.
+///
+/// The decorations after the cells stream their text between APC frames, and a
+/// plain terminal prints that text, so the read stops at the first frame.
+fn page_cells(payload: &[u8], width: u16, height: u16) -> CellRows {
+    let cells = payload
+        .windows(2)
+        .position(|pair| pair == b"\x1b_")
+        .map_or(payload, |end| &payload[..end]);
+    let mut screen = crate::term_screen::TermScreen::new(height, width);
+    screen.feed(cells);
+    (0..usize::from(height))
+        .map(|row| {
+            let cells = screen.row(row).into_iter();
+            cells.map(|cell| (cell.ch, cell.fg, cell.bg)).collect()
+        })
+        .collect()
+}
+
+/// The cells of `rect` in `buf`, as [`page_cells`] reads a page's, with the
+/// reset color as no color.
+fn buffer_cells(buf: &Buffer, rect: Rect) -> CellRows {
+    let color = |color: Color| (color != Color::Reset).then_some(color);
+    (rect.y..rect.bottom())
+        .map(|y| {
+            (rect.x..rect.right())
+                .map(|x| {
+                    let cell = &buf[(x, y)];
+                    let ch = cell.symbol().chars().next().unwrap_or(' ');
+                    (ch, color(cell.fg), color(cell.bg))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A hex theme under which the diff view's gutter draws as sub-cell runs, which
+/// takes every diff color and the background in RGB.
+fn rgb_diff_gutter_theme() -> crate::theme::Theme {
+    let src = r##"theme rgbgutter {
+            diff.context.fg = "#808080";
+            diff.added.fg = "#00ff00";
+            diff.modified.fg = "#ffff00";
+            diff.deleted.fg = "#ff0000";
+            diff.moved.fg = "#0000ff";
+            diff.staged.fg = "#00ffff";
+            diff.unstaged.fg = "#ff00ff";
+            ui.background.bg = "#282c34";
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbgutter")
+        .expect("rgb theme builds")
+}
+
+/// A page of an unfocused changes view holds the cells that the live paint
+/// shows on its rows, fade included, and the gutter runs that the live scene
+/// lays over them.
+#[test]
+fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.theme = Arc::new(rgb_diff_gutter_theme());
+    h.stoat.settings.ui_inactive_dim = Some(0.2);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stage_review_scenario("/repo", TWO_FILES);
+    h.open_file(&PathBuf::from("/repo/a.txt"));
+    h.type_action("SplitRight()");
+    h.cover_with_diff_changes(false);
+    // A focus action off the changes view closes it, so the focus moves on the
+    // pane tree alone.
+    let panes = &mut h.stoat.active_workspace_mut().panes;
+    panes.unwiden();
+    panes.focus_next();
+    h.settle();
+    let live = h.stoat.render();
+    let (pool, _, region) = diff_changes_pool_panes(&h.stoat, None)[0];
+    let lane = h
+        .stoat
+        .apc_scene
+        .lane_bytes(crate::render::content_lane(pool))
+        .to_vec();
+    let bytes = emit_raw(&mut h, &mut rx);
+    let page = fill_payload(&bytes, pool, 0);
+
+    let runs = |bytes: &[u8]| -> Vec<String> {
+        command::decode_stream(bytes)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) => Some(run.text),
+                _ => None,
+            })
+            .collect()
+    };
+    let (page_runs, live_runs) = (runs(page), runs(&lane));
+    let rect = Rect::new(region.left, region.top, region.width, region.height);
+    assert_eq!(
+        (
+            page_cells(page, region.width, region.height),
+            page_runs.is_empty(),
+            page_runs
+        ),
+        (buffer_cells(&live, rect), false, live_runs),
+    );
+}
+
+/// A search changes which matches a page paints, so it refills the page under
+/// the resting composite.
+#[test]
+fn a_search_refills_the_composited_page() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    h.type_keys("/");
+    h.type_text("x");
+    h.type_keys("enter");
+    h.stoat.render();
+    assert_eq!(pool_fills(&emit_raw(&mut h, &mut rx), pool), [0]);
 }
 
 /// A rebase screen paints over the focused pane alone. The terminal under it

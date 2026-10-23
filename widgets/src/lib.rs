@@ -28,7 +28,7 @@ use std::{
     sync::Once,
 };
 use stoatty_protocol::{
-    command::{self, HelloCommand},
+    command::{self, HelloCommand, PanelCommand},
     detect,
 };
 
@@ -280,6 +280,17 @@ impl ApcScene {
             .iter()
             .flat_map(|lane| lane.current.iter().copied())
             .collect()
+    }
+
+    /// Every panel the frame under construction declares, lane by lane.
+    ///
+    /// A pane pool's composite leaves each panel's rect to the live grid, so a
+    /// program that keeps its cells out of a pool's rect still has to write
+    /// the cells under these. Valid where [`Self::bytes`] is.
+    pub fn panels(&self) -> impl Iterator<Item = PanelCommand> {
+        self.lanes
+            .iter()
+            .flat_map(|lane| command::decode_panels(&lane.current))
     }
 
     /// Append the surface's per-line row heights as a `line_layout` frame.
@@ -664,7 +675,8 @@ mod tests {
     use super::{restore_bytes, ApcScene};
     use stoatty_protocol::command::{
         self, encode_border, encode_lane_begin, encode_lane_end, encode_line_layout, encode_reset,
-        encode_scroll_region, BorderCommand, BorderStyle, LineLayoutCommand, ScrollRegionCommand,
+        encode_scroll_region, BorderCommand, BorderStyle, LineLayoutCommand, PanelCommand,
+        PanelShadow, ScrollRegionCommand,
     };
 
     fn border() -> BorderCommand {
@@ -1093,6 +1105,32 @@ mod tests {
             [encode_border(&border()), encode_border(&moved)].concat(),
             "lane 0 comes first, though lane 2 was written first"
         );
+    }
+
+    #[test]
+    fn panels_reads_the_panels_of_every_lane() {
+        let panel = |top| PanelCommand {
+            top,
+            left: 0,
+            width: 6,
+            height: 3,
+            style: BorderStyle::Rounded,
+            border: [1, 2, 3],
+            corner_radius: 6,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+        };
+        let mut scene = ApcScene::new();
+        scene.set_lane(2);
+        command::encode_panel_into(scene.buffer(), &panel(5));
+        scene.end_lane();
+        command::encode_border_into(scene.buffer(), &border());
+        command::encode_panel_into(scene.buffer(), &panel(1));
+
+        assert_eq!(scene.panels().collect::<Vec<_>>(), [panel(1), panel(5)]);
     }
 
     /// The same mark and slice inside a lane, which is how a caller captures

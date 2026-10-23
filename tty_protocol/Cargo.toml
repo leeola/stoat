@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 base64.workspace = true
+memchr.workspace = true
 
 # Detection reads the terminal's answer off raw fd 0, which needs poll and
 # isatty. Nothing else in the crate touches the platform.

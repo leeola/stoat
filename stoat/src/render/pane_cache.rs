@@ -543,7 +543,7 @@ fn stack_cache_key(
 /// The selection pass washes a selection's cells but its cursor's, so such a
 /// selection paints no cell once the terminal draws its cursor. A second
 /// cursor paints a block, which is why one selection is the bound.
-fn bare_cursor(editor: &EditorState) -> bool {
+pub(crate) fn bare_cursor(editor: &EditorState) -> bool {
     let [selection] = editor.selections.all_anchors() else {
         return false;
     };
@@ -581,7 +581,7 @@ fn diagnostics_version(buffers: &BufferRegistry, buffer: BufferId, frame: FrameC
 /// The soften scale and the tint amount go in as bits, then the bold and the
 /// underline flags. The dials destructure whole, so a further dial fails to compile here until
 /// the key holds it.
-fn dial_bits(dials: DiffDials) -> (u32, u32, bool, bool) {
+pub(crate) fn dial_bits(dials: DiffDials) -> (u32, u32, bool, bool) {
     let DiffDials {
         soften_scale,
         tint_amount,

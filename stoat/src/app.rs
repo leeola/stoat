@@ -1214,6 +1214,14 @@ pub struct Stoat {
     /// on any anchored pool that glides. So the emit releases this pool once its
     /// pane is no longer the focused editor. `None` when no pool holds one.
     pub(crate) pool_cursor_holder: Option<u32>,
+    /// The cursor anchor last shipped for the focused changes view's resident
+    /// pool, as `(pool, row, col)`.
+    ///
+    /// The terminal draws the cursor at the anchor of every pool it
+    /// composites, and a resident pool composites at rest too. So
+    /// [`apc_emit::emit_smooth_scroll`] ships every move of the anchor, and an
+    /// idle frame ships nothing. `None` when no changes view holds one.
+    pub(crate) stack_cursor: Option<(u32, u64, u16)>,
     /// The surface each pane pool held on the last pass of
     /// [`apc_emit::emit_smooth_scroll`], by pool id.
     ///
@@ -2668,6 +2676,7 @@ impl Stoat {
             aux_windows: std::collections::BTreeMap::new(),
             aux_cursor: None,
             pool_cursor_holder: None,
+            stack_cursor: None,
             pool_owners: std::collections::BTreeMap::new(),
             terminal_pages: std::collections::HashMap::new(),
             window_pages: std::collections::HashMap::new(),
@@ -4191,7 +4200,7 @@ impl Stoat {
                         buffer,
                         cursor,
                         undercurl,
-                        resident: Vec::new(),
+                        resident: apc_emit::resident_pool_rects(self),
                         #[cfg(feature = "perf")]
                         input_time: t_event,
                     }));

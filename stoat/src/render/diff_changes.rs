@@ -254,9 +254,7 @@ pub(crate) fn paint_stack_rows(
 /// matches, and diagnostics. Each excerpt's editor keeps the layout the live
 /// paint recorded, so a page painted after the live frame leaves the terminal
 /// cursor and pointer hits on the live rows.
-// FIXME: The changes view's pool fills no page through this, so only tests
-// call it.
-#[allow(dead_code, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_page(
     state: &DiffChangesState,
     editors: &mut SlotMap<EditorId, EditorState>,
