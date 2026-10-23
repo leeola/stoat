@@ -551,6 +551,19 @@ pub trait GitRepo: Send + Sync {
         author_email: &str,
     ) -> Result<String, GitApplyError>;
 
+    /// Commit what the index holds on top of HEAD, and return the new commit's
+    /// sha.
+    ///
+    /// The index becomes the commit's tree, and HEAD's commit becomes its
+    /// parent, with none on an unborn branch. The author and committer are the
+    /// repository's configured identity. HEAD's branch moves to the new commit,
+    /// or a detached HEAD moves itself.
+    ///
+    /// Fails with the `Backend` reason `nothing staged` when the index tree
+    /// equals HEAD's tree. On an unborn branch an empty index counts the same.
+    /// Fails too when the repository has no configured identity.
+    fn commit_index(&self, message: &str) -> Result<String, GitApplyError>;
+
     /// Check out `sha`, updating the working tree and index to its content and
     /// leaving HEAD detached there.
     ///

@@ -10,6 +10,7 @@ use crate::host::{
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    mem,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -1430,6 +1431,75 @@ impl GitRepo for FakeGitRepo {
         Ok(new_sha)
     }
 
+    /// Commits the index over the head commit's tree, under the identity every
+    /// seeded commit carries.
+    ///
+    /// A real commit leaves the index and HEAD equal, so staged entries leave
+    /// `changed` and the index texts become HEAD's. The apply failure knob
+    /// fails it as it fails [`GitRepo::apply_to_index`], which is how a test
+    /// reaches the failure a real repository reports.
+    fn commit_index(&self, message: &str) -> Result<String, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = &state.apply_error {
+            return BackendSnafu {
+                reason: reason.clone(),
+            }
+            .fail();
+        }
+        let staged = state.changed.iter().any(|change| change.file.staged);
+        if !staged && state.index_contents.is_empty() && state.removed_index_entries.is_empty() {
+            return BackendSnafu {
+                reason: "nothing staged",
+            }
+            .fail();
+        }
+
+        let head = state.head.clone();
+        let mut tree = head
+            .as_ref()
+            .and_then(|sha| state.commits.get(sha))
+            .map(|commit| commit.tree.clone())
+            .unwrap_or_default();
+        tree.extend(
+            state
+                .index_contents
+                .iter()
+                .map(|(path, text)| (path.clone(), text.clone())),
+        );
+        for path in &state.removed_index_entries {
+            tree.remove(path);
+        }
+
+        state.synth_counter += 1;
+        let parent_frag = head.as_deref().unwrap_or("root");
+        let new_sha = format!(
+            "commit-{}-{}",
+            &parent_frag[..parent_frag.len().min(6)],
+            state.synth_counter
+        );
+        let commit = FakeCommit {
+            parents: head.into_iter().collect(),
+            tree,
+            message: message.to_string(),
+            author_name: "fake".into(),
+            author_email: "fake@example.invalid".into(),
+            time: 1_700_000_000 + state.synth_counter as i64,
+        };
+        state.commits.insert(new_sha.clone(), commit);
+        state.head = Some(new_sha.clone());
+        if let Some(branch) = state.head_branch.clone() {
+            state.branches.insert(branch, new_sha.clone());
+        }
+
+        state.changed.retain(|change| !change.file.staged);
+        let index = mem::take(&mut state.index_contents);
+        state.head_contents.extend(index);
+        for path in mem::take(&mut state.removed_index_entries) {
+            state.head_contents.remove(&path);
+        }
+        Ok(new_sha)
+    }
+
     /// Records the checkout and moves head, without modelling libgit2's refusal
     /// to overwrite a dirty working tree.
     ///
@@ -2364,6 +2434,89 @@ mod tests {
         assert_eq!(host.checkouts(&workdir()), ["detached:c1", "ref:main"]);
         assert_eq!(repo.resolve_rev("HEAD").as_deref(), Some("c2"));
         assert_eq!(repo.head_branch().as_deref(), Some("main"));
+    }
+
+    /// The index commits over the head commit's tree, and HEAD and its branch
+    /// move to the new commit. What was staged becomes HEAD's text, a staged
+    /// deletion leaves the tree and HEAD, and an unstaged edit stays unstaged.
+    #[test]
+    fn commit_index_commits_the_index_over_the_head_tree() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "old"), ("b.rs", "keep"), ("d.rs", "gone")])
+            .branch("main", "c1")
+            .set_head_branch("main")
+            .head_file("a.rs", "old")
+            .head_file("d.rs", "gone")
+            .staged_file("a.rs", "new")
+            .index_file("a.rs", "new")
+            .remove_index_file("d.rs")
+            .unstaged_file("c.rs", "edit");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let sha = repo.commit_index("feat: new a").unwrap();
+        let changed: Vec<(PathBuf, bool)> = repo
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged))
+            .collect();
+        assert_eq!(
+            (
+                repo.resolve_rev("HEAD"),
+                repo.resolve_rev("main"),
+                host.commit_message(&workdir(), &sha),
+                repo.commit_tree(&sha),
+                changed,
+                repo.head_content(&workdir().join("a.rs")),
+                repo.head_content(&workdir().join("d.rs")),
+            ),
+            (
+                Some(sha.clone()),
+                Some(sha.clone()),
+                Some("feat: new a".to_string()),
+                Some(BTreeMap::from([
+                    (PathBuf::from("a.rs"), "new".to_string()),
+                    (PathBuf::from("b.rs"), "keep".to_string()),
+                ])),
+                vec![(workdir().join("c.rs"), false)],
+                Some("new".to_string()),
+                None,
+            ),
+        );
+    }
+
+    /// An empty index has nothing to commit, and the apply failure knob fails a
+    /// commit as it fails an apply. Neither moves HEAD.
+    #[test]
+    fn commit_index_refuses_an_empty_index_and_a_programmed_failure() {
+        let commit = |fail: bool| {
+            let host = FakeGit::new();
+            let mut builder = host.add_repo(workdir());
+            builder.commit("c1", &[]).unstaged_file("a.rs", "edit");
+            if fail {
+                builder
+                    .staged_file("b.rs", "new")
+                    .fail_apply_with("disk full");
+            }
+            let repo = host.discover(&workdir()).unwrap();
+            (
+                repo.commit_index("msg").map_err(|err| err.to_string()),
+                repo.resolve_rev("HEAD"),
+            )
+        };
+        assert_eq!(
+            [commit(false), commit(true)],
+            [
+                (
+                    Err("git backend failure: nothing staged".to_string()),
+                    Some("c1".to_string()),
+                ),
+                (
+                    Err("git backend failure: disk full".to_string()),
+                    Some("c1".to_string()),
+                ),
+            ],
+        );
     }
 
     /// An amend writes the ref HEAD points at, so the branch moves with it. A

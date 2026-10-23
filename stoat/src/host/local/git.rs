@@ -802,6 +802,35 @@ impl GitRepo for LocalGitRepo {
         Ok(new_id.to_string())
     }
 
+    fn commit_index(&self, message: &str) -> Result<String, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let mut index = repo.index().map_err(err_msg)?;
+        // A held handle keeps the index it loaded first. Without this reload,
+        // the commit misses what was staged since that load.
+        index.read(false).map_err(err_msg)?;
+        let tree_id = index.write_tree().map_err(err_msg)?;
+
+        let head = repo.head().and_then(|head| head.peel_to_commit()).ok();
+        let unchanged = match &head {
+            Some(commit) => commit.tree_id() == tree_id,
+            None => index.is_empty(),
+        };
+        if unchanged {
+            return BackendSnafu {
+                reason: "nothing staged",
+            }
+            .fail();
+        }
+
+        let sig = repo.signature().map_err(err_msg)?;
+        let tree = repo.find_tree(tree_id).map_err(err_msg)?;
+        let parents: Vec<&Commit<'_>> = head.iter().collect();
+        let new_id = repo
+            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+            .map_err(err_msg)?;
+        Ok(new_id.to_string())
+    }
+
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
@@ -2301,6 +2330,149 @@ mod tests {
         assert!(git.checkout_ref("nope").is_err());
         assert_eq!(git.head_branch().as_deref(), Some("main"));
         assert_eq!(git.resolve_rev("HEAD").as_deref(), Some(shas[2].as_str()));
+    }
+
+    /// A staged edit commits on the branch HEAD is attached to, under the
+    /// repository's identity, and the branch moves to the new commit.
+    #[test]
+    fn commit_index_commits_the_staged_edit_on_the_branch() {
+        let (dir, repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        let sha = commit_staged_edit(&git, &repo, &dir, "feat: four").unwrap();
+
+        let commit = repo.find_commit(Oid::from_str(&sha).unwrap()).unwrap();
+        let author = commit.author();
+        assert_eq!(
+            (
+                commit.message().ok(),
+                author.name().ok(),
+                commit
+                    .parent_ids()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>(),
+                git.content_at(&sha, &dir.path().join("a.txt")),
+                git.head_branch(),
+                git.resolve_rev("main"),
+            ),
+            (
+                Some("feat: four"),
+                Some("tester"),
+                vec![shas[2].clone()],
+                Some("four".to_string()),
+                Some("main".to_string()),
+                Some(sha.clone()),
+            ),
+        );
+    }
+
+    /// On a detached HEAD the commit moves HEAD itself and leaves every branch
+    /// where it was.
+    #[test]
+    fn commit_index_on_a_detached_head_moves_head_alone() {
+        let (dir, repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        git.checkout_detached(&shas[0]).unwrap();
+        let sha = commit_staged_edit(&git, &repo, &dir, "fix: one").unwrap();
+
+        let commit = repo.find_commit(Oid::from_str(&sha).unwrap()).unwrap();
+        assert_eq!(
+            (
+                commit
+                    .parent_ids()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>(),
+                git.resolve_rev("HEAD"),
+                git.head_branch(),
+                git.resolve_rev("main"),
+            ),
+            (
+                vec![shas[0].clone()],
+                Some(sha.clone()),
+                None,
+                Some(shas[2].clone()),
+            ),
+        );
+    }
+
+    /// A clean index has nothing to commit, so the call fails and HEAD stays.
+    #[test]
+    fn commit_index_with_nothing_staged_fails() {
+        let (dir, repo, shas) = seeded_repo();
+        set_identity(&repo);
+        let git = discover(&dir);
+        assert_eq!(
+            (
+                git.commit_index("empty").map_err(|err| err.to_string()),
+                git.resolve_rev("HEAD"),
+            ),
+            (
+                Err("git backend failure: nothing staged".to_string()),
+                Some(shas[2].clone()),
+            ),
+        );
+    }
+
+    /// On an unborn branch an empty index has nothing to commit, and a staged
+    /// file makes the root commit that creates the branch.
+    #[test]
+    fn commit_index_on_an_unborn_branch_makes_the_root_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = {
+            let mut opts = RepositoryInitOptions::new();
+            opts.initial_head("main");
+            Repository::init_opts(dir.path(), &opts).unwrap()
+        };
+        set_identity(&repo);
+        let git = discover(&dir);
+
+        let empty = git.commit_index("empty").map_err(|err| err.to_string());
+        let sha = commit_staged_edit(&git, &repo, &dir, "root").unwrap();
+        let commit = repo.find_commit(Oid::from_str(&sha).unwrap()).unwrap();
+        assert_eq!(
+            (
+                empty,
+                commit.parent_count(),
+                git.head_branch(),
+                git.resolve_rev("main"),
+            ),
+            (
+                Err("git backend failure: nothing staged".to_string()),
+                0,
+                Some("main".to_string()),
+                Some(sha.clone()),
+            ),
+        );
+    }
+
+    /// Give `repo` an identity in its own config, which libgit2 reads ahead of
+    /// the machine's global config, so a commit under it does not depend on
+    /// that config.
+    fn set_identity(repo: &Repository) {
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "tester").unwrap();
+        config
+            .set_str("user.email", "tester@example.invalid")
+            .unwrap();
+    }
+
+    /// Stage `four` as `a.txt` through `repo`, then commit the index through
+    /// `git` with `message`.
+    ///
+    /// `git` reads the status first, which loads its index before the edit is
+    /// staged, so the commit sees the edit only when it reads the index again.
+    fn commit_staged_edit(
+        git: &Arc<dyn GitRepo>,
+        repo: &Repository,
+        dir: &TempDir,
+        message: &str,
+    ) -> Result<String, String> {
+        set_identity(repo);
+        let _ = git.changed_files();
+        std::fs::write(dir.path().join("a.txt"), "four").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        git.commit_index(message).map_err(|err| err.to_string())
     }
 
     /// A held handle caches the index it loaded first. A resolve through it
