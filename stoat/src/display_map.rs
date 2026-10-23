@@ -840,18 +840,24 @@ impl DisplayMap {
         self.multi_buffer.snapshot()
     }
 
+    /// The display row count as of the buffer, its diff map, and every layer
+    /// now, as a fresh [`Self::snapshot`] counts it.
+    ///
+    /// When no layer moved since the last sync, the count comes from the
+    /// cached snapshot with no clone, so a caller that wants the count alone
+    /// pays for the version checks and nothing more.
+    pub fn line_count(&mut self) -> u32 {
+        if self.cache_current()
+            && let Some(cached) = &self.cached_snapshot
+        {
+            return cached.line_count();
+        }
+        self.snapshot().line_count()
+    }
+
     pub fn snapshot(&mut self) -> DisplaySnapshot {
         let highlights_dirty = mem::take(&mut self.highlights_dirty);
-        let buffer_version = self.multi_buffer.buffer_version();
-        let diff_version_now = self.multi_buffer.diff_version();
-        // A settled background rewrap moves none of these versions, so the
-        // cache would keep serving the interpolated wrapping. Re-syncing while
-        // one is outstanding is what lets it land.
-        if buffer_version == self.last_buffer_version
-            && diff_version_now == self.last_diff_version
-            && self.fold_map.version_unchanged()
-            && self.inlay_map.version_unchanged()
-            && !self.wrap_map.background_pending()
+        if self.cache_current()
             && let Some(cached) = self.cached_snapshot.clone()
         {
             // Highlights are the one thing a snapshot carries that no layer's
@@ -950,6 +956,20 @@ impl DisplayMap {
         snapshot.inlay_highlights = self.inlay_highlights.clone();
         snapshot.syntax_highlighting = self.syntax_highlighting;
         snapshot.settings_generation = self.settings_generation;
+    }
+
+    /// Whether the cached snapshot still answers for the buffer, its diff map,
+    /// and every layer, which lets [`Self::snapshot`] and
+    /// [`Self::line_count`] read it with no sync.
+    fn cache_current(&self) -> bool {
+        // A settled background rewrap moves none of these versions. The check
+        // fails while a rewrap is out, so the next sync lands the rewrap, and
+        // the cache does not keep the interpolated wrap.
+        self.multi_buffer.buffer_version() == self.last_buffer_version
+            && self.multi_buffer.diff_version() == self.last_diff_version
+            && self.fold_map.version_unchanged()
+            && self.inlay_map.version_unchanged()
+            && !self.wrap_map.background_pending()
     }
 }
 

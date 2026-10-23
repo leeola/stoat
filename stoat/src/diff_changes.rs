@@ -260,6 +260,10 @@ pub(crate) fn shown_excerpt_rows(
 }
 
 /// The display rows `excerpt` shows, zero while it waits on its diff map.
+///
+/// The count is current with every edit, fold, and wrap, and reads with no
+/// snapshot clone while none moved, so a layout per frame pays the version
+/// checks alone.
 pub(crate) fn excerpt_rows(
     excerpt: &Excerpt,
     editors: &mut SlotMap<EditorId, EditorState>,
@@ -267,9 +271,9 @@ pub(crate) fn excerpt_rows(
     if excerpt.folded_version.is_none() {
         return 0;
     }
-    editors.get_mut(excerpt.editor_id).map_or(0, |editor| {
-        editor.display_map.snapshot().line_count() as usize
-    })
+    editors
+        .get_mut(excerpt.editor_id)
+        .map_or(0, |editor| editor.display_map.line_count() as usize)
 }
 
 /// The stack row of the focused excerpt's cursor, as of the last
@@ -1031,8 +1035,8 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        fold_range, gaps, kept_runs, landing_row, pump_diff_changes_stack, DiffChangesState,
-        Landing, StackStamp,
+        excerpt_rows, fold_range, gaps, kept_runs, landing_row, pump_diff_changes_stack,
+        DiffChangesState, Landing, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -1041,7 +1045,10 @@ mod tests {
         display_map::{DisplayPoint, InlayPoint},
         host::FakeRepoBuilder,
         test_harness::TestHarness,
-        workspace::diff::{DiffBase, WorktreeBase},
+        workspace::{
+            diff::{DiffBase, WorktreeBase},
+            Workspace,
+        },
     };
     use std::{
         ops::Range,
@@ -1304,6 +1311,36 @@ mod tests {
             .write()
             .expect("buffer poisoned")
             .edit(0..0, text);
+    }
+
+    /// An excerpt's rows follow its editor's display rows, after a refold and
+    /// after an edit that adds a row before any diff map lands.
+    #[test]
+    fn excerpt_rows_follow_a_refold_and_an_edit() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        stacked(&mut h);
+        let rows = |h: &mut TestHarness| {
+            let ws = h.stoat.active_workspace_mut();
+            let id = ws.focused_diff_changes_id().expect("a changes view");
+            let Workspace {
+                diff_changes_views,
+                editors,
+                ..
+            } = ws;
+            let excerpt = &diff_changes_views[id].excerpts[0];
+            let shown = excerpt_rows(excerpt, editors);
+            let display = editors[excerpt.editor_id].display_map.snapshot();
+            (shown, display.line_count() as usize)
+        };
+
+        let folded = rows(&mut h);
+        prepend(&h, buffer_id, "new\n");
+        let edited = rows(&mut h);
+        let count = folded.1;
+        assert_eq!([folded, edited], [(count, count), (count + 1, count + 1)]);
     }
 
     /// An unsaved edit to a clean open file joins a stack that already
