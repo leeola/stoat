@@ -324,6 +324,13 @@ pub struct Workspace {
     /// Held here rather than by the pane, as [`Self::commit_lists`] holds a
     /// list, so a parked tab's changes view keeps its cursor.
     pub(crate) diff_changes_views: SlotMap<DiffChangesId, DiffChangesState>,
+    /// The stack of the changes view the reader last flipped away from with
+    /// `Ctrl-t`, or `None`.
+    ///
+    /// The flip back takes it, so its excerpts keep their editors and buffers
+    /// and no file reopens. While parked it covers no view and no pane shows
+    /// it, so its buffers count as hidden.
+    pub(crate) parked_diff_changes: Option<DiffChangesState>,
     /// The buffers a disposed changes view opened, which the stack's pump
     /// closes when nothing else needs them.
     ///
@@ -554,6 +561,7 @@ impl Workspace {
             commit_lists: SlotMap::with_key(),
             restored_commit_lists: HashMap::new(),
             diff_changes_views: SlotMap::with_key(),
+            parked_diff_changes: None,
             diff_changes_released: Vec::new(),
             diff_changes_epoch: 0,
             review_walk: None,
@@ -850,19 +858,23 @@ impl Workspace {
     }
 
     /// Whether any pane, in any tab, shows `editor_id`, or a changes view holds
-    /// it as an excerpt.
+    /// it as an excerpt, the parked one included.
     pub(crate) fn editor_referenced(&self, editor_id: EditorId) -> bool {
         let in_pane = self.pane_trees().any(|tree| {
             tree.split_panes()
                 .any(|(_, p)| matches!(p.view, View::Editor(eid) if eid == editor_id))
         });
         in_pane
-            || self.diff_changes_views.values().any(|state| {
-                state
-                    .excerpts
-                    .iter()
-                    .any(|excerpt| excerpt.editor_id == editor_id)
-            })
+            || self
+                .diff_changes_views
+                .values()
+                .chain(&self.parked_diff_changes)
+                .any(|state| {
+                    state
+                        .excerpts
+                        .iter()
+                        .any(|excerpt| excerpt.editor_id == editor_id)
+                })
     }
 
     /// Whether a pane in any tab, detached into a window or not, or a dock shows

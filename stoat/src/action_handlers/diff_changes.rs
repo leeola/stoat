@@ -52,7 +52,40 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     };
     let (covered, covered_diff) = (state.covered, state.covered_diff);
     diff_changes::release_excerpts(stoat, state.excerpts);
+    put_back_covered(stoat, focus, covered, covered_diff);
+    UpdateEffect::Redraw
+}
 
+/// Take down the changes view the focused pane shows and park its stack, so
+/// the next changes view opens on the same excerpts.
+///
+/// A flip to the per-file diff takes this path, and the flip back finds every
+/// excerpt with its editor and buffer, so no file reopens. One stack parks at
+/// a time, so a stack already parked releases as a close releases it. The
+/// pane gets back the view the changes view covered, in normal mode.
+fn park_diff_changes(stoat: &mut Stoat) {
+    let ws = stoat.active_workspace_mut();
+    let focus = ws.panes.focus();
+    let Some(mut state) = take_down(ws, focus) else {
+        return;
+    };
+    let covered = state.covered.take();
+    state.covered_diff = false;
+    state.pending_landing = None;
+    state.held_screen_row = None;
+    if let Some(displaced) = ws.parked_diff_changes.replace(state) {
+        diff_changes::release_excerpts(stoat, displaced.excerpts);
+    }
+    put_back_covered(stoat, focus, covered, false);
+}
+
+/// Show `covered` in pane `focus` once its changes view is gone, in normal
+/// mode.
+///
+/// A covered view that is gone closes the pane instead, and a last pane gets a
+/// fresh scratch editor. With `covered_diff`, a covered editor returns to the
+/// per-file diff it showed.
+fn put_back_covered(stoat: &mut Stoat, focus: PaneId, covered: Option<View>, covered_diff: bool) {
     let ws = stoat.active_workspace();
     let live = pane::view_is_live(ws, covered.as_ref());
     let rediff = live && covered_diff && matches!(covered, Some(View::Editor(_)));
@@ -65,7 +98,6 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     if rediff {
         review::enter_diff_view(stoat);
     }
-    UpdateEffect::Redraw
 }
 
 /// Take down the changes view that pane `pane_id` of `ws` shows, before a
@@ -101,14 +133,15 @@ pub(crate) fn close_diff_changes_for_open(
     ws.panes.pane_mut(pane_id).view = view;
 }
 
-/// Close the changes view and open its focused excerpt's file in the per-file
+/// Park the changes view and open its focused excerpt's file in the per-file
 /// diff, at the excerpt's cursor.
 ///
-/// The file opens in the pane after the changes view's close puts back the view
-/// it covered, over the excerpt's own buffer, so an edit made in the excerpt
-/// and its undo history carry over. A stack with no folded excerpt in focus, as
-/// before the first diff map lands, leaves the changes view open and says so in
-/// the status row.
+/// The file opens in the pane after the changes view comes down and puts back
+/// the view it covered, over the excerpt's own buffer, so an edit made in the
+/// excerpt and its undo history carry over. The stack parks rather than
+/// closing, so the flip back reuses its excerpts. A stack with no folded
+/// excerpt in focus, as before the first diff map lands, leaves the changes
+/// view open and says so in the status row.
 ///
 /// The cursor's line keeps the screen row it held in the stack, where the file
 /// has rows enough above and below it. A cursor off the stack's painted rows
@@ -121,13 +154,12 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     let screen_row = stack_screen_row(stoat);
 
     if let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() {
-        state.covered_diff = false;
         let focused = state.focused;
         if let Some(excerpt) = state.excerpts.get_mut(focused) {
             excerpt.owns_buffer = false;
         }
     }
-    close_diff_changes(stoat);
+    park_diff_changes(stoat);
 
     let focus = stoat.active_workspace().panes.focus();
     let path = workdir.join(rel_path);
@@ -385,6 +417,9 @@ pub(crate) fn respawn_diff_changes_panes(stoat: &mut Stoat) {
 /// on that position once its file's excerpt is folded. An editor in the diff
 /// view leaves it first, so the editor comes back plain beneath the changes
 /// view, and the close returns to the diff.
+///
+/// A parked stack opens again with its excerpts, and the first pump lists the
+/// files anew against it, keeping the excerpts still listed.
 fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let landing = editor_landing(stoat);
     let (covered, covered_diff) = {
@@ -408,12 +443,11 @@ fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
 
     let ws = stoat.active_workspace_mut();
     let focus = ws.panes.focus();
-    let id = ws.diff_changes_views.insert(DiffChangesState {
-        covered: Some(covered),
-        covered_diff,
-        pending_landing: landing,
-        ..DiffChangesState::default()
-    });
+    let mut state = ws.parked_diff_changes.take().unwrap_or_default();
+    state.covered = Some(covered);
+    state.covered_diff = covered_diff;
+    state.pending_landing = landing;
+    let id = ws.diff_changes_views.insert(state);
     ws.panes.pane_mut(focus).view = View::DiffChanges(id);
     ws.panes.widen(focus);
 
@@ -598,7 +632,9 @@ mod tests {
     use crate::{
         action_handlers::{commits, dispatch, focused_editor_mut, pane},
         app::UpdateEffect,
+        buffer::BufferId,
         diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
+        editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::pty::PtyNotification,
         term_session::TermId,
@@ -1153,6 +1189,100 @@ mod tests {
                 (Some("diff_changes"), at("b.txt", 40), stacked),
             ),
         );
+    }
+
+    /// The focused changes view's excerpts as their editors and buffers, in
+    /// stack order.
+    fn excerpt_ids(h: &TestHarness) -> Vec<(EditorId, BufferId)> {
+        h.stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .map(|state| {
+                state
+                    .excerpts
+                    .iter()
+                    .map(|excerpt| (excerpt.editor_id, excerpt.buffer_id))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The flip to the per-file diff parks the stack, so the flip back finds
+    /// the same excerpt editors and buffers, and no buffer closes or opens on
+    /// the language servers.
+    #[test]
+    fn a_flip_and_back_keeps_the_stack_excerpts() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let before = excerpt_ids(&h);
+        let traffic = |h: &TestHarness| {
+            (
+                h.fake_lsp().observed_opens().len(),
+                h.fake_lsp().observed_closes().len(),
+            )
+        };
+        let quiet = traffic(&h);
+
+        h.type_keys("Ctrl-t");
+        h.settle();
+        h.type_keys("Ctrl-t");
+        h.settle();
+        assert_eq!(
+            (before.len(), excerpt_ids(&h), traffic(&h)),
+            (2, before, quiet),
+        );
+    }
+
+    /// A close after a flip back releases the stack as a close always does, so
+    /// the buffer only the stack opened closes, and nothing stays parked.
+    #[test]
+    fn a_close_after_a_flip_back_releases_the_stack_buffers() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("Ctrl-t");
+        h.settle();
+        h.type_keys("Ctrl-t");
+        h.settle();
+        h.type_keys("Escape");
+        h.settle();
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.buffers.id_for_path(Path::new("/repo/b.txt")),
+                ws.parked_diff_changes.is_some(),
+            ),
+            (None, false),
+        );
+    }
+
+    /// One stack parks at a time, so a flip from a changes view in another tab
+    /// releases the stack an earlier flip parked.
+    #[test]
+    fn a_second_flip_releases_the_stack_parked_before_it() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let first_parked: Vec<EditorId> = excerpt_ids(&h).into_iter().map(|(id, _)| id).collect();
+        h.type_keys("Ctrl-t");
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::PrevTab);
+        h.type_keys("Ctrl-t");
+        h.settle();
+        let ws = h.stoat.active_workspace();
+        let kept: Vec<bool> = first_parked
+            .iter()
+            .map(|id| ws.editors.contains_key(*id))
+            .collect();
+        assert_eq!((first_parked.len(), kept), (2, vec![false, false]));
     }
 
     /// DiffFiles on the changes view opens the cursor's file in the per-file
