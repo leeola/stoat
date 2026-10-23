@@ -3472,6 +3472,16 @@ mod tests {
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 
+    /// `:git ` with `log` selected opens the doc with the usage line `git log
+    /// [rev]`, then the alias, the parameter, and the description.
+    #[test]
+    fn snapshot_command_palette_group_doc() {
+        let mut h = Stoat::test();
+        h.type_text(":git ");
+        h.type_keys("ctrl-n");
+        h.assert_snapshot("command_palette_group_doc");
+    }
+
     /// `:o ` with no query lists every workspace file beside a live preview of
     /// the selected one.
     #[test]

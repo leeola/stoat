@@ -10,6 +10,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     widgets::{Block, Borders},
 };
 use std::{borrow::Cow, path::Path};
@@ -292,10 +293,10 @@ fn render_palette_arg_picker(
 /// Render the body for a free-typed argument, a command whose first argument
 /// has no inline picker (`ValueSource::None`, e.g. `:RenameWorkspace `).
 ///
-/// Names the parameter being collected -- its name and description, then the
-/// command's long description -- so the modal describes what to type instead of
-/// showing the emptied command list. State is synced before the frame, so this
-/// only paints.
+/// Shows the command's usage line, the parameter being collected with its
+/// description, then the command's long description, so the modal describes
+/// what to type instead of showing the emptied command list. State is synced
+/// before the frame, so this only paints.
 #[allow(clippy::too_many_arguments)]
 fn render_palette_free_arg(
     palette: &mut CommandPalette,
@@ -332,19 +333,23 @@ fn render_palette_free_arg(
     }
 
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
-    if let Some(param) = entry.def.params().first() {
+    let end_x = inner.x + inner.width;
+    write_str_clipped(
+        buf,
+        inner.x + 1,
+        body_top,
+        &usage_line(entry),
+        text_style,
+        end_x,
+    );
+    if let Some(param) = entry.def.params().first()
+        && body_top + 1 < body_bottom
+    {
         let hint = format!("{}  {}", param.name, param.description);
-        write_str_clipped(
-            buf,
-            inner.x + 1,
-            body_top,
-            &hint,
-            text_style,
-            inner.x + inner.width,
-        );
+        write_str_clipped(buf, inner.x + 1, body_top + 1, &hint, text_style, end_x);
     }
 
-    let doc_top = body_top + 2;
+    let doc_top = body_top + 3;
     if doc_top < body_bottom {
         let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
         let doc_lines = wrap_text(
@@ -471,15 +476,70 @@ fn render_palette_filter(
             separator_style,
             scene,
         );
-        let doc_lines = filtered
+        let lines = filtered
             .get(selected)
-            .map(|e| wrap_text(e.def.long_desc(), inner.width.saturating_sub(1) as usize))
+            .map(|e| doc_lines(e, inner.width.saturating_sub(1) as usize))
             .unwrap_or_default();
         let doc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
-        for (i, line) in doc_lines.iter().take(doc.height as usize).enumerate() {
-            write_str(buf, doc.x + 1, doc.y + i as u16, line, doc_style);
-        }
+        paint_doc_lines(buf, doc, &lines, doc_style);
     }
+}
+
+/// Paint `lines` into the doc region `doc`, one per row from its top, each
+/// clipped at the region's right edge.
+fn paint_doc_lines(buf: &mut Buffer, doc: Rect, lines: &[String], style: Style) {
+    for (i, line) in lines.iter().take(doc.height as usize).enumerate() {
+        write_str_clipped(
+            buf,
+            doc.x + 1,
+            doc.y + i as u16,
+            line,
+            style,
+            doc.x + doc.width,
+        );
+    }
+}
+
+/// The help of `entry` as doc-region lines, the way a CLI's help reads.
+///
+/// The lines are its [`usage_line`], an `alias:` line when it has aliases, one
+/// line per parameter with its description, a blank line after any parameter,
+/// then its long description wrapped to `width`. Only the long description
+/// wraps, so the caller clips the rest at the region's edge.
+fn doc_lines(entry: &RegistryEntry, width: usize) -> Vec<String> {
+    let mut lines = vec![usage_line(entry)];
+    let aliases = entry.def.aliases();
+    if !aliases.is_empty() {
+        lines.push(format!("alias: {}", aliases.join(", ")));
+    }
+    let params = entry.def.params();
+    lines.extend(
+        params
+            .iter()
+            .map(|param| format!("  {}  {}", param.name, param.description)),
+    );
+    if !params.is_empty() {
+        lines.push(String::new());
+    }
+    lines.extend(wrap_text(entry.def.long_desc(), width));
+    lines
+}
+
+/// The command name of `entry` followed by each parameter, as `<name>` when
+/// the parameter is required and `[name]` when it is optional.
+fn usage_line(entry: &RegistryEntry) -> String {
+    let mut line = entry.command_name.clone();
+    for param in entry.def.params() {
+        let (open, close) = match param.required {
+            true => ('<', '>'),
+            false => ('[', ']'),
+        };
+        line.push(' ');
+        line.push(open);
+        line.push_str(param.name);
+        line.push(close);
+    }
+    line
 }
 
 /// Paint command-palette result rows into `area` starting at `start_row`, one
@@ -578,9 +638,12 @@ fn shown_name(entry: &RegistryEntry, offset: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{paint_palette_rows, palette_filter_layout, DOC_ROWS, LIST_ROWS};
+    use super::{
+        doc_lines, paint_doc_lines, paint_palette_rows, palette_filter_layout, usage_line,
+        DOC_ROWS, LIST_ROWS,
+    };
     use crate::theme::Theme;
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Style};
     use stoat_action::registry;
 
     fn layout(area: Rect, content_rows: u16, zoom: i8) -> super::PaletteFilterLayout {
@@ -713,6 +776,52 @@ mod tests {
             (laid.list.height, laid.doc.height),
             (7, 0),
             "every remaining body row goes to the list"
+        );
+    }
+
+    /// A usage line names the command, then each parameter in angle brackets
+    /// when required and in square brackets when optional.
+    #[test]
+    fn a_usage_line_brackets_each_parameter_by_whether_it_is_required() {
+        let usage = |name| usage_line(registry::lookup_alias(name).expect("a command"));
+        assert_eq!(
+            ["git log", "git review", "quit"].map(usage),
+            ["git log [rev]", "git review <reference>", "quit"],
+        );
+    }
+
+    /// A doc line wider than the doc region stops at the region's right edge,
+    /// so it paints nothing onto the border or the editor behind.
+    #[test]
+    fn a_wide_doc_line_stops_at_the_region_edge() {
+        let area = Rect::new(0, 0, 40, 3);
+        let doc = Rect::new(2, 1, 20, 1);
+        let mut buf = Buffer::empty(area);
+        paint_doc_lines(&mut buf, doc, &["x".repeat(60)], Style::default());
+        let painted: Vec<u16> = (0..area.width)
+            .filter(|&x| buf[(x, 1)].symbol() == "x")
+            .collect();
+        assert_eq!(painted, (doc.x + 1..doc.x + doc.width).collect::<Vec<_>>());
+    }
+
+    /// A command's doc opens with its usage, its aliases, one line per
+    /// parameter, and a blank line before its long description.
+    #[test]
+    fn a_doc_reads_usage_aliases_and_parameters_before_the_description() {
+        let entry = registry::lookup_alias("git log").expect("a command");
+        let param = &entry.def.params()[0];
+        let lines = doc_lines(entry, 60);
+        assert_eq!(
+            (&lines[..4], lines.len() > 4),
+            (
+                &[
+                    "git log [rev]".to_string(),
+                    "alias: git ls".to_string(),
+                    format!("  rev  {}", param.description),
+                    String::new(),
+                ][..],
+                true,
+            ),
         );
     }
 }
