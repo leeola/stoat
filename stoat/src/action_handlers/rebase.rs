@@ -1,9 +1,11 @@
 use crate::{
-    action_handlers::{commits::reload_every_list, reword::install_reword_pause},
+    action_handlers::{
+        commits::reload_every_list, review_walk::WALK_LIMIT, reword::install_reword_pause,
+    },
     app::{Stoat, UpdateEffect},
     auto_reload,
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
-    host::{CherryPickOutcome, ConflictedFile, GitApplyError, GitRepo, RebaseTodoOp},
+    host::{CherryPickOutcome, CommitInfo, ConflictedFile, GitApplyError, GitRepo, RebaseTodoOp},
     merge_view::MergeRow,
     rebase::{ActiveRebase, RebaseEntry, RebasePause, RebaseState},
 };
@@ -70,6 +72,111 @@ pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
 
     stoat.active_workspace_mut().rebase = Some(RebaseState::new(workdir, onto, entries));
     UpdateEffect::Redraw
+}
+
+/// Plan an interactive rebase of the first-parent commits above `rev`, or open
+/// the commits list to pick the base with `i` when `rev` is `None`.
+///
+/// The history walk runs on the pool behind every git write queued before the
+/// press, and the plan paints over the focused pane once it lands. A review
+/// walk, an open plan, or a running rebase refuses the command, at the press
+/// and again when the walk lands.
+pub(super) fn git_rebase(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
+    if let Some(refusal) = rebase_refusal(stoat) {
+        emit_rebase_error(stoat, refusal, None);
+        return UpdateEffect::Redraw;
+    }
+    let Some(rev) = rev else {
+        if stoat.active_workspace().focused_commits_id().is_none() {
+            super::commits::open_commits(stoat);
+        }
+        if stoat.active_workspace().focused_commits_id().is_some() {
+            stoat.set_status("select the base commit and press i");
+        }
+        return UpdateEffect::Redraw;
+    };
+
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        emit_rebase_error(stoat, "not in a git repository", None);
+        return UpdateEffect::Redraw;
+    };
+    let Some(workdir) = repo.workdir() else {
+        emit_rebase_error(stoat, "git repo has no working tree", None);
+        return UpdateEffect::Redraw;
+    };
+    let Some(onto) = repo.resolve_rev(rev) else {
+        emit_rebase_error(
+            stoat,
+            "unknown revision",
+            Some(format!("no revision named {rev}")),
+        );
+        return UpdateEffect::Redraw;
+    };
+
+    let rev = rev.to_string();
+    let job = GitJob::new("rebase plan", None, move |_: &mut Stoat| {
+        Some(Box::new(move || {
+            let range = repo
+                .resolve_rev("HEAD")
+                .map(|head| repo.log_range(&head, &onto, WALK_LIMIT))
+                .unwrap_or_default();
+            Box::new(move |stoat: &mut Stoat| land_rebase_plan(stoat, workdir, &rev, onto, range))
+                as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Install the plan over the commits the walk found, or badge why there is
+/// none.
+///
+/// The view predicate ranks a diff view above the plan, so a diff on the
+/// focused pane ends first, as it does when the commits list covers an editor.
+/// The pane comes back as a plain editor when the plan closes.
+fn land_rebase_plan(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    rev: &str,
+    onto: String,
+    range: Vec<CommitInfo>,
+) {
+    if let Some(refusal) = rebase_refusal(stoat) {
+        emit_rebase_error(stoat, refusal, None);
+        return;
+    }
+    if range.is_empty() {
+        emit_rebase_error(
+            stoat,
+            "nothing to rebase",
+            Some(format!("{rev} is not behind HEAD")),
+        );
+        return;
+    }
+
+    super::review::exit_diff_view(stoat);
+    let entries = range
+        .into_iter()
+        .rev()
+        .map(|commit| RebaseEntry {
+            op: RebaseTodoOp::Pick,
+            commit,
+        })
+        .collect();
+    stoat.active_workspace_mut().rebase = Some(RebaseState::new(workdir, onto, entries));
+}
+
+/// Why a new rebase plan does not open now, or `None` when it does.
+fn rebase_refusal(stoat: &Stoat) -> Option<&'static str> {
+    let ws = stoat.active_workspace();
+    if ws.rebase.is_some() || ws.rebase_active.is_some() {
+        Some("rebase already in progress")
+    } else if ws.review_walk.is_some() {
+        Some("a review walk is open")
+    } else {
+        None
+    }
 }
 
 pub(super) fn abort_rebase(stoat: &mut Stoat) -> UpdateEffect {

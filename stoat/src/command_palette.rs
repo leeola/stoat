@@ -547,7 +547,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        GitLs | GitReview | GitCheckout | GitCommit => ctx.in_repo,
+        GitLs | GitReview | GitCheckout | GitCommit | GitRebase => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1758,7 +1758,13 @@ mod tests {
             names.sort_unstable();
             names
         };
-        let group = vec!["GitCheckout", "GitCommit", "GitLs", "GitReview"];
+        let group = vec![
+            "GitCheckout",
+            "GitCommit",
+            "GitLs",
+            "GitRebase",
+            "GitReview",
+        ];
         assert_eq!(
             [
                 git_group(PaletteScope::Active, false),

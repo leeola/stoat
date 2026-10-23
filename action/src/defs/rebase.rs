@@ -1,4 +1,8 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{
+    action::{define_action, define_action_def},
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind, ValueSource,
+};
+use std::any::Any;
 
 define_action!(
     EnterRebaseDef,
@@ -11,6 +15,50 @@ define_action!(
     ActionPriority::Normal,
     command_name = "rebase"
 );
+
+const GIT_REBASE_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "rev",
+    kind: ParamKind::String,
+    value_source: ValueSource::Branches,
+    required: false,
+    description: "Commit to rebase onto. Every first-parent commit above it becomes a Pick. \
+                  Omit it to pick the base in the commits list.",
+}];
+
+define_action_def!(
+    GitRebaseDef,
+    "GitRebase",
+    ActionKind::GitRebase,
+    "plan an interactive rebase",
+    "Open the interactive rebase plan over the focused pane, with every \
+     first-parent commit between the given revision and HEAD as a Pick. With \
+     no revision, open the commits list to pick the base with i. Refuses \
+     while a review walk, another plan, or a rebase is open.",
+    ActionPriority::Common,
+    aliases = &["git ri"],
+    command_name = "git rebase",
+    params = GIT_REBASE_PARAMS
+);
+
+#[derive(Debug)]
+pub struct GitRebase {
+    /// Commit to rebase onto, or `None` to pick the base in the commits list.
+    pub rev: Option<String>,
+}
+
+impl GitRebase {
+    pub const DEF: &GitRebaseDef = &GitRebaseDef;
+}
+
+impl Action for GitRebase {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
 
 define_action!(
     AbortRebaseDef,

@@ -19,7 +19,7 @@ use stoat_scheduler::Task;
 
 /// Commits the picker loads for a ref. Bounds the eager walk on a long
 /// history without paging, which fuzzy filtering could not work across.
-const WALK_LIMIT: usize = 1000;
+pub(super) const WALK_LIMIT: usize = 1000;
 
 /// Open the commit picker over `reference`'s first-parent history.
 ///

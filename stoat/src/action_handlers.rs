@@ -67,7 +67,7 @@ pub(crate) use pane::{
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitCheckout,
-    GitLs, GitReview, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs,
+    GitLs, GitRebase, GitReview, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs,
     OpenReviewAgentEdits, RenameTab, RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
@@ -1160,6 +1160,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiffChangesLast => diff_changes::diff_changes_edge(stoat, true),
         ActionKind::DiffChangesOpen => diff_changes::diff_changes_open(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
+        ActionKind::GitRebase => {
+            let action = action
+                .as_any()
+                .downcast_ref::<GitRebase>()
+                .expect("GitRebase action downcast");
+            rebase::git_rebase(stoat, action.rev.as_deref())
+        },
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
         ActionKind::ExecuteRebase => rebase::execute_rebase(stoat),
         ActionKind::RebaseNext => {

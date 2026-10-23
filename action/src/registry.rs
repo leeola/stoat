@@ -104,12 +104,12 @@ use crate::{
             PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
-            AbortRebase, EnterRebase, ExecuteRebase, RebaseConflictAbort, RebaseConflictApply,
-            RebaseConflictNextFile, RebaseConflictPrevFile, RebaseConflictSkipEntry,
-            RebaseConflictTakeOurs, RebaseConflictTakeTheirs, RebaseContinue, RebaseMoveDown,
-            RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort, RewordConfirm, SetRebaseOpDrop,
-            SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpReword,
-            SetRebaseOpSquash,
+            AbortRebase, EnterRebase, ExecuteRebase, GitRebase, RebaseConflictAbort,
+            RebaseConflictApply, RebaseConflictNextFile, RebaseConflictPrevFile,
+            RebaseConflictSkipEntry, RebaseConflictTakeOurs, RebaseConflictTakeTheirs,
+            RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
+            RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick,
+            SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
             ChangeWalkWrap, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
@@ -996,6 +996,23 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GitCommitAbort::DEF, |_| Ok(Box::new(GitCommitAbort)));
     add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
+    add(GitRebase::DEF, |params| {
+        // The palette autospaces a submitted command, so a bare `git rebase`
+        // arrives with an empty argument. That means the commits list, not a
+        // revision literally named "".
+        let rev = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "rev",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .filter(|rev| !rev.is_empty())
+            .map(str::to_owned);
+        Ok(Box::new(GitRebase { rev }))
+    });
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
     add(RebaseNext::DEF, |_| Ok(Box::new(RebaseNext)));
@@ -1362,6 +1379,7 @@ mod tests {
         "GitCommitAbort",
         "GitCommit",
         "EnterRebase",
+        "GitRebase",
         "AbortRebase",
         "ExecuteRebase",
         "RebaseNext",
@@ -1953,6 +1971,7 @@ mod tests {
         // + 1 GitCheckout.
         // + 2 GitCommitConfirm/GitCommitAbort.
         // + 1 GitCommit.
+        // + 1 GitRebase.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
@@ -1984,7 +2003,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 453);
+        assert_eq!(all().count(), 454);
     }
 
     #[test]

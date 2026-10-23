@@ -205,7 +205,7 @@ impl ActiveRebase {
 
 #[cfg(test)]
 mod tests {
-    use super::RebasePause;
+    use super::{ActiveRebase, RebasePause, RebaseState};
     use crate::{
         action_handlers::{dispatch, focused_editor_mut, movement},
         app::Stoat,
@@ -216,7 +216,7 @@ mod tests {
         workspace::diff::DiffBase,
     };
     use std::path::Path;
-    use stoat_action::{EnterRebase, ExecuteRebase, RebaseContinue, ToggleStageHunk};
+    use stoat_action::{EnterRebase, ExecuteRebase, GitRebase, RebaseContinue, ToggleStageHunk};
 
     const THREE_COMMITS: &[CommitSpec<'static>] = &[
         ("c1", "c1: root", &[("a.rs", "line1\n")]),
@@ -1307,6 +1307,206 @@ mod tests {
             repo.log_commits(None, 10).len(),
             3,
             "blocked rebase leaves history intact"
+        );
+    }
+
+    /// A harness whose `/repo` holds [`THREE_COMMITS`] with HEAD on `main` at
+    /// `c3`, and the workspace rooted there.
+    fn git_rebase_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "c3")
+            .set_head_branch("main");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h
+    }
+
+    fn submit(h: &mut TestHarness, command: &str) {
+        h.type_text(command);
+        h.type_keys("enter");
+        h.settle();
+    }
+
+    /// `:git rebase c1` plans every first-parent commit above `c1`, oldest
+    /// first, and the plan runs as one opened from the commits list does.
+    #[test]
+    fn git_rebase_plans_the_commits_above_a_revision() {
+        let mut h = git_rebase_harness();
+        submit(&mut h, ":git rebase c1");
+        let view = h.stoat.current_view();
+        let planned = h.stoat.active_workspace().rebase.as_ref().map(|plan| {
+            let shas: Vec<String> = plan.todo.iter().map(|e| e.commit.sha.clone()).collect();
+            (plan.onto.clone(), shas)
+        });
+
+        h.type_keys("d");
+        h.type_keys("Enter");
+        h.settle();
+        let log = h
+            .fake_git
+            .discover(Path::new("/repo"))
+            .unwrap()
+            .log_commits(None, 10);
+        assert_eq!(
+            (view, planned, log.len(), log.last().map(|c| c.sha.clone())),
+            (
+                Some("rebase"),
+                Some(("c1".to_string(), vec!["c2".to_string(), "c3".to_string()])),
+                2,
+                Some("c1".to_string()),
+            ),
+        );
+    }
+
+    /// A revision with no commit above it plans nothing, and a name that
+    /// resolves to nothing plans nothing either.
+    #[test]
+    fn git_rebase_badges_a_revision_with_nothing_above_it_and_an_unknown_one() {
+        let badge = |command: &str| {
+            let mut h = git_rebase_harness();
+            submit(&mut h, command);
+            (h.stoat.active_workspace().rebase.is_none(), dirty_badge(&h))
+        };
+        assert_eq!(
+            [badge(":git ri c3"), badge(":git ri junk")],
+            [
+                (true, Some("nothing to rebase".to_string())),
+                (true, Some("unknown revision".to_string())),
+            ],
+        );
+    }
+
+    /// With no revision the command opens the commits list, where `i` on the
+    /// base commit opens the plan. A list already focused stays open, and
+    /// outside a repository nothing opens and no hint shows.
+    #[test]
+    fn git_rebase_alone_opens_the_commits_list_to_pick_the_base() {
+        let opened = |mut h: TestHarness| {
+            submit(&mut h, ":git rebase");
+            (h.stoat.current_view(), h.stoat.pending_message.clone())
+        };
+        let mut listing = git_rebase_harness();
+        listing.open_commits("/repo");
+        let hint = Some("select the base commit and press i".to_string());
+        assert_eq!(
+            [
+                opened(git_rebase_harness()),
+                opened(listing),
+                opened(Stoat::test()),
+            ],
+            [
+                (Some("commits"), hint.clone()),
+                (Some("commits"), hint),
+                (Some("file"), None),
+            ],
+        );
+    }
+
+    /// A plan whose walk lands behind another plan's is refused, and the plan
+    /// that landed first stays.
+    #[test]
+    fn a_plan_landing_behind_another_is_refused() {
+        let mut h = git_rebase_harness();
+        // A dispatch paints no frame and pumps no job, so both walks queue
+        // before either lands.
+        dispatch(
+            &mut h.stoat,
+            &GitRebase {
+                rev: Some("c1".into()),
+            },
+        );
+        dispatch(
+            &mut h.stoat,
+            &GitRebase {
+                rev: Some("c2".into()),
+            },
+        );
+        h.settle();
+        let onto = h
+            .stoat
+            .active_workspace()
+            .rebase
+            .as_ref()
+            .map(|plan| plan.onto.clone());
+        assert_eq!(
+            (onto, dirty_badge(&h)),
+            (
+                Some("c1".to_string()),
+                Some("rebase already in progress".to_string()),
+            ),
+        );
+    }
+
+    /// The view predicate ranks a diff view above the plan, so the plan ends
+    /// the diff view rather than opening unseen under it.
+    #[test]
+    fn git_rebase_opens_the_plan_over_a_diff_view() {
+        let mut h = git_rebase_harness();
+        h.fake_fs()
+            .insert_file("/repo/a.rs", "line1\nline2\nline3\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        let editor_id = h.stoat.focused_editor_ids().expect("an editor").0;
+        h.stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(editor_id)
+            .expect("the editor")
+            .set_diff_view(true);
+        let under = h.stoat.current_view();
+        submit(&mut h, ":git rebase c1");
+        assert_eq!(
+            (under, h.stoat.current_view()),
+            (Some("diff"), Some("rebase"))
+        );
+    }
+
+    /// An open plan, a running rebase, or a review walk refuses a new plan,
+    /// with a revision or without one, and an open plan stays as it was.
+    #[test]
+    fn git_rebase_during_a_plan_a_rebase_or_a_walk_opens_no_new_plan() {
+        let refused = |h: &mut TestHarness, command: &str| {
+            submit(h, command);
+            let onto = h
+                .stoat
+                .active_workspace()
+                .rebase
+                .as_ref()
+                .map(|plan| plan.onto.clone());
+            (onto, dirty_badge(h))
+        };
+        let mut planning = git_rebase_harness();
+        submit(&mut planning, ":git rebase c1");
+        let mut rebasing = git_rebase_harness();
+        rebasing.stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(
+            RebaseState::new("/repo".into(), "c1".into(), Vec::new()),
+            None,
+        ));
+        let mut walking = git_rebase_harness();
+        submit(&mut walking, ":git review main");
+        walking.type_keys("down");
+        walking.type_keys("enter");
+        walking.settle();
+        assert!(
+            walking.stoat.active_workspace().review_walk.is_some(),
+            "the walk must be running for the refusal"
+        );
+        assert_eq!(
+            [
+                refused(&mut planning, ":git rebase c2"),
+                refused(&mut rebasing, ":git rebase c1"),
+                refused(&mut walking, ":git rebase"),
+            ],
+            [
+                (
+                    Some("c1".to_string()),
+                    Some("rebase already in progress".to_string()),
+                ),
+                (None, Some("rebase already in progress".to_string())),
+                (None, Some("a review walk is open".to_string())),
+            ],
         );
     }
 }
