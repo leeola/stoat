@@ -15,13 +15,15 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
     diff_changes::{self, DiffChangesState, Landing},
-    display_map::DisplayPoint,
+    display_map::{DisplayPoint, DisplaySnapshot},
+    editor_state::{EditorId, EditorState},
     pane::{PaneId, View},
     workspace::Workspace,
 };
+use slotmap::SlotMap;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
-use stoat_text::Point;
+use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
 
 /// Flip between the changes view and the per-file diff.
 ///
@@ -217,6 +219,52 @@ pub(super) fn diff_changes_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
     effect
 }
 
+/// Move the focused changes view's cursor by `delta` rows in one placement,
+/// to where [`diff_changes_step`] lands.
+///
+/// A row counts when a cursor lands on it, so a removed base row takes no
+/// step, and a step past an excerpt's edge goes on into the next painted
+/// excerpt. Inside the focused excerpt every cursor moves and keeps its goal
+/// column. A move into another excerpt leaves one cursor there, as the row
+/// walk does. A count typed before the key takes no part.
+pub(super) fn diff_changes_jump(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return UpdateEffect::None;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return UpdateEffect::None;
+    };
+    let editor_id = match state.focused_excerpt() {
+        Some(excerpt) if excerpt.folded_version.is_some() => excerpt.editor_id,
+        _ => return UpdateEffect::None,
+    };
+    let Some(editor) = editors.get_mut(editor_id) else {
+        return UpdateEffect::None;
+    };
+    let (down, steps) = (delta > 0, delta.unsigned_abs());
+    if steps == 0 {
+        return UpdateEffect::None;
+    }
+
+    let start = view::cursor_display_row(editor);
+    let taken = walk_rows(&editor.display_map.snapshot(), start, steps, down).0;
+    if taken == steps {
+        walk_cursors(editor, steps, down);
+        return UpdateEffect::Redraw;
+    }
+    // The step that finds the excerpt's edge moves the cursors once more and
+    // then crosses, as the row walk's step that finds no row does.
+    walk_cursors(editor, taken + 1, down);
+    cross_rows(state, editors, steps - taken - 1, down);
+    UpdateEffect::Redraw
+}
+
 /// Carry the change walk past the focused excerpt's last hunk to the first
 /// hunk of the next excerpt, or before its first hunk to the last hunk of the
 /// previous one.
@@ -264,14 +312,14 @@ pub(super) fn hop_excerpt(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
 /// Move the focused excerpt's cursor by the rows of the stack's last paint.
 pub(super) fn diff_changes_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
     let rows = viewport_rows(stoat);
-    diff_changes_step(stoat, page_delta(rows, dir))
+    diff_changes_jump(stoat, page_delta(rows, dir))
 }
 
 /// Move the focused excerpt's cursor by half the rows of the stack's last
 /// paint, and by one row at least.
 pub(super) fn diff_changes_half_page(stoat: &mut Stoat, dir: PageDir) -> UpdateEffect {
     let rows = (viewport_rows(stoat) / 2).max(1);
-    diff_changes_step(stoat, page_delta(rows, dir))
+    diff_changes_jump(stoat, page_delta(rows, dir))
 }
 
 /// Put the focused changes view's cursor on the first excerpt's first row, or
@@ -601,12 +649,8 @@ fn cross_excerpt(stoat: &mut Stoat, down: bool) -> bool {
 
     let point = {
         let snapshot = editor.display_map.snapshot();
-        let landing = |row| snapshot.display_to_buffer(DisplayPoint::new(row, 0));
-        let last = snapshot.max_point().row;
-        match down {
-            true => (0..=last).find_map(landing),
-            false => (0..=last).rev().find_map(landing),
-        }
+        edge_row(&snapshot, down)
+            .and_then(|row| snapshot.display_to_buffer(DisplayPoint::new(row, 0)))
     };
     let Some(point) = point else {
         return false;
@@ -625,9 +669,158 @@ fn excerpts_past(state: &DiffChangesState, down: bool) -> Vec<usize> {
     }
 }
 
+/// Move every cursor of `editor` by `steps` steps of the row walk toward
+/// `down`, as that many calls of [`movement::move_vertical`] move it, each
+/// cursor keeping its goal column.
+fn walk_cursors(editor: &mut EditorState, steps: u32, down: bool) {
+    let snapshot = editor.display_map.snapshot();
+    let buffer = snapshot.buffer_snapshot();
+    let rope = buffer.rope();
+    movement::move_cursors(&mut editor.selections, buffer, false, |read| {
+        let cursor = cursor_offset(rope, read.tail, read.head);
+        let at = snapshot.buffer_to_display(rope.offset_to_point(cursor));
+        let goal = match read.goal {
+            SelectionGoal::Column(column) => column,
+            SelectionGoal::None => at.column,
+        };
+        let point = walk_landing(&snapshot, at.row, goal, steps, down)?;
+        Some((rope.point_to_offset(point), SelectionGoal::Column(goal)))
+    });
+}
+
+/// Carry a walk past the focused excerpt's edge through the painted excerpts
+/// beyond it, as [`cross_excerpt`] carries it a step at a time, with `left`
+/// steps still to take after the crossing.
+///
+/// A crossing puts one cursor at the start of the entered excerpt's outermost
+/// landing row, and the steps left walk on from there. A walk that reaches an
+/// excerpt's edge with steps left takes one more step there and crosses
+/// again, so every excerpt it passes through keeps its cursor where the row
+/// walk leaves it. The walk stops at an excerpt with no landing row.
+fn cross_rows(
+    state: &mut DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    mut left: u32,
+    down: bool,
+) {
+    for index in excerpts_past(state, down) {
+        let excerpt = &state.excerpts[index];
+        if excerpt.folded_version.is_none() {
+            continue;
+        }
+        let Some(editor) = editors.get_mut(excerpt.editor_id) else {
+            break;
+        };
+        let entered = {
+            let snapshot = editor.display_map.snapshot();
+            edge_row(&snapshot, down).and_then(|entry| {
+                let start = snapshot.display_to_buffer(DisplayPoint::new(entry, 0))?;
+                Some((start, walk_rows(&snapshot, entry, left, down).0))
+            })
+        };
+        let Some((start, taken)) = entered else {
+            break;
+        };
+        diff_changes::place_cursor(editor, start);
+        state.focused = index;
+        if taken == left {
+            walk_cursors(editor, left, down);
+            return;
+        }
+        walk_cursors(editor, taken + 1, down);
+        left -= taken + 1;
+    }
+}
+
+/// Where `steps` steps of the row walk toward `down` leave a cursor at display
+/// row `row` with goal column `goal`, or `None` where no step moves it.
+///
+/// A step lands with the column [`movement::clip_to_goal`] gives on the row it
+/// aimed at, so a step over a removed base row lands at the near edge of the
+/// row past it. A step at the excerpt's edge aims past it, clamped to the
+/// excerpt, and leaves the cursor where that clip puts it, or where the last
+/// step left it.
+fn walk_landing(
+    snapshot: &DisplaySnapshot,
+    row: u32,
+    goal: u32,
+    steps: u32,
+    down: bool,
+) -> Option<Point> {
+    let travel = match down {
+        true => Bias::Right,
+        false => Bias::Left,
+    };
+    let land =
+        |target| snapshot.display_to_buffer(movement::clip_to_goal(snapshot, target, goal, travel));
+    let (taken, at, aimed) = walk_rows(snapshot, row, steps, down);
+    let moved = aimed.and_then(land);
+    if taken == steps {
+        return moved;
+    }
+    let edge = match down {
+        true => (at + 1).min(snapshot.max_point().row),
+        false => at.saturating_sub(1),
+    };
+    land(edge).or(moved)
+}
+
+/// The steps of the row walk from display row `row` toward `down` that reach
+/// another row, at most `steps`, the row they reach, and the row the last of
+/// them aimed at.
+///
+/// A step reaches the next row toward `down` that maps to a buffer position,
+/// as a text row and the top fold's placeholder do. It aims at the row beside
+/// its start, and [`movement::clip_to_goal`] carries an aim at a removed base
+/// row, which maps to none, on to that next row. The steps fall short at the
+/// excerpt's edge.
+fn walk_rows(
+    snapshot: &DisplaySnapshot,
+    row: u32,
+    steps: u32,
+    down: bool,
+) -> (u32, u32, Option<u32>) {
+    let last = snapshot.max_point().row;
+    let (mut at, mut taken, mut aimed) = (row, 0, None);
+    while taken < steps {
+        let next = match down {
+            true => (at + 1..=last).find(|&row| lands(snapshot, row)),
+            false => (0..at).rev().find(|&row| lands(snapshot, row)),
+        };
+        let Some(next) = next else {
+            break;
+        };
+        aimed = Some(match down {
+            true => at + 1,
+            false => at - 1,
+        });
+        at = next;
+        taken += 1;
+    }
+    (taken, at, aimed)
+}
+
+/// The outermost display row of an excerpt that a cursor lands on, the first
+/// going down and the last going up.
+fn edge_row(snapshot: &DisplaySnapshot, down: bool) -> Option<u32> {
+    let last = snapshot.max_point().row;
+    match down {
+        true => (0..=last).find(|&row| lands(snapshot, row)),
+        false => (0..=last).rev().find(|&row| lands(snapshot, row)),
+    }
+}
+
+/// Whether a cursor lands on display row `row`, which holds when the row maps
+/// to a buffer position.
+fn lands(snapshot: &DisplaySnapshot, row: u32) -> bool {
+    snapshot
+        .display_to_buffer(DisplayPoint::new(row, 0))
+        .is_some()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{diff_changes_step, respawn_diff_changes_panes};
+    use super::{diff_changes_jump, diff_changes_step, respawn_diff_changes_panes};
     use crate::{
         action_handlers::{commits, dispatch, focused_editor_mut, pane},
         app::UpdateEffect,
@@ -978,6 +1171,90 @@ mod tests {
                 at("b.txt", 9),
             ),
         );
+    }
+
+    /// A jump leaves every excerpt's cursor where the row-by-row walk leaves
+    /// it, for every distance: past the top fold, over a removed base row
+    /// either way, across the boundaries, past a file that waits on its diff
+    /// map, and against either end of the stack with the goal column kept. A
+    /// page up at the stack's top stays.
+    #[test]
+    fn a_jump_lands_where_the_row_walk_lands() {
+        let mut h = TestHarness::with_size(100, 24);
+        let lines = |prefix: &str| {
+            (1..=9)
+                .map(|n| format!("{prefix} {n}\n"))
+                .collect::<String>()
+        };
+        let (a, b, c) = (lines("a"), lines("b"), lines("c"));
+        h.stage_review_scenario(
+            "/repo",
+            &[
+                ("a.txt", &a, &a.replace("a 2\n", "")),
+                ("b.txt", &b, &b.replace("b 5\n", "").replace("b 9", "B")),
+                ("c.txt", &c, &c.replace("c 9\n", "C NINE")),
+            ],
+        );
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let editor_ids = |h: &TestHarness| -> Vec<EditorId> {
+            let state = h.stoat.active_workspace().focused_diff_changes();
+            let excerpts = &state.expect("a changes view").excerpts;
+            excerpts.iter().map(|excerpt| excerpt.editor_id).collect()
+        };
+        let land = |h: &mut TestHarness, (index, start): (usize, Point), delta: i32, walk: bool| {
+            for (at, id) in editor_ids(h).into_iter().enumerate() {
+                let point = if at == index { start } else { Point::new(0, 0) };
+                let editor = h.stoat.active_workspace_mut().editors.get_mut(id);
+                diff_changes::place_cursor(editor.expect("an excerpt editor"), point);
+            }
+            let ws = h.stoat.active_workspace_mut();
+            ws.focused_diff_changes_mut()
+                .expect("a changes view")
+                .focused = index;
+            let effect = match walk {
+                true => diff_changes_step(&mut h.stoat, delta),
+                false => diff_changes_jump(&mut h.stoat, delta),
+            };
+            let cursors: Vec<Point> = editor_ids(h)
+                .into_iter()
+                .map(|id| {
+                    let editor = h.stoat.active_workspace_mut().editors.get_mut(id);
+                    diff_changes::cursor_point(editor.expect("an excerpt editor"))
+                })
+                .collect();
+            let focused = h.stoat.active_workspace().focused_diff_changes();
+            (effect, focused.expect("a changes view").focused, cursors)
+        };
+
+        // From above and below b.txt's removed row, from the stack's top, and
+        // from c.txt's last rows, with b.txt folded and then waiting. A walk
+        // up into a.txt passes its removed row onto the top row.
+        let starts = [
+            (1, Point::new(2, 2)),
+            (1, Point::new(5, 2)),
+            (0, Point::new(0, 0)),
+            (2, Point::new(6, 2)),
+        ];
+        let folded = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .and_then(|state| state.excerpts[1].folded_version);
+        let (mut walked, mut jumped) = (Vec::new(), Vec::new());
+        for b_folded in [folded, None] {
+            if let Some(state) = h.stoat.active_workspace_mut().focused_diff_changes_mut() {
+                state.excerpts[1].folded_version = b_folded;
+            }
+            for start in starts {
+                for delta in -14..=24 {
+                    walked.push(land(&mut h, start, delta, true));
+                    jumped.push(land(&mut h, start, delta, false));
+                }
+            }
+        }
+        let (_, focused, cursors) = land(&mut h, (0, Point::new(0, 0)), -4, false);
+        assert_eq!((jumped, focused, cursors[0]), (walked, 0, Point::new(0, 0)),);
     }
 
     /// The editor's word motion acts on the focused excerpt, so `w` moves its
