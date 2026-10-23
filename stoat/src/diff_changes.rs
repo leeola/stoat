@@ -16,7 +16,7 @@
 use crate::{
     action_handlers::{review, view},
     app::Stoat,
-    buffer::BufferId,
+    buffer::{BufferId, SharedBuffer},
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::DiffMap,
@@ -642,7 +642,7 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
             .collect()
     };
     for (rel_path, path) in missing {
-        let Some(excerpt) = open_excerpt(stoat, rel_path.clone(), path) else {
+        let Some(excerpt) = open_excerpt(stoat, id, rel_path.clone(), path) else {
             continue;
         };
         match stoat.active_workspace_mut().diff_changes_views.get_mut(id) {
@@ -666,14 +666,23 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
         .min(state.excerpts.len().saturating_sub(1));
 }
 
-/// An excerpt of the file at `path`, in the diff view, with its diff map
-/// wanted.
+/// An excerpt of changes view `id` over the file at `path`, in the diff view,
+/// with its diff map wanted.
 ///
 /// `None` when the file reads as no buffer, as an image or an unreadable file
-/// does.
-fn open_excerpt(stoat: &mut Stoat, rel_path: String, path: &Path) -> Option<Excerpt> {
+/// does. `None` too for a large file not yet open, which reads on the pool,
+/// and [`adopt_excerpt`] adds its excerpt once the read lands.
+fn open_excerpt(
+    stoat: &mut Stoat,
+    id: DiffChangesId,
+    rel_path: String,
+    path: &Path,
+) -> Option<Excerpt> {
     let workspace = stoat.active_workspace;
     let owns_buffer = stoat.active_workspace().buffers.id_for_path(path).is_none();
+    if owns_buffer && buffer_lifecycle::defer_excerpt_open(stoat, path, id, &rel_path) {
+        return None;
+    }
     let (buffer_id, buffer) =
         buffer_lifecycle::open_buffer_unshown(stoat, workspace, path, OpenOrigin::Visited)?;
     let executor = stoat.executor.clone();
@@ -690,6 +699,67 @@ fn open_excerpt(stoat: &mut Stoat, rel_path: String, path: &Path) -> Option<Exce
         top: 0,
         owns_buffer,
     })
+}
+
+/// Add the excerpt of the file at `rel_path` to changes view `id` of the
+/// active workspace, in path order.
+///
+/// `buffer_id` is the buffer a read on the pool registered for the file. The
+/// stack owns it, since the read opened it for the excerpt, and the focus
+/// stays on its file. A view that is gone, or that already holds an excerpt of
+/// the file, takes nothing, and the buffer closes when nothing else needs it.
+pub(crate) fn adopt_excerpt(
+    stoat: &mut Stoat,
+    id: DiffChangesId,
+    rel_path: String,
+    buffer_id: BufferId,
+    buffer: SharedBuffer,
+) {
+    let held = stoat
+        .active_workspace()
+        .diff_changes_views
+        .get(id)
+        .map(|state| state.excerpts.iter().any(|e| e.rel_path == rel_path));
+    if held != Some(false) {
+        buffer_lifecycle::close_released_buffer(stoat, buffer_id);
+        return;
+    }
+
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
+    editor.set_diff_view(true);
+    let editor_id = ws.editors.insert(editor);
+    review::ensure_diff_map(stoat, buffer_id, None);
+
+    let Some(state) = stoat.active_workspace_mut().diff_changes_views.get_mut(id) else {
+        return;
+    };
+    let focused_path = state
+        .focused_excerpt()
+        .map(|excerpt| excerpt.rel_path.clone());
+    let at = state
+        .excerpts
+        .partition_point(|excerpt| excerpt.rel_path < rel_path);
+    state.excerpts.insert(
+        at,
+        Excerpt {
+            buffer_id,
+            editor_id,
+            rel_path,
+            folded_version: None,
+            top: 0,
+            owns_buffer: true,
+        },
+    );
+    state.focused = focused_path
+        .and_then(|path| {
+            state
+                .excerpts
+                .iter()
+                .position(|excerpt| excerpt.rel_path == path)
+        })
+        .unwrap_or(state.focused);
 }
 
 /// Remove `excerpt`'s editor, and close its buffer when the stack opened it

@@ -18,6 +18,7 @@ use crate::{
     badge::{Anchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, SharedBuffer},
     buffer_registry::{OpenOrigin, ReadOnly},
+    diff_changes::{self, DiffChangesId},
     editor_state::{EditorId, EditorState},
     host::FsMetadata,
     pane::{FocusTarget, PaneId, View},
@@ -49,10 +50,11 @@ pub(crate) struct PendingFileOpen {
     path: PathBuf,
     /// The workspace that asked for this file, which is where it installs.
     ///
-    /// [`PaneId`] is a per-workspace key, so `target` names a different pane in
-    /// every workspace and says nothing on its own about which one meant it.
+    /// [`PaneId`] and [`DiffChangesId`] are per-workspace keys, so `target`
+    /// names a different pane or view in every workspace and says nothing on
+    /// its own about which one meant it.
     workspace: WorkspaceId,
-    target: PaneId,
+    target: PendingTarget,
     /// The file's metadata when the open started, which carries its mtime and
     /// its read-only bit.
     meta: Option<FsMetadata>,
@@ -65,6 +67,34 @@ pub(crate) struct PendingFileOpen {
     /// A read that installs no buffer drops them, which releases each command
     /// as closed.
     waiters: Vec<BridgeWaiter>,
+}
+
+/// Where a large file installs once its read on the blocking pool lands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingTarget {
+    /// A pane, which shows the file.
+    Pane(PaneId),
+    /// A changes view, whose stack gains the excerpt of the file at `rel_path`.
+    Excerpt {
+        view: DiffChangesId,
+        rel_path: String,
+    },
+}
+
+impl PendingTarget {
+    /// Whether a read already headed for `self` also serves an open aimed at
+    /// `other`.
+    ///
+    /// Any two panes share one read, so repeated opens of one large file spawn
+    /// one, which installs where the first open asked. An excerpt shares only
+    /// with itself. A read installs at the target of the open that started it,
+    /// so a pane open folded into an excerpt's read, or the reverse, is lost.
+    fn serves(&self, other: &PendingTarget) -> bool {
+        match (self, other) {
+            (PendingTarget::Pane(_), PendingTarget::Pane(_)) => true,
+            _ => self == other,
+        }
+    }
 }
 
 /// Open `path` in pane `target`, recording `origin` as how the buffer was
@@ -115,14 +145,55 @@ pub(crate) fn open_buffer_unshown(
 ) -> Option<(BufferId, SharedBuffer)> {
     let absolute = absolute_path(stoat, path);
     let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
-    let disk_mtime = meta.map(|m| m.modified);
+    let content = read_or_report(stoat, &absolute)?;
+    register_content(stoat, workspace, &absolute, content, meta, origin)
+}
 
-    match read_or_report(stoat, &absolute)? {
+/// Start the read of `path` on the blocking pool for excerpt `rel_path` of
+/// changes view `view`, and answer whether the read started.
+///
+/// Only a file too large to read on the run loop reads on the pool. The
+/// excerpt joins the stack in the active workspace once the read lands,
+/// through [`install_pending_opens`]. A read already out for the same excerpt
+/// serves this one, so a second list of the files reads nothing twice.
+pub(crate) fn defer_excerpt_open(
+    stoat: &mut Stoat,
+    path: &Path,
+    view: DiffChangesId,
+    rel_path: &str,
+) -> bool {
+    let absolute = absolute_path(stoat, path);
+    let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
+    if !reads_on_pool(meta, &absolute) {
+        return false;
+    }
+    let target = PendingTarget::Excerpt {
+        view,
+        rel_path: rel_path.to_string(),
+    };
+    spawn_pending_open(stoat, target, absolute, meta, OpenOrigin::Visited);
+    true
+}
+
+/// Register what a read found as the buffer for `absolute` in `workspace`,
+/// with no pane to show it.
+///
+/// `None` for an image, which has no buffer, and for a workspace that is gone.
+fn register_content(
+    stoat: &mut Stoat,
+    workspace: WorkspaceId,
+    absolute: &Path,
+    content: OpenContent,
+    meta: Option<FsMetadata>,
+    origin: OpenOrigin,
+) -> Option<(BufferId, SharedBuffer)> {
+    let disk_mtime = meta.map(|m| m.modified);
+    match content {
         OpenContent::Text { text, compressed } => register_open(
             stoat,
             workspace,
             None,
-            &absolute,
+            absolute,
             OpenBody::Text {
                 text: &text,
                 read_only: read_only_kind(compressed, meta),
@@ -138,7 +209,7 @@ pub(crate) fn open_buffer_unshown(
             stoat,
             workspace,
             None,
-            &absolute,
+            absolute,
             OpenBody::Rope {
                 rope,
                 ending,
@@ -163,10 +234,8 @@ fn open_file_in_pane_with(
     let absolute = absolute_path(stoat, path);
 
     let meta = stoat.fs_host.metadata(&absolute).ok().flatten();
-    // The on-disk size understates a compressed file's text, so the name picks
-    // the pool before the bytes are read.
-    if defer_large && (meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES || is_gzip_name(&absolute)) {
-        spawn_pending_open(stoat, target, absolute, meta, origin);
+    if defer_large && reads_on_pool(meta, &absolute) {
+        spawn_pending_open(stoat, PendingTarget::Pane(target), absolute, meta, origin);
         return None;
     }
 
@@ -201,6 +270,16 @@ pub(crate) fn absolute_path(stoat: &Stoat, path: &Path) -> PathBuf {
         return path.to_path_buf();
     }
     stoat.active_workspace().git_root.join(path)
+}
+
+/// Whether an open of `absolute`, whose metadata is `meta`, reads on the
+/// blocking pool.
+///
+/// A file over [`OPEN_SYNC_MAX_BYTES`] does, and so does a gzip name. The
+/// on-disk size understates the text of a compressed file, so the name picks
+/// the pool before the bytes are read.
+fn reads_on_pool(meta: Option<FsMetadata>, absolute: &Path) -> bool {
+    meta.map_or(0, |m| m.len) > OPEN_SYNC_MAX_BYTES || is_gzip_name(absolute)
 }
 
 /// Whether `path`'s name ends in `.gz`, in any case.
@@ -322,16 +401,17 @@ fn show_image(
     stoat.set_status(format!("{} is an image", display_name(absolute)));
 }
 
-/// Read `absolute` on the blocking pool and queue it for install into the
-/// active workspace.
+/// Read `absolute` on the blocking pool and queue it for install at `target`
+/// in the active workspace.
 ///
-/// A no-op if the same workspace already has an open pending for the path, so
-/// repeated opens of one large file spawn a single read. Another workspace
-/// asking for the same file is a separate request, since the read installs
-/// somewhere else.
+/// A no-op if the same workspace already has an open pending for the path
+/// whose target serves this one, so repeated opens of one large file spawn a
+/// single read. [`PendingTarget::serves`] decides which targets share a read.
+/// Another workspace asking for the same file is a separate request, since
+/// the read installs somewhere else.
 fn spawn_pending_open(
     stoat: &mut Stoat,
-    target: PaneId,
+    target: PendingTarget,
     absolute: PathBuf,
     meta: Option<FsMetadata>,
     origin: OpenOrigin,
@@ -340,7 +420,7 @@ fn spawn_pending_open(
     if let Some(pending) = stoat
         .pending_file_opens
         .iter_mut()
-        .find(|p| p.path == absolute && p.workspace == workspace)
+        .find(|p| p.path == absolute && p.workspace == workspace && p.target.serves(&target))
     {
         // The read already under way serves this open too, and a named open
         // promotes it the way it promotes a registered buffer.
@@ -403,7 +483,7 @@ pub(crate) fn pane_awaits_open(stoat: &Stoat, pane: PaneId) -> bool {
     stoat
         .pending_file_opens
         .iter()
-        .any(|p| p.workspace == stoat.active_workspace && p.target == pane)
+        .any(|p| p.workspace == stoat.active_workspace && p.target == PendingTarget::Pane(pane))
 }
 
 /// Park `waiter` on the pending open of `path`, so it waits on the buffer the
@@ -439,10 +519,10 @@ pub(crate) fn drop_pending_waiters(stoat: &mut Stoat, workspace: WorkspaceId, cl
 
 /// Install every pending open whose read has finished.
 ///
-/// Called from [`Stoat::drive_background`]. Drops an open whose target pane
-/// vanished while it read, and clears the [`BadgeSource::FileOpen`] badge once
-/// none remain. The commands parked on an open then wait on the buffer it
-/// installs as.
+/// Called from [`Stoat::drive_background`]. Drops an open whose target pane or
+/// changes view vanished while it read, and clears the
+/// [`BadgeSource::FileOpen`] badge once none remain. The commands parked on an
+/// open then wait on the buffer it installs as.
 pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
     let mut ready = Vec::new();
     let mut i = 0;
@@ -475,23 +555,43 @@ pub(crate) fn install_pending_opens(stoat: &mut Stoat) {
             },
             None => continue,
         };
-        // A workspace closed mid-read takes its panes with it, so there is
-        // nothing left to install into and nowhere to redirect to.
+        // A workspace closed mid-read takes its panes and views with it, so
+        // there is nothing left to install into and nowhere to redirect to.
         let Some(ws) = stoat.workspaces.get(pending.workspace) else {
             continue;
         };
-        if !ws.panes.contains(pending.target) {
+        let alive = match &pending.target {
+            PendingTarget::Pane(pane) => ws.panes.contains(*pane),
+            PendingTarget::Excerpt { view, .. } => ws.diff_changes_views.contains_key(*view),
+        };
+        if !alive {
             continue;
         }
-        let installed = install_content(
-            stoat,
-            pending.workspace,
-            pending.target,
-            &pending.path,
-            content,
-            pending.meta,
-            pending.origin,
-        );
+        let installed = match pending.target {
+            PendingTarget::Pane(pane) => install_content(
+                stoat,
+                pending.workspace,
+                pane,
+                &pending.path,
+                content,
+                pending.meta,
+                pending.origin,
+            ),
+            PendingTarget::Excerpt { view, rel_path } => register_content(
+                stoat,
+                pending.workspace,
+                &pending.path,
+                content,
+                pending.meta,
+                pending.origin,
+            )
+            .map(|(buffer_id, buffer)| {
+                stoat.in_workspace(pending.workspace, |stoat| {
+                    diff_changes::adopt_excerpt(stoat, view, rel_path, buffer_id, buffer);
+                });
+                buffer_id
+            }),
+        };
         if let Some(buffer) = installed
             && let Some(ws) = stoat.workspaces.get_mut(pending.workspace)
         {
@@ -1034,6 +1134,7 @@ mod tests {
     use super::*;
     use crate::{
         action_handlers::{commits, dispatch},
+        diff_changes::DiffChangesState,
         host::FsHost,
         test_harness::{self, editor, TestHarness},
     };
@@ -1196,6 +1297,36 @@ mod tests {
         assert_eq!(
             (buffers.read_only(id), buffers.disk_mtime(id)),
             (Some(ReadOnly::Permission), Some(mtime))
+        );
+    }
+
+    /// A pane open and an excerpt open of one large file read apart, since a
+    /// read installs only where its first open asked. Repeated opens of either
+    /// kind still share one read.
+    #[test]
+    fn a_pane_open_and_an_excerpt_open_of_one_large_file_read_apart() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/big");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, vec![b'x'; OPEN_SYNC_MAX_BYTES as usize + 16]);
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+        let view = h
+            .stoat
+            .active_workspace_mut()
+            .diff_changes_views
+            .insert(DiffChangesState::default());
+        let focus = h.stoat.active_workspace().panes.focus();
+
+        let deferred = [
+            defer_excerpt_open(&mut h.stoat, &path, view, "a.txt"),
+            defer_excerpt_open(&mut h.stoat, &path, view, "a.txt"),
+        ];
+        open_file_in_pane(&mut h.stoat, focus, &path, OpenOrigin::Visited);
+        open_file_in_pane(&mut h.stoat, focus, &path, OpenOrigin::Visited);
+        assert_eq!(
+            (deferred, h.stoat.pending_file_opens.len()),
+            ([true, true], 2)
         );
     }
 

@@ -633,6 +633,7 @@ mod tests {
         action_handlers::{commits, dispatch, focused_editor_mut, pane},
         app::UpdateEffect,
         buffer::BufferId,
+        buffer_lifecycle,
         diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
@@ -1256,6 +1257,68 @@ mod tests {
                 ws.parked_diff_changes.is_some(),
             ),
             (None, false),
+        );
+    }
+
+    /// A changed file over the inline read ceiling reads on the pool. Its
+    /// excerpt joins the stack in path order once the read installs. The stack
+    /// owns its buffer, the focus stays on its file, and a second adopt of the
+    /// file adds nothing.
+    #[test]
+    fn a_large_changed_file_joins_the_stack_once_its_read_lands() {
+        let mut h = TestHarness::with_size(100, 24);
+        let line = "x".repeat(1000);
+        let big: String = (0..1100).map(|n| format!("{line}{n}\n")).collect();
+        let edited = big.replacen('x', "y", 1);
+        h.stage_review_scenario(
+            "/repo",
+            &[("z.txt", "z\n", "Z\n"), ("big.txt", &big, &edited)],
+        );
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let listed = |h: &TestHarness| -> (Vec<(String, bool)>, Option<String>) {
+            let state = h.stoat.active_workspace().focused_diff_changes();
+            let excerpts = state
+                .map(|state| {
+                    state
+                        .excerpts
+                        .iter()
+                        .map(|excerpt| (excerpt.rel_path.clone(), excerpt.owns_buffer))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let focused = state
+                .and_then(DiffChangesState::focused_excerpt)
+                .map(|excerpt| excerpt.rel_path.clone());
+            (excerpts, focused)
+        };
+        let before = listed(&h);
+
+        // Read before a settle, whose relist sorts the stack again, so the
+        // order is the one the install itself left.
+        buffer_lifecycle::install_pending_opens(&mut h.stoat);
+        let after = listed(&h);
+
+        let (view, buffer_id, buffer) = {
+            let ws = h.stoat.active_workspace();
+            let id = ws
+                .buffers
+                .id_for_path(Path::new("/repo/big.txt"))
+                .expect("the read installed");
+            let view = ws.focused_diff_changes_id().expect("a changes view");
+            (view, id, ws.buffers.get(id).expect("the buffer"))
+        };
+        diff_changes::adopt_excerpt(&mut h.stoat, view, "big.txt".to_string(), buffer_id, buffer);
+        let z = || ("z.txt".to_string(), true);
+        let big = || ("big.txt".to_string(), true);
+        let focused_z = || Some("z.txt".to_string());
+        assert_eq!(
+            [before, after, listed(&h)],
+            [
+                (vec![z()], focused_z()),
+                (vec![big(), z()], focused_z()),
+                (vec![big(), z()], focused_z()),
+            ],
         );
     }
 
