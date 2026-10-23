@@ -366,6 +366,8 @@ pub(crate) const REPOSITION_LAND_PAGES: f32 = 1.0;
 /// so handing off then snaps the view back to that stale row. Waiting for the
 /// target to hold steady lets the settle repaint arrive first, so the region
 /// only returns to a live grid that already matches the pool.
+///
+/// A resident pool never hands its region back, so it rests without this wait.
 pub(crate) const HANDOFF_STABLE_TIME: Duration = Duration::from_millis(50);
 
 /// Advance the document's eased smooth-scroll offset toward `target` by the
@@ -736,16 +738,16 @@ pub(crate) fn project_frame(
             .anims
             .entry(pool.id)
             .or_insert_with(|| PoolAnim::new(pool.scroll_target.pages()));
-        let resident = pool.region.kind == PoolKind::Terminal;
+        let terminal_kind = pool.region.kind == PoolKind::Terminal;
         // A pool declared anew under its id starts over. A drop and a declare
         // in one batch leave no frame without the id, so the serial tells the
         // two pools apart. A pool declared again as the other kind starts over
         // too, because a glide and a terminal pool hold grids of different
         // sizes, and neither describes the other.
-        if anim.serial != pool.serial || anim.last_version.is_some() != resident {
+        if anim.serial != pool.serial || anim.last_version.is_some() != terminal_kind {
             anim.restart(pool);
         }
-        if resident {
+        if terminal_kind {
             if full_screen {
                 active.extend(resident_pool(anim, pool, terminal));
             }
@@ -1056,16 +1058,18 @@ pub(crate) struct ActivePool {
 /// The outcome of stepping one pool's glide for a frame.
 pub(crate) enum PoolStep {
     /// The target held steady long enough and the ease has arrived, so the pool
-    /// hands its region back to the base grid and stops ticking.
+    /// hands its region back to the base grid and stops ticking. A resident
+    /// pool never settles.
     Settled,
-    /// The target still moves, but this frame's window is unbuffered with no
-    /// held composite, so the base grid shows through. The loop keeps ticking.
+    /// The target still moves, or a resident pool waits for its first compose,
+    /// but this frame's window is unbuffered with no held composite, so the
+    /// base grid shows through. The loop keeps ticking.
     Degraded,
     /// Still gliding with a composite ready at [`ActivePool::frac`].
     Gliding(ActivePool),
-    /// The ease arrived on a target resting between two rows, so the composite
-    /// stays on screen at [`ActivePool::frac`] and the pool asks for no further
-    /// frames.
+    /// The ease arrived on a target resting between two rows, or a resident
+    /// pool's ease arrived anywhere, so the composite stays on screen at
+    /// [`ActivePool::frac`] and the pool asks for no further frames.
     ///
     /// The base grid paints whole cells at the floored row, so handing the
     /// region back would snap the content by the fraction the target rests on.
@@ -1174,6 +1178,10 @@ impl PoolAnim {
 /// holds the region then, and the fill that composes it wakes the loop by
 /// itself.
 ///
+/// A resident pool never hands its region back. Its arrival rests as soon as
+/// the ease arrives, on a row boundary too, and an arrival with nothing
+/// composed answers [`PoolStep::Degraded`] until a fill composes it.
+///
 /// The recompose is skipped while only the sub-cell fraction moves, so a
 /// settled or shift-only pool costs no projection.
 pub(crate) fn advance_pool_glide(
@@ -1219,12 +1227,15 @@ pub(crate) fn advance_pool_glide(
     let (scroll, easing) = step_document_scroll(anim.scroll, target_pages, page_rows, dt);
     let scroll_settled = anim.target_stable_for >= HANDOFF_STABLE_TIME;
     anim.scroll = scroll;
+    let resident = pool.region.resident;
     // A target within a hundredth of a row of a cell boundary is one the base
     // paints the same way, so it hands off. Anything further in rests
     // composited, since the handoff would snap the content by that fraction.
-    let arrived = !easing && scroll_settled;
+    // A resident pool never hands off, so it rests on any arrival and has no
+    // settle repaint to wait for.
+    let arrived = !easing && (resident || scroll_settled);
     let rest_frac = (scroll * page_rows).fract();
-    if arrived && !(0.01..=0.99).contains(&rest_frac) {
+    if arrived && !resident && !(0.01..=0.99).contains(&rest_frac) {
         // The base owns the region once it hands off. Drop any held composite so
         // a later re-glide cannot resurrect content the base has since replaced.
         anim.held_frac = None;
@@ -1273,14 +1284,16 @@ pub(crate) fn advance_pool_glide(
             content_changed: false,
             scrolled_rows: None,
         })
-    } else if arrived {
+    } else if arrived && !resident {
         // Nothing is composed and nothing moves, so the region goes back to the
         // base grid. The fill that composes it wakes the loop by itself, so the
         // pool asks for no frame while it waits.
         PoolStep::Settled
     } else {
         // Nothing to hold on screen while the target still moves, so the loop
-        // keeps ticking until the app's fill lands.
+        // keeps ticking until the app's fill lands. A resident pool that waits
+        // for its first compose ticks the same way, since it never hands the
+        // region back.
         PoolStep::Degraded
     }
 }
@@ -1586,8 +1599,9 @@ mod tests {
         theme::Theme,
     };
 
-    /// A pool eight rows tall, and a terminal that has declared it.
-    fn gated_pool() -> (PoolView, Terminal) {
+    /// A pool eight rows tall, resident when `resident` is set, and a terminal
+    /// that has declared it.
+    fn gated_pool(resident: bool) -> (PoolView, Terminal) {
         let mut terminal = Terminal::new(8, 4, Theme::default());
         terminal.advance(&encode_pool_region(&PoolRegionCommand {
             pool: 1,
@@ -1598,7 +1612,7 @@ mod tests {
             window: 0,
             kind: PoolKind::Grid,
             dim: 0,
-            resident: false,
+            resident,
         }));
         let view = PoolView {
             id: 1,
@@ -1611,7 +1625,7 @@ mod tests {
                 height: 8,
                 kind: PoolKind::Grid,
                 dim: 0,
-                resident: false,
+                resident,
             },
             scroll_target: DocumentOffset::default(),
             cursor_anchor: None,
@@ -1625,8 +1639,8 @@ mod tests {
 
     /// [`gated_pool`] with its first two pages filled, so a compose at the top
     /// of the document has every row it reads, the straddle row included.
-    fn buffered_pool() -> (PoolView, Terminal) {
-        let (view, mut terminal) = gated_pool();
+    fn buffered_pool(resident: bool) -> (PoolView, Terminal) {
+        let (view, mut terminal) = gated_pool(resident);
         fill_page(&mut terminal, 1, 0, b"row");
         fill_page(&mut terminal, 1, 1, b"row");
         (view, terminal)
@@ -1637,7 +1651,7 @@ mod tests {
     /// within one cell, and a ride moves none of them at all.
     #[test]
     fn a_move_inside_one_cell_composes_nothing_again() {
-        let (view, terminal) = buffered_pool();
+        let (view, terminal) = buffered_pool(false);
         let mut anim = PoolAnim::new(0.0);
 
         // Eight rows to a page, so both of these rest on top row 2 and differ
@@ -1660,7 +1674,7 @@ mod tests {
     #[test]
     fn an_arrival_between_rows_rests_composited() {
         let arrive = |fraction: f32, buffered: bool| {
-            let (mut view, mut terminal) = gated_pool();
+            let (mut view, mut terminal) = gated_pool(false);
             if buffered {
                 // Two pages, so a compose at the top of the document has every
                 // row it reads, the straddle row included.
@@ -1692,11 +1706,88 @@ mod tests {
         );
     }
 
+    /// A resident pool keeps its composite where a grid pool hands its region
+    /// back. An arrival on a row boundary rests at no fraction on the frame the
+    /// ease arrives, with no wait for the target to hold still.
+    #[test]
+    fn a_resident_pool_rests_composited_on_a_row_boundary() {
+        let (mut view, terminal) = buffered_pool(true);
+        view.scroll_target = DocumentOffset {
+            page: 0,
+            fraction: 0.25,
+        };
+        let mut anim = PoolAnim::new(view.scroll_target.pages());
+        // The target just stopped moving, so the hand-off wait starts over.
+        anim.target_stable_for = Duration::ZERO;
+
+        match advance_pool_glide(&mut anim, &view, &terminal, None, Duration::from_millis(16)) {
+            PoolStep::Resting(tile) => assert!(
+                tile.frac.abs() < 1e-5,
+                "the rest sits on the row boundary, got {}",
+                tile.frac,
+            ),
+            _ => panic!("a resident arrival on a row boundary keeps its composite"),
+        }
+    }
+
+    /// A resident arrival with nothing composed keeps the loop ticking where a
+    /// grid pool hands its region back, so frames keep coming until a fill
+    /// composes it.
+    #[test]
+    fn an_unbuffered_resident_arrival_degrades_and_keeps_ticking() {
+        let (mut view, terminal) = gated_pool(true);
+        view.scroll_target = DocumentOffset {
+            page: 0,
+            fraction: 0.3,
+        };
+        let mut anim = PoolAnim::new(view.scroll_target.pages());
+
+        let step = advance_pool_glide(&mut anim, &view, &terminal, None, HANDOFF_STABLE_TIME);
+
+        assert!(
+            matches!(step, PoolStep::Degraded),
+            "a resident arrival with nothing composed asks for the next frame",
+        );
+    }
+
+    /// A fill under a resting resident pool composes it again on the next
+    /// frame, which still rests. A frame with nothing new composes nothing.
+    #[test]
+    fn a_fill_on_a_resting_resident_pool_recomposes() {
+        let (mut view, mut terminal) = buffered_pool(true);
+        view.scroll_target = DocumentOffset {
+            page: 0,
+            fraction: 0.25,
+        };
+        let mut anim = PoolAnim::new(view.scroll_target.pages());
+        let mut step = |terminal: &Terminal| match advance_pool_glide(
+            &mut anim,
+            &view,
+            terminal,
+            None,
+            Duration::from_millis(16),
+        ) {
+            PoolStep::Resting(tile) => Some(tile.content_changed),
+            _ => None,
+        };
+
+        let rested = [step(&terminal), step(&terminal)];
+        fill_page(&mut terminal, 1, 0, b"new");
+        let refilled = step(&terminal);
+
+        assert_eq!(
+            (rested, refilled),
+            ([Some(true), Some(false)], Some(true)),
+            "the first rest composes, the next composes nothing, and the fill \
+             composes again",
+        );
+    }
+
     /// A target that still moves keeps the loop ticking while nothing is
     /// composed, so frames keep coming until the fill lands.
     #[test]
     fn an_unbuffered_glide_keeps_ticking() {
-        let (mut view, terminal) = gated_pool();
+        let (mut view, terminal) = gated_pool(false);
         view.scroll_target = DocumentOffset {
             page: 1,
             fraction: 0.0,
@@ -1716,7 +1807,7 @@ mod tests {
     /// not glide by the change in page size.
     #[test]
     fn a_height_change_keeps_the_document_row() {
-        let (mut view, terminal) = gated_pool();
+        let (mut view, terminal) = gated_pool(false);
         view.scroll_target = DocumentOffset {
             page: 2,
             fraction: 0.0,
@@ -1745,7 +1836,7 @@ mod tests {
 
     #[test]
     fn each_of_the_three_inputs_moving_composes_again() {
-        let (view, mut terminal) = buffered_pool();
+        let (view, mut terminal) = buffered_pool(false);
         let mut anim = PoolAnim::new(0.0);
         anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
 
@@ -1774,7 +1865,7 @@ mod tests {
     /// move carries them. A fill under them does not.
     #[test]
     fn a_fill_off_the_composed_window_keeps_the_carry() {
-        let (view, mut terminal) = buffered_pool();
+        let (view, mut terminal) = buffered_pool(false);
         let mut anim = PoolAnim::new(0.0);
         anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
         // Eight rows to a page, so the nine rows composed at the top read page
@@ -1795,7 +1886,7 @@ mod tests {
     /// is, so no page is under the composed rows any more.
     #[test]
     fn an_emptied_pool_composes_again_at_the_same_top() {
-        let (view, mut terminal) = buffered_pool();
+        let (view, mut terminal) = buffered_pool(false);
         let mut anim = PoolAnim::new(0.0);
         anim.record_compose(&compose_gate(&anim, &view, &terminal, 0.0), true);
 
