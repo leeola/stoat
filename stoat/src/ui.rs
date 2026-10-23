@@ -33,7 +33,7 @@ use crossterm::{
 };
 use flush::{FrameBackend, ShownFrame};
 use futures::FutureExt;
-use ratatui::{buffer::Buffer, Terminal};
+use ratatui::{buffer::Buffer, layout::Rect, Terminal};
 #[cfg(feature = "perf")]
 use std::time::Instant;
 use std::{
@@ -71,6 +71,13 @@ pub struct RenderFrame {
     /// Written to stdout right after the grid draw so it decorates the exact
     /// frame it was built for. See [`crate::render::undercurl`].
     pub undercurl: Vec<u8>,
+    /// The rects resident pools composite over, where the UI thread's row diff
+    /// writes no cell of `buffer`.
+    ///
+    /// The terminal shows a resident pool's pages at rest, so the live cells
+    /// under it never show. The rects ride the frame, so a frame and the rects
+    /// it leaves to pools never disagree.
+    pub resident: Vec<Rect>,
     /// When the frame's first event arrived, for measuring input-to-flush
     /// latency on the UI thread. `Some` only for input-driven frames; `None`
     /// for redraw-notify and PTY wakes, which carry no input to time.
@@ -344,12 +351,12 @@ async fn run(
                         // Compared here rather than after the draw so an
                         // unchanged squiggle never leaves the watch at all.
                         let restamp = stamp.advance(src.buffer.area, &src.undercurl);
-                        (src.buffer.clone(), src.cursor, restamp)
+                        (src.buffer.clone(), src.cursor, src.resident.clone(), restamp)
                     })
                 };
                 let undercurl = match framed {
-                    Some((buffer, cursor, undercurl)) => {
-                        shown.flush(terminal, &buffer, cursor)?;
+                    Some((buffer, cursor, resident, undercurl)) => {
+                        shown.flush(terminal, &buffer, cursor, &resident)?;
                         // Drop the Arc before draining APC so the main thread's
                         // recycle can reclaim this buffer's allocation via
                         // Arc::try_unwrap instead of falling back to a fresh one.

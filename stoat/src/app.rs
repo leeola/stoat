@@ -4191,6 +4191,7 @@ impl Stoat {
                         buffer,
                         cursor,
                         undercurl,
+                        resident: Vec::new(),
                         #[cfg(feature = "perf")]
                         input_time: t_event,
                     }));
