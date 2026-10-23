@@ -441,6 +441,9 @@ pub struct Availability {
     /// `workspace.pair_panes().is_some()`: two split panes show two different
     /// files, so the pair diff has its two sides.
     pub pair_open: bool,
+    /// `workspace.repo_root.is_some()`: the workspace root sits inside a git
+    /// repository, so the git commands have one to act on.
+    pub in_repo: bool,
 }
 
 impl Availability {
@@ -482,6 +485,7 @@ impl Availability {
             walkthrough_open: ws.walkthrough.is_some(),
             run_focused,
             pair_open: ws.pair_panes().is_some(),
+            in_repo: ws.repo_root.is_some(),
         }
     }
 }
@@ -536,6 +540,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | DiffChangesOpen => ctx.diff_changes_open,
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
+
+        GitLs | GitReview => ctx.in_repo,
 
         // WalkthroughOpen is absent on purpose. A reader opens a tour when none
         // plays, so a gate on one hides it exactly when it is wanted.
@@ -1168,6 +1174,15 @@ mod tests {
         root
     }
 
+    /// A harness rooted in an empty fake repository at `/repo`, so the
+    /// palette's Active scope offers the git commands.
+    fn repo_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.fake_git().add_repo("/repo");
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        h
+    }
+
     /// The arg picker's filtered rows as the text they display, sorted so an
     /// assertion pins the row set without pinning the fuzzy ranker's order.
     fn arg_rows(h: &TestHarness) -> Vec<String> {
@@ -1446,7 +1461,7 @@ mod tests {
     /// as a match and the `o` beside it as plain text.
     #[test]
     fn a_group_titles_the_list_and_drops_its_token_from_each_row() {
-        let mut h = Stoat::test();
+        let mut h = repo_harness();
         h.type_text(":git ");
         let _ = h.snapshot();
         let text = h.rendered_text();
@@ -1479,6 +1494,25 @@ mod tests {
         assert_eq!(
             (titled, shown, style(x) == style(x + 1)),
             (true, (true, false), false),
+        );
+    }
+
+    /// `:git ` lists the whole group inside a repository and no command outside
+    /// one, where the group has no repository to act on.
+    #[test]
+    fn the_git_group_lists_its_commands_only_inside_a_repository() {
+        let listed = |mut h: TestHarness| {
+            h.type_text(":git ");
+            let palette = h.stoat.command_palette.as_ref().expect("palette open");
+            palette
+                .filtered
+                .iter()
+                .map(|entry| entry.command_name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            (listed(Stoat::test()), listed(repo_harness())),
+            (Vec::new(), names_for("git ")),
         );
     }
 
@@ -1657,6 +1691,34 @@ mod tests {
         );
     }
 
+    /// The git group acts on the workspace's repository, so the Active scope
+    /// lists its commands only inside one. The All scope lists them anywhere.
+    #[test]
+    fn active_scope_lists_the_git_group_only_in_a_repository() {
+        let git_group = |scope, in_repo| {
+            let ctx = Availability {
+                in_repo,
+                ..Availability::default()
+            };
+            let mut names: Vec<&str> = entries_for("", scope, &ctx)
+                .into_iter()
+                .filter(|entry| entry.command_name.starts_with("git "))
+                .map(|entry| entry.def.name())
+                .collect();
+            names.sort_unstable();
+            names
+        };
+        let group = vec!["GitLs", "GitReview"];
+        assert_eq!(
+            [
+                git_group(PaletteScope::Active, false),
+                git_group(PaletteScope::Active, true),
+                git_group(PaletteScope::All, false),
+            ],
+            [Vec::new(), group.clone(), group],
+        );
+    }
+
     #[test]
     fn active_scope_in_conflict_surfaces_conflict_actions() {
         let ctx = Availability {
@@ -1793,6 +1855,7 @@ mod tests {
             walkthrough_open: true,
             run_focused: true,
             pair_open: true,
+            in_repo: true,
         };
         for entry in registry::all() {
             assert!(
@@ -3476,7 +3539,7 @@ mod tests {
     /// [rev]`, then the alias, the parameter, and the description.
     #[test]
     fn snapshot_command_palette_group_doc() {
-        let mut h = Stoat::test();
+        let mut h = repo_harness();
         h.type_text(":git ");
         h.type_keys("ctrl-n");
         h.assert_snapshot("command_palette_group_doc");

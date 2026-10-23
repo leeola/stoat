@@ -3290,10 +3290,13 @@ fn palette_filter_to_arg_flip_repools() {
 }
 
 /// A grouped palette's pooled list prints each command by its subcommand
-/// token, as the live list does.
+/// token, as the live list does. The root sits in a repository, because the
+/// Active scope lists the git group only inside one.
 #[test]
 fn a_grouped_palette_pool_prints_subcommand_tokens() {
     let mut h = Stoat::test();
+    h.fake_git().add_repo("/repo");
+    h.stoat.active_workspace_mut().git_root = "/repo".into();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
 
