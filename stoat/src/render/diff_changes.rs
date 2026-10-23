@@ -40,6 +40,11 @@ use stoat_widgets::ApcScene;
 /// its lower rows. After the paint each excerpt's viewport holds all of its
 /// rows, so the editor's own follow never scrolls an excerpt.
 ///
+/// The focused excerpt records the cell of its cursor in
+/// [`EditorState::cursor_screen_cell`] when the terminal draws that cursor.
+/// The record is `None` when the paint does not lay the excerpt out, such as
+/// an excerpt outside the window.
+///
 /// With no excerpt the pane says "building changes..." while the repository
 /// tally is pending, and "no changes" once it is in.
 ///
@@ -63,6 +68,12 @@ pub(crate) fn render_diff_changes(
     let (inner, _) = split_pane_status(pane.area);
     let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled);
     state.minimap_rect = strip;
+    if let Some(editor) = state
+        .focused_excerpt()
+        .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
+    {
+        editor.cursor_screen_cell = None;
+    }
     if inner.width == 0 || inner.height == 0 {
         return;
     }
@@ -184,6 +195,9 @@ pub(crate) fn render_diff_changes(
 /// out at the scroll that paint used, which differs when it scrolled. So the
 /// replay lays the excerpt out again from the stack's scroll and the excerpt's
 /// place in it, and records the cell there.
+///
+/// When the focused excerpt is outside the window, or the terminal does not
+/// draw its cursor, a replay records no cell. The paint does the same.
 pub(crate) fn replay_cursor(
     pane: &Pane,
     state: &mut DiffChangesState,
@@ -197,6 +211,9 @@ pub(crate) fn replay_cursor(
     let Some(excerpt) = state.focused_excerpt() else {
         return;
     };
+    if let Some(editor) = editors.get_mut(excerpt.editor_id) {
+        editor.cursor_screen_cell = None;
+    }
     if !scene_live || frame.terminal_cursor_editor != Some(excerpt.editor_id) {
         return;
     }

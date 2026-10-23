@@ -6588,13 +6588,16 @@ impl Stoat {
     }
 
     /// Absolute terminal cell `(col, row)` of the primary cursor when the
-    /// focused pane is a document editor, else `None`.
+    /// focused pane is a document editor or a changes view, else `None`.
     ///
     /// Returns the position [`crate::render::editor::render_editor_with_overlay`]
     /// recorded while painting the current frame, so it is exactly where the
     /// cursor cell would otherwise be drawn. `None` for finder/palette/dock/run
     /// focus, where the editor paints its own cursor cell and the terminal
     /// cursor stays hidden. Must be called after a render.
+    ///
+    /// For a changes view, returns the cursor cell of the focused excerpt. While
+    /// that excerpt is outside the window, returns `None`.
     pub(crate) fn primary_cursor_screen_pos(&self) -> Option<(u16, u16)> {
         let (focused_id, _) = self.focused_editor_ids()?;
         let ws = self.active_workspace();
@@ -6609,6 +6612,7 @@ impl Stoat {
         }
         let pane_editor = match focused_pane.view {
             View::Editor(id) => id,
+            View::DiffChanges(id) => ws.diff_changes_views.get(id)?.focused_excerpt()?.editor_id,
             _ => return None,
         };
         if focused_id != pane_editor {

@@ -57,9 +57,9 @@ use tokio::sync::{
 ///
 /// Carries the painted grid plus the optional terminal-cursor cell. `cursor`
 /// is `Some((col, row))` only when running inside stoatty and the focused
-/// document editor delegates its primary cursor to the terminal cursor;
-/// otherwise it is `None` and the cursor stays hidden, with the editor
-/// painting its own cursor cell into `buffer`.
+/// document editor or changes view delegates its primary cursor to the
+/// terminal cursor. Otherwise it is `None` and the cursor stays hidden, with
+/// the editor painting its own cursor cell into `buffer`.
 pub struct RenderFrame {
     pub buffer: Arc<Buffer>,
     pub cursor: Option<(u16, u16)>,

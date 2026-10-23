@@ -6918,6 +6918,75 @@ fn a_held_stack_row_leaves_no_capture_under_the_scroll_it_moved() {
     );
 }
 
+/// Under stoatty a changes view parks the terminal cursor on the cell of the
+/// focused excerpt's cursor, in the second file as in the first. A step inside
+/// the window replays the paint, and the terminal cursor moves to the next row.
+#[test]
+fn the_terminal_cursor_sits_on_the_focused_excerpts_cursor() {
+    let mut h = changes_view(8, false);
+    // f0.rs shows three rows, so the third step crosses into f1.rs.
+    for _ in 0..3 {
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+    }
+    for _ in 0..3 {
+        let _ = h.stoat.render();
+    }
+    let text = stack_editor(&mut h)
+        .text_rect
+        .expect("the paint laid the focused excerpt out");
+    let painted = h.stoat.primary_cursor_screen_pos();
+
+    let paints = h.stoat.pane_paints;
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChangesNext);
+    let _ = h.stoat.render();
+    assert_eq!(
+        (
+            changes_state(&mut h).focused,
+            painted,
+            h.stoat.pane_paints - paints,
+            h.stoat.primary_cursor_screen_pos()
+        ),
+        (1, Some((text.x, text.y)), 0, Some((text.x, text.y + 1))),
+        "the painted frame and the replayed step each park the cursor on its cell",
+    );
+}
+
+/// A changes view parks no terminal cursor while its focused excerpt is outside
+/// the window. That holds on the paint that scrolls the excerpt off. It also
+/// holds on a replay of that paint after a held row laid the excerpt out at
+/// another scroll.
+#[test]
+fn a_focused_excerpt_outside_the_window_parks_no_terminal_cursor() {
+    let mut h = changes_view(8, false);
+    let paints = h.stoat.pane_paints;
+    changes_state(&mut h).scroll = 8;
+    let _ = h.stoat.render();
+    let scrolled_off = (
+        h.stoat.pane_paints - paints,
+        h.stoat.primary_cursor_screen_pos(),
+    );
+
+    changes_state(&mut h).held_screen_row = Some(0);
+    let _ = h.stoat.render();
+    let text = stack_editor(&mut h)
+        .text_rect
+        .expect("the held row laid the focused excerpt out");
+    let held = h.stoat.primary_cursor_screen_pos();
+    changes_state(&mut h).scroll = 8;
+    let paints = h.stoat.pane_paints;
+    let _ = h.stoat.render();
+    assert_eq!(
+        (
+            scrolled_off,
+            held,
+            h.stoat.pane_paints - paints,
+            h.stoat.primary_cursor_screen_pos()
+        ),
+        ((1, None), Some((text.x, text.y)), 0, None),
+        "no cursor off the window, one at the held row, and none on the replay",
+    );
+}
+
 /// A scroll past the stack's last page is clamped by the paint, so no frame
 /// replays over it and leaves the scroll unclamped.
 #[test]
