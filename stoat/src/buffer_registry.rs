@@ -188,6 +188,8 @@ pub(crate) struct BufferRegistry {
     /// Monotonic counter stamped onto [`BufferEntry::last_shown`] by
     /// [`Self::mark_shown`] to order highlight eviction by recency.
     shown_counter: u64,
+    /// See [`Self::paths_epoch`].
+    paths_epoch: u64,
 }
 
 impl BufferRegistry {
@@ -197,6 +199,7 @@ impl BufferRegistry {
             path_to_id: HashMap::new(),
             next_id: 1,
             shown_counter: 0,
+            paths_epoch: 0,
         }
     }
 
@@ -310,6 +313,7 @@ impl BufferRegistry {
         let buffer = Arc::new(RwLock::new(build(id)));
         let path_buf = path.to_path_buf();
         self.path_to_id.insert(path_buf.clone(), id);
+        self.paths_epoch += 1;
         self.buffers.insert(
             id,
             BufferEntry {
@@ -352,6 +356,7 @@ impl BufferRegistry {
         drop_syntax_in_background(entry.syntax.take(), entry.syntax_map.take());
         let path = entry.path?;
         self.path_to_id.remove(&path);
+        self.paths_epoch += 1;
         Some(path)
     }
 
@@ -367,6 +372,7 @@ impl BufferRegistry {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.path = Some(new.to_path_buf());
         }
+        self.paths_epoch += 1;
         true
     }
 
@@ -466,6 +472,16 @@ impl BufferRegistry {
         let mut paths: Vec<PathBuf> = self.path_to_id.keys().cloned().collect();
         paths.sort();
         paths
+    }
+
+    /// A counter that moves whenever a path-bound buffer opens, closes, or
+    /// changes its path.
+    ///
+    /// A reader keeps the value it saw beside what it derived from
+    /// [`Self::open_paths`], and compares, so it lists the paths again only
+    /// when the set or a path's buffer changed.
+    pub(crate) fn paths_epoch(&self) -> u64 {
+        self.paths_epoch
     }
 
     /// The paths the buffer picker lists, in lexicographic order.
@@ -921,6 +937,7 @@ impl BufferRegistry {
         self.buffers.clear();
         self.path_to_id.clear();
         self.next_id = snap.next_id.max(1);
+        self.paths_epoch += 1;
 
         for entry in snap.entries {
             let buffer = Arc::new(RwLock::new(TextBuffer::from_history(
@@ -1047,6 +1064,32 @@ mod tests {
         let (id1, _) = reg.new_scratch();
         let (id2, _) = reg.new_scratch();
         assert_ne!(id1, id2);
+    }
+
+    /// The paths epoch moves when a path-bound buffer opens, changes its path,
+    /// or closes, and when a restore replaces every buffer. It holds for a
+    /// second open of an open path and for a scratch buffer, which no path
+    /// lists.
+    #[test]
+    fn the_paths_epoch_moves_with_the_open_paths_alone() {
+        let mut reg = BufferRegistry::new();
+        let mut epochs = vec![reg.paths_epoch()];
+        let (id, _) = reg.open(Path::new("/a.txt"), "a");
+        epochs.push(reg.paths_epoch());
+        reg.open(Path::new("/a.txt"), "ignored");
+        let (scratch, _) = reg.new_scratch();
+        reg.remove(scratch);
+        epochs.push(reg.paths_epoch());
+        reg.rename_path(Path::new("/a.txt"), Path::new("/b.txt"));
+        epochs.push(reg.paths_epoch());
+        reg.remove(id);
+        epochs.push(reg.paths_epoch());
+        reg.restore_from(BufferRegistrySnapshot {
+            entries: Vec::new(),
+            next_id: 1,
+        });
+        epochs.push(reg.paths_epoch());
+        assert_eq!(epochs, [0, 1, 1, 2, 3, 4]);
     }
 
     #[test]

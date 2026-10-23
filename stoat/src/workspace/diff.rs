@@ -336,6 +336,13 @@ pub(crate) struct DiffState {
     /// The redraw timers for the [`Self::pair_settle`] windows, held so they
     /// are not cancelled on drop.
     pair_settle_timers: HashMap<PathBuf, Task<()>>,
+    /// Moves each time a diff map is installed on a buffer, so a reader of
+    /// the open buffers' maps tells a moved map from a still one without
+    /// reading every buffer.
+    ///
+    /// A landing whose hunks render the same as the installed map installs
+    /// nothing, and moves nothing.
+    pub(super) maps_epoch: u64,
 }
 
 impl DiffState {
@@ -779,6 +786,7 @@ impl DiffState {
             guard.snapshot.version
         };
         self.versions.insert(id, version);
+        self.maps_epoch += 1;
     }
 
     /// Re-read each pair base's text once its base file's buffer has held a
@@ -1093,6 +1101,7 @@ impl DiffState {
             };
             if !same {
                 guard.diff_map = out.diff_map;
+                self.maps_epoch += 1;
             }
         }
     }

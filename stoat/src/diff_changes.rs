@@ -29,8 +29,7 @@ use crate::{
 use ratatui::layout::Rect;
 use slotmap::{new_key_type, SlotMap};
 use std::{
-    collections::{hash_map::DefaultHasher, BTreeMap},
-    hash::{Hash, Hasher},
+    collections::BTreeMap,
     mem,
     ops::Range,
     path::{Path, PathBuf},
@@ -128,12 +127,16 @@ pub(crate) struct Landing {
 ///
 /// A list is current while its stamp equals the workspace's stamp now.
 /// `epoch` moves when the diff base, the git state, or the repository tally
-/// changes, and `maps` moves with the diff map of every open buffer, which
-/// decides whether an unsaved edit puts its file in the list.
+/// changes. `maps` moves with the diff map of every open buffer, which
+/// decides whether an unsaved edit puts its file in the list, and `paths`
+/// moves when a buffer opens, closes, or changes its path.
+///
+/// Each part is a counter its owner moves, so a read walks no buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StackStamp {
     epoch: u64,
     maps: u64,
+    paths: u64,
 }
 
 impl DiffChangesState {
@@ -181,16 +184,10 @@ impl Default for DiffChangesState {
 impl StackStamp {
     /// Read the stamp of `ws` as it stands.
     pub(crate) fn read(ws: &Workspace) -> Self {
-        let mut hasher = DefaultHasher::new();
-        for path in ws.buffers.open_paths() {
-            let Some(id) = ws.buffers.id_for_path(&path) else {
-                continue;
-            };
-            (id, map_version(&ws.buffers, id)).hash(&mut hasher);
-        }
         Self {
             epoch: ws.diff_changes_epoch,
-            maps: hasher.finish(),
+            maps: ws.diff_maps_epoch(),
+            paths: ws.buffers.paths_epoch(),
         }
     }
 }
@@ -526,6 +523,7 @@ fn relist(stoat: &mut Stoat) -> bool {
         return false;
     }
 
+    stoat.sync_repo_root();
     let listed = changed_files(stoat);
     for &id in &stale {
         sync_excerpts(stoat, id, &listed);
@@ -556,14 +554,12 @@ fn relist(stoat: &mut Stoat) -> bool {
 /// joins the list, so an unsaved edit shows. Under the index base only an
 /// unstaged hunk counts, as the tally counts.
 ///
-/// Outside a repository the list is empty.
+/// Outside a repository the list is empty. The working directory is the
+/// workspace's resolved [`Workspace::repo_root`], so a list opens no
+/// repository.
 fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
     let ws = stoat.active_workspace();
-    let Some(workdir) = stoat
-        .git_host
-        .discover(&ws.git_root)
-        .and_then(|repo| repo.workdir())
-    else {
+    let Some(workdir) = ws.repo_root.clone() else {
         return BTreeMap::new();
     };
     let index_base = ws.diff_base().is_none();
@@ -1040,6 +1036,7 @@ mod tests {
     };
     use crate::{
         action_handlers::dispatch,
+        buffer::BufferId,
         diff_map::DiffMap,
         display_map::{DisplayPoint, InlayPoint},
         host::FakeRepoBuilder,
@@ -1285,6 +1282,65 @@ mod tests {
         assert_eq!(excerpts(&h), listed(&["d.txt"]));
     }
 
+    /// A stack over the changed a.txt with the clean d.txt open under it, and
+    /// d.txt's buffer.
+    fn stack_beside_clean_file(h: &mut TestHarness) -> BufferId {
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        repo(h).head_file("d.txt", "same\n");
+        h.fake_fs().insert_file(Path::new("/repo/d.txt"), b"same\n");
+        h.open_file(Path::new("/repo/d.txt"));
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        stacked(h);
+        buffer_id
+    }
+
+    /// Write `text` at the start of buffer `id`, unsaved.
+    fn prepend(h: &TestHarness, id: BufferId, text: &str) {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(id)
+            .expect("buffer")
+            .write()
+            .expect("buffer poisoned")
+            .edit(0..0, text);
+    }
+
+    /// An unsaved edit to a clean open file joins a stack that already
+    /// exists, once the file's diff map lands.
+    #[test]
+    fn a_landing_outside_the_stack_relists_it() {
+        let mut h = TestHarness::with_size(100, 24);
+        let clean = stack_beside_clean_file(&mut h);
+        let before = excerpts(&h);
+
+        prepend(&h, clean, "new ");
+        h.settle_diff_map(clean);
+        assert_eq!(
+            (before, excerpts(&h)),
+            (listed(&["a.txt"]), listed(&["a.txt", "d.txt"])),
+        );
+    }
+
+    /// A relist reads the root the workspace resolved, so a moved stamp lists
+    /// the files again with no repository opened.
+    #[test]
+    fn a_relist_opens_no_repository() {
+        let mut h = TestHarness::with_size(100, 24);
+        let clean = stack_beside_clean_file(&mut h);
+        let opened = h.fake_git().discover_calls();
+
+        prepend(&h, clean, "new ");
+        h.stoat
+            .active_workspace_mut()
+            .install_test_diff_map(clean, map_of("same\n", "new same\n"));
+        h.settle();
+        assert_eq!(
+            (excerpts(&h), h.fake_git().discover_calls() - opened),
+            (listed(&["a.txt", "d.txt"]), 0),
+        );
+    }
+
     /// A base switch moves every excerpt's diff map, so each excerpt cuts its
     /// folds again.
     #[test]
@@ -1488,6 +1544,32 @@ mod tests {
         let staged = stamp(&h);
         h.stoat.active_workspace_mut().invalidate_all_diffs();
         assert_eq!((first != staged, staged != stamp(&h)), (true, true));
+    }
+
+    /// An open and a close move the stamp's path part, and a diff landing its
+    /// map part, since the list reads the open buffers' diff maps.
+    #[test]
+    fn an_open_a_landing_and_a_close_move_their_stamp_parts() {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        let parts = |h: &TestHarness| {
+            let stamp = StackStamp::read(h.stoat.active_workspace());
+            (stamp.maps, stamp.paths)
+        };
+        let mut seen = vec![parts(&h)];
+
+        h.open_file(Path::new("/repo/a.txt"));
+        seen.push(parts(&h));
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        h.settle_diff_map(buffer_id);
+        seen.push(parts(&h));
+        h.stoat.active_workspace_mut().buffers.remove(buffer_id);
+        seen.push(parts(&h));
+        let moved: Vec<(bool, bool)> = seen
+            .windows(2)
+            .map(|pair| (pair[0].0 != pair[1].0, pair[0].1 != pair[1].1))
+            .collect();
+        assert_eq!(moved, [(false, true), (true, false), (false, true)]);
     }
 
     /// Under a revision base the stack lists what changed since the revision,

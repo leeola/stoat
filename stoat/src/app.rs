@@ -4516,9 +4516,10 @@ impl Stoat {
     /// Resolves [`Workspace::repo_root`] again when the active workspace's root
     /// moved since the last resolution, or when a miss is [`REPO_RETRY`] old.
     ///
-    /// [`Self::update`] runs it for each event. An unchanged root inside a
-    /// repository costs one path comparison.
-    fn sync_repo_root(&mut self) {
+    /// [`Self::update`] runs it for each event. A reader that also runs outside
+    /// an event, as the changes view's pump does, runs it before it reads the
+    /// root. An unchanged root inside a repository costs one path comparison.
+    pub(crate) fn sync_repo_root(&mut self) {
         let ws = self.active_workspace();
         let resolved = ws.repo_root_for.as_deref() == Some(ws.git_root.as_path());
         let fresh = ws.repo_root.is_some()

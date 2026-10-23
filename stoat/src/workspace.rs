@@ -1186,6 +1186,12 @@ impl Workspace {
         self.diff.current(id, version)
     }
 
+    /// A counter that moves each time a diff map is installed on any of the
+    /// workspace's buffers. See [`DiffState::maps_epoch`].
+    pub(crate) fn diff_maps_epoch(&self) -> u64 {
+        self.diff.maps_epoch
+    }
+
     /// Whether `id`'s installed map holds the hunks for the buffer's current
     /// content, with its colors still owed. See [`DiffState::hunks_installed`].
     pub(crate) fn hunks_installed(&self, id: BufferId) -> bool {

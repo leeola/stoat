@@ -517,12 +517,11 @@ fn stack_screen_row(stoat: &mut Stoat) -> Option<u32> {
 
 /// The working directory of the repository that holds the active workspace.
 ///
-/// The changes view names each file relative to it.
-fn repo_workdir(stoat: &Stoat) -> Option<PathBuf> {
-    stoat
-        .git_host
-        .discover(&stoat.active_workspace().git_root)?
-        .workdir()
+/// The changes view names each file relative to it. The root resolves once
+/// per root, so a call opens no repository while the root holds.
+fn repo_workdir(stoat: &mut Stoat) -> Option<PathBuf> {
+    stoat.sync_repo_root();
+    stoat.active_workspace().repo_root.clone()
 }
 
 /// The rows of the focused changes view's last paint, zero before the first.
@@ -1234,6 +1233,23 @@ mod tests {
             (before.len(), excerpt_ids(&h), traffic(&h)),
             (2, before, quiet),
         );
+    }
+
+    /// A flip and a flip back read the root the workspace resolved, so neither
+    /// opens a repository.
+    #[test]
+    fn a_flip_and_back_open_no_repository() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let opened = h.fake_git().discover_calls();
+
+        h.type_keys("Ctrl-t");
+        h.settle();
+        h.type_keys("Ctrl-t");
+        h.settle();
+        assert_eq!(h.fake_git().discover_calls() - opened, 0);
     }
 
     /// A close after a flip back releases the stack as a close always does, so

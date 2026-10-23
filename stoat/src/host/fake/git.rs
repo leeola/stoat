@@ -28,6 +28,7 @@ use stoat_text::LineEnding;
 /// `FsHost`) sees consistent state.
 pub struct FakeGit {
     state: Mutex<FakeGitState>,
+    discover_calls: AtomicUsize,
 }
 
 struct FakeGitState {
@@ -51,6 +52,7 @@ impl FakeGit {
                 repos: HashMap::new(),
                 discover_index: Vec::new(),
             }),
+            discover_calls: AtomicUsize::new(0),
         }
     }
 
@@ -189,6 +191,14 @@ impl FakeGit {
             .collect()
     }
 
+    /// How many times [`GitHost::discover`] has run, against any path.
+    ///
+    /// The local backend opens a repository per call, so a test of a path
+    /// that runs per frame or per landing counts it.
+    pub fn discover_calls(&self) -> usize {
+        self.discover_calls.load(Ordering::Relaxed)
+    }
+
     /// How many repo-wide tallies have run against the repo at `workdir`.
     ///
     /// A tally is the most expensive read the trait offers, so a test that
@@ -233,6 +243,7 @@ fn parse_patch_target(patch: &str) -> Option<PathBuf> {
 
 impl GitHost for FakeGit {
     fn discover(&self, path: &Path) -> Option<Arc<dyn GitRepo>> {
+        self.discover_calls.fetch_add(1, Ordering::Relaxed);
         let state = self.state.lock().unwrap();
         let workdir = state
             .discover_index
