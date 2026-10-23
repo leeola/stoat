@@ -1062,7 +1062,7 @@ pub struct Stoat {
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
     pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
-    /// Active commit picker modal, opened by `:git-review` to choose the
+    /// Active commit picker modal, opened by `:git review` to choose the
     /// commit a review walk starts from. `Some` while the modal is open;
     /// cleared on Esc, on selection, and on Ctrl-C.
     pub(crate) commit_picker: Option<crate::commit_picker::CommitPicker>,

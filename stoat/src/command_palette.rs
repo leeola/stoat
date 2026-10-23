@@ -1252,7 +1252,7 @@ mod tests {
         // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
         let listed = names_for("re");
         let prefix = pos_in(&listed, "reload");
-        let substring = pos_in(&listed, "git-review");
+        let substring = pos_in(&listed, "git review");
         let fuzzy = pos_in(&listed, "run-interrupt");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
@@ -2885,7 +2885,7 @@ mod tests {
             .set_head_branch("main");
         h.stoat.active_workspace_mut().git_root = "/repo".into();
 
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
         h.type_keys("down");

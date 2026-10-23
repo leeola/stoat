@@ -54,7 +54,7 @@ pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
 
 /// List a ref's history read-only, defaulting to the current branch.
 ///
-/// The same picker `:git-review` opens, in a role where selecting a row
+/// The same picker `:git review` opens, in a role where selecting a row
 /// dismisses rather than starting a walk, so browsing history never touches the
 /// working tree. A named `rev` titles the modal after itself, since a list
 /// rooted somewhere other than HEAD has to say where.
@@ -1345,7 +1345,7 @@ mod tests {
             .set_head_branch("main");
         h.stoat.active_workspace_mut().git_root = "/repo".into();
 
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
 
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn git_review_opens_the_picker_over_the_refs_history() {
         let mut h = harness();
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
 
@@ -1401,7 +1401,7 @@ mod tests {
     #[test]
     fn git_review_resolves_a_sha_as_well_as_a_branch() {
         let mut h = harness();
-        h.type_text(":git-review b2c3d4e5");
+        h.type_text(":git review b2c3d4e5");
         h.type_keys("enter");
         h.settle();
 
@@ -1420,7 +1420,7 @@ mod tests {
     #[test]
     fn an_unknown_revision_badges_without_opening_anything() {
         let mut h = harness();
-        h.type_text(":git-review junk");
+        h.type_text(":git review junk");
         h.type_keys("enter");
         h.settle();
 
@@ -1432,7 +1432,7 @@ mod tests {
     fn outside_a_repository_it_badges_too() {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().git_root = "/elsewhere".into();
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
 
@@ -1443,7 +1443,7 @@ mod tests {
     #[test]
     fn the_picker_takes_typing_as_its_query() {
         let mut h = harness();
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
         assert_eq!(h.stoat.focused_mode(), "insert", "the query field is live");
@@ -1641,7 +1641,7 @@ mod tests {
 
         h.type_keys("escape");
         h.settle();
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
         assert_eq!(
@@ -1787,7 +1787,7 @@ mod tests {
     #[test]
     fn picking_inside_a_drilled_scope_walks_the_drilled_commits() {
         let mut h = merged_harness();
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
 
@@ -1924,7 +1924,7 @@ mod tests {
 
     /// Open the picker over `main` and select the oldest commit as the base.
     fn start_walk(h: &mut TestHarness) {
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
         h.type_keys("down");
@@ -2363,7 +2363,7 @@ mod tests {
     #[test]
     fn the_walk_spans_history_the_query_hid() {
         let mut h = harness();
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
         h.type_text("a1b2");
@@ -2628,7 +2628,7 @@ mod tests {
         h.fake_git().add_repo("/repo").branch("main", "b2c3d4e5");
         h.stoat.active_workspace_mut().git_root = "/repo".into();
 
-        h.type_text(":git-review main");
+        h.type_text(":git review main");
         h.type_keys("enter");
         h.settle();
         h.type_keys("down");

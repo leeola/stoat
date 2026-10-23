@@ -139,7 +139,7 @@ Put the stops in the order the commits land, oldest first. Two stops in a row
 on one commit step without a checkout. A step onto another commit waits for its
 checkout, then lands.
 
-**Playing.** The tour needs a clean tree, the same as `:git-review`. A tree
+**Playing.** The tour needs a clean tree, the same as `:git review`. A tree
 with uncommitted changes refuses the tour. The player checks each stop's commit
 out detached, and the diff view shows what that commit changed in the stop's
 file. The status line names the commit as `@ <sha>`.

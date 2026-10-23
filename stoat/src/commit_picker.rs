@@ -639,7 +639,7 @@ impl CommitPicker {
     ///
     /// Under [`CommitPickerRole::PickBase`] this is the newest commit carrying
     /// a local branch other than the ref the picker was opened over, falling
-    /// back to the newest row. Opening `:git-review main` from `main` most
+    /// back to the newest row. Opening `:git review main` from `main` most
     /// often means reviewing what another branch added, so the nearest such
     /// branch tip is a better landing spot than the tip the user is already
     /// sitting on.

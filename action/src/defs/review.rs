@@ -394,7 +394,7 @@ define_action_def!(
      base. Reports an error without opening anything when the revision \
      does not resolve or the workspace is not inside a repository.",
     ActionPriority::Normal,
-    command_name = "git-review",
+    command_name = "git review",
     params = GIT_REVIEW_PARAMS
 );
 
