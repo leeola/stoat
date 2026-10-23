@@ -5,7 +5,8 @@ use crate::{
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
-            CommitsRefresh, GitCheckout, GitLs, OpenCommits,
+            CommitsRefresh, GitCheckout, GitCommit, GitCommitAbort, GitCommitConfirm, GitLs,
+            OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -991,6 +992,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             reference: reference.to_owned(),
         }))
     });
+    add(GitCommitConfirm::DEF, |_| Ok(Box::new(GitCommitConfirm)));
+    add(GitCommitAbort::DEF, |_| Ok(Box::new(GitCommitAbort)));
+    add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
@@ -1354,6 +1358,9 @@ mod tests {
         "DiffChangesLast",
         "DiffChangesOpen",
         "GitLs",
+        "GitCommitConfirm",
+        "GitCommitAbort",
+        "GitCommit",
         "EnterRebase",
         "AbortRebase",
         "ExecuteRebase",
@@ -1944,6 +1951,8 @@ mod tests {
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
         // + 1 GitCheckout.
+        // + 2 GitCommitConfirm/GitCommitAbort.
+        // + 1 GitCommit.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
@@ -1975,7 +1984,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 450);
+        assert_eq!(all().count(), 453);
     }
 
     #[test]

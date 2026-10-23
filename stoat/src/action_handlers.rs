@@ -10,6 +10,7 @@ pub(crate) mod diff_nav;
 pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
+mod git_commit;
 pub(crate) mod help;
 pub(crate) mod jump;
 pub(crate) mod lsp;
@@ -773,6 +774,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("GitCheckout action downcast");
             review_walk::git_checkout(stoat, &action.reference)
         },
+        ActionKind::GitCommit => git_commit::git_commit(stoat),
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),
@@ -1196,6 +1198,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::RewordConfirm => reword::reword_confirm(stoat),
         ActionKind::RewordAbort => reword::reword_abort(stoat),
+        ActionKind::GitCommitConfirm => git_commit::git_commit_confirm(stoat),
+        ActionKind::GitCommitAbort => git_commit::git_commit_abort(stoat),
         ActionKind::RebaseContinue => rebase::rebase_continue(stoat),
         ActionKind::RebaseConflictTakeOurs => {
             conflict::conflict_set(stoat, conflict::ConflictChoice::Ours)

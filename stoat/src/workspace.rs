@@ -17,6 +17,7 @@ use crate::{
         nav::TrailState,
     },
     commit_list::{CommitListId, CommitListSnap, CommitListState},
+    commit_message::CommitMessageEditor,
     conflict_session::ConflictSession,
     debounce::INDEX_EDIT_DEBOUNCE,
     diff_changes::{self, DiffChangesId, DiffChangesState},
@@ -356,6 +357,10 @@ pub struct Workspace {
     /// dropped when the plan completes, aborts, or fails a step, and when a
     /// restore finds it with no pause.
     pub(crate) rebase_active: Option<ActiveRebase>,
+    /// The commit message screen, up while the reader writes a message for
+    /// the staged changes. Dropped when the commit lands or the reader closes
+    /// the screen, and never saved with the session.
+    pub(crate) commit_message: Option<CommitMessageEditor>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     /// The languages whose action queries a parse sent to the pool to compile.
     ///
@@ -556,6 +561,7 @@ impl Workspace {
             walkthrough: None,
             rebase: None,
             rebase_active: None,
+            commit_message: None,
             parse_jobs: HashMap::new(),
             warmed_languages: std::collections::HashSet::new(),
             partial_token_buffers: std::collections::HashSet::new(),

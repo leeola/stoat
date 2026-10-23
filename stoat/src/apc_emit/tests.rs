@@ -2,7 +2,9 @@ use super::*;
 use crate::{
     action_handlers::movement,
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
+    commit_message::CommitMessageEditor,
     debounce,
+    input_view::{InputView, SubmitTarget},
     test_fixture::fake_term_session,
 };
 
@@ -244,6 +246,47 @@ fn emit_smooth_scroll_retires_pools_in_overlay_mode() {
     assert!(
         !cmds.is_empty() && cmds.iter().all(|cmd| matches!(cmd, Command::PoolDrop(_))),
         "overlay mode only drops pools, got {cmds:?}"
+    );
+}
+
+/// The commit message screen paints over the focused pane on the live grid, as
+/// the rebase screens do, so it retires the editor pool under it.
+#[test]
+fn the_commit_message_screen_retires_the_editor_pool() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    let path = PathBuf::from("/pool/a.txt");
+    h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/pool");
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    emit_smooth_scroll(&mut h.stoat);
+    let pooled = drain_apc(&mut rx)
+        .iter()
+        .any(|cmd| matches!(cmd, Command::PoolRegion(_)));
+
+    let executor = h.stoat.executor.clone();
+    let ws = h.stoat.active_workspace_mut();
+    let input = InputView::create(ws, executor, SubmitTarget::CommitMessage, "", "insert");
+    ws.commit_message = Some(CommitMessageEditor {
+        workdir: PathBuf::from("/pool"),
+        staged: Vec::new(),
+        input,
+    });
+    emit_smooth_scroll(&mut h.stoat);
+    let cmds = drain_apc(&mut rx);
+    assert_eq!(
+        (
+            pooled,
+            !cmds.is_empty() && cmds.iter().all(|cmd| matches!(cmd, Command::PoolDrop(_))),
+        ),
+        (true, true),
+        "the screen drops the editor pool and declares none, got {cmds:?}"
     );
 }
 

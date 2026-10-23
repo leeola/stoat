@@ -2464,6 +2464,21 @@ mod tests {
         );
         assert_eq!(
             (
+                plain("commit_message", KeyCode::Left),
+                plain("commit_message", KeyCode::Down),
+                plain("commit_message", KeyCode::Up),
+                plain("commit_message", KeyCode::Right),
+            ),
+            (
+                "MoveLeft".to_string(),
+                "MoveDown".to_string(),
+                "MoveUp".to_string(),
+                "MoveRight".to_string(),
+            ),
+            "the commit message screen takes all four arrows, as it takes h/j/k/l"
+        );
+        assert_eq!(
+            (
                 bound("commits", KeyCode::Char('d'), KeyModifiers::CONTROL),
                 bound("commits", KeyCode::Char('u'), KeyModifiers::CONTROL),
             ),

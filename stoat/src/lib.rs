@@ -16,6 +16,7 @@ mod code_index;
 pub mod command_palette;
 mod commit_graph;
 mod commit_list;
+mod commit_message;
 mod commit_picker;
 pub mod completion;
 pub(crate) mod conflict_session;

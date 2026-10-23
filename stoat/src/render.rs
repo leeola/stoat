@@ -3,6 +3,7 @@ pub(crate) mod chrome;
 pub(crate) mod code_action;
 pub(crate) mod code_search;
 pub(crate) mod command_palette;
+pub(crate) mod commit_message;
 pub(crate) mod commit_picker;
 pub(crate) mod commits;
 pub(crate) mod completion;
@@ -1383,6 +1384,19 @@ pub(crate) fn frame(
                     &mut *scene,
                 );
             }
+        } else if screen == Some("commit_message")
+            && let Some(commit) = ws.commit_message.as_ref()
+            && let Some(editor) = ws.editors.get_mut(commit.input.editor_id)
+        {
+            commit_message::render_commit_message(
+                pane,
+                is_focused,
+                editor,
+                &commit.staged,
+                frame,
+                buf,
+                &mut *scene,
+            );
         } else if screen == Some("rebase_conflict")
             && let Some(active) = ws.rebase_active.as_ref()
         {
@@ -1987,13 +2001,14 @@ pub(crate) fn status_lane(pane_index: u32) -> u32 {
     2 + 2 * pane_index
 }
 
-/// The pane that a rebase, reword, or conflict screen paints over.
+/// The pane that a rebase, reword, conflict, or commit message screen paints
+/// over.
 ///
 /// The screen covers the focused pane alone, so every other pane keeps
 /// painting beside it. `None` while no such screen is up.
 pub(crate) fn overlay_pane(ws: &Workspace) -> Option<PaneId> {
     match crate::keymap_state::view_predicate(ws) {
-        Some("rebase" | "reword" | "rebase_conflict") => Some(ws.panes.focus()),
+        Some("rebase" | "reword" | "rebase_conflict" | "commit_message") => Some(ws.panes.focus()),
         _ => None,
     }
 }

@@ -210,6 +210,44 @@ impl Action for GitCheckout {
 }
 
 define_action!(
+    GitCommitConfirmDef,
+    GitCommitConfirm,
+    "GitCommitConfirm",
+    ActionKind::GitCommitConfirm,
+    "commit with the edited message",
+    "Commit the staged changes with the message in the commit message \
+     screen, and close the screen once the commit lands. An empty message \
+     closes the screen without a commit.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GitCommitAbortDef,
+    GitCommitAbort,
+    "GitCommitAbort",
+    ActionKind::GitCommitAbort,
+    "close the commit message editor",
+    "Close the commit message screen without a commit. The staged changes \
+     stay staged.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GitCommitDef,
+    GitCommit,
+    "GitCommit",
+    ActionKind::GitCommit,
+    "commit the staged changes",
+    "Open a commit message screen over the focused pane that lists the staged \
+     files. Ctrl-s commits the index with the message, and Escape in normal \
+     mode closes the screen without a commit. Refuses while a review walk or \
+     a rebase holds HEAD, and when nothing is staged.",
+    ActionPriority::Common,
+    aliases = &["git ci"],
+    command_name = "git commit"
+);
+
+define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,
     "CommitsOpenReview",

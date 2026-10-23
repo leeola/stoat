@@ -1082,6 +1082,28 @@ on key {
         Escape -> SetMode(normal);
         Ctrl-s -> RewordConfirm();
     }
+    view == commit_message && mode == normal {
+        Escape -> GitCommitAbort();
+        Ctrl-s -> GitCommitConfirm();
+        i -> SetMode(insert);
+        a -> SetMode(insert);
+        h -> MoveLeft();
+        j -> MoveDown();
+        k -> MoveUp();
+        l -> MoveRight();
+        Left -> MoveLeft();
+        Down -> MoveDown();
+        Up -> MoveUp();
+        Right -> MoveRight();
+        w -> MoveNextWordStart();
+        e -> MoveNextWordEnd();
+        b -> MovePrevWordStart();
+        : -> OpenCommandPalette();
+    }
+    view == commit_message && mode == insert {
+        Escape -> SetMode(normal);
+        Ctrl-s -> GitCommitConfirm();
+    }
     view == rebase_conflict && mode == normal {
         Escape -> RebaseConflictAbort();
         a -> RebaseConflictAbort();

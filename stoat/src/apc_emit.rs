@@ -671,16 +671,18 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .is_some_and(|(at, _)| stoat.executor.now() < *at);
     stoat.smooth_scroll.set_geometry_unsettled(unsettled);
 
-    // The commits list, the changes view, and the rebase, reword, and conflict
-    // screens retire every editor and modal pool, and the editors beside them
-    // paint on the live grid. None of these screens covers the whole window.
-    // The commits list and the changes view are pane views, and the rebase
-    // screens paint over the focused pane alone, so a terminal beside one keeps
-    // its pool. The diff screen renders in the real editor pool, so it is not
-    // an overlay.
+    // The commits list, the changes view, and the rebase, reword, conflict, and
+    // commit message screens retire every editor and modal pool, and the editors
+    // beside them paint on the live grid. None of these screens covers the whole
+    // window. The commits list and the changes view are pane views, and the
+    // other screens paint over the focused pane alone, so a terminal beside one
+    // keeps its pool. The diff screen renders in the real editor pool, so it is
+    // not an overlay.
     let overlay = matches!(
         crate::keymap_state::view_predicate(stoat.active_workspace()),
-        Some("commits" | "diff_changes" | "rebase" | "reword" | "rebase_conflict")
+        Some(
+            "commits" | "diff_changes" | "rebase" | "reword" | "rebase_conflict" | "commit_message"
+        )
     );
     let panes = if overlay {
         Vec::new()

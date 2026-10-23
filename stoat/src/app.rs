@@ -6567,6 +6567,10 @@ impl Stoat {
             return Some(ids);
         }
 
+        if let Some(screen) = ws.commit_message.as_ref() {
+            return Some((screen.input.editor_id, screen.input.buffer_id));
+        }
+
         if let Some((editor_id, buffer_id)) = ws
             .rebase_active
             .as_ref()

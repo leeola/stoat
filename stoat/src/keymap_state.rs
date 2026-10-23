@@ -589,12 +589,17 @@ pub(crate) fn pane_predicate(ws: &Workspace) -> Option<&'static str> {
 /// The active `view` predicate value, naming the app screen in the foreground.
 ///
 /// App screens are not editor modes. They are derived from the session state
-/// that already tracks them, resolved in the precedence order conflict > diff >
-/// reword > rebase_conflict > rebase > commits > file so that a screen stacked
-/// over another (a diff opened from the commit list, a reword paused
-/// mid-rebase) reports the topmost one. `file` is any focused editor with no screen over it. The
-/// value is absent when nothing is focused.
+/// that already tracks them, resolved in the precedence order commit_message >
+/// conflict > diff > reword > rebase_conflict > rebase > commits > file so that
+/// a screen stacked over another (a diff opened from the commit list, a reword
+/// paused mid-rebase) reports the topmost one. `file` is any focused editor
+/// with no screen over it. The value is absent when nothing is focused.
 pub(crate) fn view_predicate(ws: &Workspace) -> Option<&'static str> {
+    // The commit message screen opens over whatever the pane shows, most often
+    // the diff view the reader staged from, so it outranks every pane view.
+    if ws.commit_message.is_some() {
+        return Some("commit_message");
+    }
     // The conflict resolve view is a swapped-in scratch editor with
     // `conflict_view` set rather than a pane variant of its own.
     if let Some(View::Editor(id)) = focused_view(ws)
