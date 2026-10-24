@@ -262,21 +262,31 @@ fn modal_frame_inner(
                 block = block.title(title.to_string()).title_style(style);
             }
             block.render(area, buf);
-            Panel {
-                style: BorderStyle::None_,
-                border: [0, 0, 0],
-                corner_radius: 0,
-                fill: None,
-                shadow: PanelShadow::None_,
-                inset_x: 0,
-                above_pools,
-                anchor: None,
-            }
-            .draw_components(area, scene);
+            cover_cells(area, above_pools, scene);
         },
     }
 
     inner
+}
+
+/// Declare a panel over `area` that draws nothing, for a frame that the cells
+/// draw.
+///
+/// Every pane pool's composite leaves a panel's rect to the live grid, so the
+/// frame's cells show through a glide, a terminal pool, and a resident pool
+/// alike.
+fn cover_cells(area: Rect, above_pools: bool, scene: &mut ApcScene) {
+    Panel {
+        style: BorderStyle::None_,
+        border: [0, 0, 0],
+        corner_radius: 0,
+        fill: None,
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools,
+        anchor: None,
+    }
+    .draw_components(area, scene);
 }
 
 /// Device pixels shaved off each horizontal edge of a popout card's panel, so the
@@ -299,6 +309,10 @@ const POPOUT_INSET_PX: u8 = 4;
 /// draws only when `area` spans at least two rows, because a one-row card has no
 /// room for a box border and degrades to the bare background cells the caller
 /// already painted.
+///
+/// Under a live scene the fallback also covers `area` with a panel that draws
+/// nothing, at any height, so no pane pool's composite paints over the card's
+/// cells.
 pub(crate) fn popout_frame(
     buf: &mut Buffer,
     area: Rect,
@@ -331,6 +345,7 @@ pub(crate) fn popout_frame(
                     .border_style(Style::default().fg(border))
                     .render(area, buf);
             }
+            cover_cells(area, false, scene);
         },
     }
 }
@@ -793,6 +808,53 @@ mod tests {
                 above_pools: false,
                 anchor: None,
             }),
+        );
+    }
+
+    /// The popout's cell fallback under a live scene covers the card with a
+    /// panel that draws nothing, a one-row card with no border included, so no
+    /// pool composite paints over the cells the card drew.
+    #[test]
+    fn the_popout_fallback_declares_a_panel_that_draws_nothing() {
+        let (tall, row) = (Rect::new(2, 1, 8, 3), Rect::new(2, 5, 8, 1));
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+        let theme = Theme::empty();
+
+        for area in [tall, row] {
+            popout_frame(
+                &mut buf,
+                area,
+                Color::Rgb(4, 5, 6),
+                Color::Blue,
+                &theme,
+                &mut scene,
+            );
+        }
+
+        let panel = |area: Rect| {
+            encode_panel(&PanelCommand {
+                top: area.y,
+                left: area.x,
+                width: area.width,
+                height: area.height,
+                style: BorderStyle::None_,
+                border: [0, 0, 0],
+                corner_radius: 0,
+                fill: None,
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                above_pools: false,
+                anchor: None,
+            })
+        };
+        assert_eq!(
+            (
+                buf.cell((2, 1)).unwrap().symbol(),
+                buf.cell((2, 5)).unwrap().symbol(),
+                scene.buffer().as_slice()
+            ),
+            ("┌", " ", [panel(tall), panel(row)].concat().as_slice()),
         );
     }
 
