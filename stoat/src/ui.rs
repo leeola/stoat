@@ -51,10 +51,21 @@ use stoatty_protocol::{
     command::{self, HelloCommand},
     detect,
 };
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    watch,
+use tokio::{
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        watch,
+    },
+    time,
 };
+
+/// The longest time the UI thread holds a written frame for its APC batches.
+///
+/// It is long enough for the pool job that redraws the gutter of the pages a
+/// scroll moves, so a scroll reaches the terminal in one write. A refill of
+/// many pages takes longer. The frame then goes out without the rest of the
+/// refill, so no job holds the screen for longer than this.
+const FRAME_BATCH_WAIT: Duration = Duration::from_millis(4);
 
 /// One rendered frame published from the main thread to the UI thread.
 ///
@@ -93,6 +104,12 @@ pub struct RenderFrame {
     /// paints over the panes anywhere, so a frame that paints one lists no
     /// capture.
     pub(crate) captures: Vec<(Rect, u64)>,
+    /// The APC batches that the run loop sends for this frame after the publish.
+    ///
+    /// The UI thread waits for them, for at most [`FRAME_BATCH_WAIT`], before
+    /// it ends the frame's synchronized update. The frame and its batches then
+    /// leave in one write.
+    pub(crate) batches: FrameBatches,
     /// When the frame's first event arrived, for measuring input-to-flush
     /// latency on the UI thread. `Some` only for input-driven frames; `None`
     /// for redraw-notify and PTY wakes, which carry no input to time.
@@ -102,6 +119,44 @@ pub struct RenderFrame {
     /// covers frames actually flushed, which is the user-visible latency.
     #[cfg(feature = "perf")]
     pub input_time: Option<Instant>,
+}
+
+/// The APC batches that the run loop sends for one published frame.
+///
+/// The run loop publishes a frame and then sends the frame's batches. Its
+/// emits send most of them, and the pool jobs that the emits start on the
+/// blocking pool send the rest. Each sender keeps a [`FrameBatchesHold`] until
+/// its last batch is on the APC channel. The UI thread waits for every hold to
+/// go before it drains the channel, so the frame and its batches go out in one
+/// synchronized update.
+#[derive(Clone)]
+pub(crate) struct FrameBatches(watch::Receiver<()>);
+
+impl FrameBatches {
+    /// Starts the batches of a frame, with the first hold on them.
+    pub(crate) fn start() -> (FrameBatchesHold, Self) {
+        let (sender, receiver) = watch::channel(());
+        let hold = FrameBatchesHold {
+            _sender: Arc::new(sender),
+        };
+        (hold, Self(receiver))
+    }
+
+    /// Waits until every hold on the frame's batches is gone.
+    pub(crate) async fn sent(mut self) {
+        // Nothing is ever sent on the channel. The last hold to go drops the
+        // sender, which closes the channel and ends the wait.
+        let _ = self.0.changed().await;
+    }
+}
+
+/// A hold on the batches of one frame, which keeps the frame's synchronized
+/// update open.
+///
+/// Drop it after the last batch that it covers is on the APC channel.
+#[derive(Clone)]
+pub(crate) struct FrameBatchesHold {
+    _sender: Arc<watch::Sender<()>>,
 }
 
 /// Install a process-global panic hook that restores the terminal before the
@@ -371,20 +426,21 @@ async fn run(
                             src.cursor,
                             src.resident.clone(),
                             src.captures.clone(),
+                            src.batches.clone(),
                             restamp,
                         )
                     })
                 };
-                let undercurl = match framed {
-                    Some((buffer, cursor, resident, captures, undercurl)) => {
+                let (undercurl, batches) = match framed {
+                    Some((buffer, cursor, resident, captures, batches, undercurl)) => {
                         shown.flush(terminal, &buffer, cursor, &resident, &captures)?;
                         // Drop the Arc before draining APC so the main thread's
                         // recycle can reclaim this buffer's allocation via
                         // Arc::try_unwrap instead of falling back to a fresh one.
                         drop(buffer);
-                        undercurl
+                        (undercurl, Some(batches))
                     },
-                    None => None,
+                    None => (None, None),
                 };
                 // Re-stamp diagnostic curly underlines over the grid just drawn,
                 // before the APC batches composite over the same stdout.
@@ -396,7 +452,7 @@ async fn run(
                 // Write any stoatty APC byte batches the app pushed for this
                 // frame to the same stdout, after the grid frame so the pool
                 // composites over the content just drawn.
-                drain_apc(None, apc_rx, terminal.backend_mut())?;
+                drain_frame_apc(batches, FRAME_BATCH_WAIT, apc_rx, terminal.backend_mut()).await?;
                 // Close the synchronized update so the cell diff, undercurl, and
                 // APC batch commit as one atomic frame. Its flush sends the
                 // whole frame, which the backend held until now.
@@ -803,6 +859,26 @@ fn forward_event(
     event_tx.send(event).is_ok()
 }
 
+/// Write the APC batches of a frame whose grid `out` holds, and every other
+/// batch already queued on `apc_rx`, to `out`.
+///
+/// The frame's batches come after the publish, from the run loop's emits and
+/// from the pool jobs that the emits start, so the last of them is often still
+/// on its way when the grid is written. The wait of up to `wait` for them keeps
+/// them in the frame's synchronized update. Without it they go out in an update
+/// of their own, and a scroll costs two writes.
+async fn drain_frame_apc(
+    batches: Option<FrameBatches>,
+    wait: Duration,
+    apc_rx: &mut UnboundedReceiver<Vec<u8>>,
+    out: &mut impl Write,
+) -> io::Result<()> {
+    if let Some(batches) = batches {
+        let _ = time::timeout(wait, batches.sent()).await;
+    }
+    drain_apc(None, apc_rx, out)
+}
+
 /// Write `first`, then every APC byte batch already queued on `apc_rx`, to
 /// `out`.
 ///
@@ -877,7 +953,7 @@ fn supersede_stale_fills(queued: &mut Vec<Vec<u8>>) {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use std::{cell::RefCell, collections::VecDeque, os::fd::RawFd};
+    use std::{cell::RefCell, collections::VecDeque, os::fd::RawFd, pin::pin};
 
     /// A queued fill goes out only if nothing later replaces its page, and
     /// everything else goes out untouched and in order.
@@ -1010,6 +1086,53 @@ mod tests {
             queued,
             vec![row_patch(3, 0, "first"), row_patch(3, 0, "second")],
             "both patches stay, in order",
+        );
+    }
+
+    /// A frame's drain waits until every hold on the frame's batches is gone, a
+    /// pool job's as well as the run loop's, and then writes the batches. A hold
+    /// that outlasts the wait holds the frame no longer.
+    #[tokio::test]
+    async fn a_frame_drains_its_batches_once_every_hold_is_gone() {
+        let (apc_tx, mut apc_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut out = Vec::new();
+
+        let (run_loop, batches) = FrameBatches::start();
+        let job = run_loop.clone();
+        let polls = {
+            let wait = Duration::from_secs(60);
+            let mut drain =
+                pin!(drain_frame_apc(Some(batches), wait, &mut apc_rx, &mut out).fuse());
+            let mut polls = vec![drain.as_mut().now_or_never().is_some()];
+            drop(run_loop);
+            polls.push(drain.as_mut().now_or_never().is_some());
+            apc_tx.send(b"decorations".to_vec()).unwrap();
+            drop(job);
+            polls.push(drain.now_or_never().is_some_and(|drained| drained.is_ok()));
+            polls
+        };
+
+        let (_stuck, batches) = FrameBatches::start();
+        apc_tx.send(b"fill".to_vec()).unwrap();
+        let mut expired = Vec::new();
+        let wait = Duration::from_millis(1);
+        time::timeout(
+            Duration::from_secs(10),
+            drain_frame_apc(Some(batches), wait, &mut apc_rx, &mut expired),
+        )
+        .await
+        .expect("the wait ends at its bound")
+        .unwrap();
+
+        assert_eq!(
+            (polls, out, expired),
+            (
+                vec![false, false, true],
+                b"decorations".to_vec(),
+                b"fill".to_vec()
+            ),
+            "the drain waits out the run loop's hold and the job's and writes the \
+             job's batch, and a hold past the wait keeps back nothing queued",
         );
     }
 

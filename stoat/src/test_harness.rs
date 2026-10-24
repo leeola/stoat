@@ -551,6 +551,17 @@ impl TestHarness {
         self.scheduler.blocking_calls()
     }
 
+    /// Queue later blocking jobs instead of running them inline, until
+    /// [`Self::run_held_blocking`] runs them.
+    pub(crate) fn hold_blocking(&self) {
+        self.scheduler.hold_blocking();
+    }
+
+    /// Run the held blocking jobs, and run later ones inline again.
+    pub(crate) fn run_held_blocking(&self) {
+        self.scheduler.run_held_blocking();
+    }
+
     /// Advance the fake clock by `duration`, firing every timer that
     /// expires inside the window, then settle the harness so any pending
     /// commit produced by those wake-ups is routed through the main dispatch

@@ -19,6 +19,9 @@ struct ScheduledTimer {
 struct SchedulerState {
     runnables: VecDeque<Runnable>,
     timers: Vec<ScheduledTimer>,
+    /// Blocking work that waits for [`TestScheduler::run_held_blocking`], or
+    /// `None` while blocking work runs inline.
+    held_blocking: Option<Vec<Box<dyn FnOnce() + Send>>>,
 }
 
 pub struct TestScheduler {
@@ -34,6 +37,7 @@ impl TestScheduler {
             state: Mutex::new(SchedulerState {
                 runnables: VecDeque::new(),
                 timers: Vec::new(),
+                held_blocking: None,
             }),
             blocking_calls: AtomicUsize::new(0),
         }
@@ -46,6 +50,25 @@ impl TestScheduler {
     /// caller kept a long walk off the run-loop thread.
     pub fn blocking_calls(&self) -> usize {
         self.blocking_calls.load(Ordering::Relaxed)
+    }
+
+    /// Queue later blocking work instead of running it inline, until
+    /// [`Self::run_held_blocking`] runs it.
+    ///
+    /// Inline work ends before the call that scheduled it returns, so a state
+    /// that lasts only while a job is in flight never shows. Hold the work to
+    /// look at that state before the job runs.
+    pub fn hold_blocking(&self) {
+        self.state.lock().held_blocking.get_or_insert_with(Vec::new);
+    }
+
+    /// Run the held blocking work in the order it was scheduled, and run later
+    /// blocking work inline again.
+    pub fn run_held_blocking(&self) {
+        let held = self.state.lock().held_blocking.take().unwrap_or_default();
+        for work in held {
+            work();
+        }
     }
 
     pub fn test_clock(&self) -> &TestClock {
@@ -211,6 +234,10 @@ impl Scheduler for TestScheduler {
 
     fn schedule_blocking(&self, work: Box<dyn FnOnce() + Send + 'static>) {
         self.blocking_calls.fetch_add(1, Ordering::Relaxed);
+        if let Some(held) = self.state.lock().held_blocking.as_mut() {
+            held.push(work);
+            return;
+        }
         work();
     }
 }

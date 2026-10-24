@@ -73,7 +73,9 @@ use crate::{
     test_fixture::{
         drain_apc, finder_layout, help_layout, open_with_minimap_strip, palette_sizing,
     },
+    ui::FrameBatches,
 };
+use futures::FutureExt;
 use std::path::PathBuf;
 use stoat_action::{Conflict, DetachPane, OpenFile};
 use stoat_config::MinimapMode;
@@ -4597,22 +4599,7 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
     use crate::render::conflict_view::render_conflict_rows;
     use ratatui::layout::Rect;
 
-    let mut h = crate::test_harness::TestHarness::with_size(150, 24);
-    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
-    h.fake_git()
-        .add_repo("/repo")
-        .with_fs(h.fake_fs())
-        .conflicted_file(
-            "f.txt",
-            Some("a\nbase\nz\n"),
-            Some("a\nOURS\nz\n"),
-            Some("a\nTHEIRS\nz\n"),
-        );
-    action_handlers::dispatch(&mut h.stoat, &Conflict);
-    h.settle();
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    h.stoat.set_apc_tx(tx);
+    let (mut h, mut rx) = conflict_pane();
     emit_smooth_scroll(&mut h.stoat);
     // The fills render on blocking workers, so settle before draining.
     h.settle();
@@ -4658,6 +4645,82 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
             .any(|batch| batch.windows(expected.len()).any(|w| w == expected)),
         "a pooled fill carries the live three-column body, not the bare center buffer",
     );
+}
+
+/// A 150x24 harness with a conflicted file in the conflict view, before its
+/// first emit, and the receiver of that emit's batches.
+fn conflict_pane() -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let mut h = crate::test_harness::TestHarness::with_size(150, 24);
+    h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+    h.fake_git()
+        .add_repo("/repo")
+        .with_fs(h.fake_fs())
+        .conflicted_file(
+            "f.txt",
+            Some("a\nbase\nz\n"),
+            Some("a\nOURS\nz\n"),
+            Some("a\nTHEIRS\nz\n"),
+        );
+    action_handlers::dispatch(&mut h.stoat, &Conflict);
+    h.settle();
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    (h, rx)
+}
+
+/// A pool job that a frame's emits start holds the frame's batches until the
+/// job ends, after the run loop's own hold is gone. This is true for the job
+/// that redraws an editor page's gutter and for the jobs that fill a conflict
+/// page.
+#[test]
+fn a_frame_waits_for_the_pool_jobs_its_emits_start() {
+    let (mut editor, mut editor_rx) =
+        buffered_relative_pool(stoatty_protocol::PROTOCOL_VERSION, false);
+    let redecorated = frame_through_held_jobs(&mut editor, &mut editor_rx, move_one_line_down);
+    let (mut conflict, mut conflict_rx) = conflict_pane();
+    let filled = frame_through_held_jobs(&mut conflict, &mut conflict_rx, |h| {
+        emit_smooth_scroll(&mut h.stoat)
+    });
+
+    assert_eq!(
+        (redecorated, filled),
+        ([(false, 0), (true, 5)], [(false, 0), (true, 2)]),
+        "the frame waits while its jobs are held, then their batches are queued",
+    );
+}
+
+/// Run `emit` as the emits of a frame whose hold the run loop then drops, with
+/// the blocking pool held.
+///
+/// Reports whether the frame's batches count as sent and how many page fills
+/// are on the channel, once while the jobs wait and once after they run.
+fn frame_through_held_jobs(
+    h: &mut crate::test_harness::TestHarness,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    emit: impl FnOnce(&mut crate::test_harness::TestHarness),
+) -> [(bool, usize); 2] {
+    use stoatty_protocol::command::Command;
+
+    h.hold_blocking();
+    let (hold, batches) = FrameBatches::start();
+    h.stoat.frame_batches = Some(hold);
+    emit(h);
+    h.stoat.frame_batches = None;
+
+    let mut observe = || {
+        let fills = drain_apc(rx)
+            .iter()
+            .filter(|cmd| matches!(cmd, Command::Fill(_) | Command::FillDecorations(_)))
+            .count();
+        (batches.clone().sent().now_or_never().is_some(), fills)
+    };
+    let held = observe();
+    h.run_held_blocking();
+    [held, observe()]
 }
 
 #[test]
@@ -5302,6 +5365,29 @@ fn wheel_glide_defers_the_relative_line_refill_to_settle() {
 fn relative_line_scroll_fills(protocol: u32, diff_view: bool) -> (Vec<u64>, Vec<u64>) {
     use stoatty_protocol::command::{Command, FillCommand};
 
+    let (mut h, mut rx) = buffered_relative_pool(protocol, diff_view);
+    move_one_line_down(&mut h);
+
+    let (mut fills, mut decorations) = (Vec::new(), Vec::new());
+    for command in drain_apc(&mut rx) {
+        match command {
+            Command::Fill(FillCommand { index, .. }) => fills.push(index),
+            Command::FillDecorations(FillCommand { index, .. }) => decorations.push(index),
+            _ => {},
+        }
+    }
+    (fills, decorations)
+}
+
+/// The harness of [`relative_line_scroll_fills`], with the pool window of its
+/// 400-line file buffered and the receiver drained.
+fn buffered_relative_pool(
+    protocol: u32,
+    diff_view: bool,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
     let mut h = Stoat::test();
     h.stoat.theme = Arc::new(rgb_diagnostic_theme());
     h.stoat.stoatty_protocol = protocol;
@@ -5323,10 +5409,14 @@ fn relative_line_scroll_fills(protocol: u32, diff_view: bool) -> (Vec<u64>, Vec<
     emit_smooth_scroll(&mut h.stoat);
     h.settle();
     let _ = drain_apc(&mut rx);
+    (h, rx)
+}
 
+/// Move the cursor and the scroll row of [`buffered_relative_pool`]'s file one
+/// line down, then emit.
+fn move_one_line_down(h: &mut crate::test_harness::TestHarness) {
     // Moved without a glide, since a glide holds the numbered line still.
-    let line_one = body.find("line 1\n").expect("line 1 exists");
-    h.stoat.collapse_focused_cursor_to(line_one);
+    h.stoat.collapse_focused_cursor_to("line 0\n".len());
     {
         let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
         editor.scroll_row = 1;
@@ -5334,16 +5424,6 @@ fn relative_line_scroll_fills(protocol: u32, diff_view: bool) -> (Vec<u64>, Vec<
     }
     emit_smooth_scroll(&mut h.stoat);
     h.settle();
-
-    let (mut fills, mut decorations) = (Vec::new(), Vec::new());
-    for command in drain_apc(&mut rx) {
-        match command {
-            Command::Fill(FillCommand { index, .. }) => fills.push(index),
-            Command::FillDecorations(FillCommand { index, .. }) => decorations.push(index),
-            _ => {},
-        }
-    }
-    (fills, decorations)
 }
 
 #[test]

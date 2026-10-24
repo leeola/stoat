@@ -12029,6 +12029,56 @@ fn shutdown_notify_quits_the_run_loop() {
     });
 }
 
+/// A published frame's APC batches are on the channel and released by the
+/// time the run loop waits again. The UI thread holds the frame's synchronized
+/// update open until the run loop's hold on them is gone.
+#[test]
+fn a_published_frame_releases_its_batches_within_its_turn() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut h = Stoat::test();
+        h.stoat.persistence_disabled = true;
+        let (apc_tx, mut apc_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(apc_tx);
+        h.stoat.stoatty = true;
+        let path = h.write_file("a.txt", "alpha\nbravo\n");
+        h.open_file(&path);
+        h.settle();
+        crate::test_fixture::drain_apc(&mut apc_rx);
+
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let (render_tx, mut render_rx) = watch::channel(None);
+        event_tx.send(Event::Resize(100, 30)).expect("send");
+
+        // Checked inside the branch, while the run loop is alive. A dropped run
+        // loop drops its hold, and the frame's batches then count as sent.
+        let released = tokio::select! {
+            _ = h.stoat.run(event_rx, render_tx) => None,
+            released = async {
+                render_rx.changed().await.ok()?;
+                let batches = render_rx.borrow().as_ref()?.batches.clone();
+                Some(batches.sent().now_or_never().is_some())
+            } => released,
+        };
+        let regions: Vec<PoolKind> = crate::test_fixture::drain_apc(&mut apc_rx)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                command::Command::PoolRegion(region) => Some(region.kind),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            (released, regions),
+            (Some(true), vec![PoolKind::Grid]),
+            "the frame's batches are released with its pool region on the channel",
+        );
+    });
+}
+
 #[cfg(feature = "perf")]
 #[test]
 fn input_driven_frame_carries_an_input_timestamp() {

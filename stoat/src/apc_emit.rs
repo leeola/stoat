@@ -2433,9 +2433,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 // the run instead of once per page. Fills still ship one at
                 // a time, so the terminal sees each page as it finishes.
                 let apc_tx = apc_tx.clone();
+                let hold = stoat.frame_batches.clone();
                 stoat
                     .executor
                     .spawn_blocking(move || {
+                        // Bound for the whole job, so the frame's update waits
+                        // for the job's last batch.
+                        let _hold = hold;
                         // Endpoints wider than the rows a page paints are
                         // valid, so one resolve over the run's union serves
                         // every page in it.
@@ -2510,9 +2514,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     let state = state.clone();
                     let theme = theme.clone();
                     let apc_tx = apc_tx.clone();
+                    let hold = stoat.frame_batches.clone();
                     stoat
                         .executor
                         .spawn_blocking(move || {
+                            let _hold = hold;
                             let fill = crate::smooth_scroll::render_conflict_page_from_parts(
                                 &snapshot,
                                 &state,

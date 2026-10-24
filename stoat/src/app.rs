@@ -55,7 +55,7 @@ use crate::{
     term_keys,
     term_session::{TermId, TermLocation},
     theme_pool::{ThemePool, VscodeSource},
-    ui::RenderFrame,
+    ui::{FrameBatches, FrameBatchesHold, RenderFrame},
     workspace::{BridgeWaiter, ParseRestyle, Workspace, WorkspaceId, WorkspaceUid},
     workspace_picker::WorkspacePicker,
 };
@@ -2276,6 +2276,14 @@ pub struct Stoat {
     /// [`Self::set_apc_tx`] installs it, which startup does after construction
     /// and a test need not do at all.
     pub(crate) apc_tx: Option<UnboundedSender<Vec<u8>>>,
+    /// The hold on the APC batches of the frame that [`Self::run`] publishes,
+    /// from the publish until the frame's emits end.
+    ///
+    /// [`apc_emit::emit_smooth_scroll`] gives a clone to each pool job it
+    /// starts, so the UI thread waits for the job's batches with the frame's
+    /// own. It is `None` outside a publish, so the jobs of a glide tick hold no
+    /// frame.
+    pub(crate) frame_batches: Option<FrameBatchesHold>,
     /// The remote `:ssh` or `:mosh` session that owns the screen, or `None`
     /// while this process draws it. Set while the window belongs to a remote
     /// stoat, which is what holds back every frame, scene, image, window, pool,
@@ -2885,6 +2893,7 @@ impl Stoat {
             version_info: "unknown",
             next_aux_window: 1,
             apc_tx: None,
+            frame_batches: None,
             passthrough: None,
             passthrough_link: None,
             stoatty: false,
@@ -4213,6 +4222,8 @@ impl Stoat {
                         (Arc::new(b), undercurl, captured)
                     };
                     let cursor = self.primary_cursor_screen_pos();
+                    let (hold, batches) = FrameBatches::start();
+                    self.frame_batches = Some(hold);
                     let prior = render.send_replace(Some(RenderFrame {
                         buffer,
                         cursor,
@@ -4220,6 +4231,7 @@ impl Stoat {
                         resident: apc_emit::resident_pool_rects(self),
                         holds,
                         captures,
+                        batches,
                         #[cfg(feature = "perf")]
                         input_time: t_event,
                     }));
@@ -4257,6 +4269,10 @@ impl Stoat {
                     apc_emit::emit_windows(self);
                     apc_emit::emit_smooth_scroll(self);
                     emit::emit_minimap(self);
+                    // The UI thread holds the frame's synchronized update open
+                    // until every hold is gone, so the loop's own goes after
+                    // the frame's last emit.
+                    self.frame_batches = None;
                     if render.is_closed() {
                         break;
                     }
