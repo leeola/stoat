@@ -2915,18 +2915,31 @@ fn a_modal_with_a_named_border_leaves_the_mask() {
     );
 }
 
-/// A stack that a resize moves leaves the mask until the terminal holds its
-/// pool at the new rect, since the composite still covers the old one.
+/// A stack that a resize burst moves leaves the mask, before its emit and
+/// after it, and that emit fills no page into a rect the next event replaces.
+/// The terminal shows the live grid there until a fill lands. The emit after
+/// the burst settles fills the window and masks the rect.
 #[test]
-fn a_moved_stack_leaves_the_mask_until_the_terminal_holds_it() {
-    let (mut h, mut rx, _) = resident_stack(TWO_FILES, MinimapMode::Off);
+fn a_stack_a_resize_burst_moves_waits_for_the_settle() {
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
     emit_raw(&mut h, &mut rx);
     h.resize(100, 20);
     let moved = resident_pool_rects(&h.stoat);
-    emit_raw(&mut h, &mut rx);
+    let burst = pool_fills(&emit_raw(&mut h, &mut rx), pool);
+    let during = resident_pool_rects(&h.stoat);
+
+    h.advance_clock(debounce::POOL_SETTLE_DEBOUNCE);
+    h.stoat.render();
+    let settled = pool_fills(&emit_raw(&mut h, &mut rx), pool);
     assert_eq!(
-        (moved, resident_pool_rects(&h.stoat)),
-        (vec![], vec![focused_content(&h)])
+        (moved, burst, during, settled, resident_pool_rects(&h.stoat)),
+        (
+            vec![],
+            vec![],
+            vec![],
+            vec![0, 1],
+            vec![focused_content(&h)]
+        )
     );
 }
 

@@ -2771,19 +2771,22 @@ fn subtract_rect(rect: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
 }
 
 /// The rects where the terminal composites a resident grid pool over the
-/// primary grid, by pool id, at the placement each pool's last emit declared.
+/// primary grid, by pool id, at the placement each pool's last emit declared
+/// and filled.
 ///
 /// The live paint of a changes view whose stack fills one of these rects
 /// leaves out the stack's runs and bars, and [`resident_pool_rects`] masks the
-/// same rects, so the two agree on which stacks the terminal covers. Empty
-/// under a terminal that keeps no pool composited at rest.
+/// same rects, so the two agree on which stacks the terminal covers. A pool
+/// whose moved region waits out a resize burst holds no page, so the terminal
+/// shows the live grid there and the list leaves it out. Empty under a
+/// terminal that keeps no pool composited at rest.
 pub(crate) fn composited_stacks(stoat: &Stoat) -> Vec<(u32, Rect)> {
     if !stoat.stoatty || stoat.stoatty_protocol < RESIDENT_POOL_PROTOCOL {
         return Vec::new();
     }
     stoat
         .smooth_scroll
-        .held_regions()
+        .filled_regions()
         .filter(|region| region.resident && region.kind == PoolKind::Grid && region.window == 0)
         .map(|region| {
             let rect = Rect::new(region.left, region.top, region.width, region.height);

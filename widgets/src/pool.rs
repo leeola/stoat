@@ -23,7 +23,7 @@ use std::{
 };
 use stoatty_protocol::command::{
     encode_fill_scope, encode_minimap_view_into, encode_pool_drop_into, encode_pool_region_into,
-    encode_reposition_into, encode_scroll_into, MinimapViewCommand, PoolRegionCommand,
+    encode_reposition_into, encode_scroll_into, MinimapViewCommand, PoolKind, PoolRegionCommand,
     ScrollCommand,
 };
 
@@ -217,13 +217,18 @@ impl SmoothScrollState {
         })
     }
 
-    /// The region of each pool the terminal holds, as the pool's last emit
-    /// declared it, in pool id order.
+    /// The region of each pool whose window was requested since the region
+    /// last moved, as the pool's last emit declared it, in pool id order.
     ///
-    /// A pool that has never emitted holds none, and neither does one a drop
-    /// retired.
-    pub fn held_regions(&self) -> impl Iterator<Item = PoolRegionCommand> {
-        self.pools.values().filter_map(|entry| entry.region)
+    /// For a caller that fills synchronously, these are the regions the
+    /// terminal holds pages for. A pool that has never emitted has none, and
+    /// neither has one that a drop retired, nor one whose moved region waits
+    /// out a resize burst.
+    pub fn filled_regions(&self) -> impl Iterator<Item = PoolRegionCommand> {
+        self.pools
+            .values()
+            .filter(|entry| entry.requested.is_some())
+            .filter_map(|entry| entry.region)
     }
 
     /// Declare `region` for a pool whose placement the terminal holds, and
@@ -587,11 +592,19 @@ pub fn emit_pages_into(
     let jumped = prev.is_some_and(|p| p.end <= window.start || window.end <= p.start);
 
     // A page rendered into a rectangle the next resize event replaces is thrown
-    // away, so a resting pool waits the burst out. A rectangle that moves for
+    // away, so a resting pool waits the burst out. A resident grid pool waits it
+    // out while it glides too, since the terminal shows the live grid in its
+    // place until a fill lands, and that grid holds the region's own content.
+    // The live grid under a terminal pool is blank, so that pool fills at once.
+    // A first display fills at once for every pool. A rectangle that moves for
     // any other reason has settled by the time the page draws: a picker's box
     // grows with its match count, and blanking that list would cost more than
     // the page it saves.
-    let entered = if idle && pages_moved && unsettled {
+    let waits = match region.resident && region.kind == PoolKind::Grid {
+        true => last_target.is_some(),
+        false => idle,
+    };
+    let entered = if waits && pages_moved && unsettled {
         Vec::new()
     } else {
         refill(
@@ -1591,6 +1604,55 @@ mod tests {
         assert_eq!(
             (changed_at_rest(45.0), changed_at_rest(40.0)),
             (vec![2, 3], vec![2])
+        );
+    }
+
+    /// A resident grid pool whose rectangle a resize burst moves fills nothing
+    /// until the geometry settles, gliding or not, and its region counts as
+    /// unfilled meanwhile. The settled emit fills the window a first display
+    /// there fills. A terminal pool fills at once, since the live grid under it
+    /// is blank.
+    #[test]
+    fn a_resident_grid_pool_waits_out_a_burst_while_it_glides() {
+        let grid = PoolRegionCommand {
+            resident: true,
+            ..region(1, 20)
+        };
+        let terminal = PoolRegionCommand {
+            kind: PoolKind::Terminal,
+            ..grid
+        };
+        let moved = |region: PoolRegionCommand| PoolRegionCommand {
+            width: 70,
+            ..region
+        };
+        let emit = |state: &mut SmoothScrollState, region, offset| {
+            emit_into(&mut Vec::new(), state, region, offset, 0, false, |_| {
+                Vec::new()
+            })
+        };
+        let burst = |region| {
+            let mut state = SmoothScrollState::default();
+            emit(&mut state, region, 0.0);
+            state.set_geometry_unsettled(true);
+            let entered = emit(&mut state, moved(region), 30.0);
+            (state, entered)
+        };
+
+        let (mut state, held) = burst(grid);
+        let during: Vec<_> = state.filled_regions().collect();
+        state.set_geometry_unsettled(false);
+        let settled = emit(&mut state, moved(grid), 30.0);
+        let first = emit(&mut SmoothScrollState::default(), moved(grid), 30.0);
+        assert_eq!(
+            (
+                held,
+                during,
+                settled,
+                state.filled_regions().collect::<Vec<_>>(),
+                burst(terminal).1,
+            ),
+            (vec![], vec![], first.clone(), vec![moved(grid)], first),
         );
     }
 
