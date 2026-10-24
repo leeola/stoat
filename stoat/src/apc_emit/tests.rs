@@ -2876,6 +2876,45 @@ fn a_panel_over_a_stack_pool_leaves_the_mask() {
     );
 }
 
+/// A theme whose modal borders, the file finder's and the key hints', are
+/// `color`.
+fn modal_border_theme(color: &str) -> crate::theme::Theme {
+    let src = format!(
+        r#"theme modalborder {{
+            ui.modal.palette.fg = "{color}";
+            ui.modal.hints.fg = "{color}";
+        }}"#
+    );
+    let (config, _) = stoat_config::parse(&src);
+    crate::theme::Theme::from_config(&config.expect("theme config parses"), "modalborder")
+        .expect("modal theme builds")
+}
+
+/// A modal whose border is a named color frames itself in the cells, and it
+/// leaves the mask as a modal with an RGB border does, so the pool's composite
+/// never covers it.
+#[test]
+fn a_modal_with_a_named_border_leaves_the_mask() {
+    use stoat_action::OpenFileFinder;
+
+    let mask = |color: &str| {
+        let (mut h, mut rx, _) = resident_stack(TWO_FILES, MinimapMode::Off);
+        emit_raw(&mut h, &mut rx);
+        h.stoat.theme = Arc::new(modal_border_theme(color));
+        h.stoat.paint_generation += 1;
+        action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+        h.settle();
+        h.stoat.render();
+        (resident_pool_rects(&h.stoat), finder_layout(&h).modal)
+    };
+
+    let (named, finder) = mask("blue");
+    assert_eq!(
+        (named.iter().any(|rect| rect.intersects(finder)), named),
+        (false, mask("#8899aa").0)
+    );
+}
+
 /// A stack that a resize moves leaves the mask until the terminal holds its
 /// pool at the new rect, since the composite still covers the old one.
 #[test]

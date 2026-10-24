@@ -2738,8 +2738,6 @@ pub(crate) fn resident_pool_rects(stoat: &Stoat) -> Vec<Rect> {
         return pools;
     }
 
-    // FIXME: A modal whose border color is not RGB draws a cell border and no
-    // panel, so the composite of a resident pool under it covers the modal.
     stoat.apc_scene.panels().fold(pools, |rects, panel| {
         let hole = Rect::new(panel.left, panel.top, panel.width, panel.height);
         rects

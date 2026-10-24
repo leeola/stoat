@@ -120,6 +120,10 @@ pub(crate) fn list_modal_width(area: Rect) -> u16 {
 /// on the border, and `title` styled the same, which is exactly what the sites drew
 /// before, so their snapshots stay identical.
 ///
+/// Under a live scene the fallback also declares a `panel` over `area` in
+/// [`BorderStyle::None_`], with no fill and no shadow. It draws nothing, and it
+/// keeps every pane pool's composite off the cells the fallback drew.
+///
 /// When the border colour resolves to RGB it instead emits a hairline `panel` APC frame with
 /// rounded corners and a drop shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over
 /// the top edge. The hairline runs unbroken through the title span, and the title run
@@ -258,6 +262,17 @@ fn modal_frame_inner(
                 block = block.title(title.to_string()).title_style(style);
             }
             block.render(area, buf);
+            Panel {
+                style: BorderStyle::None_,
+                border: [0, 0, 0],
+                corner_radius: 0,
+                fill: None,
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                above_pools,
+                anchor: None,
+            }
+            .draw_components(area, scene);
         },
     }
 
@@ -672,6 +687,41 @@ mod tests {
                 anchor: None,
             }),
             "the flag is the only difference from modal_frame's frame"
+        );
+    }
+
+    /// The cell fallback under a live scene covers its rect with a panel that
+    /// draws nothing, so no pool composite paints over the cells it drew. The
+    /// panel carries the caller's flag, as the rich arm's frame does.
+    #[test]
+    fn the_cell_fallback_declares_a_panel_that_draws_nothing() {
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+        let theme = Theme::empty();
+
+        modal_frame_above_pools(&mut buf, area, None, plain_style(), &theme, &mut scene);
+
+        let panel = encode_panel(&PanelCommand {
+            top: 1,
+            left: 2,
+            width: 8,
+            height: 4,
+            style: BorderStyle::None_,
+            border: [0, 0, 0],
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: true,
+            anchor: None,
+        });
+        assert_eq!(
+            (
+                buf.cell((2, 1)).unwrap().symbol(),
+                scene.buffer().as_slice()
+            ),
+            ("┌", panel.as_slice()),
         );
     }
 
