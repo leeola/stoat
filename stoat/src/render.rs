@@ -48,6 +48,7 @@ pub(crate) mod workspace_picker;
 use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
     action_handlers::search::{self, StatusPrompt},
+    apc_emit,
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
     buffer_registry::BufferRegistry,
@@ -384,6 +385,14 @@ pub(crate) struct FrameCtx<'a> {
     /// is the focused editor while no modal input holds focus. A pane whose
     /// editor is any other paints its own primary block.
     pub(crate) terminal_cursor_editor: Option<EditorId>,
+    /// The rects where the terminal composites a resident grid pool over the
+    /// live grid, by pool id, from [`apc_emit::composited_stacks`].
+    ///
+    /// A changes view whose stack paints into one of them leaves the stack's
+    /// runs and bars out of the scene, since the pool's pages carry their own
+    /// and the composite covers the live ones. Empty for every paint but the
+    /// live frame's.
+    pub(crate) composited_stacks: &'a [(u32, Rect)],
     /// How document editor panes number the gutter, resolved from
     /// `editor.line_numbers` (default [`LineNumbers::Relative`]).
     /// [`LineNumbers::Off`] keeps the diagnostic-only gutter column.
@@ -1069,6 +1078,9 @@ pub(crate) fn frame(
     // Resolved here for the same reason. It reads the whole &Stoat to find the
     // input that holds focus.
     let terminal_cursor_editor = stoat.focused_editor_ids().map(|(id, _)| id);
+    // Resolved here for the same reason. It reads the terminal's pools and the
+    // protocol off the whole &Stoat.
+    let composited_stacks = apc_emit::composited_stacks(stoat);
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -1177,6 +1189,7 @@ pub(crate) fn frame(
         search_smart_case,
         status_prompt: status_prompt.as_ref(),
         terminal_cursor_editor,
+        composited_stacks: &composited_stacks,
         line_numbers: stoat
             .settings
             .editor_line_numbers

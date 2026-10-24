@@ -85,6 +85,10 @@ impl PaintLayout {
 /// its right edge to the strip, with or without excerpts. The strip's rect
 /// lands on [`DiffChangesState::minimap_rect`], and no excerpt reserves a strip
 /// of its own.
+///
+/// Where [`stack_composited`] holds, the stack's runs and bars go to a scene
+/// the paint drops. The pool's pages carry their own, and the composite covers
+/// the live ones.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_changes(
     pane: &Pane,
@@ -150,10 +154,25 @@ pub(crate) fn render_diff_changes(
     state.scroll = state.scroll.min(total.saturating_sub(state.viewport_rows));
 
     let first_row = state.scroll;
+    let mut covered = stack_composited(pane, frame).then(ApcScene::new);
+    let scene = covered.as_mut().unwrap_or(scene);
     paint_stack_rows(
         state, editors, buffers, is_focused, text_style, undercurls, frame, buf, scene, first_row,
         inner,
     );
+}
+
+/// Whether the terminal composites the resident pool of `pane`'s stack over
+/// the rect the stack paints into.
+///
+/// The rect is the pane's content area less its minimap strip, the rect that
+/// [`diff_changes_pool_panes`](crate::apc_emit::diff_changes_pool_panes)
+/// declares. A pool that the terminal does not hold yet, or holds at another
+/// rect, covers no part of the paint.
+pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
+    let (inner, _) = split_pane_status(pane.area);
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled);
+    frame.composited_stacks.contains(&(pane.index, inner))
 }
 
 /// Paint stack rows `first_row..first_row + area.height` of the stack `state`
@@ -600,6 +619,7 @@ mod tests {
             search_smart_case: true,
             status_prompt: None,
             terminal_cursor_editor: stoat.focused_editor_ids().map(|(id, _)| id),
+            composited_stacks: &[],
             line_numbers: LineNumbers::Relative,
             wrap_mode: WrapMode::EditorWidth,
             wrap_column: 80,

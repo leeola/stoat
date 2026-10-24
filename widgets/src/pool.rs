@@ -217,6 +217,15 @@ impl SmoothScrollState {
         })
     }
 
+    /// The region of each pool the terminal holds, as the pool's last emit
+    /// declared it, in pool id order.
+    ///
+    /// A pool that has never emitted holds none, and neither does one a drop
+    /// retired.
+    pub fn held_regions(&self) -> impl Iterator<Item = PoolRegionCommand> {
+        self.pools.values().filter_map(|entry| entry.region)
+    }
+
     /// Declare `region` for a pool whose placement the terminal holds, and
     /// keep the pool's pages.
     ///

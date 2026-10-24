@@ -40,7 +40,10 @@ use crate::{
     display_map::PaintVersion,
     editor_state::{EditorId, EditorState},
     pane::{Pane, View},
-    render::{pane::diff_sides_for, review::DiffDials, undercurl::UndercurlBatch, FrameCtx},
+    render::{
+        diff_changes::stack_composited, pane::diff_sides_for, review::DiffDials,
+        undercurl::UndercurlBatch, FrameCtx,
+    },
 };
 use lsp_types::MessageType;
 use ratatui::{
@@ -156,8 +159,9 @@ pub(crate) struct PaneCacheKey {
     /// generation moves with it.
     pub(crate) search_smart_case: bool,
     /// The excerpts a changes view's window shows, hashed with the focused
-    /// index and the window's rows. Each one counts its buffer, placement,
-    /// rows, path, fold, versions, and diagnostics. Zero for an editor pane.
+    /// index, the window's rows, and whether the terminal composites the
+    /// stack. Each one counts its buffer, placement, rows, path, fold,
+    /// versions, and diagnostics. Zero for an editor pane.
     pub(crate) stack: u64,
 }
 
@@ -427,7 +431,9 @@ pub(crate) fn pane_cache_key(
 /// The common parts come from the focused excerpt, the one excerpt that
 /// paints selections, the cursor, and the hover. `stack` folds in what every
 /// excerpt the window shows paints from, and their placement, which an
-/// excerpt above the window moves when its rows change.
+/// excerpt above the window moves when its rows change. It also folds in
+/// [`stack_composited`], under which the paint leaves out the stack's runs and
+/// bars, so a capture never replays across a change of it.
 ///
 /// A held screen row, a pending landing, a cursor that moved out of the window
 /// since the last paint, and a scroll past the stack's last page each move the
@@ -471,7 +477,12 @@ fn stack_cache_key(
     }
 
     let mut stack = DefaultHasher::new();
-    (state.focused, state.viewport_rows).hash(&mut stack);
+    (
+        state.focused,
+        state.viewport_rows,
+        stack_composited(pane, frame),
+    )
+        .hash(&mut stack);
     let ends = state
         .excerpts
         .iter()

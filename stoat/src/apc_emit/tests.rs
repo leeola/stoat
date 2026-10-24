@@ -2876,6 +2876,48 @@ fn a_panel_over_a_stack_pool_leaves_the_mask() {
     );
 }
 
+/// A stack that a resize moves leaves the mask until the terminal holds its
+/// pool at the new rect, since the composite still covers the old one.
+#[test]
+fn a_moved_stack_leaves_the_mask_until_the_terminal_holds_it() {
+    let (mut h, mut rx, _) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    h.resize(100, 20);
+    let moved = resident_pool_rects(&h.stoat);
+    emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (moved, resident_pool_rects(&h.stoat)),
+        (vec![], vec![focused_content(&h)])
+    );
+}
+
+/// A changes view over a pane whose editor pool the terminal holds masks
+/// nothing on its first frame, since an editor pool shows the live grid at
+/// rest.
+#[test]
+fn a_changes_view_over_a_held_editor_pool_leaves_the_mask() {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stage_review_scenario("/repo", TWO_FILES);
+    h.open_file(&PathBuf::from("/repo/a.txt"));
+    h.settle();
+    h.stoat.render();
+    emit_raw(&mut h, &mut rx);
+
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    let first = resident_pool_rects(&h.stoat);
+    emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        (first, resident_pool_rects(&h.stoat)),
+        (vec![], vec![focused_content(&h)])
+    );
+}
+
 /// The focused changes view anchors the cursor on its stack pool, follows each
 /// move of it, sends nothing while it holds still, and releases the pool when
 /// focus leaves for a modal.
@@ -3109,6 +3151,81 @@ fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
             page_runs
         ),
         (buffer_cells(&live, rect), false, live_runs),
+    );
+}
+
+/// [`resident_stack`] under [`rgb_diff_gutter_theme`], painted again, so the
+/// stack's gutter draws as runs and bars in the pane's content lane.
+fn gutter_stack(
+    files: &[(&str, &str, &str)],
+    minimap: MinimapMode,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    u32,
+) {
+    let (mut h, rx, pool) = resident_stack(files, minimap);
+    h.stoat.theme = Arc::new(rgb_diff_gutter_theme());
+    h.stoat.paint_generation += 1;
+    h.stoat.render();
+    (h, rx, pool)
+}
+
+/// What the last paint put in the content lane of pool `pool`'s pane.
+fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8> {
+    let lane = crate::render::content_lane(pool);
+    h.stoat.apc_scene.lane_bytes(lane).to_vec()
+}
+
+/// A step that scrolls a held stack leaves the stack's runs and bars out of
+/// the pane's content lane, and the minimap strip's declaration stays. The
+/// pool's pages carry the runs, and its composite covers the live grid.
+#[test]
+fn a_scrolling_step_over_a_held_stack_keeps_only_the_strip_in_its_lane() {
+    use stoatty_protocol::command::Command;
+
+    let base: String = (1..=30).map(|i| format!("{i}\n")).collect();
+    let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
+    let (mut h, mut rx, pool) = gutter_stack(&[("a.txt", &base, &text)], MinimapMode::PerPane);
+    let (runs, rest): (Vec<Command>, Vec<Command>) =
+        command::decode_stream(&content_lane_bytes(&h, pool))
+            .into_iter()
+            .partition(|command| {
+                matches!(
+                    command,
+                    Command::TextRun(_) | Command::TextRunEnd | Command::Bar(_)
+                )
+            });
+    emit_raw(&mut h, &mut rx);
+
+    let scrolled = (0..30).find_map(|_| {
+        h.type_action("DiffChangesNext()");
+        h.stoat.render();
+        let lane = command::decode_stream(&content_lane_bytes(&h, pool));
+        emit_raw(&mut h, &mut rx);
+        let state = h.stoat.active_workspace().focused_diff_changes();
+        (state.expect("the changes view").scroll > 0).then_some(lane)
+    });
+    assert_eq!((runs.is_empty(), scrolled), (false, Some(rest)));
+}
+
+/// A stack that the terminal stops holding paints its runs again, though
+/// nothing else about the pane moved since a capture painted under the
+/// composite.
+#[test]
+fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
+    let (mut h, mut rx, pool) = gutter_stack(TWO_FILES, MinimapMode::Off);
+    let first = content_lane_bytes(&h, pool);
+    emit_raw(&mut h, &mut rx);
+    h.stoat.render();
+    h.stoat.render();
+    let held = content_lane_bytes(&h, pool);
+
+    crate::ssh::retire_terminal_state(&mut h.stoat);
+    h.stoat.render();
+    assert_eq!(
+        (first.is_empty(), held, content_lane_bytes(&h, pool)),
+        (false, vec![], first)
     );
 }
 

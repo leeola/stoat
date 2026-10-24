@@ -436,6 +436,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         search_smart_case: true,
         status_prompt: None,
         terminal_cursor_editor,
+        composited_stacks: &[],
         line_numbers: LineNumbers::Relative,
         wrap_mode: WrapMode::EditorWidth,
         wrap_column: 80,
@@ -1443,6 +1444,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             search_smart_case,
             status_prompt: None,
             terminal_cursor_editor: focused_editor,
+            composited_stacks: &[],
             line_numbers,
             wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
             wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
@@ -2712,19 +2714,25 @@ pub(crate) fn diff_changes_pool_panes(
 /// The rects where resident pools composite over the live grid this frame,
 /// which the UI thread's row diff leaves alone.
 ///
-/// A pool's rect counts once the terminal holds its region, so the frame that
-/// first declares a pool still writes its cells. The rect of every panel the
-/// frame declares is cut out, since a pane pool's composite shows the live grid
-/// under a panel. Empty under a terminal that keeps no pool composited at rest.
+/// A stack the frame declares counts once [`composited_stacks`] names its rect,
+/// so the frame that first declares a pool still writes its cells. The rect of
+/// every panel the frame declares is cut out, since a pane pool's composite
+/// shows the live grid under a panel. Empty under a terminal that keeps no pool
+/// composited at rest.
 pub(crate) fn resident_pool_rects(stoat: &Stoat) -> Vec<Rect> {
-    if !stoat.stoatty || stoat.stoatty_protocol < RESIDENT_POOL_PROTOCOL {
+    let composited = composited_stacks(stoat);
+    if composited.is_empty() {
         return Vec::new();
     }
     let covered = crate::render::overlay_pane(stoat.active_workspace());
     let pools: Vec<Rect> = diff_changes_pool_panes(stoat, covered)
         .into_iter()
-        .filter(|(_, _, region)| stoat.smooth_scroll.holds_region(region.pool, region))
-        .map(|(_, _, region)| Rect::new(region.left, region.top, region.width, region.height))
+        .map(|(pool, _, region)| {
+            let rect = Rect::new(region.left, region.top, region.width, region.height);
+            (pool, rect)
+        })
+        .filter(|stack| composited.contains(stack))
+        .map(|(_, rect)| rect)
         .collect();
     if pools.is_empty() {
         return pools;
@@ -2762,6 +2770,28 @@ fn subtract_rect(rect: Rect, hole: Rect) -> impl Iterator<Item = Rect> {
         ],
     };
     parts.into_iter().filter(|part| !part.is_empty())
+}
+
+/// The rects where the terminal composites a resident grid pool over the
+/// primary grid, by pool id, at the placement each pool's last emit declared.
+///
+/// The live paint of a changes view whose stack fills one of these rects
+/// leaves out the stack's runs and bars, and [`resident_pool_rects`] masks the
+/// same rects, so the two agree on which stacks the terminal covers. Empty
+/// under a terminal that keeps no pool composited at rest.
+pub(crate) fn composited_stacks(stoat: &Stoat) -> Vec<(u32, Rect)> {
+    if !stoat.stoatty || stoat.stoatty_protocol < RESIDENT_POOL_PROTOCOL {
+        return Vec::new();
+    }
+    stoat
+        .smooth_scroll
+        .held_regions()
+        .filter(|region| region.resident && region.kind == PoolKind::Grid && region.window == 0)
+        .map(|region| {
+            let rect = Rect::new(region.left, region.top, region.width, region.height);
+            (region.pool, rect)
+        })
+        .collect()
 }
 
 /// Every visible split pane showing a terminal or an agent, as the pool that
