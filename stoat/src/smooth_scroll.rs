@@ -456,8 +456,8 @@ fn paint_page_gutter(
                 rich.bg,
             );
             let mut scene = ApcScene::new();
-            let mut scratch = Buffer::empty(area);
-            widget.draw_components(area, &mut scratch, &mut scene);
+            // The components write only the scene, so `buf` keeps its cells.
+            widget.draw_components(area, buf, &mut scene);
             (widget.cell_width(), scene.buffer().clone())
         },
         None => {
@@ -908,10 +908,12 @@ pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
 
 #[cfg(test)]
 mod tests {
+    use super::PageGutter;
     use crate::{
         display_map::{highlights::HighlightEndpoints, DisplaySnapshot},
         render::review::DiffDials,
     };
+    use ratatui::style::Style;
     use std::sync::Arc;
 
     /// The endpoints a page resolved for itself before a refill began sharing
@@ -1870,40 +1872,9 @@ mod tests {
 
     #[test]
     fn rich_page_fill_carries_gutter_component_frames() {
-        use super::{render_page_fill, PageGutter};
-        use crate::{
-            action_handlers::{self, dispatch},
-            render::editor::{resolve_rich_gutter, RowSeverity},
-            theme::scope,
-            Stoat,
-        };
-        use std::path::PathBuf;
-        use stoat_action::OpenFile;
+        use super::render_page_fill;
 
-        let mut h = Stoat::test();
-        let root = PathBuf::from("/rich-page");
-        let path = root.join("doc.txt");
-        h.fake_fs()
-            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        dispatch(&mut h.stoat, &OpenFile { path });
-        h.settle();
-
-        let theme = h.stoat.theme.clone();
-        let fallback = theme.get(scope::UI_TEXT);
-        let rich = resolve_rich_gutter(&theme, fallback)
-            .expect("the shipped theme resolves the rich gutter colors");
-        let gutter = PageGutter::new(
-            true,
-            Arc::new(RowSeverity::default()),
-            theme.clone(),
-            Some(rich),
-            None,
-        );
-
-        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        let snapshot = editor.display_map.snapshot();
-
+        let (snapshot, gutter, fallback) = rich_gutter_page();
         let frame = render_page_fill(
             &snapshot,
             3,
@@ -1929,6 +1900,62 @@ mod tests {
             cmds.iter().any(|cmd| matches!(cmd, Command::Bar(_))),
             "the rich page fill carries the gutter separator bar, got {cmds:?}"
         );
+    }
+
+    /// A rich page lays its gutter out as scene components alone, so the page
+    /// cells under the gutter keep the page background.
+    #[test]
+    fn a_rich_page_gutter_writes_no_cell() {
+        use super::{page_buffer, paint_page_gutter};
+        use ratatui::layout::Rect;
+
+        let (snapshot, gutter, _) = rich_gutter_page();
+        let area = Rect::new(0, 0, 12, 4);
+        let mut buf = page_buffer(area, gutter.theme());
+        let (width, components) = paint_page_gutter(&snapshot, 0, 4, &mut buf, area, &gutter, None);
+
+        assert_eq!(
+            (width > 0, components.is_empty(), buf),
+            (true, false, page_buffer(area, gutter.theme())),
+            "the gutter reserves its columns and rides the scene, writing no cell",
+        );
+    }
+
+    /// The snapshot of a six-line document, the rich page gutter of the shipped
+    /// theme, which numbers the document absolutely, and that theme's text style.
+    fn rich_gutter_page() -> (DisplaySnapshot, PageGutter, Style) {
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::{resolve_rich_gutter, RowSeverity},
+            theme::scope,
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/rich-page");
+        let path = root.join("doc.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::default()),
+            theme,
+            Some(rich),
+            None,
+        );
+
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        (editor.display_map.snapshot(), gutter, fallback)
     }
 
     /// A decorations-only batch stands in for the components a whole fill lays
