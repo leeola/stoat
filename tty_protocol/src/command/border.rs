@@ -26,12 +26,20 @@ pub struct BorderCommand {
 /// [`BorderStyle::Light`], [`BorderStyle::Heavy`], and [`BorderStyle::Double`]
 /// select the line weight. [`BorderStyle::Rounded`] is a light line whose
 /// corners arc where two adjacent edges of the region meet.
+///
+/// [`BorderStyle::None_`] draws no line. A panel in it with no fill and no
+/// shadow draws nothing, yet it covers its rect as every panel does, so pane
+/// pool composites and the chrome declared before it leave the rect to the
+/// live grid. A program whose frame the cells draw declares such a panel to
+/// keep the pools off those cells. A terminal before protocol version 15 reads
+/// the style as [`BorderStyle::Light`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BorderStyle {
     Light,
     Heavy,
     Double,
     Rounded,
+    None_,
 }
 
 /// Encode a [`BorderCommand`] as a full `Gstoatty;border` frame for an emitter.
@@ -76,6 +84,7 @@ pub(super) fn decode_style(code: u8) -> BorderStyle {
         1 => BorderStyle::Heavy,
         2 => BorderStyle::Double,
         3 => BorderStyle::Rounded,
+        4 => BorderStyle::None_,
         _ => BorderStyle::Light,
     }
 }
@@ -86,6 +95,7 @@ pub(super) fn style_code(style: BorderStyle) -> u8 {
         BorderStyle::Heavy => 1,
         BorderStyle::Double => 2,
         BorderStyle::Rounded => 3,
+        BorderStyle::None_ => 4,
     }
 }
 
@@ -119,6 +129,23 @@ mod tests {
             width: 4,
             height: 3,
             style: BorderStyle::Rounded,
+            color: [1, 2, 3],
+        };
+
+        assert_eq!(
+            decode(&encode_border(&command)),
+            Some(Command::Border(command))
+        );
+    }
+
+    #[test]
+    fn the_style_with_no_line_round_trips() {
+        let command = BorderCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            style: BorderStyle::None_,
             color: [1, 2, 3],
         };
 

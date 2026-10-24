@@ -228,3 +228,84 @@ fn a_rounded_corner_carries_the_weight_of_the_runs_it_joins() {
         "the arc holds the straight run's ink: {join} at the join against {run} along the run"
     );
 }
+
+/// A border and a panel in the style that draws no line paint no pixel, so a
+/// panel declared only to cover its rect leaves the frame as a blank grid
+/// draws it. Each in a light line paints, which shows the fixture reaches the
+/// screen.
+#[test]
+fn the_style_with_no_line_paints_nothing() {
+    let (device, queue) = require_headless_device();
+
+    let font_size = 24;
+    let cell = cell_size(font_size, 1.0);
+    let (width, height) = (256u32, (cell[1] * 6.0).round() as u32);
+
+    let (target, view) = offscreen_target(&device, width, height);
+
+    let mut renderer =
+        test_support::renderer(&device, [width, height], font_size, 1.0, Rgb::new(0, 0, 0));
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 4 && cols >= 8, "grid too small: {rows}x{cols}");
+
+    let bordered = |style| {
+        let mut grid = Grid::new(rows, cols);
+        grid.set_border_edge(
+            2,
+            1..3,
+            BorderEdge::Bottom,
+            Border {
+                style,
+                color: Rgb::new(255, 0, 0),
+            },
+        );
+        grid
+    };
+    let paneled = |style| {
+        let mut grid = Grid::new(rows, cols);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 4,
+            width: 4,
+            height: 3,
+            style,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 6,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+            seq: 0,
+        }]);
+        grid
+    };
+    // One renderer draws every grid in turn, and a frame keeps the decorations
+    // it does not name, so each frame names them all.
+    let mut render = |grid: &Grid| {
+        renderer.render_into(
+            &device,
+            &queue,
+            &view,
+            grid,
+            still_frame(&Damage::Full, &Damage::Full),
+        );
+        read_back(&device, &queue, &target, width, height)
+    };
+
+    let blank = render(&Grid::new(rows, cols));
+    let changed = |pixels: Vec<u8>| blank.iter().zip(&pixels).filter(|(a, b)| a != b).count();
+    let painted = [
+        bordered(BorderStyle::Light),
+        paneled(BorderStyle::Light),
+        bordered(BorderStyle::None_),
+        paneled(BorderStyle::None_),
+    ]
+    .map(|grid| changed(render(&grid)) > 0);
+    assert_eq!(
+        painted,
+        [true, true, false, false],
+        "a light border and panel paint, and with no line each leaves the blank frame"
+    );
+}

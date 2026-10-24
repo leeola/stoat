@@ -34,6 +34,7 @@ const STYLE_LIGHT: u32 = 0u;
 const STYLE_HEAVY: u32 = 1u;
 const STYLE_DOUBLE: u32 = 2u;
 const STYLE_ROUNDED: u32 = 3u;
+const STYLE_NONE: u32 = 4u;
 
 // Drop-shadow color and peak alpha. The shadow paints only outside the box
 // exterior (fs_main gates it by interior coverage); this is its opacity where
@@ -260,7 +261,8 @@ fn band(d: f32, near: f32, far: f32) -> f32 {
 
 // Coverage of the frame at a point `d` pixels inward from the box edge,
 // weighted by the border style: a heavy line is thicker, a double line is two
-// parallel hairlines, and light and rounded are a single hairline.
+// parallel hairlines, light and rounded are a single hairline, and none draws
+// nothing.
 //
 // The frame sits inside the box rather than straddling its perimeter, so the
 // box covers exactly the pixels it declares and a frame drawn without a shadow
@@ -273,6 +275,9 @@ fn band(d: f32, near: f32, far: f32) -> f32 {
 // finer rather than fatter.
 fn line_coverage(style: u32, d: f32) -> f32 {
     let s = globals.scale_factor;
+    if style == STYLE_NONE {
+        return 0.0;
+    }
     if style == STYLE_HEAVY {
         return band(d, 0.0, 2.0 * s);
     }

@@ -1628,13 +1628,15 @@ pub struct Border {
 /// [`BorderStyle::Light`], [`BorderStyle::Heavy`], and [`BorderStyle::Double`]
 /// mirror the box-drawing line weights. [`BorderStyle::Rounded`] is a light line
 /// whose corners arc where two adjacent edges of a cell meet, so a framed region
-/// reads as a panel with rounded corners.
+/// reads as a panel with rounded corners. [`BorderStyle::None_`] draws no line,
+/// so a [`Panel`] in it draws only its fill and shadow and still covers its rect.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum BorderStyle {
     Light,
     Heavy,
     Double,
     Rounded,
+    None_,
 }
 
 /// How a [`Panel`]'s shadow is drawn, as renderer primitives.

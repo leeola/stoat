@@ -112,9 +112,15 @@
 /// and the dim it knows and ignores the resident byte. This version drops a
 /// shorter head.
 ///
+/// Version 15 reads border style code 4, which draws no line, in a `border` and
+/// in a `panel`. A panel in it with no fill and no shadow draws nothing and
+/// still covers its rect, so pane pool composites and the chrome declared before
+/// it leave the rect to the live grid. A terminal that predates it reads the
+/// code as a light line.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 pub mod command;
 pub mod detect;

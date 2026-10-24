@@ -41,6 +41,7 @@ const STYLE_LIGHT: u32 = 0;
 const STYLE_HEAVY: u32 = 1;
 const STYLE_DOUBLE: u32 = 2;
 const STYLE_ROUNDED: u32 = 3;
+const STYLE_NONE: u32 = 4;
 
 /// Per-cell instance: the cell, each edge's color, a presence bitmask, and the
 /// four per-edge style codes.
@@ -441,6 +442,7 @@ fn style_flag(style: BorderStyle) -> u32 {
         BorderStyle::Heavy => STYLE_HEAVY,
         BorderStyle::Double => STYLE_DOUBLE,
         BorderStyle::Rounded => STYLE_ROUNDED,
+        BorderStyle::None_ => STYLE_NONE,
     }
 }
 

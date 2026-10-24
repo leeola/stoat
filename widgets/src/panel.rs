@@ -78,12 +78,14 @@ impl Panel {
     ///
     /// Frame-only. [`Self::fill`] and [`Self::shadow`] are APC details with no
     /// cell equivalent, so the cells keep their own backgrounds.
+    /// [`BorderStyle::None_`] draws no line, so it writes no cells.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let set = match self.style {
             BorderStyle::Light => border::PLAIN,
             BorderStyle::Heavy => border::THICK,
             BorderStyle::Double => border::DOUBLE,
             BorderStyle::Rounded => border::ROUNDED,
+            BorderStyle::None_ => return,
         };
         let style = Style::default().fg(cells::rgb(self.border));
 
@@ -183,6 +185,28 @@ mod tests {
 
         assert_eq!(symbol(&buf, 0, 0), "╭");
         assert_eq!(symbol(&buf, 2, 2), "╯");
+    }
+
+    /// A panel in the style that draws no line has no cell border to degrade
+    /// to, so its fallback leaves the buffer alone.
+    #[test]
+    fn the_fallback_with_no_line_writes_no_cell() {
+        let area = Rect::new(0, 0, 3, 3);
+        let mut buf = Buffer::empty(area);
+
+        Panel {
+            style: BorderStyle::None_,
+            border: [1, 2, 3],
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+        }
+        .draw_fallback(area, &mut buf);
+
+        assert_eq!(buf, Buffer::empty(area));
     }
 
     /// An app compositing its own chrome takes the halves apart. The frame half

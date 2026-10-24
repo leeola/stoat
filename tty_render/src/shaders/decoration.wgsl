@@ -28,6 +28,7 @@ const STYLE_LIGHT: u32 = 0u;
 const STYLE_HEAVY: u32 = 1u;
 const STYLE_DOUBLE: u32 = 2u;
 const STYLE_ROUNDED: u32 = 3u;
+const STYLE_NONE: u32 = 4u;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -96,7 +97,7 @@ fn band(d: f32, near: f32, far: f32) -> f32 {
 
 // Coverage of the band an edge style draws, at a point `d` pixels in from the
 // edge. Light and Rounded draw a single line against the edge. Heavy widens it.
-// Double draws a second line a line width further in.
+// Double draws a second line a line width further in. None draws nothing.
 //
 // The heavy width and the double line's separation are logical pixels, scaled
 // to the display, so a heavy edge stays visibly heavier than a light one at any
@@ -105,6 +106,9 @@ fn band(d: f32, near: f32, far: f32) -> f32 {
 // rather than fatter.
 fn line_coverage(style: u32, d: f32) -> f32 {
     let s = globals.scale_factor;
+    if style == STYLE_NONE {
+        return 0.0;
+    }
     if style == STYLE_HEAVY {
         return band(d, 0.0, 2.0 * s);
     }

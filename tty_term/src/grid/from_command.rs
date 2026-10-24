@@ -201,6 +201,7 @@ pub(crate) fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
         command::BorderStyle::Heavy => BorderStyle::Heavy,
         command::BorderStyle::Double => BorderStyle::Double,
         command::BorderStyle::Rounded => BorderStyle::Rounded,
+        command::BorderStyle::None_ => BorderStyle::None_,
     }
 }
 

@@ -210,6 +210,13 @@ pool is resident by kind. A terminal below version 14 reads the kind and the
 dim it knows and ignores the resident byte. A terminal at version 14 or later
 drops a shorter head.
 
+From protocol version 15, style code 4 in a `border` or a `panel` draws no
+line. A `panel` in that style with no fill and no shadow draws nothing, yet it
+covers its rect as every panel does: pane pool composites and the chrome
+declared before it leave the rect to the live grid. A program that draws a
+frame in the cells declares such a panel over it, so no pool paints over those
+cells. A terminal below version 15 reads the code as a light line.
+
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
 

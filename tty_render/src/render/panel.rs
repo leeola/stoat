@@ -485,6 +485,7 @@ fn style_code(style: BorderStyle) -> u32 {
         BorderStyle::Heavy => 1,
         BorderStyle::Double => 2,
         BorderStyle::Rounded => 3,
+        BorderStyle::None_ => 4,
     }
 }
 

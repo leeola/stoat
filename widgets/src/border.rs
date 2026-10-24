@@ -46,12 +46,15 @@ impl Border {
 
     /// Draw only the degraded cell perimeter, for a terminal without the
     /// off-grid frame.
+    ///
+    /// [`BorderStyle::None_`] draws no line, so it writes no cells.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
         let set = match self.style {
             BorderStyle::Light => border::PLAIN,
             BorderStyle::Heavy => border::THICK,
             BorderStyle::Double => border::DOUBLE,
             BorderStyle::Rounded => border::ROUNDED,
+            BorderStyle::None_ => return,
         };
         let style = Style::default().fg(cells::rgb(self.color));
 
