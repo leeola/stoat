@@ -113,19 +113,20 @@ const REDECLARE_GRACE: Duration = Duration::from_millis(250);
 /// connectors, and label boxes.
 ///
 /// A no-op with no walkthrough playing or when the focused pane is not an
-/// editor. Under a terminal that draws no marks, only the code is lit.
-pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
+/// editor. Under a terminal that draws no marks, only the code is lit. Returns
+/// whether it lit the code.
+pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) -> bool {
     let Some(content) = focused_content_area(stoat) else {
-        return;
+        return false;
     };
     let Some(input) = measure(stoat) else {
-        return;
+        return false;
     };
     let colors = Colors::of(stoat);
     spotlight(buf, &input, &colors, content);
 
     if !scene.live() || !stoat.stoatty || stoat.stoatty_protocol < SKETCH_PROTOCOL {
-        return;
+        return true;
     }
 
     // A retiring slide holds the screen while it goes, and the arriving one
@@ -138,7 +139,7 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
     let slide = match stoat.active_workspace_mut().walkthrough.as_mut() {
         Some(run) => run.slide_for(&input),
-        None => return,
+        None => return true,
     };
 
     // The card is part of the slide, so it goes where the slide puts it. The
@@ -155,11 +156,11 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     // and hands it back below.
     let last_declared = match stoat.active_workspace_mut().walkthrough.as_mut() {
         Some(run) => std::mem::take(&mut run.last_declared),
-        None => return,
+        None => return true,
     };
     let now = stoat.executor.now();
     let Some(run) = stoat.active_workspace().walkthrough.as_ref() else {
-        return;
+        return true;
     };
     let painter = Painter {
         ids: SlideIds::of(run),
@@ -191,6 +192,7 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         run.last_parts = declared;
         run.last_declared = last_declared;
     }
+    true
 }
 
 /// Light the current annotation's code in its marker color, and dim the rest of

@@ -12,21 +12,21 @@ use ratatui::buffer::Buffer;
 /// to the focused pane.
 ///
 /// No-op when the picker has no entries (still in flight) or when
-/// the focused pane is not an editor.
+/// the focused pane is not an editor. Returns whether it painted the picker.
 pub(crate) fn render_code_action(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     let anchor_offset = match &stoat.pending_code_action_picker {
         Some(p) if !p.entries.is_empty() => p.anchor_offset,
-        _ => return,
+        _ => return false,
     };
 
     let Some((content_area, cursor_screen)) =
         cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)
     else {
-        return;
+        return false;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
@@ -34,11 +34,11 @@ pub(crate) fn render_code_action(
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
-        return;
+        return false;
     }
     let picker = match stoat.pending_code_action_picker.as_ref() {
         Some(p) => p,
-        None => return,
+        None => return false,
     };
     let total = picker.entries.len();
     let viewport_top =
@@ -88,4 +88,5 @@ pub(crate) fn render_code_action(
         (modal_style, selected_style),
         buf,
     );
+    true
 }

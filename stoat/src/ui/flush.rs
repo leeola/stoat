@@ -55,6 +55,9 @@ pub(super) struct ShownFrame {
     /// The cells inside them never reached the terminal, though a changed row
     /// copies them into `buffer`.
     resident: Vec<Rect>,
+    /// The pane captures the last flushed frame showed whole, as
+    /// [`RenderFrame::captures`](super::RenderFrame::captures) lists them.
+    captures: Vec<(Rect, u64)>,
 }
 
 impl ShownFrame {
@@ -72,12 +75,17 @@ impl ShownFrame {
     /// That frame writes no cell inside the `resident` rects, where resident
     /// pools composite. A rect the last frame named and this one does not
     /// writes every cell it held, since the terminal never received them.
+    ///
+    /// That frame also compares no cell of a rect that it and the shown frame
+    /// both list in `captures` with one tick, since both show one pane capture
+    /// there.
     pub(super) fn flush<B: Backend>(
         &mut self,
         terminal: &mut Terminal<B>,
         frame: &Buffer,
         cursor: Option<(u16, u16)>,
         resident: &[Rect],
+        captures: &[(Rect, u64)],
     ) -> Result<(), B::Error> {
         let screen = Rect::from(terminal.size()?);
         if let Some(shown) = self.buffer.as_mut()
@@ -90,12 +98,18 @@ impl ShownFrame {
                 .filter(|rect| !resident.contains(rect))
                 .copied()
                 .collect();
+            let shared: Vec<Rect> = captures
+                .iter()
+                .filter(|capture| self.captures.contains(capture))
+                .map(|&(rect, _)| rect)
+                .collect();
             let mut changed = Vec::new();
             terminal.backend_mut().draw(FrameDiff::new(
                 shown,
                 frame,
                 resident,
                 &uncovered,
+                &shared,
                 &mut changed,
             ))?;
             // Through the terminal rather than its backend, because the terminal
@@ -115,6 +129,8 @@ impl ShownFrame {
             }
             self.resident.clear();
             self.resident.extend_from_slice(resident);
+            self.captures.clear();
+            self.captures.extend_from_slice(captures);
             return Ok(());
         }
 
@@ -135,6 +151,8 @@ impl ShownFrame {
         self.buffer = (frame.area == screen).then(|| frame.clone());
         self.resident.clear();
         self.resident.extend_from_slice(resident);
+        self.captures.clear();
+        self.captures.extend_from_slice(captures);
         Ok(())
     }
 
@@ -277,6 +295,12 @@ impl<W: Write> Write for DiscardOnPanic<W> {
 /// lie in masked cells counts as unchanged. A cell inside an uncovered rect,
 /// and outside every masked one, is written whatever the shown frame holds,
 /// since the terminal never received the cell there.
+///
+/// A cell inside a shared rect, and outside every uncovered one, is never
+/// compared and never written, whatever its diff option asks, since both
+/// frames show one pane capture there. The walk steps over a shared span
+/// whole. A pane paints inside its rect, so no wide cell runs across the edge
+/// of the span.
 struct FrameDiff<'a, 'frame> {
     shown: &'a [Cell],
     frame: &'frame [Cell],
@@ -285,7 +309,9 @@ struct FrameDiff<'a, 'frame> {
     masked: &'a [Rect],
     /// Rects the last frame masked and this one does not.
     uncovered: &'a [Rect],
-    /// The masked and uncovered columns of the open row.
+    /// Rects that show one pane capture in both frames.
+    shared: &'a [Rect],
+    /// The masked, uncovered, and shared columns of the open row.
     spans: RowSpans,
     /// The next row to compare.
     row: usize,
@@ -307,20 +333,33 @@ struct Trailing {
     force: bool,
 }
 
-/// The columns of one row that masked and uncovered rects cover, as offsets
-/// into the row.
+/// The columns of one row that masked, uncovered, and shared rects cover, as
+/// offsets into the row.
 #[derive(Default)]
 struct RowSpans {
     masked: Vec<Range<usize>>,
     /// The uncovered columns that no masked rect covers.
     uncovered: Vec<Range<usize>>,
+    /// The shared columns that no uncovered span covers.
+    shared: Vec<Range<usize>>,
+    /// The masked and shared spans in the order of their starts, which are the
+    /// columns the row compares none of.
+    skipped: Vec<Range<usize>>,
 }
 
 impl RowSpans {
     /// Work out the spans of row `y` of `area`.
-    fn collect(&mut self, area: Rect, y: u16, masked: &[Rect], uncovered: &[Rect]) {
+    fn collect(
+        &mut self,
+        area: Rect,
+        y: u16,
+        masked: &[Rect],
+        uncovered: &[Rect],
+        shared: &[Rect],
+    ) {
         self.masked.clear();
         self.uncovered.clear();
+        self.shared.clear();
         self.masked
             .extend(masked.iter().filter_map(|rect| row_columns(area, y, rect)));
         for rect in uncovered {
@@ -328,20 +367,35 @@ impl RowSpans {
                 subtract_spans(columns, &self.masked, &mut self.uncovered);
             }
         }
+        for columns in shared.iter().filter_map(|rect| row_columns(area, y, rect)) {
+            // The subtraction visits each column, and a row with no uncovered
+            // span has nothing to take out.
+            match self.uncovered.is_empty() {
+                true => self.shared.push(columns),
+                false => subtract_spans(columns, &self.uncovered, &mut self.shared),
+            }
+        }
+        self.skipped.clear();
+        self.skipped
+            .extend(self.masked.iter().chain(&self.shared).cloned());
+        self.skipped.sort_unstable_by_key(|span| span.start);
     }
 
     /// Whether the row writes nothing, because it holds no uncovered column and
-    /// every column outside the masked ones writes nothing.
+    /// every column outside the masked and shared ones writes nothing.
     fn unchanged(&self, shown: &[Cell], frame: &[Cell]) -> bool {
         if !self.uncovered.is_empty() {
             return false;
         }
-        if self.masked.is_empty() {
-            return row_unchanged(shown, frame);
+        let mut col = 0;
+        for span in &self.skipped {
+            let compared = col..span.start.max(col);
+            if !row_unchanged(&shown[compared.clone()], &frame[compared]) {
+                return false;
+            }
+            col = col.max(span.end);
         }
-        (0..shown.len())
-            .filter(|&col| !self.masked(col))
-            .all(|col| cell_unchanged(&shown[col], &frame[col]))
+        row_unchanged(&shown[col..], &frame[col..])
     }
 
     fn masked(&self, col: usize) -> bool {
@@ -351,6 +405,15 @@ impl RowSpans {
     fn uncovered(&self, col: usize) -> bool {
         self.uncovered.iter().any(|span| span.contains(&col))
     }
+
+    /// Where the shared span over `col` ends, or `None` when no shared span
+    /// covers it.
+    fn shared_end(&self, col: usize) -> Option<usize> {
+        self.shared
+            .iter()
+            .find(|span| span.contains(&col))
+            .map(|span| span.end)
+    }
 }
 
 impl<'a, 'frame> FrameDiff<'a, 'frame> {
@@ -359,6 +422,7 @@ impl<'a, 'frame> FrameDiff<'a, 'frame> {
         frame: &'frame Buffer,
         masked: &'a [Rect],
         uncovered: &'a [Rect],
+        shared: &'a [Rect],
         changed: &'a mut Vec<usize>,
     ) -> Self {
         Self {
@@ -367,6 +431,7 @@ impl<'a, 'frame> FrameDiff<'a, 'frame> {
             area: frame.area,
             masked,
             uncovered,
+            shared,
             spans: RowSpans::default(),
             row: 0,
             pos: 0,
@@ -386,12 +451,14 @@ impl<'a, 'frame> FrameDiff<'a, 'frame> {
 
             let (start, end) = (row * width, (row + 1) * width);
             let (shown, frame) = (&self.shown[start..end], &self.frame[start..end]);
-            let unchanged = match self.masked.is_empty() && self.uncovered.is_empty() {
+            let no_rects =
+                self.masked.is_empty() && self.uncovered.is_empty() && self.shared.is_empty();
+            let unchanged = match no_rects {
                 true => row_unchanged(shown, frame),
                 false => {
                     let y = self.area.y + row as u16;
                     self.spans
-                        .collect(self.area, y, self.masked, self.uncovered);
+                        .collect(self.area, y, self.masked, self.uncovered, self.shared);
                     self.spans.unchanged(shown, frame)
                 },
             };
@@ -436,6 +503,10 @@ impl<'a, 'frame> FrameDiff<'a, 'frame> {
             let i = self.pos;
             self.pos += 1;
             if self.spans.masked(i - row_start) {
+                continue;
+            }
+            if let Some(end) = self.spans.shared_end(i - row_start) {
+                self.pos = row_start + end;
                 continue;
             }
             let current = &self.frame[i];
@@ -719,7 +790,21 @@ mod tests {
         resident: &[Rect],
     ) -> Vec<Op> {
         let frame = Buffer::with_lines(lines.iter().copied());
-        shown.flush(terminal, &frame, cursor, resident).unwrap();
+        shown
+            .flush(terminal, &frame, cursor, resident, &[])
+            .unwrap();
+        mem::take(&mut terminal.backend_mut().ops)
+    }
+
+    /// [`flush`] of a frame that lists `captures`, with the cursor hidden.
+    fn flush_captured(
+        shown: &mut ShownFrame,
+        terminal: &mut Terminal<Recorder>,
+        lines: &[&str],
+        captures: &[(Rect, u64)],
+    ) -> Vec<Op> {
+        let frame = Buffer::with_lines(lines.iter().copied());
+        shown.flush(terminal, &frame, None, &[], captures).unwrap();
         mem::take(&mut terminal.backend_mut().ops)
     }
 
@@ -865,10 +950,11 @@ mod tests {
         frame: [&str; 2],
         masked: &[Rect],
         uncovered: &[Rect],
+        shared: &[Rect],
     ) -> (Vec<(u16, u16)>, Vec<usize>) {
         let (shown, frame) = (Buffer::with_lines(shown), Buffer::with_lines(frame));
         let mut changed = Vec::new();
-        let writes = FrameDiff::new(&shown, &frame, masked, uncovered, &mut changed)
+        let writes = FrameDiff::new(&shown, &frame, masked, uncovered, shared, &mut changed)
             .map(|(x, y, _)| (x, y))
             .collect();
         (writes, changed)
@@ -884,16 +970,79 @@ mod tests {
 
         assert_eq!(
             [
-                masked_diff(["abc", "def"], ["axy", "def"], &mask, &[]),
+                masked_diff(["abc", "def"], ["axy", "def"], &mask, &[], &[]),
                 masked_diff(
                     ["abc", "def"],
                     ["axy", "def"],
                     &mask,
-                    &[Rect::new(2, 0, 1, 1)]
+                    &[Rect::new(2, 0, 1, 1)],
+                    &[]
                 ),
-                masked_diff(["abc", "def"], ["\u{2764}\u{fe0f}c", "def"], &mask, &[]),
+                masked_diff(
+                    ["abc", "def"],
+                    ["\u{2764}\u{fe0f}c", "def"],
+                    &mask,
+                    &[],
+                    &[]
+                ),
             ],
             [(vec![], vec![]), (vec![], vec![]), (vec![(0, 0)], vec![0])],
+        );
+    }
+
+    /// A change inside a shared rect writes nothing and leaves its row
+    /// unchanged, while a change beside the rect writes. An uncovered rect
+    /// inside the shared one still writes its cells, since the terminal never
+    /// received them.
+    #[test]
+    fn a_change_inside_a_shared_rect_writes_nothing() {
+        let shared = [Rect::new(0, 0, 2, 2)];
+        let uncovered = [Rect::new(1, 0, 1, 1)];
+
+        assert_eq!(
+            [
+                masked_diff(["abc", "def"], ["xbc", "dyf"], &[], &[], &shared),
+                masked_diff(["abc", "def"], ["xbz", "def"], &[], &[], &shared),
+                masked_diff(["abc", "def"], ["xbc", "def"], &[], &uncovered, &shared),
+            ],
+            [
+                (vec![], vec![]),
+                (vec![(2, 0)], vec![0]),
+                (vec![(1, 0)], vec![0])
+            ],
+        );
+    }
+
+    /// A rect that the frame on screen and the next frame both list with one
+    /// capture tick writes none of its cells, which match by construction, so
+    /// the change planted there stays off the screen. A rect that either frame
+    /// lists under another tick or not at all compares as any other. The frame
+    /// on screen lists nothing while a popup covers the panes, so the frame
+    /// after the popup closes writes the cells it covered.
+    #[test]
+    fn a_rect_both_frames_list_with_one_tick_compares_nothing() {
+        let rect = Rect::new(0, 0, 2, 1);
+        let second_flush = |on_screen: &[(Rect, u64)], next: &[(Rect, u64)]| {
+            let mut terminal = recorder(3, 2);
+            let mut shown = ShownFrame::default();
+            flush_captured(&mut shown, &mut terminal, &["abc", "def"], on_screen);
+            flush_captured(&mut shown, &mut terminal, &["xbc", "dyf"], next)
+        };
+        let compared = || vec![draw(&[(0, 0, "x"), (1, 1, "y")]), Op::HideCursor];
+
+        assert_eq!(
+            [
+                second_flush(&[(rect, 3)], &[(rect, 3)]),
+                second_flush(&[(rect, 3)], &[(rect, 6)]),
+                second_flush(&[], &[(rect, 3)]),
+                second_flush(&[(rect, 3)], &[]),
+            ],
+            [
+                vec![draw(&[(1, 1, "y")]), Op::HideCursor],
+                compared(),
+                compared(),
+                compared(),
+            ],
         );
     }
 
@@ -962,7 +1111,14 @@ mod tests {
     fn queue_frame<B: Backend>(backend: &mut B) -> Result<(), B::Error> {
         let shown = Buffer::with_lines(["abc", "def"]);
         let frame = Buffer::with_lines(["xbc", "dyf"]);
-        backend.draw(FrameDiff::new(&shown, &frame, &[], &[], &mut Vec::new()))?;
+        backend.draw(FrameDiff::new(
+            &shown,
+            &frame,
+            &[],
+            &[],
+            &[],
+            &mut Vec::new(),
+        ))?;
         backend.hide_cursor()?;
         backend.show_cursor()?;
         backend.set_cursor_position(Position::new(1, 1))
@@ -1018,13 +1174,64 @@ mod tests {
         for case in 0..4000 {
             let (shown, frame) = random_pair(&mut state);
             let mut changed = Vec::new();
-            let rows: Vec<_> = FrameDiff::new(&shown, &frame, &[], &[], &mut changed).collect();
+            let rows: Vec<_> =
+                FrameDiff::new(&shown, &frame, &[], &[], &[], &mut changed).collect();
             assert_eq!(
                 rows,
                 shown.diff_iter(&frame).collect::<Vec<_>>(),
                 "case {case}"
             );
         }
+    }
+
+    /// A shared rect over cells that both frames hold alike writes what
+    /// ratatui's whole-grid diff writes, over random pairs of frames.
+    #[test]
+    fn a_shared_rect_writes_what_the_grid_diff_writes() {
+        let mut state = 7;
+        for case in 0..4000 {
+            let (mut shown, mut frame) = random_pair(&mut state);
+            let rect = share_rect(&mut state, &mut shown, &mut frame);
+            let mut changed = Vec::new();
+            let rows: Vec<_> =
+                FrameDiff::new(&shown, &frame, &[], &[], &[rect], &mut changed).collect();
+            assert_eq!(
+                rows,
+                shown.diff_iter(&frame).collect::<Vec<_>>(),
+                "case {case}"
+            );
+        }
+    }
+
+    /// A random rect inside the frames' area, with one cell written into both
+    /// frames at each of its columns, as a pane capture both frames show.
+    ///
+    /// The cells are narrow with no diff option, and the column before the
+    /// rect holds a narrow cell, since a pane paints inside its rect and no
+    /// wide cell runs across its edge.
+    fn share_rect(state: &mut u64, shown: &mut Buffer, frame: &mut Buffer) -> Rect {
+        let area = frame.area;
+        let x = area.left() + (lcg(state) % u64::from(area.width)) as u16;
+        let y = area.top() + (lcg(state) % u64::from(area.height)) as u16;
+        let rect = Rect::new(
+            x,
+            y,
+            1 + (lcg(state) % u64::from(area.right() - x)) as u16,
+            1 + (lcg(state) % u64::from(area.bottom() - y)) as u16,
+        );
+        for row in rect.top()..rect.bottom() {
+            if rect.left() > area.left() {
+                shown[(rect.left() - 1, row)] = Cell::new("a");
+                frame[(rect.left() - 1, row)] = Cell::new("a");
+            }
+            for col in rect.left()..rect.right() {
+                let mut cell = random_cell(state, 1);
+                cell.diff_option = CellDiffOption::None;
+                shown[(col, row)] = cell.clone();
+                frame[(col, row)] = cell;
+            }
+        }
+        rect
     }
 
     /// Two frames over one random area, the second a copy of the first with a

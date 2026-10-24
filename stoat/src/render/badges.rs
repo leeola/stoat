@@ -12,6 +12,9 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use stoat_widgets::{panel::Panel, ApcScene};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
 
+/// Paint each visible badge of the workspace and global trays over `area`.
+///
+/// Returns whether it painted a badge.
 pub(crate) fn render_badges(
     workspace: &BadgeTray,
     global: &BadgeTray,
@@ -20,16 +23,19 @@ pub(crate) fn render_badges(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
-) {
+) -> bool {
     if workspace.is_empty() && global.is_empty() {
-        return;
+        return false;
     }
 
+    let mut painted = false;
     for anchor in Anchor::ALL {
         for (badge, rect) in placements(workspace, global, anchor, area) {
             render_single_badge(badge, rect.x, rect.y, render_tick, theme, buf, scene);
+            painted = true;
         }
     }
+    painted
 }
 
 /// The columns the bottom-right badges cover on `area`'s bottom row, as a

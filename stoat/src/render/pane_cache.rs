@@ -192,8 +192,12 @@ pub(crate) struct PaneCacheEntry {
     /// The cells sit behind an `Arc`, since a [`Hold`] shares them with the
     /// job that puts them back into a frame buffer off the loop.
     region: (Rect, Arc<Vec<Cell>>),
-    /// Which capture the entry holds, counted up on each capture, so a
-    /// [`Hold`] names the capture its buffer carries.
+    /// Which capture the entry holds, as the render tick of the frame that
+    /// took it, so a [`Hold`] names the capture its buffer carries.
+    ///
+    /// A frame captures a pane at most once, and its panes never overlap, so
+    /// no two captures of any pane share both a rect and a tick. The UI thread
+    /// relies on that to tell two frames that show one capture in a rect.
     capture_seq: u64,
     /// The pane's own slice of its content lane, with the lane's id. The slice
     /// is contiguous because no other pane writes that lane.
@@ -250,7 +254,9 @@ impl PaneCacheEntry {
     /// Every motion and keystroke moves some other part of the key.
     ///
     /// A capture writes over whatever this entry held, keeping its
-    /// allocations, except the cells that a [`Hold`] still shares.
+    /// allocations, except the cells that a [`Hold`] still shares. It takes
+    /// `tick`, the render tick of the frame that painted, as its id.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_into(
         &mut self,
         key: PaneCacheKey,
@@ -259,6 +265,7 @@ impl PaneCacheEntry {
         scene: &ApcScene,
         undercurls: &UndercurlBatch,
         mark: PaintMark,
+        tick: u64,
     ) -> bool {
         let moved = self.seen.is_none_or(|seen| {
             seen != PaneCacheKey {
@@ -284,7 +291,7 @@ impl PaneCacheEntry {
             *cells = Arc::default();
         }
         cells_into(buf, rect, Arc::make_mut(cells));
-        self.capture_seq += 1;
+        self.capture_seq = tick;
 
         let (id, start) = mark.lane;
         let (held_id, bytes) = &mut self.scene;

@@ -13,20 +13,22 @@ pub(crate) const VISIBLE_WINDOW: usize = 9;
 /// editor's primary cursor. Renders a 9-row viewport over the
 /// picker's `entries` that follows `selected_idx`; visible rows are
 /// numbered 1..=9. Clamps width and height to the focused pane.
+///
+/// Returns whether it painted the picker.
 pub(crate) fn render_symbol_picker(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     let picker = match &stoat.pending_symbol_picker {
         Some(p) if !p.entries.is_empty() => p.clone(),
-        _ => return,
+        _ => return false,
     };
 
     let Some((content_area, cursor_screen)) =
         cursor_popup::focused_editor_popup_ctx(stoat, picker.anchor_offset)
     else {
-        return;
+        return false;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
@@ -34,7 +36,7 @@ pub(crate) fn render_symbol_picker(
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
-        return;
+        return false;
     }
     let total = picker.entries.len();
     let viewport_top = viewport_top_for(picker.selected_idx, total, VISIBLE_WINDOW);
@@ -82,6 +84,7 @@ pub(crate) fn render_symbol_picker(
         (modal_style, selected_style),
         buf,
     );
+    true
 }
 
 /// Return the index of the entry that should appear at the top of

@@ -4,16 +4,19 @@ use crate::{
 };
 use ratatui::buffer::Buffer;
 
+/// Paint a minimized dock as a line along its edge.
+///
+/// Returns whether it painted, which it does unless its area is empty.
 pub(crate) fn render_dock_minimized(
     dock: &DockPanel,
     is_focused: bool,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
-        return;
+        return false;
     }
     let style = if is_focused {
         theme.get(crate::theme::scope::UI_BORDER_FOCUSED)
@@ -21,8 +24,12 @@ pub(crate) fn render_dock_minimized(
         theme.get(crate::theme::scope::UI_BORDER_INACTIVE)
     };
     crate::render::chrome::vline(buf, area.x, area.y, area.height, style, scene);
+    true
 }
 
+/// Paint an open dock as a framed panel over the panes.
+///
+/// Returns whether it painted, which it does unless its area is empty.
 pub(crate) fn render_dock_open(
     dock: &DockPanel,
     is_focused: bool,
@@ -30,10 +37,10 @@ pub(crate) fn render_dock_open(
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     let area = dock.area;
     if area.width == 0 || area.height == 0 {
-        return;
+        return false;
     }
     let theme = frame.theme;
     let border_style = if is_focused {
@@ -60,4 +67,5 @@ pub(crate) fn render_dock_open(
             is_focused,
         );
     }
+    true
 }

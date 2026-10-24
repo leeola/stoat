@@ -216,23 +216,24 @@ fn detail_footer(item: &CompletionItem) -> Option<String> {
 /// No-op when [`Stoat::pending_completion`] is `None` or empty,
 /// when the focused pane is not an editor, when the cursor is
 /// off-screen, or when neither the popup width nor height fits.
+/// Returns whether it painted the popup.
 pub(crate) fn render_completion(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     // Parked back before every return, since the pool emit runs after this and
     // reads what the frame's first consumer left rather than laying out again.
     let memo = frame_layout(stoat);
     let Some((prefix, layout)) = &memo.layout else {
         park_layout(stoat, memo);
-        return;
+        return false;
     };
     // The layout confirmed a non-empty popup. Re-borrow it for the rows instead
     // of cloning the item list through the layout call.
     let Some(popup) = stoat.pending_completion.as_ref() else {
         park_layout(stoat, memo);
-        return;
+        return false;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
@@ -270,6 +271,7 @@ pub(crate) fn render_completion(
     }
 
     park_layout(stoat, memo);
+    true
 }
 
 /// Paint completion rows into `area` starting at item `start_row`, one row per

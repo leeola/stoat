@@ -469,7 +469,8 @@ pub(crate) struct BlankedBuffer {
 pub(crate) struct Hold {
     pub(crate) pane: (WorkspaceId, PaneId),
     pub(crate) rect: Rect,
-    /// Which capture of the pane's cache entry the cells are.
+    /// Which capture of the pane's cache entry the cells are, as the render
+    /// tick of the frame that took it.
     pub(crate) capture: u64,
     /// The capture's cells over `rect`, row-major.
     pub(crate) cells: Arc<Vec<Cell>>,
@@ -1009,13 +1010,17 @@ fn trailing_blank_run(shown: &[(u16, &Cell)]) -> usize {
 /// every other cell blank. A pane whose capture still replays leaves its held
 /// cells in place, and every other held rect is blanked before a pane paints
 /// over it. Answers a hold for each pane the frame replayed or captured.
+///
+/// Also answers each hold's rect and capture tick, for
+/// [`RenderFrame::captures`](crate::ui::RenderFrame::captures), or none of
+/// them when anything painted over the panes after they painted.
 pub(crate) fn frame(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut ApcScene,
     undercurls: &mut UndercurlBatch,
     holds: Vec<Hold>,
-) -> Vec<Hold> {
+) -> (Vec<Hold>, Vec<(Rect, u64)>) {
     let full = stoat.size();
 
     // Settled before the frame borrows the rest of the state it paints from,
@@ -1271,6 +1276,7 @@ pub(crate) fn frame(
     }
 
     let paint_generation = stoat.paint_generation;
+    let tick = stoat.render_tick;
     let workspace = stoat.active_workspace;
     let split_focused = ws.panes.focus();
     let mut lsp_badge_rect: Option<Rect> = None;
@@ -1392,7 +1398,7 @@ pub(crate) fn frame(
         if let Some(key) = key {
             let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
             let entry = stoat.pane_cache.entry((workspace, id)).or_default();
-            if entry.capture_into(key, content, buf, scene, undercurls, mark) {
+            if entry.capture_into(key, content, buf, scene, undercurls, mark, tick) {
                 stoat.pane_captures += 1;
                 frame_holds.push(entry.hold((workspace, id)));
             }
@@ -1445,6 +1451,11 @@ pub(crate) fn frame(
 
     pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, &mut *scene);
 
+    // A paint from here on writes over the panes wherever its box falls, so
+    // each one reports whether it wrote, and a frame where one did lists no
+    // capture for the UI thread. The band and the dividers above sit outside
+    // every pane.
+    let mut overlaid = overlay_pane.is_some();
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == pane_id;
@@ -1509,9 +1520,10 @@ pub(crate) fn frame(
         }
         let is_focused = matches!(ws.focus, FocusTarget::Dock(id) if id == dock_id);
         if matches!(dock.visibility, DockVisibility::Minimized) {
-            dock::render_dock_minimized(dock, is_focused, &stoat.theme, buf, &mut *scene);
+            overlaid |=
+                dock::render_dock_minimized(dock, is_focused, &stoat.theme, buf, &mut *scene);
         } else {
-            dock::render_dock_open(
+            overlaid |= dock::render_dock_open(
                 dock,
                 is_focused,
                 PaneCtx {
@@ -1531,13 +1543,13 @@ pub(crate) fn frame(
     }
     // Before the hover, so the card the slide points at is already placed when
     // the connector to it is emitted.
-    walkthrough::render_slide(stoat, buf, &mut *scene);
-    hover::render_hover(stoat, buf, &mut *scene);
-    signature_help::render_signature_help(stoat, buf, &mut *scene);
-    completion::render_completion(stoat, buf, &mut *scene);
-    code_action::render_code_action(stoat, buf, &mut *scene);
-    rename_input::render_rename_input(stoat, buf, &mut *scene);
-    symbol_picker::render_symbol_picker(stoat, buf, &mut *scene);
+    overlaid |= walkthrough::render_slide(stoat, buf, &mut *scene);
+    overlaid |= hover::render_hover(stoat, buf, &mut *scene);
+    overlaid |= signature_help::render_signature_help(stoat, buf, &mut *scene);
+    overlaid |= completion::render_completion(stoat, buf, &mut *scene);
+    overlaid |= code_action::render_code_action(stoat, buf, &mut *scene);
+    overlaid |= rename_input::render_rename_input(stoat, buf, &mut *scene);
+    overlaid |= symbol_picker::render_symbol_picker(stoat, buf, &mut *scene);
     // The modals below paint editors of their own, and this is the same set the
     // pane path already rides down FrameCtx. Bound here because the workspace
     // borrow on the next line rules out rebuilding a FrameCtx.
@@ -1550,7 +1562,7 @@ pub(crate) fn frame(
     let toggles = ToggleStates::read(stoat);
     let app = AppFlags::from_stoat(stoat);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
-    badges::render_badges(
+    overlaid |= badges::render_badges(
         &ws.badges,
         &stoat.badges,
         size,
@@ -1559,6 +1571,8 @@ pub(crate) fn frame(
         buf,
         &mut *scene,
     );
+    // Each arm that paints a box paints one whenever its modal is open.
+    overlaid |= painted_modal.is_some_and(ActiveModal::paints_own_box);
     match painted_modal {
         Some(ActiveModal::Run) => {
             if let Some(run_id) = stoat.modal_run
@@ -2050,13 +2064,23 @@ pub(crate) fn frame(
             buf,
             &mut *scene,
         );
+        overlaid = true;
     }
 
     if mode == "space_pane_display" {
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
+        overlaid = true;
     }
     scene.end_lane();
-    frame_holds
+
+    let captures = match overlaid {
+        true => Vec::new(),
+        false => frame_holds
+            .iter()
+            .map(|hold| (hold.rect, hold.capture))
+            .collect(),
+    };
+    (frame_holds, captures)
 }
 
 /// The content store and palette the single band declares for the focused

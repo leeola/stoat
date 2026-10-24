@@ -250,8 +250,9 @@ fn clamp_into(rect: Rect, bounds: Rect) -> Rect {
 /// truncated.
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
-/// pane is not an editor, or when the cursor is off-screen.
-pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) {
+/// pane is not an editor, or when the cursor is off-screen. Returns whether it
+/// painted the popup.
+pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcScene) -> bool {
     let Some((popup_area, _)) = hover_popup_layout(stoat) else {
         // An unplaceable popup paints nothing, so clear its stored rects. A
         // default rect hit-tests to no point, so the mouse and wheel handlers
@@ -261,7 +262,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             open.area = Rect::default();
             open.inner = Rect::default();
         }
-        return;
+        return false;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
@@ -480,6 +481,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
         run.last_parts.runs.extend(card_runs);
     }
+    true
 }
 
 /// The half-open char range selected on content `line`, bounded to the line's

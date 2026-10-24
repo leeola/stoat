@@ -6285,7 +6285,7 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
 /// frame ends with.
 fn paint_held(h: &mut crate::test_harness::TestHarness) -> (Buffer, Vec<Hold>) {
     let mut buf = Buffer::empty(h.stoat.size);
-    let holds = h.stoat.paint_into(&mut buf, None);
+    let (holds, _) = h.stoat.paint_into(&mut buf, None);
     (buf, holds)
 }
 
@@ -6411,6 +6411,47 @@ fn a_closed_modal_leaves_no_trace_on_a_held_pane() {
     assert_eq!(
         (h.stoat.pane_replays_held - held_before, restored),
         (1, h.stoat.render())
+    );
+}
+
+/// A frame lists each pane capture it shows whole for the UI thread, by its
+/// hold's rect and capture tick. A frame under a modal lists none, since the
+/// modal's box covers the pane rects.
+#[test]
+fn a_frame_lists_the_captures_it_shows_whole() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let mut buf = Buffer::empty(h.stoat.size);
+    let (holds, bare) = h.stoat.paint_into(&mut buf, None);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+    h.settle();
+    let (_, under_modal) = h.stoat.paint_into(&mut buf, None);
+
+    let held: Vec<(Rect, u64)> = holds.iter().map(|hold| (hold.rect, hold.capture)).collect();
+    assert_eq!((held.len(), bare, under_modal), (2, held, Vec::new()));
+}
+
+/// A pane that a workspace switch puts at the rect of the last workspace's
+/// pane lists its own capture tick there. The UI thread then compares the
+/// rect, rather than keep the last workspace's cells on screen.
+#[test]
+fn a_workspace_switch_lists_another_tick_at_the_same_rect() {
+    let mut h = Stoat::test();
+    let a = h.write_file("a.txt", "alpha\n");
+    h.open_file(&a);
+    let mut buf = Buffer::empty(h.stoat.size);
+    let (_, before) = h.stoat.paint_into(&mut buf, None);
+    h.type_action("NewWorkspace()");
+    let b = h.write_file("b.txt", "bravo\n");
+    h.open_file(&b);
+    let (_, after) = h.stoat.paint_into(&mut buf, None);
+
+    let rects = |captures: &[(Rect, u64)]| -> Vec<Rect> {
+        captures.iter().map(|&(rect, _)| rect).collect()
+    };
+    assert_eq!(
+        (rects(&before), after.len(), before == after),
+        (rects(&after), 1, false),
     );
 }
 

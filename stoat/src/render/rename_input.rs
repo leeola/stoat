@@ -9,14 +9,14 @@ use ratatui::buffer::Buffer;
 /// inside a bordered popup titled "rename".
 ///
 /// No-op when there is no rename input open or the focused pane is
-/// not an editor.
+/// not an editor. Returns whether it painted the popup.
 pub(crate) fn render_rename_input(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     if stoat.rename_input.is_none() {
-        return;
+        return false;
     }
     let anchor_offset = stoat
         .rename_input
@@ -27,7 +27,7 @@ pub(crate) fn render_rename_input(
     let Some((content_area, cursor_screen)) =
         cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)
     else {
-        return;
+        return false;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
@@ -66,4 +66,5 @@ pub(crate) fn render_rename_input(
     if let Some(editor) = ws.editors.get_mut(editor_id) {
         render_editor(editor, inner, modal_style, &theme, chrome, buf, true);
     }
+    true
 }

@@ -84,6 +84,15 @@ pub struct RenderFrame {
     /// publish replaces, so the blank job that takes the buffer puts each
     /// capture back into its rect.
     pub(crate) holds: Vec<Hold>,
+    /// The pane captures `buffer` shows with nothing painted over them, as each
+    /// capture's rect and the render tick of the frame that took it.
+    ///
+    /// No two captures share a rect and a tick, so a rect that the frame on
+    /// screen lists with the same tick holds the same cells there, and the UI
+    /// thread compares none of them. A popup, a badge, a dock, or a modal
+    /// paints over the panes anywhere, so a frame that paints one lists no
+    /// capture.
+    pub(crate) captures: Vec<(Rect, u64)>,
     /// When the frame's first event arrived, for measuring input-to-flush
     /// latency on the UI thread. `Some` only for input-driven frames; `None`
     /// for redraw-notify and PTY wakes, which carry no input to time.
@@ -357,12 +366,18 @@ async fn run(
                         // Compared here rather than after the draw so an
                         // unchanged squiggle never leaves the watch at all.
                         let restamp = stamp.advance(src.buffer.area, &src.undercurl);
-                        (src.buffer.clone(), src.cursor, src.resident.clone(), restamp)
+                        (
+                            src.buffer.clone(),
+                            src.cursor,
+                            src.resident.clone(),
+                            src.captures.clone(),
+                            restamp,
+                        )
                     })
                 };
                 let undercurl = match framed {
-                    Some((buffer, cursor, resident, undercurl)) => {
-                        shown.flush(terminal, &buffer, cursor, &resident)?;
+                    Some((buffer, cursor, resident, captures, undercurl)) => {
+                        shown.flush(terminal, &buffer, cursor, &resident, &captures)?;
                         // Drop the Arc before draining APC so the main thread's
                         // recycle can reclaim this buffer's allocation via
                         // Arc::try_unwrap instead of falling back to a fresh one.

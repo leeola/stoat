@@ -10,36 +10,37 @@ use ratatui::{buffer::Buffer, style::Modifier};
 ///
 /// No-op when there is no pending signature help, when the completion popup is
 /// open (it takes precedence so the two never overlap), when the focused pane
-/// is not an editor, or when the cursor is off-screen.
+/// is not an editor, or when the cursor is off-screen. Returns whether it
+/// painted the popup.
 pub(crate) fn render_signature_help(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
-) {
+) -> bool {
     if stoat.pending_completion.is_some() {
-        return;
+        return false;
     }
     let anchor_offset = match &stoat.pending_signature_help {
         Some(p) => p.anchor_offset,
-        None => return,
+        None => return false,
     };
 
     let Some((content_area, cursor_screen)) =
         cursor_popup::focused_editor_popup_ctx(stoat, anchor_offset)
     else {
-        return;
+        return false;
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
-        return;
+        return false;
     }
 
     let popup = match stoat.pending_signature_help.as_ref() {
         Some(p) => p,
-        None => return,
+        None => return false,
     };
     let label = truncate_to_width(&popup.label, interior_width as usize);
     let doc = popup
@@ -95,4 +96,5 @@ pub(crate) fn render_signature_help(
             }
         }
     }
+    true
 }
