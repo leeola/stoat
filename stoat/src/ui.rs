@@ -17,7 +17,7 @@
 mod flush;
 
 use crate::{
-    render::undercurl::UndercurlStamp,
+    render::{undercurl::UndercurlStamp, Hold},
     ssh::{PassthroughSlot, SlotState, UiControl},
     tty, vt_input,
 };
@@ -78,6 +78,12 @@ pub struct RenderFrame {
     /// under it never show. The rects ride the frame, so a frame and the rects
     /// it leaves to pools never disagree.
     pub resident: Vec<Rect>,
+    /// The pane captures `buffer` holds, which the UI thread never reads.
+    ///
+    /// They ride back to the run loop with the buffer, as the frame the next
+    /// publish replaces, so the blank job that takes the buffer puts each
+    /// capture back into its rect.
+    pub(crate) holds: Vec<Hold>,
     /// When the frame's first event arrived, for measuring input-to-flush
     /// latency on the UI thread. `Some` only for input-driven frames; `None`
     /// for redraw-notify and PTY wakes, which carry no input to time.

@@ -45,7 +45,7 @@ use crate::{
         review::DiffDials,
         sanitize,
         undercurl::{self, UndercurlBatch},
-        BlankedBuffer, PRIMARY_MODES,
+        BlankedBuffer, Hold, PRIMARY_MODES,
     },
     run::{CommandMark, PtyNotification, RunId},
     selection::merge_overlapping_spans,
@@ -2363,6 +2363,12 @@ pub struct Stoat {
     /// A pane skips the capture through a run of frames that move its key, and
     /// a copy that does not happen leaves no trace either.
     pub(crate) pane_captures: u64,
+    /// How many pane replays this session left to the cells a held capture had
+    /// already put back into the frame buffer.
+    ///
+    /// A copy that does not happen leaves no trace in the frame either, which
+    /// is why a test counts it.
+    pub(crate) pane_replays_held: u64,
     /// How many key presses derived a keymap lookup.
     ///
     /// Whether a press consults the keymap is otherwise invisible, since the
@@ -2891,6 +2897,7 @@ impl Stoat {
             pane_cache: std::collections::HashMap::new(),
             pane_paints: 0,
             pane_captures: 0,
+            pane_replays_held: 0,
             #[cfg(test)]
             keymap_lookups: std::cell::Cell::new(0),
             #[cfg(test)]
@@ -4180,9 +4187,13 @@ impl Stoat {
                         self.save_all_workspaces();
                         break;
                     }
-                    let (buffer, undercurl) = {
-                        let (mut b, blank) = match take_blanked(&mut blanking) {
-                            Some(BlankedBuffer { buffer, blank }) => (buffer, Some(blank)),
+                    let (buffer, undercurl, holds) = {
+                        let (mut b, blanked) = match take_blanked(&mut blanking) {
+                            Some(BlankedBuffer {
+                                buffer,
+                                blank,
+                                holds,
+                            }) => (buffer, Some((blank, holds))),
                             None => {
                                 let spare = recycled
                                     .take()
@@ -4191,14 +4202,15 @@ impl Stoat {
                                 (spare, None)
                             },
                         };
+                        let (blank, held) = blanked.unzip();
                         #[cfg(feature = "perf")]
                         let painted = self.executor.now();
-                        self.paint_into(&mut b, blank.as_ref());
+                        let holds = self.paint_into(&mut b, blank.as_ref().zip(held));
                         #[cfg(feature = "perf")]
                         self.perf
                             .record_paint(self.executor.now().duration_since(painted));
                         let undercurl = undercurl::build(&b, self.pending_undercurls.spans());
-                        (Arc::new(b), undercurl)
+                        (Arc::new(b), undercurl, holds)
                     };
                     let cursor = self.primary_cursor_screen_pos();
                     let prior = render.send_replace(Some(RenderFrame {
@@ -4206,9 +4218,12 @@ impl Stoat {
                         cursor,
                         undercurl,
                         resident: apc_emit::resident_pool_rects(self),
+                        holds,
                         #[cfg(feature = "perf")]
                         input_time: t_event,
                     }));
+                    // A recycled buffer takes the whole fill on the loop, so
+                    // only a buffer bound for a blank job keeps its holds.
                     if let Some(frame) = prior {
                         if blanking.len() == BLANK_JOBS_IN_FLIGHT {
                             recycled = Some(frame.buffer);
@@ -4217,10 +4232,12 @@ impl Stoat {
                                 Ok(buffer) => {
                                     let (tx, rx) = oneshot::channel();
                                     let blank = crate::render::themed_blank(&self.theme);
+                                    let holds = frame.holds;
                                     self.executor
                                         .spawn_blocking(move || {
-                                            let _ =
-                                                tx.send(crate::render::blank_buffer(buffer, blank));
+                                            let blanked =
+                                                crate::render::blank_buffer(buffer, blank, holds);
+                                            let _ = tx.send(blanked);
                                         })
                                         .detach();
                                     blanking.push_back(rx);
@@ -8985,26 +9002,34 @@ impl Stoat {
         buf
     }
 
-    /// Paint the current state into `buf`, reusing its allocation.
+    /// Paint the current state into `buf`, reusing its allocation, and answer
+    /// the pane captures the painted buffer holds.
     ///
     /// `blanked` names the cell that every cell of `buf` holds, when a task
-    /// blanked it ahead of this paint. A buffer blanked to the current theme at
-    /// the current size skips the fill. Any other buffer is resized and blanked
-    /// here first, so both paint byte-identically to a fresh buffer.
+    /// blanked it ahead of this paint, with the held captures the task put back
+    /// in their rects. A buffer blanked to the current theme at the current
+    /// size skips the fill, and its held panes replay with no copy. Any other
+    /// buffer is resized and blanked here first and drops its holds, so both
+    /// paint byte-identically to a fresh buffer.
     ///
     /// Blanking to the theme rather than to Reset is what keeps the ambient
     /// screen following `:theme`. The terminal resolves a cell that reaches it
     /// at Reset against its own theme instead.
-    fn paint_into(&mut self, buf: &mut Buffer, blanked: Option<&Cell>) {
+    fn paint_into(&mut self, buf: &mut Buffer, blanked: Option<(&Cell, Vec<Hold>)>) -> Vec<Hold> {
         self.render_tick += 1;
         let blank = crate::render::themed_blank(&self.theme);
+        let (blanked, holds) = blanked.unzip();
         // Checked before the resize, which pads a grown buffer with
         // `Cell::EMPTY` rather than the blank.
         let prefilled = buf.area == self.size && blanked == Some(&blank);
         buf.resize(self.size);
-        if !prefilled {
-            buf.content.fill(blank);
-        }
+        let holds = match prefilled {
+            true => holds.unwrap_or_default(),
+            false => {
+                buf.content.fill(blank);
+                Vec::new()
+            },
+        };
 
         // Keep every editor's syntax coloring in step with the session toggle
         // before painting, so a newly opened editor inherits the current
@@ -9031,9 +9056,10 @@ impl Stoat {
         scene.set_live(self.stoatty);
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
         undercurls.begin();
-        crate::render::frame(self, buf, &mut scene, &mut undercurls);
+        let holds = crate::render::frame(self, buf, &mut scene, &mut undercurls, holds);
         self.apc_scene = scene;
         self.pending_undercurls = undercurls;
+        holds
     }
 
     /// Drive the background work whose results feed the next paint: parse-job

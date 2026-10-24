@@ -39,11 +39,12 @@ use crate::{
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::PaintVersion,
     editor_state::{EditorId, EditorState},
-    pane::{Pane, View},
+    pane::{Pane, PaneId, View},
     render::{
         diff_changes::stack_composited, pane::diff_sides_for, review::DiffDials,
-        undercurl::UndercurlBatch, FrameCtx,
+        undercurl::UndercurlBatch, FrameCtx, Hold,
     },
+    workspace::WorkspaceId,
 };
 use lsp_types::MessageType;
 use ratatui::{
@@ -51,7 +52,10 @@ use ratatui::{
     layout::Rect,
 };
 use slotmap::SlotMap;
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::Arc,
+};
 use stoat_config::{LineNumbers, WrapMode};
 use stoat_widgets::ApcScene;
 
@@ -184,7 +188,13 @@ pub(crate) struct PaneCacheKey {
 pub(crate) struct PaneCacheEntry {
     pub(crate) key: Option<PaneCacheKey>,
     /// The content rect the pane painted, with its cells row-major.
-    region: (Rect, Vec<Cell>),
+    ///
+    /// The cells sit behind an `Arc`, since a [`Hold`] shares them with the
+    /// job that puts them back into a frame buffer off the loop.
+    region: (Rect, Arc<Vec<Cell>>),
+    /// Which capture the entry holds, counted up on each capture, so a
+    /// [`Hold`] names the capture its buffer carries.
+    capture_seq: u64,
     /// The pane's own slice of its content lane, with the lane's id. The slice
     /// is contiguous because no other pane writes that lane.
     scene: (u32, Vec<u8>),
@@ -240,7 +250,7 @@ impl PaneCacheEntry {
     /// Every motion and keystroke moves some other part of the key.
     ///
     /// A capture writes over whatever this entry held, keeping its
-    /// allocations.
+    /// allocations, except the cells that a [`Hold`] still shares.
     pub(crate) fn capture_into(
         &mut self,
         key: PaneCacheKey,
@@ -268,7 +278,13 @@ impl PaneCacheEntry {
 
         let (held, cells) = &mut self.region;
         *held = rect;
-        cells_into(buf, rect, cells);
+        // While a hold shares the cells, a blank job reads them off the loop,
+        // so the capture fills a fresh vector rather than writing under it.
+        if Arc::get_mut(cells).is_none() {
+            *cells = Arc::default();
+        }
+        cells_into(buf, rect, Arc::make_mut(cells));
+        self.capture_seq += 1;
 
         let (id, start) = mark.lane;
         let (held_id, bytes) = &mut self.scene;
@@ -294,22 +310,29 @@ impl PaneCacheEntry {
     /// The scene append lands nowhere while the scene is dead, which is the
     /// same place the original paint's did, so a session without a listener
     /// replays exactly what it painted.
+    ///
+    /// With `copy` false, `buf` already holds the cells, from a [`Hold`] of
+    /// this capture, so the replay leaves them and writes the scene and the
+    /// undercurls alone.
     pub(crate) fn replay(
         &mut self,
         buf: &mut Buffer,
         scene: &mut ApcScene,
         undercurls: &mut UndercurlBatch,
+        copy: bool,
     ) {
         // The held key is the last one the pane built, so a replayed frame
         // held the key still, which ends any run of moving frames.
         self.moved = false;
 
-        let (rect, cells) = &self.region;
-        let width = rect.width as usize;
-        for (row, y) in (rect.top()..rect.bottom()).enumerate() {
-            let start = buf.index_of(rect.left(), y);
-            buf.content[start..start + width]
-                .clone_from_slice(&cells[row * width..(row + 1) * width]);
+        if copy {
+            let (rect, cells) = &self.region;
+            let width = rect.width as usize;
+            for (row, y) in (rect.top()..rect.bottom()).enumerate() {
+                let start = buf.index_of(rect.left(), y);
+                buf.content[start..start + width]
+                    .clone_from_slice(&cells[row * width..(row + 1) * width]);
+            }
         }
 
         let (id, bytes) = &self.scene;
@@ -320,6 +343,23 @@ impl PaneCacheEntry {
         for &(x, y, len, color) in &self.undercurls {
             undercurls.push(x, y, len, color);
         }
+    }
+
+    /// The capture this entry holds, as the [`Hold`] that a frame buffer
+    /// carries for `pane`.
+    pub(crate) fn hold(&self, pane: (WorkspaceId, PaneId)) -> Hold {
+        let (rect, cells) = &self.region;
+        Hold {
+            pane,
+            rect: *rect,
+            capture: self.capture_seq,
+            cells: cells.clone(),
+        }
+    }
+
+    /// Whether `hold` names the capture this entry holds.
+    pub(crate) fn is_held_by(&self, hold: &Hold) -> bool {
+        hold.capture == self.capture_seq && hold.rect == self.region.0
     }
 }
 

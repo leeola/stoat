@@ -6136,7 +6136,7 @@ fn paint_blanked(
     mut buf: Buffer,
     blanked: &Cell,
 ) -> Buffer {
-    h.stoat.paint_into(&mut buf, Some(blanked));
+    h.stoat.paint_into(&mut buf, Some((blanked, Vec::new())));
     buf
 }
 
@@ -6200,6 +6200,7 @@ fn a_landed_blank_job_behind_a_running_one_is_taken() {
     let _ = done.send(BlankedBuffer {
         buffer: Buffer::empty(Rect::new(0, 0, 3, 1)),
         blank: Cell::EMPTY,
+        holds: Vec::new(),
     });
     let mut jobs = std::collections::VecDeque::from([pending, closed, landed]);
 
@@ -6278,6 +6279,139 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
     assert_eq!(replayed.0, repainted.0, "the cells match");
     assert_eq!(replayed.1, repainted.1, "the scene bytes match");
     assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+}
+
+/// Paint one frame into a fresh buffer, and answer it with the holds the
+/// frame ends with.
+fn paint_held(h: &mut crate::test_harness::TestHarness) -> (Buffer, Vec<Hold>) {
+    let mut buf = Buffer::empty(h.stoat.size);
+    let holds = h.stoat.paint_into(&mut buf, None);
+    (buf, holds)
+}
+
+/// Hand `buf` and its `holds` to a blank job as the run loop does, and paint
+/// one frame into the buffer the job hands back.
+fn paint_restored(
+    h: &mut crate::test_harness::TestHarness,
+    buf: Buffer,
+    holds: Vec<Hold>,
+) -> Buffer {
+    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let BlankedBuffer {
+        mut buffer,
+        blank,
+        holds,
+    } = crate::render::blank_buffer(buf, blank, holds);
+    h.stoat.paint_into(&mut buffer, Some((&blank, holds)));
+    buffer
+}
+
+/// Overwrite `hold`'s cells with `#` on red, so a held rect that the frame
+/// neither blanks nor paints over shows the poison.
+fn poison_hold(hold: &mut Hold) {
+    let poison = poisoned(Rect::new(0, 0, 1, 1)).content[0].clone();
+    hold.cells = Arc::new(vec![poison; hold.cells.len()]);
+}
+
+/// A buffer whose blank job put each pane's capture back replays those panes
+/// with no copy, and paints what a fresh buffer paints.
+#[test]
+fn a_held_capture_replays_with_no_copy() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let (buf, holds) = paint_held(&mut h);
+    let held_before = h.stoat.pane_replays_held;
+
+    let restored = paint_restored(&mut h, poisoned(buf.area), holds);
+    assert_eq!(
+        (h.stoat.pane_replays_held - held_before, restored),
+        (2, h.stoat.render())
+    );
+}
+
+/// A hold of a capture that the pane has replaced since copies the cells
+/// again, so the cells the hold put back never reach the frame.
+#[test]
+fn a_hold_of_an_older_capture_copies_the_cells() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let (buf, mut holds) = paint_held(&mut h);
+    for hold in &mut holds {
+        poison_hold(hold);
+        hold.capture -= 1;
+    }
+    let held_before = h.stoat.pane_replays_held;
+
+    let restored = paint_restored(&mut h, buf, holds);
+    assert_eq!(
+        (h.stoat.pane_replays_held - held_before, restored),
+        (0, h.stoat.render())
+    );
+}
+
+/// A pane that moved since its buffer's frame paints over a blank rect, so
+/// the cells held under its old rect never reach the frame. The split runs
+/// with no frame between, so the pane's entry still holds that capture.
+#[test]
+fn a_moved_pane_leaves_no_held_cells() {
+    let mut h = Stoat::test();
+    let (buf, mut holds) = paint_held(&mut h);
+    holds.iter_mut().for_each(poison_hold);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
+
+    let restored = paint_restored(&mut h, buf, holds);
+    assert_eq!(restored, h.stoat.render());
+}
+
+/// A closed pane's hold goes, and the pane that takes its rect paints over a
+/// blank one. The close runs with no frame between, so the closed pane's
+/// entry is still in the cache.
+#[test]
+fn a_closed_pane_leaves_no_held_cells() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    let (buf, mut holds) = paint_held(&mut h);
+    holds.iter_mut().for_each(poison_hold);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::ClosePane);
+
+    let restored = paint_restored(&mut h, buf, holds);
+    assert_eq!(restored, h.stoat.render());
+}
+
+/// A held pane that paints fresh does so over a blank rect, since a paint
+/// leaves the cells it skips. A changes view that lost its excerpts writes one
+/// line of text and leaves the rest of its rect, where the held stack rows stay
+/// unless the frame blanks them first.
+#[test]
+fn a_held_pane_that_paints_fresh_leaves_no_held_cells() {
+    let mut h = changes_view(1, false);
+    let (buf, holds) = paint_held(&mut h);
+    let held = holds.len();
+    changes_state(&mut h).excerpts.clear();
+
+    let restored = paint_restored(&mut h, buf, holds);
+    assert_eq!((held, restored), (1, h.stoat.render()));
+}
+
+/// A modal over a held pane leaves no trace once it closes, since the blank
+/// job puts the capture back over what the modal painted. The unfocused pane
+/// replays its held capture with no copy. The focused pane paints fresh, since
+/// the terminal cursor it gave the finder's input comes back to it.
+#[test]
+fn a_closed_modal_leaves_no_trace_on_a_held_pane() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+    h.settle();
+    let (buf, holds) = paint_held(&mut h);
+    h.type_keys("escape");
+    let held_before = h.stoat.pane_replays_held;
+
+    let restored = paint_restored(&mut h, buf, holds);
+    assert_eq!(
+        (h.stoat.pane_replays_held - held_before, restored),
+        (1, h.stoat.render())
+    );
 }
 
 /// A held screen row moves the scroll inside the paint, so the frame that

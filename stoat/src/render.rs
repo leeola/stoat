@@ -90,6 +90,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
@@ -447,11 +448,31 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) perf: Option<PerfSegment>,
 }
 
-/// A screen buffer whose every cell holds `blank`, blanked off the run loop
-/// ahead of the paint that reuses it.
+/// A screen buffer whose every cell holds `blank` or a held capture, blanked
+/// off the run loop ahead of the paint that reuses it.
 pub(crate) struct BlankedBuffer {
     pub(crate) buffer: Buffer,
     pub(crate) blank: Cell,
+    /// The pane captures the blank put back into `buffer`, each in its rect.
+    pub(crate) holds: Vec<Hold>,
+}
+
+/// A pane's capture that a frame buffer carries, so the paint that takes the
+/// buffer back replays that pane with no copy of its cells.
+///
+/// The frame that replays or captures a pane answers a hold for it, and the
+/// hold rides the [`RenderFrame`](crate::ui::RenderFrame) to the UI thread and
+/// back with the buffer. The blank job that takes the buffer copies each
+/// hold's cells into its rect and blanks every other cell, so a held rect
+/// holds the capture whatever painted over it in the buffer's last frame.
+#[derive(Clone, Debug)]
+pub(crate) struct Hold {
+    pub(crate) pane: (WorkspaceId, PaneId),
+    pub(crate) rect: Rect,
+    /// Which capture of the pane's cache entry the cells are.
+    pub(crate) capture: u64,
+    /// The capture's cells over `rect`, row-major.
+    pub(crate) cells: Arc<Vec<Cell>>,
 }
 
 /// A status-bar latency readout holding the most recent paint time and the
@@ -817,16 +838,38 @@ pub(crate) fn themed_blank(theme: &crate::theme::Theme) -> Cell {
     cell
 }
 
-/// Blanks every cell of `buffer` to `blank`.
+/// Blanks every cell of `buffer` to `blank`, then copies each hold's capture
+/// into its rect.
 ///
 /// The run loop gives a published frame's buffer to a blocking-pool task that
 /// calls this. The fill of a whole screen then runs while the newest frame is
 /// on screen, not between a key and the frame it causes. The returned blank
 /// lets the paint that takes the buffer back tell whether the theme still
-/// matches.
-pub(crate) fn blank_buffer(mut buffer: Buffer, blank: Cell) -> BlankedBuffer {
+/// matches, and the returned holds let it replay each held pane with no copy.
+///
+/// A hold whose rect leaves `buffer`, or whose cells do not fill the rect,
+/// drops out, so a returned hold always names cells the buffer holds.
+pub(crate) fn blank_buffer(mut buffer: Buffer, blank: Cell, mut holds: Vec<Hold>) -> BlankedBuffer {
     buffer.content.fill(blank.clone());
-    BlankedBuffer { buffer, blank }
+    holds.retain(|hold| {
+        let (rect, width) = (hold.rect, hold.rect.width as usize);
+        if buffer.area.intersection(rect) != rect
+            || hold.cells.len() != width * rect.height as usize
+        {
+            return false;
+        }
+        for (row, y) in (rect.top()..rect.bottom()).enumerate() {
+            let start = buffer.index_of(rect.left(), y);
+            buffer.content[start..start + width]
+                .clone_from_slice(&hold.cells[row * width..(row + 1) * width]);
+        }
+        true
+    });
+    BlankedBuffer {
+        buffer,
+        blank,
+        holds,
+    }
 }
 
 /// The foreground the theme gives ordinary text, for a caller that has nothing
@@ -961,12 +1004,18 @@ fn trailing_blank_run(shown: &[(u16, &Cell)]) -> usize {
 ///
 /// Retires an expired [`Stoat::pending_message`] up front, then hands the live
 /// one to the panes as a status-bar segment. The panes always keep full height.
+///
+/// `holds` are the pane captures that `buf` carries, each in its rect, with
+/// every other cell blank. A pane whose capture still replays leaves its held
+/// cells in place, and every other held rect is blanked before a pane paints
+/// over it. Answers a hold for each pane the frame replayed or captured.
 pub(crate) fn frame(
     stoat: &mut Stoat,
     buf: &mut Buffer,
     scene: &mut ApcScene,
     undercurls: &mut UndercurlBatch,
-) {
+    holds: Vec<Hold>,
+) -> Vec<Hold> {
     let full = stoat.size();
 
     // Settled before the frame borrows the rest of the state it paints from,
@@ -1225,6 +1274,30 @@ pub(crate) fn frame(
     let workspace = stoat.active_workspace;
     let split_focused = ws.panes.focus();
     let mut lsp_badge_rect: Option<Rect> = None;
+
+    // A painter writes over a blank buffer and leaves the cells it skips. So
+    // before any pane paints, the frame blanks each held rect whose pane is
+    // gone, moved, under the overlay screen, or captured again since.
+    let mut held = Vec::new();
+    for hold in holds {
+        let placed = (hold.pane.0 == workspace)
+            .then(|| ws.panes.split_panes().find(|(id, _)| *id == hold.pane.1))
+            .flatten()
+            .is_some_and(|(id, pane)| {
+                Some(id) != overlay_pane
+                    && pane::pane_areas(pane.area, frame.minimap_band).0 == hold.rect
+            });
+        let current = stoat
+            .pane_cache
+            .get(&hold.pane)
+            .is_some_and(|entry| entry.is_held_by(&hold));
+        match placed && current {
+            true => held.push(hold),
+            false => clear_themed(hold.rect, buf, &stoat.theme),
+        }
+    }
+    let mut frame_holds = Vec::new();
+
     for (id, pane) in ws.panes.split_panes() {
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && id == split_focused;
         if Some(id) == overlay_pane {
@@ -1258,11 +1331,19 @@ pub(crate) fn frame(
             paint_generation,
             scene.live(),
         );
+        let hold = held
+            .iter()
+            .position(|hold| hold.pane.1 == id)
+            .map(|at| held.swap_remove(at));
         if let Some(key) = key
             && let Some(entry) = stoat.pane_cache.get_mut(&(workspace, id))
             && entry.key == Some(key)
         {
-            entry.replay(buf, scene, undercurls);
+            entry.replay(buf, scene, undercurls, hold.is_none());
+            if hold.is_some() {
+                stoat.pane_replays_held += 1;
+            }
+            frame_holds.push(entry.hold((workspace, id)));
             if let View::DiffChanges(view) = pane.view
                 && let Some(state) = ws.diff_changes_views.get_mut(view)
             {
@@ -1281,6 +1362,9 @@ pub(crate) fn frame(
             continue;
         }
 
+        if let Some(hold) = &hold {
+            clear_themed(hold.rect, buf, &stoat.theme);
+        }
         let lane = content_lane(pane.index);
         let mark = pane_cache::PaintMark::take(scene, lane, undercurls);
         scene.set_lane(lane);
@@ -1307,13 +1391,10 @@ pub(crate) fn frame(
 
         if let Some(key) = key {
             let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
-            let captured = stoat
-                .pane_cache
-                .entry((workspace, id))
-                .or_default()
-                .capture_into(key, content, buf, scene, undercurls, mark);
-            if captured {
+            let entry = stoat.pane_cache.entry((workspace, id)).or_default();
+            if entry.capture_into(key, content, buf, scene, undercurls, mark) {
                 stoat.pane_captures += 1;
+                frame_holds.push(entry.hold((workspace, id)));
             }
         }
     }
@@ -1975,6 +2056,7 @@ pub(crate) fn frame(
         render_pane_id_badges(&stoat.theme, ws, buf, scene);
     }
     scene.end_lane();
+    frame_holds
 }
 
 /// The content store and palette the single band declares for the focused
@@ -2218,9 +2300,49 @@ mod perf_tests {
 
 #[cfg(test)]
 mod themed_blank_tests {
-    use super::{clear_themed, themed_blank};
-    use crate::{app::Stoat, theme::Theme};
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use super::{blank_buffer, clear_themed, themed_blank, Hold};
+    use crate::{app::Stoat, pane::PaneId, theme::Theme, workspace::WorkspaceId};
+    use ratatui::{
+        buffer::{Buffer, Cell},
+        layout::Rect,
+        style::Color,
+    };
+    use std::sync::Arc;
+
+    /// A blank job puts each hold's capture back into its rect and blanks every
+    /// other cell. It drops a hold whose rect leaves the buffer, since such a
+    /// hold names cells the buffer does not hold.
+    #[test]
+    fn a_blank_job_restores_held_rects_and_blanks_the_rest() {
+        let area = Rect::new(0, 0, 4, 3);
+        let held = |rect: Rect, symbol: &'static str| Hold {
+            pane: (WorkspaceId::default(), PaneId::default()),
+            rect,
+            capture: 1,
+            cells: Arc::new(vec![
+                Cell::new(symbol);
+                usize::from(rect.width * rect.height)
+            ]),
+        };
+        let (inside, outside) = (
+            held(Rect::new(1, 1, 2, 1), "x"),
+            held(Rect::new(3, 2, 2, 1), "y"),
+        );
+        let mut poison = Cell::new("#");
+        poison.bg = Color::Red;
+
+        let blanked = blank_buffer(
+            Buffer::filled(area, poison),
+            Cell::new(" "),
+            vec![inside.clone(), outside],
+        );
+
+        let mut expected = Buffer::filled(area, Cell::new(" "));
+        expected[(1u16, 1u16)] = Cell::new("x");
+        expected[(2u16, 1u16)] = Cell::new("x");
+        let kept: Vec<Rect> = blanked.holds.iter().map(|hold| hold.rect).collect();
+        assert_eq!((blanked.buffer, kept), (expected, vec![inside.rect]));
+    }
 
     /// A theme with nothing to say about a channel leaves it at Reset, since the
     /// terminal's own default is the only answer left. That is the whole reason
