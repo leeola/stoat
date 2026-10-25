@@ -728,44 +728,107 @@ impl SelectionsCollection {
         self.replace_with(new_disjoint, snapshot);
     }
 
-    /// Replace selections from `(start, end)` offsets, giving each a fresh id
-    /// and minting every endpoint under `bias` in one batched walk.
+    /// Replace selections from `(start, end)` spans in document order, giving
+    /// each a fresh id and the first one the primary.
     ///
-    /// For a producer that found its spans by scanning text rather than by
-    /// moving selections around, and so holds offsets. Anchoring them itself
-    /// would be a root descent per endpoint, which a regex over a large
-    /// selection turns into thousands.
-    pub(crate) fn replace_with_fresh_ids_from_offsets(
+    /// The result is the set that [`Self::replace_with_fresh_ids_primary`]
+    /// installs for the same spans anchored under `bias`, with the primary at
+    /// index 0. Endpoints clip to grapheme boundaries and overlapping spans
+    /// merge, as in [`Self::replace_with`].
+    ///
+    /// For a producer that finds its spans in one forward scan, such as a regex
+    /// over each selection, so they arrive in order. The spans are anchored in
+    /// one batch and never resolved back or sorted, where the general path does
+    /// both for every span. A regex over a large selection makes that thousands
+    /// of spans per keystroke.
+    ///
+    /// `spans` must be sorted by start. A debug build panics otherwise.
+    pub(crate) fn replace_sorted_from_offsets(
         &mut self,
         spans: &[(usize, usize)],
         bias: Bias,
         snapshot: &MultiBufferSnapshot,
     ) {
-        let anchors = {
-            let flat: Vec<usize> = spans
+        /// An endpoint after the clip, with the bias its anchor takes.
+        #[derive(Clone, Copy)]
+        struct End {
+            offset: usize,
+            bias: Bias,
+        }
+
+        assert!(
+            !spans.is_empty(),
+            "SelectionsCollection invariant: at least one selection"
+        );
+        debug_assert!(
+            spans.is_sorted_by_key(|&(start, _)| start),
+            "spans arrive in document order"
+        );
+
+        // The clip of `replace_with`. An endpoint it keeps takes the producer's
+        // bias, and one it moves takes the side it moved toward.
+        let snapped = {
+            let requests: Vec<(usize, Bias)> = spans
                 .iter()
-                .flat_map(|&(start, end)| [start, end])
+                .flat_map(|&(start, end)| [(start, Bias::Left), (end, Bias::Right)])
                 .collect();
-            snapshot.anchors_at_batch(&flat, bias)
+            snapshot.rope().clip_to_grapheme_boundaries_batch(&requests)
+        };
+        let end_at = |offset: usize, clipped: usize, side: Bias| End {
+            offset: clipped,
+            bias: if clipped == offset { bias } else { side },
         };
 
-        let new_disjoint: Vec<Selection<Anchor>> = anchors
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|span| {
-                let id = self.next_selection_id;
-                self.next_selection_id += 1;
-                Selection {
-                    id,
-                    start: span[0],
-                    end: span[1],
-                    reversed: false,
-                    goal: SelectionGoal::None,
+        // The merge of `replace_with`. The clip keeps the spans in order, so a
+        // span overlaps nothing but the one before it.
+        let mut merged: Vec<(End, End)> = Vec::with_capacity(spans.len());
+        for (&(start, end), snapped) in spans.iter().zip(snapped.as_chunks::<2>().0) {
+            let start = end_at(start, snapped[0], Bias::Left);
+            let end = end_at(end, snapped[1], Bias::Right);
+            if let Some((prev_start, prev_end)) = merged.last_mut()
+                && (start.offset == prev_start.offset || start.offset < prev_end.offset)
+            {
+                if end.offset > prev_end.offset {
+                    *prev_end = end;
                 }
+                continue;
+            }
+            merged.push((start, end));
+        }
+
+        let batched = {
+            let offsets: Vec<usize> = merged
+                .iter()
+                .flat_map(|(start, end)| [start.offset, end.offset])
+                .collect();
+            snapshot.anchors_at_batch(&offsets, bias)
+        };
+        let anchor = |end: End, batched: Anchor| match end.bias == bias {
+            true => batched,
+            false => snapshot.anchor_at(end.offset, end.bias),
+        };
+
+        // The first span takes the top of a fresh block and the rest ascend
+        // from its base, which is the order `make_first_primary` leaves.
+        let base = self.next_selection_id;
+        let top = base + merged.len() - 1;
+        let selections: Vec<Selection<Anchor>> = merged
+            .iter()
+            .zip(batched.as_chunks::<2>().0)
+            .enumerate()
+            .map(|(index, (&(start, end), batched))| Selection {
+                id: match index {
+                    0 => top,
+                    _ => base + index - 1,
+                },
+                start: anchor(start, batched[0]),
+                end: anchor(end, batched[1]),
+                reversed: false,
+                goal: SelectionGoal::None,
             })
             .collect();
-        self.replace_with(new_disjoint, snapshot);
+        self.next_selection_id = top + 1;
+        self.install(selections.into());
     }
 
     /// Replace selections with `new_disjoint`, sorting by offset and deduping
@@ -2734,6 +2797,62 @@ mod tests {
         assert_eq!(after, vec![(0, 3), (5, 8)]);
         let after_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
         assert!(after_ids.iter().all(|id| !before_ids.contains(id)));
+    }
+
+    /// Spans in document order install the anchors that the general path
+    /// installs when it hands the primary to the first span. That holds for
+    /// spans that touch, for a repeated span, which merges, for endpoints inside
+    /// a cluster, which clip out and merge, and for a start that clips out and
+    /// stays apart.
+    #[test]
+    fn sorted_spans_install_what_the_general_path_does() {
+        let multi = singleton("ae\u{301}bcdefgh\n");
+        let snapshot = multi.snapshot();
+        let installed = |spans: &[(usize, usize)], sorted: bool| {
+            let mut collection = SelectionsCollection::new();
+            if sorted {
+                collection.replace_sorted_from_offsets(spans, Bias::Right, &snapshot);
+            } else {
+                let offsets: Vec<usize> = spans
+                    .iter()
+                    .flat_map(|&(start, end)| [start, end])
+                    .collect();
+                let selections = snapshot
+                    .anchors_at_batch(&offsets, Bias::Right)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|span| Selection {
+                        id: 0,
+                        start: span[0],
+                        end: span[1],
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    })
+                    .collect();
+                collection.replace_with_fresh_ids_primary(selections, 0, &snapshot);
+            }
+            let anchors: Vec<(Anchor, Anchor)> = collection
+                .all_anchors()
+                .iter()
+                .map(|sel| (sel.start, sel.end))
+                .collect();
+            (anchors, collection.primary_index())
+        };
+
+        for spans in [
+            vec![(0, 1), (4, 6), (6, 9)],
+            vec![(0, 1), (0, 1), (1, 4)],
+            vec![(0, 2), (2, 5), (7, 8)],
+            vec![(0, 1), (3, 6)],
+        ] {
+            let general = installed(&spans, false);
+            assert_eq!(
+                (installed(&spans, true), general.1),
+                (general.clone(), 0),
+                "spans {spans:?}"
+            );
+        }
     }
 
     #[test]

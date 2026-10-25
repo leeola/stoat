@@ -3327,11 +3327,9 @@ mod tests {
                         (offset, offset + 1)
                     })
                     .collect();
-                editor.selections.replace_with_fresh_ids_from_offsets(
-                    &spans,
-                    Bias::Right,
-                    buf_snap,
-                );
+                editor
+                    .selections
+                    .replace_sorted_from_offsets(&spans, Bias::Right, buf_snap);
             }
 
             let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");

@@ -200,29 +200,56 @@ fn split_on_matches(editor: &mut EditorState, regex: &CursorRegex) {
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+    let offsets = {
+        let anchors: Vec<Anchor> = editor.selections.anchors().copied().collect();
+        buffer_snapshot.resolve_anchors_batch(&anchors)
+    };
+    let spans = offsets.as_chunks::<2>().0;
+
+    // A zero-width selection splits into itself, and only the general path
+    // keeps it as it was, its anchors and its goal included.
+    if spans.iter().any(|span| span[0] == span[1]) {
+        editor
+            .selections
+            .split_each(buffer_snapshot, Bias::Right, |sel| {
+                let start = buffer_snapshot.resolve_anchor(&sel.start);
+                let end = buffer_snapshot.resolve_anchor(&sel.end);
+                match start == end {
+                    true => Vec::new(),
+                    false => split_pieces(rope, regex, start, end),
+                }
+            });
+        editor.selections.make_first_primary();
+        return;
+    }
+
+    // The selections are disjoint and in document order, and each piece stays
+    // inside its selection, so the pieces arrive in order.
+    let pieces: Vec<(usize, usize)> = spans
+        .iter()
+        .flat_map(|span| split_pieces(rope, regex, span[0], span[1]))
+        .collect();
     editor
         .selections
-        .split_each(buffer_snapshot, Bias::Right, |sel| {
-            let start = buffer_snapshot.resolve_anchor(&sel.start);
-            let end = buffer_snapshot.resolve_anchor(&sel.end);
-            if start == end {
-                return Vec::new();
-            }
-            let mut pieces: Vec<(usize, usize)> = Vec::new();
-            let mut piece_start = start;
-            for m in regex.find_iter(rope.regex_input(start..end)) {
-                // Two matches touching leave nothing between them, and that gap
-                // is still a position the user split at, so it becomes a cursor
-                // rather than disappearing.
-                pieces.push((piece_start, m.start()));
-                piece_start = m.end();
-            }
-            if piece_start < end {
-                pieces.push((piece_start, end));
-            }
-            widen_pieces(rope, pieces)
-        });
-    editor.selections.make_first_primary();
+        .replace_sorted_from_offsets(&pieces, Bias::Right, buffer_snapshot);
+}
+
+/// The pieces that a split at each match of `regex` cuts `start..end` into,
+/// with each zero-width piece widened.
+fn split_pieces(rope: &Rope, regex: &CursorRegex, start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut pieces: Vec<(usize, usize)> = Vec::new();
+    let mut piece_start = start;
+    for m in regex.find_iter(rope.regex_input(start..end)) {
+        // Two matches touching leave nothing between them, and that gap is
+        // still a position the user split at, so it becomes a cursor rather
+        // than disappearing.
+        pieces.push((piece_start, m.start()));
+        piece_start = m.end();
+    }
+    if piece_start < end {
+        pieces.push((piece_start, end));
+    }
+    widen_pieces(rope, pieces)
 }
 
 /// Replace the selections with every match found inside them.
@@ -269,11 +296,11 @@ fn select_on_matches(editor: &mut EditorState, regex: &CursorRegex) -> bool {
     // place, so a selection that matched nothing is gone rather than left
     // sitting where the user searched and found nothing. The guard above
     // returned already if that were every selection, so this is never empty.
+    // A scan of the selections in document order finds the matches in order.
     let matches: Vec<(usize, usize)> = found.into_iter().flatten().collect();
     editor
         .selections
-        .replace_with_fresh_ids_from_offsets(&matches, Bias::Right, buffer_snapshot);
-    editor.selections.make_first_primary();
+        .replace_sorted_from_offsets(&matches, Bias::Right, buffer_snapshot);
     true
 }
 
@@ -792,6 +819,54 @@ mod tests {
             editor::selection_spans(&mut h.stoat),
             vec![(0, 3, false)],
             "the first piece survives",
+        );
+    }
+
+    /// A split keeps a zero-width selection as it was, its goal included, and
+    /// splits the others.
+    #[test]
+    fn splitting_keeps_a_zero_width_selection_as_it_was() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("a,b");
+        select_range(&mut h, 0, 2);
+        {
+            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            let at_end = buf_snap.anchor_at(3, stoat_text::Bias::Right);
+            let cursor = stoat_text::Selection {
+                id: 0,
+                start: at_end,
+                end: at_end,
+                reversed: false,
+                goal: stoat_text::SelectionGoal::Column(4),
+            };
+            editor
+                .selections
+                .extend_with_fresh_ids(vec![cursor], buf_snap);
+        }
+        dispatch(&mut h.stoat, &action::SplitSelection);
+        h.type_text(",");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        let goals: Vec<stoat_text::SelectionGoal> =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat)
+                .expect("editor")
+                .selections
+                .all_anchors()
+                .iter()
+                .map(|sel| sel.goal)
+                .collect();
+        assert_eq!(
+            (editor::selection_spans(&mut h.stoat), goals),
+            (
+                vec![(0, 1, false), (3, 3, false)],
+                vec![
+                    stoat_text::SelectionGoal::None,
+                    stoat_text::SelectionGoal::Column(4)
+                ]
+            ),
+            "the first selection splits at the comma, and the cursor at the end keeps its goal",
         );
     }
 
