@@ -7,8 +7,14 @@ use crate::{
     editor_state::EditorState,
     input_view::{InputView, SubmitTarget},
 };
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 use stoat_text::{next_char_boundary, Anchor, Bias, Rope, Selection};
+
+/// The most previews a prompt keeps for a return to their pattern.
+///
+/// Each one holds a selection per match, so a prompt typed through a long
+/// pattern keeps the latest few rather than every one.
+const SHOWN_PREVIEWS: usize = 8;
 
 /// Whether the regex modal splits selections at matches or replaces them with
 /// the matches. The modal, input state, and submit path are shared. Only the
@@ -41,6 +47,23 @@ pub(crate) struct SplitSelectionInputState {
     /// The preview syncs once per frame, so without this every idle frame
     /// redoes the restore and the transform for a pattern that has not changed.
     previewed: Option<String>,
+    /// The previews shown since the prompt opened, newest first.
+    ///
+    /// A Backspace back to an earlier pattern installs the set that pattern
+    /// showed rather than scanning the selections again.
+    shown: VecDeque<ShownPreview>,
+}
+
+/// The set that one pattern's preview installed, kept for a return to the
+/// pattern.
+struct ShownPreview {
+    pattern: String,
+    /// The version of the buffer the preview ran over. An edit while the prompt
+    /// is open changes what the pattern matches.
+    version: u64,
+    /// `None` when the pattern selected nothing and the preview showed the
+    /// origin.
+    selections: Option<Arc<[Selection<Anchor>]>>,
 }
 
 pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
@@ -65,6 +88,7 @@ pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
         origin_selections,
         origin_view,
         previewed: None,
+        shown: VecDeque::new(),
     });
     UpdateEffect::Redraw
 }
@@ -75,6 +99,9 @@ pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
 /// the last sync. Otherwise the prompt's transform runs again from the
 /// selections captured at open, so the preview shown is always the one that
 /// pattern alone produces. The view follows the result from where it stands.
+///
+/// A pattern that the prompt showed before, over the same buffer, installs the
+/// set it showed then, so a Backspace back to it scans nothing.
 ///
 /// The preview is silent. A pattern that is empty, does not compile yet, or
 /// selects nothing is an ordinary state mid-typing. It glides the view back to
@@ -87,6 +114,8 @@ pub(crate) fn sync_regex_preview(stoat: &mut Stoat) {
     if state.previewed.as_deref() == Some(pattern.as_str()) {
         return;
     }
+    let version =
+        search::pane_editor(stoat).map(|editor| editor.display_map.buffer_snapshot().version());
 
     let state = stoat
         .split_selection_input
@@ -94,22 +123,77 @@ pub(crate) fn sync_regex_preview(stoat: &mut Stoat) {
         .expect("prompt still open");
     state.previewed = Some(pattern.clone());
     let kind = state.kind;
-    let selections = Arc::clone(&state.origin_selections);
+    let origin = Arc::clone(&state.origin_selections);
     let view = state.origin_view;
+    let shown = version.and_then(|version| {
+        state
+            .shown
+            .iter()
+            .find(|shown| shown.version == version && shown.pattern == pattern)
+            .map(|shown| shown.selections.clone())
+    });
 
+    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+    let landed = match shown {
+        Some(shown) => show_again(stoat, origin, shown, scrolloff),
+        None => preview_from_origin(stoat, pattern, kind, origin, version, scrolloff),
+    };
+    if !landed {
+        search::restore_origin_view(stoat, view);
+    }
+}
+
+/// Install the set that a pattern showed before, or the origin when it selected
+/// nothing, and report whether a set landed.
+fn show_again(
+    stoat: &mut Stoat,
+    origin: Arc<[Selection<Anchor>]>,
+    shown: Option<Arc<[Selection<Anchor>]>>,
+    scrolloff: u32,
+) -> bool {
+    let Some(selections) = shown else {
+        restore_origin_if_moved(stoat, origin);
+        return false;
+    };
+    if let Some(editor) = search::pane_editor(stoat) {
+        editor.selections.restore(selections);
+        view::follow_jump(editor, scrolloff);
+    }
+    true
+}
+
+/// Run the prompt's transform for `pattern` from the origin, keep what it
+/// showed against the buffer `version`, and report whether a set landed.
+fn preview_from_origin(
+    stoat: &mut Stoat,
+    pattern: String,
+    kind: RegexSelectKind,
+    origin: Arc<[Selection<Anchor>]>,
+    version: Option<u64>,
+    scrolloff: u32,
+) -> bool {
     let regex = (!pattern.is_empty())
         .then(|| search::compile_cursor_regex(&pattern, search::smart_case(stoat)))
         .flatten();
-    restore_origin_if_moved(stoat, selections);
+    restore_origin_if_moved(stoat, origin);
 
-    let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
-    if let Some(regex) = regex
-        && let Some(editor) = search::pane_editor(stoat)
-        && apply_kind(editor, kind, &regex, scrolloff)
-    {
-        return;
+    let Some(regex) = regex else {
+        return false;
+    };
+    let Some(editor) = search::pane_editor(stoat) else {
+        return false;
+    };
+    let landed = apply_kind(editor, kind, &regex, scrolloff);
+    let selections = landed.then(|| editor.selections.shared_anchors());
+    if let (Some(version), Some(state)) = (version, stoat.split_selection_input.as_mut()) {
+        state.shown.push_front(ShownPreview {
+            pattern,
+            version,
+            selections,
+        });
+        state.shown.truncate(SHOWN_PREVIEWS);
     }
-    search::restore_origin_view(stoat, view);
+    landed
 }
 
 /// Submit the regex modal. Reads the typed pattern, compiles it, and either
@@ -343,6 +427,7 @@ mod tests {
         Stoat,
     };
     use crossterm::event::{Event, KeyCode};
+    use std::sync::Arc;
     use stoat_action::{self as action, Action};
 
     fn select_range(h: &mut TestHarness, start: usize, end: usize) {
@@ -532,6 +617,58 @@ mod tests {
             (vec![true, true, false, false, true], vec![(0, 11)]),
             "`(` and the empty pattern keep the open set, `foo` and `foo[` each \
              install one, and `foo[[` keeps the restored origin",
+        );
+    }
+
+    /// A Backspace back to a pattern installs the very set that pattern showed,
+    /// so the preview scans nothing.
+    #[test]
+    fn a_pattern_shown_before_installs_the_set_it_showed() {
+        let mut h = prompt_over("foo bar foo", &action::SelectRegex);
+        let installed = |h: &mut TestHarness| {
+            search::pane_editor(&mut h.stoat)
+                .expect("pane holds an editor")
+                .selections
+                .shared_anchors()
+        };
+        preview(&mut h, "fo");
+        let fo = installed(&mut h);
+        preview(&mut h, "o");
+        h.type_keys("backspace");
+        super::sync_regex_preview(&mut h.stoat);
+
+        assert_eq!(
+            (Arc::ptr_eq(&installed(&mut h), &fo), pane_spans(&mut h)),
+            (true, vec![(0, 2), (8, 10)]),
+            "the Backspace back to `fo` installs the set `fo` showed",
+        );
+    }
+
+    /// An edit while the prompt is open makes a return to a pattern scan
+    /// again, since the edit changes what the pattern matches.
+    #[test]
+    fn an_edit_scans_a_shown_pattern_again() {
+        let mut h = prompt_over("foo bar foo", &action::SelectRegex);
+        preview(&mut h, "fo");
+        preview(&mut h, "o");
+        let buffer_id = search::pane_editor(&mut h.stoat)
+            .expect("pane holds an editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer exists")
+            .write()
+            .expect("buffer poisoned")
+            .edit(4..4, "fo ");
+        h.type_keys("backspace");
+        super::sync_regex_preview(&mut h.stoat);
+
+        assert_eq!(
+            pane_spans(&mut h),
+            vec![(0, 2), (4, 6), (11, 13)],
+            "`fo` finds the match the edit inserted inside the selection",
         );
     }
 
