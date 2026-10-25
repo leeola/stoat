@@ -97,11 +97,11 @@ pub(crate) fn sync_regex_preview(stoat: &mut Stoat) {
     let selections = Arc::clone(&state.origin_selections);
     let view = state.origin_view;
 
-    search::restore_origin_selections(stoat, selections);
-
     let regex = (!pattern.is_empty())
         .then(|| search::compile_cursor_regex(&pattern, search::smart_case(stoat)))
         .flatten();
+    restore_origin_if_moved(stoat, selections);
+
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     if let Some(regex) = regex
         && let Some(editor) = search::pane_editor(stoat)
@@ -131,7 +131,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let ws = stoat.active_workspace_mut();
     state.input.dispose(ws);
 
-    search::restore_origin_selections(stoat, state.origin_selections);
+    restore_origin_if_moved(stoat, state.origin_selections);
 
     if query.is_empty() {
         search::restore_origin_view(stoat, state.origin_view);
@@ -151,6 +151,22 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         stoat.set_status("nothing selected");
     }
     true
+}
+
+/// Put the pane editor's selections back to `origin` unless they are that set
+/// already.
+///
+/// A restore installs a new generation whatever the list held, and the pane
+/// repaints on any new generation. A key whose pattern is empty or does not
+/// compile after another such key finds the origin in place, so the pane
+/// replays instead.
+fn restore_origin_if_moved(stoat: &mut Stoat, origin: Arc<[Selection<Anchor>]>) {
+    let Some(editor) = search::pane_editor(stoat) else {
+        return;
+    };
+    if !Arc::ptr_eq(&editor.selections.shared_anchors(), &origin) {
+        editor.selections.restore(origin);
+    }
 }
 
 /// Apply `kind`'s transform to `editor` and scroll its primary into view.
@@ -480,6 +496,42 @@ mod tests {
         assert_eq!(
             (pane_spans(&mut h), h.stoat.pending_message.as_deref()),
             (vec![(0, 11)], None),
+        );
+    }
+
+    /// A key whose pattern is empty or does not compile leaves the selection set
+    /// as it stood when the origin is in place already, so the pane replays. A
+    /// failing key after a preview puts the origin back.
+    #[test]
+    fn a_failing_pattern_over_the_origin_keeps_the_selection_set() {
+        let mut h = prompt_over("foo bar foo", &action::SelectRegex);
+        let identity = |h: &mut TestHarness| {
+            search::pane_editor(&mut h.stoat)
+                .expect("pane holds an editor")
+                .selections
+                .identity()
+        };
+
+        let mut identities = vec![identity(&mut h)];
+        preview(&mut h, "(");
+        identities.push(identity(&mut h));
+        h.type_keys("backspace");
+        super::sync_regex_preview(&mut h.stoat);
+        identities.push(identity(&mut h));
+        for text in ["foo", "[", "["] {
+            preview(&mut h, text);
+            identities.push(identity(&mut h));
+        }
+
+        let kept: Vec<bool> = identities
+            .windows(2)
+            .map(|pair| pair[0] == pair[1])
+            .collect();
+        assert_eq!(
+            (kept, pane_spans(&mut h)),
+            (vec![true, true, false, false, true], vec![(0, 11)]),
+            "`(` and the empty pattern keep the open set, `foo` and `foo[` each \
+             install one, and `foo[[` keeps the restored origin",
         );
     }
 
