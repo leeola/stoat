@@ -1393,7 +1393,14 @@ impl Rope {
             };
             let (offset, bias) = requests[original_idx];
 
-            cursor.seek_forward(&offset, Bias::Right);
+            // Sorted requests land mostly in the chunk in hand, which a seek
+            // only confirms. It keeps the chunk that holds the offset short of
+            // the chunk's end, so that test skips it exactly.
+            let in_hand =
+                cursor.item().is_some() && *cursor.start() <= offset && offset < cursor.end();
+            if !in_hand {
+                cursor.seek_forward(&offset, Bias::Right);
+            }
             let chunk_start = *cursor.start();
             let on_boundary = cursor.item().and_then(|chunk| {
                 let text = chunk.text.as_str();

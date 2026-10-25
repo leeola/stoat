@@ -2194,7 +2194,14 @@ impl TextBufferSnapshot {
             } else if bias == Bias::Right && offset == len {
                 Anchor::max_for_buffer(self.buffer_id)
             } else {
-                cursor.seek_forward(&offset, bias);
+                // Sorted offsets land mostly inside the fragment in hand, which
+                // a seek only confirms. The bias decides the fragment only at a
+                // boundary, so an offset strictly inside skips it exactly.
+                let in_hand =
+                    cursor.item().is_some() && *cursor.start() < offset && offset < cursor.end();
+                if !in_hand {
+                    cursor.seek_forward(&offset, bias);
+                }
                 let start = *cursor.start();
                 match cursor.item() {
                     Some(fragment) if fragment.visible => Anchor {
