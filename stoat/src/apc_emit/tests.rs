@@ -4653,17 +4653,24 @@ fn conflict_pane() -> (
     crate::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
+    conflict_pane_of(["a\nbase\nz\n", "a\nOURS\nz\n", "a\nTHEIRS\nz\n"])
+}
+
+/// [`conflict_pane`] over a file whose ancestor, ours, and theirs stages are
+/// `stages`.
+fn conflict_pane_of(
+    stages: [&str; 3],
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let [ancestor, ours, theirs] = stages;
     let mut h = crate::test_harness::TestHarness::with_size(150, 24);
     h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
     h.fake_git()
         .add_repo("/repo")
         .with_fs(h.fake_fs())
-        .conflicted_file(
-            "f.txt",
-            Some("a\nbase\nz\n"),
-            Some("a\nOURS\nz\n"),
-            Some("a\nTHEIRS\nz\n"),
-        );
+        .conflicted_file("f.txt", Some(ancestor), Some(ours), Some(theirs));
     action_handlers::dispatch(&mut h.stoat, &Conflict);
     h.settle();
 
@@ -5443,6 +5450,52 @@ fn a_relative_line_scroll_in_the_diff_view_refills_no_page() {
         relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION, true),
         (Vec::new(), Vec::new()),
         "the diff pages keep their cells and their decorations"
+    );
+}
+
+/// A conflict page numbers each stage's lines absolutely, so the cursor's
+/// line is in neither of its versions and a move refills none of its pages.
+#[test]
+fn a_relative_line_scroll_in_the_conflict_view_refills_no_page() {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    let stage = |middle: &str| -> String {
+        (0..60)
+            .map(|i| match i {
+                30 => format!("{middle}\n"),
+                _ => format!("line {i}\n"),
+            })
+            .collect()
+    };
+    let (mut h, mut rx) = conflict_pane_of([&stage("base"), &stage("OURS"), &stage("THEIRS")]);
+    h.stoat.theme = Arc::new(rgb_diagnostic_theme());
+    h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+    let _ = drain_apc(&mut rx);
+
+    // Moved without a glide, since a glide holds the numbered line still.
+    h.stoat.collapse_focused_cursor_to("line 0\n".len());
+    {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
+        editor.scroll_row = 1;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+    emit_smooth_scroll(&mut h.stoat);
+    h.settle();
+
+    let refilled: Vec<(bool, u64)> = drain_apc(&mut rx)
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Fill(FillCommand { index, .. }) => Some((false, index)),
+            Command::FillDecorations(FillCommand { index, .. }) => Some((true, index)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        refilled,
+        Vec::new(),
+        "the conflict pages keep their cells and their decorations"
     );
 }
 
