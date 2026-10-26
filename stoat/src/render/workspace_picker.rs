@@ -6,6 +6,7 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Style,
     widgets::{Block, Borders},
 };
 use std::path::Path;
@@ -126,6 +127,9 @@ pub(crate) fn render_workspace_picker(
     let selected = picker.selected();
     let entries = picker.entries();
 
+    let query = picker.input.text(ws);
+    let query = query.trim();
+
     // Reused across the painted rows rather than allocated per row, since a row
     // past the indexed block derives its offsets here.
     let mut derived = Vec::new();
@@ -176,18 +180,7 @@ pub(crate) fn render_workspace_picker(
             .as_deref()
             .map(|h| format!("{h}:"))
             .unwrap_or_default();
-        let path_end = path_x + path_w;
-        write_str_clipped(buf, path_x, row, &host, base_style, path_end);
-
-        let host_w = host.chars().count();
-        let x = path_x + host_w as u16;
-        match tail_within(&path, (path_w as usize).saturating_sub(host_w)) {
-            Some(tail) => {
-                write_str_clipped(buf, x, row, "\u{2026}", base_style, path_end);
-                write_str_clipped(buf, x + 1, row, tail, base_style, path_end);
-            },
-            None => write_str_clipped(buf, x, row, &path, base_style, path_end),
-        }
+        paint_root(buf, path_x, row, path_w, &host, &path, base_style);
 
         // An inactive row has no live runs or editors, so those counts blank
         // rather than reading a misleading zero.
@@ -214,6 +207,54 @@ pub(crate) fn render_workspace_picker(
             &right_pad(&count(entry.editor_count, inactive), EDIT_W),
             base_style,
         );
+    }
+
+    if picker.filtered().is_empty() && !query.is_empty() && !picker.renaming() {
+        for col in inner.x..inner.x + inner.width {
+            buf[(col, entries_top)]
+                .set_char(' ')
+                .set_style(selected_style);
+        }
+        write_str(buf, marker_x, entries_top, "+", selected_style);
+        write_str_clipped(
+            buf,
+            name_x,
+            entries_top,
+            query,
+            selected_style,
+            name_x + NAME_W,
+        );
+
+        let root = crate::paths::display_relative(&ws.git_root, Path::new(""));
+        paint_root(buf, path_x, entries_top, path_w, "", &root, selected_style);
+    }
+}
+
+/// Paints `host` and then `path` into the `width` cells of the path column
+/// from `x`.
+///
+/// A path too wide for what `host` leaves gives up its head to an ellipsis,
+/// per [`tail_within`].
+fn paint_root(
+    buf: &mut Buffer,
+    x: u16,
+    row: u16,
+    width: u16,
+    host: &str,
+    path: &str,
+    style: Style,
+) {
+    let end = x + width;
+    write_str_clipped(buf, x, row, host, style, end);
+
+    let host_w = host.chars().count();
+    let path_x = x + host_w as u16;
+    match tail_within(path, (width as usize).saturating_sub(host_w)) {
+        Some(tail) => {
+            write_str_clipped(buf, path_x, row, "\u{2026}", style, end);
+            write_str_clipped(buf, path_x + 1, row, tail, style, end);
+        },
+        None => write_str_clipped(buf, path_x, row, path, style, end),
     }
 }
 
@@ -508,6 +549,105 @@ mod tests {
             "the prompt reads rename>, and the name starts past it:\n{}",
             painted.join("\n")
         );
+    }
+
+    /// The create row takes the first list row and names the session that
+    /// Enter makes. Its counts stay blank, because that session does not exist
+    /// yet.
+    #[test]
+    fn a_query_with_no_row_paints_a_create_row_in_its_place() {
+        let (buf, inner) = painted_with_query("notes");
+        assert_eq!(
+            selected_words(&buf, inner),
+            [["+", "notes", "/tmp/ws00"]],
+            "one selected row names the query and the active root"
+        );
+    }
+
+    #[test]
+    fn a_query_with_a_row_paints_no_create_row() {
+        let (buf, inner) = painted_with_query("ws01");
+
+        let selected: Vec<Vec<String>> = selected_words(&buf, inner)
+            .into_iter()
+            .map(|words| words.into_iter().take(2).collect())
+            .collect();
+        assert_eq!(
+            selected,
+            [["ws01", "/tmp/ws01"]],
+            "the selection rides the matching row"
+        );
+        assert!(
+            (inner.y..inner.y + inner.height).all(|y| buf[(inner.x + 1, y)].symbol() != "+"),
+            "no row paints the create marker"
+        );
+    }
+
+    /// Enter on an empty query with no row closes the picker and creates
+    /// nothing, so an empty list offers no create row.
+    #[test]
+    fn an_empty_query_over_no_row_paints_no_create_row() {
+        let (mut workspaces, active) =
+            workspaces_over(2, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        for (uid, ws) in (1..).zip(workspaces.values_mut()) {
+            ws.uid = WorkspaceUid(uid);
+        }
+        let mut picker = picker_for(&workspaces, active);
+        picker.omit_active();
+        picker.toggle_scope();
+        assert!(
+            picker.filtered().is_empty(),
+            "the active family has no row left"
+        );
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+        assert_eq!(
+            selected_rows(&buf),
+            Vec::<u16>::new(),
+            "no row paints as selected"
+        );
+    }
+
+    /// The picker over three workspaces with `query` typed into a real input
+    /// and ranked, painted, alongside the modal's inner rect.
+    fn painted_with_query(query: &str) -> (Buffer, Rect) {
+        let (mut workspaces, active) =
+            workspaces_over(3, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        let executor: Executor = Arc::new(TestScheduler::new()).executor();
+        let input = InputView::create(
+            &mut workspaces[active],
+            executor,
+            SubmitTarget::WorkspacePicker,
+            query,
+            "insert",
+        );
+        let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
+        picker.refilter(query);
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+        let (_, inner) = workspace_picker_layout(area, 3).expect("the area hosts the modal");
+        (buf, inner)
+    }
+
+    /// The words of each selected row inside the modal's border, top first.
+    fn selected_words(buf: &Buffer, inner: Rect) -> Vec<Vec<String>> {
+        selected_rows(buf)
+            .into_iter()
+            .map(|row| {
+                row_text(buf, row)
+                    .chars()
+                    .skip(inner.x as usize)
+                    .take(inner.width as usize)
+                    .collect::<String>()
+                    .split_whitespace()
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .collect()
     }
 
     /// Picking a remote row leaves this machine, so the host it goes to leads

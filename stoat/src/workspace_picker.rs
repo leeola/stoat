@@ -50,9 +50,9 @@ enum PickerScope {
 /// reports the row to switch to.
 ///
 /// The picker opens on the row after the active one, the session focused
-/// before it, so Enter at once returns there. Enter on a query with no row
-/// creates a root session of that name. Alt-Enter creates it as a sub-session
-/// of the active family instead.
+/// before it, so Enter at once returns there. A query that matches no row
+/// paints a create row. Enter on that row creates a root session named by the
+/// query. Alt-Enter creates it as a sub-session of the active family instead.
 ///
 /// [`Self::toggle_scope`] narrows the list to the active workspace's family and
 /// back.
