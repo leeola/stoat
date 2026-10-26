@@ -22,6 +22,35 @@ use crate::{
 use std::collections::HashMap;
 use stoat_text::{Bias, CharCategory, Point, Rope, SelectionGoal};
 
+/// The type chars an armed textobject chord takes, each with the label its
+/// hint row reads.
+///
+/// The rows follow the type-char match in `find_textobject`. The tree-sitter
+/// types are listed whether or not the buffer's grammar answers them, since
+/// the chord takes their chars either way. The seven pair chars share the
+/// `pair` label, so the hints box folds them into one row.
+pub(crate) const TEXTOBJECT_HINTS: &[(&str, &str)] = &[
+    ("w", "word"),
+    ("W", "WORD"),
+    ("p", "paragraph"),
+    ("f", "function"),
+    ("t", "class"),
+    ("a", "parameter"),
+    ("c", "comment"),
+    ("T", "test"),
+    ("e", "entry"),
+    ("x", "xml element"),
+    ("g", "change"),
+    ("m", "closest pair"),
+    ("(", "pair"),
+    ("[", "pair"),
+    ("{", "pair"),
+    ("<", "pair"),
+    ("\"", "pair"),
+    ("'", "pair"),
+    ("`", "pair"),
+];
+
 /// Around / inside selection mode for the active textobject chord.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TextobjectMode {
@@ -30,6 +59,14 @@ pub(crate) enum TextobjectMode {
 }
 
 impl TextobjectMode {
+    /// The title of the hints box an armed chord of this mode shows.
+    pub(crate) fn hint_title(self) -> &'static str {
+        match self {
+            TextobjectMode::Around => "around",
+            TextobjectMode::Inner => "inside",
+        }
+    }
+
     fn capture_suffix(self) -> &'static str {
         match self {
             TextobjectMode::Around => "around",

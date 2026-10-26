@@ -25,6 +25,16 @@ pub(crate) struct HintsFooter {
     pub(crate) style: Style,
 }
 
+/// The box an armed one-char chord shows while it waits on its char.
+///
+/// `rows` pairs each char the chord takes with the label its row reads, and
+/// chars that share a label fold into one row.
+#[derive(Clone, Copy)]
+pub(crate) struct ChordHints {
+    pub(crate) title: &'static str,
+    pub(crate) rows: &'static [(&'static str, &'static str)],
+}
+
 /// One row of the hints box, holding the keys that reach an action, the
 /// action's label, and the toggle the action flips.
 ///
@@ -426,6 +436,16 @@ pub(crate) fn group_by_action(bindings: &[(&str, String, Option<Toggle>)]) -> Ve
         }
     }
     rows
+}
+
+/// The rows of `hints`, with the chars that share a label on one row.
+pub(crate) fn chord_rows(hints: &ChordHints) -> Vec<HintRow> {
+    let bindings: Vec<(&str, String, Option<Toggle>)> = hints
+        .rows
+        .iter()
+        .map(|&(chars, label)| (chars, label.to_string(), None))
+        .collect();
+    group_by_action(&bindings)
 }
 
 #[cfg(test)]

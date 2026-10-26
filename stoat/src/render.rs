@@ -47,7 +47,10 @@ pub(crate) mod workspace_picker;
 
 use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
-    action_handlers::search::{self, StatusPrompt},
+    action_handlers::{
+        search::{self, StatusPrompt},
+        textobject,
+    },
     apc_emit,
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer::BufferId,
@@ -1561,6 +1564,11 @@ pub(crate) fn frame(
     let mode = stoat.frame_mode.as_str();
     let toggles = ToggleStates::read(stoat);
     let app = AppFlags::from_stoat(stoat);
+    // An armed one-char chord waits on its char in a primary mode. The hints
+    // box below lists the chars it takes, and a pinned pane shows that box too,
+    // since the capture is one press. The read comes before the workspace
+    // borrow on the next line.
+    let chord = pending_chord_hints(stoat);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     overlaid |= badges::render_badges(
         &ws.badges,
@@ -1961,7 +1969,8 @@ pub(crate) fn frame(
         && ((!PRIMARY_MODES.contains(&mode) && !pin_hidden)
             || screen == Some("review")
             || screen == Some("conflict")
-            || stoat.key_hints_visible)
+            || stoat.key_hints_visible
+            || chord.is_some())
     {
         // The space_pane_display chord paints its own digit badges below, and
         // the auto-shown hint box would only stack an eleven-row overlay over
@@ -1971,9 +1980,22 @@ pub(crate) fn frame(
         let pane = pane_predicate(ws);
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
-        let key = hints_cache_key(mode, screen, pane, &flags, token, &focus, None, None);
+        let key = hints_cache_key(
+            mode,
+            screen,
+            pane,
+            &flags,
+            token,
+            &focus,
+            None,
+            None,
+            chord.as_ref().map(|chord| chord.title),
+        );
 
-        if stoat.hints_cache.as_ref().map(|c| c.key) != Some(key) {
+        let missed = stoat.hints_cache.as_ref().map(|c| c.key) != Some(key);
+        if missed && let Some(chord) = &chord {
+            stoat.hints_cache = Some(hints::HintsCache::new(key, hints::chord_rows(chord)));
+        } else if missed {
             // The conflict screen rides on normal mode, so scope to its own
             // `view == conflict` bindings. A terminal or agent pane at rest
             // sends every other key to its child, so it scopes to the bindings
@@ -2049,9 +2071,10 @@ pub(crate) fn frame(
         };
         let footer = conflict_footer.as_ref();
 
-        let hint_label = match screen {
-            Some("conflict") => "conflict",
-            _ => mode,
+        let hint_label = match (chord, screen) {
+            (Some(chord), _) => chord.title,
+            (None, Some("conflict")) => "conflict",
+            (None, _) => mode,
         };
         let cache = stoat.hints_cache.as_mut().expect("cache populated above");
         hints::render_hints_grouped(
@@ -2140,6 +2163,9 @@ pub(crate) fn overlay_pane(ws: &Workspace) -> Option<PaneId> {
 /// Hash the keymap-state inputs that decide which bindings are active into a
 /// cache key. An unchanged key means the same hints list, so the binding walk
 /// and regrouping can be skipped.
+///
+/// `chord` is the title of an armed chord whose own table takes the place of
+/// the keymap's rows.
 #[allow(clippy::too_many_arguments)]
 fn hints_cache_key(
     mode: &str,
@@ -2150,6 +2176,7 @@ fn hints_cache_key(
     focus: &FocusFlags,
     modal: Option<&str>,
     scope: Option<&str>,
+    chord: Option<&str>,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     mode.hash(&mut hasher);
@@ -2160,7 +2187,22 @@ fn hints_cache_key(
     focus.hash(&mut hasher);
     modal.hash(&mut hasher);
     scope.hash(&mut hasher);
+    chord.hash(&mut hasher);
     hasher.finish()
+}
+
+/// The hints box of the one-char chord that waits on the next key, or `None`
+/// while no chord is armed.
+///
+/// The arms follow the order in which `handle_key` consumes the chords, so the
+/// box names the chord that the next key reaches.
+fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
+    stoat
+        .pending_textobject_select
+        .map(|(mode, _)| hints::ChordHints {
+            title: mode.hint_title(),
+            rows: textobject::TEXTOBJECT_HINTS,
+        })
 }
 
 /// Paint a modal's hint box, reusing `cache` when its mode, modal, and scope
@@ -2197,6 +2239,7 @@ fn cached_modal_hints(
         &FocusFlags::default(),
         Some(modal),
         scope,
+        None,
     );
     if cache.as_ref().map(|c| c.key) != Some(key) {
         let state = StoatKeymapState::with_flags(mode, Flags::default())
@@ -2461,6 +2504,7 @@ mod dispatch_tests {
             &FocusFlags::default(),
             Some(modal),
             scope,
+            None,
         )
     }
 
@@ -2508,7 +2552,9 @@ mod dispatch_tests {
 
 #[cfg(test)]
 mod lsp_filter_tests {
-    use crate::{lsp::LspSymbolKind, test_harness::TestHarness};
+    use crate::{
+        action_handlers::textobject::TextobjectMode, lsp::LspSymbolKind, test_harness::TestHarness,
+    };
     use std::sync::Arc;
     use stoat_action::registry;
 
@@ -2807,6 +2853,77 @@ mod lsp_filter_tests {
             (vec![true; 3], vec![false; 3], vec![true]),
             "a scratch root lists only the ungated rows, and a repository brings GitLs back",
         );
+    }
+
+    /// The chord waits on one char in a primary mode, so its box lists the
+    /// chars the chord takes in place of the keymap's rows.
+    #[test]
+    fn the_textobject_chord_box_lists_its_chars() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = chord_rows(&mut h, "m i");
+        h.type_keys("m i");
+        let text = box_text(&mut h);
+
+        let labels = [
+            "word",
+            "WORD",
+            "paragraph",
+            "function",
+            "class",
+            "parameter",
+            "comment",
+            "test",
+            "entry",
+            "xml element",
+            "change",
+            "closest pair",
+            "pair",
+        ];
+        assert_eq!(
+            (rows, text.contains("inside")),
+            (labels.map(String::from).to_vec(), true),
+            "the box lists every type, the pair chars on one row, under its title",
+        );
+    }
+
+    #[test]
+    fn the_textobject_chord_box_leaves_with_the_chord() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.type_keys("m a");
+        let armed = box_text(&mut h);
+        h.type_keys("w");
+        let resolved = box_text(&mut h);
+
+        assert_eq!(
+            (
+                armed.contains("around"),
+                resolved.contains("around"),
+                resolved.contains("paragraph"),
+            ),
+            (true, false, false),
+            "the box shows while the chord waits and leaves with its char",
+        );
+    }
+
+    /// The forced box caches the keymap's rows under the same primary mode the
+    /// chord waits in, so the chord's part of the cache key is what brings its
+    /// table in. The chord arms by hand, since a typed `m` repaints the match
+    /// chord's box between the two frames.
+    #[test]
+    fn the_textobject_chord_box_replaces_the_forced_box() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.stoat.key_hints_visible = true;
+        h.render_composited();
+        h.stoat.pending_textobject_select = Some((TextobjectMode::Inner, 1));
+        h.render_composited();
+
+        let first = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .and_then(|cache| cache.rows.first())
+            .map(|row| row.action.as_str());
+        assert_eq!(first, Some("word"), "the chord's table takes the box");
     }
 
     #[test]
