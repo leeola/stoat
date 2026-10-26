@@ -2196,7 +2196,10 @@ fn hints_cache_key(
 ///
 /// The arms follow the order in which `handle_key` consumes the chords, so the
 /// box names the chord that the next key reaches.
-fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
+///
+/// [`Stoat::update`] compares the box before and after each event, and asks
+/// for a frame when it changed.
+pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
     stoat
         .pending_surround_add
         .then_some(hints::ChordHints {
@@ -2561,8 +2564,12 @@ mod dispatch_tests {
 #[cfg(test)]
 mod lsp_filter_tests {
     use crate::{
-        action_handlers::textobject::TextobjectMode, lsp::LspSymbolKind, test_harness::TestHarness,
+        action_handlers::textobject::TextobjectMode,
+        app::UpdateEffect,
+        lsp::LspSymbolKind,
+        test_harness::{keys, TestHarness},
     };
+    use crossterm::event::{Event, KeyCode};
     use std::sync::Arc;
     use stoat_action::registry;
 
@@ -2948,6 +2955,21 @@ mod lsp_filter_tests {
             (rows, text.contains("surround")),
             (labels.map(String::from).to_vec(), true),
             "the brackets and the quotes fold into a row each, under the box title",
+        );
+    }
+
+    /// A chord whose char finds nothing edits no text and moves no cursor, so
+    /// the box leaving is the one change that frame has to paint.
+    #[test]
+    fn a_chord_key_that_finds_nothing_still_repaints() {
+        let mut h = TestHarness::with_size(150, 50);
+        open_foo_bar(&mut h);
+        h.type_keys("m i");
+        let effect = h.stoat.update(Event::Key(keys::key(KeyCode::Char('('))));
+        assert_eq!(
+            effect,
+            UpdateEffect::Redraw,
+            "the frame takes the inside box down"
         );
     }
 

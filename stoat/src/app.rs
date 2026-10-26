@@ -5351,6 +5351,7 @@ impl Stoat {
         debounce::drain_fs_watch_events(self);
         self.drain_external();
         let focus_before = self.focus_before_change();
+        let chord_before = crate::render::pending_chord_hints(self);
 
         // Only what the user did. A resize arms nothing because their next
         // input does, and fs-watch or LSP traffic moves disk-backed state the
@@ -5443,7 +5444,13 @@ impl Stoat {
             debounce::arm_workspace_autosave(self);
         }
 
-        effect
+        // A chord whose char finds nothing returns no effect, and the skipped
+        // frame is the one that takes its hints box down.
+        if crate::render::pending_chord_hints(self) != chord_before {
+            effect.merge(UpdateEffect::Redraw)
+        } else {
+            effect
+        }
     }
 
     /// Where the user is before a call that moves focus, for

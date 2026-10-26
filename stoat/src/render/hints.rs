@@ -29,7 +29,7 @@ pub(crate) struct HintsFooter {
 ///
 /// `rows` pairs each char the chord takes with the label its row reads, and
 /// chars that share a label fold into one row.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChordHints {
     pub(crate) title: &'static str,
     pub(crate) rows: &'static [(&'static str, &'static str)],
