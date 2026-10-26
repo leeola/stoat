@@ -8,6 +8,29 @@ use std::{cmp::Reverse, ops::Range, sync::Arc};
 use stoat_language::Language;
 use stoat_text::{Bias, Rope, SelectionGoal};
 
+/// The chars an armed `m s` chord takes, each with the label its hint row
+/// reads.
+///
+/// The rows follow [`surround_pair_for`] and the chord's Enter arm in
+/// `handle_key`. A bracket char wraps the selection in its pair, and any other
+/// char wraps it in that char on both sides. The quotes have a row of their
+/// own because they are the usual case of that rule. The Enter row reads
+/// `Ret`, the label that the keymap's hint boxes give that key.
+///
+/// The box leaves out the rarer pairs in [`BRACKET_PAIRS`] to stay short.
+/// Those chars wrap in their pair too, which the `any` row does not say.
+pub(crate) const SURROUND_ADD_HINTS: &[(&str, &str)] = &[
+    ("(", "pair"),
+    ("[", "pair"),
+    ("{", "pair"),
+    ("<", "pair"),
+    ("\"", "quote"),
+    ("'", "quote"),
+    ("`", "quote"),
+    ("Ret", "own line"),
+    ("any", "that char both sides"),
+];
+
 /// Two-step capture state for [`surround_replace`]: arms after the action
 /// fires, transitions to [`SurroundReplaceStage::AwaitTo`] once the user
 /// types the from-char, then back to [`SurroundReplaceStage::Idle`] after

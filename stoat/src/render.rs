@@ -49,7 +49,7 @@ use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
     action_handlers::{
         search::{self, StatusPrompt},
-        textobject,
+        surround, textobject,
     },
     apc_emit,
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
@@ -2198,10 +2198,18 @@ fn hints_cache_key(
 /// box names the chord that the next key reaches.
 fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
     stoat
-        .pending_textobject_select
-        .map(|(mode, _)| hints::ChordHints {
-            title: mode.hint_title(),
-            rows: textobject::TEXTOBJECT_HINTS,
+        .pending_surround_add
+        .then_some(hints::ChordHints {
+            title: "surround",
+            rows: surround::SURROUND_ADD_HINTS,
+        })
+        .or_else(|| {
+            stoat
+                .pending_textobject_select
+                .map(|(mode, _)| hints::ChordHints {
+                    title: mode.hint_title(),
+                    rows: textobject::TEXTOBJECT_HINTS,
+                })
         })
 }
 
@@ -2924,6 +2932,23 @@ mod lsp_filter_tests {
             .and_then(|cache| cache.rows.first())
             .map(|row| row.action.as_str());
         assert_eq!(first, Some("word"), "the chord's table takes the box");
+    }
+
+    #[test]
+    fn the_surround_add_chord_box_lists_the_pair_chars() {
+        let mut h = TestHarness::with_size(150, 50);
+        open_foo_bar(&mut h);
+        h.type_keys("w");
+        let rows = chord_rows(&mut h, "m s");
+        h.type_keys("m s");
+        let text = box_text(&mut h);
+
+        let labels = ["pair", "quote", "own line", "that char both sides"];
+        assert_eq!(
+            (rows, text.contains("surround")),
+            (labels.map(String::from).to_vec(), true),
+            "the brackets and the quotes fold into a row each, under the box title",
+        );
     }
 
     #[test]
