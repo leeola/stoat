@@ -1200,6 +1200,19 @@ impl DiffLanding {
     pub(crate) fn wants_whole_map(&self) -> bool {
         matches!(self, Self::FileHop { .. })
     }
+
+    /// The variant's name, which the session log gives the landing in place
+    /// of its fields.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            Self::LatchedView { .. } => "LatchedView",
+            Self::ToggleJump { .. } => "ToggleJump",
+            Self::ChangeWalk { .. } => "ChangeWalk",
+            Self::EdgeChange { .. } => "EdgeChange",
+            Self::PairVerdict { .. } => "PairVerdict",
+            Self::FileHop { .. } => "FileHop",
+        }
+    }
 }
 
 /// A task that wakes a redraw when a settle window closes, so the frame that

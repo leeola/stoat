@@ -696,6 +696,12 @@ pub(crate) fn ensure_diff_map(
     let whole = landing.as_ref().is_some_and(DiffLanding::wants_whole_map);
     if ws.diff_map_current(buffer_id) || (!whole && ws.hunks_installed(buffer_id)) {
         if let Some(landing) = landing {
+            tracing::debug!(
+                target: "stoat::change_walk",
+                ?buffer_id,
+                landing = landing.name(),
+                "diff landing lands now"
+            );
             land_diff_want(stoat, buffer_id, landing);
         }
         return;
@@ -707,6 +713,7 @@ pub(crate) fn ensure_diff_map(
     let syntax_styles = stoat.syntax_styles.clone();
     let base_cache = stoat.base_highlights_cache.clone();
     let redraw_notify = stoat.redraw_notify.clone();
+    let name = landing.as_ref().map(DiffLanding::name);
     let unwanted = stoat.active_workspace_mut().want_diff_map(
         &executor,
         &git_host,
@@ -719,6 +726,13 @@ pub(crate) fn ensure_diff_map(
     );
     if let Some(landing) = unwanted {
         land_diff_want(stoat, buffer_id, landing);
+    } else if let Some(name) = name {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?buffer_id,
+            landing = name,
+            "diff landing waits on the pool"
+        );
     }
 }
 
@@ -748,6 +762,15 @@ pub(crate) fn pump_diff_wants(stoat: &mut Stoat) -> bool {
 /// needs the focused buffer to be `buffer_id`. Otherwise the landing is
 /// dropped.
 fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) {
+    let name = landing.name();
+    tracing::debug!(
+        target: "stoat::change_walk",
+        ?buffer_id,
+        path = ?stoat.active_workspace().buffers.path_for(buffer_id),
+        landing = name,
+        "diff landing runs"
+    );
+
     let focused = stoat.focused_editor_ids();
     match landing {
         DiffLanding::LatchedView { editor } => {
@@ -760,6 +783,7 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
                 pane.diff_mode && matches!(pane.view, View::Editor(id) if id == editor)
             });
             if !shows || !latched {
+                log_dropped_landing(stoat, buffer_id, name);
                 return;
             }
             let has_changes = editor_shows_changes(stoat, editor);
@@ -770,21 +794,31 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
         DiffLanding::ToggleJump { editor, origin } => {
             if focused_diff_view(stoat, editor) {
                 land_toggle_jump(stoat, origin);
+            } else {
+                log_dropped_landing(stoat, buffer_id, name);
             }
         },
         DiffLanding::PairVerdict { editor } => {
-            if focused_diff_view(stoat, editor) && !editor_shows_changes(stoat, editor) {
+            if !focused_diff_view(stoat, editor) {
+                log_dropped_landing(stoat, buffer_id, name);
+                return;
+            }
+            if !editor_shows_changes(stoat, editor) {
                 stoat.set_status("the two files do not differ");
             }
         },
         DiffLanding::ChangeWalk { dir, count } => {
             if focused.is_some_and(|(_, id)| id == buffer_id) {
                 super::movement::goto_change_impl(stoat, dir, count);
+            } else {
+                log_dropped_landing(stoat, buffer_id, name);
             }
         },
         DiffLanding::EdgeChange { last } => {
             if focused.is_some_and(|(_, id)| id == buffer_id) {
                 super::movement::goto_edge_change(stoat, last);
+            } else {
+                log_dropped_landing(stoat, buffer_id, name);
             }
         },
         DiffLanding::FileHop {
@@ -795,9 +829,23 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
         } => {
             if focused.is_some_and(|(_, id)| id == buffer_id) {
                 super::movement::land_file_hop(stoat, dir, origin, wrapped, fallback);
+            } else {
+                log_dropped_landing(stoat, buffer_id, name);
             }
         },
     }
+}
+
+/// Log that landing `name` on `buffer_id` found the reader gone and did
+/// nothing.
+fn log_dropped_landing(stoat: &Stoat, buffer_id: BufferId, name: &str) {
+    tracing::debug!(
+        target: "stoat::change_walk",
+        ?buffer_id,
+        path = ?stoat.active_workspace().buffers.path_for(buffer_id),
+        landing = name,
+        "diff landing dropped, the reader moved"
+    );
 }
 
 /// Whether `editor` holds the focus and still shows the diff view.
