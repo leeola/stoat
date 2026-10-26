@@ -117,7 +117,9 @@ pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
 ///
 /// The rows follow the arms of [`register_for_char`]. `any` stands for every
 /// other char, each of which names a register of its own. The `SelectRegister`
-/// chord and the insert-mode `InsertRegister` chord share the table.
+/// chord, the insert-mode `InsertRegister` chord, and the `ReplayMacro` chord
+/// share the table. `@`, the register that `Q` records into when no register
+/// is selected, falls under the `any` row.
 pub(crate) const REGISTER_HINTS: &[(&str, &str)] = &[
     ("\"", "unnamed"),
     ("+", "system clipboard"),

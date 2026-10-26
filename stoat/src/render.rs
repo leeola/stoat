@@ -2202,10 +2202,16 @@ fn hints_cache_key(
 /// for a frame when it changed.
 pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
     stoat
-        .pending_find
-        .map(|(kind, _, _)| hints::ChordHints {
-            title: kind.hint_title(),
-            rows: movement::FIND_HINTS,
+        .pending_macro_replay
+        .map(|_| hints::ChordHints {
+            title: "replay macro",
+            rows: yank::REGISTER_HINTS,
+        })
+        .or_else(|| {
+            stoat.pending_find.map(|(kind, _, _)| hints::ChordHints {
+                title: kind.hint_title(),
+                rows: movement::FIND_HINTS,
+            })
         })
         .or_else(|| {
             stoat.pending_mark.map(|request| hints::ChordHints {
@@ -2598,7 +2604,7 @@ mod dispatch_tests {
 #[cfg(test)]
 mod lsp_filter_tests {
     use crate::{
-        action_handlers::textobject::TextobjectMode,
+        action_handlers::{textobject::TextobjectMode, yank},
         app::UpdateEffect,
         lsp::LspSymbolKind,
         test_harness::{keys, TestHarness},
@@ -3120,6 +3126,24 @@ mod lsp_filter_tests {
             (shows(&armed), shows(&resolved)),
             ((true, true), (false, false)),
             "the box shows while the chord waits and leaves with its char",
+        );
+    }
+
+    #[test]
+    fn the_macro_replay_chord_box_lists_the_registers() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = chord_rows(&mut h, "q");
+        h.type_keys("q");
+        let text = box_text(&mut h);
+
+        let labels: Vec<String> = yank::REGISTER_HINTS
+            .iter()
+            .map(|&(_, label)| label.to_string())
+            .collect();
+        assert_eq!(
+            (rows, has_box_titled(&text, "replay macro")),
+            (labels, true),
+            "the replay chord names its register through the register table",
         );
     }
 
