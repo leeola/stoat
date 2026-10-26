@@ -3704,6 +3704,16 @@ fn find_parent_start(node: stoat_language::Node<'_>) -> Option<stoat_language::N
     Some(node)
 }
 
+/// The keys an armed find or till chord takes, each with the label its hint
+/// row reads.
+///
+/// The rows follow the chord's capture in `handle_key`. A char key finds that
+/// char, Enter finds a line ending, and Tab finds a tab. The rows match
+/// [`REPLACE_HINTS`], but the two chords act differently on those keys, so
+/// each keeps its own table.
+pub(crate) const FIND_HINTS: &[(&str, &str)] =
+    &[("any", "that char"), ("Ret", "line ending"), ("Tab", "tab")];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub(crate) enum FindKind {
@@ -3711,6 +3721,18 @@ pub(crate) enum FindKind {
     PrevChar,
     TillNextChar,
     TillPrevChar,
+}
+
+impl FindKind {
+    /// The title of the hints box an armed chord of this kind shows.
+    pub(crate) fn hint_title(self) -> &'static str {
+        match self {
+            FindKind::NextChar => "find next",
+            FindKind::PrevChar => "find prev",
+            FindKind::TillNextChar => "till next",
+            FindKind::TillPrevChar => "till prev",
+        }
+    }
 }
 
 pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind, extend: bool) -> UpdateEffect {

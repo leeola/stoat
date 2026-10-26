@@ -2202,10 +2202,16 @@ fn hints_cache_key(
 /// for a frame when it changed.
 pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
     stoat
-        .pending_replace
-        .then_some(hints::ChordHints {
-            title: "replace",
-            rows: movement::REPLACE_HINTS,
+        .pending_find
+        .map(|(kind, _, _)| hints::ChordHints {
+            title: kind.hint_title(),
+            rows: movement::FIND_HINTS,
+        })
+        .or_else(|| {
+            stoat.pending_replace.then_some(hints::ChordHints {
+                title: "replace",
+                rows: movement::REPLACE_HINTS,
+            })
         })
         .or_else(|| {
             stoat.pending_surround_add.then_some(hints::ChordHints {
@@ -3028,6 +3034,28 @@ mod lsp_filter_tests {
             (rows, text.contains("replace")),
             (labels.map(String::from).to_vec(), true),
             "the box lists a char, Enter, and Tab under its title",
+        );
+    }
+
+    #[test]
+    fn the_find_chord_box_names_its_direction() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = chord_rows(&mut h, "f");
+        h.type_keys("f");
+        let find = box_text(&mut h);
+        h.type_keys("escape T");
+        let till = box_text(&mut h);
+
+        let labels = ["that char", "line ending", "tab"];
+        assert_eq!(
+            (
+                rows,
+                find.contains("find next"),
+                till.contains("till prev"),
+                till.contains("find next"),
+            ),
+            (labels.map(String::from).to_vec(), true, true, false),
+            "each find kind titles the box with its own direction",
         );
     }
 
