@@ -3,6 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::TextBuffer,
     pane::View,
+    render::hints::ChordHints,
 };
 use std::{cmp::Reverse, ops::Range, sync::Arc};
 use stoat_language::Language;
@@ -31,6 +32,41 @@ pub(crate) const SURROUND_ADD_HINTS: &[(&str, &str)] = &[
     ("any", "that char both sides"),
 ];
 
+/// The chars that name an existing pair, each with the label its hint row
+/// reads.
+///
+/// An armed `m r` chord takes one as its first char. `m` names the nearest
+/// pair of any type. Every other char names its pair through
+/// [`surround_pair_for`], so a quote names a pair of that quote. As in
+/// [`SURROUND_ADD_HINTS`], the box leaves out the rarer pairs in
+/// [`BRACKET_PAIRS`].
+pub(crate) const SURROUND_FROM_HINTS: &[(&str, &str)] = &[
+    ("m", "closest pair"),
+    ("(", "pair"),
+    ("[", "pair"),
+    ("{", "pair"),
+    ("<", "pair"),
+    ("\"", "pair"),
+    ("'", "pair"),
+    ("`", "pair"),
+];
+
+/// The chars an armed `m r` chord takes as its second char, each with the
+/// label its hint row reads.
+///
+/// The rows are those of [`SURROUND_ADD_HINTS`] without its `Ret` row, since
+/// a key other than a char cancels this stage.
+pub(crate) const SURROUND_TO_HINTS: &[(&str, &str)] = &[
+    ("(", "pair"),
+    ("[", "pair"),
+    ("{", "pair"),
+    ("<", "pair"),
+    ("\"", "quote"),
+    ("'", "quote"),
+    ("`", "quote"),
+    ("any", "that char both sides"),
+];
+
 /// Two-step capture state for [`surround_replace`]: arms after the action
 /// fires, transitions to [`SurroundReplaceStage::AwaitTo`] once the user
 /// types the from-char, then back to [`SurroundReplaceStage::Idle`] after
@@ -41,6 +77,23 @@ pub(crate) enum SurroundReplaceStage {
     Idle,
     AwaitFrom,
     AwaitTo(char),
+}
+
+impl SurroundReplaceStage {
+    /// The hints box for the char this stage waits on, or `None` while idle.
+    pub(crate) fn hints(self) -> Option<ChordHints> {
+        match self {
+            SurroundReplaceStage::Idle => None,
+            SurroundReplaceStage::AwaitFrom => Some(ChordHints {
+                title: "replace pair",
+                rows: SURROUND_FROM_HINTS,
+            }),
+            SurroundReplaceStage::AwaitTo(_) => Some(ChordHints {
+                title: "replace with",
+                rows: SURROUND_TO_HINTS,
+            }),
+        }
+    }
 }
 
 pub(super) fn surround_add(stoat: &mut Stoat) -> UpdateEffect {

@@ -2206,6 +2206,7 @@ pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
             title: "surround",
             rows: surround::SURROUND_ADD_HINTS,
         })
+        .or_else(|| stoat.pending_surround_replace.hints())
         .or_else(|| {
             stoat
                 .pending_textobject_select
@@ -2955,6 +2956,35 @@ mod lsp_filter_tests {
             (rows, text.contains("surround")),
             (labels.map(String::from).to_vec(), true),
             "the brackets and the quotes fold into a row each, under the box title",
+        );
+    }
+
+    #[test]
+    fn the_surround_replace_chord_box_follows_its_two_stages() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = (chord_rows(&mut h, "m r"), chord_rows(&mut h, "m r ("));
+        h.type_keys("m r");
+        let from = box_text(&mut h);
+        h.type_keys("(");
+        let to = box_text(&mut h);
+        h.type_keys("[");
+        let done = box_text(&mut h);
+
+        let titles = |text: &str| (text.contains("replace pair"), text.contains("replace with"));
+        let from_rows = ["closest pair", "pair"];
+        let to_rows = ["pair", "quote", "that char both sides"];
+        assert_eq!(
+            (rows, titles(&from), titles(&to), titles(&done)),
+            (
+                (
+                    from_rows.map(String::from).to_vec(),
+                    to_rows.map(String::from).to_vec(),
+                ),
+                (true, false),
+                (false, true),
+                (false, false),
+            ),
+            "each stage shows its own box, and the box leaves with the second char",
         );
     }
 
