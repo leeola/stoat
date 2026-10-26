@@ -2156,6 +2156,15 @@ pub(super) fn open_line(
     UpdateEffect::Redraw
 }
 
+/// The keys an armed `r` chord takes, each with the label its hint row reads.
+///
+/// The rows follow the chord's capture in `handle_key`. A char key puts that
+/// char in place of each selected char. Enter puts a line ending there, and
+/// Tab puts a tab. The Enter row reads `Ret`, the label that the keymap's hint
+/// boxes give that key.
+pub(crate) const REPLACE_HINTS: &[(&str, &str)] =
+    &[("any", "that char"), ("Ret", "line ending"), ("Tab", "tab")];
+
 pub(super) fn set_pending_replace(stoat: &mut Stoat) -> UpdateEffect {
     stoat.pending_replace = true;
     UpdateEffect::Redraw

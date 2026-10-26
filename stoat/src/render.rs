@@ -48,6 +48,7 @@ pub(crate) mod workspace_picker;
 use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
     action_handlers::{
+        movement,
         search::{self, StatusPrompt},
         surround, textobject,
     },
@@ -2201,10 +2202,16 @@ fn hints_cache_key(
 /// for a frame when it changed.
 pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
     stoat
-        .pending_surround_add
+        .pending_replace
         .then_some(hints::ChordHints {
-            title: "surround",
-            rows: surround::SURROUND_ADD_HINTS,
+            title: "replace",
+            rows: movement::REPLACE_HINTS,
+        })
+        .or_else(|| {
+            stoat.pending_surround_add.then_some(hints::ChordHints {
+                title: "surround",
+                rows: surround::SURROUND_ADD_HINTS,
+            })
         })
         .or_else(|| stoat.pending_surround_replace.hints())
         .or_else(|| {
@@ -3006,6 +3013,21 @@ mod lsp_filter_tests {
             (rows, text.contains("delete pair")),
             (labels.map(String::from).to_vec(), true),
             "the pair chars fold into one row under the box title",
+        );
+    }
+
+    #[test]
+    fn the_replace_chord_box_lists_its_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = chord_rows(&mut h, "r");
+        h.type_keys("r");
+        let text = box_text(&mut h);
+
+        let labels = ["that char", "line ending", "tab"];
+        assert_eq!(
+            (rows, text.contains("replace")),
+            (labels.map(String::from).to_vec(), true),
+            "the box lists a char, Enter, and Tab under its title",
         );
     }
 
