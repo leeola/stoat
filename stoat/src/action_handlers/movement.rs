@@ -9,14 +9,14 @@ use crate::{
     host::{FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
-    pane::View,
+    pane::{FocusTarget, PaneId, View},
     selection::{
         anchor_selection, forward_block_cursor, land_block_cursor, merge_overlapping_spans,
         ResolvedRead, SelectionsCollection, SpanLanding,
     },
     workspace::{
         diff::{self, DiffBase, DiffLanding},
-        Workspace,
+        Workspace, WorkspaceId,
     },
 };
 use std::{
@@ -4492,6 +4492,12 @@ pub(crate) struct PendingChangedFileJump {
     /// toward the file the reader came from. The scan lands long after the
     /// keypress that knew this.
     dir: ChangeDir,
+    /// The workspace whose key armed the hop. The hop lands only while this
+    /// workspace is active.
+    workspace: WorkspaceId,
+    /// The split pane whose key armed the hop. The hop lands only while this
+    /// pane holds the focus, so a switch before the scan lands drops it.
+    pane: PaneId,
 }
 
 /// What a changed-file scan decided.
@@ -4589,6 +4595,8 @@ fn goto_change_across_files(
         source_diff_view,
         origin,
         dir,
+        workspace: stoat.active_workspace,
+        pane: stoat.active_workspace().panes.focus(),
     });
     UpdateEffect::Redraw
 }
@@ -4870,6 +4878,10 @@ fn staged_mark_stops(
 }
 
 /// Apply a landed changed-file hop, opening the target and landing on its hunk.
+///
+/// The hop lands only in the split pane that pressed it, as each landing in
+/// `land_diff_want` acts only where the reader still is. A switch of pane, tab,
+/// or workspace before the scan lands drops the hop with no status message.
 pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
     let Some(pending) = stoat.pending_changed_file_jump.take() else {
         return false;
@@ -4882,6 +4894,18 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
         },
         Err(mpsc::TryRecvError::Disconnected) => return false,
     };
+
+    let here = stoat.active_workspace == pending.workspace
+        && matches!(stoat.active_workspace().focus, FocusTarget::SplitPane)
+        && stoat.active_workspace().panes.focus() == pending.pane;
+    if !here {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            dir = ?pending.dir,
+            "file hop dropped, the focus left its pane"
+        );
+        return true;
+    }
 
     let (path, line, rows, wrapped) = match found {
         ChangedFileJump::To {

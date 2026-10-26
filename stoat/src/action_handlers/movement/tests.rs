@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     action_handlers::dispatch,
     keymap::{ResolvedAction, ResolvedArg},
-    pane::View,
+    pane::{DockPanel, DockSide, DockVisibility, View},
     test_harness::{
         editor,
         editor::{focused_buffer_path, focused_cursor_point, focused_head_row, place_cursor},
@@ -439,6 +439,98 @@ fn next_change_crosses_to_next_file_first_hunk() {
         focused_editor_mut(&mut h.stoat).expect("editor").diff_view,
         "diff_view carried across the file boundary"
     );
+}
+
+/// A split between the press and the scan's landing moves the focus to a new
+/// pane, which the hop never reaches, so the file it found stays unopened.
+#[test]
+fn a_file_hop_that_lands_after_a_pane_switch_opens_nothing() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = armed_file_hop(&mut h);
+    dispatch(&mut h.stoat, &stoat_action::SplitRight);
+    h.settle();
+
+    assert_eq!(
+        (
+            focused_buffer_path(&h.stoat),
+            h.stoat.pending_changed_file_jump.is_none(),
+            opened_anywhere(&h, &workdir.join("b.rs")),
+        ),
+        (workdir.join("a.rs"), true, false),
+    );
+}
+
+/// Each workspace keys its own panes, so the new workspace's first pane
+/// carries the same key as the pane that pressed the hop. The workspace check
+/// alone keeps the hop out of it.
+#[test]
+fn a_file_hop_that_lands_after_a_workspace_switch_opens_nothing() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = armed_file_hop(&mut h);
+    let pressed = h.stoat.active_workspace;
+    dispatch(&mut h.stoat, &stoat_action::NewWorkspace);
+    h.settle();
+
+    assert_eq!(
+        (
+            h.stoat.active_workspace == pressed,
+            h.stoat.pending_changed_file_jump.is_none(),
+            opened_anywhere(&h, &workdir.join("b.rs")),
+        ),
+        (false, true, false),
+    );
+}
+
+/// The split pane that pressed the hop keeps the split focus while a dock
+/// takes the keys, so the focus target alone keeps the hop out of the pane.
+#[test]
+fn a_file_hop_that_lands_after_a_dock_takes_the_focus_opens_nothing() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = armed_file_hop(&mut h);
+    let ws = h.stoat.active_workspace_mut();
+    let dock = ws.docks.insert(DockPanel {
+        view: View::Label("dock".into()),
+        side: DockSide::Right,
+        visibility: DockVisibility::Open { width: 10 },
+        default_width: 10,
+        area: Default::default(),
+    });
+    ws.focus = FocusTarget::Dock(dock);
+    h.settle();
+
+    assert_eq!(
+        (
+            h.stoat.active_workspace().focus,
+            h.stoat.pending_changed_file_jump.is_none(),
+            opened_anywhere(&h, &workdir.join("b.rs")),
+        ),
+        (FocusTarget::Dock(dock), true, false),
+    );
+}
+
+/// Press `n` on a.rs's only hunk, which arms a hop to b.rs whose scan has not
+/// landed.
+///
+/// The press runs in a plain pane. The diff view is a full-window screen, and a
+/// split there closes the screen instead of moving the focus.
+fn armed_file_hop(h: &mut TestHarness) -> PathBuf {
+    let workdir = stage_two_changed_files(h);
+    h.open_file(&workdir.join("a.rs"));
+    h.settle_diff_jobs();
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+    goto_change(&mut h.stoat, ChangeDir::Next);
+    assert!(
+        h.stoat.pending_changed_file_jump.is_some(),
+        "the press armed a hop"
+    );
+    workdir
+}
+
+fn opened_anywhere(h: &TestHarness, path: &Path) -> bool {
+    h.stoat
+        .workspaces
+        .values()
+        .any(|ws| ws.buffers.id_for_path(path).is_some())
 }
 
 /// Under the index base a file whose every change is staged has marks and no
