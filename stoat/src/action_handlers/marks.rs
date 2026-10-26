@@ -6,11 +6,30 @@ use crate::{
 use std::path::PathBuf;
 use stoat_text::{cursor_offset, Bias, Point};
 
+/// The chars an armed mark chord takes, each with the label its hint row
+/// reads.
+///
+/// A lowercase letter names a mark in the buffer. An uppercase letter also
+/// records the file path, so the mark outlives the buffer. Any other char
+/// names a buffer mark too, but the box lists the letters only.
+pub(crate) const MARK_HINTS: &[(&str, &str)] = &[("a-z", "buffer mark"), ("A-Z", "global mark")];
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MarkRequest {
     Set,
     GotoLine,
     GotoExact,
+}
+
+impl MarkRequest {
+    /// The title of the hints box an armed chord of this request shows.
+    pub(crate) fn hint_title(self) -> &'static str {
+        match self {
+            MarkRequest::Set => "set mark",
+            MarkRequest::GotoLine => "goto mark line",
+            MarkRequest::GotoExact => "goto mark",
+        }
+    }
 }
 
 pub(super) fn set_mark(stoat: &mut Stoat) -> UpdateEffect {

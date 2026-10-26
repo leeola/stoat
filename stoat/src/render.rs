@@ -48,7 +48,7 @@ pub(crate) mod workspace_picker;
 use self::{review::DiffDials, undercurl::UndercurlBatch};
 use crate::{
     action_handlers::{
-        movement,
+        marks, movement,
         search::{self, StatusPrompt},
         surround, textobject, yank,
     },
@@ -2208,6 +2208,12 @@ pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
             rows: movement::FIND_HINTS,
         })
         .or_else(|| {
+            stoat.pending_mark.map(|request| hints::ChordHints {
+                title: request.hint_title(),
+                rows: marks::MARK_HINTS,
+            })
+        })
+        .or_else(|| {
             stoat.pending_replace.then_some(hints::ChordHints {
                 title: "replace",
                 rows: movement::REPLACE_HINTS,
@@ -3114,6 +3120,41 @@ mod lsp_filter_tests {
             (shows(&armed), shows(&resolved)),
             ((true, true), (false, false)),
             "the box shows while the chord waits and leaves with its char",
+        );
+    }
+
+    /// The mark actions have no default binding, so each one arms through
+    /// dispatch, as the command palette arms it.
+    #[test]
+    fn the_mark_chord_box_names_its_request() {
+        let mut h = TestHarness::with_size(150, 50);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SetMark);
+        let set = box_text(&mut h);
+        let rows: Vec<String> = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .map(|cache| cache.rows.iter().map(|row| row.action.clone()).collect())
+            .unwrap_or_default();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoMark);
+        let line = box_text(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoMarkExact);
+        let exact = box_text(&mut h);
+
+        assert_eq!(
+            (
+                rows,
+                has_box_titled(&set, "set mark"),
+                has_box_titled(&line, "goto mark line"),
+                has_box_titled(&exact, "goto mark"),
+            ),
+            (
+                ["buffer mark", "global mark"].map(String::from).to_vec(),
+                true,
+                true,
+                true,
+            ),
+            "the box lists the mark letters under the title of each request",
         );
     }
 
