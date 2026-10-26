@@ -586,8 +586,8 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
 /// change below, and `origin` goes to the jumplist, so the usual jump-back
 /// returns. A cursor that already sits on a change stays where it is, with no
 /// jump and no scroll. When the focused buffer has no changes of its own, the
-/// view instead crosses into the first changed file and lands on its first
-/// hunk.
+/// status row says so, and the view crosses into the next changed file in path
+/// order and lands on its first hunk.
 pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
     // `Some(true)` when the cursor moved onto a change, `Some(false)` when it
     // already sat on one, and `None` when the buffer has no change at all.
@@ -641,10 +641,19 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
     }
 
     // A buffer with no changes of its own has no hunk to land on, so cross into
-    // the first changed file. This makes `:diff-files` from a scratch or
+    // the next changed file. This makes `:diff-files` from a scratch or
     // unchanged buffer open a real diff instead of silently toggling empty
     // columns.
     if landing.is_none() {
+        let name = stoat
+            .focused_editor_ids()
+            .and_then(|(_, buffer_id)| stoat.active_workspace().buffers.path_for(buffer_id))
+            .and_then(Path::file_name)
+            .map_or_else(
+                || "the buffer".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        stoat.set_status(format!("{name} has no changes"));
         let _ = super::movement::goto_change(stoat, ChangeDir::Next);
     }
 }
@@ -1998,6 +2007,26 @@ mod tests {
             (review_cursor_row(&mut h), jump_count(&h)),
             (1, jumps_before + 1),
             "the cursor lands on the change, and the jump goes on the jumplist",
+        );
+    }
+
+    /// The crossing opens another file, so the status row names the file that
+    /// has nothing to show.
+    #[test]
+    fn a_diff_toggle_on_a_clean_file_says_so_and_crosses() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/repo", &[("b.txt", "1\n", "2\n")]);
+        h.fake_git().add_repo("/repo").head_file("a.txt", "same\n");
+        h.fake_fs().insert_file("/repo/a.txt", b"same\n");
+        h.open_file(Path::new("/repo/a.txt"));
+        run(&mut h, &stoat_action::DiffFiles { rev: None });
+
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                crate::test_harness::editor::focused_buffer_path(&h.stoat),
+            ),
+            (Some("a.txt has no changes"), PathBuf::from("/repo/b.txt")),
         );
     }
 
