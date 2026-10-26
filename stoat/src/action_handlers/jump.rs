@@ -48,7 +48,18 @@ pub(crate) fn push_entry(stoat: &mut Stoat, entry: JumpEntry) {
         FocusTarget::Dock(_) => return,
     };
     let buffers = &ws.buffers;
-    ws.panes.pane_mut(pane_id).jumplist.push(entry, buffers);
+    let buffer_id = entry.buffer_id;
+    let jumplist = &mut ws.panes.pane_mut(pane_id).jumplist;
+    let before = jumplist.generation();
+    jumplist.push(entry, buffers);
+    tracing::debug!(
+        target: "stoat::jumplist",
+        ?pane_id,
+        path = ?buffers.path_for(buffer_id),
+        before,
+        after = jumplist.generation(),
+        "jumplist push"
+    );
 }
 
 /// Record what a change walk landed on, with the jumplist's push count at that
@@ -66,10 +77,14 @@ pub(crate) fn record_change_landing(stoat: &mut Stoat) {
         FocusTarget::Dock(_) => return,
     };
     let pane = ws.panes.pane_mut(pane_id);
-    pane.change_landing = Some(ChangeLanding {
-        entry,
-        generation: pane.jumplist.generation(),
-    });
+    let generation = pane.jumplist.generation();
+    pane.change_landing = Some(ChangeLanding { entry, generation });
+    tracing::debug!(
+        target: "stoat::jumplist",
+        ?pane_id,
+        generation,
+        "change landing recorded"
+    );
 }
 
 /// Record `target` pane's outgoing editor position on its own jumplist before
@@ -193,8 +208,21 @@ pub(crate) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
             .cloned()
     };
     let Some(target) = target else {
+        tracing::debug!(
+            target: "stoat::jumplist",
+            count,
+            direction = "back",
+            "jumplist walk found no entry"
+        );
         return UpdateEffect::None;
     };
+    tracing::debug!(
+        target: "stoat::jumplist",
+        count,
+        direction = "back",
+        path = ?stoat.active_workspace().buffers.path_for(target.buffer_id),
+        "jumplist walk"
+    );
     apply_jump_entry(stoat, target);
     UpdateEffect::Redraw
 }
@@ -210,8 +238,21 @@ pub(crate) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
         ws.panes.pane_mut(pane_id).jumplist.forward(count).cloned()
     };
     let Some(target) = target else {
+        tracing::debug!(
+            target: "stoat::jumplist",
+            count,
+            direction = "forward",
+            "jumplist walk found no entry"
+        );
         return UpdateEffect::None;
     };
+    tracing::debug!(
+        target: "stoat::jumplist",
+        count,
+        direction = "forward",
+        path = ?stoat.active_workspace().buffers.path_for(target.buffer_id),
+        "jumplist walk"
+    );
     apply_jump_entry(stoat, target);
     UpdateEffect::Redraw
 }

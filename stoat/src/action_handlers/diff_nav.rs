@@ -26,7 +26,19 @@ use stoat_text::cursor_offset;
 /// jumplist instead, one position per press, until the cursor is on that
 /// change again.
 pub(crate) fn back(stoat: &mut Stoat) -> UpdateEffect {
-    if jumped_away(stoat) && matches!(jump::jump_backward(stoat), UpdateEffect::Redraw) {
+    let left = left_since_landing(stoat);
+    let on = on_landing(stoat);
+    let retrace = jumped_away(left, on);
+    tracing::debug!(
+        target: "stoat::change_walk",
+        left_since_landing = left,
+        on_landing = on,
+        landing_generation = ?landing(stoat).map(|(landing, _)| landing.generation),
+        list_generation = ?landing(stoat).map(|(_, list)| list),
+        route = if retrace { "retrace jumplist" } else { "walk changes" },
+        "diff back"
+    );
+    if retrace && matches!(jump::jump_backward(stoat), UpdateEffect::Redraw) {
         return UpdateEffect::Redraw;
     }
     movement::goto_change_impl(stoat, ChangeDir::Next, 1)
@@ -39,7 +51,17 @@ pub(crate) fn back(stoat: &mut Stoat) -> UpdateEffect {
 /// change, the way `GotoPrevChange` does, so a back to the change followed by a
 /// forward returns to where the jump went.
 pub(crate) fn forward(stoat: &mut Stoat) -> UpdateEffect {
-    if left_since_landing(stoat) && matches!(jump::jump_forward(stoat), UpdateEffect::Redraw) {
+    let left = left_since_landing(stoat);
+    tracing::debug!(
+        target: "stoat::change_walk",
+        left_since_landing = left,
+        on_landing = on_landing(stoat),
+        landing_generation = ?landing(stoat).map(|(landing, _)| landing.generation),
+        list_generation = ?landing(stoat).map(|(_, list)| list),
+        route = if left { "retrace jumplist" } else { "walk changes" },
+        "diff forward"
+    );
+    if left && matches!(jump::jump_forward(stoat), UpdateEffect::Redraw) {
         return UpdateEffect::Redraw;
     }
     movement::goto_change_impl(stoat, ChangeDir::Prev, 1)
@@ -67,8 +89,8 @@ fn left_since_landing(stoat: &Stoat) -> bool {
 ///
 /// A cursor moved by hand records no jump, so it still walks changes, and a
 /// history walk that arrives back on the change stops retracing.
-fn jumped_away(stoat: &mut Stoat) -> bool {
-    left_since_landing(stoat) && !on_landing(stoat)
+fn jumped_away(left_since_landing: bool, on_landing: bool) -> bool {
+    left_since_landing && !on_landing
 }
 
 /// Whether the cursor sits on a row of the change the last walk landed on.
