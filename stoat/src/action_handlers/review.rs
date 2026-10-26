@@ -625,6 +625,17 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
         Some(true)
     });
     let jumped = landing == Some(true);
+    tracing::debug!(
+        target: "stoat::change_walk",
+        landing = match landing {
+            Some(true) => "moved",
+            Some(false) => "held",
+            None => "none, crossing",
+        },
+        cursor_row = ?super::focused_editor_mut(stoat)
+            .map(|editor| crate::diff_changes::cursor_point(editor).row),
+        "diff toggle landing"
+    );
 
     // The jump only moves the selection. Pull the view onto it here so a
     // non-key dispatch (the `stoat review` startup, a mouse palette accept)

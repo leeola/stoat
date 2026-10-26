@@ -4050,6 +4050,13 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     // the session, so a plain diff pane open alongside a conflict still walks its
     // own hunks.
     if focused_editor_mut(stoat).is_some_and(|editor| editor.conflict_view.is_some()) {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            count,
+            route = "conflict chunk",
+            "change walk"
+        );
         super::conflict_view::conflict_step_chunk(
             stoat,
             matches!(dir, ChangeDir::Next),
@@ -4065,6 +4072,14 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             .active_workspace_mut()
             .add_diff_landing(buffer_id, DiffLanding::ChangeWalk { dir, count })
     {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            count,
+            ?buffer_id,
+            route = "deferred until hunks land",
+            "change walk"
+        );
         return UpdateEffect::Redraw;
     }
 
@@ -4086,11 +4101,26 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
         && focused_editor_mut(stoat).is_none()
     {
         let status = super::diff_changes::no_target_status(stoat.active_workspace());
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            count,
+            status,
+            route = "empty changes view",
+            "change walk"
+        );
         stoat.set_status(status);
         return UpdateEffect::Redraw;
     }
 
     let Some(editor) = focused_editor_mut(stoat) else {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            count,
+            route = "no focused editor",
+            "change walk"
+        );
         return UpdateEffect::None;
     };
     let source_diff_view = editor.diff_view;
@@ -4124,10 +4154,29 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     // leaves a gap, so the list is not indexed by position.
     landings.sort_unstable_by_key(|(id, ..)| *id);
 
+    // Each branch below names its own route. The branch tests read the
+    // workspace, and before the branch `editor` still holds its borrow for the
+    // in-file landing, so the route is not known up front.
+    let log_route = |route: &str| {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            count,
+            path = ?current_path,
+            stops = hunk_rows.len(),
+            diff_walk,
+            landed = landings.len(),
+            rows = ?landings.last().map(|(.., rows)| rows),
+            route,
+            "change walk"
+        );
+    };
+
     if landings.is_empty() {
         // A changes view holds the changed files as its excerpts, so the walk
         // goes on into the next excerpt rather than opening the next file.
         if stoat.active_workspace().focused_diff_changes_id().is_some() {
+            log_route("excerpt hop");
             return super::diff_changes::hop_excerpt(stoat, dir);
         }
         // The repository's changed files are no part of a comparison of two
@@ -4136,9 +4185,11 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             .as_deref()
             .is_some_and(|path| stoat.active_workspace().pair_for(path).is_some())
         {
+            log_route("pair end");
             stoat.set_status("no more changes");
             return UpdateEffect::Redraw;
         }
+        log_route("file hop armed");
         return goto_change_across_files(
             stoat,
             dir,
@@ -4148,6 +4199,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             origin,
         );
     }
+    log_route("in-file stop");
 
     editor
         .selections
@@ -4563,6 +4615,13 @@ fn goto_change_across_files(
     let fs_host = stoat.fs_host.clone();
     let base = stoat.active_workspace().diff_base().cloned();
     let wrap = stoat.change_walk_wrap;
+    tracing::debug!(
+        target: "stoat::change_walk",
+        ?dir,
+        wrap,
+        from = ?current_path,
+        "file hop armed"
+    );
     // The hop reads the tally the workspace already holds rather than walking
     // the repository again, which is what every `n` across a file used to cost.
     let tally = stoat
@@ -4915,10 +4974,23 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
             wrapped,
         } => (path, line, rows, wrapped),
         ChangedFileJump::NoMoreChanges => {
+            tracing::debug!(
+                target: "stoat::change_walk",
+                dir = ?pending.dir,
+                "file hop found no more changes"
+            );
             stoat.set_status("no more changes");
             return true;
         },
     };
+    tracing::debug!(
+        target: "stoat::change_walk",
+        dir = ?pending.dir,
+        path = %path.display(),
+        line,
+        wrapped,
+        "file hop scan landed"
+    );
 
     let focused_pane = stoat.active_workspace().panes.focus();
     if crate::buffer_lifecycle::open_file_in_pane(stoat, focused_pane, &path, OpenOrigin::Visited)
@@ -4997,6 +5069,18 @@ pub(super) fn land_file_hop(
                 (offset, rows)
             },
         };
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            stop = match (stop, dir) {
+                (None, _) => "fallback",
+                (Some(_), ChangeDir::Next) => "first",
+                (Some(_), ChangeDir::Prev) => "last",
+            },
+            ?rows,
+            wrapped,
+            "hop landed"
+        );
         editor.selections.transform(buffer_snapshot, |sel| {
             land_block_cursor(
                 sel.id,

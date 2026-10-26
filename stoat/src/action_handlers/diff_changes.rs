@@ -302,9 +302,24 @@ pub(super) fn hop_excerpt(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
         start.map(|&start| (index, start))
     });
     let Some((index, start)) = target else {
+        tracing::debug!(
+            target: "stoat::change_walk",
+            ?dir,
+            from = ?state.focused_excerpt().map(|excerpt| &excerpt.rel_path),
+            route = "no more changes",
+            "excerpt hop"
+        );
         stoat.set_status("no more changes");
         return UpdateEffect::Redraw;
     };
+    tracing::debug!(
+        target: "stoat::change_walk",
+        ?dir,
+        from = ?state.focused_excerpt().map(|excerpt| &excerpt.rel_path),
+        to = %state.excerpts[index].rel_path,
+        row = start,
+        "excerpt hop"
+    );
     state.focused = index;
 
     movement::land_file_hop(stoat, dir, origin, false, (start, start..start + 1));
