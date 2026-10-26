@@ -4080,6 +4080,16 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             .map(Path::to_path_buf)
     });
     let diff_walk = walks_diff_view(stoat);
+
+    // A changes view with no focused editor holds no excerpt.
+    if stoat.active_workspace().focused_diff_changes_id().is_some()
+        && focused_editor_mut(stoat).is_none()
+    {
+        let status = super::diff_changes::no_target_status(stoat.active_workspace());
+        stoat.set_status(status);
+        return UpdateEffect::Redraw;
+    }
+
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };

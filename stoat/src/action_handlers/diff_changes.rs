@@ -141,16 +141,18 @@ pub(crate) fn close_diff_changes_for_open(
 /// The file opens in the pane after the changes view comes down and puts back
 /// the view it covered, over the excerpt's own buffer, so an edit made in the
 /// excerpt and its undo history carry over. The stack parks rather than
-/// closing, so the flip back reuses its excerpts. A stack with no folded
-/// excerpt in focus, as before the first diff map lands, leaves the changes
-/// view open and says so in the status row.
+/// closing, so the flip back reuses its excerpts.
+///
+/// A stack with no folded excerpt in focus leaves the changes view open, and
+/// [`no_target_status`] says why in the status row.
 ///
 /// The cursor's line keeps the screen row it held in the stack, where the file
 /// has rows enough above and below it. A cursor off the stack's painted rows
 /// opens with its line centered.
 pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     let Some(((rel_path, point), workdir)) = focused_target(stoat).zip(repo_workdir(stoat)) else {
-        stoat.set_status("no change under the cursor");
+        let status = no_target_status(stoat.active_workspace());
+        stoat.set_status(status);
         return UpdateEffect::Redraw;
     };
     let screen_row = stack_screen_row(stoat);
@@ -543,6 +545,20 @@ fn focused_target(stoat: &mut Stoat) -> Option<(String, Point)> {
     Some((rel_path, diff_changes::cursor_point(editor)))
 }
 
+/// The status row's answer to a key that finds no folded excerpt in focus on
+/// the focused changes view.
+///
+/// The answer agrees with the pane. "no changes" needs an empty stack over a
+/// landed repository tally, where the pane reads "no changes" too. Any other
+/// stack is still loading. An empty pane reads "building changes..." until the
+/// tally lands, and an excerpt shows no rows until its diff map folds.
+pub(super) fn no_target_status(ws: &Workspace) -> &'static str {
+    match ws.focused_diff_changes() {
+        Some(state) if state.excerpts.is_empty() && !ws.tally_pending() => "no changes",
+        _ => "changes still loading",
+    }
+}
+
 /// The row of the view that the focused changes view's cursor sits on.
 ///
 /// `None` when the cursor lies off the rows the stack's last paint showed.
@@ -846,6 +862,16 @@ mod tests {
         h
     }
 
+    /// A settled changes view over a repository with no changed file.
+    fn empty_stack() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git().add_repo(PathBuf::from("/repo"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h
+    }
+
     /// Two changed files whose one change sits on the last of nine lines, so
     /// the lines above the change lie outside its context.
     fn deep_files() -> TestHarness {
@@ -906,6 +932,22 @@ mod tests {
 
     fn at(rel_path: &str, row: u32) -> (String, u32) {
         (rel_path.to_string(), row)
+    }
+
+    /// The view and the status row after each of `actions`, each one
+    /// dispatched over a cleared status row.
+    fn answers(
+        h: &mut TestHarness,
+        actions: &[&dyn Action],
+    ) -> Vec<(Option<&'static str>, Option<String>)> {
+        actions
+            .iter()
+            .map(|&action| {
+                h.stoat.pending_message = None;
+                dispatch(&mut h.stoat, action);
+                (h.stoat.current_view(), h.stoat.pending_message.clone())
+            })
+            .collect()
     }
 
     /// The file of the focused editor.
@@ -1278,14 +1320,27 @@ mod tests {
     /// keys find nothing to act on.
     #[test]
     fn an_empty_stack_has_no_focused_editor() {
-        let mut h = TestHarness::with_size(100, 24);
-        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
-        h.fake_git().add_repo(PathBuf::from("/repo"));
-        h.cover_with_diff_changes(false);
-        h.settle();
+        let h = empty_stack();
         assert_eq!(
             (h.stoat.current_view(), h.stoat.focused_editor_ids()),
             (Some("diff_changes"), None),
+        );
+    }
+
+    #[test]
+    fn an_empty_stack_says_no_changes_to_a_hop_and_an_open() {
+        let mut h = empty_stack();
+        assert_eq!(
+            answers(
+                &mut h,
+                &[
+                    &stoat_action::GotoNextChange,
+                    &stoat_action::GotoPrevChange,
+                    &stoat_action::DiffChangesOpen,
+                ],
+            ),
+            vec![(Some("diff_changes"), Some("no changes".to_owned())); 3],
+            "each key answers the empty stack and keeps the changes view"
         );
     }
 
@@ -1700,7 +1755,49 @@ mod tests {
         dispatch(&mut h.stoat, &stoat_action::DiffChangesOpen);
         assert_eq!(
             (h.stoat.current_view(), h.stoat.pending_message.as_deref()),
-            (Some("diff_changes"), Some("no change under the cursor")),
+            (Some("diff_changes"), Some("changes still loading")),
+        );
+    }
+
+    /// The pane reads "building changes..." until the tally lands, so a hop
+    /// before then finds the changes loading, not absent.
+    #[test]
+    fn a_hop_before_the_first_excerpt_says_changes_still_loading() {
+        let mut h = deep_files();
+        h.cover_with_diff_changes(false);
+
+        let loading = (
+            Some("diff_changes"),
+            Some("changes still loading".to_owned()),
+        );
+        assert_eq!(
+            answers(
+                &mut h,
+                &[&stoat_action::GotoNextChange, &stoat_action::GotoPrevChange],
+            ),
+            vec![loading; 2],
+        );
+    }
+
+    #[test]
+    fn an_open_on_an_unfolded_excerpt_says_changes_still_loading() {
+        let mut h = deep_files();
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let state = h
+            .stoat
+            .active_workspace_mut()
+            .focused_diff_changes_mut()
+            .expect("a changes view");
+        state.excerpts[state.focused].folded_version = None;
+
+        let loading = (
+            Some("diff_changes"),
+            Some("changes still loading".to_owned()),
+        );
+        assert_eq!(
+            answers(&mut h, &[&stoat_action::DiffChangesOpen]),
+            [loading]
         );
     }
 
