@@ -35,11 +35,11 @@ pub(crate) const SURROUND_ADD_HINTS: &[(&str, &str)] = &[
 /// The chars that name an existing pair, each with the label its hint row
 /// reads.
 ///
-/// An armed `m r` chord takes one as its first char. `m` names the nearest
-/// pair of any type. Every other char names its pair through
-/// [`surround_pair_for`], so a quote names a pair of that quote. As in
-/// [`SURROUND_ADD_HINTS`], the box leaves out the rarer pairs in
-/// [`BRACKET_PAIRS`].
+/// An armed `m r` chord takes one as its first char, and an armed `m d`
+/// chord takes one as its only char. `m` names the nearest pair of any type.
+/// Every other char names its pair through [`surround_pair_for`], so a quote
+/// names a pair of that quote. As in [`SURROUND_ADD_HINTS`], the box leaves
+/// out the rarer pairs in [`BRACKET_PAIRS`].
 pub(crate) const SURROUND_FROM_HINTS: &[(&str, &str)] = &[
     ("m", "closest pair"),
     ("(", "pair"),

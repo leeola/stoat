@@ -2208,6 +2208,12 @@ pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
         })
         .or_else(|| stoat.pending_surround_replace.hints())
         .or_else(|| {
+            stoat.pending_surround_delete.then_some(hints::ChordHints {
+                title: "delete pair",
+                rows: surround::SURROUND_FROM_HINTS,
+            })
+        })
+        .or_else(|| {
             stoat
                 .pending_textobject_select
                 .map(|(mode, _)| hints::ChordHints {
@@ -2985,6 +2991,21 @@ mod lsp_filter_tests {
                 (false, false),
             ),
             "each stage shows its own box, and the box leaves with the second char",
+        );
+    }
+
+    #[test]
+    fn the_surround_delete_chord_box_lists_the_pair_chars() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = chord_rows(&mut h, "m d");
+        h.type_keys("m d");
+        let text = box_text(&mut h);
+
+        let labels = ["closest pair", "pair"];
+        assert_eq!(
+            (rows, text.contains("delete pair")),
+            (labels.map(String::from).to_vec(), true),
+            "the pair chars fold into one row under the box title",
         );
     }
 
