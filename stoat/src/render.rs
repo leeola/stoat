@@ -50,7 +50,7 @@ use crate::{
     action_handlers::{
         movement,
         search::{self, StatusPrompt},
-        surround, textobject,
+        surround, textobject, yank,
     },
     apc_emit,
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
@@ -2219,6 +2219,14 @@ pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
                 rows: surround::SURROUND_ADD_HINTS,
             })
         })
+        .or_else(|| {
+            (stoat.pending_register_select || stoat.pending_insert_register).then_some(
+                hints::ChordHints {
+                    title: "register",
+                    rows: yank::REGISTER_HINTS,
+                },
+            )
+        })
         .or_else(|| stoat.pending_surround_replace.hints())
         .or_else(|| {
             stoat.pending_surround_delete.then_some(hints::ChordHints {
@@ -3056,6 +3064,56 @@ mod lsp_filter_tests {
             ),
             (labels.map(String::from).to_vec(), true, true, false),
             "each find kind titles the box with its own direction",
+        );
+    }
+
+    /// Whether `text` holds the top border of a box titled `title`, which a
+    /// row label holding the same word never matches.
+    fn has_box_titled(text: &str, title: &str) -> bool {
+        text.contains(&format!("\u{250c} {title} \u{2500}"))
+    }
+
+    #[test]
+    fn the_register_chord_box_lists_the_special_registers() {
+        let mut h = TestHarness::with_size(150, 50);
+        let rows = chord_rows(&mut h, "\"");
+        h.type_keys("\"");
+        let text = box_text(&mut h);
+
+        let labels = [
+            "unnamed",
+            "system clipboard",
+            "primary clipboard",
+            "search",
+            "blackhole",
+            "selection index",
+            "selection contents",
+            "document path",
+            "command",
+            "named register",
+        ];
+        assert_eq!(
+            (rows, has_box_titled(&text, "register")),
+            (labels.map(String::from).to_vec(), true),
+            "the box lists each special register by char under its title",
+        );
+    }
+
+    /// The insert-mode chord waits in insert mode, where no keymap box shows,
+    /// and names its register through the same table.
+    #[test]
+    fn the_insert_register_chord_shows_the_same_box() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.type_keys("i ctrl-r");
+        let armed = box_text(&mut h);
+        h.type_keys("\"");
+        let resolved = box_text(&mut h);
+
+        let shows = |text: &str| (has_box_titled(text, "register"), text.contains("blackhole"));
+        assert_eq!(
+            (shows(&armed), shows(&resolved)),
+            ((true, true), (false, false)),
+            "the box shows while the chord waits and leaves with its char",
         );
     }
 

@@ -113,6 +113,24 @@ pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
     stoat.selected_register = Some(register_for_char(ch));
 }
 
+/// The chars a register chord takes, each with the label its hint row reads.
+///
+/// The rows follow the arms of [`register_for_char`]. `any` stands for every
+/// other char, each of which names a register of its own. The `SelectRegister`
+/// chord and the insert-mode `InsertRegister` chord share the table.
+pub(crate) const REGISTER_HINTS: &[(&str, &str)] = &[
+    ("\"", "unnamed"),
+    ("+", "system clipboard"),
+    ("*", "primary clipboard"),
+    ("/", "search"),
+    ("_", "blackhole"),
+    ("#", "selection index"),
+    (".", "selection contents"),
+    ("%", "document path"),
+    (":", "command"),
+    ("any", "named register"),
+];
+
 /// The register a consumed-char keypress names.
 ///
 /// Backs the `SelectRegister` chord and the pending
