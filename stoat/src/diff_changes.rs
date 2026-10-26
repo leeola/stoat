@@ -633,6 +633,12 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
     let (kept, gone): (Vec<Excerpt>, Vec<Excerpt>) = mem::take(&mut state.excerpts)
         .into_iter()
         .partition(|excerpt| listed.contains_key(&excerpt.rel_path));
+    let held_before = kept.len() + gone.len();
+    let kept_count = kept.len();
+    let gone_paths: Vec<String> = gone
+        .iter()
+        .map(|excerpt| excerpt.rel_path.clone())
+        .collect();
     state.excerpts = kept;
     release_excerpts(stoat, gone);
 
@@ -648,12 +654,16 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
             .filter(|(rel_path, _)| !held.iter().any(|excerpt| &excerpt.rel_path == *rel_path))
             .collect()
     };
+    let mut added_paths = Vec::new();
     for (rel_path, path) in missing {
         let Some(excerpt) = open_excerpt(stoat, id, rel_path.clone(), path) else {
             continue;
         };
         match stoat.active_workspace_mut().diff_changes_views.get_mut(id) {
-            Some(state) => state.excerpts.push(excerpt),
+            Some(state) => {
+                state.excerpts.push(excerpt);
+                added_paths.push(rel_path);
+            },
             None => drop_excerpt(stoat, excerpt),
         }
     }
@@ -663,6 +673,7 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
     };
     state.excerpts.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     state.focused = focused_path
+        .as_deref()
         .and_then(|path| {
             state
                 .excerpts
@@ -671,6 +682,20 @@ fn sync_excerpts(stoat: &mut Stoat, id: DiffChangesId, listed: &BTreeMap<String,
         })
         .unwrap_or(state.focused)
         .min(state.excerpts.len().saturating_sub(1));
+
+    tracing::debug!(
+        target: "stoat::diff_changes",
+        kept = kept_count,
+        gone = ?gone_paths,
+        added = ?added_paths,
+        focused_before = ?focused_path,
+        focused_after = ?state.focused_excerpt().map(|excerpt| &excerpt.rel_path),
+        excerpts = state.excerpts.len(),
+        "changes view resynced"
+    );
+    if held_before > 0 && state.excerpts.is_empty() {
+        tracing::info!(target: "stoat::diff_changes", "changes view stack is empty");
+    }
 }
 
 /// An excerpt of changes view `id` over the file at `path`, in the diff view,
@@ -758,6 +783,11 @@ pub(crate) fn adopt_excerpt(
             top: 0,
             owns_buffer: true,
         },
+    );
+    tracing::debug!(
+        target: "stoat::diff_changes",
+        rel_path = %state.excerpts[at].rel_path,
+        "excerpt adopted"
     );
     state.focused = focused_path
         .and_then(|path| {

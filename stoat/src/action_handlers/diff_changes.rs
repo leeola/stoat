@@ -55,6 +55,7 @@ pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     let (covered, covered_diff) = (state.covered, state.covered_diff);
     diff_changes::release_excerpts(stoat, state.excerpts);
     put_back_covered(stoat, focus, covered, covered_diff);
+    tracing::info!(target: "stoat::review", "changes view closed");
     UpdateEffect::Redraw
 }
 
@@ -79,6 +80,10 @@ fn park_diff_changes(stoat: &mut Stoat) {
         diff_changes::release_excerpts(stoat, displaced.excerpts);
     }
     put_back_covered(stoat, focus, covered, false);
+    tracing::info!(
+        target: "stoat::review",
+        "changes view parked for the per-file diff"
+    );
 }
 
 /// Show `covered` in pane `focus` once its changes view is gone, in normal
@@ -133,6 +138,7 @@ pub(crate) fn close_diff_changes_for_open(
         editor.pinned = false;
     }
     ws.panes.pane_mut(pane_id).view = view;
+    tracing::info!(target: "stoat::review", "changes view closed for a file open");
 }
 
 /// Park the changes view and open its focused excerpt's file in the per-file
@@ -155,6 +161,11 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
         stoat.set_status(status);
         return UpdateEffect::Redraw;
     };
+    tracing::info!(
+        target: "stoat::review",
+        path = %rel_path,
+        "changes view flips to the per-file diff"
+    );
     let screen_row = stack_screen_row(stoat);
 
     if let Some(state) = stoat.active_workspace_mut().focused_diff_changes_mut() {
@@ -517,6 +528,7 @@ fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     ws.panes.widen(focus);
 
     diff_changes::pump_diff_changes_stack(stoat);
+    tracing::info!(target: "stoat::review", covered_diff, "changes view opened");
     UpdateEffect::Redraw
 }
 
