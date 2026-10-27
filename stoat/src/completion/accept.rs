@@ -20,8 +20,8 @@ use crate::{
     lsp::stamp::DocumentStamp,
     pane::{FocusTarget, View},
 };
-use std::{collections::HashMap, ops::Range, path::Path, time::Duration};
-use stoat_text::{Anchor, Bias, Rope, Selection, SelectionGoal};
+use std::{ops::Range, path::Path, time::Duration};
+use stoat_text::{Anchor, Bias, Rope, Selection};
 
 /// The `additionalTextEdits` a `completionItem/resolve` returned for an
 /// accepted completion, plus the buffer they apply to. Carried from the
@@ -55,14 +55,19 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
+    let editor_id = {
+        let ws = stoat.active_workspace();
+        let FocusTarget::SplitPane = ws.focus else {
+            return UpdateEffect::None;
+        };
+        let View::Editor(editor_id) = ws.panes.pane(ws.panes.focus()).view else {
+            return UpdateEffect::None;
+        };
+        editor_id
+    };
+    let tails = stoat.editor_selection_tails(editor_id);
+
     let ws = stoat.active_workspace_mut();
-    let FocusTarget::SplitPane = ws.focus else {
-        return UpdateEffect::None;
-    };
-    let pane_id = ws.panes.focus();
-    let View::Editor(editor_id) = ws.panes.pane(pane_id).view else {
-        return UpdateEffect::None;
-    };
     let editor = match ws.editors.get_mut(editor_id) {
         Some(e) => e,
         None => return UpdateEffect::None,
@@ -100,29 +105,29 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
         inserted_text,
     );
 
-    let new_display = editor.display_map.snapshot();
-    let new_buf = new_display.buffer_snapshot();
-
     let active_snippet = if let Some(rendered) = &snippet_rendered {
-        let mut starts: Vec<usize> = copies.iter().map(|(start, _)| *start).collect();
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let mut starts: Vec<usize> = copies.iter().map(|(_, start, _)| *start).collect();
         starts.sort_unstable();
         let (selections, active) = crate::completion::snippet::install(rendered, &starts, new_buf);
         editor.selections.replace_with(selections, new_buf);
         active
     } else {
-        let landings: HashMap<usize, usize> = copies
+        // Each cursor lands past its own copy, and its tail maps through every
+        // copy, so a selection the reader typed into survives the accept.
+        let landings: Vec<(usize, usize)> = copies
             .iter()
-            .flat_map(|(start, ids)| ids.iter().map(move |&id| (id, start + inserted_text.len())))
+            .flat_map(|(_, start, ids)| {
+                ids.iter().map(move |&id| (id, start + inserted_text.len()))
+            })
             .collect();
-        editor.selections.transform(new_buf, |s| {
-            crate::selection::forward_block_cursor(
-                s.id,
-                landings[&s.id],
-                SelectionGoal::None,
-                new_buf.rope(),
-                new_buf,
-            )
-        });
+        let written: Vec<(Range<usize>, usize)> = copies
+            .iter()
+            .rev()
+            .map(|(range, _, _)| (range.clone(), inserted_text.len()))
+            .collect();
+        stoat.land_cursors_after_insert(editor_id, landings, &tails, &written);
         None
     };
 
@@ -136,18 +141,19 @@ pub(crate) fn execute(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Replace each cursor's copy of the accepted text with `text` in one batch
-/// edit, and answer where each copy starts after the edit, with the ids of the
-/// selections that land in it.
+/// edit, and answer each copy's replaced range, where the copy starts after the
+/// edit, and the ids of the selections that land in it.
 ///
 /// `edit_range` is the range of the `newest` selection, which the request
-/// measured from.
+/// measured from. The copies come sorted by start descending, as
+/// [`replace_ranges`] answers them.
 fn insert_at_every_cursor(
     buffer: &mut TextBuffer,
     selections: &[Selection<Anchor>],
     newest: usize,
     edit_range: Range<usize>,
     text: &str,
-) -> Vec<(usize, Vec<usize>)> {
+) -> Vec<(Range<usize>, usize, Vec<usize>)> {
     let cursors: Vec<(usize, usize)> = selections
         .iter()
         .map(|sel| {
@@ -176,7 +182,7 @@ fn insert_at_every_cursor(
     groups
         .into_iter()
         .zip(&starts)
-        .map(|((_, ids), start)| (buffer.resolve_anchor(start), ids))
+        .map(|((range, ids), start)| (range, buffer.resolve_anchor(start), ids))
         .collect()
 }
 
@@ -356,7 +362,7 @@ mod tests {
     };
     use std::{ops::Range, path::PathBuf};
     use stoat_action::AcceptCompletion;
-    use stoat_text::Anchor;
+    use stoat_text::{Anchor, SelectionGoal};
 
     fn open_scratch(h: &mut TestHarness, contents: &str) -> PathBuf {
         open_scratch_at(h, "/ws/buf.rs", contents)
@@ -418,6 +424,35 @@ mod tests {
         assert_eq!(cursor_offset(&mut h), 6);
         assert!(h.stoat.pending_completion.is_none());
         assert!(!h.stoat.pending_completion_request.is_pending());
+    }
+
+    #[test]
+    fn accept_keeps_a_selection_the_reader_typed_into() {
+        let mut h = TestHarness::default();
+        let path = open_scratch(&mut h, "bar baz\n");
+        h.type_keys("w i");
+        h.type_text("fo");
+        let items = vec![CompletionItem {
+            label: "foo".into(),
+            source: CompletionSource::Word,
+            kind: None,
+            detail: None,
+            replace_range: anchors(&h, 0..2),
+            insert_text: "foo".into(),
+            is_snippet: false,
+            documentation: None,
+            lsp_item: None,
+            server: None,
+        }];
+        install_popup(&mut h, items, 0..2);
+
+        dispatch(&mut h.stoat, &AcceptCompletion);
+
+        assert_eq!(
+            (h.buffer_text_at(&path), h.selection_spans()),
+            ("foobar baz\n".to_string(), vec![(3, 7, true)]),
+            "the caret lands past the completion and the tail past the text it moved",
+        );
     }
 
     #[test]

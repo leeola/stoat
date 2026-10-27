@@ -48,7 +48,7 @@ use crate::{
         BlankedBuffer, Hold, PRIMARY_MODES,
     },
     run::{CommandMark, PtyNotification, RunId},
-    selection::merge_overlapping_spans,
+    selection::{merge_overlapping_spans, SpanLanding},
     session_log::SessionLog,
     ssh,
     symbol_finder::SymbolFinder,
@@ -7359,6 +7359,7 @@ impl Stoat {
             return;
         }
 
+        let tails = self.editor_selection_tails(editor_id);
         let ws = self.active_workspace_mut();
         let Some(buffer) = ws.buffers.get(buffer_id) else {
             return;
@@ -7377,11 +7378,15 @@ impl Stoat {
         // so its text ends at offset + (k + 1) * text.len(). Shifting in place
         // keeps that arithmetic on the offset ordering it depends on.
         let text_len = text.len();
+        let written: Vec<(Range<usize>, usize)> = inserts
+            .iter()
+            .map(|&(_, offset)| (offset..offset, text_len))
+            .collect();
         for (k, (_, offset)) in inserts.iter_mut().enumerate() {
             *offset += (k + 1) * text_len;
         }
 
-        self.land_cursors_after_insert(editor_id, inserts);
+        self.land_cursors_after_insert(editor_id, inserts, &tails, &written);
     }
 
     /// Insert one typed character at every cursor, completing or stepping over
@@ -7592,19 +7597,93 @@ impl Stoat {
         cursors
     }
 
-    /// Put each selection back as a block cursor at the offset `landings` gives
-    /// for its id, leaving any selection the list does not name alone.
+    /// Every selection in `editor_id` as `(selection id, tail offset, reversed,
+    /// empty)`, sorted by id. Empty when the editor is gone.
+    ///
+    /// An insert-mode edit reads these before it writes, and
+    /// [`Self::land_cursors_after_insert`] maps each tail through the edit. One
+    /// walk for every endpoint, as in [`Self::editor_cursor_offsets`].
+    pub(crate) fn editor_selection_tails(
+        &mut self,
+        editor_id: EditorId,
+    ) -> Vec<(usize, usize, bool, bool)> {
+        let ws = self.active_workspace_mut();
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            return Vec::new();
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+
+        let ends = {
+            let anchors: Vec<Anchor> = editor
+                .selections
+                .all_anchors()
+                .iter()
+                .flat_map(|sel| [sel.tail(), sel.head()])
+                .collect();
+            buf_snapshot.resolve_anchors_batch(&anchors)
+        };
+
+        let mut tails: Vec<(usize, usize, bool, bool)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .zip(ends.as_chunks::<2>().0.iter())
+            .map(|(sel, ends)| (sel.id, ends[0], sel.reversed, ends[0] == ends[1]))
+            .collect();
+        tails.sort_unstable_by_key(|&(id, ..)| id);
+        tails
+    }
+
+    /// Land each selection that `landings` names with its head on the caret the
+    /// list gives for its id, leaving any selection the list does not name
+    /// alone.
+    ///
+    /// The tail maps through `edits`, the batch's ascending `(replaced range,
+    /// text length)` pairs in offsets from before the edit, starting from
+    /// `tails` as [`Self::editor_selection_tails`] read them before the write.
+    /// A forward or empty selection's tail moves past text written at it, and a
+    /// reversed one's stays before it, as Helix maps a range through a change.
+    /// So a selection survives typing, and a one-cell block cursor lands as a
+    /// one-cell block on the caret.
     ///
     /// `landings` is re-keyed by id here rather than by the caller, which holds
     /// it in offset order to compute the shifts. A binary search over a list
     /// already in hand beats hashing a fresh map into existence for every typed
     /// character.
-    fn land_cursors_after_insert(
+    pub(crate) fn land_cursors_after_insert(
         &mut self,
         editor_id: EditorId,
         mut landings: Vec<(usize, usize)>,
+        tails: &[(usize, usize, bool, bool)],
+        edits: &[(Range<usize>, usize)],
     ) {
         landings.sort_unstable_by_key(|(id, _)| *id);
+
+        // A tail maps through what the batch took out, then through what it
+        // wrote. Each text lands at its range's start once the deletions before
+        // that range are gone.
+        let deletions: Vec<(usize, usize)> = edits
+            .iter()
+            .filter(|(range, _)| !range.is_empty())
+            .map(|(range, _)| (range.start, range.end))
+            .collect();
+        let mut deleted_before = Vec::with_capacity(deletions.len() + 1);
+        let mut running = 0;
+        for (start, end) in &deletions {
+            deleted_before.push(running);
+            running += end - start;
+        }
+        deleted_before.push(running);
+        let mut taken = 0;
+        let inserts: Vec<(usize, usize)> = edits
+            .iter()
+            .map(|(range, len)| {
+                let at = range.start - taken;
+                taken += range.len();
+                (at, *len)
+            })
+            .collect();
 
         let ws = self.active_workspace_mut();
         let Some(editor) = ws.editors.get_mut(editor_id) else {
@@ -7612,11 +7691,43 @@ impl Stoat {
         };
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        let landings: Vec<(usize, usize, SelectionGoal)> = landings
-            .into_iter()
-            .map(|(id, offset)| (id, offset, SelectionGoal::None))
+        let forwards = {
+            let carets: Vec<usize> = landings.iter().map(|&(_, caret)| caret).collect();
+            stoat_text::next_char_boundaries_batch(new_buf.rope(), &carets)
+        };
+
+        let spans: Vec<SpanLanding> = landings
+            .iter()
+            .zip(forwards)
+            .map(|(&(id, caret), forward)| {
+                let tail = tails
+                    .binary_search_by_key(&id, |&(id, ..)| id)
+                    .ok()
+                    .map(|found| {
+                        let (_, tail, reversed, empty) = tails[found];
+                        let tail = Self::offset_after_deletions(tail, &deletions, &deleted_before);
+                        let after = !reversed || empty;
+                        let tail = stoat_text::map_offset_through_inserts(tail, &inserts, after);
+                        (tail, reversed)
+                    });
+                // The forward span ends one cell past the caret, which is where
+                // the block cursor sits. At the rope end there is no next cell,
+                // so `forward` is the caret itself and the span stays empty.
+                let (start, end, reversed) = match tail {
+                    Some((tail, true)) if tail > caret => (caret, tail, true),
+                    Some((tail, _)) => (tail.min(caret), forward, false),
+                    None => (caret, forward, false),
+                };
+                SpanLanding {
+                    id,
+                    start,
+                    end,
+                    reversed,
+                    goal: SelectionGoal::None,
+                }
+            })
             .collect();
-        editor.selections.land_block_cursors(&landings, new_buf);
+        editor.selections.replace_from_offsets(&spans, new_buf);
     }
 
     /// Insert one indent step at every cursor.
@@ -7706,6 +7817,7 @@ impl Stoat {
             return;
         }
 
+        let tails = self.editor_selection_tails(editor_id);
         let ws = self.active_workspace_mut();
         let Some(buffer) = ws.buffers.get(buffer_id) else {
             return;
@@ -7732,8 +7844,12 @@ impl Stoat {
                 (edit.id, landing)
             })
             .collect();
+        let written: Vec<(Range<usize>, usize)> = insertions
+            .iter()
+            .map(|edit| (edit.range.clone(), edit.text.len()))
+            .collect();
 
-        self.land_cursors_after_insert(editor_id, landings);
+        self.land_cursors_after_insert(editor_id, landings, &tails, &written);
     }
 
     /// Byte offset of the focused editor's newest cursor.

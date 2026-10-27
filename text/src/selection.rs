@@ -237,6 +237,22 @@ pub fn cursor_offsets(rope: &Rope, selections: &[(usize, usize)]) -> Vec<usize> 
     cursors
 }
 
+/// Where `offset` lands once `inserts` are written, each an ascending
+/// `(at, len)` insertion of `len` bytes at `at`.
+///
+/// An insertion before `offset` pushes it along. An insertion at `offset`
+/// pushes it only when `after` is true, which is what separates an anchor that
+/// sticks to the text after it from one that sticks to the text before it. An
+/// insertion past `offset` leaves it alone.
+pub fn map_offset_through_inserts(offset: usize, inserts: &[(usize, usize)], after: bool) -> usize {
+    let pushed: usize = inserts
+        .iter()
+        .take_while(|&&(at, _)| at < offset || (after && at == offset))
+        .map(|&(_, len)| len)
+        .sum();
+    offset + pushed
+}
+
 /// Offset one grapheme cluster past `offset`, or `offset` itself at the rope
 /// end.
 ///
@@ -293,6 +309,26 @@ mod tests {
             reversed,
             goal: SelectionGoal::None,
         }
+    }
+
+    #[test]
+    fn an_offset_moves_past_the_inserts_that_land_before_it() {
+        let cases = [
+            (5, vec![(2, 3)], false),
+            (5, vec![(5, 3)], true),
+            (5, vec![(5, 3)], false),
+            (5, vec![(7, 3)], true),
+            (5, vec![(1, 2), (5, 4)], true),
+        ];
+        let mapped: Vec<usize> = cases
+            .iter()
+            .map(|(offset, inserts, after)| map_offset_through_inserts(*offset, inserts, *after))
+            .collect();
+        assert_eq!(
+            mapped,
+            [8, 8, 5, 5, 11],
+            "before, at after, at before, past, then two inserts"
+        );
     }
 
     #[test]

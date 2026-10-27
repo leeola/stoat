@@ -40,8 +40,8 @@ pub use rope::{
     FindIter, Lines, MeasuredChunk, MeasuredChunksInRange, ReversedCharsAt, Rope, TextSummary,
 };
 pub use selection::{
-    cursor_offset, cursor_offsets, next_char_boundaries_batch, next_char_boundary,
-    prev_char_boundary, Selection, SelectionGoal,
+    cursor_offset, cursor_offsets, map_offset_through_inserts, next_char_boundaries_batch,
+    next_char_boundary, prev_char_boundary, Selection, SelectionGoal,
 };
 pub use sum_tree::{
     Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Edit, FilterCursor, Item, Iter,

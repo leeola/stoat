@@ -13327,6 +13327,7 @@ fn insert_with_forward_selection_types_at_block_cursor() {
     h.stoat.transition_mode("insert".to_string());
     h.type_text("X");
     assert_eq!(h.buffer_text_at(&path), "abXcdef");
+    assert_eq!(h.selection_spans(), vec![(0, 4, false)]);
 }
 
 #[test]
@@ -13886,6 +13887,46 @@ fn i_on_selection_inserts_before_it() {
     h.type_keys("i");
     h.type_keys("X");
     assert_eq!(h.buffer_text_at(&path), "Xfoo\n");
+    assert_eq!(h.selection_spans(), vec![(1, 5, true)]);
+}
+
+#[test]
+fn i_then_typing_then_escape_keeps_the_selection_after_the_typed_text() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foo bar\n");
+    h.type_keys("w i X escape");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.selection_spans()),
+        ("Xfoo bar\n".to_string(), vec![(1, 5, true)]),
+        "the selection moves past the typed text and keeps its direction",
+    );
+}
+
+#[test]
+fn a_then_typing_grows_the_selection_over_the_typed_text() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foo bar\n");
+    h.type_keys("w a X escape");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.selection_spans()),
+        ("foo Xbar\n".to_string(), vec![(0, 5, false)]),
+        "the selection reaches over the appended text",
+    );
+}
+
+/// The selection starts on a space, since a bracket typed before a word char
+/// writes no closer.
+#[test]
+fn typing_a_bracket_after_i_keeps_the_selection() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foo bar\n");
+    select_forward(&mut h, 3, 7);
+    h.type_keys("i (");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.selection_spans()),
+        ("foo() bar\n".to_string(), vec![(4, 9, true)]),
+        "the caret sits between the pair halves and the tail past the pair",
+    );
 }
 
 /// A leaves the cursor where the insert ended, past the last typed
