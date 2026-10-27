@@ -2,8 +2,8 @@
 //!
 //! The changes view paints its excerpts one under another through the
 //! per-file diff's painter, so a hunk reads the same here as in the per-file
-//! diff. A header row names each excerpt's file, and the focused excerpt
-//! paints the cursor where the changes view's keys act.
+//! diff. A header row names each excerpt's file, centered across the pane.
+//! The focused excerpt paints the cursor where the changes view's keys act.
 
 use crate::{
     buffer_registry::BufferRegistry,
@@ -13,7 +13,7 @@ use crate::{
     render::{
         editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         layout::split_pane_status,
-        text::{write_str, write_str_clipped},
+        text::{text_width, write_str, write_str_clipped},
         undercurl::UndercurlBatch,
         FrameCtx,
     },
@@ -68,10 +68,11 @@ impl PaintLayout {
 /// least scroll that keeps it on screen, and a cursor that stayed leaves the
 /// scroll, so a wheel scroll leaves the cursor off screen.
 ///
-/// Each excerpt takes a header row in the commit header style and then its
-/// rows, painted from its own scroll row, so an excerpt cut at the top shows
-/// its lower rows. After the paint each excerpt's viewport holds all of its
-/// rows, so the editor's own follow never scrolls an excerpt.
+/// Each excerpt takes a header row in the commit header style, with its file
+/// name centered, and then its rows. The rows paint from the excerpt's own
+/// scroll row, so an excerpt cut at the top shows its lower rows. After the
+/// paint each excerpt's viewport holds all of its rows, so the editor's own
+/// follow never scrolls an excerpt.
 ///
 /// The focused excerpt records the cell of its cursor in
 /// [`EditorState::cursor_screen_cell`] when the terminal draws that cursor.
@@ -178,11 +179,12 @@ pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
 /// Paint stack rows `first_row..first_row + area.height` of the stack `state`
 /// holds into `area` of `buf`.
 ///
-/// Each excerpt the rows reach takes a header row in the commit header style
-/// and then its rows, painted from its own scroll row, so an excerpt cut at
-/// the top of `area` shows its lower rows. A painted excerpt's editor records
-/// where this paint laid it out: its scroll row, its viewport, its text rect,
-/// and the cell of its cursor.
+/// Each excerpt the rows reach takes a header row in the commit header style,
+/// with its file name centered, and then its rows. The rows paint from the
+/// excerpt's own scroll row, so an excerpt cut at the top of `area` shows its
+/// lower rows. A painted excerpt's editor records where this paint laid it
+/// out: its scroll row, its viewport, its text rect, and the cell of its
+/// cursor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_rows(
     state: &DiffChangesState,
@@ -208,7 +210,9 @@ pub(crate) fn paint_stack_rows(
         if top >= scroll {
             let y = area.y + (top - scroll) as u16;
             let end_x = area.x + area.width;
-            write_str_clipped(buf, area.x, y, &excerpt.rel_path, header_style, end_x);
+            let width = text_width(&excerpt.rel_path).min(usize::from(area.width)) as u16;
+            let x = area.x + (area.width - width) / 2;
+            write_str_clipped(buf, x, y, &excerpt.rel_path, header_style, end_x);
         }
 
         // The screen row of the excerpt's first row, past its header.
@@ -452,21 +456,28 @@ mod tests {
     /// Two changed files under a focused changes view with no minimap, at a
     /// width that pairs each modified line with its base line, settled.
     fn two_files(height: u16) -> TestHarness {
-        let mut h = TestHarness::with_size(120, height);
-        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
-        h.stage_review_scenario(
-            "/repo",
+        changes_view(
+            120,
+            height,
             &[("a.txt", "a\nx\n", "A\nx\n"), ("b.txt", "b\n", "B\n")],
-        );
-        h.open_file(Path::new("/repo/a.txt"));
+        )
+    }
+
+    /// `files` changed under a focused changes view with no minimap, opened
+    /// over the first file, settled.
+    fn changes_view(width: u16, height: u16, files: &[(&str, &str, &str)]) -> TestHarness {
+        let mut h = TestHarness::with_size(width, height);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stage_review_scenario("/repo", files);
+        h.open_file(&Path::new("/repo").join(files[0].0));
         h.cover_with_diff_changes(false);
         h.settle();
         h
     }
 
-    /// Each excerpt paints under a header row that names its file, with its
-    /// rows numbered in the per-file diff's gutters, and only the focused
-    /// excerpt paints a cursor.
+    /// Each excerpt paints under a header row that names its file in the middle
+    /// of the row, with its rows numbered in the per-file diff's gutters, and
+    /// only the focused excerpt paints a cursor.
     #[test]
     fn a_changes_view_paints_its_excerpts_under_their_file_headers() {
         let mut h = two_files(16);
@@ -478,8 +489,12 @@ mod tests {
         let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
 
         // a.txt's three rows sit under its header on row 0, and b.txt's first
-        // row under its header on row 4.
-        let headers = [inner.y, inner.y + 4].map(|y| cells(&buf, inner.x, 8, y));
+        // row under its header on row 4. Each header pairs its name with the
+        // column the name starts on.
+        let headers = [inner.y, inner.y + 4].map(|y| {
+            let start = (inner.x..inner.x + inner.width).find(|&x| buf[(x, y)].symbol() != " ");
+            (cells(&buf, inner.x, inner.width, y), start)
+        });
         let numbers: Vec<(String, String)> = [1, 2, 3, 5]
             .into_iter()
             .map(|row| {
@@ -496,13 +511,35 @@ mod tests {
             .map(|excerpt| editors[excerpt.editor_id].cursor_screen_cell)
             .collect();
         let pair = |n: &str| (n.to_string(), n.to_string());
+        let centered = Some(inner.x + (inner.width - 5) / 2);
         assert_eq!(
             (headers, numbers, cursors),
             (
-                ["a.txt".to_string(), "b.txt".to_string()],
+                [
+                    ("a.txt".to_string(), centered),
+                    ("b.txt".to_string(), centered)
+                ],
                 vec![pair("1"), pair("2"), pair("3"), pair("1")],
                 vec![Some((cols.right_text_x, inner.y + 1)), None],
             ),
+        );
+    }
+
+    /// A file name wider than the pane starts at the pane's left column and
+    /// clips at its right edge.
+    #[test]
+    fn a_header_wider_than_the_pane_clips_from_its_left_column() {
+        let name = "a-file-name-wider-than-the-pane.txt";
+        let mut h = changes_view(30, 16, &[(name, "a\n", "A\n")]);
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+
+        assert_eq!(
+            cells(&buf, inner.x, inner.width, inner.y),
+            name[..usize::from(inner.width)]
         );
     }
 
