@@ -412,7 +412,8 @@ pub(crate) struct FrameCtx<'a> {
     /// modes.
     pub(crate) wrap_column: u32,
     /// Fraction an unfocused pane's colors blend toward the theme background,
-    /// resolved from `ui.inactive_dim` (default 0.25, clamped to `0.0..=1.0`).
+    /// resolved from `ui.inactive_dim` (default 0.25, clamped to `0.0..=1.0`)
+    /// and the `:pane-fade` session override by [`Stoat::inactive_dim`].
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
@@ -1065,11 +1066,7 @@ pub(crate) fn frame(
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
-    let inactive_dim = stoat
-        .settings
-        .ui_inactive_dim
-        .unwrap_or(0.25)
-        .clamp(0.0, 1.0) as f32;
+    let inactive_dim = stoat.inactive_dim();
 
     stoat.refresh_minimap_palettes(minimap_enabled, inactive_dim);
 

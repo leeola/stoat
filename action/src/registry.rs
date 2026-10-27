@@ -124,7 +124,7 @@ use crate::{
         set_theme::SetTheme,
         tab::{
             CloseTab, GotoTab, MoveTabLeft, MoveTabRight, NewTab, NextTab, PrevTab, RenameTab,
-            ToggleTab, ToggleTabBar,
+            TogglePaneFade, ToggleTab, ToggleTabBar,
         },
         terminal::Terminal,
         walkthrough::{
@@ -292,6 +292,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseTab::DEF, |_| Ok(Box::new(CloseTab)));
     add(ToggleTab::DEF, |_| Ok(Box::new(ToggleTab)));
     add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
+    add(TogglePaneFade::DEF, |_| Ok(Box::new(TogglePaneFade)));
     add(ClosePane::DEF, |_| Ok(Box::new(ClosePane)));
     add(CloseOtherPanes::DEF, |_| Ok(Box::new(CloseOtherPanes)));
     add(TogglePaneWiden::DEF, |_| Ok(Box::new(TogglePaneWiden)));
@@ -1896,6 +1897,7 @@ mod tests {
         // + 1 WorkspacePickerComplete.
         // + 4 NewTab, CloseTab, GotoTab, ToggleTab.
         // + 1 ToggleTabBar.
+        // + 1 TogglePaneFade.
         // + 1 RenameTab.
         // + 2 NextTab, PrevTab.
         // + 2 MoveTabLeft, MoveTabRight.
@@ -2015,7 +2017,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 458);
+        assert_eq!(all().count(), 459);
     }
 
     #[test]

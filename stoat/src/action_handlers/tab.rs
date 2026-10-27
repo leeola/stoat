@@ -165,6 +165,22 @@ pub(super) fn toggle_tab_bar(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Turn the fade of unfocused panes off when it is on, and on when it is off.
+///
+/// The flip sets an explicit override from the fade the panes show, so a
+/// later config reload that changes `ui.inactive_dim` does not invert what
+/// the user asked for this session.
+pub(super) fn toggle_pane_fade(stoat: &mut Stoat) -> UpdateEffect {
+    let (fade, status) = if stoat.pane_fade_enabled() {
+        (false, "pane fade off")
+    } else {
+        (true, "pane fade on")
+    };
+    stoat.pane_fade_override = Some(fade);
+    stoat.set_status(status);
+    UpdateEffect::Redraw
+}
+
 /// Set, clear, or prompt for the active tab's title.
 ///
 /// A `Some` name sets the override, or clears it when empty or all whitespace,
@@ -437,6 +453,48 @@ mod tests {
         dispatch(&mut h, &stoat_action::ToggleTabBar);
         assert!(h.stoat.tab_bar_visible());
         assert_eq!(h.stoat.pending_message.as_deref(), Some("tab bar shown"));
+    }
+
+    #[test]
+    fn toggling_the_pane_fade_flips_it_and_reports() {
+        let mut h = Stoat::test();
+        let flip = |h: &mut TestHarness| {
+            dispatch(h, &stoat_action::TogglePaneFade);
+            (h.stoat.inactive_dim(), h.stoat.pending_message.clone())
+        };
+        let off = flip(&mut h);
+        let on = flip(&mut h);
+        assert_eq!(
+            [off, on],
+            [
+                (0.0, Some("pane fade off".to_string())),
+                (0.25, Some("pane fade on".to_string())),
+            ],
+        );
+    }
+
+    /// A setting of zero leaves the panes unfaded, and `:pane-fade` turns the
+    /// fade on at the default fraction.
+    #[test]
+    fn the_pane_fade_turns_on_over_a_zero_setting() {
+        let mut h = Stoat::test();
+        h.stoat.settings.ui_inactive_dim = Some(0.0);
+        dispatch(&mut h, &stoat_action::TogglePaneFade);
+        assert_eq!(
+            (h.stoat.inactive_dim(), h.stoat.pending_message.as_deref()),
+            (0.25, Some("pane fade on")),
+        );
+    }
+
+    /// A setting past either end of a fraction fades by the nearer end.
+    #[test]
+    fn the_inactive_dim_setting_clamps_to_a_fraction() {
+        let mut h = Stoat::test();
+        let dims = [1.5, -0.5].map(|setting| {
+            h.stoat.settings.ui_inactive_dim = Some(setting);
+            h.stoat.inactive_dim()
+        });
+        assert_eq!(dims, [1.0, 0.0]);
     }
 
     /// The row has to carry both numbered labels and distinguish the active tab

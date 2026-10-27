@@ -51,6 +51,7 @@ action_kinds! {
     MoveTabRight,
     ToggleTab,
     ToggleTabBar,
+    TogglePaneFade,
     ClosePane,
     CloseOtherPanes,
     TogglePaneWiden,

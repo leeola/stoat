@@ -33,11 +33,12 @@ pub(crate) enum Toggle {
     Wrap,
     Minimap,
     TabBar,
+    PaneFade,
 }
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 18] = [
+    pub(crate) const ALL: [Toggle; 19] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
         Toggle::FollowReload,
@@ -56,6 +57,7 @@ impl Toggle {
         Toggle::Wrap,
         Toggle::Minimap,
         Toggle::TabBar,
+        Toggle::PaneFade,
     ];
 
     /// The toggle an action of `kind` flips, or `None` for an action that flips
@@ -80,6 +82,7 @@ impl Toggle {
             ActionKind::ToggleWrap => Toggle::Wrap,
             ActionKind::ToggleMinimap => Toggle::Minimap,
             ActionKind::ToggleTabBar => Toggle::TabBar,
+            ActionKind::TogglePaneFade => Toggle::PaneFade,
             _ => return None,
         })
     }
@@ -118,6 +121,7 @@ impl Toggle {
             }),
             Toggle::Minimap => stoat.minimap_enabled(),
             Toggle::TabBar => stoat.tab_bar_visible(),
+            Toggle::PaneFade => stoat.pane_fade_enabled(),
         }
     }
 }
@@ -246,6 +250,16 @@ mod tests {
         );
     }
 
+    /// A binding a user gives `:pane-fade` reads as its toggle, so the hint row
+    /// carries the mark.
+    #[test]
+    fn a_pane_fade_binding_reads_as_its_toggle() {
+        assert_eq!(
+            binding_toggle(&[action("TogglePaneFade")]),
+            Some(Toggle::PaneFade)
+        );
+    }
+
     #[test]
     fn toggle_states_read_the_session_flags() {
         let mut h = Stoat::test();
@@ -257,6 +271,7 @@ mod tests {
                 Toggle::SyntaxHighlight,
                 Toggle::Wrap,
                 Toggle::Minimap,
+                Toggle::PaneFade,
             ],
             "the flags a lone scratch pane starts with",
         );
@@ -280,6 +295,7 @@ mod tests {
                 Toggle::InlayHints,
                 Toggle::Wrap,
                 Toggle::Minimap,
+                Toggle::PaneFade,
             ],
         );
     }
@@ -316,6 +332,7 @@ mod tests {
                 Toggle::DiffView,
                 Toggle::PaneWiden,
                 Toggle::TabBar,
+                Toggle::PaneFade,
             ],
             "each view toggle reads the state its action flipped",
         );

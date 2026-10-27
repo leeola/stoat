@@ -1324,6 +1324,9 @@ pub struct Stoat {
     /// Session-only override of the `ui.tab_bar` setting, set by `:tabs`.
     /// `None` leaves the configured mode in force.
     pub(crate) tab_bar_override: Option<TabBarMode>,
+    /// Session-only override of the `ui.inactive_dim` setting, set by
+    /// `:pane-fade`. `None` leaves the configured fade in force.
+    pub(crate) pane_fade_override: Option<bool>,
     /// The extent of each tab that the last paint drew in the tab bar.
     ///
     /// The extents run in tab order, in sixteenths of a cell from the window's
@@ -2727,6 +2730,7 @@ impl Stoat {
             syntax_highlight: true,
             minimap_override: None,
             tab_bar_override: None,
+            pane_fade_override: None,
             tab_bar_spans: Vec::new(),
             single_minimap_rect: None,
             lsp_badge_rect: None,
@@ -3926,6 +3930,32 @@ impl Stoat {
             TabBarMode::Never => false,
             TabBarMode::Auto => self.active_workspace().tabs.len() > 1,
         }
+    }
+
+    /// The fraction an unfocused pane's colors blend toward the theme
+    /// background, resolving `:pane-fade` against the `ui.inactive_dim`
+    /// setting.
+    ///
+    /// [`Self::pane_fade_override`] `Some(false)` answers `0.0`, which paints
+    /// no fade. Otherwise the setting answers, clamped to `0.0..=1.0` and
+    /// `0.25` when unset. `Some(true)` over a setting of `0.0` answers `0.25`,
+    /// so turning the fade on fades the panes.
+    pub(crate) fn inactive_dim(&self) -> f32 {
+        let setting = self
+            .settings
+            .ui_inactive_dim
+            .unwrap_or(0.25)
+            .clamp(0.0, 1.0) as f32;
+        match self.pane_fade_override {
+            Some(false) => 0.0,
+            Some(true) if setting == 0.0 => 0.25,
+            _ => setting,
+        }
+    }
+
+    /// Whether unfocused panes fade this frame.
+    pub(crate) fn pane_fade_enabled(&self) -> bool {
+        self.inactive_dim() > 0.0
     }
 
     /// Convenience wrapper that dispatches the [`OpenFile`] action with `path`.

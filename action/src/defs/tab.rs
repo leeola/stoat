@@ -187,6 +187,19 @@ define_action!(
     aliases = &["tabs"]
 );
 
+define_action!(
+    TogglePaneFadeDef,
+    TogglePaneFade,
+    "TogglePaneFade",
+    ActionKind::TogglePaneFade,
+    "fade or unfade unfocused panes",
+    "Turn the fade that dims every unfocused pane off when it is on, or on \
+     when it is off, for this session only. The `ui.inactive_dim` setting \
+     decides the fade by default, and a restart returns to it.",
+    ActionPriority::Common,
+    command_name = "pane-fade"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

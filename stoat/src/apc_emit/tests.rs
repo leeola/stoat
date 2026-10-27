@@ -2438,6 +2438,44 @@ fn a_focus_move_between_terminal_panes_sends_their_cursor_rows_alone() {
     );
 }
 
+/// `:pane-fade` off declares an unfocused terminal pane's region unfaded, as
+/// the live grid paints it.
+#[test]
+fn a_pane_fade_turned_off_declares_an_unfaded_region() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = 11;
+    h.stoat.theme = Arc::new(rgb_review_theme());
+    h.stoat.settings.ui_inactive_dim = Some(0.2);
+    h.resize(80, 24);
+    h.type_action("SplitRight()");
+    h.settle();
+    let (term, pool) = terminal_in_focused_pane(&mut h, b"right\r\n");
+    h.stoat
+        .active_workspace_mut()
+        .term_pool_grids
+        .insert(term, (6, 30));
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+
+    let mut dims = |h: &mut crate::test_harness::TestHarness| -> Vec<u8> {
+        let _ = h.stoat.render();
+        command::decode_stream(&emit_raw(h, &mut rx))
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::PoolRegion(region) if region.pool == pool => Some(region.dim),
+                _ => None,
+            })
+            .collect()
+    };
+    let faded = dims(&mut h);
+    h.stoat.pane_fade_override = Some(false);
+    let unfaded = dims(&mut h);
+    assert_eq!((faded, unfaded), (vec![51], vec![0]));
+}
+
 /// Under protocol 10 an unfocused pane's fade lands in its page's cells, so a
 /// focus move repaints the colored row above each cursor row too, and declares
 /// no region.
