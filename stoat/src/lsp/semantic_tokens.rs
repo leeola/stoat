@@ -465,6 +465,10 @@ fn convert_semantic_tokens(
 
 /// Map an LSP `SemanticTokenType` name onto a stoat tree-sitter scope stem. Types
 /// with no stoat equivalent return `None` and are skipped.
+///
+/// A comment token maps to no scope. The grammar already colors every comment,
+/// and a server's comment token spans the whole doc comment line. A scope for it
+/// puts its color over the markdown that the grammar injects into doc comments.
 fn lsp_token_scope(token_type: &str) -> Option<&'static str> {
     Some(match token_type {
         "function" | "method" => "function",
@@ -475,7 +479,6 @@ fn lsp_token_scope(token_type: &str) -> Option<&'static str> {
         "parameter" => "variable.parameter",
         "property" | "enumMember" => "property",
         "keyword" | "modifier" => "keyword",
-        "comment" => "comment",
         "string" => "string",
         "number" => "number",
         "operator" => "operator",
@@ -758,6 +761,7 @@ mod tests {
         assert_eq!(lsp_token_scope("static"), Some("constant"));
         assert_eq!(lsp_token_scope("procMacro"), Some("function.special"));
         assert_eq!(lsp_token_scope("regexp"), None);
+        assert_eq!(lsp_token_scope("comment"), None);
     }
 
     #[test]
@@ -1048,6 +1052,71 @@ mod tests {
         h.advance_clock(Duration::from_millis(550));
         assert_eq!(lsp_token_count(&mut h), 1);
         h.assert_snapshot("semantic_tokens_recolor");
+    }
+
+    /// A server sends one comment token over a whole doc comment line. The
+    /// token drops at decode, so the code span the grammar injects keeps its
+    /// markdown color under a live server.
+    #[test]
+    fn a_server_comment_token_leaves_the_doc_comment_markdown_painted() {
+        use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensResult};
+        let mut h = TestHarness::with_size(40, 4);
+        enable_semantic_tokens_with_legend(&h, &["comment"]);
+        let root = seed(&mut h, &[("main.rs", "/// Call `foo` here.\nfn a() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_semantic_tokens_full(
+            path.to_str().unwrap(),
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data: vec![SemanticToken {
+                    delta_line: 0,
+                    delta_start: 0,
+                    length: 20,
+                    token_type: 0,
+                    token_modifiers_bitset: 0,
+                }],
+            }),
+        );
+        h.type_keys("escape");
+        h.advance_clock(Duration::from_millis(550));
+        let tokens = lsp_token_count(&mut h);
+
+        // The frame flow of `TestHarness::capture`. The first drive and frame
+        // start the parse jobs, the settle runs them, and the second drive
+        // installs their highlights.
+        h.stoat.drive_background();
+        h.render_composited();
+        h.settle();
+        h.stoat.drive_background();
+        let buf = h.render_composited();
+        let row = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| &buf[(x, y)])
+                    .collect::<Vec<_>>()
+            })
+            .find(|cells| {
+                let text: String = cells.iter().map(|cell| cell.symbol()).collect();
+                text.contains("/// Call")
+            })
+            .expect("the doc comment row is on screen");
+        let fg_of = |symbol: &str| {
+            row.iter()
+                .find(|cell| cell.symbol() == symbol)
+                .map(|cell| cell.fg)
+        };
+
+        let theme_fg = |key: &str| h.stoat.theme.get(key).fg;
+        assert_eq!(
+            (tokens, fg_of("`"), fg_of("C")),
+            (
+                0,
+                theme_fg("syntax.markup.text.literal"),
+                theme_fg("syntax.comment"),
+            ),
+            "the code span keeps its markdown color and the prose its comment color",
+        );
     }
 
     /// The hover and the other token-guarded LSP keys bind only where the
@@ -1500,7 +1569,6 @@ mod tests {
             "enumMember",
             "keyword",
             "modifier",
-            "comment",
             "string",
             "number",
             "operator",
