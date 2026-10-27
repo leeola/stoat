@@ -265,6 +265,7 @@ pub(crate) fn paint_stack_rows(
             frame.diff_dials,
             frame.wrap_mode,
             frame.wrap_column,
+            frame.scrolloff,
         );
         editor.viewport_rows = Some(rows as u32);
     }
@@ -660,6 +661,7 @@ mod tests {
             line_numbers: LineNumbers::Relative,
             wrap_mode: WrapMode::EditorWidth,
             wrap_column: 80,
+            scrolloff: stoat.settings.scrolloff.unwrap_or(3),
             inactive_dim: 0.0,
             diff_dials: DiffDials::from_stoat(stoat),
             images_capable: false,

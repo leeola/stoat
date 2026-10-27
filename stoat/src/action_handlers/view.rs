@@ -747,18 +747,21 @@ pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
     }
 }
 
-/// Pull `editor`'s view back to the last row that keeps its display filled,
-/// when the display ends above the view.
+/// Pull `editor`'s view back when it starts past the row that leaves the last
+/// line its bottom padding of blank rows.
 ///
 /// A diff map replaced under a diff view drops the deleted-line blocks of the
 /// hunks it no longer holds. Blocks dropped from above the view shorten the
 /// display under a scroll that stays put, and painted as it stands, the view
 /// starts past the last row and shows an empty pane. The pull is a swap, so it
 /// clears a glide and the wheel fraction.
-pub(crate) fn clamp_scroll_to_display(editor: &mut EditorState) {
+///
+/// The bound admits the `scrolloff` padding that [`land_jump`] leaves under the
+/// last line, so a jump that lands at the end keeps its float.
+pub(crate) fn clamp_scroll_to_display(editor: &mut EditorState, scrolloff: u32) {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
     let line_count = editor.display_map.snapshot().line_count();
-    let max_scroll = max_scroll_row(line_count, viewport);
+    let max_scroll = max_scroll_row(line_count, viewport) + scrolloff.min(viewport / 2);
     if editor.scroll_row <= max_scroll {
         return;
     }

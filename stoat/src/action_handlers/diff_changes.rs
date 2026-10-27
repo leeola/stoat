@@ -1800,8 +1800,27 @@ mod tests {
         let editor = focused_editor_mut(&mut h.stoat).expect("a focused editor");
         assert_eq!(
             (editor.scroll_row, editor.scroll_offset),
-            (max_scroll, max_scroll as f32)
+            (max_scroll + 3, (max_scroll + 3) as f32),
+            "the pull keeps the scrolloff padding of blank rows under the last line",
         );
+    }
+
+    /// A jump that lands at a diff's end floats the last line by the padding,
+    /// and the paint after it keeps the float.
+    #[test]
+    fn a_landing_at_a_diffs_end_keeps_its_padding_over_two_paints() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/b.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        let max_scroll = frame_view(&mut h).3;
+
+        let state = focused_editor_mut(&mut h.stoat).expect("a focused editor");
+        editor::place_cursor(state, 60, 0);
+        state.pending_center = Some(3);
+        let landed = frame_view(&mut h).0;
+        let kept = frame_view(&mut h).0;
+        assert_eq!((landed, kept), (max_scroll + 3, max_scroll + 3));
     }
 
     /// Two changed files of 150 lines too wide for a diff column, each changed

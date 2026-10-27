@@ -411,6 +411,9 @@ pub(crate) struct FrameCtx<'a> {
     /// `editor.wrap_column` (default 80, at least 1). Ignored by the other wrap
     /// modes.
     pub(crate) wrap_column: u32,
+    /// The `editor.scrolloff` padding (default 3), which a diff view keeps as
+    /// blank rows past its last row when a jump lands at its end.
+    pub(crate) scrolloff: u32,
     /// Fraction an unfocused pane's colors blend toward the theme background,
     /// resolved from `ui.inactive_dim` (default 0.25, clamped to `0.0..=1.0`)
     /// and the `:pane-fade` session override by [`Stoat::inactive_dim`].
@@ -1252,6 +1255,7 @@ pub(crate) fn frame(
             .unwrap_or(LineNumbers::Relative),
         wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
+        scrolloff: stoat.settings.scrolloff.unwrap_or(3),
         inactive_dim,
         diff_dials,
         images_capable: stoat.stoatty && stoat.stoatty_protocol >= 2,

@@ -133,6 +133,7 @@ pub(crate) fn render_pane(
                     frame.diff_dials,
                     frame.wrap_mode,
                     frame.wrap_column,
+                    frame.scrolloff,
                 );
 
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)

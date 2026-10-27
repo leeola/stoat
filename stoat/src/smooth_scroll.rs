@@ -1002,6 +1002,7 @@ mod tests {
                 DiffDials::shipped(),
                 WrapMode::None,
                 80,
+                0,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
@@ -1085,6 +1086,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         let expected = serialize_buffer(&expected);
 
@@ -1178,6 +1180,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         let expected = serialize_buffer(&expected);
 

@@ -128,6 +128,7 @@ pub(crate) fn render_editor(
         DiffDials::shipped(),
         WrapMode::None,
         80,
+        0,
     );
 }
 
@@ -161,6 +162,7 @@ pub(crate) fn render_editor_with_overlay(
     dials: DiffDials,
     wrap: WrapMode,
     wrap_column: u32,
+    scrolloff: u32,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -171,7 +173,7 @@ pub(crate) fn render_editor_with_overlay(
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
         fit_diff_view(editor, inner, wrap, wrap_column);
         view::apply_held_screen_row(editor);
-        view::clamp_scroll_to_display(editor);
+        view::clamp_scroll_to_display(editor, scrolloff);
         render_diff_view(
             editor,
             inner,
@@ -3084,6 +3086,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         editor
             .search_match_cache
@@ -3187,6 +3190,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
 
         let italic: String = (0..area.width)
@@ -3264,6 +3268,7 @@ mod tests {
                 DiffDials::shipped(),
                 WrapMode::None,
                 80,
+                0,
             );
             (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
         }
@@ -3359,6 +3364,7 @@ mod tests {
                 DiffDials::shipped(),
                 WrapMode::None,
                 80,
+                0,
             );
             buf
         }
@@ -3758,6 +3764,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
@@ -3874,6 +3881,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
 
         let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
@@ -3915,6 +3923,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
 
         assert!(
@@ -4053,6 +4062,7 @@ mod tests {
             DiffDials::shipped(),
             wrap,
             wrap_column,
+            0,
         );
         let snapshot = editor.display_map.snapshot();
         (
@@ -4226,6 +4236,7 @@ mod tests {
                 DiffDials::shipped(),
                 WrapMode::EditorWidth,
                 80,
+                0,
             );
         }
 
@@ -4273,6 +4284,7 @@ mod tests {
             DiffDials::shipped(),
             wrap,
             80,
+            0,
         );
         editor
             .gutter_geometry_cache
@@ -4436,6 +4448,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         editor
             .gutter_geometry_cache
@@ -4518,6 +4531,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         String::from_utf8_lossy(scene.bytes()).into_owned()
     }
@@ -4622,6 +4636,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         let gutter_w = editor.gutter_width;
         (0..rows)
@@ -4673,6 +4688,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         let rect = editor.minimap_rect;
         let strip = (0..rows)
@@ -4819,6 +4835,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
         let change_x = editor.gutter_width - 3;
         let staged_x = change_x + 1;
@@ -5061,6 +5078,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::None,
             80,
+            0,
         );
 
         // Row 1 is the line the trailing newline opens, and the gutter takes
@@ -5123,6 +5141,7 @@ mod tests {
             DiffDials::shipped(),
             WrapMode::EditorWidth,
             80,
+            0,
         );
 
         assert!(
