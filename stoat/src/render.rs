@@ -2424,7 +2424,7 @@ fn render_pane_id_badges(
 
     for badge in pane_badges(ws) {
         let digit = badge.digit.to_string();
-        Popover {
+        let popover = Popover {
             fill: accent,
             border: background,
             content_fg: background,
@@ -2432,8 +2432,14 @@ fn render_pane_id_badges(
             offset: [0, 0],
             bold: true,
             content: &digit,
+        };
+        // The live popover has rounded corners, and a cell fill under it shows
+        // past them, as the hover card's clear does. Each host draws one form.
+        if scene.live() {
+            popover.draw_components(badge.rect, scene);
+        } else {
+            popover.draw_fallback(badge.rect, buf);
         }
-        .render(badge.rect, buf, scene);
     }
 }
 
@@ -2588,8 +2594,10 @@ mod themed_blank_tests {
 
 #[cfg(test)]
 mod pane_badge_tests {
-    use super::pane_badges;
+    use super::{paint, pane_badges};
     use crate::test_harness::TestHarness;
+    use ratatui::{layout::Rect, style::Color};
+    use stoatty_protocol::command::{self, Command, PopoverCommand};
 
     /// The focused pane has no badge, since the chord starts there, and the
     /// other panes keep the numbers their places give them, so a digit names
@@ -2622,16 +2630,10 @@ mod pane_badge_tests {
     /// reaches stand out, and the focused pane carries no badge.
     #[test]
     fn a_badge_paints_the_accent_fill() {
-        let mut h = TestHarness::with_size(80, 24);
-        h.type_action("SplitRight()");
-        h.stoat.set_focused_mode("space_pane_display".into());
+        let mut h = badge_chord(true);
         let buf = h.render_composited();
 
-        let accent = h
-            .stoat
-            .theme
-            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
-            .bg;
+        let accent = accent_bg(&h);
         let ws = h.stoat.active_workspace();
         let badges = pane_badges(ws);
         let [badge] = badges.as_slice() else {
@@ -2648,6 +2650,89 @@ mod pane_badge_tests {
             (badge.digit.to_string().as_str(), accent, false),
             "the digit sits on the accent fill, and the focused pane above its status row has none",
         );
+    }
+
+    /// A live scene floats the rounded badge alone, so no square cell fill
+    /// sits under its corners.
+    #[test]
+    fn a_live_scene_paints_no_badge_cells() {
+        let mut h = badge_chord(true);
+        let buf = h.stoat.render();
+
+        let accent = accent_bg(&h);
+        let badges = pane_badges(h.stoat.active_workspace());
+        let [badge] = badges.as_slice() else {
+            panic!("one badge, on the pane without the focus");
+        };
+        let fills: Vec<[u8; 3]> = popovers(&h).into_iter().map(|p| p.fill).collect();
+
+        assert_eq!(
+            (
+                rect_cells(badge.rect).any(|cell| Some(buf[cell].bg) == accent),
+                fills
+            ),
+            (
+                false,
+                vec![paint::style_rgb(accent).expect("an RGB accent")]
+            ),
+            "the grid under the badge keeps its cells, and one popover carries the fill",
+        );
+    }
+
+    /// A dead scene draws the cell box alone, since no host floats a popover.
+    #[test]
+    fn a_dead_scene_paints_the_badge_cells() {
+        let mut h = badge_chord(false);
+        let buf = h.stoat.render();
+
+        let accent = accent_bg(&h);
+        let badges = pane_badges(h.stoat.active_workspace());
+        let [badge] = badges.as_slice() else {
+            panic!("one badge, on the pane without the focus");
+        };
+
+        assert_eq!(
+            (
+                rect_cells(badge.rect).all(|cell| Some(buf[cell].bg) == accent),
+                popovers(&h).len()
+            ),
+            (true, 0),
+            "every cell of the badge box takes the fill, and no popover goes out",
+        );
+    }
+
+    /// Two side-by-side panes in the pane picker chord, rendered for a host
+    /// that floats popovers when `stoatty` is set.
+    fn badge_chord(stoatty: bool) -> TestHarness {
+        let mut h = TestHarness::with_size(80, 24);
+        h.type_action("SplitRight()");
+        h.stoat.stoatty = stoatty;
+        h.stoat.set_focused_mode("space_pane_display".into());
+        h
+    }
+
+    /// The background of the accent style, which a badge fills with.
+    fn accent_bg(h: &TestHarness) -> Option<Color> {
+        h.stoat
+            .theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .bg
+    }
+
+    /// The popovers the last frame sent to the host.
+    fn popovers(h: &TestHarness) -> Vec<PopoverCommand> {
+        command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Popover(popover) => Some(popover),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every cell position inside `rect`, row by row.
+    fn rect_cells(rect: Rect) -> impl Iterator<Item = (u16, u16)> {
+        (rect.y..rect.bottom()).flat_map(move |y| (rect.x..rect.right()).map(move |x| (x, y)))
     }
 }
 

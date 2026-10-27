@@ -992,14 +992,11 @@ fn pane_display_mode_renders_a_bold_digit_badge_per_unfocused_pane() {
         "every pane but the focused one gets a badge, got {cmds:?}"
     );
     assert!(popovers.iter().all(|p| p.bold), "badges shape bold");
-    let digits: Vec<&str> = popovers
-        .iter()
-        .map(|p| buf[(p.left + 1, p.top + 1)].symbol())
-        .collect();
+    let digits: Vec<&str> = popovers.iter().map(|p| p.content.as_str()).collect();
     assert_eq!(
         digits,
         ["1"],
-        "the center of the pane without the focus carries its digit"
+        "the badge of the pane without the focus carries its digit"
     );
 
     let hint_box_shown = (buf.area.y..buf.area.y + buf.area.height).any(|y| {
