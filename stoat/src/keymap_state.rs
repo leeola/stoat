@@ -662,6 +662,7 @@ pub(crate) enum ActiveModal {
     WorkspacePicker,
     Jumplist,
     WalkthroughPicker,
+    PaneFinder,
     Diagnostics,
     CommitPicker,
     Location,
@@ -689,6 +690,7 @@ impl ActiveModal {
             Self::WorkspacePicker => "workspace_picker",
             Self::Jumplist => "jumplist",
             Self::WalkthroughPicker => "walkthrough_picker",
+            Self::PaneFinder => "pane_finder",
             Self::Diagnostics => "diagnostics",
             Self::CommitPicker => "commit_picker",
             Self::Location => "location",
@@ -827,6 +829,11 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
                 picker.dispose(stoat.active_workspace_mut());
             }
         },
+        ActiveModal::PaneFinder => {
+            if let Some(finder) = stoat.pane_finder.take() {
+                finder.dispose(stoat.active_workspace_mut());
+            }
+        },
         ActiveModal::Diagnostics => {
             if let Some(picker) = stoat.diagnostics_picker.take() {
                 picker.dispose(stoat.active_workspace_mut());
@@ -881,6 +888,8 @@ pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
         Some(ActiveModal::Jumplist)
     } else if stoat.walkthrough_picker.is_some() {
         Some(ActiveModal::WalkthroughPicker)
+    } else if stoat.pane_finder.is_some() {
+        Some(ActiveModal::PaneFinder)
     } else if stoat.diagnostics_picker.is_some() {
         Some(ActiveModal::Diagnostics)
     } else if stoat.commit_picker.is_some() {
@@ -937,6 +946,7 @@ fn open_modal_count(stoat: &Stoat) -> usize {
         stoat.workspace_picker.is_some(),
         stoat.jumplist_picker.is_some(),
         stoat.walkthrough_picker.is_some(),
+        stoat.pane_finder.is_some(),
         stoat.diagnostics_picker.is_some(),
         stoat.commit_picker.is_some(),
         stoat.location_picker.is_some(),
@@ -1780,12 +1790,13 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 18] = [
+    const ALL_MODALS: [ActiveModal; 19] = [
         ActiveModal::Run,
         ActiveModal::QuitConfirm,
         ActiveModal::WorkspacePicker,
         ActiveModal::Jumplist,
         ActiveModal::WalkthroughPicker,
+        ActiveModal::PaneFinder,
         ActiveModal::Diagnostics,
         ActiveModal::CommitPicker,
         ActiveModal::Location,
@@ -1817,6 +1828,7 @@ mod tests {
                 "workspace_picker",
                 "jumplist",
                 "walkthrough_picker",
+                "pane_finder",
                 "diagnostics",
                 "commit_picker",
                 "location",
@@ -1842,6 +1854,7 @@ mod tests {
             "workspace_picker",
             "jumplist",
             "walkthrough_picker",
+            "pane_finder",
             "diagnostics",
             "commit_picker",
             "location",

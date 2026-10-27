@@ -19,7 +19,7 @@ pub(crate) mod marks;
 pub(crate) mod move_nav;
 pub(crate) mod movement;
 mod palette;
-mod pane;
+pub(crate) mod pane;
 pub(crate) mod picker;
 pub(crate) mod prompt;
 pub(crate) mod rebase;
@@ -739,6 +739,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::JumpForward => jump::jump_forward(stoat),
         ActionKind::OpenJumplistPicker => picker::open_jumplist_picker(stoat),
         ActionKind::OpenWalkthroughPicker => picker::open_walkthrough_picker(stoat),
+        ActionKind::OpenPaneFinder => picker::open_pane_finder(stoat),
         ActionKind::OpenDiagnosticsPicker => picker::open_diagnostics_picker(stoat),
         ActionKind::OpenWorkspaceDiagnosticsPicker => {
             picker::open_workspace_diagnostics_picker(stoat)
@@ -1483,6 +1484,7 @@ fn is_picker_open_kind(kind: ActionKind) -> bool {
             | ActionKind::OpenCommandPalette
             | ActionKind::OpenJumplistPicker
             | ActionKind::OpenWalkthroughPicker
+            | ActionKind::OpenPaneFinder
             | ActionKind::OpenCodeSearch
             | ActionKind::OpenDiagnosticsPicker
             | ActionKind::OpenWorkspaceDiagnosticsPicker

@@ -772,7 +772,7 @@ fn leave_all_workspaces(stoat: &mut Stoat) {
     }
 }
 
-fn dispatch_open_file(stoat: &mut Stoat, path: PathBuf) -> UpdateEffect {
+pub(super) fn dispatch_open_file(stoat: &mut Stoat, path: PathBuf) -> UpdateEffect {
     super::dispatch(stoat, &OpenFile { path })
 }
 

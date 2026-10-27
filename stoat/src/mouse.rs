@@ -340,6 +340,7 @@ pub(crate) fn modal_preview_editor(stoat: &Stoat) -> Option<EditorId> {
             .walkthrough_picker
             .as_ref()
             .map(|p| p.picker.preview.editor),
+        ActiveModal::PaneFinder => stoat.pane_finder.as_ref().map(|f| f.picker.preview.editor),
         _ => None,
     }
 }
@@ -499,6 +500,20 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 preview: layout.preview,
                 len: picker.filtered().len(),
                 selected: picker.selected(),
+            })
+        },
+        ActiveModal::PaneFinder => {
+            let finder = stoat.pane_finder.as_ref()?;
+            let layout = crate::render::picker::target_picker_layout(
+                size,
+                zoom(ModalKind::PaneFinder),
+                split(ModalKind::PaneFinder),
+            )?;
+            Some(ModalSurfaces {
+                list: layout.list,
+                preview: layout.preview,
+                len: finder.filtered().len(),
+                selected: finder.selected(),
             })
         },
         ActiveModal::Diagnostics => {
@@ -692,6 +707,10 @@ pub(crate) fn open_modal_box(stoat: &Stoat, kind: ModalKind, zoom: i8) -> Option
         },
         ModalKind::WalkthroughPicker => {
             stoat.walkthrough_picker.as_ref()?;
+            crate::render::picker::target_picker_layout(size, zoom, split)?.modal
+        },
+        ModalKind::PaneFinder => {
+            stoat.pane_finder.as_ref()?;
             crate::render::picker::target_picker_layout(size, zoom, split)?.modal
         },
     };

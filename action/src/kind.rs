@@ -143,6 +143,7 @@ action_kinds! {
     JumpForward,
     OpenJumplistPicker,
     OpenWalkthroughPicker,
+    OpenPaneFinder,
     OpenDiagnosticsPicker,
     OpenWorkspaceDiagnosticsPicker,
     OpenLastPicker,

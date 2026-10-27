@@ -251,6 +251,21 @@ define_action!(
     command_name = "dock-left"
 );
 
+define_action!(
+    OpenPaneFinderDef,
+    OpenPaneFinder,
+    "OpenPaneFinder",
+    ActionKind::OpenPaneFinder,
+    "open the pane finder",
+    "Open a modal that lists every view the workspace holds, with where each \
+     shows. The views are the open buffers, run panes, terminals, agent panes, \
+     commits lists, changes views, and image panes. Enter opens a buffer in the \
+     focused pane, or moves focus to the pane, tab, or dock that shows the \
+     picked view. A hidden terminal goes into the focused pane. Esc cancels.",
+    ActionPriority::Normal,
+    command_name = "panes"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

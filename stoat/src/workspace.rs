@@ -919,6 +919,12 @@ impl Workspace {
         self.locate(|view| matches!(view, View::Terminal(t) | View::Agent(t) if *t == term_id))
     }
 
+    /// Where a pane or a dock shows `view`, or `None` for a view no surface
+    /// shows.
+    pub(crate) fn view_location(&self, view: &View) -> Option<ViewLocation> {
+        self.locate(|candidate| candidate == view)
+    }
+
     /// The first place whose view `shows` accepts.
     ///
     /// The search reads the active tab's split panes first, then each parked
@@ -2199,6 +2205,7 @@ pub(crate) fn view_kind(view: &View) -> &'static str {
 mod tests {
     use super::{BridgeWaiter, ParseJob, Workspace};
     use crate::{
+        action_handlers::dispatch,
         buffer::BufferId,
         code_index::build::IndexUpdate,
         commit_list::CommitListId,
@@ -2206,7 +2213,7 @@ mod tests {
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::RunId,
-        term_session::TermId,
+        term_session::{TermId, ViewLocation},
         test_fixture::fake_term_session,
         test_harness::TestHarness,
     };
@@ -2218,6 +2225,7 @@ mod tests {
             Arc,
         },
     };
+    use stoat_action::{NewTab, OpenRun};
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
     use tokio::sync::mpsc;
@@ -2251,6 +2259,30 @@ mod tests {
         }
 
         assert_eq!(ws.shell_terms(), [docked, shown, covered]);
+    }
+
+    /// A run keeps its place while a new tab parks the tab that shows it, and
+    /// a view no surface shows has no place.
+    #[test]
+    fn view_location_finds_a_run_in_a_parked_tab() {
+        let mut h = TestHarness::with_size(80, 24);
+        dispatch(&mut h.stoat, &OpenRun);
+        let (view, pane) = {
+            let ws = h.stoat.active_workspace();
+            let pane = ws.panes.focus();
+            (ws.panes.pane(pane).view.clone(), pane)
+        };
+        assert!(matches!(view, View::Run(_)), "OpenRun shows a run");
+        dispatch(&mut h.stoat, &NewTab);
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.view_location(&view),
+                ws.view_location(&View::Label("x".into()))
+            ),
+            (Some(ViewLocation::Pane { tab: 0, pane }), None),
+        );
     }
 
     /// Insert a session with a fake PTY into `ws`, newer than every session

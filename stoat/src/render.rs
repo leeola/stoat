@@ -24,6 +24,7 @@ pub(crate) mod location_picker;
 pub(crate) mod paint;
 pub(crate) mod pane;
 pub(crate) mod pane_cache;
+pub(crate) mod pane_finder;
 pub(crate) mod picker;
 pub(crate) mod popout;
 pub(crate) mod quit_all_confirm;
@@ -1700,6 +1701,36 @@ pub(crate) fn frame(
                 );
             }
         },
+        Some(ActiveModal::PaneFinder) => {
+            if let Some(finder) = &mut stoat.pane_finder {
+                let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::PaneFinder);
+                let split = modal_split_percent(&stoat.modal_split, ModalKind::PaneFinder);
+                pane_finder::render_pane_finder(
+                    finder,
+                    ws,
+                    &stoat.theme,
+                    chrome,
+                    full,
+                    zoom,
+                    split,
+                    buf,
+                    &mut *scene,
+                );
+                cached_modal_hints(
+                    &mut stoat.hints_cache,
+                    &stoat.keymap,
+                    mode,
+                    "pane_finder",
+                    None,
+                    None,
+                    toggles,
+                    &stoat.theme,
+                    full,
+                    buf,
+                    &mut *scene,
+                );
+            }
+        },
         Some(ActiveModal::Diagnostics) => {
             if let Some(picker) = &mut stoat.diagnostics_picker {
                 let zoom = modal_zoom_steps(&stoat.modal_zoom, ModalKind::DiagnosticsPicker);
@@ -3207,6 +3238,7 @@ mod lsp_filter_tests {
                 "SplitDown",
                 "OpenFileFinderHSplit",
                 "OpenFileFinderVSplit",
+                "OpenPaneFinder",
             ]
             .map(short_desc)
             .into_iter()

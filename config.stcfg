@@ -482,6 +482,18 @@ on key {
         Ctrl-d -> PickerDetailDown();
         Ctrl-u -> PickerDetailUp();
     }
+    modal == pane_finder && mode == insert {
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-p -> PickerPrev();
+        Ctrl-n -> PickerNext();
+        Ctrl-f -> PickerPageDown();
+        Ctrl-b -> PickerPageUp();
+        PageDown -> PickerPageDown();
+        PageUp -> PickerPageUp();
+        Ctrl-d -> PickerDetailDown();
+        Ctrl-u -> PickerDetailUp();
+    }
     modal == diagnostics && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();
@@ -1725,6 +1737,7 @@ on key {
         v -> [SplitDown(), SetMode(normal)];
         n -> SetMode(space_pane_nav_new);
         e -> SetMode(space_pane_display);
+        p -> OpenPaneFinder();
 
         window_ipc && panes > 1 && !detached {
             d -> [DetachPane(), SetMode(normal)];

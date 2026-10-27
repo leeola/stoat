@@ -676,6 +676,7 @@ pub(crate) enum ModalKind {
     DiagnosticsPicker,
     JumplistPicker,
     WalkthroughPicker,
+    PaneFinder,
 }
 
 /// Rows one wheel notch moves the commit picker's diff preview.
@@ -1058,6 +1059,10 @@ pub struct Stoat {
     /// [`stoat_action::OpenWalkthroughPicker`] and dismissed when a tour plays or
     /// on cancel.
     pub(crate) walkthrough_picker: Option<crate::walkthrough_picker::WalkthroughPicker>,
+    /// The modal that lists every view the workspace holds.
+    /// [`stoat_action::OpenPaneFinder`] opens it, and a pick or a cancel
+    /// closes it.
+    pub(crate) pane_finder: Option<crate::pane_finder::PaneFinder>,
     /// Active diagnostics picker modal (`space l d`). `Some` while
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
@@ -2656,6 +2661,7 @@ impl Stoat {
             quit_all_confirm: None,
             jumplist_picker: None,
             walkthrough_picker: None,
+            pane_finder: None,
             diagnostics_picker: None,
             commit_picker: None,
             location_picker: None,
@@ -6562,6 +6568,7 @@ impl Stoat {
             ActiveModal::Diagnostics => &self.diagnostics_picker.as_ref()?.picker.input,
             ActiveModal::Jumplist => &self.jumplist_picker.as_ref()?.picker.input,
             ActiveModal::WalkthroughPicker => &self.walkthrough_picker.as_ref()?.picker.input,
+            ActiveModal::PaneFinder => &self.pane_finder.as_ref()?.picker.input,
             ActiveModal::Run | ActiveModal::QuitConfirm => return None,
         };
 
@@ -9329,6 +9336,7 @@ impl Stoat {
         action_handlers::picker::sync_diagnostics_picker(self);
         action_handlers::picker::sync_jumplist_picker(self);
         action_handlers::picker::sync_walkthrough_picker(self);
+        action_handlers::picker::sync_pane_finder(self);
 
         let followed_change = crate::auto_reload::drain_followed_change(self);
         let live_reload = crate::auto_reload::drain_live_reload(self);

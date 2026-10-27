@@ -64,6 +64,7 @@ pub mod multi_buffer;
 mod nav_list;
 pub(crate) mod osc_cap;
 pub mod pane;
+pub(crate) mod pane_finder;
 mod paths;
 #[cfg(feature = "perf")]
 pub mod perf;

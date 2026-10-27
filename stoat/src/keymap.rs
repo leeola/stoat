@@ -2821,6 +2821,7 @@ mod tests {
             "diagnostics",
             "jumplist",
             "walkthrough_picker",
+            "pane_finder",
         ];
 
         let expected = [
@@ -2875,6 +2876,7 @@ mod tests {
             ("diagnostics", "insert"),
             ("jumplist", "insert"),
             ("walkthrough_picker", "insert"),
+            ("pane_finder", "insert"),
         ];
         for (modal, mode) in with_preview {
             let state = TestState::new()

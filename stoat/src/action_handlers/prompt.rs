@@ -94,6 +94,7 @@ fn picker_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     match active_modal(stoat)? {
         ActiveModal::Jumplist => Some(super::picker::jumplist_picker_select(stoat)),
         ActiveModal::WalkthroughPicker => Some(super::picker::walkthrough_picker_select(stoat)),
+        ActiveModal::PaneFinder => Some(super::picker::pane_finder_select(stoat)),
         ActiveModal::Diagnostics => Some(super::picker::diagnostics_picker_select(stoat)),
         ActiveModal::Location => Some(super::picker::location_picker_select(stoat)),
         ActiveModal::WorkspacePicker => Some(super::workspace::workspace_picker_select(stoat)),
@@ -107,6 +108,7 @@ fn picker_cancel(stoat: &mut Stoat) -> Option<UpdateEffect> {
     match active_modal(stoat)? {
         ActiveModal::Jumplist => Some(super::picker::jumplist_picker_close(stoat)),
         ActiveModal::WalkthroughPicker => Some(super::picker::walkthrough_picker_close(stoat)),
+        ActiveModal::PaneFinder => Some(super::picker::pane_finder_close(stoat)),
         ActiveModal::Diagnostics => Some(super::picker::diagnostics_picker_close(stoat)),
         ActiveModal::Location => Some(super::picker::location_picker_close(stoat)),
         ActiveModal::WorkspacePicker => Some(super::workspace::workspace_picker_close(stoat)),

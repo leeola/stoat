@@ -2,8 +2,10 @@ use super::focused_pane_jumplist;
 use crate::{
     app::{Stoat, UpdateEffect},
     buffer_registry::OpenOrigin,
+    file_finder::OpenIntent,
     keymap_state::{active_modal, ActiveModal},
     pane::{FocusTarget, View},
+    pane_finder::PaneTarget,
 };
 
 /// Step the open list modal's selection by `delta` rows.
@@ -32,6 +34,7 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
         Some(ActiveModal::WalkthroughPicker) => {
             shift!(stoat.walkthrough_picker.as_mut().map(|p| &mut p.picker))
         },
+        Some(ActiveModal::PaneFinder) => shift!(stoat.pane_finder.as_mut().map(|f| &mut f.picker)),
         Some(ActiveModal::Diagnostics) => {
             shift!(stoat.diagnostics_picker.as_mut().map(|p| &mut p.picker))
         },
@@ -56,6 +59,7 @@ pub(super) fn picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     match active_modal(stoat) {
         Some(ActiveModal::Jumplist) => jumplist_picker_page(stoat, dir),
         Some(ActiveModal::WalkthroughPicker) => walkthrough_picker_page(stoat, dir),
+        Some(ActiveModal::PaneFinder) => pane_finder_page(stoat, dir),
         Some(ActiveModal::Diagnostics) => diagnostics_picker_page(stoat, dir),
         Some(ActiveModal::Location) => location_picker_page(stoat, dir),
         Some(ActiveModal::WorkspacePicker) => super::workspace::workspace_picker_page(stoat, dir),
@@ -610,6 +614,135 @@ pub(crate) fn sync_walkthrough_picker(stoat: &mut Stoat) {
         .sync_preview(ws, fs_host, language_registry, target);
 }
 
+/// Drive [`ActionKind::OpenPaneFinder`]. Lists every view the workspace holds
+/// in [`Stoat::pane_finder`].
+///
+/// A workspace with nothing to list reports it in the status line and opens
+/// nothing.
+///
+/// The editor under the finder resets to normal mode, as the jumplist
+/// picker's does.
+pub(super) fn open_pane_finder(stoat: &mut Stoat) -> UpdateEffect {
+    let rows = crate::pane_finder::rows(stoat.active_workspace());
+    if rows.is_empty() {
+        stoat.set_status("no panes to list");
+        return UpdateEffect::Redraw;
+    }
+
+    let executor = stoat.executor.clone();
+    let redraw = stoat.redraw_notify.clone();
+    stoat.set_focused_mode("normal".into());
+    let ws = stoat.active_workspace_mut();
+    let input = crate::input_view::InputView::create(
+        ws,
+        executor.clone(),
+        crate::input_view::SubmitTarget::PaneFinder,
+        "",
+        "insert",
+    );
+    let preview = crate::picker::Preview::new(ws, executor.clone());
+    stoat.pane_finder = Some(crate::pane_finder::PaneFinder::from_rows(
+        rows, input, preview, executor, redraw,
+    ));
+    UpdateEffect::Redraw
+}
+
+/// Re-rank the pane finder for what is typed and sync its preview.
+///
+/// Driven once per frame beside the other picker syncs, so typing narrows the
+/// list and the pane follows the selection without an action of its own.
+pub(crate) fn sync_pane_finder(stoat: &mut Stoat) {
+    if stoat.pane_finder.is_none() {
+        return;
+    }
+    let query = {
+        let ws = stoat.active_workspace();
+        stoat
+            .pane_finder
+            .as_ref()
+            .expect("pane_finder present")
+            .picker
+            .input
+            .text(ws)
+    };
+
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let fs_host = &*stoat.fs_host;
+    let language_registry = &stoat.language_registry;
+    let Some(finder) = stoat.pane_finder.as_mut() else {
+        return;
+    };
+    finder.picker.refilter(&query);
+    finder.picker.pump_rank();
+    if finder.picker.preview_current() {
+        return;
+    }
+
+    let target = finder
+        .picker
+        .selected_entry()
+        .and_then(crate::pane_finder::pane_target);
+    finder
+        .picker
+        .sync_preview(ws, fs_host, language_registry, target);
+}
+
+/// Page the pane finder's selection by half its visible rows in `dir`.
+pub(super) fn pane_finder_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    if let Some(finder) = stoat.pane_finder.as_mut() {
+        finder.page(dir);
+    }
+    UpdateEffect::Redraw
+}
+
+pub(super) fn pane_finder_close(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(finder) = stoat.pane_finder.take() {
+        finder.dispose(stoat.active_workspace_mut());
+    }
+    UpdateEffect::Redraw
+}
+
+/// Bring the view under the pane finder's selection back on screen. An empty
+/// finder just closes.
+///
+/// A buffer opens in the focused pane, as the buffer picker opens one. A
+/// terminal or an agent takes focus where it shows, or comes into the focused
+/// pane from behind the pane that covers it. Any other view takes focus at the
+/// pane, tab, or dock that shows it, and a view closed since the finder opened
+/// reports it in the status line.
+pub(super) fn pane_finder_select(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(mut finder) = stoat.pane_finder.take() else {
+        return UpdateEffect::None;
+    };
+    let query = finder.picker.input.text(stoat.active_workspace());
+    finder.picker.settle_rank(&query);
+    let target = finder.selected_row().map(|row| row.target.clone());
+    finder.dispose(stoat.active_workspace_mut());
+    let Some(target) = target else {
+        return UpdateEffect::Redraw;
+    };
+
+    // FIXME: A view that only a detached pane shows has no location. Its row
+    // reports `pane closed`, and a terminal's row shows the session in the
+    // focused pane a second time.
+    let view = match target {
+        PaneTarget::Buffer { path, .. } => {
+            return super::file_finder::dispatch_open_file(stoat, path);
+        },
+        PaneTarget::View(View::Terminal(id) | View::Agent(id)) => {
+            return super::terminal::show_terminal(stoat, id, OpenIntent::Replace);
+        },
+        PaneTarget::View(view) => view,
+    };
+    let Some(at) = stoat.active_workspace().view_location(&view) else {
+        stoat.set_status("pane closed");
+        return UpdateEffect::Redraw;
+    };
+    stoat.reveal_location(at);
+    UpdateEffect::Redraw
+}
+
 /// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].
 /// Snapshots every `(path, diagnostic)` pair currently in
 /// `Stoat::diagnostics` and stores the workspace-scope picker
@@ -723,11 +856,11 @@ pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
 mod tests {
     use super::{super::dispatch, *};
     use crate::{
-        test_fixture::store_two_tours,
+        test_fixture::{open_scratch_file, store_two_tours},
         test_harness::{editor, keys, stoat, TestHarness},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use stoat_action::{MoveDown, SaveSelection};
+    use stoat_action::{Action, MoveDown, SaveSelection};
 
     /// One verb set serves every list modal, so the verbs reach the dispatch
     /// whether or not a modal is open. With none open there is no list to
@@ -936,6 +1069,121 @@ mod tests {
         assert_eq!(
             (h.stoat.walkthrough_picker.is_none(), playing_slug(&h)),
             (true, None),
+        );
+    }
+
+    /// The view the focused pane shows.
+    fn focused_view(h: &TestHarness) -> View {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).view.clone()
+    }
+
+    #[test]
+    fn open_pane_finder_with_nothing_to_list_reports_it() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+        assert_eq!(
+            (
+                h.stoat.pane_finder.is_none(),
+                h.stoat.pending_message.as_deref()
+            ),
+            (true, Some("no panes to list")),
+        );
+    }
+
+    /// A run takes focus through its place, and a terminal through
+    /// `show_terminal`, and both lead back to the parked tab that shows them.
+    #[test]
+    fn enter_on_a_run_or_terminal_row_switches_to_the_tab_that_shows_it() {
+        let lands_on_its_tab = |open: &dyn Action, query: &str| {
+            let mut h = Stoat::test();
+            dispatch(&mut h.stoat, open);
+            let shown = focused_view(&h);
+            dispatch(&mut h.stoat, &stoat_action::NewTab);
+            dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+
+            h.type_text(query);
+            h.type_keys("enter");
+            (
+                h.stoat.pane_finder.is_none(),
+                h.stoat.active_workspace().active_tab,
+                focused_view(&h) == shown,
+            )
+        };
+        assert_eq!(
+            [
+                lands_on_its_tab(&stoat_action::OpenRun, "run"),
+                lands_on_its_tab(&stoat_action::Terminal, "term"),
+            ],
+            [(true, 0, true); 2],
+        );
+    }
+
+    /// A buffer row opens where the reader stands, as the buffer picker opens
+    /// one, rather than moving focus to a pane that shows it.
+    #[test]
+    fn enter_on_a_buffer_row_opens_it_in_the_focused_pane() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        dispatch(&mut h.stoat, &stoat_action::SplitNewRight);
+        let split = h.stoat.active_workspace().panes.focus();
+        dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+
+        h.type_keys("enter");
+
+        let (_, buffer_id) = h.stoat.focused_editor_ids().expect("focused editor");
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.pane_finder.is_none(),
+                ws.panes.focus(),
+                ws.buffers.path_for(buffer_id)
+            ),
+            (true, split, Some(path.as_path())),
+        );
+    }
+
+    /// A terminal row previews the screen as plain text, since program output
+    /// has no language to highlight it with.
+    #[test]
+    fn a_terminal_row_previews_the_screen() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &stoat_action::Terminal);
+        let View::Terminal(term_id) = focused_view(&h) else {
+            panic!("the terminal action shows a shell");
+        };
+        h.stoat.active_workspace_mut().terms[term_id]
+            .term
+            .feed(b"hello");
+        dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+
+        h.snapshot();
+
+        let preview = h
+            .stoat
+            .pane_finder
+            .as_ref()
+            .expect("finder open")
+            .picker
+            .preview
+            .buffer;
+        let ws = h.stoat.active_workspace();
+        let text = ws
+            .buffers
+            .get(preview)
+            .expect("preview buffer")
+            .read()
+            .expect("preview buffer poisoned")
+            .rope()
+            .to_string();
+        assert_eq!(
+            (
+                text,
+                ws.buffers
+                    .language_for(preview)
+                    .map(|language| language.name)
+            ),
+            ("hello".to_string(), None),
         );
     }
 }

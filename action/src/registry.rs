@@ -89,8 +89,8 @@ use crate::{
         pane::{
             CloseOtherPanes, ClosePane, DetachPane, FocusDown, FocusLeft, FocusNext, FocusPane,
             FocusPrev, FocusRight, FocusUp, MovePaneDown, MovePaneLeft, MovePaneNext, MovePanePrev,
-            MovePaneRight, MovePaneUp, ReattachPane, SplitDown, SplitNewDown, SplitNewRight,
-            SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
+            MovePaneRight, MovePaneUp, OpenPaneFinder, ReattachPane, SplitDown, SplitNewDown,
+            SplitNewRight, SplitRight, ToggleDockLeft, ToggleDockRight, TogglePaneWiden,
         },
         picker::{
             CodeSearchClose, CodeSearchModeToggle, CodeSearchSelect, CommitPickerBack,
@@ -479,6 +479,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenWalkthroughPicker::DEF, |_| {
         Ok(Box::new(OpenWalkthroughPicker))
     });
+    add(OpenPaneFinder::DEF, |_| Ok(Box::new(OpenPaneFinder)));
     add(OpenLastPicker::DEF, |_| Ok(Box::new(OpenLastPicker)));
     add(OpenDiagnosticsPicker::DEF, |_| {
         Ok(Box::new(OpenDiagnosticsPicker))
@@ -1275,6 +1276,7 @@ mod tests {
         "TrailPrev",
         "TrailClear",
         "OpenWalkthroughPicker",
+        "OpenPaneFinder",
         "WalkthroughNext",
         "WalkthroughPrev",
         "WalkthroughNextAnnotation",
@@ -1833,6 +1835,7 @@ mod tests {
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
         // + 1 OpenWalkthroughPicker.
+        // + 1 OpenPaneFinder.
         // + 1 OpenLastPicker.
         // + 1 OpenDiagnosticsPicker.
         // + 1 OpenWorkspaceDiagnosticsPicker.
@@ -2006,7 +2009,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 455);
+        assert_eq!(all().count(), 456);
     }
 
     #[test]

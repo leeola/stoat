@@ -15312,17 +15312,38 @@ fn the_walkthrough_picker_rows_show_slug_count_and_title() {
     h.snapshot();
 
     let rows = target_picker_rows(&h, ModalKind::WalkthroughPicker);
-    let row_words = |row: u16| -> String {
-        let buf = h.rendered_buffer();
-        let text: String = (rows.x..rows.x + rows.width)
-            .map(|col| buf[(col, row)].symbol())
-            .collect();
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
-    };
     assert_eq!(
-        [row_words(rows.y), row_words(rows.y + 1)],
+        [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)],
         ["alpha 1 Alpha tour", "zebra 2 Zebra tour"],
     );
+}
+
+/// A reader tells held views apart by kind, title, and place, so each row
+/// shows all three.
+#[test]
+fn the_pane_finder_rows_show_kind_title_and_place() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    open_scratch_file(&mut h, "");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::Terminal);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+    h.snapshot();
+
+    let rows = target_picker_rows(&h, ModalKind::PaneFinder);
+    assert_eq!(
+        [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)],
+        ["buffer buf.txt tab 1", "term term tab 2"],
+    );
+}
+
+/// The words painted on `row` across the list `rows`, joined by single
+/// spaces, so a row reads the same at any column width.
+fn row_words(h: &crate::test_harness::TestHarness, rows: Rect, row: u16) -> String {
+    let buf = h.rendered_buffer();
+    let text: String = (rows.x..rows.x + rows.width)
+        .map(|col| buf[(col, row)].symbol())
+        .collect();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Open a jumplist picker over `count` jumps into a seeded file, one per
