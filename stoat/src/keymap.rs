@@ -2520,8 +2520,8 @@ mod tests {
         );
     }
 
-    /// Ctrl-t flips between the two diff layouts, so it names one action on the
-    /// per-file diff and on the changes view, and no other view binds it.
+    /// Ctrl-t flips between the two diff layouts, so each screen's Ctrl-t names
+    /// the other layout's action, and no other view binds it.
     #[test]
     fn ctrl_t_flips_the_diff_layout_from_either_screen() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
@@ -2538,10 +2538,13 @@ mod tests {
                 .map(|actions| actions[0].name.clone())
         };
 
-        let flip = Some("DiffChanges".to_string());
         assert_eq!(
             [ctrl_t("diff"), ctrl_t("diff_changes"), ctrl_t("file")],
-            [flip.clone(), flip, None],
+            [
+                Some("DiffChanges".to_string()),
+                Some("DiffFiles".to_string()),
+                None
+            ],
         );
     }
 

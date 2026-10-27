@@ -1148,9 +1148,9 @@ on key {
         C -> RebaseContinue();
     }
     # Ctrl-t flips between the two diff layouts, so both screens bind it. On
-    # the per-file diff it opens the changes view on the hunk under the cursor,
-    # and on the changes view it opens the per-file diff at the cursor's hunk.
-    # DiffFiles() on the changes view does the same, so space d f flips too.
+    # the per-file diff it runs DiffChanges onto the hunk under the cursor, and
+    # on the changes view it runs DiffFiles onto the cursor's hunk. DiffChanges
+    # on the changes view closes it, so space d c opens and closes the view.
     view == diff {
         Ctrl-t -> DiffChanges();
     }
@@ -1171,7 +1171,7 @@ on key {
     view == diff_changes && mode == normal {
         Escape -> CloseDiffChanges();
         q -> CloseDiffChanges();
-        Ctrl-t -> DiffChanges();
+        Ctrl-t -> DiffFiles();
         Enter -> DiffChangesOpen();
         j -> DiffChangesNext();
         Down -> DiffChangesNext();
@@ -1540,7 +1540,8 @@ on key {
     # releases after one key.
     #
     # `f` opens the per-file diff and `c` opens the changes view, the hunk
-    # list of every change. Once one is open, `Ctrl-t` flips between them.
+    # list of every change. On a changes view `c` closes it. Once one is open,
+    # `Ctrl-t` flips between them.
     #
     # `i` and `h` point the diff at the index or at HEAD, `b` flips the base
     # between them, and `e` opens the base on the command line. A pair diff of

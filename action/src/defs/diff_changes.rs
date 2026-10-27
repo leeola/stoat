@@ -9,8 +9,9 @@ define_action!(
     "Open a changes view of every working-tree change against the diff base. \
      The changes view shows the hunks of each changed file side by side, in one \
      list that scrolls. From the per-file diff it opens on the hunk under the \
-     cursor. Run on the changes view, it opens the per-file diff at the cursor's \
-     hunk, so one key flips between the two layouts.",
+     cursor. Run on the changes view, it closes the view and puts back what it \
+     covered, so one key opens and closes the changes view. Ctrl-t and \
+     DiffFiles open the per-file diff at the cursor's hunk from it.",
     ActionPriority::Common,
     command_name = "diff-changes"
 );

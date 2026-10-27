@@ -25,13 +25,14 @@ use std::path::{Path, PathBuf};
 use stoat_scheduler::Executor;
 use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
 
-/// Flip between the changes view and the per-file diff.
+/// Open a changes view over the focused view, or close the focused one.
 ///
-/// On a focused changes view this opens the per-file diff at the cursor's hunk.
-/// Anywhere else it shows a changes view over the focused view.
+/// On a focused changes view this closes it and puts back the view it covered.
+/// Anywhere else it shows a changes view over the focused view. `DiffFiles`
+/// opens the per-file diff from a changes view.
 pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     if stoat.active_workspace().focused_diff_changes_id().is_some() {
-        return diff_changes_open(stoat);
+        return close_diff_changes(stoat);
     }
     open_diff_changes(stoat)
 }
@@ -1406,6 +1407,39 @@ mod tests {
         assert_eq!(
             (h.stoat.current_view(), h.stoat.focused_editor_ids()),
             (Some("diff_changes"), None),
+        );
+    }
+
+    /// `space d c` closes a changes view with no change left in it, and puts
+    /// back the view it covered.
+    #[test]
+    fn diff_changes_on_an_empty_changes_view_closes_it() {
+        let mut h = empty_stack();
+        h.type_keys("space d c");
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.stoat
+                    .active_workspace()
+                    .focused_diff_changes_id()
+                    .is_none()
+            ),
+            (Some("file"), true),
+        );
+    }
+
+    #[test]
+    fn diff_changes_on_a_stacked_changes_view_closes_it() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+
+        assert_eq!(
+            (h.stoat.current_view(), focused_path(&h)),
+            (Some("file"), Some(PathBuf::from("/repo/a.txt"))),
         );
     }
 
