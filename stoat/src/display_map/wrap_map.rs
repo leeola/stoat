@@ -364,6 +364,14 @@ impl WrapMap {
             }
             self.flush_edits();
         } else if needs_full_rebuild {
+            // A rewrap still on the pool started from an older tab snapshot,
+            // so its result holds rows from before this rebuild. The rebuild
+            // covers every edit the queue holds, so the rewrap, its queue,
+            // and the provisional edits it reported all go.
+            self.background_task = None;
+            self.background_edits_taken = 0;
+            self.pending_edits.clear();
+            self.interpolated_edits = Patch::empty();
             let old_line_count = self.snapshot.line_count();
             self.snapshot = build_snapshot(tab_snapshot, self.wrap_width);
             let new_line_count = self.snapshot.line_count();
@@ -1897,11 +1905,11 @@ mod tests {
                 create_highlight_endpoints, AnchorResolver, HighlightEndpoints, HighlightKey,
                 HighlightLayer, HighlightStyle,
             },
-            inlay_map::InlayMap,
+            inlay_map::{InlayMap, InlaySnapshot},
             sampler::{self, Sampler},
-            tab_map::{self, TabMap, TabPoint},
+            tab_map::{self, TabMap, TabPoint, TabSnapshot},
         },
-        multi_buffer::MultiBuffer,
+        multi_buffer::{MultiBuffer, MultiBufferSnapshot},
     };
     use ratatui::style::Color;
     use std::{
@@ -2996,10 +3004,10 @@ mod tests {
     /// Turning wrapping off while a rewrap is running does not surface the
     /// width the task was started with.
     ///
-    /// A width change on a large file is deferred, and the finished snapshot is
-    /// installed whatever the wanted width has become meanwhile. The re-queue
-    /// after that install only fires when both widths are set, so turning
-    /// wrapping off leaves the wrapped result standing and `sync` returns it.
+    /// A width change on a large file is deferred to the pool. The sync after
+    /// wrapping turns off rebuilds the rows inline, and the result the task
+    /// carries, wrapped at the width it started with, never lands over that
+    /// rebuild.
     #[test]
     fn a_rewrap_landing_after_wrapping_is_turned_off_returns_unwrapped() {
         let scheduler = Arc::new(TestScheduler::new());
@@ -3032,12 +3040,12 @@ mod tests {
 
         // The first sync rebuilds inline, because the wanted width no longer
         // matches the snapshot's and deferral does not apply without one. The
-        // background result is still sitting unpolled behind it.
+        // rebuild drops the rewrap still on the pool.
         let rebuilt = resync(&multi_buffer, &mut wrap_map);
         assert_eq!(rebuilt.wrap_width, None, "the inline rebuild is unwrapped");
 
-        // Now the widths agree, so nothing forces a rebuild and the pending
-        // task is picked up instead, over the top of the correct snapshot.
+        // Now the widths agree, so nothing forces a rebuild, and no rewrap is
+        // left to land over the rebuilt rows.
         let snapshot = resync(&multi_buffer, &mut wrap_map);
         assert_eq!(
             snapshot.wrap_width, None,
@@ -3048,6 +3056,171 @@ mod tests {
             151,
             "and holds one row per buffer line, not the wrapped count",
         );
+    }
+
+    /// A fold that takes a long file under the deferral threshold while its
+    /// rewrap runs on the pool keeps the folded rows.
+    ///
+    /// The fold's sync rebuilds inline at the wanted width, since a file that
+    /// short does not defer. The rewrap on the pool started from the unfolded
+    /// rows, so its landing reports no edit in rows nothing above holds.
+    #[test]
+    fn a_fold_during_a_deferred_rewrap_keeps_the_folded_rows() {
+        let mut rig = FoldRig::new();
+        rig.wrap_map.set_wrap_width(Some(10));
+        rig.sync(&Patch::empty());
+        assert!(
+            rig.wrap_map.background_pending(),
+            "the width change was deferred to the pool",
+        );
+
+        let rebuilt = rig.refold(1..149, true);
+        rig.scheduler.run_until_parked();
+        let landed = rig.sync(&Patch::empty());
+        let fresh = folded_snapshot(&rig.content, (1, 0)..(149, 0), Some(10)).line_count();
+        assert_eq!(
+            (
+                rebuilt.line_count(),
+                landed.line_count(),
+                rig.wrap_map.background_pending(),
+            ),
+            (fresh, fresh, false),
+        );
+    }
+
+    /// A rewrap queued after a fold's inline rebuild reports edits from the
+    /// rebuilt rows, and none from the rewrap that the rebuild dropped.
+    ///
+    /// The dropped rewrap left a queued entry over the unfolded rows, and a
+    /// small fold that came while it ran left the provisional edits it
+    /// reported. The next deferred rewrap starts from the rebuilt rows, so
+    /// neither of those enters its walk or its landing.
+    #[test]
+    fn a_rewrap_after_a_fold_rebuild_reports_edits_from_the_rebuilt_rows() {
+        let mut rig = FoldRig::new();
+        rig.wrap_map.set_wrap_width(Some(10));
+        rig.sync(&Patch::empty());
+        rig.refold(145..148, true);
+        rig.refold(1..140, true);
+
+        rig.wrap_map.set_wrap_width(Some(15));
+        rig.refold(1..140, false);
+        assert!(
+            rig.wrap_map.background_pending(),
+            "the unfolded width change was deferred to the pool",
+        );
+
+        rig.scheduler.run_until_parked();
+        let landed = rig.sync(&Patch::empty());
+        let fresh = folded_snapshot(&rig.content, (145, 0)..(148, 0), Some(15)).line_count();
+        assert_eq!(
+            (landed.line_count(), rig.wrap_map.background_pending()),
+            (fresh, false),
+        );
+    }
+
+    /// A wrap map at width 20 over 150 rows that wrap at a width of 10, with
+    /// the fold and tab layers under it and the scheduler that runs its pool.
+    ///
+    /// `held` is the row count a layer above keeps from the edits each sync
+    /// reports, which [`Self::sync`] checks every patch against.
+    struct FoldRig {
+        scheduler: Arc<TestScheduler>,
+        content: String,
+        buffer_snapshot: MultiBufferSnapshot,
+        inlay_snapshot: Arc<InlaySnapshot>,
+        fold_map: FoldMap,
+        tab_map: TabMap,
+        tab_snapshot: TabSnapshot,
+        wrap_map: WrapMap,
+        held: u32,
+    }
+
+    impl FoldRig {
+        fn new() -> Self {
+            let scheduler = Arc::new(TestScheduler::new());
+            let content: String = (0..150)
+                .map(|i| format!("line{i} aaaaaaaaaaaa\n"))
+                .collect();
+            let buffer = TextBuffer::with_text(BufferId::new(0), &content);
+            let buffer_snapshot = MultiBuffer::singleton(Arc::new(RwLock::new(buffer))).snapshot();
+            let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+            let (fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot.clone());
+            let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+            let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+            let (wrap_map, first) = WrapMap::new(
+                tab_snapshot.clone(),
+                Some(20),
+                Executor::new(scheduler.clone()),
+                crate::test_notify(),
+            );
+            Self {
+                scheduler,
+                content,
+                buffer_snapshot,
+                inlay_snapshot,
+                fold_map,
+                tab_map,
+                tab_snapshot,
+                wrap_map,
+                held: first.line_count(),
+            }
+        }
+
+        /// Fold the buffer `rows`, or unfold them, and sync the wrap map to
+        /// the folds that result.
+        fn refold(&mut self, rows: Range<u32>, fold: bool) -> Arc<super::WrapSnapshot> {
+            let range = {
+                let rope = self.buffer_snapshot.rope();
+                rope.point_to_offset(Point::new(rows.start, 0))
+                    ..rope.point_to_offset(Point::new(rows.end, 0))
+            };
+            if fold {
+                let anchors = self.buffer_snapshot.anchor_at(range.start, Bias::Right)
+                    ..self.buffer_snapshot.anchor_at(range.end, Bias::Left);
+                self.fold_map.fold(
+                    vec![anchors],
+                    FoldPlaceholder::default(),
+                    &self.buffer_snapshot,
+                );
+            } else {
+                self.fold_map.unfold(vec![range], &self.buffer_snapshot);
+            }
+
+            let (fold_snapshot, fold_edits) =
+                self.fold_map
+                    .sync(self.inlay_snapshot.clone(), &Patch::empty(), None);
+            let (tab_snapshot, tab_edits) = self.tab_map.sync(fold_snapshot, fold_edits);
+            self.tab_snapshot = tab_snapshot;
+            self.sync(&tab_edits)
+        }
+
+        /// Sync the wrap map to the current folds, and assert the reported
+        /// edits map the rows held above onto the new snapshot's rows.
+        fn sync(&mut self, tab_edits: &Patch<u32>) -> Arc<super::WrapSnapshot> {
+            let (snapshot, edits) = self.wrap_map.sync(self.tab_snapshot.clone(), tab_edits);
+            let rows = snapshot.line_count();
+            let ranges: Vec<(Range<u32>, Range<u32>)> = edits
+                .edits()
+                .iter()
+                .map(|edit| (edit.old.clone(), edit.new.clone()))
+                .collect();
+            let inside = ranges
+                .iter()
+                .all(|(old, new)| old.end <= self.held && new.end <= rows);
+            let moved: i64 = ranges
+                .iter()
+                .map(|(old, new)| new.len() as i64 - old.len() as i64)
+                .sum();
+            assert_eq!(
+                (inside, i64::from(self.held) + moved),
+                (true, i64::from(rows)),
+                "edits {ranges:?} map {} held rows onto {rows}",
+                self.held,
+            );
+            self.held = rows;
+            snapshot
+        }
     }
 
     #[test]

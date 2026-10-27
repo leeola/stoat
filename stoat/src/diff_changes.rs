@@ -1390,6 +1390,52 @@ mod tests {
         assert_eq!([folded, edited], [(count, count), (count + 1, count + 1)]);
     }
 
+    /// Excerpts over long files that paint before their hunks land show the
+    /// rows of excerpts that waited for the hunks to paint.
+    ///
+    /// One scheduler pass lands the tally, which opens each excerpt unfolded
+    /// with its hunks still on the pool. A paint then gives each excerpt its
+    /// first width, which a file this long wraps on the pool, and the folds
+    /// that the hunks bring land while that rewrap runs.
+    #[test]
+    fn excerpts_folded_under_a_pending_wrap_show_their_folded_rows() {
+        let stack_rows = |paint_before_hunks: bool| {
+            let mut h = TestHarness::with_size(160, 48);
+            let base = numbered(120);
+            let working = base.replace("\n60\n", "\nSIXTY\n");
+            h.stage_review_scenario(
+                "/repo",
+                &[("a.txt", &base, &working), ("b.txt", &base, &working)],
+            );
+            h.open_file(Path::new("/repo/a.txt"));
+            h.cover_with_diff_changes(false);
+            h.run_until_parked();
+            h.stoat.drive_pumps();
+            if paint_before_hunks {
+                h.stoat.render();
+            }
+            h.settle();
+            h.stoat.render();
+            h.stoat.render();
+
+            let ws = h.stoat.active_workspace_mut();
+            let id = ws.focused_diff_changes_id().expect("a changes view");
+            let Workspace {
+                diff_changes_views,
+                editors,
+                ..
+            } = ws;
+            diff_changes_views[id]
+                .excerpts
+                .iter()
+                .map(|excerpt| excerpt_rows(excerpt, editors))
+                .collect::<Vec<_>>()
+        };
+        let waited = stack_rows(false);
+        let folded = waited.iter().all(|rows| (1..121).contains(rows));
+        assert_eq!((stack_rows(true), folded), (waited, true));
+    }
+
     /// An unsaved edit to a clean open file joins a stack that already
     /// exists, once the file's diff map lands.
     #[test]
