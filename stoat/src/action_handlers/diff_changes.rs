@@ -18,7 +18,7 @@ use crate::{
     display_map::{DisplayPoint, DisplaySnapshot},
     editor_state::{EditorId, EditorState},
     pane::{PaneId, View},
-    workspace::Workspace,
+    workspace::{diff::DiffLanding, Workspace},
 };
 use slotmap::SlotMap;
 use std::path::{Path, PathBuf};
@@ -193,15 +193,28 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
         movement::jump_to_offset(stoat, offset);
     }
     review::enter_diff_view(stoat);
-    if let Some(editor) = super::focused_editor_mut(stoat) {
-        match screen_row {
-            Some(row) => editor.held_screen_row = Some(row),
-            None => {
-                view::align_view(editor, ViewAlign::Center);
-            },
-        }
+    if let Some(row) = screen_row {
+        hold_screen_row(stoat, row);
+    } else if let Some(editor) = super::focused_editor_mut(stoat) {
+        view::align_view(editor, ViewAlign::Center);
     }
     UpdateEffect::Redraw
+}
+
+/// Hold the focused editor's cursor on `screen_row` of the diff it opened.
+///
+/// The next paint applies the hold. A file whose hunks are on the pool gets the
+/// hold again when they land, since the deleted-line blocks they bring move the
+/// cursor's display row.
+fn hold_screen_row(stoat: &mut Stoat, screen_row: u32) {
+    let Some((editor, buffer_id)) = stoat.focused_editor_ids() else {
+        return;
+    };
+    let ws = stoat.active_workspace_mut();
+    if let Some(state) = ws.editors.get_mut(editor) {
+        state.held_screen_row = Some(screen_row);
+    }
+    ws.add_diff_landing(buffer_id, DiffLanding::HeldRow { editor, screen_row });
 }
 
 /// Move the focused changes view's cursor by `delta` display rows.
@@ -921,7 +934,8 @@ fn lands(snapshot: &DisplaySnapshot, row: u32) -> bool {
 mod tests {
     use super::{diff_changes_jump, diff_changes_step, respawn_diff_changes_panes};
     use crate::{
-        action_handlers::{commits, dispatch, focused_editor_mut, pane},
+        action_handlers::{commits, dispatch, focused_editor_mut, pane, view},
+        apc_emit,
         app::UpdateEffect,
         buffer::BufferId,
         buffer_lifecycle,
@@ -936,6 +950,7 @@ mod tests {
     use stoat_action::Action;
     use stoat_config::MinimapMode;
     use stoat_text::Point;
+    use tokio::sync::mpsc;
 
     /// Two changed files, with `a.txt` open in the focused pane.
     fn two_files() -> TestHarness {
@@ -1692,6 +1707,170 @@ mod tests {
                 (Some("diff_changes"), at("b.txt", 40), stacked),
             ),
         );
+    }
+
+    #[test]
+    fn a_flip_to_the_diff_keeps_the_cursor_on_screen_before_and_after_its_hunks_land() {
+        assert_flip_shows_the_cursor(&mut long_files(24));
+    }
+
+    #[test]
+    fn a_stoatty_flip_to_the_diff_keeps_the_cursor_on_screen_before_and_after_its_hunks_land() {
+        let mut h = long_files(24);
+        let (tx, _rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.resize(160, 48);
+        assert_flip_shows_the_cursor(&mut h);
+    }
+
+    #[test]
+    fn a_flip_into_a_file_that_wraps_on_the_pool_keeps_the_cursor_on_screen() {
+        assert_flip_shows_the_cursor(&mut wrapped_files());
+    }
+
+    #[test]
+    fn a_flip_whose_hunks_land_late_holds_the_stack_row_once_they_land() {
+        let mut h = long_files(24);
+        stack_on_b(&mut h);
+        let stacked = screen_row(&mut h);
+        move_b_base(&mut h);
+
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        let before = frame_view(&mut h);
+        h.settle();
+        assert_eq!(
+            (stacked.is_some(), on_screen(before), screen_row(&mut h)),
+            (true, true, stacked),
+            "the view before the hunks land, {before:?}, shows the cursor, and the landing puts it on its stack row",
+        );
+    }
+
+    #[test]
+    fn a_flip_back_before_the_hunks_land_leaves_the_file_unheld() {
+        let mut h = long_files(24);
+        stack_on_b(&mut h);
+        move_b_base(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.stoat.render();
+        let (editor, _) = h.stoat.focused_editor_ids().expect("the diff's editor");
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let held = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(editor)
+            .map(|state| state.held_screen_row);
+        assert_eq!(held, Some(None));
+    }
+
+    #[test]
+    fn a_diff_left_past_its_last_row_paints_its_last_rows() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/b.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        let max_scroll = frame_view(&mut h).3;
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused editor");
+        editor.scroll_row = max_scroll + 30;
+        editor.scroll_offset = (max_scroll + 30) as f32;
+        frame_view(&mut h);
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused editor");
+        assert_eq!(
+            (editor.scroll_row, editor.scroll_offset),
+            (max_scroll, max_scroll as f32)
+        );
+    }
+
+    /// Two changed files of 150 lines too wide for a diff column, each changed
+    /// on its 121st line.
+    ///
+    /// A file this long wraps a new width on the pool, so a fresh editor over
+    /// either paints a frame of unwrapped rows before its rows wrap.
+    fn wrapped_files() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        let words = "word ".repeat(30);
+        let base: String = (1..=150).map(|n| format!("{n} {words}\n")).collect();
+        let working = base.replace(&format!("\n121 {words}\n"), &format!("\nCHANGED {words}\n"));
+        h.stage_review_scenario(
+            "/repo",
+            &[("a.txt", &base, &working), ("b.txt", &base, &working)],
+        );
+        h
+    }
+
+    /// Open the changes view over `a.txt` and walk its cursor onto `b.txt`'s
+    /// change.
+    fn stack_on_b(h: &mut TestHarness) {
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("n n");
+    }
+
+    /// Give `long_files`' `b.txt` a HEAD with thirty more lines past its tenth,
+    /// and stale its diff map, so the next hunks splice thirty deleted rows
+    /// above its change.
+    fn move_b_base(h: &mut TestHarness) {
+        let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
+        let moved = base.replace("\n10\n", &format!("\n10\n{}", "gone\n".repeat(30)));
+        h.fake_git().add_repo("/repo").head_file("b.txt", &moved);
+        let b = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/b.txt"))
+            .expect("the stack opened b.txt");
+        h.stoat
+            .active_workspace_mut()
+            .invalidate_diff(b, Path::new("/repo/b.txt"));
+    }
+
+    /// Flip from the changes view to `b.txt`'s diff, and assert the view shows
+    /// the cursor on the frame before the hunks land and on the frame after,
+    /// with the hold gone once the rows are final.
+    fn assert_flip_shows_the_cursor(h: &mut TestHarness) {
+        stack_on_b(h);
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        let before = frame_view(h);
+        h.settle();
+        let after = frame_view(h);
+        let held = focused_editor_mut(&mut h.stoat).map(|editor| editor.held_screen_row);
+        assert_eq!(
+            (on_screen(before), on_screen(after), held),
+            (true, true, Some(None)),
+            "views as (scroll_row, cursor_row, viewport, max_scroll): {before:?} then {after:?}",
+        );
+    }
+
+    /// Paint a frame as the loop does, with the pools a stoatty terminal reads
+    /// emitted after the paint, and read the focused editor's view from it.
+    fn frame_view(h: &mut TestHarness) -> (u32, u32, u32, u32) {
+        h.stoat.render();
+        apc_emit::emit_smooth_scroll(&mut h.stoat);
+        view_bounds(h)
+    }
+
+    /// The focused editor's view as its top row, its cursor's display row, its
+    /// height, and the top row that puts the last display row at the bottom.
+    fn view_bounds(h: &mut TestHarness) -> (u32, u32, u32, u32) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused editor");
+        let viewport = editor.viewport_rows.expect("a painted view");
+        let max_scroll = view::max_scroll_offset(editor) as u32;
+        (
+            editor.scroll_row,
+            view::cursor_display_row(editor),
+            viewport,
+            max_scroll,
+        )
+    }
+
+    /// Whether a view from [`view_bounds`] shows its cursor and starts no lower
+    /// than the top row that puts the last display row at the bottom.
+    fn on_screen((scroll_row, cursor_row, viewport, max_scroll): (u32, u32, u32, u32)) -> bool {
+        scroll_row <= cursor_row && cursor_row < scroll_row + viewport && scroll_row <= max_scroll
     }
 
     /// The focused changes view's excerpts as their editors and buffers, in

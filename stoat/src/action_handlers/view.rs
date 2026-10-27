@@ -671,14 +671,19 @@ fn center_jump_on_rows(
 }
 
 /// Scroll `editor` so its primary cursor's row sits on the held screen row,
-/// and drop the hold.
+/// and drop the hold once the rows it measured are final.
 ///
 /// The paint calls this after it fits the display to the width, so the row it
 /// measures is the row it paints. A held row past the view's last row holds on
 /// the last row, and the scroll stops where the last display row reaches the
 /// bottom. The move is a swap, so it clears a glide and the wheel fraction.
+///
+/// A new width on a long file rewraps on the pool, and the paints before the
+/// rewrap lands show the rows of the old wrapping. The landing moves every row
+/// below a line that wraps differently, so the hold stays over those paints
+/// and places the cursor again on the paint after the landing.
 pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
-    let Some(screen_row) = editor.held_screen_row.take() else {
+    let Some(screen_row) = editor.held_screen_row else {
         return;
     };
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
@@ -687,6 +692,30 @@ pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
     editor.scroll_row = cursor_row
         .saturating_sub(screen_row.min(viewport - 1))
         .min(max_scroll_row(line_count, viewport));
+    editor.scroll_frac = 0.0;
+    editor.scroll_offset = editor.scroll_row as f32;
+    editor.scroll_glide = ScrollGlide::None;
+    if !editor.display_map.rewrap_pending() {
+        editor.held_screen_row = None;
+    }
+}
+
+/// Pull `editor`'s view back to the last row that keeps its display filled,
+/// when the display ends above the view.
+///
+/// A diff map replaced under a diff view drops the deleted-line blocks of the
+/// hunks it no longer holds. Blocks dropped from above the view shorten the
+/// display under a scroll that stays put, and painted as it stands, the view
+/// starts past the last row and shows an empty pane. The pull is a swap, so it
+/// clears a glide and the wheel fraction.
+pub(crate) fn clamp_scroll_to_display(editor: &mut EditorState) {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let line_count = editor.display_map.snapshot().line_count();
+    let max_scroll = max_scroll_row(line_count, viewport);
+    if editor.scroll_row <= max_scroll {
+        return;
+    }
+    editor.scroll_row = max_scroll;
     editor.scroll_frac = 0.0;
     editor.scroll_offset = editor.scroll_row as f32;
     editor.scroll_glide = ScrollGlide::None;

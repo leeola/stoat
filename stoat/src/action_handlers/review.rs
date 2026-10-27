@@ -756,11 +756,11 @@ pub(crate) fn pump_diff_wants(stoat: &mut Stoat) -> bool {
 ///
 /// A landing acts only where the reader still is, since the reader moves on
 /// while the hunks are on the pool. A latched view needs its editor to show
-/// `buffer_id` in a latched split pane. A toggle jump or a pair verdict needs
-/// its editor focused with the diff view still on, so a view closed before the
-/// hunks land keeps the cursor and the open file. A change press or a file hop
-/// needs the focused buffer to be `buffer_id`. Otherwise the landing is
-/// dropped.
+/// `buffer_id` in a latched split pane. A toggle jump, a pair verdict, or a
+/// held row needs its editor focused with the diff view still on, so a view
+/// closed before the hunks land keeps the cursor and the open file. A change
+/// press or a file hop needs the focused buffer to be `buffer_id`. Otherwise
+/// the landing is dropped.
 fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) {
     let name = landing.name();
     tracing::debug!(
@@ -831,6 +831,15 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
                 super::movement::land_file_hop(stoat, dir, origin, wrapped, fallback);
             } else {
                 log_dropped_landing(stoat, buffer_id, name);
+            }
+        },
+        DiffLanding::HeldRow { editor, screen_row } => {
+            if !focused_diff_view(stoat, editor) {
+                log_dropped_landing(stoat, buffer_id, name);
+                return;
+            }
+            if let Some(state) = stoat.active_workspace_mut().editors.get_mut(editor) {
+                state.held_screen_row = Some(screen_row);
             }
         },
     }

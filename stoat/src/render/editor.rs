@@ -171,6 +171,7 @@ pub(crate) fn render_editor_with_overlay(
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
         fit_diff_view(editor, inner, wrap, wrap_column);
         view::apply_held_screen_row(editor);
+        view::clamp_scroll_to_display(editor);
         render_diff_view(
             editor,
             inner,

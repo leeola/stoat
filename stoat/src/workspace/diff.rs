@@ -1191,6 +1191,9 @@ pub(crate) enum DiffLanding {
         wrapped: bool,
         fallback: (u32, Range<u32>),
     },
+    /// A flip's screen row, applied once the hunks are in so the row is
+    /// measured against the display the reader sees.
+    HeldRow { editor: EditorId, screen_row: u32 },
 }
 
 impl DiffLanding {
@@ -1211,6 +1214,7 @@ impl DiffLanding {
             Self::EdgeChange { .. } => "EdgeChange",
             Self::PairVerdict { .. } => "PairVerdict",
             Self::FileHop { .. } => "FileHop",
+            Self::HeldRow { .. } => "HeldRow",
         }
     }
 }

@@ -491,6 +491,12 @@ impl DisplayMap {
         self.wrap_map.wrap_width()
     }
 
+    /// Whether the wrapping of the last snapshot is provisional, with a rewrap
+    /// on the pool that moves its rows when it lands.
+    pub(crate) fn rewrap_pending(&self) -> bool {
+        self.wrap_map.background_pending()
+    }
+
     pub fn highlight_text(
         &mut self,
         key: HighlightKey,
