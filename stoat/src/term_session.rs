@@ -90,7 +90,7 @@ impl TermSelection {
     }
 }
 
-/// Where a view shows, which is a split pane of a tab or a dock.
+/// Where a view shows, which is a split or detached pane of a tab, or a dock.
 ///
 /// The pane arm carries a tab index, because the view sits in a parked tab at
 /// times. The index is good only against the workspace that gave it.

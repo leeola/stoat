@@ -6993,6 +6993,8 @@ impl Stoat {
     /// Move focus to `at`, and switch to its tab when the tab is parked.
     /// Returns whether focus moved.
     ///
+    /// A detached pane that takes focus comes to the front.
+    ///
     /// Returns `false` for the place focus already sits, a closed pane, a
     /// dropped dock, or a tab that is gone.
     pub(crate) fn focus_location(&mut self, at: ViewLocation) -> bool {
@@ -7007,11 +7009,12 @@ impl Stoat {
             },
             ViewLocation::Pane { tab, pane } if tab == self.active_workspace().active_tab => {
                 let ws = self.active_workspace_mut();
-                if pane == ws.panes.focus() || !ws.panes.split_pane_ids().contains(&pane) {
+                if pane == ws.panes.focus() || !ws.panes.selectable_pane_ids().contains(&pane) {
                     return false;
                 }
                 ws.panes.set_focus(pane);
                 ws.focus = FocusTarget::SplitPane;
+                action_handlers::pane::raise_detached_window(self, pane);
                 true
             },
             ViewLocation::Pane { tab, pane } => {
@@ -7020,7 +7023,7 @@ impl Stoat {
                     .tabs
                     .get(tab)
                     .and_then(|t| t.parked.as_ref())
-                    .is_some_and(|tree| tree.split_pane_ids().contains(&pane));
+                    .is_some_and(|tree| tree.selectable_pane_ids().contains(&pane));
                 if !parked_holds_pane || !self.active_workspace_mut().switch_tab(tab) {
                     return false;
                 }
@@ -7031,6 +7034,9 @@ impl Stoat {
                 ws.layout(size);
                 ws.panes.set_focus(pane);
                 ws.focus = FocusTarget::SplitPane;
+                // A parked tab's detached windows are closed. The next frame
+                // opens them again, and stoatty opens a window focused, so a
+                // raise sent now finds no window to raise.
                 true
             },
         }

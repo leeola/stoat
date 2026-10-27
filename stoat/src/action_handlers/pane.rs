@@ -699,10 +699,15 @@ pub(super) fn focus_pane_by_index(stoat: &mut Stoat, index: usize) {
         return;
     };
     stoat.active_workspace_mut().panes.set_focus(id);
+    raise_detached_window(stoat, id);
+}
 
-    // A detached pane lives in its own OS window. Keys route by the focused
-    // pane, so raise the window or they land where the user cannot see them.
-    if let Placement::Window(window) = &stoat.active_workspace().panes.pane(id).placement
+/// Raise the OS window of `pane` when the pane is detached into one.
+///
+/// Keys route by the focused pane. Without the raise, a detached pane that
+/// takes focus behind other windows takes keys out of the user's sight.
+pub(crate) fn raise_detached_window(stoat: &Stoat, pane: PaneId) {
+    if let Placement::Window(window) = &stoat.active_workspace().panes.pane(pane).placement
         && let Some(tx) = &stoat.apc_tx
     {
         let _ = tx.send(stoatty_protocol::command::encode_window_focus(

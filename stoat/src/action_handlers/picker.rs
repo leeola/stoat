@@ -725,9 +725,6 @@ pub(super) fn pane_finder_select(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::Redraw;
     };
 
-    // FIXME: A view that only a detached pane shows has no location. Its row
-    // reports `pane closed`, and a terminal's row shows the session in the
-    // focused pane a second time.
     let view = match target {
         PaneTarget::Buffer { path, .. } => {
             return super::file_finder::dispatch_open_file(stoat, path);
@@ -859,11 +856,13 @@ mod tests {
     use super::{super::dispatch, *};
     use crate::{
         run::OutputBlock,
-        test_fixture::{open_scratch_file, store_two_tours},
+        test_fixture::{drain_apc, open_scratch_file, store_two_tours},
         test_harness::{editor, keys, stoat, TestHarness},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use stoat_action::{Action, MoveDown, SaveSelection};
+    use stoatty_protocol::command::Command;
+    use tokio::sync::mpsc;
 
     /// One verb set serves every list modal, so the verbs reach the dispatch
     /// whether or not a modal is open. With none open there is no list to
@@ -1120,6 +1119,67 @@ mod tests {
             ],
             [(true, 0, true); 2],
         );
+    }
+
+    /// A run or a terminal that only a detached pane shows takes focus there and
+    /// raises the pane's window. The split pane that held focus keeps its view,
+    /// so no second view opens over the terminal.
+    #[test]
+    fn enter_on_a_detached_row_focuses_and_raises_its_pane() {
+        let lands_on_the_detached_pane = |open: &dyn Action, query: &str| {
+            let mut h = Stoat::test();
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            h.stoat.set_apc_tx(tx);
+            h.stoat.window_ipc_connected = true;
+            h.resize(80, 24);
+            dispatch(&mut h.stoat, &stoat_action::SplitRight);
+            dispatch(&mut h.stoat, open);
+            dispatch(&mut h.stoat, &stoat_action::DetachPane);
+            let detached = h.stoat.active_workspace().panes.windowed_panes()[0].0;
+            dispatch(&mut h.stoat, &stoat_action::FocusPane { index: 1 });
+            let left = focused_view(&h);
+            dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+            while rx.try_recv().is_ok() {}
+
+            h.type_text(query);
+            h.type_keys("enter");
+            let raised = drain_apc(&mut rx)
+                .iter()
+                .any(|command| matches!(command, Command::WindowFocus(_)));
+            let ws = h.stoat.active_workspace();
+            (
+                ws.panes.focus() == detached,
+                raised,
+                ws.panes.split_panes().all(|(_, pane)| pane.view == left),
+            )
+        };
+        assert_eq!(
+            [
+                lands_on_the_detached_pane(&stoat_action::OpenRun, "run"),
+                lands_on_the_detached_pane(&stoat_action::Terminal, "term"),
+            ],
+            [(true, true, true); 2],
+        );
+    }
+
+    /// A detached pane of a parked tab takes focus once its tab is back.
+    #[test]
+    fn enter_on_a_detached_row_of_a_parked_tab_switches_to_it() {
+        let mut h = Stoat::test();
+        h.stoat.window_ipc_connected = true;
+        h.resize(80, 24);
+        dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        dispatch(&mut h.stoat, &stoat_action::OpenRun);
+        dispatch(&mut h.stoat, &stoat_action::DetachPane);
+        let detached = h.stoat.active_workspace().panes.windowed_panes()[0].0;
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+
+        h.type_text("run");
+        h.type_keys("enter");
+
+        let ws = h.stoat.active_workspace();
+        assert_eq!((ws.active_tab, ws.panes.focus()), (0, detached));
     }
 
     /// A buffer row opens where the reader stands, as the buffer picker opens

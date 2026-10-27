@@ -927,13 +927,19 @@ impl Workspace {
 
     /// The first place whose view `shows` accepts.
     ///
-    /// The search reads the active tab's split panes first, then each parked
-    /// tab's, then the docks.
+    /// The search reads the active tab's panes first, then each parked tab's,
+    /// then the docks. A tab's split panes come before its detached panes.
     fn locate(&self, shows: impl Fn(&View) -> bool) -> Option<ViewLocation> {
         let in_tree = |tree: &PaneTree| {
             tree.split_panes()
                 .find(|(_, pane)| shows(&pane.view))
                 .map(|(id, _)| id)
+                .or_else(|| {
+                    tree.windowed_panes()
+                        .into_iter()
+                        .map(|(id, _)| id)
+                        .find(|id| shows(&tree.pane(*id).view))
+                })
         };
         if let Some(pane) = in_tree(&self.panes) {
             return Some(ViewLocation::Pane {
