@@ -2356,14 +2356,61 @@ fn cached_modal_hints(
     );
 }
 
-/// Paint a large digit badge centered on each split pane while the
-/// `space_pane_display` chord is active, so a pane can be focused by its number.
+/// A digit badge on a split pane that the `space_pane_display` chord reaches.
+struct PaneBadge {
+    rect: Rect,
+    digit: char,
+    /// The size stoatty floats the digit at, in cells per glyph side.
+    scale: u8,
+}
+
+/// The badges the `space_pane_display` chord paints on `ws`'s split panes.
 ///
 /// Panes are numbered 1-9 then 0 for the tenth in `split_panes` layout order,
-/// and panes past the tenth get no badge. The focused pane's badge is inverted
-/// (fill and mark swapped) so the current pane reads highlighted. Each badge is
-/// a bold [`Popover`], so a plain terminal draws the cell-fallback box and
-/// stoatty floats the scaled bold glyph.
+/// and panes past the tenth get no badge. The focused pane gets no badge, and
+/// its number goes unused, so a digit names the same pane wherever the focus
+/// sits. A pane with no area gets no badge either.
+fn pane_badges(ws: &Workspace) -> Vec<PaneBadge> {
+    let focused = ws.panes.focus();
+    ws.panes
+        .split_panes()
+        .enumerate()
+        .take(10)
+        .filter(|(_, (pane_id, pane))| {
+            *pane_id != focused && pane.area.width > 0 && pane.area.height > 0
+        })
+        .filter_map(|(i, (_, pane))| {
+            let digit = char::from_digit((i as u32 + 1) % 10, 10)?;
+            let scale = pane
+                .area
+                .width
+                .saturating_sub(2)
+                .min(pane.area.height.saturating_sub(2))
+                .clamp(1, 4);
+            let side = scale + 2;
+            let rect = Rect::new(
+                pane.area.x + pane.area.width.saturating_sub(side) / 2,
+                pane.area.y + pane.area.height.saturating_sub(side) / 2,
+                side,
+                side,
+            );
+            Some(PaneBadge {
+                rect,
+                digit,
+                scale: scale as u8,
+            })
+        })
+        .collect()
+}
+
+/// Paint a large digit badge centered on each split pane while the
+/// `space_pane_display` chord is active, so the reader focuses a pane by its
+/// number.
+///
+/// The focused pane gets no badge, since it is where the chord started, and
+/// every other badge paints in the accent fill so the reachable panes stand
+/// out. Each badge is a bold [`Popover`], so a plain terminal draws the
+/// cell-fallback box and stoatty floats the scaled bold glyph.
 fn render_pane_id_badges(
     theme: &crate::theme::Theme,
     ws: &Workspace,
@@ -2374,45 +2421,19 @@ fn render_pane_id_badges(
         .unwrap_or([90, 90, 110]);
     let background =
         paint::style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).unwrap_or([40, 44, 52]);
-    let focused = ws.panes.focus();
 
-    for (i, (pane_id, pane)) in ws.panes.split_panes().enumerate().take(10) {
-        let Some(digit) = char::from_digit((i as u32 + 1) % 10, 10) else {
-            continue;
-        };
-        if pane.area.width == 0 || pane.area.height == 0 {
-            continue;
-        }
-        let scale = pane
-            .area
-            .width
-            .saturating_sub(2)
-            .min(pane.area.height.saturating_sub(2))
-            .clamp(1, 4);
-        let side = scale + 2;
-        let rect = Rect::new(
-            pane.area.x + pane.area.width.saturating_sub(side) / 2,
-            pane.area.y + pane.area.height.saturating_sub(side) / 2,
-            side,
-            side,
-        );
-
-        let (fill, mark) = if pane_id == focused {
-            (accent, background)
-        } else {
-            (background, accent)
-        };
-        let digit = digit.to_string();
+    for badge in pane_badges(ws) {
+        let digit = badge.digit.to_string();
         Popover {
-            fill,
-            border: mark,
-            content_fg: mark,
-            scale: scale as u8,
+            fill: accent,
+            border: background,
+            content_fg: background,
+            scale: badge.scale,
             offset: [0, 0],
             bold: true,
             content: &digit,
         }
-        .render(rect, buf, scene);
+        .render(badge.rect, buf, scene);
     }
 }
 
@@ -2561,6 +2582,71 @@ mod themed_blank_tests {
                 .iter()
                 .all(|cell| cell.bg != Color::Reset && cell.fg != Color::Reset),
             "and every cell of a frame with a box open over it",
+        );
+    }
+}
+
+#[cfg(test)]
+mod pane_badge_tests {
+    use super::pane_badges;
+    use crate::test_harness::TestHarness;
+
+    /// The focused pane has no badge, since the chord starts there, and the
+    /// other panes keep the numbers their places give them, so a digit names
+    /// the same pane wherever the focus sits.
+    #[test]
+    fn the_focused_pane_has_no_badge_and_the_others_keep_their_numbers() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.type_action("SplitRight()");
+        h.type_action("SplitRight()");
+        let digits_with_focus_on = |h: &mut TestHarness, place: usize| {
+            let ws = h.stoat.active_workspace_mut();
+            let pane = ws.panes.split_pane_ids()[place];
+            ws.panes.set_focus(pane);
+            pane_badges(ws)
+                .iter()
+                .map(|badge| badge.digit)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [
+                digits_with_focus_on(&mut h, 2),
+                digits_with_focus_on(&mut h, 1)
+            ],
+            [vec!['1', '2'], vec!['1', '3']],
+        );
+    }
+
+    /// A badge paints the digit on the accent fill, so the panes a digit
+    /// reaches stand out, and the focused pane carries no badge.
+    #[test]
+    fn a_badge_paints_the_accent_fill() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.type_action("SplitRight()");
+        h.stoat.set_focused_mode("space_pane_display".into());
+        let buf = h.render_composited();
+
+        let accent = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .bg;
+        let ws = h.stoat.active_workspace();
+        let badges = pane_badges(ws);
+        let [badge] = badges.as_slice() else {
+            panic!("one badge, on the pane without the focus");
+        };
+        let digit_cell = &buf[(badge.rect.x + 1, badge.rect.y + 1)];
+        let focused = ws.panes.pane(ws.panes.focus()).area;
+        let focused_has_accent = (focused.y..focused.y + focused.height - 1)
+            .flat_map(|y| (focused.x..focused.x + focused.width).map(move |x| (x, y)))
+            .any(|cell| Some(buf[cell].bg) == accent);
+
+        assert_eq!(
+            (digit_cell.symbol(), Some(digit_cell.bg), focused_has_accent),
+            (badge.digit.to_string().as_str(), accent, false),
+            "the digit sits on the accent fill, and the focused pane above its status row has none",
         );
     }
 }

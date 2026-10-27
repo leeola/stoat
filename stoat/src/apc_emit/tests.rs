@@ -963,7 +963,7 @@ fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
 }
 
 #[test]
-fn pane_display_mode_renders_a_bold_digit_badge_per_pane() {
+fn pane_display_mode_renders_a_bold_digit_badge_per_unfocused_pane() {
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -986,15 +986,20 @@ fn pane_display_mode_renders_a_bold_digit_badge_per_pane() {
             _ => None,
         })
         .collect();
-    assert_eq!(popovers.len(), 2, "each pane gets a badge, got {cmds:?}");
+    assert_eq!(
+        popovers.len(),
+        1,
+        "every pane but the focused one gets a badge, got {cmds:?}"
+    );
     assert!(popovers.iter().all(|p| p.bold), "badges shape bold");
     let digits: Vec<&str> = popovers
         .iter()
         .map(|p| buf[(p.left + 1, p.top + 1)].symbol())
         .collect();
-    assert!(
-        digits.contains(&"1") && digits.contains(&"2"),
-        "the pane centers carry the digits 1 and 2, got {digits:?}"
+    assert_eq!(
+        digits,
+        ["1"],
+        "the center of the pane without the focus carries its digit"
     );
 
     let hint_box_shown = (buf.area.y..buf.area.y + buf.area.height).any(|y| {
