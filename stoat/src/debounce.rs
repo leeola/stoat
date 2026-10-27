@@ -181,6 +181,10 @@ impl<'a> DepartedPaths<'a> {
 /// [`auto_reload::note_live_reload`]. None of them does the work here. Each
 /// arms a timer whose drain lands on the main loop later.
 ///
+/// A write under the repository outside `.git` stales the repository tally once
+/// per drain. Another tool's write moves the counts that the changes view and
+/// the status bar read, also for a file with no open buffer.
+///
 /// A file that a language server's registered watchers name also goes to that
 /// server, in one `workspace/didChangeWatchedFiles` notification at the end of
 /// the turn. The server turned its own watcher off when it registered them, so
@@ -245,6 +249,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
     // Opened at most once for the batch, and only where a verdict is needed.
     let mut repo: Option<Option<Arc<dyn GitRepo>>> = None;
     let mut finder_changes = Vec::new();
+    let mut tally_stale = false;
     let mut lsp_changes: HashMap<String, Vec<FileEvent>> = HashMap::new();
     let mut departed = Vec::new();
     for (path, kind) in events {
@@ -368,11 +373,17 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
             // stales every open buffer's diff map.
             arm_diff_refresh_debounce(stoat);
         }
+        if !in_git_dir && path.starts_with(&repo_root) {
+            tally_stale = true;
+        }
         if path.starts_with(&git_root) && stoat.language_registry.for_path(&path).is_some() {
             arm_index_external_edit_debounce(stoat, path);
         }
     }
 
+    if tally_stale {
+        stoat.active_workspace_mut().stale_hunk_tally();
+    }
     apply_finder_changes(stoat, &git_root, finder_changes);
 
     report_departed_files(stoat, &departed, &mut lsp_changes);
@@ -1979,6 +1990,35 @@ mod tests {
             h.stoat.pending_diff_refresh.is_some(),
             "a commit above the workspace root stales its diffs",
         );
+    }
+
+    /// A tracked file that another tool writes moves the repository's counts,
+    /// which the changes view and the status bar read.
+    #[test]
+    fn a_working_tree_write_stales_the_tally() {
+        assert!(tally_owed_after_write("/repo/a.rs"));
+    }
+
+    /// Build output under an ignored directory moves no tracked file's count.
+    #[test]
+    fn a_write_under_an_ignored_directory_leaves_the_tally() {
+        assert!(!tally_owed_after_write("/repo/target/debug/a.o"));
+    }
+
+    /// Whether a fresh tally is owed after the watcher reports a write of
+    /// `path` over a landed one.
+    fn tally_owed_after_write(path: &str) -> bool {
+        let mut h = ignored_dir_harness();
+        h.settle_diff_jobs();
+        assert!(
+            !h.stoat.active_workspace().tally_pending(),
+            "the first tally landed",
+        );
+
+        h.fake_fs_watcher()
+            .inject(Path::new(path), FsEventKind::Modified);
+        drain_fs_watch_events(&mut h.stoat);
+        h.stoat.active_workspace().tally_pending()
     }
 
     #[test]

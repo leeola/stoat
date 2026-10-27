@@ -294,9 +294,10 @@ pub(crate) struct DiffState {
     /// changed file carries, as the status bar's repo-wide tally reads them.
     ///
     /// `None` until the first tally lands, and for a workspace root outside any
-    /// repo. Four events owe it a fresh read, each by clearing
-    /// [`Self::tally_current`]. They are a landed save, a staging action, a
-    /// write under `.git`, and a first open.
+    /// repo. Five events owe it a fresh read, each by clearing
+    /// [`Self::tally_current`]. They are a landed save, a working-tree write
+    /// that the watcher reports, a staging action, a re-read of the git state,
+    /// and a first open.
     ///
     /// An edit is not one of them. The tally reads what is on disk, which an
     /// unsaved edit has not touched, so re-walking the repository per keystroke
@@ -315,9 +316,10 @@ pub(crate) struct DiffState {
     /// Whether the stored tally is known to match what is on disk.
     ///
     /// Starts `false`, because a fresh workspace has read no tally and the first
-    /// drive owes one. A landed tally sets it, and a save, a staging action, a
-    /// git write, or a first open clears it. An unsaved edit does not, since the
-    /// tally reads the disk and an unsaved edit has not touched it.
+    /// drive owes one. A landed tally sets it, and a save, a working-tree write,
+    /// a staging action, a git re-read, or a first open clears it. An unsaved
+    /// edit does not, since the tally reads the disk and an unsaved edit has not
+    /// touched it.
     pub(super) tally_current: bool,
     /// The version each buffer is currently settling on, and when that version
     /// was first seen. Read by [`Self::settled`].
@@ -474,7 +476,9 @@ impl DiffState {
     ///
     /// This serves the events that move the tally without staling any buffer
     /// diff. A landed save is the case in point: the file's own hunks are
-    /// unchanged by the write, but the repo's counts are not.
+    /// unchanged by the write, but the repo's counts are not. A working-tree
+    /// write that the watcher reports is another. Another tool's write moves
+    /// the repo's counts, also for a file that no buffer holds.
     pub(super) fn stale_tally(&mut self) {
         self.tally_current = false;
     }
