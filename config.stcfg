@@ -1837,6 +1837,9 @@ on key {
     # The step and close keys bind only with a second tab, and the toggle keys
     # only with a tab to return to. `num` stays bound for every digit, because
     # one placeholder binding cannot gate per digit and a miss reports it.
+    # The Ctrl twins of the step keys move the tab instead of the focus, and
+    # hold the chord as `prefix_move` does, because the moved tab keeps the
+    # focus.
     mode == prefix_tab {
         Escape -> SetMode(normal);
         r -> [SetMode(normal), RenameTab()];
@@ -1850,6 +1853,10 @@ on key {
             Right -> [SetMode(normal), NextTab()];
             j -> [SetMode(normal), NextTab()];
             Down -> [SetMode(normal), NextTab()];
+            Ctrl-h -> MoveTabLeft();
+            Ctrl-Left -> MoveTabLeft();
+            Ctrl-l -> MoveTabRight();
+            Ctrl-Right -> MoveTabRight();
             x -> [SetMode(normal), CloseTab()];
         }
 

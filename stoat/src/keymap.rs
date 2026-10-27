@@ -3339,6 +3339,37 @@ mod tests {
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
     }
 
+    /// The Ctrl twins of the step keys move the tab and hold the chord, since
+    /// the moved tab keeps the focus. A lone tab has no place to move to.
+    #[test]
+    fn ca_t_moves_the_tab_on_the_ctrl_steps_only_with_a_second_tab() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let bound = |tabs: f64, code: KeyCode| -> Option<Vec<String>> {
+            let state = TestState::with_tabs("prefix_tab", tabs);
+            let actions = keymap.lookup(&state, &key_event(code, KeyModifiers::CONTROL))?;
+            Some(actions.iter().map(|action| action.name.clone()).collect())
+        };
+        let one = |name: &str| Some(vec![name.to_string()]);
+
+        assert_eq!(
+            [
+                bound(2.0, KeyCode::Char('h')),
+                bound(2.0, KeyCode::Left),
+                bound(2.0, KeyCode::Char('l')),
+                bound(2.0, KeyCode::Right),
+                bound(1.0, KeyCode::Right),
+            ],
+            [
+                one("MoveTabLeft"),
+                one("MoveTabLeft"),
+                one("MoveTabRight"),
+                one("MoveTabRight"),
+                None,
+            ],
+        );
+    }
+
     #[test]
     fn ca_m_move_mode_chords_move_the_pane_and_hold() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

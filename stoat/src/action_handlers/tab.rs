@@ -744,6 +744,8 @@ mod tests {
                 "NextTab",
                 "PrevTab",
                 "ToggleTab",
+                "MoveTabLeft",
+                "MoveTabRight",
             ]
             .map(|name| {
                 let desc = registry::lookup(name).expect("registered").def.short_desc();
@@ -755,8 +757,11 @@ mod tests {
         dispatch(&mut h, &stoat_action::NewTab);
         assert_eq!(
             [one_tab, listed(&tab_chord_rows(&mut h))],
-            [[true, true, false, false, false, false], [true; 6]],
-            "rename, new, close, next, prev, and toggle rows on one tab and on two",
+            [
+                [true, true, false, false, false, false, false, false],
+                [true; 8]
+            ],
+            "rename, new, close, next, prev, toggle, and move rows on one tab and on two",
         );
     }
 }
