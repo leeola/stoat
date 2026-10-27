@@ -271,8 +271,9 @@ pub(crate) fn paint_path_rows(
         // A row wider than its column gives up chars to an ellipsis in one cell,
         // leaving `width - 1` cells for the rest. A path is start-truncated
         // helix-style so the file name at the tail stays on screen. A relative
-        // entry is a label rather than a path, such as a terminal row of the
-        // buffer list, and its head names it, so its tail goes instead.
+        // entry is a label rather than a path, such as a branch name of the
+        // palette's argument list, and its head names it, so its tail goes
+        // instead.
         let (dropped, text_x, text_end) = if label_len > width && width > 1 {
             if picklist.base[idx].is_absolute() {
                 let dropped = label_len - (width - 1);
@@ -475,12 +476,12 @@ mod tests {
         );
     }
 
-    /// A relative entry is a label rather than a path, such as a terminal row
-    /// of the buffer list, and its head names it. So a cut keeps the head, and
-    /// a match in the cut tail paints nothing over the ellipsis.
+    /// A relative entry is a label rather than a path, such as a branch name of
+    /// the palette's argument list, and its head names it. So a cut keeps the
+    /// head, and a match in the cut tail paints nothing over the ellipsis.
     #[test]
     fn a_long_label_keeps_its_head() {
-        let label = "term 1: lee@host: /very/long/working/directory";
+        let label = "feature/a-long-branch-name-for-the-cut";
         let list = list_of(vec![PathBuf::from(label)], vec![vec![0, 18]]);
         // Column width 20 leaves a 19-cell label area after the one-cell pad.
         let area = Rect::new(0, 0, 20, 1);

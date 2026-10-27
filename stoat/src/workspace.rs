@@ -892,27 +892,6 @@ impl Workspace {
         self.pane_trees().any(in_tree) || self.docks.values().any(|dock| shows(&dock.view))
     }
 
-    /// Every shell terminal a pane or a dock names, shown or covered, oldest
-    /// first.
-    pub(crate) fn shell_terms(&self) -> Vec<TermId> {
-        // FIXME: A terminal in a detached pane has no row, because split_panes
-        // leaves detached panes out.
-        let mut terms: Vec<TermId> = self
-            .pane_trees()
-            .flat_map(|tree| tree.split_panes().map(|(_, pane)| pane))
-            .flat_map(|pane| [Some(&pane.view), pane.prev_view.as_ref()])
-            .flatten()
-            .chain(self.docks.values().map(|dock| &dock.view))
-            .filter_map(|view| match view {
-                View::Terminal(id) if self.terms.contains_key(*id) => Some(*id),
-                _ => None,
-            })
-            .collect();
-        terms.sort_by_key(|id| self.terms[*id].token);
-        terms.dedup();
-        terms
-    }
-
     /// Where a view shows `term_id`, or `None` for a session that no view
     /// shows.
     pub(crate) fn term_location(&self, term_id: TermId) -> Option<ViewLocation> {
@@ -2235,37 +2214,6 @@ mod tests {
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
     use tokio::sync::mpsc;
-
-    /// The rows of `:buffers` name every shell that a pane in any tab shows or
-    /// covers, or that a dock shows, once each and oldest first. An agent is no
-    /// shell, and a record that outlived its session names nothing.
-    #[test]
-    fn shell_terms_lists_each_shell_once_oldest_first() {
-        let mut h = TestHarness::with_size(80, 24);
-        let ws = h.stoat.active_workspace_mut();
-        let [docked, shown, covered, agent, gone] = [(); 5].map(|_| insert_session(ws));
-        ws.terms.remove(gone);
-
-        let focus = ws.panes.focus();
-        let pane = ws.panes.pane_mut(focus);
-        pane.view = View::Terminal(shown);
-        pane.prev_view = Some(View::Terminal(covered));
-        let side = ws.panes.split(Axis::Vertical);
-        let pane = ws.panes.pane_mut(side);
-        pane.view = View::Agent(agent);
-        pane.prev_view = Some(View::Terminal(gone));
-        for term in [docked, shown] {
-            ws.docks.insert(DockPanel {
-                view: View::Terminal(term),
-                side: DockSide::Right,
-                visibility: DockVisibility::Hidden,
-                default_width: 30,
-                area: Default::default(),
-            });
-        }
-
-        assert_eq!(ws.shell_terms(), [docked, shown, covered]);
-    }
 
     /// A run keeps its place while a new tab parks the tab that shows it, and
     /// a view no surface shows has no place.

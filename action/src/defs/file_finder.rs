@@ -56,11 +56,9 @@ define_action!(
     "OpenBufferPicker",
     ActionKind::OpenBufferPicker,
     "open the buffer picker",
-    "Open the file finder modal scoped to currently-open buffers and terminals. \
-     Selecting a buffer row switches the focused pane to that buffer. \
-     Selecting a terminal row moves focus to that terminal. \
-     Tab and Shift-Tab flip between the open buffers and the buffers with \
-     unsaved edits.",
+    "Open the file finder modal scoped to currently-open buffers. Selecting a \
+     row switches the focused pane to that buffer. Tab and Shift-Tab flip \
+     between the open buffers and the buffers with unsaved edits.",
     ActionPriority::Normal,
     command_name = "buffers"
 );

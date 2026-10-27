@@ -252,12 +252,6 @@ pub(super) fn open_file_finder(
         .into_iter()
         .filter_map(|buffer| buffer.path)
         .collect();
-    // Only the Buffers scope reads the rows, and the toggle reaches it only from
-    // the other buffer scope, so a finder opened in a file scope takes none.
-    let term_rows = match initial_scope {
-        FinderScope::Buffers => crate::file_finder::term_rows(stoat.active_workspace()),
-        _ => Vec::new(),
-    };
     let finder_scopes = stoat.settings.finder_scopes.clone();
     tracing::debug!(
         target: "stoat::picker",
@@ -281,7 +275,6 @@ pub(super) fn open_file_finder(
         diff_paths,
         buffer_paths,
         dirty_buffer_paths,
-        term_rows,
         &finder_scopes,
     );
     if let Some(roots) = all_workspaces_roots {
@@ -603,25 +596,17 @@ fn push_ancestor_dirs(
 /// that file's excerpt and keeps the changes view, unless the pick splits.
 pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     settle_finder_scan(stoat);
-    let (path, term, intent) = {
+    let (path, intent) = {
         let finder = stoat.file_finder.as_ref()?;
-        (
-            finder.selected_path()?.to_path_buf(),
-            finder.selected_term(),
-            finder.open_intent,
-        )
+        (finder.selected_path()?.to_path_buf(), finder.open_intent)
     };
     tracing::info!(
         target: "stoat::picker",
         path = %path.display(),
         ?intent,
-        term = term.is_some(),
         "file finder pick"
     );
     close_file_finder(stoat);
-    if let Some(term) = term {
-        return Some(super::terminal::show_terminal(stoat, term, intent));
-    }
     if intent == OpenIntent::Replace && super::diff_changes::land_pick(stoat, &path) {
         return Some(UpdateEffect::Redraw);
     }
