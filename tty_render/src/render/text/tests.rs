@@ -1500,6 +1500,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         true,
         None,
         None,
+        None,
         [0.0; 4],
         0,
         0,
@@ -1524,6 +1525,7 @@ fn composite_runs_reresolve_when_the_run_build_grows_the_atlas() {
         0.0,
         [0.0; 2],
         false,
+        None,
         None,
         None,
         [0.0; 4],
@@ -1574,6 +1576,7 @@ fn composite_runs_reresolve_when_the_row_pack_grows_the_atlas() {
         0.0,
         [0.0; 2],
         true,
+        None,
         None,
         None,
         [0.0; 4],
@@ -2872,6 +2875,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         true,
         None,
         None,
+        None,
         [0.0; 4],
         0,
         0,
@@ -2892,6 +2896,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         true,
         Some(1),
         None,
+        None,
         [0.0; 4],
         0,
         0,
@@ -2910,6 +2915,7 @@ fn a_scrolled_composite_matches_one_built_from_scratch() {
         0.0,
         [0.0; 2],
         true,
+        None,
         None,
         None,
         [0.0; 4],
@@ -2961,6 +2967,7 @@ fn a_partial_composite_matches_a_full_rebuild() {
             true,
             None,
             changed_rows,
+            None,
             [0.0; 4],
             pool,
             0,
@@ -2987,6 +2994,154 @@ fn a_partial_composite_matches_a_full_rebuild() {
     assert_eq!(
         patched, whole,
         "the patched pool holds the glyphs and underlines a whole build holds",
+    );
+}
+
+/// A pool shapes the cell under the terminal cursor alone, as the live grid
+/// does, so the ligature that cell joins breaks there and forms with no cursor.
+#[test]
+fn a_composite_shapes_the_cursor_cell_alone() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let mut grid = Grid::new(1, 6);
+    fill_row(&mut grid, 0, "a |= b");
+    for (pool, cursor_cell) in [(0, None), (1, Some((0, 3)))] {
+        pass.prepare_composite(
+            &device,
+            &queue,
+            &grid,
+            pass.face.metrics,
+            PoolOccluders::new(&[], 0, true),
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            true,
+            None,
+            None,
+            cursor_cell,
+            [0.0; 4],
+            pool,
+            0,
+        );
+    }
+    pass.rasterize_visible(
+        &device,
+        &queue,
+        &grid,
+        Some((0, 3)),
+        &Damage::Full,
+        &Damage::Full,
+    );
+    let live: Vec<(usize, usize, GlyphSource)> = pass
+        .glyph_row_cache
+        .iter()
+        .flatten()
+        .map(|glyph| (glyph.row, glyph.col, glyph.source))
+        .collect();
+
+    assert_eq!(
+        shaped(&pass, 1),
+        live,
+        "the pool breaks the run where the live grid does"
+    );
+    assert_ne!(
+        shaped(&pass, 0),
+        shaped(&pass, 1),
+        "with no cursor the ligature forms"
+    );
+}
+
+/// A cursor move over held rows reshapes the row it left and the row it
+/// entered, so the pool holds what a pool built whole under the new cursor
+/// holds.
+///
+/// The move keeps every other row it built. A row that changed with no word of
+/// it keeps what the pool built before, which is what shows the move reshaped
+/// two rows.
+#[test]
+fn a_cursor_move_reshapes_the_rows_it_left_and_entered() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let mut grid = Grid::new(3, 6);
+    for row in 0..3 {
+        fill_row(&mut grid, row, "a |= b");
+    }
+    let mut composite = |grid: &Grid, pool: u32, content_changed: bool, cursor_cell| {
+        pass.prepare_composite(
+            &device,
+            &queue,
+            grid,
+            pass.face.metrics,
+            PoolOccluders::new(&[], 0, true),
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            content_changed,
+            None,
+            None,
+            cursor_cell,
+            [0.0; 4],
+            pool,
+            0,
+        );
+        bytemuck::cast_slice::<TextInstance, u8>(&pass.composite_instances(pool)).to_vec()
+    };
+    composite(&grid, 0, true, Some((0, 3)));
+    let built_moved = composite(&grid, 1, true, Some((1, 3)));
+    let built_left = composite(&grid, 2, true, None);
+
+    fill_row(&mut grid, 2, "z |= z");
+    let moved = composite(&grid, 0, false, Some((1, 3)));
+    let left = composite(&grid, 0, false, None);
+    assert_eq!(
+        (moved, left),
+        (built_moved, built_left),
+        "each move matches a pool built whole under its cursor",
+    );
+}
+
+/// A slide under a cursor that kept its pool cell brings a row the split never
+/// reached under the cursor and carries the split row away, so the pool
+/// reshapes both.
+///
+/// The slide leaves the pool rotated, so the glyphs are compared by the cell
+/// each lands on and the glyph it is.
+#[test]
+fn a_slide_under_a_held_cursor_reshapes_the_rows_it_moved() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let page = |lines: [&str; 3]| {
+        let mut grid = Grid::new(3, 6);
+        for (row, line) in lines.into_iter().enumerate() {
+            fill_row(&mut grid, row, line);
+        }
+        grid
+    };
+    let mut composite = |pool: u32, grid: &Grid, scrolled_rows| {
+        pass.prepare_composite(
+            &device,
+            &queue,
+            grid,
+            pass.face.metrics,
+            PoolOccluders::new(&[], 0, true),
+            [640.0, 480.0],
+            0.0,
+            [0.0; 2],
+            true,
+            scrolled_rows,
+            None,
+            Some((1, 3)),
+            [0.0; 4],
+            pool,
+            0,
+        );
+    };
+    composite(0, &page(["a |= b", "c |= d", "e |= f"]), None);
+    let slid = page(["c |= d", "e |= f", "g |= h"]);
+    composite(0, &slid, Some(1));
+    composite(1, &slid, None);
+
+    assert_eq!(
+        shaped(&pass, 0),
+        shaped(&pass, 1),
+        "the slid pool holds what a pool built whole from the slid rows holds",
     );
 }
 
@@ -3019,6 +3174,7 @@ fn a_partial_composite_after_a_slide_matches_a_full_rebuild() {
             true,
             scrolled,
             changed_rows,
+            None,
             [0.0; 4],
             pool,
             0,
@@ -3085,6 +3241,7 @@ fn a_moved_composite_rebuilds_against_its_new_origin() {
             0.0,
             origin,
             content_changed,
+            None,
             None,
             None,
             [0.0; 4],
@@ -3155,6 +3312,7 @@ fn a_sub_cell_drift_leaves_the_instances_a_rebuild_would_hold() {
             content_changed,
             None,
             None,
+            None,
             [0.0; 4],
             0,
             0,
@@ -3216,6 +3374,7 @@ fn a_composite_whose_runs_held_builds_none_of_them_again() {
             [0.0; 2],
             true,
             scrolled,
+            None,
             None,
             [0.0; 4],
             0,
@@ -3293,6 +3452,7 @@ fn a_composite_bakes_its_runs_again_when_the_atlas_moved_under_them() {
             true,
             None,
             None,
+            None,
             [0.0; 4],
             0,
             0,
@@ -3358,6 +3518,7 @@ fn a_reusing_composite_still_writes_its_own_globals() {
             changed,
             None,
             None,
+            None,
             [0.0; 4],
             pool,
             0,
@@ -3399,6 +3560,7 @@ fn a_composite_carries_its_dim_in_its_globals() {
             changed,
             None,
             None,
+            None,
             dim,
             1,
             0,
@@ -3438,6 +3600,7 @@ fn composite_at(
         0.0,
         [0.0; 2],
         content_changed,
+        None,
         None,
         None,
         [0.0; 4],
@@ -3566,6 +3729,7 @@ fn composite_globals_name_the_atlas_the_pack_grew_to() {
         0.0,
         [0.0; 2],
         true,
+        None,
         None,
         None,
         [0.0; 4],

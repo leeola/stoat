@@ -1094,6 +1094,7 @@ impl Renderer {
             content_changed,
             scrolled_rows,
             changed_rows,
+            None,
             dim,
             pool,
             slot,

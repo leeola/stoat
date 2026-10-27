@@ -376,6 +376,13 @@ struct TextCompositeSlot {
     /// rewriting the whole thing. text.wgsl takes a slot back to a display row
     /// through the same number, carried in the globals.
     row_offset: u32,
+    /// The pool-local `(row, col)` cell [`Self::glyph_rows`] shaped alone, so no
+    /// ligature spans it, or `None`.
+    ///
+    /// A frame whose cell differs, once its slide is applied, reshapes the row
+    /// the cursor left and the row it entered, the way
+    /// [`TextPass::last_cursor_cell`] drives the live grid.
+    cursor_cell: Option<(usize, usize)>,
     /// What each slot shaped to, kept so a scrolled frame re-shapes only the
     /// rows the scroll exposed.
     ///
@@ -1943,6 +1950,10 @@ impl TextPass {
     /// `changed_rows` at `None`, a slide reshapes only the exposed rows, and no
     /// slide reshapes every row.
     ///
+    /// `cursor_cell` is the pool's own cell under the terminal cursor, shaped
+    /// alone so no ligature spans it, or `None` when the cursor sits outside the
+    /// pool.
+    ///
     /// Pool glyphs rasterize into the shared atlas. A grow moves every UV, so
     /// the atlas bind group the live draw also binds is recreated afterward.
     /// Covers only plain glyphs and underlines, the two buffers [`Self::draw`]
@@ -1971,6 +1982,7 @@ impl TextPass {
         content_changed: bool,
         scrolled_rows: Option<isize>,
         changed_rows: Option<&[usize]>,
+        cursor_cell: Option<(usize, usize)>,
         dim: [f32; 4],
         pool: u32,
         slot: usize,
@@ -1995,6 +2007,7 @@ impl TextPass {
             content_changed,
             scrolled_rows,
             changed_rows,
+            cursor_cell,
             dim,
             pool,
             slot,
@@ -2040,6 +2053,7 @@ impl TextPass {
         content_changed: bool,
         scrolled_rows: Option<isize>,
         changed_rows: Option<&[usize]>,
+        cursor_cell: Option<(usize, usize)>,
         dim: [f32; 4],
         pool: u32,
         slot: usize,
@@ -2074,10 +2088,26 @@ impl TextPass {
         let rotate_by = scrolled_rows
             .filter(|&by| by != 0)
             .filter(|_| carries && rows > 0);
+        // The cell the held rows split, where this frame's slide put it. A
+        // cursor that kept its cell while the rows slid under it sits over a
+        // row the split never reached, so that counts as a move.
+        let held_cursor = held
+            .and_then(|target| target.cursor_cell)
+            .and_then(|(row, col)| {
+                let row = row as isize - rotate_by.unwrap_or(0);
+                usize::try_from(row)
+                    .ok()
+                    .filter(|&row| row < rows)
+                    .map(|row| (row, col))
+            });
+        let cursor_moved = carries && held_cursor != cursor_cell;
         // A patch keeps every row it does not name in the slot that row sits in,
-        // so the rotation holds and only the named rows are shaped again.
-        let partial = content_changed && carries && changed_rows.is_some();
-        let reusing = !content_changed && reusable;
+        // so the rotation holds and only the named rows are shaped again. A
+        // cursor move over held content is a patch of the rows it left and
+        // entered.
+        let partial = carries
+            && ((content_changed && changed_rows.is_some()) || (!content_changed && cursor_moved));
+        let reusing = !content_changed && !cursor_moved && reusable;
         let row_offset = match rotate_by {
             _ if reusing => held_offset,
             Some(by) => (held_offset + by.rem_euclid(rows as isize) as u32) % rows as u32,
@@ -2125,18 +2155,25 @@ impl TextPass {
             rows,
         };
         // Rows the frame has to shape for itself, ascending. A rotation leaves
-        // only the ones it scrolled into view, and a patch adds the ones it
-        // names. Anything else starts from nothing.
+        // only the ones it scrolled into view, a patch adds the ones it names,
+        // and a cursor move adds the rows it left and entered. Anything else
+        // starts from nothing.
         let mut build = mem::take(&mut self.composite_build_scratch);
         build.clear();
-        match changed_rows.filter(|_| partial) {
-            Some(changed) => {
-                build.extend(rotate_by.map_or(0..0, |by| exposed_rows(Some(by), rows)));
-                build.extend_from_slice(changed);
-                build.sort_unstable();
-                build.dedup();
-            },
-            None => build.extend(exposed_rows(rotate_by, rows)),
+        if partial || rotate_by.is_some() {
+            build.extend(rotate_by.map_or(0..0, |by| exposed_rows(Some(by), rows)));
+            if content_changed {
+                build.extend_from_slice(changed_rows.unwrap_or(&[]));
+            }
+            if cursor_moved {
+                let entered = cursor_cell.map(|(row, _)| row).filter(|&row| row < rows);
+                build.extend(entered);
+                build.extend(held_cursor.map(|(row, _)| row));
+            }
+            build.sort_unstable();
+            build.dedup();
+        } else {
+            build.extend(0..rows);
         }
 
         let slot = self.composite_slots.entry(pool, || new_slot(device));
@@ -2271,7 +2308,7 @@ impl TextPass {
                 primary,
                 covers: &covers,
                 reshapes: &reshapes,
-                cursor_cell: None,
+                cursor_cell,
             };
 
             for &row in &build {
@@ -2398,6 +2435,7 @@ impl TextPass {
         target.row_offset = row_offset;
         target.instance_epoch = instance_epoch;
         target.run_build = Some(run_build);
+        target.cursor_cell = cursor_cell;
         target.glyph_rows = glyph_rows;
         target.underline_rows = underline_rows;
         target.glyph_instances = glyph_instances;
@@ -4316,6 +4354,7 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         baked_origin: [0.0; 2],
         baked_metrics: None,
         row_offset: 0,
+        cursor_cell: None,
         glyph_rows: Vec::new(),
         underline_rows: Vec::new(),
         glyph_instances: Vec::new(),
