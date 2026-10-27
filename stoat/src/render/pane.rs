@@ -871,7 +871,8 @@ pub(crate) struct PaneStatusCells {
 /// Shares [`status_segments`] with [`status_row`], adding the numeric
 /// pane badge that only a detached pane needs, since the primary scene's digit
 /// popover does not reach its window. The badge paints in the focused bar's
-/// style on either bar, so its digit reads against its box.
+/// style on either bar, so its digit reads against its box. The focused window
+/// gets none, since the chord starts from that pane and does not pick it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_status_cells(
     view: &View,

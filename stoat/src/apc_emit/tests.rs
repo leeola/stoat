@@ -3566,18 +3566,34 @@ fn detached_pane_status_badge_continues_the_split_count() {
     h.settle();
     h.type_action("DetachPane()");
     h.settle();
+    let mut shows_two = |h: &mut crate::test_harness::TestHarness| {
+        h.stoat.set_focused_mode("space_pane_display".to_string());
+        while rx.try_recv().is_ok() {}
+        emit_smooth_scroll(&mut h.stoat);
+        let mut bytes = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            bytes.extend(chunk);
+        }
+        bytes.windows(3).any(|w| w == b"[2]")
+    };
 
-    h.stoat.set_focused_mode("space_pane_display".to_string());
-    while rx.try_recv().is_ok() {}
-    emit_smooth_scroll(&mut h.stoat);
+    // The detached pane keeps the focus after the detach.
+    let focused_window = shows_two(&mut h);
+    let split = h
+        .stoat
+        .active_workspace()
+        .panes
+        .split_panes()
+        .next()
+        .map(|(id, _)| id)
+        .expect("a split pane stays in the layout");
+    h.stoat.active_workspace_mut().panes.set_focus(split);
+    let unfocused_window = shows_two(&mut h);
 
-    let mut bytes = Vec::new();
-    while let Ok(chunk) = rx.try_recv() {
-        bytes.extend(chunk);
-    }
-    assert!(
-        bytes.windows(3).any(|w| w == b"[2]"),
-        "a detached pane's status badge continues the split count to 2"
+    assert_eq!(
+        (focused_window, unfocused_window),
+        (false, true),
+        "the focused window shows no badge, and from the split pane the window's badge continues the split count to 2"
     );
 }
 

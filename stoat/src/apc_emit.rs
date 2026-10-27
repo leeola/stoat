@@ -598,6 +598,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         let badge = show_badges
             .then(|| split_count + windowed_index)
             .filter(|&position| position < 10)
+            .filter(|_| !is_focused)
             .map(|position| (position as u32 + 1) % 10);
 
         let row = Rect::new(0, 0, status.width, 1);
