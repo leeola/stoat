@@ -679,10 +679,12 @@ pub(crate) fn sync_pane_finder(stoat: &mut Stoat) {
         return;
     }
 
+    // Resolving reads the workspace and the sync writes it, so the target is
+    // in hand before the picker takes its mutable borrow.
     let target = finder
         .picker
         .selected_entry()
-        .and_then(crate::pane_finder::pane_target);
+        .and_then(|entry| crate::pane_finder::pane_target(ws, entry));
     finder
         .picker
         .sync_preview(ws, fs_host, language_registry, target);
@@ -856,6 +858,7 @@ pub(super) fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
 mod tests {
     use super::{super::dispatch, *};
     use crate::{
+        run::OutputBlock,
         test_fixture::{open_scratch_file, store_two_tours},
         test_harness::{editor, keys, stoat, TestHarness},
     };
@@ -1159,6 +1162,34 @@ mod tests {
 
         h.snapshot();
 
+        assert_eq!(finder_preview(&h), ("hello".to_string(), None));
+    }
+
+    /// A run row previews each block as its command line and the output rows
+    /// the run pane shows, with a blank line between blocks and no language.
+    #[test]
+    fn a_run_row_previews_its_blocks() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        let run = &mut h.stoat.active_workspace_mut().runs[run_id];
+        for (command, output) in [("echo hi", "hi\r\n"), ("pwd", "/ws"), ("sleep 9", "")] {
+            let mut block = OutputBlock::new(command.into(), run.cwd.clone(), 80);
+            block.feed(output.as_bytes());
+            run.blocks.push(block);
+        }
+        dispatch(&mut h.stoat, &stoat_action::OpenPaneFinder);
+
+        h.snapshot();
+
+        assert_eq!(
+            finder_preview(&h),
+            ("$ echo hi\nhi\n\n$ pwd\n/ws\n\n$ sleep 9".to_string(), None),
+        );
+    }
+
+    /// The pane finder's preview as its text and the name of the language that
+    /// paints it.
+    fn finder_preview(h: &TestHarness) -> (String, Option<&'static str>) {
         let preview = h
             .stoat
             .pane_finder
@@ -1167,23 +1198,17 @@ mod tests {
             .picker
             .preview
             .buffer;
-        let ws = h.stoat.active_workspace();
-        let text = ws
-            .buffers
+        let buffers = &h.stoat.active_workspace().buffers;
+        let text = buffers
             .get(preview)
             .expect("preview buffer")
             .read()
             .expect("preview buffer poisoned")
             .rope()
             .to_string();
-        assert_eq!(
-            (
-                text,
-                ws.buffers
-                    .language_for(preview)
-                    .map(|language| language.name)
-            ),
-            ("hello".to_string(), None),
-        );
+        (
+            text,
+            buffers.language_for(preview).map(|language| language.name),
+        )
     }
 }

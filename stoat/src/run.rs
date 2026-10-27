@@ -64,6 +64,29 @@ impl RunState {
         }
     }
 
+    /// The run's blocks as plain text, for a preview pane.
+    ///
+    /// Each block reads as its `$ <command>` line, then the output rows the
+    /// run pane shows for it. A blank line separates the blocks.
+    pub(crate) fn preview_text(&self) -> String {
+        let mut text = String::new();
+        for block in &self.blocks {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str("$ ");
+            text.push_str(&block.command);
+
+            let grid = &block.grid;
+            let output = grid.text_in(0..grid.width() as usize, 0..grid.rendered_line_count());
+            if !output.is_empty() {
+                text.push('\n');
+                text.push_str(&output);
+            }
+        }
+        text
+    }
+
     pub fn active_block(&self) -> Option<&OutputBlock> {
         self.blocks.last()
     }

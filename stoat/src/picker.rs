@@ -1714,6 +1714,8 @@ pub(crate) enum PreviewSource {
     /// Text a picker composes itself, such as a tour's description, painted
     /// with the markdown grammar. No file backs it, so nothing is read.
     Markdown(Arc<str>),
+    /// Plain text a picker composes itself, with no language. Nothing is read.
+    Text(Arc<str>),
 }
 
 /// Paths [`PreviewTextCache`] holds before the oldest goes.
@@ -1869,6 +1871,11 @@ impl Preview {
             PreviewSource::Markdown(text) => {
                 replace_preview_text(ws, self.editor, self.buffer, text);
                 language_registry.for_path(Path::new("preview.md"))
+            },
+            PreviewSource::Text(text) => {
+                let text = sanitize::sanitize_preview_text(text);
+                replace_preview_text(ws, self.editor, self.buffer, &text);
+                None
             },
         };
         ws.reset_preview_syntax(self.buffer);

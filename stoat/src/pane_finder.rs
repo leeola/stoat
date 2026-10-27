@@ -189,12 +189,17 @@ pub(crate) fn rows(ws: &Workspace) -> Vec<PaneRow> {
 /// [`None`] for a row with nothing to show.
 ///
 /// A buffer shows its live text, and a terminal or an agent shows its screen.
-/// Every other view blanks the pane.
-pub(crate) fn pane_target(row: &PaneRow) -> Option<(PreviewSource, u32)> {
+/// A run shows its blocks as text, as they stand when the row takes the
+/// selection. Every other view blanks the pane.
+pub(crate) fn pane_target(ws: &Workspace, row: &PaneRow) -> Option<(PreviewSource, u32)> {
     match &row.target {
         PaneTarget::Buffer { id, .. } => Some((PreviewSource::Buffer(*id), 0)),
         PaneTarget::View(View::Terminal(id) | View::Agent(id)) => {
             Some((PreviewSource::Terminal(*id), 0))
+        },
+        PaneTarget::View(View::Run(id)) => {
+            let text = ws.runs.get(*id)?.preview_text();
+            Some((PreviewSource::Text(text.into()), 0))
         },
         PaneTarget::View(_) => None,
     }
