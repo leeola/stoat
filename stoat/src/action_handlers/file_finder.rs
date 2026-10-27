@@ -1,6 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    diff_changes,
     file_finder::{Browse, FileFinder, FinderPathCache, FinderScope, OpenIntent, BROWSE_PATH_CAP},
+    pane::{FocusTarget, View},
     picker::{PathPicker, PendingScan},
 };
 use std::{
@@ -198,7 +200,11 @@ pub(super) fn open_file_finder(
         return UpdateEffect::None;
     }
 
-    let initial_scope = forced_scope.unwrap_or_else(|| resolve_remembered_scope(stoat));
+    let diff_paths = diff_scope_paths(stoat);
+    let initial_scope = forced_scope.unwrap_or_else(|| match diff_paths {
+        Some(_) => FinderScope::Diff,
+        None => resolve_remembered_scope(stoat),
+    });
 
     stoat.set_focused_mode("normal".into());
 
@@ -272,6 +278,7 @@ pub(super) fn open_file_finder(
         seed_display,
         walk_epoch,
         modified,
+        diff_paths,
         buffer_paths,
         dirty_buffer_paths,
         term_rows,
@@ -282,6 +289,36 @@ pub(super) fn open_file_finder(
     }
     stoat.file_finder = Some(finder);
     UpdateEffect::Redraw
+}
+
+/// The files the diff in the focused pane shows, or `None` when the focused
+/// pane shows no diff.
+///
+/// Over the changes view these are the files it lists. Over the per-file diff
+/// the untracked files join them, since the walk from file to file enters an
+/// untracked file. A focus on a dock reads as no diff.
+fn diff_scope_paths(stoat: &mut Stoat) -> Option<Vec<PathBuf>> {
+    let per_file = {
+        let ws = stoat.active_workspace();
+        let FocusTarget::SplitPane = ws.focus else {
+            return None;
+        };
+        let pane = ws.panes.pane(ws.panes.focus());
+        let per_file = match pane.view {
+            View::Editor(id) => {
+                pane.diff_mode || ws.editors.get(id).is_some_and(|editor| editor.diff_view)
+            },
+            _ => false,
+        };
+        if !per_file && !matches!(pane.view, View::DiffChanges(_)) {
+            return None;
+        }
+        per_file
+    };
+
+    stoat.sync_repo_root();
+    let listed = diff_changes::listed_files(stoat, per_file);
+    Some(listed.into_values().collect())
 }
 
 /// Resolve the scope a finder open with no forced scope should land in.
@@ -736,8 +773,9 @@ fn dispatch_open_file(stoat: &mut Stoat, path: PathBuf) -> UpdateEffect {
 /// Dispose the finder's owned editors and restore the pre-open mode.
 ///
 /// Records the scope the finder closed in on the workspace so `space p`
-/// reopens there. [`FinderScope::Buffers`] has no persisted name, so closing
-/// in it leaves the prior remembered scope intact.
+/// reopens there. [`FinderScope::Buffers`] and [`FinderScope::Diff`] have no
+/// persisted name, so closing in either leaves the prior remembered scope
+/// intact.
 pub(crate) fn close_file_finder(stoat: &mut Stoat) {
     let Some(mut finder) = stoat.file_finder.take() else {
         return;

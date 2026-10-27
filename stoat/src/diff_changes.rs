@@ -552,14 +552,22 @@ fn relist(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// The files a changes view lists, keyed by their path relative to the working
-/// directory, so the keys run in path order.
+/// The files a changes view lists.
+fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
+    listed_files(stoat, false)
+}
+
+/// The files a diff over the working tree shows, keyed by their path relative
+/// to the working directory, so the keys run in path order.
 ///
 /// The repository's tally names the files changed against the base: the files
 /// with an unstaged hunk under the index base, and the files that differ from
 /// HEAD under any other base. Under a revision base the files changed since
-/// the revision take the tally's place. An untracked file stays out, so a
-/// scratch file beside the work does not fill the stack.
+/// the revision take the tally's place.
+///
+/// An untracked file joins only under `keep_untracked`. The changes view leaves
+/// it out, so a scratch file beside the work does not fill the stack. The
+/// per-file walk enters it, so the finder over the per-file diff lists it.
 ///
 /// Every open buffer under the working directory whose diff map holds a hunk
 /// joins the list, so an unsaved edit shows. Under the index base only an
@@ -568,7 +576,7 @@ fn relist(stoat: &mut Stoat) -> bool {
 /// Outside a repository the list is empty. The working directory is the
 /// workspace's resolved [`Workspace::repo_root`], so a list opens no
 /// repository.
-fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
+pub(crate) fn listed_files(stoat: &Stoat, keep_untracked: bool) -> BTreeMap<String, PathBuf> {
     let ws = stoat.active_workspace();
     let Some(workdir) = ws.repo_root.clone() else {
         return BTreeMap::new();
@@ -588,7 +596,9 @@ fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
             totals
                 .unwrap_or_default()
                 .iter()
-                .filter(|(path, count)| *count > 0 && untracked.binary_search(path).is_err())
+                .filter(|(path, count)| {
+                    *count > 0 && (keep_untracked || untracked.binary_search(path).is_err())
+                })
                 .map(|(path, _)| workdir.join(path))
                 .collect()
         },

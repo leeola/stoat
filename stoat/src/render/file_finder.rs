@@ -103,6 +103,7 @@ pub(crate) fn render_file_finder(
         match finder.scope() {
             FinderScope::All => "all",
             FinderScope::Modified => "modified",
+            FinderScope::Diff => "diff",
             FinderScope::Buffers => "buffers",
             FinderScope::ModifiedBuffers => "modified buffers",
             FinderScope::Named(name) => name.as_str(),

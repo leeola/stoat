@@ -8,7 +8,9 @@ define_action!(
     "open the file finder",
     "Open the file finder modal. Type to fuzzy-filter files in the current \
      workspace; Enter opens the selected file in the focused pane; Shift-Tab \
-     switches between all tracked files and git-modified files.",
+     switches between all tracked files and git-modified files. Over the \
+     changes view or the per-file diff it opens on the files the diff shows, \
+     and Shift-Tab cycles on from there.",
     ActionPriority::Normal,
     command_name = "files"
 );

@@ -47,6 +47,13 @@ pub enum FinderScope {
     /// Files with uncommitted git changes. Refreshed on every scope toggle
     /// so the list stays current.
     Modified,
+    /// The files the diff under the finder shows, captured at open time. Over
+    /// the changes view these are the files it lists. Over the per-file diff
+    /// the untracked files join them, since the walk from file to file enters
+    /// an untracked file. Only an open over one of the two lands here, and for
+    /// that open the scope takes [`FinderScope::Modified`]'s place in the
+    /// Shift-Tab cycle.
+    Diff,
     /// Currently-open path-bound buffers from the workspace's
     /// [`BufferRegistry`], then the workspace's shell terminals. Captured at
     /// open time. Reachable only through the dedicated `OpenBufferPicker`
@@ -78,13 +85,16 @@ impl FinderScope {
     /// [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] return
     /// `None`. They make up a dedicated picker, not a sticky mode, so closing
     /// in either leaves the prior remembered scope intact.
+    ///
+    /// [`FinderScope::Diff`] returns `None` as well. Its rows come from the
+    /// diff under the finder, so an open over a plain editor has none to list.
     pub(crate) fn persist_name(&self) -> Option<String> {
         match self {
             FinderScope::All => Some("all".to_string()),
             FinderScope::Modified => Some("modified".to_string()),
             FinderScope::Named(name) => Some(name.clone()),
             FinderScope::AllWorkspaces => Some("allworkspaces".to_string()),
-            FinderScope::Buffers | FinderScope::ModifiedBuffers => None,
+            FinderScope::Buffers | FinderScope::ModifiedBuffers | FinderScope::Diff => None,
         }
     }
 
@@ -93,8 +103,9 @@ impl FinderScope {
     ///
     /// A persisted name whose scope has since been removed from config must
     /// not resurrect, so validation returns `None` and the caller falls
-    /// through to its next default. `"buffers"` and `"modified_buffers"` are
-    /// intentionally not accepted, as neither is ever a sticky or default scope.
+    /// through to its next default. `"buffers"`, `"modified_buffers"`, and
+    /// `"diff"` are intentionally not accepted, as none is ever a sticky or
+    /// default scope.
     pub(crate) fn from_persist_name(
         name: &str,
         named: &BTreeMap<String, Vec<String>>,
@@ -110,13 +121,14 @@ impl FinderScope {
 
     /// The `scope` keymap predicate value for this scope.
     ///
-    /// The two buffer scopes have names here although they never persist,
-    /// since a binding scoped to the buffer picker has to name them. A named
-    /// scope reads as its config name.
+    /// The two buffer scopes and [`FinderScope::Diff`] have names here although
+    /// they never persist, since a binding scoped to one of them has to name
+    /// it. A named scope reads as its config name.
     pub(crate) fn context_name(&self) -> &str {
         match self {
             FinderScope::All => "all",
             FinderScope::Modified => "modified",
+            FinderScope::Diff => "diff",
             FinderScope::Buffers => "buffers",
             FinderScope::ModifiedBuffers => "modified_buffers",
             FinderScope::Named(name) => name,
@@ -229,8 +241,12 @@ pub struct FileFinder {
     /// reports back here. `None` once its answer has been taken. The task is
     /// held so dropping the finder drops the query with it.
     modified: Option<(UnboundedReceiver<Vec<PathBuf>>, Task<()>)>,
-    /// Which generation of [`Self::modified_paths`], [`Self::buffer_paths`],
-    /// and [`Self::dirty_buffer_paths`] the pick list shows.
+    /// Absolute paths of the [`FinderScope::Diff`] base, or `None` when the
+    /// finder opened over no diff. Captured once at open time.
+    pub(crate) diff_paths: Option<Vec<PathBuf>>,
+    /// Which generation of [`Self::modified_paths`], [`Self::diff_paths`],
+    /// [`Self::buffer_paths`], and [`Self::dirty_buffer_paths`] the pick list
+    /// shows.
     ///
     /// The lists are fixed between the moments they are replaced, so the
     /// picker only has to be told when one is, and otherwise keeps the rows it
@@ -257,8 +273,8 @@ pub struct FileFinder {
     /// freshness and so is safe to leave alone.
     pub(crate) walk_epoch: u64,
     /// The shared walk / fuzzy-list / preview core. Its `all_paths` is the
-    /// [`FinderScope::All`] base; Modified and the two buffer scopes feed their
-    /// own vecs through [`PathPicker::refilter_with_base`]. A scope toggle
+    /// [`FinderScope::All`] base; Modified, Diff, and the two buffer scopes feed
+    /// their own vecs through [`PathPicker::refilter_with_base`]. A scope toggle
     /// [`PathPicker::invalidate`]s it to force a re-run under an unchanged
     /// query.
     pub(crate) core: PathPicker,
@@ -293,6 +309,7 @@ const MODIFIED_BASE: u8 = 0;
 const BUFFERS_BASE: u8 = 1;
 const NAMED_BASE: u8 = 2;
 const DIRTY_BUFFERS_BASE: u8 = 3;
+const DIFF_BASE: u8 = 4;
 
 /// Name a capped scope's candidate list for [`PathPicker::refilter_with_base`].
 ///
@@ -348,6 +365,7 @@ impl FileFinder {
         seed_display: Option<DisplayCache>,
         walk_epoch: u64,
         modified: (UnboundedReceiver<Vec<PathBuf>>, Task<()>),
+        diff_paths: Option<Vec<PathBuf>>,
         mut buffer_paths: Vec<PathBuf>,
         dirty_buffer_paths: Vec<PathBuf>,
         term_rows: Vec<TermRow>,
@@ -365,6 +383,7 @@ impl FileFinder {
             scope: initial_scope,
             modified_paths: Vec::new(),
             modified: Some(modified),
+            diff_paths,
             buffer_paths,
             dirty_buffer_paths,
             term_rows,
@@ -505,6 +524,7 @@ impl FileFinder {
     ///
     /// The file scopes and the buffer scopes are separate cycles. The file
     /// scopes go All -> Modified -> each named scope -> AllWorkspaces -> All.
+    /// A finder over a diff has [`FinderScope::Diff`] in Modified's place.
     /// [`FinderScope::Buffers`] and [`FinderScope::ModifiedBuffers`] flip with
     /// each other, so the buffer picker never enters a file scope. A finder
     /// reaches the buffer pair only through the dedicated `OpenBufferPicker`
@@ -558,12 +578,13 @@ impl FileFinder {
     /// The scope Shift-Tab lands on next.
     ///
     /// The file scopes cycle All -> Modified -> each named scope (alphabetical)
-    /// -> AllWorkspaces -> All. Buffers and ModifiedBuffers flip with each
-    /// other.
+    /// -> AllWorkspaces -> All. A finder over a diff has Diff in Modified's
+    /// place. Buffers and ModifiedBuffers flip with each other.
     fn next_scope(&self) -> FinderScope {
         match &self.scope {
+            FinderScope::All if self.diff_paths.is_some() => FinderScope::Diff,
             FinderScope::All => FinderScope::Modified,
-            FinderScope::Modified => self
+            FinderScope::Modified | FinderScope::Diff => self
                 .named_scopes
                 .first()
                 .map(|(name, _)| FinderScope::Named(name.clone()))
@@ -624,7 +645,10 @@ impl FileFinder {
             // The uncapped scopes are the whole repo walk, so their scan goes to
             // a worker and the caller spawns what this hands back.
             FinderScope::All | FinderScope::AllWorkspaces => self.core.begin_scan(text),
-            FinderScope::Modified | FinderScope::Buffers | FinderScope::ModifiedBuffers => {
+            FinderScope::Modified
+            | FinderScope::Diff
+            | FinderScope::Buffers
+            | FinderScope::ModifiedBuffers => {
                 self.refilter_listed(text);
                 None
             },
@@ -647,12 +671,13 @@ impl FileFinder {
     }
 
     /// Refilter [`Self::core`] on this thread against the modified files, the
-    /// open buffers, or the modified buffers, whichever list the scope shows.
+    /// diff's files, the open buffers, or the modified buffers, whichever list
+    /// the scope shows.
     fn refilter_listed(&mut self, query: &str) {
         // The tag stops two lists that share the finder's generation from
         // reading as each other. A scope flip invalidates too, but the tag does
         // not depend on that.
-        let (base, id) = match &self.scope {
+        let (base, id): (&[PathBuf], BaseId) = match &self.scope {
             FinderScope::Modified => (
                 &self.modified_paths,
                 base_id(
@@ -661,6 +686,10 @@ impl FileFinder {
                     self.modified_paths.len(),
                 ),
             ),
+            FinderScope::Diff => {
+                let paths = self.diff_paths.as_deref().unwrap_or_default();
+                (paths, base_id(DIFF_BASE, self.base_generation, paths.len()))
+            },
             FinderScope::Buffers => (
                 &self.buffer_paths,
                 base_id(BUFFERS_BASE, self.base_generation, self.buffer_paths.len()),
@@ -744,7 +773,10 @@ impl FileFinder {
                     self.core.settle_scan_with_base(query, &cache.filtered, id);
                 }
             },
-            FinderScope::Modified | FinderScope::Buffers | FinderScope::ModifiedBuffers => {
+            FinderScope::Modified
+            | FinderScope::Diff
+            | FinderScope::Buffers
+            | FinderScope::ModifiedBuffers => {
                 self.pump_modified();
                 self.refilter_listed(query);
             },
@@ -1113,6 +1145,7 @@ mod tests {
     // ----- TestHarness integration tests -----
 
     use crate::{buffer_registry::OpenOrigin, debounce, test_harness::TestHarness};
+    use stoat_action::Action;
 
     /// Insert `files` into the harness' [`crate::host::FakeFs`] under a
     /// fixed virtual root and point the active workspace at it. Returns the
@@ -1245,6 +1278,135 @@ mod tests {
         assert_eq!(base.len(), 1, "Modified scope should list only b.rs");
         assert!(base[0].ends_with("b.rs"));
         assert_eq!(h.snapshot().mode, "insert");
+    }
+
+    /// A repository at `/repo` with two modified files, a clean file, and an
+    /// untracked file, with `a.txt` open.
+    fn diff_repo() -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        let root = PathBuf::from("/repo");
+        h.fake_fs().insert_files(
+            [
+                ("a.txt", "A\n"),
+                ("b.txt", "B\n"),
+                ("c.txt", "c\n"),
+                ("d.txt", "d\n"),
+            ]
+            .map(|(rel, text)| (root.join(rel), text.as_bytes())),
+        );
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        h.fake_git()
+            .add_repo(&root)
+            .with_fs(h.fake_fs())
+            .modified("a.txt", "a\n", "A\n")
+            .modified("b.txt", "b\n", "B\n")
+            .head_file("c.txt", "c\n")
+            .untracked("d.txt");
+        h.open_file(&root.join("a.txt"));
+        h
+    }
+
+    fn repo_paths(rels: &[&str]) -> Vec<PathBuf> {
+        rels.iter()
+            .map(|rel| Path::new("/repo").join(rel))
+            .collect()
+    }
+
+    /// Dispatch `action` and let the views it opens settle.
+    fn settle_into(h: &mut TestHarness, action: &dyn Action) {
+        crate::action_handlers::dispatch(&mut h.stoat, action);
+        h.settle();
+    }
+
+    /// The scopes a `space p` finder shows after zero through `toggles`
+    /// Shift-Tabs. The finder closes after the last.
+    fn scope_cycle(h: &mut TestHarness, toggles: usize) -> Vec<FinderScope> {
+        h.type_keys("space p");
+        let mut scopes = vec![scope_and_base(h).0];
+        for _ in 0..toggles {
+            h.type_keys("backtab");
+            scopes.push(scope_and_base(h).0);
+        }
+        h.type_keys("escape");
+        scopes
+    }
+
+    fn scope_and_base(h: &TestHarness) -> (FinderScope, Vec<PathBuf>) {
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        (finder.scope().clone(), finder.core.picklist.base.to_vec())
+    }
+
+    #[test]
+    fn space_p_over_the_changes_view_lists_the_stacks_files() {
+        let mut h = diff_repo();
+        settle_into(&mut h, &stoat_action::DiffChanges);
+        h.type_keys("space p");
+
+        assert_eq!(
+            scope_and_base(&h),
+            (FinderScope::Diff, repo_paths(&["a.txt", "b.txt"]))
+        );
+        assert!(
+            h.snapshot().content.contains("file finder (diff)"),
+            "the title names the diff scope"
+        );
+    }
+
+    #[test]
+    fn space_p_over_the_per_file_diff_lists_the_walks_files() {
+        let mut h = diff_repo();
+        // Over the per-file diff only the frame drive reads the repository
+        // tally, and the harness keeps that drive off unless a test asks.
+        h.stoat.set_diff_warm_auto(true);
+        settle_into(&mut h, &stoat_action::DiffFiles { rev: None });
+        h.settle_diff_jobs();
+        h.type_keys("space p");
+
+        assert_eq!(
+            scope_and_base(&h),
+            (FinderScope::Diff, repo_paths(&["a.txt", "b.txt", "d.txt"]))
+        );
+    }
+
+    #[test]
+    fn the_diff_scope_takes_modifieds_place_in_the_cycle() {
+        let mut h = diff_repo();
+        let plain = scope_cycle(&mut h, 2);
+        settle_into(&mut h, &stoat_action::DiffChanges);
+        let over_changes = scope_cycle(&mut h, 3);
+
+        assert_eq!(
+            (plain, over_changes),
+            (
+                vec![
+                    FinderScope::All,
+                    FinderScope::Modified,
+                    FinderScope::AllWorkspaces
+                ],
+                vec![
+                    FinderScope::Diff,
+                    FinderScope::AllWorkspaces,
+                    FinderScope::All,
+                    FinderScope::Diff
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn a_close_in_the_diff_scope_keeps_the_remembered_scope() {
+        let mut h = diff_repo();
+        h.stoat.active_workspace_mut().last_finder_scope = Some("modified".to_string());
+        settle_into(&mut h, &stoat_action::DiffChanges);
+
+        let cycle = scope_cycle(&mut h, 0);
+        assert_eq!(
+            (
+                cycle,
+                h.stoat.active_workspace().last_finder_scope.as_deref()
+            ),
+            (vec![FinderScope::Diff], Some("modified"))
+        );
     }
 
     #[test]
@@ -2731,6 +2893,7 @@ mod tests {
         );
         assert_eq!(FinderScope::Buffers.persist_name(), None);
         assert_eq!(FinderScope::ModifiedBuffers.persist_name(), None);
+        assert_eq!(FinderScope::Diff.persist_name(), None);
 
         assert_eq!(
             FinderScope::from_persist_name("all", &named),
@@ -2754,6 +2917,11 @@ mod tests {
             FinderScope::from_persist_name("modified_buffers", &named),
             None,
             "modified_buffers is never a sticky or default scope"
+        );
+        assert_eq!(
+            FinderScope::from_persist_name("diff", &named),
+            None,
+            "diff is never a sticky or default scope"
         );
     }
 
