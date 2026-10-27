@@ -107,10 +107,18 @@ pub struct TokenDetail {
 ///
 /// `line_of` maps a buffer byte offset to its row. It is a closure because the
 /// caller already holds the rope and has to clamp stale offsets against it.
+/// `blank` answers whether a buffer row holds only whitespace.
 ///
 /// Runs come back sorted and merged, with adjacent runs joined, so a caller
 /// can binary-search them and a full-hunk refinement collapses to one run.
-fn marked_row_runs(spans: &[ChangeSpan], line_of: impl Fn(usize) -> u32) -> Vec<Range<u32>> {
+/// Runs that only whitespace-only rows separate join too. A blank line between
+/// two changed statements holds no token for the tree differ to mark, but it
+/// sits inside one change, and a gap in the runs there shows that change as two.
+fn marked_row_runs(
+    spans: &[ChangeSpan],
+    line_of: impl Fn(usize) -> u32,
+    blank: impl Fn(u32) -> bool,
+) -> Vec<Range<u32>> {
     let mut runs: Vec<Range<u32>> = spans
         .iter()
         .filter(|span| !span.byte_range.is_empty())
@@ -130,7 +138,9 @@ fn marked_row_runs(spans: &[ChangeSpan], line_of: impl Fn(usize) -> u32) -> Vec<
             // Adjacent runs join too. Two spans on consecutive rows describe
             // one marked region, and leaving a seam would let a caller read a
             // gap that is not there.
-            Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
+            Some(last) if run.start <= last.end || (last.end..run.start).all(&blank) => {
+                last.end = last.end.max(run.end);
+            },
             _ => merged.push(run),
         }
     }
@@ -163,7 +173,9 @@ pub struct DiffHunk {
     /// lines it already called changed, so every row of such a hunk is marked
     /// either way and narrowing costs a walk to reach the same answer.
     ///
-    /// The runs are sorted, and no two touch, as [`marked_row_runs`] returns
+    /// The runs are sorted, and no two touch or sit apart by whitespace-only
+    /// rows alone, as [`marked_row_runs`] returns them. A blank row between two
+    /// changed rows lies inside the joined run, so it is marked and staged with
     /// them. [`LiveHunks::hunk_stops`] tiles the hunk in that order.
     ///
     /// Stored rather than resolved per frame because the spans are byte offsets
@@ -298,10 +310,13 @@ impl<'a> LiveHunks<'a> {
     ///
     /// A refined hunk's ranges tile its live rows. Each starts at its run's
     /// first row and reaches the next run, and the first starts at the hunk's
-    /// first row. A blank row or a paired brace lies in no run, and staging a
-    /// stop stages its rows, so a row outside every stop stays unstaged after
-    /// every stop the walk offers is staged. A gap joins the run above it,
-    /// since a reindented or blank aftermath belongs to the change above.
+    /// first row. A paired brace or a blank row at the hunk's edge lies in no
+    /// run, and staging a stop stages its rows, so a row outside every stop
+    /// stays unstaged after every stop the walk offers is staged. A gap joins
+    /// the run above it, since a reindented or blank aftermath belongs to the
+    /// change above. A blank row between two runs lies inside the joined run,
+    /// so it is marked and staged with them, and the changes around it are one
+    /// stop.
     ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
     /// what a caller turns into a single-cell landing at the seam row.
@@ -2018,9 +2033,11 @@ pub(crate) fn merge_structural_detail(
             }
         }
 
-        hunk.marked_rows = marked_row_runs(&buffer_spans, |off| {
-            line_of(&buffer_starts, off.min(buffer_text.len()))
-        });
+        hunk.marked_rows = marked_row_runs(
+            &buffer_spans,
+            |off| line_of(&buffer_starts, off.min(buffer_text.len())),
+            |row| line_is_blank(&buffer_starts, buffer_text, row),
+        );
         hunk.token_detail = Some(Arc::new(TokenDetail {
             buffer_spans,
             base_spans,
@@ -4060,6 +4077,61 @@ mod tests {
         );
     }
 
+    /// The runs [`super::marked_row_runs`] makes of spans over `ranges` in
+    /// `text`, each as its `(start, end)` rows.
+    fn runs_over(text: &str, ranges: &[std::ops::Range<usize>]) -> Vec<(u32, u32)> {
+        let starts = super::line_starts(text);
+        let spans: Vec<ChangeSpan> = ranges
+            .iter()
+            .map(|range| ChangeSpan {
+                byte_range: range.clone(),
+                kind: ChangeKind::Replaced,
+                move_metadata: None,
+                prose: ProseChange::None,
+            })
+            .collect();
+        super::marked_row_runs(
+            &spans,
+            |off| super::line_of(&starts, off),
+            |row| super::line_is_blank(&starts, text, row),
+        )
+        .into_iter()
+        .map(|run| (run.start, run.end))
+        .collect()
+    }
+
+    /// A row holding only whitespace sits inside the change around it, so the
+    /// runs on either side of it join. A row holding content keeps them apart.
+    #[test]
+    fn marked_runs_join_across_whitespace_only_rows() {
+        assert_eq!(
+            (
+                runs_over("x\na\n\nb\ny\n", &[2..3, 5..6]),
+                runs_over("x\na\nz\nb\ny\n", &[2..3, 6..7]),
+                runs_over("a\n\n  \nb\n", &[0..1, 6..7]),
+            ),
+            (vec![(1, 4)], vec![(1, 2), (3, 4)], vec![(0, 4)]),
+            "a blank row joins, a content row splits, two whitespace rows join",
+        );
+    }
+
+    /// A blank row that only gains indentation puts the two statements around
+    /// it in one line hunk, and the tree pass marks the row with them.
+    #[test]
+    fn a_whitespace_row_between_two_refined_statements_marks_with_them() {
+        let base = "fn f() {\n    let a = 1;\n\n    let b = 2;\n}\n";
+        let buffer = "fn f() {\n    let a = 10;\n    \n    let b = 20;\n}\n";
+        let marked: Vec<Vec<std::ops::Range<u32>>> = rust_hunks(base, buffer)
+            .into_iter()
+            .map(|hunk| hunk.marked_rows)
+            .collect();
+        assert_eq!(
+            marked,
+            vec![vec![1..4]],
+            "one hunk, one run from the first statement through the second",
+        );
+    }
+
     /// A hunk the tree pass never narrowed keeps marking whole, so nothing that
     /// gets no structural detail loses its gutter.
     #[test]
@@ -4675,6 +4747,15 @@ mod tests {
     /// Each line hunk's token detail once the Rust tree pass of `buffer`
     /// against `base` merges into it.
     fn rust_detail(base: &str, buffer: &str) -> Vec<Option<Arc<TokenDetail>>> {
+        rust_hunks(base, buffer)
+            .into_iter()
+            .map(|hunk| hunk.token_detail)
+            .collect()
+    }
+
+    /// Each line hunk once the Rust tree pass of `buffer` against `base`
+    /// merges into it.
+    fn rust_hunks(base: &str, buffer: &str) -> Vec<DiffHunk> {
         let language = stoat_language::LanguageRegistry::standard()
             .for_path(std::path::Path::new("a.rs"))
             .expect("rust language");
@@ -4686,6 +4767,6 @@ mod tests {
             buffer,
         );
         super::merge_structural_detail(&mut hunks, &tree.changes, &tree.unsearched, base, buffer);
-        hunks.into_iter().map(|hunk| hunk.token_detail).collect()
+        hunks
     }
 }
