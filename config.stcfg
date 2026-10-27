@@ -393,6 +393,10 @@ on key {
     # The mini-help toggle, bound at the root so every mode answers it. A
     # pinned chord hides the box, and this is the one key that asks for it back.
     Ctrl-? -> ToggleKeyHints();
+    # The palette, bound at the root so every mode and every modal answers it.
+    # The `!modal` guards do not cover a root key, so the handler closes an
+    # open modal before the palette opens.
+    Ctrl-: -> OpenCommandPalette();
 
     # The modes named here bind `?` to something of their own. This block
     # outranks theirs on atom count, so a mode that takes the key has to be
@@ -1225,6 +1229,7 @@ on key {
     !modal && (pane == terminal || pane == agent) && mode == normal {
         Ctrl-a -> SetMode(prefix);
         Ctrl-? -> ToggleKeyHints();
+        Ctrl-: -> OpenCommandPalette();
         # Shift walks the pane's own history, the xterm convention, which
         # leaves plain PageUp and PageDown with the child.
         Shift-PageUp -> PageUp();

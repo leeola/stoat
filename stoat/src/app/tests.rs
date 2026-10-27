@@ -117,6 +117,71 @@ fn window_ipc_wheel_moves_the_editor_target_by_its_fraction() {
 /// A list steps by whole notches, so sub-notch travel over one accrues
 /// until it makes a step rather than being thrown away or falling through
 /// to the pane underneath.
+/// The root `Ctrl-:` fires over an open finder, which closes so the palette
+/// owns the keys alone.
+#[test]
+fn ctrl_colon_over_a_finder_swaps_it_for_the_palette() {
+    let mut h = Stoat::test();
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+
+    h.stoat.handle_key(ctrl(':'));
+
+    assert_eq!(
+        (
+            h.stoat.file_finder.is_none(),
+            h.stoat.command_palette.is_some()
+        ),
+        (true, true),
+        "the finder closes and the palette opens",
+    );
+}
+
+/// A finished run is the one modal the topmost close leaves open, so the
+/// palette dismisses it the way Escape does before it opens.
+#[test]
+fn ctrl_colon_over_a_finished_run_dismisses_it_for_the_palette() {
+    let mut h = Stoat::test();
+    let executor = h.stoat.executor.clone();
+    let run_id = {
+        let ws = h.stoat.active_workspace_mut();
+        let run = crate::run::RunState::new(PathBuf::from("/tmp"), ws, executor);
+        ws.runs.insert(run)
+    };
+    h.stoat.modal_run = Some(run_id);
+
+    h.stoat.handle_key(ctrl(':'));
+
+    assert_eq!(
+        (
+            h.stoat.modal_run.is_none(),
+            h.stoat.active_workspace().runs.get(run_id).is_none(),
+            h.stoat.command_palette.is_some(),
+        ),
+        (true, true, true),
+        "the run closes and the palette opens",
+    );
+}
+
+/// A second `Ctrl-:` over the open palette leaves it as it stands, so the
+/// query typed into it stays.
+#[test]
+fn ctrl_colon_over_the_palette_keeps_its_query() {
+    let mut h = Stoat::test();
+    h.stoat.handle_key(ctrl(':'));
+    for c in ['q', 'u'] {
+        h.stoat.handle_key(key(KeyCode::Char(c)));
+    }
+
+    h.stoat.handle_key(ctrl(':'));
+
+    let palette = h
+        .stoat
+        .command_palette
+        .as_ref()
+        .expect("the palette stays open");
+    assert_eq!(palette.input.text(h.stoat.active_workspace()), "qu");
+}
+
 #[test]
 fn window_ipc_wheel_steps_a_picker_once_per_notch() {
     use stoat_action::OpenFileFinder;
@@ -4613,7 +4678,7 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
         .collect();
     assert_eq!(
         keys,
-        ["C-a", "C-?", "S-PgUp", "S-PgDn"],
+        ["C-a", "C-?", "C-:", "S-PgUp", "S-PgDn"],
         "a terminal at rest lists only the keys it takes from its child"
     );
 }
@@ -5047,6 +5112,21 @@ fn ctrl_question_in_a_terminal_toggles_the_hints_and_sends_nothing() {
             ),
             (true, "normal".to_string(), Vec::<Vec<u8>>::new()),
             "Ctrl-? shows the hints and never reaches the child",
+        );
+    }
+}
+
+#[test]
+fn ctrl_colon_in_a_terminal_opens_the_palette_and_sends_nothing() {
+    for make_view in [View::Terminal, View::Agent] {
+        let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
+
+        stoat.handle_key(ctrl(':'));
+
+        assert_eq!(
+            (stoat.command_palette.is_some(), fake.sent_bytes()),
+            (true, Vec::<Vec<u8>>::new()),
+            "Ctrl-: opens the palette and never reaches the child",
         );
     }
 }

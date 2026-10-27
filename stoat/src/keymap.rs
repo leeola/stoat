@@ -3007,6 +3007,33 @@ mod tests {
         }
     }
 
+    /// The palette is bound at the root of `on key` too, so every mode answers
+    /// the key, and so does a prompt that a modal owns.
+    #[test]
+    fn ctrl_colon_opens_the_palette_from_every_mode() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let ctrl_colon = key_event(KeyCode::Char(':'), KeyModifiers::CONTROL);
+        let in_mode = |mode: &str| TestState::new().set("mode", StateValue::String(mode.into()));
+        let in_finder = in_mode("insert").set("modal", StateValue::String("finder".into()));
+
+        for (name, state) in [
+            ("normal mode", in_mode("normal")),
+            ("insert mode", in_mode("insert")),
+            ("space_goto mode", in_mode("space_goto")),
+            ("an open finder", in_finder),
+        ] {
+            let bound = keymap
+                .lookup(&state, &ctrl_colon)
+                .unwrap_or_else(|| panic!("Ctrl-: is bound in {name}"));
+            assert_eq!(
+                (bound.len(), bound[0].name.as_str()),
+                (1, "OpenCommandPalette"),
+                "Ctrl-: opens the palette in {name} and switches no mode",
+            );
+        }
+    }
+
     #[test]
     fn ctrl_a_enters_the_prefix_from_insert_but_not_from_a_prompt() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
@@ -3064,7 +3091,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_at_rest_answers_ctrl_a_and_ctrl_question() {
+    fn a_pane_at_rest_answers_ctrl_a_ctrl_question_and_ctrl_colon() {
         let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
         let ctrl = |c| key_event(KeyCode::Char(c), KeyModifiers::CONTROL);
         let bare = |code| key_event(code, KeyModifiers::NONE);
@@ -3086,6 +3113,7 @@ mod tests {
                 (
                     scoped(&at_rest(), ctrl('a')),
                     scoped(&at_rest(), ctrl('?')),
+                    scoped(&at_rest(), ctrl(':')),
                     scoped(&at_rest(), bare(KeyCode::Esc)),
                     scoped(&at_rest(), bare(KeyCode::Tab)),
                     scoped(&at_rest(), ctrl('d')),
@@ -3097,12 +3125,14 @@ mod tests {
                         vec![Value::Ident("prefix".into())]
                     )]),
                     Some(vec![("ToggleKeyHints".to_string(), Vec::new())]),
+                    Some(vec![("OpenCommandPalette".to_string(), Vec::new())]),
                     None,
                     None,
                     None,
                     None,
                 ),
-                "the {pane} pane takes back only Ctrl-a and Ctrl-?, and only with no modal open"
+                "the {pane} pane takes back only Ctrl-a, Ctrl-?, and Ctrl-:, and only with no \
+                 modal open"
             );
         }
     }

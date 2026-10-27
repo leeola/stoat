@@ -420,7 +420,16 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             Some(crate::file_finder::FinderScope::AllWorkspaces),
         ),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
+        ActionKind::OpenCommandPalette if stoat.command_palette.is_some() => UpdateEffect::None,
         ActionKind::OpenCommandPalette => {
+            // `Ctrl-:` binds at the keymap's root, past every `!modal` guard,
+            // so the modal it fires over closes and the palette owns the keys
+            // alone. A finished run is the one modal that close leaves open.
+            if stoat.modal_run.is_some() {
+                run::run_modal_dismiss(stoat);
+            } else {
+                keymap_state::close_topmost_modal(stoat);
+            }
             let executor = stoat.executor.clone();
             let availability = crate::command_palette::Availability::from_stoat(stoat);
             let ws = stoat.active_workspace_mut();
@@ -3696,6 +3705,19 @@ mod tests {
         let mut stoat = stoat();
         dispatch(&mut stoat, &stoat_action::OpenCommandPalette);
         assert_eq!(stoat.last_picker_action, Some("OpenCommandPalette"));
+    }
+
+    /// The palette owns an editor of its own, so a close leaves the pane
+    /// editor in the mode it held when the palette opened over it.
+    #[test]
+    fn open_command_palette_from_insert_mode_leaves_insert_behind_it() {
+        let mut stoat = stoat();
+        stoat.set_focused_mode("insert".into());
+
+        dispatch(&mut stoat, &stoat_action::OpenCommandPalette);
+        dispatch(&mut stoat, &stoat_action::CancelPromptInput);
+
+        assert_eq!(stoat.focused_mode(), "insert");
     }
 
     #[test]
