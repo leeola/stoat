@@ -317,6 +317,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::NewTab => tab::new_tab(stoat),
         ActionKind::NextTab => tab::next_tab(stoat),
         ActionKind::PrevTab => tab::prev_tab(stoat),
+        ActionKind::MoveTabLeft => tab::move_tab_left(stoat),
+        ActionKind::MoveTabRight => tab::move_tab_right(stoat),
         ActionKind::CloseTab => tab::close_tab(stoat),
         ActionKind::ToggleTab => tab::toggle_tab(stoat),
         ActionKind::ToggleTabBar => tab::toggle_tab_bar(stoat),

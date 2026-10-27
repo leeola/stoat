@@ -47,6 +47,8 @@ action_kinds! {
     RenameTab,
     NextTab,
     PrevTab,
+    MoveTabLeft,
+    MoveTabRight,
     ToggleTab,
     ToggleTabBar,
     ClosePane,

@@ -125,6 +125,30 @@ define_action!(
 );
 
 define_action!(
+    MoveTabLeftDef,
+    MoveTabLeft,
+    "MoveTabLeft",
+    ActionKind::MoveTabLeft,
+    "move the tab one place left",
+    "Swap the active tab with its left neighbor in display order. The tab \
+     stays active. At the first place the status line reports it and the tab \
+     stays put, with no wrap to the end.",
+    ActionPriority::Common
+);
+
+define_action!(
+    MoveTabRightDef,
+    MoveTabRight,
+    "MoveTabRight",
+    ActionKind::MoveTabRight,
+    "move the tab one place right",
+    "Swap the active tab with its right neighbor in display order. The tab \
+     stays active. At the last place the status line reports it and the tab \
+     stays put, with no wrap to the start.",
+    ActionPriority::Common
+);
+
+define_action!(
     CloseTabDef,
     CloseTab,
     "CloseTab",

@@ -678,6 +678,35 @@ impl Workspace {
         }
     }
 
+    /// Move the active tab to place `to` in display order, so it trades places
+    /// with the tab there and stays active. Returns whether it moved.
+    ///
+    /// A tab keeps its tree and its name through the trade, and the toggle
+    /// target follows the tab it names. A no-op for an out-of-range place or
+    /// the active tab's own.
+    pub(crate) fn move_tab(&mut self, to: usize) -> bool {
+        let from = self.active_tab;
+        if to >= self.tabs.len() || to == from {
+            return false;
+        }
+
+        self.tabs.swap(from, to);
+        self.last_tab = self.last_tab.map(|tab| match tab {
+            tab if tab == to => from,
+            tab if tab == from => to,
+            tab => tab,
+        });
+        self.active_tab = to;
+        tracing::debug!(
+            target: "stoat::pane",
+            from,
+            to,
+            tabs = self.tabs.len(),
+            "moved tab"
+        );
+        true
+    }
+
     /// The list the focused split pane shows, or `None` when focus sits on a
     /// dock or the focused pane shows something else.
     pub(crate) fn focused_commits_id(&self) -> Option<CommitListId> {
@@ -2471,6 +2500,39 @@ mod tests {
         assert!(
             ws.tabs[0].parked.is_none(),
             "the surviving active tab parks nothing"
+        );
+    }
+
+    /// The active tab trades places with the tab at the target and stays
+    /// active. The parked tree and the name move with their tab, and the
+    /// toggle target follows the tab it names.
+    #[test]
+    fn move_tab_swaps_the_slots_and_follows_the_active_and_toggle_indices() {
+        let mut h = TestHarness::with_size(80, 24);
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        ws.new_tab(&executor);
+        ws.new_tab(&executor);
+        ws.tabs[0].name = Some("first".into());
+        assert!(ws.switch_tab(0));
+        assert!(ws.switch_tab(2));
+        assert_eq!(ws.last_tab, Some(0));
+
+        assert!(ws.move_tab(0));
+        assert_eq!(
+            (
+                ws.active_tab,
+                ws.last_tab,
+                ws.tabs[0].parked.is_none(),
+                ws.tabs[2].parked.is_some(),
+                ws.tabs[2].name.as_deref(),
+            ),
+            (0, Some(2), true, true, Some("first")),
+        );
+        assert_eq!(
+            (ws.move_tab(0), ws.move_tab(9)),
+            (false, false),
+            "the active tab's own place and a place past the end move nothing"
         );
     }
 

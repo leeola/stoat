@@ -122,7 +122,10 @@ use crate::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
         },
         set_theme::SetTheme,
-        tab::{CloseTab, GotoTab, NewTab, NextTab, PrevTab, RenameTab, ToggleTab, ToggleTabBar},
+        tab::{
+            CloseTab, GotoTab, MoveTabLeft, MoveTabRight, NewTab, NextTab, PrevTab, RenameTab,
+            ToggleTab, ToggleTabBar,
+        },
         terminal::Terminal,
         walkthrough::{
             OpenWalkthroughPicker, WalkthroughBackward, WalkthroughDone, WalkthroughForward,
@@ -284,6 +287,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(NewTab::DEF, |_| Ok(Box::new(NewTab)));
     add(NextTab::DEF, |_| Ok(Box::new(NextTab)));
     add(PrevTab::DEF, |_| Ok(Box::new(PrevTab)));
+    add(MoveTabLeft::DEF, |_| Ok(Box::new(MoveTabLeft)));
+    add(MoveTabRight::DEF, |_| Ok(Box::new(MoveTabRight)));
     add(CloseTab::DEF, |_| Ok(Box::new(CloseTab)));
     add(ToggleTab::DEF, |_| Ok(Box::new(ToggleTab)));
     add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
@@ -1893,6 +1898,7 @@ mod tests {
         // + 1 ToggleTabBar.
         // + 1 RenameTab.
         // + 2 NextTab, PrevTab.
+        // + 2 MoveTabLeft, MoveTabRight.
         // + 2 .
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
@@ -2009,7 +2015,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 456);
+        assert_eq!(all().count(), 458);
     }
 
     #[test]

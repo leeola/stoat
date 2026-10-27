@@ -38,6 +38,36 @@ pub(super) fn prev_tab(stoat: &mut Stoat) -> UpdateEffect {
     cycle_tab(stoat, -1)
 }
 
+/// Move the active tab one place left in display order, keeping it active.
+pub(super) fn move_tab_left(stoat: &mut Stoat) -> UpdateEffect {
+    shift_tab(stoat, -1)
+}
+
+/// Move the active tab one place right in display order, keeping it active.
+pub(super) fn move_tab_right(stoat: &mut Stoat) -> UpdateEffect {
+    shift_tab(stoat, 1)
+}
+
+/// Trade the active tab's place with its neighbor `dir` (`-1` left, `+1`
+/// right), reporting at the bar's edge rather than wrapping.
+///
+/// A held key parks the tab at the end of the bar, and does not carry it
+/// around to the other end. The shown tree does not change, so no relayout
+/// runs.
+fn shift_tab(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let to = ws.active_tab as i32 + dir;
+    if to < 0 || to as usize >= ws.tabs.len() {
+        stoat.set_status(match dir < 0 {
+            true => "tab already first",
+            false => "tab already last",
+        });
+        return UpdateEffect::Redraw;
+    }
+    ws.move_tab(to as usize);
+    UpdateEffect::Redraw
+}
+
 /// Step the active tab by `dir` (`+1` next, `-1` previous) with wraparound,
 /// reporting when the workspace has no other tab to move to.
 fn cycle_tab(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
@@ -232,6 +262,54 @@ mod tests {
             h.stoat.active_workspace().active_tab,
             2,
             "prev from the first wraps to the last"
+        );
+    }
+
+    /// A move off either end of the bar reports it and leaves the tab where it
+    /// is, so a held key parks the tab at the end.
+    #[test]
+    fn move_tab_at_either_edge_reports_and_stays_put() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NewTab);
+        let at_edge = |h: &mut TestHarness, action: &dyn stoat_action::Action| {
+            dispatch(h, action);
+            (
+                h.stoat.active_workspace().active_tab,
+                h.stoat.pending_message.clone(),
+            )
+        };
+
+        let last = at_edge(&mut h, &stoat_action::MoveTabRight);
+        dispatch(&mut h, &stoat_action::GotoTab { index: 1 });
+        let first = at_edge(&mut h, &stoat_action::MoveTabLeft);
+
+        assert_eq!(
+            [last, first],
+            [
+                (1, Some("tab already last".to_string())),
+                (0, Some("tab already first".to_string())),
+            ],
+        );
+    }
+
+    /// The moved tab takes its neighbor's number, which is what the bar shows.
+    #[test]
+    fn move_tab_left_renumbers_the_bar() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NewTab);
+        dispatch(
+            &mut h,
+            &stoat_action::RenameTab {
+                name: Some("two".to_string()),
+            },
+        );
+        dispatch(&mut h, &stoat_action::MoveTabLeft);
+
+        let buf = h.render_composited();
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(
+            row.split_whitespace().take(2).collect::<Vec<_>>(),
+            ["1:two", "2:scratch"],
         );
     }
 
