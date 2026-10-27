@@ -2,10 +2,10 @@ use crate::{
     app::{Stoat, UpdateEffect},
     file_finder::OpenIntent,
     host::terminal::TerminalSession,
-    pane::{DockVisibility, PaneId, View},
+    pane::{PaneId, View},
     run::{agent_socket_path_in, spawn_term_reader, spawn_terminal, TermSpawnEnv},
     term_screen::TermScreen,
-    term_session::{TermId, TermLocation, TermSession},
+    term_session::{TermId, TermSession},
     workspace::Workspace,
 };
 use futures::FutureExt;
@@ -102,15 +102,7 @@ pub(super) fn show_terminal(
     // A terminal pane rests in normal mode, where its keys go to the child, so
     // the focus move sets no mode.
     if let Some(at) = stoat.active_workspace().term_location(term_id) {
-        if let TermLocation::Dock(id) = at
-            && let Some(dock) = stoat.active_workspace_mut().docks.get_mut(id)
-            && dock.visibility == DockVisibility::Hidden
-        {
-            dock.visibility = DockVisibility::Open {
-                width: dock.default_width,
-            };
-        }
-        stoat.focus_location(at);
+        stoat.reveal_location(at);
         return UpdateEffect::Redraw;
     }
 
@@ -270,6 +262,7 @@ fn resolve_shell(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pane::DockVisibility;
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

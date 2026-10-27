@@ -90,13 +90,12 @@ impl TermSelection {
     }
 }
 
-/// A place on screen that shows a terminal, either a split pane of a tab or a
-/// dock.
+/// Where a view shows, which is a split pane of a tab or a dock.
 ///
 /// The pane arm carries a tab index, because the view sits in a parked tab at
 /// times. The index is good only against the workspace that gave it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TermLocation {
+pub(crate) enum ViewLocation {
     Pane { tab: usize, pane: PaneId },
     Dock(DockId),
 }

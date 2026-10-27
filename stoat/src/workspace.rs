@@ -31,7 +31,7 @@ use crate::{
     run::{RunId, RunState},
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
-    term_session::{TermId, TermLocation, TermSession},
+    term_session::{TermId, TermSession, ViewLocation},
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffLanding, DiffState,
         PairBase, RevOrigin, WorktreeBase,
@@ -915,29 +915,35 @@ impl Workspace {
 
     /// Where a view shows `term_id`, or `None` for a session that no view
     /// shows.
-    pub(crate) fn term_location(&self, term_id: TermId) -> Option<TermLocation> {
-        let shows =
-            |view: &View| matches!(view, View::Terminal(t) | View::Agent(t) if *t == term_id);
+    pub(crate) fn term_location(&self, term_id: TermId) -> Option<ViewLocation> {
+        self.locate(|view| matches!(view, View::Terminal(t) | View::Agent(t) if *t == term_id))
+    }
+
+    /// The first place whose view `shows` accepts.
+    ///
+    /// The search reads the active tab's split panes first, then each parked
+    /// tab's, then the docks.
+    fn locate(&self, shows: impl Fn(&View) -> bool) -> Option<ViewLocation> {
         let in_tree = |tree: &PaneTree| {
             tree.split_panes()
                 .find(|(_, pane)| shows(&pane.view))
                 .map(|(id, _)| id)
         };
         if let Some(pane) = in_tree(&self.panes) {
-            return Some(TermLocation::Pane {
+            return Some(ViewLocation::Pane {
                 tab: self.active_tab,
                 pane,
             });
         }
         for (index, tab) in self.tabs.iter().enumerate() {
             if let Some(pane) = tab.parked.as_ref().and_then(in_tree) {
-                return Some(TermLocation::Pane { tab: index, pane });
+                return Some(ViewLocation::Pane { tab: index, pane });
             }
         }
         self.docks
             .iter()
             .find(|(_, dock)| shows(&dock.view))
-            .map(|(id, _)| TermLocation::Dock(id))
+            .map(|(id, _)| ViewLocation::Dock(id))
     }
 
     /// Stable identifier for this session across restarts.

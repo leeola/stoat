@@ -53,7 +53,7 @@ use crate::{
     ssh,
     symbol_finder::SymbolFinder,
     term_keys,
-    term_session::{TermId, TermLocation},
+    term_session::{TermId, ViewLocation},
     theme_pool::{ThemePool, VscodeSource},
     ui::{FrameBatches, FrameBatchesHold, RenderFrame},
     workspace::{BridgeWaiter, ParseRestyle, Workspace, WorkspaceId, WorkspaceUid},
@@ -6988,9 +6988,9 @@ impl Stoat {
     ///
     /// Returns `false` for the place focus already sits, a closed pane, a
     /// dropped dock, or a tab that is gone.
-    pub(crate) fn focus_location(&mut self, at: TermLocation) -> bool {
+    pub(crate) fn focus_location(&mut self, at: ViewLocation) -> bool {
         match at {
-            TermLocation::Dock(id) => {
+            ViewLocation::Dock(id) => {
                 let ws = self.active_workspace_mut();
                 if ws.focus == FocusTarget::Dock(id) || !ws.docks.contains_key(id) {
                     return false;
@@ -6998,7 +6998,7 @@ impl Stoat {
                 ws.focus = FocusTarget::Dock(id);
                 true
             },
-            TermLocation::Pane { tab, pane } if tab == self.active_workspace().active_tab => {
+            ViewLocation::Pane { tab, pane } if tab == self.active_workspace().active_tab => {
                 let ws = self.active_workspace_mut();
                 if pane == ws.panes.focus() || !ws.panes.split_pane_ids().contains(&pane) {
                     return false;
@@ -7007,7 +7007,7 @@ impl Stoat {
                 ws.focus = FocusTarget::SplitPane;
                 true
             },
-            TermLocation::Pane { tab, pane } => {
+            ViewLocation::Pane { tab, pane } => {
                 let parked_holds_pane = self
                     .active_workspace()
                     .tabs
@@ -7027,6 +7027,21 @@ impl Stoat {
                 true
             },
         }
+    }
+
+    /// Move focus to `at`, and open its dock first when the dock is hidden.
+    ///
+    /// Returns whether focus moved, as [`Self::focus_location`] does.
+    pub(crate) fn reveal_location(&mut self, at: ViewLocation) -> bool {
+        if let ViewLocation::Dock(id) = at
+            && let Some(dock) = self.active_workspace_mut().docks.get_mut(id)
+            && dock.visibility == DockVisibility::Hidden
+        {
+            dock.visibility = DockVisibility::Open {
+                width: dock.default_width,
+            };
+        }
+        self.focus_location(at)
     }
 
     /// Put the view that held focus before an event back in normal mode when
