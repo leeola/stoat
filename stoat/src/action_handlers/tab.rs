@@ -330,6 +330,43 @@ mod tests {
         );
     }
 
+    /// A step in the tab chord keeps the chord on the incoming tab, so a
+    /// repeated step walks the tabs, and Escape ends it. The pane a step leaves
+    /// rests in normal mode, so no parked tab keeps the chord.
+    #[test]
+    fn a_step_in_the_tab_chord_keeps_the_chord_and_escape_ends_it() {
+        let mut h = Stoat::test();
+        dispatch(&mut h, &stoat_action::NewTab);
+        h.stoat.set_focused_mode("prefix_tab".into());
+        let after = |h: &mut TestHarness, keys: &str| {
+            h.type_keys(keys);
+            (
+                h.stoat.active_workspace().active_tab,
+                h.stoat.focused_mode().to_string(),
+            )
+        };
+
+        let steps = [
+            after(&mut h, "Left"),
+            after(&mut h, "Right"),
+            after(&mut h, "Escape"),
+        ];
+        dispatch(&mut h, &stoat_action::GotoTab { index: 1 });
+
+        assert_eq!(
+            (steps, h.stoat.focused_mode()),
+            (
+                [
+                    (0, "prefix_tab".to_string()),
+                    (1, "prefix_tab".to_string()),
+                    (1, "normal".to_string()),
+                ],
+                "normal"
+            ),
+            "the step keys walk the tabs in the chord, and the first tab rests in normal mode",
+        );
+    }
+
     #[test]
     fn cycling_a_single_tab_reports_and_stays_put() {
         let mut h = Stoat::test();

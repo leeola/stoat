@@ -3321,22 +3321,61 @@ mod tests {
             .expect("r is bound in prefix_tab mode");
         assert_eq!(r[1].name, "RenameTab");
 
+        let names = |actions: &[ResolvedAction]| {
+            actions
+                .iter()
+                .map(|action| action.name.clone())
+                .collect::<Vec<_>>()
+        };
+
         let h = keymap
             .lookup(&tab, &key_event(KeyCode::Char('h'), KeyModifiers::NONE))
             .expect("h is bound in prefix_tab mode");
-        assert_eq!(h[0].name, "SetMode", "the mode resets before the switch");
-        assert_eq!(h[0].args[0].value, Value::Ident("normal".into()));
-        assert_eq!(h[1].name, "PrevTab");
+        assert_eq!(
+            names(&h),
+            ["SetMode", "PrevTab", "SetMode"],
+            "the step resets the mode, switches, and re-enters the chord"
+        );
+        assert_eq!(
+            (&h[0].args[0].value, &h[2].args[0].value),
+            (
+                &Value::Ident("normal".into()),
+                &Value::Ident("prefix_tab".into())
+            ),
+        );
 
         let l = keymap
             .lookup(&tab, &key_event(KeyCode::Char('l'), KeyModifiers::NONE))
             .expect("l is bound in prefix_tab mode");
-        assert_eq!(l[1].name, "NextTab");
+        assert_eq!(names(&l), ["SetMode", "NextTab", "SetMode"]);
 
         let esc = keymap
             .lookup(&tab, &key_event(KeyCode::Esc, KeyModifiers::NONE))
             .expect("Escape is bound in prefix_tab mode");
         assert_eq!(esc[0].args[0].value, Value::Ident("normal".into()));
+
+        // With a tab to return to, the toggle outranks the plain end of the
+        // chord, since its arm carries one more guard.
+        let no_toggle =
+            TestState::with_tabs("prefix_tab", 2.0).set("prev_tab", StateValue::Bool(false));
+        let ctrl_a = |state: &TestState| {
+            let event = key_event(KeyCode::Char('a'), KeyModifiers::CONTROL);
+            let actions = keymap
+                .lookup(state, &event)
+                .expect("Ctrl-a is bound in prefix_tab mode");
+            (names(&actions), actions[0].args[0].value.clone())
+        };
+        let normal = Value::Ident("normal".into());
+        assert_eq!(
+            [ctrl_a(&tab), ctrl_a(&no_toggle)],
+            [
+                (
+                    vec!["SetMode".to_string(), "ToggleTab".to_string()],
+                    normal.clone()
+                ),
+                (vec!["SetMode".to_string()], normal),
+            ],
+        );
     }
 
     /// The Ctrl twins of the step keys move the tab and hold the chord, since

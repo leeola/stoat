@@ -1840,19 +1840,24 @@ on key {
     # The Ctrl twins of the step keys move the tab instead of the focus, and
     # hold the chord as `prefix_move` does, because the moved tab keeps the
     # focus.
+    # A step resets the outgoing pane, switches, and re-enters the chord on the
+    # incoming focus, so a repeated step walks the tabs and no parked pane
+    # keeps the chord. The actions of a step run in order, and the chord box
+    # names a step by its first action that is not a mode switch.
     mode == prefix_tab {
         Escape -> SetMode(normal);
+        Ctrl-a -> SetMode(normal);
         r -> [SetMode(normal), RenameTab()];
 
         tabs > 1 {
-            h -> [SetMode(normal), PrevTab()];
-            Left -> [SetMode(normal), PrevTab()];
-            k -> [SetMode(normal), PrevTab()];
-            Up -> [SetMode(normal), PrevTab()];
-            l -> [SetMode(normal), NextTab()];
-            Right -> [SetMode(normal), NextTab()];
-            j -> [SetMode(normal), NextTab()];
-            Down -> [SetMode(normal), NextTab()];
+            h -> [SetMode(normal), PrevTab(), SetMode(prefix_tab)];
+            Left -> [SetMode(normal), PrevTab(), SetMode(prefix_tab)];
+            k -> [SetMode(normal), PrevTab(), SetMode(prefix_tab)];
+            Up -> [SetMode(normal), PrevTab(), SetMode(prefix_tab)];
+            l -> [SetMode(normal), NextTab(), SetMode(prefix_tab)];
+            Right -> [SetMode(normal), NextTab(), SetMode(prefix_tab)];
+            j -> [SetMode(normal), NextTab(), SetMode(prefix_tab)];
+            Down -> [SetMode(normal), NextTab(), SetMode(prefix_tab)];
             Ctrl-h -> MoveTabLeft();
             Ctrl-Left -> MoveTabLeft();
             Ctrl-l -> MoveTabRight();
