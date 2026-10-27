@@ -96,39 +96,54 @@ pub(crate) fn render_workspace_picker(
     let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
+    let query = picker.input.text(ws);
+    let query = query.trim();
+    let creating = picker.filtered().is_empty() && !query.is_empty() && !picker.renaming();
+
     let header_row = inner.y + 2;
-    write_str(buf, name_x, header_row, "name", header_style);
-    write_str(buf, path_x, header_row, "path", header_style);
-    write_str(
-        buf,
-        buf_col_x,
-        header_row,
-        &right_pad("buf", BUF_W),
-        header_style,
-    );
-    write_str(
-        buf,
-        run_col_x,
-        header_row,
-        &right_pad("run", RUN_W),
-        header_style,
-    );
-    write_str(
-        buf,
-        edit_col_x,
-        header_row,
-        &right_pad("edit", EDIT_W),
-        header_style,
-    );
+    if creating {
+        // Alt-Enter makes a root session too when the create leaves the fresh
+        // launch workspace, as `workspace_picker_create_sub` decides.
+        let hint = match picker.omitted_workspace == Some(ws.id) && ws.is_fresh() {
+            true => "Enter: new session".to_owned(),
+            false => format!(
+                "Enter: new session   Alt-Enter: new sub-session of {}",
+                picker.family_name()
+            ),
+        };
+        let end_x = inner.x + inner.width;
+        write_str_clipped(buf, name_x, header_row, &hint, header_style, end_x);
+    } else {
+        write_str(buf, name_x, header_row, "name", header_style);
+        write_str(buf, path_x, header_row, "path", header_style);
+        write_str(
+            buf,
+            buf_col_x,
+            header_row,
+            &right_pad("buf", BUF_W),
+            header_style,
+        );
+        write_str(
+            buf,
+            run_col_x,
+            header_row,
+            &right_pad("run", RUN_W),
+            header_style,
+        );
+        write_str(
+            buf,
+            edit_col_x,
+            header_row,
+            &right_pad("edit", EDIT_W),
+            header_style,
+        );
+    }
 
     let entries_top = inner.y + HEADER_ROWS;
     let rows = inner.height.saturating_sub(HEADER_ROWS) as usize;
     picker.viewport_rows = Some(rows);
     let selected = picker.selected();
     let entries = picker.entries();
-
-    let query = picker.input.text(ws);
-    let query = query.trim();
 
     // Reused across the painted rows rather than allocated per row, since a row
     // past the indexed block derives its offsets here.
@@ -209,7 +224,7 @@ pub(crate) fn render_workspace_picker(
         );
     }
 
-    if picker.filtered().is_empty() && !query.is_empty() && !picker.renaming() {
+    if creating {
         for col in inner.x..inner.x + inner.width {
             buf[(col, entries_top)]
                 .set_char(' ')
@@ -581,6 +596,13 @@ mod tests {
             (inner.y..inner.y + inner.height).all(|y| buf[(inner.x + 1, y)].symbol() != "+"),
             "no row paints the create marker"
         );
+        assert_eq!(
+            header_text(&buf, inner)
+                .split_whitespace()
+                .collect::<Vec<_>>(),
+            ["name", "path", "buf", "run", "edit"],
+            "the header labels every column"
+        );
     }
 
     /// Enter on an empty query with no row closes the picker and creates
@@ -613,6 +635,12 @@ mod tests {
     /// The picker over three workspaces with `query` typed into a real input
     /// and ranked, painted, alongside the modal's inner rect.
     fn painted_with_query(query: &str) -> (Buffer, Rect) {
+        painted_with(query, |_| {})
+    }
+
+    /// [`painted_with_query`] with `adjust` run on the picker as it opens,
+    /// before the query ranks.
+    fn painted_with(query: &str, adjust: impl FnOnce(&mut WorkspacePicker)) -> (Buffer, Rect) {
         let (mut workspaces, active) =
             workspaces_over(3, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
         let executor: Executor = Arc::new(TestScheduler::new()).executor();
@@ -624,13 +652,43 @@ mod tests {
             "insert",
         );
         let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
+        adjust(&mut picker);
         picker.refilter(query);
 
         let area = Rect::new(0, 0, 100, 30);
         let mut buf = Buffer::empty(area);
         render(&mut picker, &mut workspaces, active, &mut buf, area);
-        let (_, inner) = workspace_picker_layout(area, 3).expect("the area hosts the modal");
+        let (_, inner) = workspace_picker_layout(area, picker.entries().len())
+            .expect("the area hosts the modal");
         (buf, inner)
+    }
+
+    /// The column header row's text inside the modal's border.
+    fn header_text(buf: &Buffer, inner: Rect) -> String {
+        row_text(buf, inner.y + HEADER_ROWS - 1)
+            .chars()
+            .skip(inner.x as usize)
+            .take(inner.width as usize)
+            .collect()
+    }
+
+    /// The create row's header names both keys and the family a sub-session
+    /// joins.
+    #[test]
+    fn a_create_row_hints_both_keys_in_the_header() {
+        let (buf, inner) = painted_with_query("notes");
+        assert_eq!(
+            header_text(&buf, inner).trim(),
+            "Enter: new session   Alt-Enter: new sub-session of ws00"
+        );
+    }
+
+    /// A create that leaves the fresh launch workspace makes a root session on
+    /// either key, so the header names Enter alone.
+    #[test]
+    fn a_create_row_from_a_fresh_launch_hints_enter_alone() {
+        let (buf, inner) = painted_with("notes", WorkspacePicker::omit_active);
+        assert_eq!(header_text(&buf, inner).trim(), "Enter: new session");
     }
 
     /// The words of each selected row inside the modal's border, top first.
@@ -687,13 +745,10 @@ mod tests {
         render(&mut picker, &mut workspaces, active, &mut buf, area);
 
         let (_, inner) = workspace_picker_layout(area, 2).expect("the area hosts the modal");
-        let header: String = row_text(&buf, inner.y + HEADER_ROWS - 1)
-            .chars()
-            .skip(inner.x as usize)
-            .take(inner.width as usize)
-            .collect();
         assert_eq!(
-            header.split_whitespace().collect::<Vec<_>>(),
+            header_text(&buf, inner)
+                .split_whitespace()
+                .collect::<Vec<_>>(),
             ["name", "path", "buf", "run", "edit"],
             "the header labels every column",
         );

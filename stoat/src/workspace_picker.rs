@@ -474,19 +474,25 @@ impl WorkspacePicker {
     /// The name of the family the list narrows to, or `None` while it lists
     /// every session.
     ///
-    /// The name comes from the family root's row. A root without a row reads
-    /// as `family`, because an untouched root leaves no saved session, and the
-    /// picker omits the row of an untouched active workspace.
+    /// See also:
+    /// - [`Self::family_name`] for the name a root without a row reads as.
     pub(crate) fn family_title(&self) -> Option<&str> {
         match self.scope {
             PickerScope::All => None,
-            PickerScope::Family => Some(
-                self.entries
-                    .iter()
-                    .find(|entry| entry.uid == self.family_root)
-                    .map_or("family", |entry| entry.basename.as_str()),
-            ),
+            PickerScope::Family => Some(self.family_name()),
         }
+    }
+
+    /// The name of the active workspace's family, from the family root's row.
+    ///
+    /// A root without a row reads as `family`, because an untouched root
+    /// leaves no saved session, and the picker omits the row of an untouched
+    /// active workspace.
+    pub(crate) fn family_name(&self) -> &str {
+        self.entries
+            .iter()
+            .find(|entry| entry.uid == self.family_root)
+            .map_or("family", |entry| entry.basename.as_str())
     }
 
     /// The name column's text for the entry at `idx`, `parent/name` for a
