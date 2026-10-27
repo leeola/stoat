@@ -1640,6 +1640,9 @@ pub struct Stoat {
     /// moved since the press, so `Up(Left)` copies the selection only for a real
     /// drag and a plain click leaves no selection behind.
     pub(crate) terminal_drag: Option<(TermId, bool)>,
+    /// The pool id and terminal-font cell of the `pool_mouse` event being
+    /// routed, or `None` outside one.
+    pub(crate) pool_pointer: Option<(u32, u16, u16)>,
     /// Terminal cell the mouse last rested over a focused editor pane, or
     /// `None` before any motion. The render resolves the diagnostic under it
     /// to raise a hover popover. Motion events only arrive with mouse capture
@@ -2792,6 +2795,7 @@ impl Stoat {
             replaying_registers: Vec::new(),
             editor_drag: None,
             terminal_drag: None,
+            pool_pointer: None,
             hover_cell: None,
             hover_diag: None,
             divider_drag: None,
@@ -3204,6 +3208,21 @@ impl Stoat {
             WindowIpc::Event(event) => event,
         };
 
+        // A pool's pointer runs the pane-apply path that a terminal report runs,
+        // and the pane-tree borrow below leaves that path unreachable.
+        if let WindowIpcEvent::PoolMouse {
+            pool,
+            kind,
+            col,
+            row,
+            cell_col,
+            cell_row,
+            mods,
+        } = event
+        {
+            return self.handle_pool_mouse(pool, kind, col, row, (cell_col, cell_row), mods);
+        }
+
         // A pointer event runs the full pane-apply path, which borrows self more
         // broadly than the pane-only lifecycle arms below can while holding the
         // pane-tree borrow.
@@ -3303,6 +3322,7 @@ impl Stoat {
             WindowIpcEvent::Chord { .. } => return UpdateEffect::None,
             WindowIpcEvent::Wheel { .. } => unreachable!("wheel events return above"),
             WindowIpcEvent::PoolSized { .. } => unreachable!("pool sizes return above"),
+            WindowIpcEvent::PoolMouse { .. } => unreachable!("pool pointer events return above"),
         }
         UpdateEffect::Redraw
     }
@@ -3340,6 +3360,50 @@ impl Stoat {
             true => UpdateEffect::None,
             false => UpdateEffect::Redraw,
         }
+    }
+
+    /// Route a gesture that stoatty reported in terminal pool `pool`, at grid
+    /// cell `col`, `row` and at the pool's own `cell`, with `mods` as the
+    /// modifier bitmask.
+    ///
+    /// The grid cell runs the modal gates, the divider arming, and the focus
+    /// that a terminal report runs. The pane that takes the gesture reads
+    /// `cell` through [`Self::pool_pointer`], since only the terminal knows
+    /// which of its cells is under the pointer. A side button does nothing.
+    fn handle_pool_mouse(
+        &mut self,
+        pool: u32,
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+        cell: (u16, u16),
+        mods: u8,
+    ) -> UpdateEffect {
+        let Some(kind) = mouse_event_kind(kind) else {
+            return UpdateEffect::None;
+        };
+
+        self.pool_pointer = Some((pool, cell.0, cell.1));
+        let effect = self.route_mouse(MouseEvent {
+            kind,
+            column: col,
+            row,
+            modifiers: ipc_modifiers(mods),
+        });
+        self.pool_pointer = None;
+        effect
+    }
+
+    /// Route a pointer event in grid cells through the pane mouse handlers, and
+    /// reset the chord mode of a pane that the event took the focus from.
+    fn route_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        button_repeat::note_press(self, PressSource::Terminal(mouse));
+        let workspace_before = self.active_workspace;
+        let focus_before = self.active_workspace().focus;
+        let pane_before = self.active_workspace().panes.focus();
+        let effect = mouse::handle_mouse(self, mouse);
+        self.rest_left_pane(workspace_before, focus_before, pane_before);
+        effect
     }
 
     /// Route `lines` of precision wheel travel from `window` at cell `col`,
@@ -5460,15 +5524,7 @@ impl Stoat {
                     effect
                 }
             },
-            Event::Mouse(mouse) => {
-                button_repeat::note_press(self, PressSource::Terminal(mouse));
-                let workspace_before = self.active_workspace;
-                let focus_before = self.active_workspace().focus;
-                let pane_before = self.active_workspace().panes.focus();
-                let effect = mouse::handle_mouse(self, mouse);
-                self.rest_left_pane(workspace_before, focus_before, pane_before);
-                effect
-            },
+            Event::Mouse(mouse) => self.route_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
             _ => UpdateEffect::None,
         };

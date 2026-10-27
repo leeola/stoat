@@ -5763,6 +5763,127 @@ fn a_repeated_terminal_drag_on_the_settled_cell_costs_no_frame() {
     assert_eq!(h.fake_clipboard().writes(), vec!["hello"]);
 }
 
+/// stoatty names the pool's own cell under the pointer. One grid cell spans
+/// more than one terminal cell, so its ratio lands on row 0 where the named
+/// cell is on row 1.
+#[test]
+fn a_pool_mouse_gesture_selects_the_terminal_cell_it_names() {
+    let (mut h, pool) = pooled_terminal_pane(b"hello\r\nsecond");
+
+    for (kind, cell_col) in [
+        (MouseKind::Press(IpcMouseButton::Left), 0),
+        (MouseKind::Drag(IpcMouseButton::Left), 5),
+        (MouseKind::Release(IpcMouseButton::Left), 5),
+    ] {
+        h.stoat
+            .handle_window_ipc(pool_gesture(pool, kind, (0, 0), (cell_col, 1)));
+    }
+
+    assert_eq!(
+        (
+            h.fake_clipboard().writes(),
+            h.stoat.pending_message.as_deref()
+        ),
+        (
+            vec!["second".to_string()],
+            Some("copied 1 line to clipboard")
+        ),
+    );
+}
+
+/// A report that names the left pool with the pointer over the right pane
+/// raced a layout change. The right pane maps the grid cell by its ratio, 80
+/// terminal columns over 40 content cells, and selects its own row 0 rather
+/// than the named row 1.
+#[test]
+fn a_pool_mouse_gesture_naming_another_pool_takes_the_grid_cell() {
+    let mut h = Stoat::test();
+    let (left_pool, right_term) = {
+        let ws = h.stoat.active_workspace_mut();
+        let left = ws.panes.focus();
+        let right = ws.panes.split(crate::pane::Axis::Vertical);
+        let terms = [left, right].map(|pane| {
+            let term_id = insert_term_session(ws);
+            ws.panes.pane_mut(pane).view = View::Terminal(term_id);
+            ws.term_pool_grids.insert(term_id, (24, 80));
+            term_id
+        });
+        ws.panes.pane_mut(left).area = Rect::new(0, 0, 40, 24);
+        ws.panes.pane_mut(right).area = Rect::new(40, 0, 40, 24);
+        (ws.panes.pane(left).index, terms[1])
+    };
+    h.stoat.active_workspace_mut().terms[right_term]
+        .term
+        .feed(b"first\r\nsecond");
+
+    for (kind, grid_col, cell_col) in [
+        (MouseKind::Press(IpcMouseButton::Left), 40, 0),
+        (MouseKind::Drag(IpcMouseButton::Left), 42, 5),
+        (MouseKind::Release(IpcMouseButton::Left), 42, 5),
+    ] {
+        h.stoat
+            .handle_window_ipc(pool_gesture(left_pool, kind, (grid_col, 0), (cell_col, 1)));
+    }
+
+    assert_eq!(h.fake_clipboard().writes(), vec!["first"]);
+}
+
+/// The pool cell lasts for its own event alone. A grid report after it maps
+/// its cell by the ratio, 120 terminal columns over 80 content cells, so a
+/// drag to grid column 2 copies through terminal column 3.
+#[test]
+fn a_grid_report_after_a_pool_gesture_takes_the_ratio() {
+    let (mut h, pool) = pooled_terminal_pane(b"hello\r\nsecond");
+    for kind in [
+        MouseKind::Press(IpcMouseButton::Left),
+        MouseKind::Release(IpcMouseButton::Left),
+    ] {
+        h.stoat
+            .handle_window_ipc(pool_gesture(pool, kind, (0, 0), (5, 1)));
+    }
+
+    for (kind, col) in [
+        (MouseEventKind::Down(MouseButton::Left), 0),
+        (MouseEventKind::Drag(MouseButton::Left), 2),
+        (MouseEventKind::Up(MouseButton::Left), 2),
+    ] {
+        h.stoat.update(mouse_event(kind, col, 0));
+    }
+
+    assert_eq!(h.fake_clipboard().writes(), vec!["hell"]);
+}
+
+/// A harness whose focused split pane is a terminal holding `content`, drawn
+/// as a pool of 40 rows by 120 columns, and that pool's id.
+fn pooled_terminal_pane(content: &[u8]) -> (crate::test_harness::TestHarness, u32) {
+    let mut h = Stoat::test();
+    let term_id = focused_terminal_pane(&mut h, content);
+    h.stoat
+        .active_workspace_mut()
+        .term_pool_grids
+        .insert(term_id, (40, 120));
+    let _ = h.stoat.render();
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    (h, pool)
+}
+
+/// A `pool_mouse` report of `kind` in `pool`, at grid cell `grid` and pool cell
+/// `cell`, with no modifiers.
+fn pool_gesture(pool: u32, kind: MouseKind, grid: (u16, u16), cell: (u16, u16)) -> WindowIpc {
+    WindowIpc::Event(WindowIpcEvent::PoolMouse {
+        pool,
+        kind,
+        col: grid.0,
+        row: grid.1,
+        cell_col: cell.0,
+        cell_row: cell.1,
+        mods: 0,
+    })
+}
+
 /// The drag stays live, since the release that copies clears the selection on
 /// its own.
 #[test]

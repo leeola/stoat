@@ -2047,33 +2047,39 @@ fn handle_editor_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, r
 /// nothing. Coordinates are pane-relative cells.
 ///
 /// A split pane's terminal that stoatty draws at its own font size holds other
-/// cells than the pane's content area, so a content cell maps to the terminal
-/// cell under it through the ratio of the two.
+/// cells than the pane's content area. A `pool_mouse` report names the terminal
+/// cell under the pointer, which [`Stoat::pool_pointer`] carries. A report in
+/// grid cells maps a content cell to the terminal cell under it through the
+/// ratio of the two.
 fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row: u16) -> bool {
     let Some((term_id, area)) = focused_term_target(stoat) else {
         return false;
     };
-    let (rows, cols, pooled) = {
+    let (rows, cols, pooled, pool) = {
         let ws = stoat.active_workspace();
         let Some(session) = ws.terms.get(term_id) else {
             return false;
         };
+        let pane = ws.panes.pane(ws.panes.focus());
         let pooled = matches!(ws.focus, FocusTarget::SplitPane)
-            && ws.panes.pane(ws.panes.focus()).placement == Placement::Split
+            && pane.placement == Placement::Split
             && ws.term_pool_grids.contains_key(&term_id);
-        (session.term.rows(), session.term.cols(), pooled)
+        (session.term.rows(), session.term.cols(), pooled, pane.index)
     };
     if rows == 0 || cols == 0 {
         return false;
     }
 
     let (col, row) = match pooled {
-        true => {
-            let (content, _) = crate::render::layout::split_pane_status(area);
-            (
-                terminal_cell(col, cols, content.width),
-                terminal_cell(row, rows, content.height),
-            )
+        true => match stoat.pool_pointer.filter(|(named, ..)| *named == pool) {
+            Some((_, cell_col, cell_row)) => (cell_col, cell_row),
+            None => {
+                let (content, _) = crate::render::layout::split_pane_status(area);
+                (
+                    terminal_cell(col, cols, content.width),
+                    terminal_cell(row, rows, content.height),
+                )
+            },
         },
         false => (col, row),
     };

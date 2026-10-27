@@ -118,9 +118,14 @@
 /// it leave the rect to the live grid. A terminal that predates it reads the
 /// code as a light line.
 ///
+/// Version 16 reports a gesture pressed in a terminal pool as a `pool_mouse`
+/// line on the window socket, which names the pool's own cell under the
+/// pointer, and writes no SGR report for it. A terminal that predates it
+/// reports the gesture in the grid's cells alone.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 pub mod command;
 pub mod detect;

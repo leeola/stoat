@@ -67,9 +67,26 @@ pub enum WindowIpcEvent {
     /// size, so only the terminal knows how many terminal cells fit in it. A
     /// program sizes the pane's emulator and PTY to this answer.
     PoolSized { pool: u32, cols: u16, rows: u16 },
+    /// A pointer gesture pressed in terminal-kind `pool`, with modifiers `mods`
+    /// as a bitmask.
+    ///
+    /// `col` and `row` are the primary-grid cell under the pointer.
+    /// `cell_col` and `cell_row` are the pool's cell at the terminal font size,
+    /// which only the terminal knows. A gesture pressed in a terminal pool
+    /// rides this event in place of an SGR report.
+    PoolMouse {
+        pool: u32,
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+        cell_col: u16,
+        cell_row: u16,
+        mods: u8,
+    },
 }
 
-/// A pointer gesture carried by [`WindowIpcEvent::Mouse`].
+/// A pointer gesture carried by [`WindowIpcEvent::Mouse`] and
+/// [`WindowIpcEvent::PoolMouse`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MouseKind {
     Press(MouseButton),
@@ -163,6 +180,18 @@ impl WindowIpcEvent {
                 let (verb, arg) = kind.words();
                 format!("mouse {window} {col} {row} {mods} {verb} {arg}")
             },
+            WindowIpcEvent::PoolMouse {
+                pool,
+                kind,
+                col,
+                row,
+                cell_col,
+                cell_row,
+                mods,
+            } => {
+                let (verb, arg) = kind.words();
+                format!("pool_mouse {pool} {col} {row} {cell_col} {cell_row} {mods} {verb} {arg}")
+            },
             WindowIpcEvent::Zoom { window, delta } => format!("zoom {window} {delta}"),
             WindowIpcEvent::Chord { window, ch } => format!("chord {window} {ch}"),
             WindowIpcEvent::Wheel {
@@ -239,6 +268,24 @@ pub fn parse_line(line: &str) -> Option<WindowIpcEvent> {
             pool: parts.next()?.parse().ok()?,
             cols: parts.next()?.parse().ok()?,
             rows: parts.next()?.parse().ok()?,
+        },
+        "pool_mouse" => {
+            let pool = parts.next()?.parse().ok()?;
+            let col = parts.next()?.parse().ok()?;
+            let row = parts.next()?.parse().ok()?;
+            let cell_col = parts.next()?.parse().ok()?;
+            let cell_row = parts.next()?.parse().ok()?;
+            let mods = parts.next()?.parse().ok()?;
+            let kind = MouseKind::from_words(parts.next()?, parts.next()?)?;
+            WindowIpcEvent::PoolMouse {
+                pool,
+                kind,
+                col,
+                row,
+                cell_col,
+                cell_row,
+                mods,
+            }
         },
         _ => return None,
     };
@@ -456,6 +503,47 @@ mod tests {
         ] {
             assert_eq!(parse_line(&event.encode_line()), Some(event));
         }
+    }
+
+    #[test]
+    fn pool_mouse_events_round_trip() {
+        let gesture = |kind, cell_col| WindowIpcEvent::PoolMouse {
+            pool: 3,
+            kind,
+            col: 10,
+            row: 4,
+            cell_col,
+            cell_row: 5,
+            mods: 2,
+        };
+        let events = [
+            gesture(MouseKind::Press(MouseButton::Left), 11),
+            gesture(MouseKind::Drag(MouseButton::Left), 12),
+            gesture(MouseKind::Release(MouseButton::Left), 12),
+        ];
+
+        assert_eq!(
+            events.map(|event| (event.encode_line(), parse_line(&event.encode_line()))),
+            [
+                (
+                    "pool_mouse 3 10 4 11 5 2 press left".to_string(),
+                    Some(events[0])
+                ),
+                (
+                    "pool_mouse 3 10 4 12 5 2 drag left".to_string(),
+                    Some(events[1])
+                ),
+                (
+                    "pool_mouse 3 10 4 12 5 2 release left".to_string(),
+                    Some(events[2])
+                ),
+            ],
+        );
+        assert_eq!(
+            parse_line("pool_mouse 3 10 4 11 5 2 press"),
+            None,
+            "missing button",
+        );
     }
 
     #[test]
