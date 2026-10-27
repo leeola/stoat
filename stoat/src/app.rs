@@ -8210,9 +8210,11 @@ impl Stoat {
     /// nothing and only follows the leftward shift.
     ///
     /// Overlapping spans merge before the edit, so two cursors inside one word
-    /// remove the shared span once rather than double-deleting it. Each cursor
-    /// then lands at its deletion start. Cursors that collapse to the same
-    /// offset dedupe when the selections are rebuilt.
+    /// remove the shared span once rather than double-deleting it. Both ends of
+    /// each selection then map through the deletions, so a selection shrinks
+    /// where a deletion ate into it and otherwise shifts whole. A selection
+    /// whose ends meet lands as a block cursor on the cell after them.
+    /// Selections that collapse onto one another merge when the set is rebuilt.
     fn editor_delete_ranges<F>(&mut self, editor_id: EditorId, buffer_id: BufferId, range_for: F)
     where
         F: Fn(&Rope, usize) -> (usize, usize),
@@ -8240,7 +8242,7 @@ impl Stoat {
             buf_snapshot.resolve_anchors_batch(&anchors)
         };
 
-        let per_sel: Vec<(usize, usize, usize)> = editor
+        let per_sel: Vec<(usize, usize, usize, usize, usize, bool)> = editor
             .selections
             .all_anchors()
             .iter()
@@ -8255,14 +8257,15 @@ impl Stoat {
                 // to the character it was cutting and never splits one.
                 let start = rope.clip_to_grapheme_boundary(start, Bias::Left);
                 let end = rope.clip_to_grapheme_boundary(end, Bias::Right);
-                (sel.id, start, end)
+                let span = (ends[0].min(ends[1]), ends[0].max(ends[1]));
+                (sel.id, start, end, span.0, span.1, sel.reversed)
             })
             .collect();
 
         let ranges: Vec<(usize, usize)> = per_sel
             .iter()
-            .filter(|(_, start, end)| start < end)
-            .map(|&(_, start, end)| (start, end))
+            .filter(|(_, start, end, ..)| start < end)
+            .map(|&(_, start, end, ..)| (start, end))
             .collect();
         if ranges.is_empty() {
             return;
@@ -8289,23 +8292,48 @@ impl Stoat {
         }
         deleted_before.push(running);
 
-        let mut new_offsets: Vec<(usize, usize, SelectionGoal)> = per_sel
+        let mapped: Vec<(usize, usize, usize, bool)> = per_sel
             .iter()
-            .map(|&(id, start, _)| {
+            .map(|&(id, _, _, start, end, reversed)| {
                 (
                     id,
                     Self::offset_after_deletions(start, &merged, &deleted_before),
-                    SelectionGoal::None,
+                    Self::offset_after_deletions(end, &merged, &deleted_before),
+                    reversed,
                 )
             })
             .collect();
-        // Sorted so the closure can binary-search rather than hash a map built
-        // for one pass over the selections.
-        new_offsets.sort_unstable_by_key(|(id, _, _)| *id);
 
         let new_display = editor.display_map.snapshot();
         let new_buf = new_display.buffer_snapshot();
-        editor.selections.land_block_cursors(&new_offsets, new_buf);
+        let forwards = {
+            let starts: Vec<usize> = mapped.iter().map(|&(_, start, ..)| start).collect();
+            stoat_text::next_char_boundaries_batch(new_buf.rope(), &starts)
+        };
+
+        // Ends that meet are a cursor, which covers the cell after it. At the
+        // rope end there is no such cell, and the boundary is the offset itself.
+        let mut spans: Vec<SpanLanding> = mapped
+            .into_iter()
+            .zip(forwards)
+            .map(|((id, start, end, reversed), forward)| {
+                let (end, reversed) = match start == end {
+                    true => (forward, false),
+                    false => (end, reversed),
+                };
+                SpanLanding {
+                    id,
+                    start,
+                    end,
+                    reversed,
+                    goal: SelectionGoal::None,
+                }
+            })
+            .collect();
+        // Sorted by id, so the landing finds each span by binary search and
+        // builds no map for one pass over the selections.
+        spans.sort_unstable_by_key(|span| span.id);
+        editor.selections.replace_from_offsets(&spans, new_buf);
     }
 
     /// New offset of `target` after deleting the ascending, disjoint `ranges`.

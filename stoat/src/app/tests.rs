@@ -13338,6 +13338,43 @@ fn backspace_with_forward_selection_acts_at_block_cursor() {
     h.stoat.transition_mode("insert".to_string());
     h.type_keys("backspace");
     assert_eq!(h.buffer_text_at(&path), "acdef");
+    assert_eq!(h.selection_spans(), vec![(0, 2, false)]);
+}
+
+#[test]
+fn backspace_after_i_keeps_the_selection_past_the_cursor() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foo bar\n");
+    h.type_keys("w w i backspace");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.selection_spans()),
+        ("foobar\n".to_string(), vec![(3, 6, true)]),
+        "the whole selection shifts back over the deleted space",
+    );
+}
+
+#[test]
+fn delete_after_i_shrinks_the_selection_from_its_start() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foo bar\n");
+    h.type_keys("w w i ctrl-d");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.selection_spans()),
+        ("foo ar\n".to_string(), vec![(4, 6, true)]),
+        "the deleted char leaves the selection one char shorter",
+    );
+}
+
+#[test]
+fn kill_to_line_end_after_i_leaves_a_block_cursor() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "foo bar\n");
+    h.type_keys("w w i ctrl-k");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.selection_spans()),
+        ("foo \n".to_string(), vec![(4, 5, false)]),
+        "a selection the kill took whole lands as a cursor on the next cell",
+    );
 }
 
 #[test]
