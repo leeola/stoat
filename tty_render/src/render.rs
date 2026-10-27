@@ -62,7 +62,8 @@ pub struct Scroll<'a> {
 /// ligatures on the cursor's cell.
 pub struct Frame<'a> {
     /// Cursor cell origin in fractional cell coordinates, or `None` when
-    /// hidden. Breaks the ligature on the cell it lands on. The drawn block
+    /// hidden. Breaks the ligature on the cell it lands on, in the live grid
+    /// and in the live-size pool page composited over it. The drawn block
     /// comes from [`Self::cursor_corners`].
     pub cursor: Option<[f32; 2]>,
     /// The cursor block's four corners [TL, TR, BL, BR] in fractional cell

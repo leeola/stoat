@@ -4978,7 +4978,7 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
 /// `cursor` is the eased block position in fractional cell coordinates
 /// (`[col, row]`). Rounding to the nearest cell tracks the cell the block mostly
 /// covers, so the break follows the visible block as it eases.
-fn cursor_cell(cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
+pub(crate) fn cursor_cell(cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
     let [col, row] = cursor?;
     Some((row.round() as usize, col.round() as usize))
 }

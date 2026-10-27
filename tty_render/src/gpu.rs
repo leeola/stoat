@@ -567,6 +567,7 @@ impl Renderer {
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.changed_rows,
+                pool.cursor_cell(frame.cursor),
                 pool.occludable,
                 pool.skip_clear,
                 pool.dim,
@@ -970,6 +971,7 @@ impl Renderer {
             content_changed,
             scrolled_rows,
             None,
+            None,
             occludable,
             false,
             0.0,
@@ -1019,6 +1021,10 @@ impl Renderer {
     /// `changed_rows` names the rows that differ once `scrolled_rows` slid the
     /// pool's last composite, as [`PoolComposite::changed_rows`] describes.
     ///
+    /// `cursor_cell` is the pool's own cell under the delegated cursor, from
+    /// [`pool_cursor_cell`], which the text pass shapes alone so no ligature
+    /// spans it.
+    ///
     /// `skip_clear` leaves the pool's cells of the frame's clear color undrawn,
     /// as [`PoolComposite::skip_clear`] describes.
     ///
@@ -1038,6 +1044,7 @@ impl Renderer {
         content_changed: bool,
         scrolled_rows: Option<isize>,
         changed_rows: Option<&[usize]>,
+        cursor_cell: Option<(usize, usize)>,
         occludable: bool,
         skip_clear: bool,
         dim: f32,
@@ -1094,7 +1101,7 @@ impl Renderer {
             content_changed,
             scrolled_rows,
             changed_rows,
-            None,
+            cursor_cell,
             dim,
             pool,
             slot,
@@ -1407,6 +1414,25 @@ pub struct PoolComposite<'a> {
     pub dim: f32,
 }
 
+impl PoolComposite<'_> {
+    /// The pool's own cell under the frame's eased cursor block, per
+    /// [`pool_cursor_cell`], or `None` for a pool at its own font size.
+    ///
+    /// A pool at its own size is a terminal pane's, which holds no delegated
+    /// cursor.
+    fn cursor_cell(&self, cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
+        match self.font_size {
+            None => pool_cursor_cell(
+                cursor,
+                self.origin_cells,
+                self.grid.rows(),
+                self.grid.cols(),
+            ),
+            Some(_) => None,
+        }
+    }
+}
+
 /// Clamp `scissor` (`[x, y, width, height]` in physical pixels) to a
 /// `width`x`height` render target, or `None` when nothing of it remains inside.
 ///
@@ -1442,6 +1468,26 @@ fn pool_origin(origin: [f32; 2], live: CellMetrics, pool: CellMetrics) -> [f32; 
         origin[0] * (live.width / pool.width),
         origin[1] * (live.height / pool.height),
     ]
+}
+
+/// The cell of a pool at the live size that the eased cursor block covers, in
+/// the pool's own rows and columns, or `None` when the block sits outside the
+/// pool.
+///
+/// The origin is rounded because a region eased within a cell carries the
+/// fraction in the globals shift, as `TextCompositeSlot::baked_origin`
+/// describes.
+fn pool_cursor_cell(
+    cursor: Option<[f32; 2]>,
+    origin_cells: [f32; 2],
+    rows: usize,
+    cols: usize,
+) -> Option<(usize, usize)> {
+    let (row, col) = text::cursor_cell(cursor)?;
+    let left = origin_cells[0].round() as usize;
+    let top = origin_cells[1].round() as usize;
+    let inside = row >= top && row - top < rows && col >= left && col - left < cols;
+    inside.then(|| (row - top, col - left))
 }
 
 /// The scissors of the first [`MAX_COVERED`] `pools` that draw on a
@@ -2228,8 +2274,8 @@ impl GpuContext {
 
         // The pool composites paint over the cursor's cell, so the base prepares
         // without its cursor block and the block is recorded after the pools. The
-        // ligature-break cell (`frame.cursor`) stays, keeping the live grid's
-        // glyph under a chrome cursor broken out of any ligature.
+        // ligature-break cell (`frame.cursor`) stays, keeping the glyph under a
+        // chrome cursor broken out of any ligature.
         let base = Frame {
             cursor_corners: None,
             ..*frame
@@ -2323,6 +2369,7 @@ impl GpuContext {
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.changed_rows,
+                pool.cursor_cell(frame.cursor),
                 pool.occludable,
                 pool.skip_clear,
                 pool.dim,
@@ -2469,9 +2516,10 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_font_system, clamp_scissor, covered_rects, needs_configure, surface_formats,
-        CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, PoolComposite, Renderer,
-        SharedFonts, SurfaceColorSpace, SurfaceConfiguration, TextureFormat, MAX_COVERED,
+        build_font_system, clamp_scissor, covered_rects, needs_configure, pool_cursor_cell,
+        surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame,
+        PoolComposite, Renderer, SharedFonts, SurfaceColorSpace, SurfaceConfiguration,
+        TextureFormat, MAX_COVERED,
     };
     use crate::test_support::{pixel, read_back, require_headless_device, still_frame};
     use std::iter;
@@ -2629,6 +2677,7 @@ mod tests {
                 pool.content_changed,
                 pool.scrolled_rows,
                 pool.changed_rows,
+                None,
                 pool.occludable,
                 pool.skip_clear,
                 pool.dim,
@@ -2763,6 +2812,7 @@ mod tests {
             0.0,
             [0.0; 2],
             true,
+            None,
             None,
             None,
             true,
@@ -3056,17 +3106,27 @@ mod tests {
         live: &Grid,
         pools: &[PoolComposite<'_>],
     ) -> Vec<u8> {
+        draw_pooled_under(device, queue, renderer, target, live, pools, None)
+    }
+
+    /// [`draw_pooled`] for a frame whose cursor sits at `cursor`, in fractional
+    /// cell coordinates, with no cursor block drawn.
+    fn draw_pooled_under(
+        device: &Device,
+        queue: &Queue,
+        renderer: &mut Renderer,
+        target: &Texture,
+        live: &Grid,
+        pools: &[PoolComposite<'_>],
+        cursor: Option<[f32; 2]>,
+    ) -> Vec<u8> {
         let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
         let view = target.create_view(&TextureViewDescriptor::default());
-        renderer.render_pools_into(
-            device,
-            queue,
-            &view,
-            live,
-            still_frame(&full, &none),
-            pools,
-            &[],
-        );
+        let frame = Frame {
+            cursor,
+            ..still_frame(&full, &none)
+        };
+        renderer.render_pools_into(device, queue, &view, live, frame, pools, &[]);
         read_back(device, queue, target, TARGET_WIDTH, TARGET_HEIGHT)
     }
 
@@ -3149,6 +3209,73 @@ mod tests {
             clamp_scissor([10, 10, 0, 20], 100, 100),
             None,
             "a zero-width input is empty"
+        );
+    }
+
+    /// The eased block rounds to the cell it mostly covers, counted from the
+    /// pool's corner, and a block off the pool names no cell of it.
+    #[test]
+    fn pool_cursor_cell_maps_the_block_into_the_pool() {
+        let cell = |cursor| pool_cursor_cell(cursor, [2.0, 1.0], 4, 10);
+        assert_eq!(
+            [
+                cell(None),
+                cell(Some([5.6, 2.4])),
+                cell(Some([1.0, 2.0])),
+                cell(Some([5.0, 5.0])),
+            ],
+            [None, Some((1, 4)), None, None],
+            "hidden, inside, left of the pool, and below it",
+        );
+    }
+
+    /// A pool at its own font size is a terminal pane's, which holds no
+    /// delegated cursor, so only a pool at the live size takes the frame's.
+    #[test]
+    fn only_a_pool_at_the_live_size_takes_the_cursor() {
+        let grid = Grid::new(2, 6);
+        let cell = |font_size| {
+            PoolComposite {
+                font_size,
+                ..whole_pool(&grid)
+            }
+            .cursor_cell(Some([3.0, 1.0]))
+        };
+        assert_eq!([cell(None), cell(Some(10))], [Some((1, 3)), None]);
+    }
+
+    /// The page composited over the live grid breaks the ligature under the
+    /// frame's cursor, as the live grid does, so the glyphs under the cursor
+    /// draw apart.
+    #[test]
+    fn a_pool_breaks_the_ligature_under_the_frame_cursor() {
+        let (device, queue) = require_headless_device();
+        let ground = Rgb::new(0, 0, 0);
+        let (target, mut renderer) = readback_renderer(&device, ground);
+        let (rows, cols) = renderer.grid_size();
+        let live = filled_grid(rows, cols, ground);
+        let mut pool = filled_grid(rows, cols, ground);
+        for (col, ch) in "a |= b".chars().enumerate() {
+            pool.get_mut(1, col).ch = ch;
+        }
+        let pools = [whole_pool(&pool)];
+        let mut drawn = |cursor| {
+            draw_pooled_under(
+                &device,
+                &queue,
+                &mut renderer,
+                &target,
+                &live,
+                &pools,
+                cursor,
+            )
+        };
+
+        let apart = drawn(Some([3.0, 1.0]));
+        let joined = drawn(None);
+        assert!(
+            apart != joined,
+            "the glyphs under the cursor draw apart from the ligature",
         );
     }
 
