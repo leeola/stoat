@@ -943,12 +943,7 @@ pub(crate) fn set_buffer_auto_reload(stoat: &mut Stoat, state: &str) -> UpdateEf
 /// Turning the mode off drops a write still waiting on its window, so nothing
 /// lands after the reader stops following.
 pub(crate) fn toggle_follow_changes(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.follow_changes = !stoat.follow_changes;
-    if !stoat.follow_changes {
-        stoat.follow_pending = None;
-        stoat.follow_timer = None;
-    }
-
+    set_follow_changes(stoat, !stoat.follow_changes);
     stoat.set_status(if stoat.follow_changes {
         "follow changes on"
     } else {
@@ -957,21 +952,52 @@ pub(crate) fn toggle_follow_changes(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Set the workspace follow mode to `on`, dropping the held write when off.
+fn set_follow_changes(stoat: &mut Stoat, on: bool) {
+    stoat.follow_changes = on;
+    if !on {
+        stoat.follow_pending = None;
+        stoat.follow_timer = None;
+    }
+}
+
 /// Flip the workspace live reload, backing the `LiveReload` action.
 ///
 /// Turning the mode off drops the writes still waiting on their window, so no
 /// buffer reloads after the reader stops it.
 pub(crate) fn toggle_live_reload(stoat: &mut Stoat) -> UpdateEffect {
-    stoat.live_reload = !stoat.live_reload;
-    if !stoat.live_reload {
-        stoat.live_reload_pending.clear();
-        stoat.live_reload_timer = None;
-    }
-
+    set_live_reload(stoat, !stoat.live_reload);
     stoat.set_status(if stoat.live_reload {
         "live reload on"
     } else {
         "live reload off"
+    });
+    UpdateEffect::Redraw
+}
+
+/// Set the workspace live reload to `on`, dropping the held writes when off.
+fn set_live_reload(stoat: &mut Stoat, on: bool) {
+    stoat.live_reload = on;
+    if !on {
+        stoat.live_reload_pending.clear();
+        stoat.live_reload_timer = None;
+    }
+}
+
+/// Turn the workspace follow mode and live reload on together, or both off,
+/// backing the `FollowReload` action.
+///
+/// The pair reads on only while both modes are on, so a press while one mode
+/// is on alone turns both on. Off drops the writes each mode still holds, as
+/// each mode's own toggle does.
+pub(crate) fn toggle_follow_reload(stoat: &mut Stoat) -> UpdateEffect {
+    let on = !(stoat.follow_changes && stoat.live_reload);
+    set_follow_changes(stoat, on);
+    set_live_reload(stoat, on);
+    stoat.set_status(if on {
+        "follow and reload on"
+    } else {
+        "follow and reload off"
     });
     UpdateEffect::Redraw
 }
@@ -1318,7 +1344,8 @@ mod tests {
         collapse_to_offset, drain_followed_change, editor_cursor_row, ensure_auto_reload_poll,
         follow_change_now, open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install,
         reload_all, reload_focused, set_auto_reload_config, set_buffer_auto_reload,
-        stat_and_read_buffer, target_log_path, toggle_follow_changes, toggle_live_reload,
+        stat_and_read_buffer, target_log_path, toggle_follow_changes, toggle_follow_reload,
+        toggle_live_reload,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
@@ -2087,6 +2114,53 @@ mod tests {
         watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
         h.advance_clock(FS_WATCH_DEBOUNCE);
         assert_eq!(landing(&mut h), (PathBuf::from("/repo/a.rs"), false, 0));
+    }
+
+    /// The pair turns both modes on, and a second press turns both off and
+    /// drops the write each mode holds in its window.
+    #[test]
+    fn follow_reload_turns_both_modes_on_and_off_together() {
+        let (mut h, _, _) = live_reload_harness();
+        h.stoat.live_reload = false;
+        let state = |h: &TestHarness| {
+            (
+                (h.stoat.follow_changes, h.stoat.live_reload),
+                (
+                    h.stoat.follow_pending.is_some(),
+                    h.stoat.follow_timer.is_some(),
+                ),
+                (
+                    !h.stoat.live_reload_pending.is_empty(),
+                    h.stoat.live_reload_timer.is_some(),
+                ),
+            )
+        };
+
+        toggle_follow_reload(&mut h.stoat);
+        watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+        let held = state(&h);
+        toggle_follow_reload(&mut h.stoat);
+
+        assert_eq!(
+            (held, state(&h)),
+            (
+                ((true, true), (true, true), (true, true)),
+                ((false, false), (false, false), (false, false)),
+            ),
+            "on holds the write in both windows, and off drops both",
+        );
+    }
+
+    /// The pair reads on only while both modes are on, so a press while one
+    /// mode is on alone turns both on.
+    #[test]
+    fn follow_reload_reads_off_while_one_mode_is_on() {
+        let mut h = Stoat::test();
+        h.stoat.follow_changes = true;
+
+        toggle_follow_reload(&mut h.stoat);
+
+        assert_eq!((h.stoat.follow_changes, h.stoat.live_reload), (true, true));
     }
 
     fn focused_view(h: &TestHarness) -> View {

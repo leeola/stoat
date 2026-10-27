@@ -70,9 +70,9 @@ use crate::{
             YankMainToClipboard, YankToClipboard,
         },
         file::{
-            AutoReload, AutoReloadConfig, FollowChanges, FontSizeDec, FontSizeInc, ForceReloadAll,
-            ForceReloadBuffer, ForceSaveBuffer, LiveReload, OpenBuffer, OpenConfig, OpenFile,
-            ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
+            AutoReload, AutoReloadConfig, FollowChanges, FollowReload, FontSizeDec, FontSizeInc,
+            ForceReloadAll, ForceReloadBuffer, ForceSaveBuffer, LiveReload, OpenBuffer, OpenConfig,
+            OpenFile, ReloadAll, ReloadBuffer, ToggleMinimap, ToggleWrap,
         },
         file_finder::{
             FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
@@ -535,6 +535,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ForceReloadAll::DEF, |_| Ok(Box::new(ForceReloadAll)));
     add(FollowChanges::DEF, |_| Ok(Box::new(FollowChanges)));
     add(LiveReload::DEF, |_| Ok(Box::new(LiveReload)));
+    add(FollowReload::DEF, |_| Ok(Box::new(FollowReload)));
     add(FontSizeInc::DEF, |_| Ok(Box::new(FontSizeInc)));
     add(FontSizeDec::DEF, |_| Ok(Box::new(FontSizeDec)));
     add(OpenConfig::DEF, |params| {
@@ -1451,6 +1452,7 @@ mod tests {
         "ForceReloadAll",
         "FollowChanges",
         "LiveReload",
+        "FollowReload",
         "ChangeWalkWrap",
         "DiffUnderline",
         "DiffBold",
@@ -1995,6 +1997,7 @@ mod tests {
         // + 2 CommitsDetailDown/CommitsDetailUp.
         // + 1 FollowChanges.
         // + 1 LiveReload.
+        // + 1 FollowReload.
         // + 1 ChangeWalkWrap.
         // + 2 DiffAgainstIndex/DiffAgainstHead.
         // + 2 DiffBack/DiffForward.
@@ -2003,7 +2006,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 454);
+        assert_eq!(all().count(), 455);
     }
 
     #[test]

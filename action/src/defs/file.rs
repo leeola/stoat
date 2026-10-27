@@ -284,6 +284,17 @@ define_action!(
 );
 
 define_action!(
+    FollowReloadDef,
+    FollowReload,
+    "FollowReload",
+    ActionKind::FollowReload,
+    "follow every change and reload open buffers",
+    "Turn FollowChanges and LiveReload on together. While on, a file written outside the editor opens in the focused pane's diff view on its change, and every other open buffer whose file is written re-reads it. The pair is on only while both modes are on, so a run with one of them on alone turns both on. A second run turns both off. The modes last for the session and start off.",
+    ActionPriority::Normal,
+    command_name = "follow-reload"
+);
+
+define_action!(
     FontSizeIncDef,
     FontSizeInc,
     "FontSizeInc",

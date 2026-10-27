@@ -192,6 +192,7 @@ action_kinds! {
     ForceReloadAll,
     FollowChanges,
     LiveReload,
+    FollowReload,
     AcceptCompletion,
     SmartTab,
     InsertTab,

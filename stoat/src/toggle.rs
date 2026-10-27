@@ -17,6 +17,7 @@ use stoat_config::WrapMode;
 pub(crate) enum Toggle {
     FollowChanges,
     LiveReload,
+    FollowReload,
     ChangeWalkWrap,
     DiffUnderline,
     DiffBold,
@@ -35,9 +36,10 @@ pub(crate) enum Toggle {
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 16] = [
+    pub(crate) const ALL: [Toggle; 17] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
+        Toggle::FollowReload,
         Toggle::ChangeWalkWrap,
         Toggle::DiffUnderline,
         Toggle::DiffBold,
@@ -60,6 +62,7 @@ impl Toggle {
         Some(match kind {
             ActionKind::FollowChanges => Toggle::FollowChanges,
             ActionKind::LiveReload => Toggle::LiveReload,
+            ActionKind::FollowReload => Toggle::FollowReload,
             ActionKind::ChangeWalkWrap => Toggle::ChangeWalkWrap,
             ActionKind::DiffUnderline => Toggle::DiffUnderline,
             ActionKind::DiffBold => Toggle::DiffBold,
@@ -87,6 +90,7 @@ impl Toggle {
         match self {
             Toggle::FollowChanges => stoat.follow_changes,
             Toggle::LiveReload => stoat.live_reload,
+            Toggle::FollowReload => stoat.follow_changes && stoat.live_reload,
             Toggle::ChangeWalkWrap => stoat.change_walk_wrap,
             Toggle::DiffUnderline => stoat.diff_underline,
             Toggle::DiffBold => stoat.diff_bold,
@@ -264,6 +268,7 @@ mod tests {
             [
                 Toggle::FollowChanges,
                 Toggle::LiveReload,
+                Toggle::FollowReload,
                 Toggle::ChangeWalkWrap,
                 Toggle::DiffUnderline,
                 Toggle::DiffBold,
@@ -273,6 +278,18 @@ mod tests {
                 Toggle::Minimap,
             ],
         );
+    }
+
+    /// The pair toggle reads on only while both of the modes it flips are on.
+    #[test]
+    fn follow_reload_reads_on_only_while_both_modes_are() {
+        let mut h = Stoat::test();
+        let reads = [(true, false), (false, true), (true, true)].map(|(follow, reload)| {
+            h.stoat.follow_changes = follow;
+            h.stoat.live_reload = reload;
+            Toggle::FollowReload.is_on(&h.stoat)
+        });
+        assert_eq!(reads, [false, false, true]);
     }
 
     #[test]
