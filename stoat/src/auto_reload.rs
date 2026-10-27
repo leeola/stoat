@@ -624,7 +624,16 @@ pub(crate) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
 /// other reloads. The status summarizes the outcome by cause: how many buffers
 /// reloaded, how many unsaved buffers were skipped, and how many files were
 /// missing.
+///
+/// A reload re-reads the git state too, with or without a file open. It stales
+/// every diff map and the repository tally. Without that, a commit that no
+/// watcher event reported leaves the gutters and the changes view on the tree
+/// before it.
 pub(crate) fn reload_all(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    ws.invalidate_all_diffs();
+    ws.diff_warmed = false;
+
     let paths = stoat.active_workspace().buffers.open_paths();
     if paths.is_empty() {
         stoat.set_status("no files to reload");
@@ -3027,6 +3036,56 @@ mod tests {
         assert_eq!(
             h.stoat.pending_message.as_deref(),
             Some("all files up to date"),
+        );
+    }
+
+    /// A commit that no watcher event reported leaves the diff maps and the
+    /// tally on the tree before it, so a reload re-reads git with the buffers.
+    #[test]
+    fn reload_all_re_reads_the_git_state() {
+        let mut h = changed_repo();
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        let id = h.stoat.focused_editor_ids().expect("focused editor").1;
+        let git_reads = |h: &TestHarness| {
+            let ws = h.stoat.active_workspace();
+            (ws.diff_map_current(id), ws.tally_pending(), ws.diff_warmed)
+        };
+        assert_eq!(git_reads(&h), (true, false, true), "the settled repository");
+
+        reload_all(&mut h.stoat, false);
+        assert_eq!(
+            git_reads(&h),
+            (false, true, false),
+            "the map, the tally, and the warm each owe a fresh read",
+        );
+    }
+
+    /// With no file open, a reload still re-reads git for the status bar's
+    /// repository tally.
+    #[test]
+    fn reload_all_with_no_open_file_re_reads_the_git_state() {
+        let mut h = changed_repo();
+        h.stoat.set_diff_warm_auto(true);
+        h.settle_diff_jobs();
+        h.stoat.active_workspace_mut().diff_warmed = true;
+        assert!(
+            !h.stoat.active_workspace().tally_pending(),
+            "the tally landed"
+        );
+
+        reload_all(&mut h.stoat, false);
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                h.stoat.pending_message.as_deref(),
+                ws.tally_pending(),
+                ws.diff_warmed
+            ),
+            (Some("no files to reload"), true, false),
         );
     }
 

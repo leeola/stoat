@@ -256,7 +256,7 @@ define_action!(
     "ReloadAll",
     ActionKind::ReloadAll,
     "re-read every open file-backed buffer from disk",
-    "Re-read every open file-backed buffer from its backing file, replacing buffer content. A buffer with unsaved edits is skipped; use ForceReloadAll to discard them. A file missing on disk is reported and left untouched. Reports how many buffers reloaded, were skipped, or were missing.",
+    "Re-read every open file-backed buffer from its backing file, replacing buffer content. A buffer with unsaved edits is skipped; use ForceReloadAll to discard them. A file missing on disk is reported and left untouched. Reports how many buffers reloaded, were skipped, or were missing. Every diff map and the repository tally re-read git too.",
     ActionPriority::Common,
     command_name = "reload-all"
 );
@@ -320,7 +320,7 @@ define_action!(
     "ForceReloadAll",
     ActionKind::ForceReloadAll,
     "re-read every open file-backed buffer, discarding unsaved edits",
-    "Re-read every open file-backed buffer from its backing file even when a buffer has unsaved edits, discarding them. The unforced ReloadAll skips unsaved buffers instead. A file missing on disk is reported and left untouched.",
+    "Re-read every open file-backed buffer from its backing file even when a buffer has unsaved edits, discarding them. The unforced ReloadAll skips unsaved buffers instead. A file missing on disk is reported and left untouched. Every diff map and the repository tally re-read git too.",
     ActionPriority::Common,
     aliases = &["reload-all!"]
 );
