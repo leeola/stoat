@@ -1306,6 +1306,18 @@ mod tests {
         h
     }
 
+    /// The [`diff_repo`] harness with `a.txt` in the per-file diff.
+    ///
+    /// Over the per-file diff only the frame drive reads the repository tally,
+    /// and the harness keeps that drive off unless a test asks.
+    fn per_file_diff() -> TestHarness {
+        let mut h = diff_repo();
+        h.stoat.set_diff_warm_auto(true);
+        settle_into(&mut h, &stoat_action::DiffFiles { rev: None });
+        h.settle_diff_jobs();
+        h
+    }
+
     fn repo_paths(rels: &[&str]) -> Vec<PathBuf> {
         rels.iter()
             .map(|rel| Path::new("/repo").join(rel))
@@ -1354,12 +1366,7 @@ mod tests {
 
     #[test]
     fn space_p_over_the_per_file_diff_lists_the_walks_files() {
-        let mut h = diff_repo();
-        // Over the per-file diff only the frame drive reads the repository
-        // tally, and the harness keeps that drive off unless a test asks.
-        h.stoat.set_diff_warm_auto(true);
-        settle_into(&mut h, &stoat_action::DiffFiles { rev: None });
-        h.settle_diff_jobs();
+        let mut h = per_file_diff();
         h.type_keys("space p");
 
         assert_eq!(
@@ -1407,6 +1414,34 @@ mod tests {
             ),
             (vec![FinderScope::Diff], Some("modified"))
         );
+    }
+
+    /// The picked file shows in the diff view from the moment it opens, so no
+    /// plain layout shows while its hunks are on the pool.
+    #[test]
+    fn a_finder_pick_over_the_per_file_diff_keeps_the_diff_view() {
+        let mut h = per_file_diff();
+        h.type_keys("space p b");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SubmitPromptInput);
+        let opened = diff_view_state(&h);
+        h.settle_diff_jobs();
+
+        let shown = (Some(PathBuf::from("/repo/b.txt")), true, true);
+        assert_eq!((opened, diff_view_state(&h)), (shown.clone(), shown));
+    }
+
+    /// The focused editor's file, whether it shows the diff view, and whether
+    /// its pane is latched to the diff.
+    fn diff_view_state(h: &TestHarness) -> (Option<PathBuf>, bool, bool) {
+        let (editor_id, buffer_id) = h.stoat.focused_editor_ids().expect("a focused editor");
+        let ws = h.stoat.active_workspace();
+        (
+            ws.buffers.path_for(buffer_id).map(Path::to_path_buf),
+            ws.editors
+                .get(editor_id)
+                .is_some_and(|editor| editor.diff_view),
+            ws.panes.pane(ws.panes.focus()).diff_mode,
+        )
     }
 
     #[test]
