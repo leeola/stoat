@@ -28,6 +28,7 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::{AutoReloadMode, OpenOrigin},
     debounce::FS_WATCH_DEBOUNCE,
+    diff_changes::{DiffChangesId, Landing},
     editor_state::{EditorId, EditorState},
     keymap_state,
     lsp::sync,
@@ -497,7 +498,7 @@ fn install_reload(
     }
     if mode == AutoReloadMode::Follow {
         if stoat.follow_changes && on_screen {
-            show_followed_buffer(stoat, id, buffer);
+            show_followed_buffer(stoat, id, buffer, diff.follow_offset);
         }
 
         let ws = stoat.active_workspace_mut();
@@ -521,16 +522,47 @@ fn install_reload(
 /// The install's follow collapse then puts the cursor on what the reload
 /// changed. The pane's outgoing position goes on its jumplist first, so a
 /// backward jump returns the reader to where the follow found them.
-fn show_followed_buffer(stoat: &mut Stoat, id: BufferId, buffer: SharedBuffer) {
+///
+/// Over a focused changes view the buffer's excerpt takes the focus instead,
+/// with the cursor on the row that holds `follow_offset`, the start of what
+/// the reload changed.
+fn show_followed_buffer(
+    stoat: &mut Stoat,
+    id: BufferId,
+    buffer: SharedBuffer,
+    follow_offset: usize,
+) {
     let Some(target) = follow_target(stoat) else {
         return;
     };
-    let workspace = stoat.active_workspace;
-    let executor = stoat.executor.clone();
-
-    jump::record_pane_switch(stoat, workspace, target, id);
-    buffer_lifecycle::show_buffer_in_pane(stoat, workspace, target, id, buffer, executor);
-    review::enter_diff_view(stoat);
+    match target {
+        FollowTarget::Pane(pane) => {
+            let workspace = stoat.active_workspace;
+            let executor = stoat.executor.clone();
+            jump::record_pane_switch(stoat, workspace, pane, id);
+            buffer_lifecycle::show_buffer_in_pane(stoat, workspace, pane, id, buffer, executor);
+            review::enter_diff_view(stoat);
+        },
+        FollowTarget::Changes(view) => {
+            let row = {
+                let guard = buffer.read().expect("buffer poisoned");
+                guard
+                    .snapshot
+                    .visible_text
+                    .offset_to_point(follow_offset)
+                    .row
+            };
+            let Some(path) = stoat
+                .active_workspace()
+                .buffers
+                .path_for(id)
+                .map(Path::to_path_buf)
+            else {
+                return;
+            };
+            land_in_changes(stoat, view, id, &path, row);
+        },
+    }
 }
 
 /// Re-read the focused buffer's backing file from disk, backing `:reload` and
@@ -1026,9 +1058,9 @@ pub(crate) fn note_followed_change(stoat: &mut Stoat, path: PathBuf) {
 /// Land the held path, and report whether the reader sees anything move.
 ///
 /// After its follow window closes, the path lands on the first pass that finds
-/// an editor split pane in focus. While a terminal, agent, image, or label
-/// pane, a dock, or a modal has focus, the path waits in its slot. A later
-/// write replaces the held path and opens a new window.
+/// an editor split pane or a changes view in focus. While a terminal, agent,
+/// image, or label pane, a dock, or a modal has focus, the path waits in its
+/// slot. A later write replaces the held path and opens a new window.
 ///
 /// Answers `false` while the path waits, and when it lands nowhere.
 ///
@@ -1051,7 +1083,7 @@ pub(crate) fn drain_followed_change(stoat: &mut Stoat) -> bool {
             tracing::debug!(
                 target: "stoat::follow",
                 path = %held.display(),
-                "followed write held, no editor pane has focus"
+                "followed write held, no editor pane or changes view has focus"
             );
         }
         return false;
@@ -1081,6 +1113,10 @@ pub(crate) fn drain_followed_change(stoat: &mut Stoat) -> bool {
 /// A file with no buffer opens in the pane's diff view at once, and the cursor
 /// goes to its first change stop when its hunks land. The diff against its base
 /// is the only record of what changed in it.
+///
+/// Over a focused changes view the written file's excerpt takes the focus in
+/// place of the pane. A file with no buffer opens as a buffer no pane shows,
+/// so its diff map lists it, and lands on its excerpt's first shown row.
 fn follow_change_now(stoat: &mut Stoat, path: &Path) -> bool {
     let Some(target) = follow_target(stoat) else {
         return false;
@@ -1103,20 +1139,90 @@ fn follow_change_now(stoat: &mut Stoat, path: &Path) -> bool {
         return false;
     }
 
-    buffer_lifecycle::open_file_in_pane(stoat, target, path, OpenOrigin::Visited);
-    review::enter_diff_view(stoat);
-    movement::goto_first_change(stoat);
+    match target {
+        FollowTarget::Pane(pane) => {
+            buffer_lifecycle::open_file_in_pane(stoat, pane, path, OpenOrigin::Visited);
+            review::enter_diff_view(stoat);
+            movement::goto_first_change(stoat);
+            true
+        },
+        FollowTarget::Changes(view) => {
+            let workspace = stoat.active_workspace;
+            let Some((buffer_id, _)) =
+                buffer_lifecycle::open_buffer_unshown(stoat, workspace, path, OpenOrigin::Visited)
+            else {
+                return false;
+            };
+            land_in_changes(stoat, view, buffer_id, path, 0)
+        },
+    }
+}
+
+/// Make changes view `view` land on row `row` of `path`, whose buffer is
+/// `buffer_id`, and report whether the landing is set.
+///
+/// The file's excerpt takes the focus once the stack lists it. The buffer's
+/// diff map is wanted here, since a buffer that neither a pane nor an excerpt
+/// shows has no map wanted for it otherwise, and the landing waits on that map
+/// to tell whether the file joins the list.
+///
+/// `false` outside a repository and for a path outside its working directory.
+fn land_in_changes(
+    stoat: &mut Stoat,
+    view: DiffChangesId,
+    buffer_id: BufferId,
+    path: &Path,
+    row: u32,
+) -> bool {
+    let Some(rel_path) = stoat
+        .active_workspace()
+        .repo_root
+        .as_deref()
+        .and_then(|root| path.strip_prefix(root).ok())
+        .map(|relative| relative.display().to_string())
+    else {
+        return false;
+    };
+    review::ensure_diff_map(stoat, buffer_id, None);
+
+    let Some(state) = stoat
+        .active_workspace_mut()
+        .diff_changes_views
+        .get_mut(view)
+    else {
+        return false;
+    };
+    state.pending_landing = Some(Landing {
+        buffer_id,
+        rel_path,
+        row,
+        column: 0,
+        screen_row: None,
+    });
+    state.held_screen_row = None;
     true
 }
 
-/// The split pane a followed write lands in, or `None` while the reader works
-/// somewhere else.
+/// Where a followed write lands.
+#[derive(Clone, Copy)]
+enum FollowTarget {
+    /// The focused split pane's editor, which shows the written file in the
+    /// diff view.
+    Pane(PaneId),
+    /// The focused changes view, where the written file's excerpt takes the
+    /// focus.
+    Changes(DiffChangesId),
+}
+
+/// Where a followed write lands, or `None` while the reader works somewhere
+/// else.
 ///
-/// Follow reuses the focused editor. An open modal, a focused dock, and a
-/// focused pane that shows an agent, a terminal, or an image all answer `None`,
-/// because taking any of them over hides what the reader works in. On `None`,
-/// [`drain_followed_change`] holds the write until an editor pane has focus.
-fn follow_target(stoat: &Stoat) -> Option<PaneId> {
+/// Follow reuses the focused editor, or the focused changes view's stack. An
+/// open modal, a focused dock, and a focused pane that shows an agent, a
+/// terminal, or an image all answer `None`, because taking any of them over
+/// hides what the reader works in. On `None`, [`drain_followed_change`] holds
+/// the write until an editor pane or a changes view has focus.
+fn follow_target(stoat: &Stoat) -> Option<FollowTarget> {
     if keymap_state::active_modal(stoat).is_some() {
         return None;
     }
@@ -1126,7 +1232,11 @@ fn follow_target(stoat: &Stoat) -> Option<PaneId> {
         return None;
     }
     let pane = ws.panes.focus();
-    matches!(ws.panes.pane(pane).view, View::Editor(_)).then_some(pane)
+    match ws.panes.pane(pane).view {
+        View::Editor(_) => Some(FollowTarget::Pane(pane)),
+        View::DiffChanges(view) => Some(FollowTarget::Changes(view)),
+        _ => None,
+    }
 }
 
 /// Hold `path`, the file of an open buffer written outside the editor, for the
@@ -2239,6 +2349,75 @@ mod tests {
 
         h.advance_clock(FS_WATCH_DEBOUNCE);
         assert_eq!(landing(&mut h).0, PathBuf::from("/repo/c.rs"));
+    }
+
+    /// The paths of the focused changes view's excerpts and of its focused
+    /// excerpt.
+    fn stack_files(h: &TestHarness) -> (Vec<String>, Option<String>) {
+        let state = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .expect("a changes view has focus");
+        (
+            state.excerpts.iter().map(|e| e.rel_path.clone()).collect(),
+            state.focused_excerpt().map(|e| e.rel_path.clone()),
+        )
+    }
+
+    /// A followed write over a changes view re-reads the written file and
+    /// focuses its excerpt with the cursor on the change, and the changes view
+    /// keeps the pane.
+    #[test]
+    fn a_followed_write_in_a_changes_view_focuses_the_files_excerpt() {
+        let mut h = follow_harness();
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.fake_fs().insert_file("/repo/b.rs", b"x\nY\nZ\n");
+
+        assert!(follow_change_now(&mut h.stoat, Path::new("/repo/b.rs")));
+        h.run_until_parked();
+        pump_auto_reload_install(&mut h.stoat);
+        h.settle();
+
+        assert_eq!(
+            (
+                stack_files(&h).1,
+                landing(&mut h),
+                h.stoat.follow_pending.clone()
+            ),
+            (
+                Some("b.rs".to_string()),
+                (PathBuf::from("/repo/b.rs"), true, 2),
+                None
+            ),
+        );
+    }
+
+    /// A followed write of a file the changes view does not list opens the file
+    /// as a buffer no pane shows, so its diff map lists it, and its new excerpt
+    /// takes the focus on its first shown row.
+    #[test]
+    fn a_followed_write_of_an_unlisted_file_in_a_changes_view_opens_its_excerpt() {
+        let mut h = follow_harness();
+        h.fake_git().add_repo("/repo").head_file("c.rs", "c\n");
+        h.fake_fs().insert_file("/repo/c.rs", b"C\n");
+        h.cover_with_diff_changes(false);
+        h.settle();
+
+        assert!(follow_change_now(&mut h.stoat, Path::new("/repo/c.rs")));
+        h.settle();
+
+        assert_eq!(
+            (stack_files(&h), landing(&mut h)),
+            (
+                (
+                    vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()],
+                    Some("c.rs".to_string())
+                ),
+                (PathBuf::from("/repo/c.rs"), true, 0),
+            ),
+        );
     }
 
     #[test]

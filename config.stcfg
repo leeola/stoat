@@ -1480,8 +1480,9 @@ on key {
     #
     # `f` follows the whole working tree. Each file written outside the editor
     # opens in the diff view with the cursor on the change, until a second `f`
-    # stops it. A write that lands while a terminal or an agent pane has focus
-    # waits for an editor pane.
+    # stops it. In a changes view the written file's excerpt takes the focus
+    # with the cursor on the change. A write that lands while a terminal or an
+    # agent pane has focus waits for an editor pane or a changes view.
     #
     # `R` holds `r` on. Each open buffer re-reads its file as an outside write
     # lands, with the pane and the cursor left where they are, until a second
@@ -1548,7 +1549,9 @@ on key {
     #
     # `r` turns on the git chord's `f` and `R` together, so a file written
     # outside the editor opens on its change, and every open buffer re-reads
-    # its file as it changes. A second `r` turns both off.
+    # its file as it changes. In a changes view the written file's excerpt
+    # takes the focus with the cursor on the change. A second `r` turns both
+    # off.
     mode == space_diff {
         Escape -> SetMode(normal);
 

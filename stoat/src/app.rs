@@ -1922,11 +1922,13 @@ pub struct Stoat {
     /// Whether the focused pane follows every working-tree change in the repo.
     ///
     /// On, a file written outside the editor opens in the focused pane's diff
-    /// view with the cursor on the change, whichever file it is. A buffer with
-    /// unsaved edits is skipped, never clobbered.
+    /// view with the cursor on the change, whichever file it is. In a changes
+    /// view the written file's excerpt takes the focus with the cursor on the
+    /// change. A buffer with unsaved edits is skipped, never clobbered.
     ///
-    /// The `FollowChanges` action is the only writer. Session-scoped and off at
-    /// start, never persisted, because it answers what the reader watches now.
+    /// The `FollowChanges` and `FollowReload` actions are its only writers.
+    /// Session-scoped and off at start, never persisted, because it answers
+    /// what the reader watches now.
     pub(crate) follow_changes: bool,
     /// Whether every open buffer re-reads its file when the file is written
     /// outside the editor.
@@ -1934,8 +1936,8 @@ pub struct Stoat {
     /// The pane, the view, and each cursor stay where they are, and a buffer
     /// with unsaved edits is skipped.
     ///
-    /// The `LiveReload` action is the only writer. Session-scoped, off at
-    /// start, and never persisted.
+    /// The `LiveReload` and `FollowReload` actions are its only writers.
+    /// Session-scoped, off at start, and never persisted.
     pub(crate) live_reload: bool,
     /// Directory holding the per-workspace agent sockets, the single source of
     /// the path both [`Self::serve_term_session`] binds and an owned child's

@@ -267,7 +267,7 @@ define_action!(
     "FollowChanges",
     ActionKind::FollowChanges,
     "follow every change in the repo",
-    "Toggle following of the working tree. While on, a file written outside the editor opens in the focused pane's diff view with the cursor on the change, whichever file it is. While a terminal, an agent pane, a dock, or a modal has focus, the file waits. It opens when an editor pane next takes focus. A buffer with unsaved edits is skipped, never clobbered. A second run turns following off. The mode lasts for the session and starts off.",
+    "Toggle following of the working tree. While on, a file written outside the editor opens in the focused pane's diff view with the cursor on the change, whichever file it is. In a changes view the written file's excerpt takes the focus with the cursor on the change. While a terminal, an agent pane, a dock, or a modal has focus, the file waits. It opens when an editor pane or a changes view next takes focus. A buffer with unsaved edits is skipped, never clobbered. A second run turns following off. The mode lasts for the session and starts off.",
     ActionPriority::Normal,
     command_name = "follow-changes"
 );
@@ -289,7 +289,7 @@ define_action!(
     "FollowReload",
     ActionKind::FollowReload,
     "follow every change and reload open buffers",
-    "Turn FollowChanges and LiveReload on together. While on, a file written outside the editor opens in the focused pane's diff view on its change, and every other open buffer whose file is written re-reads it. The pair is on only while both modes are on, so a run with one of them on alone turns both on. A second run turns both off. The modes last for the session and start off.",
+    "Turn FollowChanges and LiveReload on together. While on, a file written outside the editor opens in the focused pane's diff view on its change, and every other open buffer whose file is written re-reads it. In a changes view the written file's excerpt takes the focus with the cursor on the change. The pair is on only while both modes are on, so a run with one of them on alone turns both on. A second run turns both off. The modes last for the session and start off.",
     ActionPriority::Normal,
     command_name = "follow-reload"
 );
