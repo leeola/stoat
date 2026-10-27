@@ -440,6 +440,67 @@ pub(crate) fn follow_cursor(stoat: &mut Stoat, scrolloff: u32) -> bool {
     state.scroll != before
 }
 
+/// Center the focused changes view on a change walk's landed `span`, as an
+/// editor centers a jump, and report whether the scroll moved.
+///
+/// `span` is the landed chunk's display rows in the focused excerpt, with an
+/// exclusive end. The stack takes the band and the bias of
+/// [`view::centered_scroll`], so the key epilogue's [`follow_cursor`] and the
+/// paint's follow find the landing inside the band and leave it. A span taller
+/// than the view centers the cursor's row alone, as
+/// [`view::center_jump_on_span`] does.
+///
+/// Before the first paint the stack has no height to center in, and while the
+/// focused excerpt waits on its diff map it has no rows. Either answers
+/// `false`, and the paint shows the row.
+pub(crate) fn center_jump(
+    stoat: &mut Stoat,
+    span: Range<u32>,
+    down: bool,
+    center_off: u32,
+) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return false;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return false;
+    };
+    let total = layout_stack(state, editors);
+    let viewport = state.viewport_rows;
+    let top = match state.focused_excerpt() {
+        Some(excerpt) if viewport > 0 && excerpt.folded_version.is_some() => excerpt.top + 1,
+        _ => return false,
+    };
+    let rows = if span.len() > viewport {
+        let Some(row) = cursor_stack_row(state, editors) else {
+            return false;
+        };
+        row..row + 1
+    } else {
+        top + span.start as usize..top + span.end as usize
+    };
+
+    let Some(scroll) = view::centered_scroll(
+        rows.start as u32..rows.end as u32,
+        viewport as u32,
+        state.scroll as u32,
+        total.saturating_sub(viewport) as u32,
+        down,
+        center_off,
+    ) else {
+        return false;
+    };
+    let before = state.scroll;
+    state.scroll = scroll as usize;
+    state.scroll != before
+}
+
 /// Remove `excerpts`' editors, and close each buffer the stack opened when
 /// nothing else needs it.
 pub(crate) fn release_excerpts(stoat: &mut Stoat, excerpts: Vec<Excerpt>) {

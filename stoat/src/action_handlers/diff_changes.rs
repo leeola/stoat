@@ -948,6 +948,7 @@ mod tests {
         run::pty::PtyNotification,
         term_session::TermId,
         test_harness::{editor, TestHarness},
+        workspace::Workspace,
     };
     use std::path::{Path, PathBuf};
     use stoat_action::Action;
@@ -2235,6 +2236,140 @@ mod tests {
                 at("a.txt", 5)
             ],
         );
+    }
+
+    /// A change walk centers the stack on each landing, in the file it stands
+    /// in and across an excerpt hop either way, so the key epilogue's follow
+    /// leaves the stack where the walk put it.
+    #[test]
+    fn a_change_walk_centers_the_stack_on_its_landing() {
+        let landings = walk_the_stack(None);
+        let centered: Vec<(usize, bool)> = landings
+            .iter()
+            .map(|&(_, row, total, _)| (row.saturating_sub(2).min(total - 4), false))
+            .collect();
+        let got: Vec<(usize, bool)> = landings
+            .iter()
+            .map(|&(scroll, _, _, followed)| (scroll, followed))
+            .collect();
+        assert_eq!(got, centered);
+    }
+
+    /// A jump bias keeps a row more of where the walk came from on screen, so a
+    /// landing walked down sits a row below the center, and one walked up a row
+    /// above it.
+    #[test]
+    fn a_biased_change_walk_lands_a_row_off_the_center() {
+        let offsets: Vec<usize> = walk_the_stack(Some(1))
+            .iter()
+            .map(|&(scroll, row, ..)| row - scroll)
+            .collect();
+        assert_eq!(offsets, [3, 3, 1]);
+    }
+
+    /// The stack of `long_files` in a four-row view, walked `n`, then `n` into
+    /// `b.txt`, then `p` back, as `(scroll, cursor stack row, stack rows,
+    /// followed)` at each landing. `followed` says whether the key epilogue's
+    /// follow moved the stack again.
+    fn walk_the_stack(jump_scrolloff: Option<u32>) -> Vec<(usize, usize, usize, bool)> {
+        let mut h = long_files(24);
+        h.stoat.settings.jump_scrolloff = jump_scrolloff;
+        h.open_file(Path::new("/repo/a.txt"));
+        four_row_stack(&mut h);
+
+        let walk: [&dyn Action; 3] = [
+            &stoat_action::GotoNextChange,
+            &stoat_action::GotoNextChange,
+            &stoat_action::GotoPrevChange,
+        ];
+        walk.into_iter()
+            .map(|action| {
+                dispatch(&mut h.stoat, action);
+                let (scroll, row, total) = stack_view(&mut h);
+                let followed = diff_changes::follow_cursor(&mut h.stoat, 1);
+                (scroll, row, total, followed)
+            })
+            .collect()
+    }
+
+    /// Before the stack's first paint it has no height to center in, so a walk
+    /// leaves the scroll for the paint to settle.
+    #[test]
+    fn a_change_walk_before_the_first_paint_leaves_the_stack_scroll() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        assert_eq!(stack_view(&mut h).0, 0);
+    }
+
+    /// While the focused excerpt waits on its fold it has no rows in the stack,
+    /// so a walk in it leaves the stack's scroll where it is.
+    #[test]
+    fn a_change_walk_on_an_unfolded_excerpt_leaves_the_stack_scroll() {
+        let mut h = long_files(24);
+        h.open_file(Path::new("/repo/a.txt"));
+        four_row_stack(&mut h);
+        let state = h
+            .stoat
+            .active_workspace_mut()
+            .focused_diff_changes_mut()
+            .expect("a changes view");
+        state.excerpts[state.focused].folded_version = None;
+        let before = state.scroll;
+
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        let scroll = h
+            .stoat
+            .active_workspace_mut()
+            .focused_diff_changes_mut()
+            .expect("a changes view")
+            .scroll;
+        assert_eq!(scroll, before);
+    }
+
+    /// A chunk taller than the view has no whole-chunk center to reach, so the
+    /// stack centers the cursor's row, as an editor does.
+    #[test]
+    fn a_change_walk_onto_a_chunk_taller_than_the_view_centers_its_cursor_row() {
+        let mut h = TestHarness::with_size(100, 24);
+        let base: String = (1..=60).map(|n| format!("{n}\n")).collect();
+        let working = base.replace("\n40\n", "\n40\nA\nB\nC\nD\nE\nF\n");
+        h.stage_review_scenario("/repo", &[("a.txt", &base, &working)]);
+        h.open_file(Path::new("/repo/a.txt"));
+        four_row_stack(&mut h);
+
+        dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        let (scroll, row, total) = stack_view(&mut h);
+        assert_eq!(scroll, row.saturating_sub(2).min(total - 4));
+    }
+
+    /// Cover the pane of `h` with a settled changes view, paint it once, and
+    /// shrink its view to four rows, so its center is stack row 2.
+    fn four_row_stack(h: &mut TestHarness) {
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.render_composited();
+        if let Some(state) = h.stoat.active_workspace_mut().focused_diff_changes_mut() {
+            state.viewport_rows = 4;
+        }
+    }
+
+    /// The focused stack's scroll, its cursor's stack row, and its row count.
+    fn stack_view(h: &mut TestHarness) -> (usize, usize, usize) {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws.focused_diff_changes_id().expect("a changes view");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        let state = &mut diff_changes_views[id];
+        let total = diff_changes::layout_stack(state, editors);
+        let row = diff_changes::cursor_stack_row(state, editors).expect("a cursor stack row");
+        (state.scroll, row, total)
     }
 
     /// The side buttons walk the hunks across the excerpts as n and p do. A

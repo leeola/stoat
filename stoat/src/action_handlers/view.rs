@@ -668,9 +668,8 @@ pub(crate) fn center_jump_on_span(
 /// Scroll so `rows` sits centered, biased `center_off` rows toward the side the
 /// jump arrived from, and report whether the view moved.
 ///
-/// The midpoint `(start + end) / 2` is what takes the target. For a one-row
-/// range that is the row itself, so a cursor jump and a span jump run the same
-/// arithmetic rather than two that must be kept in step.
+/// The scroll row is [`centered_scroll`]'s. A move over one row seeds the
+/// glide from the pre-jump row.
 fn center_jump_on_rows(
     editor: &mut EditorState,
     rows: Range<u32>,
@@ -678,26 +677,13 @@ fn center_jump_on_rows(
     center_off: u32,
 ) -> bool {
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
-    let midpoint = (rows.start + rows.end) / 2;
-
-    let center = viewport / 2;
-    let center_off = center_off.min(viewport.saturating_sub(1) / 2);
-    let target = match down {
-        true => center + center_off,
-        false => center.saturating_sub(center_off),
-    };
     let max_scroll = max_scroll_row(editor.display_map.snapshot().line_count(), viewport);
-
     let prev = editor.scroll_row;
-    let sits_past = match down {
-        true => midpoint > prev + target,
-        false => midpoint < prev + target,
-    };
-    let on_screen = rows.start >= prev && rows.end <= prev + viewport;
-    if !sits_past && on_screen {
+    let Some(scroll_row) = centered_scroll(rows, viewport, prev, max_scroll, down, center_off)
+    else {
         return false;
-    }
-    editor.scroll_row = midpoint.saturating_sub(target).min(max_scroll);
+    };
+    editor.scroll_row = scroll_row;
     // A jump lands on the row grid, whatever fraction the wheel last rested on.
     editor.scroll_frac = 0.0;
 
@@ -706,6 +692,47 @@ fn center_jump_on_rows(
         editor.scroll_glide = ScrollGlide::Page;
     }
     editor.scroll_row != prev
+}
+
+/// The scroll row that centers a jump's landed `rows` in a view of `viewport`
+/// rows at `prev`, or `None` when the view stays.
+///
+/// The midpoint `(start + end) / 2` takes the target. For a one-row range that
+/// is the row itself, so a cursor jump and a span jump run the same arithmetic.
+/// The bias moves the target `center_off` rows past the middle row in the
+/// direction `down` names, so that many more rows of where the reader came
+/// from stay on screen. It is capped at half the viewport.
+///
+/// The band is one-sided. A landing on screen that does not sit past the
+/// target keeps the view, since the reader already sees it, and a landing off
+/// screen centers whichever way it came. The answer stops at `max_scroll`.
+///
+/// An editor and the changes view's stack both center a jump by this rule.
+pub(crate) fn centered_scroll(
+    rows: Range<u32>,
+    viewport: u32,
+    prev: u32,
+    max_scroll: u32,
+    down: bool,
+    center_off: u32,
+) -> Option<u32> {
+    let midpoint = (rows.start + rows.end) / 2;
+    let center = viewport / 2;
+    let center_off = center_off.min(viewport.saturating_sub(1) / 2);
+    let target = match down {
+        true => center + center_off,
+        false => center.saturating_sub(center_off),
+    };
+
+    let sits_past = match down {
+        true => midpoint > prev + target,
+        false => midpoint < prev + target,
+    };
+    let on_screen = rows.start >= prev && rows.end <= prev + viewport;
+    if !sits_past && on_screen {
+        return None;
+    }
+    Some(midpoint.saturating_sub(target).min(max_scroll))
 }
 
 /// Scroll `editor` so its primary cursor's row sits on the held screen row, or
@@ -1244,6 +1271,19 @@ mod tests {
             editor.scroll_row, 41,
             "the bias caps at four, so the landing sits on the last row of the \
              ten the viewport holds",
+        );
+    }
+
+    #[test]
+    fn centered_scroll_centers_past_the_band_and_stops_at_the_last_page() {
+        assert_eq!(
+            [
+                centered_scroll(50..51, 10, 0, 90, true, 0),
+                centered_scroll(3..4, 10, 0, 90, true, 0),
+                centered_scroll(98..99, 10, 0, 90, true, 0),
+            ],
+            [Some(45), None, Some(90)],
+            "a row past the center centers, one short of it on screen stays, and the end clamps",
         );
     }
 

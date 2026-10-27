@@ -4270,13 +4270,24 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     //
     // The whole chunk takes the middle, not the row the cursor sits on, so a
     // tall hunk does not hang off the bottom edge with its landing centered.
-    if let Some(editor) = focused_editor_mut(stoat) {
-        let down = matches!(dir, ChangeDir::Next);
+    let down = matches!(dir, ChangeDir::Next);
+    let landed = focused_editor_mut(stoat).map(|editor| {
         let span = landed_display_span(editor, &landings);
-        match span {
+        match span.clone() {
             Some(span) => view::center_jump_on_span(editor, span, down, center_off),
             None => view::center_jump_on_cursor(editor, down, center_off),
         };
+        span.unwrap_or_else(|| {
+            let row = view::cursor_display_row(editor);
+            row..row + 1
+        })
+    });
+    // A changes view paints each excerpt at the rows its stack gives it, never
+    // at the excerpt editor's own scroll, so the stack centers the landing too.
+    if let Some(span) = landed
+        && stoat.active_workspace().focused_diff_changes_id().is_some()
+    {
+        crate::diff_changes::center_jump(stoat, span, down, center_off);
     }
     UpdateEffect::Redraw
 }
@@ -5073,7 +5084,8 @@ pub(super) fn land_file_hop(
 ) {
     let diff_walk = walks_diff_view(stoat);
     let center_off = stoat.settings.jump_scrolloff.unwrap_or(0);
-    if let Some(editor) = focused_editor_mut(stoat) {
+    let down = matches!(dir, ChangeDir::Next);
+    let landed = if let Some(editor) = focused_editor_mut(stoat) {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
         let stops = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
@@ -5118,9 +5130,18 @@ pub(super) fn land_file_hop(
         // dispatch that skips the Key-event epilogue still lands scrolled. The
         // hop centers its landing the way the in-file walk does, biased toward
         // the file the reader crossed from.
-        let down = matches!(dir, ChangeDir::Next);
         let span = stop_display_span(&editor.display_map.snapshot(), &rows);
-        view::center_jump_on_span(editor, span, down, center_off);
+        view::center_jump_on_span(editor, span.clone(), down, center_off);
+        Some(span)
+    } else {
+        None
+    };
+    // A hop between the excerpts of a changes view lands in the focused
+    // excerpt, which the stack paints at its own rows, so the stack centers.
+    if let Some(span) = landed
+        && stoat.active_workspace().focused_diff_changes_id().is_some()
+    {
+        crate::diff_changes::center_jump(stoat, span, down, center_off);
     }
 
     if let Some(entry) = origin {
