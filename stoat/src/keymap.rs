@@ -3765,6 +3765,27 @@ mod tests {
         }
     }
 
+    /// The diff chord's `r` turns following and live reload on together, and
+    /// only inside a repository, as the git chord's follow keys do.
+    #[test]
+    fn the_diff_chord_binds_follow_reload_in_a_repo() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let r = key_event(KeyCode::Char('r'), KeyModifiers::NONE);
+        let outside = TestState::new().set("mode", StateValue::String("space_diff".into()));
+
+        assert_eq!(
+            [
+                action_names(keymap.lookup(&TestState::in_repo("space_diff"), &r)),
+                action_names(keymap.lookup(&outside, &r)),
+            ],
+            [
+                Some(vec!["FollowReload".to_string(), "SetMode".to_string()]),
+                None
+            ],
+        );
+    }
+
     #[test]
     fn default_config_pins_every_setting_default() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

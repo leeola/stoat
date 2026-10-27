@@ -1545,6 +1545,10 @@ on key {
     # between them, and `e` opens the base on the command line. A pair diff of
     # two files has no index or HEAD behind it, so these four bind only where
     # no pair stands behind the focused file.
+    #
+    # `r` turns on the git chord's `f` and `R` together, so a file written
+    # outside the editor opens on its change, and every open buffer re-reads
+    # its file as it changes. A second `r` turns both off.
     mode == space_diff {
         Escape -> SetMode(normal);
 
@@ -1558,6 +1562,10 @@ on key {
             h -> [DiffAgainstHead(), SetMode(normal)];
             b -> [DiffBaseToggle(), SetMode(normal)];
             e -> [SetMode(normal), DiffBaseEdit()];
+        }
+
+        git {
+            r -> [FollowReload(), SetMode(normal)];
         }
 
         view == diff {
