@@ -8,9 +8,11 @@ use crate::host::git::{
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Delta, Diff, DiffFindOptions,
-    DiffOptions, Repository, RepositoryState, Sort, Status, StatusEntry, StatusOptions,
+    DiffLineType, DiffOptions, Repository, RepositoryState, Sort, Status, StatusEntry,
+    StatusOptions,
 };
 use std::{
+    cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -192,11 +194,14 @@ impl GitRepo for LocalGitRepo {
         // spells the empty one, so everything reads as added.
         let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
 
-        // Zero context and no interhunk merging, so the count is of edits
-        // rather than of the windows a reader would see around them.
+        // Zero context, and every change in a file merged into one hunk, so
+        // the lines between two edits arrive as context lines. [`count_hunks`]
+        // reads them to join edits that only whitespace-only lines separate.
+        // The bound is `i32::MAX` because xdiff keeps the value in a `long`,
+        // which is 32 bits wide on some targets.
         let hunk_only = || {
             let mut opts = DiffOptions::new();
-            opts.context_lines(0).interhunk_lines(0);
+            opts.context_lines(0).interhunk_lines(i32::MAX as u32);
             opts
         };
         // No `show_untracked_content`. That flag reads and xdiffs every
@@ -1474,39 +1479,73 @@ fn entry_paths(entry: &StatusEntry<'_>, workdir: &Path) -> Option<(PathBuf, Opti
 /// Hunks in `diff`, reporting each delta's path and its own count to `per_file`
 /// along the way.
 ///
-/// The hunk callback is the only one asked for, so libgit2 never walks the
-/// lines a count does not read. A delta names its new path, except a deletion,
-/// which has only an old one.
+/// A hunk here is a run of changed lines, and two runs that only
+/// whitespace-only context lines separate are one hunk. That is the grouping
+/// the editor's gutter and change walk use. The diff options in `hunk_tallies`
+/// merge every change in a file into one libgit2 hunk, so the lines between
+/// two runs arrive as context lines, and the line callback reads them to tell
+/// a blank separator from one that holds text.
+///
+/// A delta names its new path, except a deletion, which has only an old one.
+/// A delta with no changed line reports nothing.
 fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usize {
-    let mut total = 0;
-    let mut current: Option<(PathBuf, usize)> = None;
+    // Three callbacks share the walk's state, so it sits in cells.
+    let held: RefCell<Option<(PathBuf, usize)>> = RefCell::new(None);
+    let in_change = Cell::new(false);
+    let counted = Cell::new(0);
     let _ = diff.foreach(
-        &mut |_, _| true,
+        &mut |delta, _| {
+            if let Some((done, count)) = held.take()
+                && count > 0
+            {
+                per_file(done, count);
+            }
+            let path = delta.new_file().path().or_else(|| delta.old_file().path());
+            *held.borrow_mut() = path.map(|path| (path.to_path_buf(), 0));
+            in_change.set(false);
+            true
+        },
         None,
-        Some(&mut |delta, _| {
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .map(Path::to_path_buf);
-            total += 1;
-            match (&mut current, path) {
-                (Some((held, count)), Some(path)) if *held == path => *count += 1,
-                (held, Some(path)) => {
-                    if let Some((done, count)) = held.take() {
-                        per_file(done, count);
+        Some(&mut |_, _| {
+            in_change.set(false);
+            true
+        }),
+        Some(&mut |_, _, line| {
+            match line.origin_value() {
+                DiffLineType::Addition
+                | DiffLineType::Deletion
+                | DiffLineType::AddEOFNL
+                | DiffLineType::DeleteEOFNL => {
+                    if !in_change.replace(true) {
+                        counted.set(counted.get() + 1);
+                        if let Some((_, count)) = held.borrow_mut().as_mut() {
+                            *count += 1;
+                        }
                     }
-                    *held = Some((path, 1));
                 },
-                (_, None) => {},
+                DiffLineType::Context => {
+                    if line
+                        .content()
+                        .iter()
+                        .any(|byte| !byte.is_ascii_whitespace())
+                    {
+                        in_change.set(false);
+                    }
+                },
+                DiffLineType::ContextEOFNL
+                | DiffLineType::FileHeader
+                | DiffLineType::HunkHeader
+                | DiffLineType::Binary => {},
             }
             true
         }),
-        None,
     );
-    if let Some((done, count)) = current {
+    if let Some((done, count)) = held.take()
+        && count > 0
+    {
         per_file(done, count);
     }
+    let mut total = counted.get();
 
     // An untracked file carries no hunk through the walk above, because the
     // diff was built without `show_untracked_content` and libgit2 reads no

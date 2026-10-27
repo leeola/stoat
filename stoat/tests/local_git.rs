@@ -408,6 +408,32 @@ fn hunk_tallies_count_separated_edits_apart() {
     );
 }
 
+/// Two edits with only whitespace-only lines between them are one hunk, the
+/// grouping the editor's gutter and change walk use.
+#[test]
+fn hunk_tallies_count_edits_a_blank_line_apart_as_one() {
+    let tally = |head: &str, working: &str| {
+        let tr = TestRepo::new();
+        tr.commit_file("a.rs", head);
+        tr.write("a.rs", working);
+        let tallies = LocalGit::new().discover(tr.path()).unwrap().hunk_tallies();
+        (tallies.staged, tallies.unstaged, tallies.per_file)
+    };
+    let one = (0, 1, vec![(PathBuf::from("a.rs"), 1)]);
+    assert_eq!(
+        [
+            tally("one\n\nthree\nfour\nfive\n", "ONE\n\nTHREE\nfour\nfive\n"),
+            tally("one\n\n\nfour\nfive\n", "ONE\n\n\nFOUR\nfive\n"),
+            tally(
+                "one\n  \nthree\nfour\nfive\n",
+                "ONE\n  \nTHREE\nfour\nfive\n"
+            ),
+        ],
+        [one.clone(), one.clone(), one],
+        "a blank line, two blank lines, and a spaces-only line each join the edits",
+    );
+}
+
 /// Staging one of two edits splits them across the index. Each side diffs
 /// against its own neighbour, so each sees one hunk and the total rises.
 #[test]

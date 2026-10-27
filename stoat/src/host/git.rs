@@ -28,6 +28,9 @@ pub enum DiffStatus {
 /// in part therefore counts once on each side, each diff seeing its own
 /// remainder, which is why staging half a hunk raises `staged + unstaged` by
 /// one.
+///
+/// Two edits that only whitespace-only lines separate count as one hunk, the
+/// grouping the editor's gutter and change walk use.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HunkTallies {
     /// Hunks the index carries over HEAD.
