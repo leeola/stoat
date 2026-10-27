@@ -1386,8 +1386,10 @@ pub(crate) struct HunkPosition {
 ///
 /// The hunk total counts the focused file through its live diff map rather
 /// than through the stored tally, because the map is what the reader is
-/// looking at and the tally is refreshed a beat later. A file counts as
-/// changed when the tally gives it a hunk.
+/// looking at and the tally is refreshed a beat later. The focused file counts
+/// changes, with hunks that only whitespace-only rows separate folded into
+/// one, as the walk crosses them. A file counts as changed when the tally
+/// gives it a hunk.
 ///
 /// Under the index base the count is of unstaged hunks alone, in the focused
 /// file and in the tally. Those hunks are the stops the diff view's walk makes.
@@ -1420,8 +1422,9 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
         snapshot.rope().offset_to_point(offset).row
     };
 
+    let live = diff_map.live_hunks(&snapshot);
     let (before, total, files_before, files_other) = totals.iter().fold(
-        (0, diff_map.hunk_count(), 0, 0),
+        (0, live.change_count(), 0, 0),
         |(before, total, files_before, files_other), (path, count)| {
             let changed = usize::from(*count > 0);
             match path.cmp(&relative) {
@@ -1441,8 +1444,7 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
     Some(HunkPosition {
         file_at: files_before + 1,
         file_total: files_other + 1,
-        hunk_at: diff_map
-            .live_hunks(&snapshot)
+        hunk_at: live
             .hunk_index_at(snapshot.rope(), cursor_row)
             .map(|k| before + k),
         hunk_total: total,
@@ -2396,6 +2398,40 @@ mod tests {
                 hunk_total: 1,
             }),
             "the walk lands the removal on row 2, and the position counts it",
+        );
+    }
+
+    /// Two edits that only a blank line separates are one change, the one the
+    /// walk crosses in one press, so the position counts them once.
+    #[test]
+    fn two_edits_around_a_blank_line_count_as_one_change() {
+        let mut h = TestHarness::with_size(40, 16);
+        let workdir = PathBuf::from("/position");
+        h.stage_review_scenario(&workdir, &[("b.rs", "a\nb\n\nc\nd\n", "a\nB\n\nC\nd\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+
+        let buffer_id = {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+            editor.set_diff_view(true);
+            editor.buffer_id
+        };
+        h.type_keys("j j j");
+        h.stoat.active_workspace_mut().install_test_diff_map(
+            buffer_id,
+            DiffMap::from_hunks([added_hunk(1..2), added_hunk(3..4)], None),
+        );
+
+        assert_eq!(
+            repo_hunk_position(h.stoat.active_workspace()),
+            Some(HunkPosition {
+                file_at: 1,
+                file_total: 1,
+                hunk_at: Some(1),
+                hunk_total: 1,
+            }),
+            "the cursor on the second edit stands on change one of one",
         );
     }
 

@@ -223,6 +223,11 @@ impl DiffHunk {
 /// typing since. Built by [`DiffMap::live_hunks`], which resolves each hunk's
 /// anchors once, so a caller painting a screenful of rows pays for that walk
 /// once rather than per row.
+///
+/// Two hunks that only whitespace-only rows separate are one change. They make
+/// one stop, take one position, and mark the rows between them. The hunks
+/// themselves stay as the differ made them, because staging and the changes
+/// view build from them.
 pub struct LiveHunks<'a> {
     hunks: Vec<LiveHunk<'a>>,
     /// The map's staged marks as the buffer rows they paint on now, sorted by
@@ -234,6 +239,11 @@ pub struct LiveHunks<'a> {
 struct LiveHunk<'a> {
     hunk: &'a DiffHunk,
     rows: Range<u32>,
+    /// Whether only whitespace-only rows separate this hunk's marked rows from
+    /// the previous hunk's, which makes the two one change.
+    joined_above: bool,
+    /// The 0-based index of the change this hunk belongs to.
+    change: usize,
 }
 
 impl<'a> LiveHunks<'a> {
@@ -246,6 +256,10 @@ impl<'a> LiveHunks<'a> {
     /// real change is two tokens paints two marks rather than a hundred. A hunk
     /// with no refinement marks its whole range. A row no hunk marks answers
     /// the staged mark on it, if any.
+    ///
+    /// A row in the gap between two hunks that only whitespace-only rows
+    /// separate takes the mark and the staged flag of the hunk above it, so the
+    /// two read as one change.
     pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
         self.hunk_mark_for_line(line)
             .or_else(|| staged_row_mark(&self.staged, line))
@@ -259,6 +273,14 @@ impl<'a> LiveHunks<'a> {
             .checked_sub(1)?;
         let live = &self.hunks[index];
         let hunk = live.hunk;
+        // A row past this hunk's marked rows is in the gap to the next hunk,
+        // which marks with this hunk when the next one joins it.
+        let gap_below = || {
+            self.hunks
+                .get(index + 1)
+                .filter(|next| next.joined_above)
+                .map(|_| (hunk.status, hunk.staged()))
+        };
 
         if live.rows.contains(&line) {
             // The staged rows and the marked runs are both recorded in the
@@ -266,6 +288,15 @@ impl<'a> LiveHunks<'a> {
             // the hunk has moved before either is read.
             let stored = (line + hunk.buffer_line_range.start).saturating_sub(live.rows.start);
             if hunk.refined() && !hunk.marked_rows.iter().any(|run| run.contains(&stored)) {
+                let marked = marked_span(hunk, &live.rows);
+                if line >= marked.end {
+                    return gap_below();
+                }
+                // The first hunk never joins, so a joined one has a hunk above.
+                if line < marked.start && live.joined_above {
+                    let above = self.hunks[index - 1].hunk;
+                    return Some((above.status, above.staged()));
+                }
                 return None;
             }
             return Some((hunk.status, hunk.line_staged(stored)));
@@ -276,7 +307,7 @@ impl<'a> LiveHunks<'a> {
         if hunk.status == DiffHunkStatus::Moved && live.rows.is_empty() && live.rows.start == line {
             return Some((DiffHunkStatus::Moved, hunk.staged()));
         }
-        None
+        gap_below()
     }
 
     /// The diff status of buffer `line`. The row-level counterpart of
@@ -318,11 +349,23 @@ impl<'a> LiveHunks<'a> {
     /// so it is marked and staged with them, and the changes around it are one
     /// stop.
     ///
+    /// A hunk that only whitespace-only rows separate from the hunk above it
+    /// is part of that change. Its first stop extends the stop above, so the
+    /// walk crosses both hunks in one press.
+    ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
     /// what a caller turns into a single-cell landing at the seam row.
     pub fn hunk_stops(&self) -> Vec<Range<u32>> {
-        let mut stops = Vec::with_capacity(self.hunks.len());
+        let mut stops: Vec<Range<u32>> = Vec::with_capacity(self.hunks.len());
         for live in &self.hunks {
+            let mut join = live.joined_above;
+            let mut push = |stop: Range<u32>| {
+                match stops.last_mut() {
+                    Some(above) if join => above.end = above.end.max(stop.end),
+                    _ => stops.push(stop),
+                }
+                join = false;
+            };
             match live.hunk.refined() {
                 // The runs are the hunk's own coordinates, so they shift with
                 // it the same way its live rows did.
@@ -335,13 +378,13 @@ impl<'a> LiveHunks<'a> {
                         // A run that starts at or past the live end opens no
                         // stop, so every stop keeps at least one row.
                         if run_start > stop_start && run_start < live.rows.end {
-                            stops.push(stop_start..run_start);
+                            push(stop_start..run_start);
                             stop_start = run_start;
                         }
                     }
-                    stops.push(stop_start..live.rows.end);
+                    push(stop_start..live.rows.end);
                 },
-                false => stops.push(live.rows.clone()),
+                false => push(live.rows.clone()),
             }
         }
         stops
@@ -362,13 +405,16 @@ impl<'a> LiveHunks<'a> {
         stops
     }
 
-    /// One-based position of the hunk at buffer `row` among the hunks, or
+    /// One-based position of the change at buffer `row` among the changes, or
     /// `None` when `row` sits before the first one.
     ///
-    /// A row between two hunks answers the one before it. A jump lands the
-    /// cursor inside a hunk, so the walk stands on the previous hunk until it
-    /// reaches the next one. A position that blanks out between hunks flickers
-    /// as the reader moves.
+    /// Hunks that only whitespace-only rows separate are one change, the one
+    /// the walk crosses in one press, so they share a position.
+    ///
+    /// A row between two changes answers the one before it. A jump lands the
+    /// cursor inside a hunk, so the walk stands on the previous change until it
+    /// reaches the next one. A position that blanks out between changes
+    /// flickers as the reader moves.
     ///
     /// A zero-width hunk past the last row counts from the last row, which is
     /// where the change walk lands it. `rope` is the text of the snapshot that
@@ -382,7 +428,16 @@ impl<'a> LiveHunks<'a> {
             };
             landing <= row
         });
-        (hunks > 0).then_some(hunks)
+        (hunks > 0).then(|| self.hunks[hunks - 1].change + 1)
+    }
+
+    /// How many changes the hunks make, where hunks that only whitespace-only
+    /// rows separate count as one.
+    ///
+    /// The denominator of the diff view's position. It agrees with
+    /// [`Self::hunk_index_at`] and with the stops of [`Self::hunk_stops`].
+    pub fn change_count(&self) -> usize {
+        self.hunks.last().map_or(0, |live| live.change + 1)
     }
 
     /// The hunks meeting `rows`, each with the rows it now covers.
@@ -547,8 +602,39 @@ struct LiveRowsCache {
     rows: Vec<Range<u32>>,
     /// Indices into `rows`, ordered as the answer is.
     order: Vec<usize>,
+    /// Whether each hunk joins the one above it, in answer order.
+    joined: Vec<bool>,
     /// The staged marks placed against `rows`.
     staged: Vec<(Range<u32>, DiffHunkStatus)>,
+}
+
+impl LiveRowsCache {
+    /// The answer [`DiffMap::live_hunks`] gives for this resolve, where `hunk`
+    /// names each hunk by its index in tree order.
+    fn answer<'a>(&self, hunk: impl Fn(usize) -> &'a DiffHunk) -> LiveHunks<'a> {
+        let mut change = 0;
+        let hunks = self
+            .order
+            .iter()
+            .zip(&self.joined)
+            .enumerate()
+            .map(|(k, (&i, &joined_above))| {
+                if k > 0 && !joined_above {
+                    change += 1;
+                }
+                LiveHunk {
+                    hunk: hunk(i),
+                    rows: self.rows[i].clone(),
+                    joined_above,
+                    change,
+                }
+            })
+            .collect();
+        LiveHunks {
+            hunks,
+            staged: self.staged.clone(),
+        }
+    }
 }
 
 impl DiffMap {
@@ -774,17 +860,7 @@ impl DiffMap {
             .filter(|held| held.buffer_version == buffer_version)
         {
             let hunks: Vec<&DiffHunk> = self.hunks.iter().collect();
-            return LiveHunks {
-                hunks: held
-                    .order
-                    .iter()
-                    .map(|&i| LiveHunk {
-                        hunk: hunks[i],
-                        rows: held.rows[i].clone(),
-                    })
-                    .collect(),
-                staged: held.staged.clone(),
-            };
+            return held.answer(|i| hunks[i]);
         }
 
         // A hunk built before anchoring, or by a caller that never anchored,
@@ -826,24 +902,16 @@ impl DiffMap {
         // is stale enough to have overlapping hunks, so this rarely reorders.
         order.sort_by_key(|&i| (rows[i].start, rows[i].end));
         let staged = self.staged_rows_at(rows.iter().cloned());
+        let joined = joined_above(order.iter().map(|&i| (live[i].0, &rows[i])), buffer.rope());
 
         let held = cache.insert(LiveRowsCache {
             buffer_version,
             rows,
             order,
+            joined,
             staged,
         });
-        LiveHunks {
-            hunks: held
-                .order
-                .iter()
-                .map(|&i| LiveHunk {
-                    hunk: live[i].0,
-                    rows: held.rows[i].clone(),
-                })
-                .collect(),
-            staged: held.staged.clone(),
-        }
+        held.answer(|i| live[i].0)
     }
 
     pub fn version(&self) -> usize {
@@ -1289,10 +1357,9 @@ impl DiffMap {
 
     /// How many hunks the map holds.
     ///
-    /// The denominator of the status bar's position, and the live answer for
-    /// the focused file, which the repo-wide tally lags by up to a keystroke. A
-    /// staged mark does not count, because the diff view's walk, which the
-    /// position reports on, does not stop on one.
+    /// A staged mark does not count. The status bar's position counts changes
+    /// through [`LiveHunks::change_count`] instead, which folds hunks that only
+    /// whitespace-only rows separate into one.
     pub fn hunk_count(&self) -> usize {
         self.hunks.iter().count()
     }
@@ -1653,6 +1720,44 @@ fn staged_row_mark(
         return Some((*status, true));
     }
     (range.is_empty() && range.start == line).then_some((DiffHunkStatus::Deleted, true))
+}
+
+/// The live rows from `hunk`'s first marked row to its last, where `rows` are
+/// the rows the hunk covers now. A hunk the tree pass never narrowed marks all
+/// of `rows`.
+fn marked_span(hunk: &DiffHunk, rows: &Range<u32>) -> Range<u32> {
+    let (Some(first), Some(last)) = (hunk.marked_rows.first(), hunk.marked_rows.last()) else {
+        return rows.clone();
+    };
+    // The runs are the hunk's own coordinates, so they shift with it the way
+    // its live rows did. An edit inside the hunk leaves them stale, and the
+    // clamp keeps a stale run inside the live rows.
+    let delta = i64::from(rows.start) - i64::from(hunk.buffer_line_range.start);
+    let live = |row: u32| shift(row, delta).clamp(rows.start, rows.end);
+    live(first.start)..live(last.end)
+}
+
+/// Whether each of `hunks`, given in answer order with the rows each covers
+/// now, joins the hunk above it into one change.
+///
+/// Two hunks join when no row between the first one's last marked row and the
+/// second one's first holds text. A blank line between two changed blocks
+/// splits the diff into two hunks, but the reader sees one change there.
+/// Touching or overlapping hunks join too. The first hunk joins nothing.
+fn joined_above<'a>(
+    hunks: impl Iterator<Item = (&'a DiffHunk, &'a Range<u32>)>,
+    rope: &Rope,
+) -> Vec<bool> {
+    let mut above: Option<u32> = None;
+    hunks
+        .map(|(hunk, rows)| {
+            let marked = marked_span(hunk, rows);
+            let joined =
+                above.is_some_and(|end| (end..marked.start).all(|row| !row_holds_text(rope, row)));
+            above = Some(marked.end);
+            joined
+        })
+        .collect()
 }
 
 /// Fold a structural diff's changes into hunks, in buffer-line order.
@@ -2077,6 +2182,14 @@ fn lines_covered(ranges: &[Range<usize>], starts: &[usize], text: &str, lines: R
                 .iter()
                 .any(|range| range.start < bounds.end && bounds.start < range.end)
         })
+}
+
+/// Whether buffer `row` holds a non-whitespace char.
+pub(crate) fn row_holds_text(rope: &Rope, row: u32) -> bool {
+    let start = rope.point_to_offset(Point::new(row, 0));
+    rope.chars_at(start)
+        .take_while(|&ch| ch != '\n')
+        .any(|ch| !ch.is_whitespace())
 }
 
 /// Whether line `line` holds nothing but whitespace.
@@ -4054,6 +4167,105 @@ mod tests {
             stops_of(hunks, text),
             [0..2, 2..3, 4..7],
             "stops from both hunks follow row order"
+        );
+    }
+
+    /// The stops, the change position at `row`, and the change count a map of
+    /// `hunks` offers over `text`, all read from one live answer.
+    fn live_answer(
+        hunks: Vec<DiffHunk>,
+        text: &str,
+        row: u32,
+    ) -> (Vec<std::ops::Range<u32>>, Option<usize>, usize) {
+        let map = DiffMap::from_hunks(hunks, Some(Arc::new(text.to_string())));
+        let multi = buffer_holding(text);
+        let snapshot = multi.snapshot();
+        let live = map.live_hunks(&snapshot);
+        (
+            live.hunk_stops(),
+            live.hunk_index_at(snapshot.rope(), row),
+            live.change_count(),
+        )
+    }
+
+    /// Two hunks with only a blank row between them are one change. The walk
+    /// stops once over both, the position counts one, and the blank row marks.
+    #[test]
+    fn hunks_a_blank_row_apart_are_one_change() {
+        let text = "0\n1\n\n3\n4\n";
+        let hunks = || {
+            vec![
+                refined_hunk(1..2, Vec::new()),
+                refined_hunk(3..4, Vec::new()),
+            ]
+        };
+        let modified = Some(DiffHunkStatus::Modified);
+        assert_eq!(
+            (
+                live_answer(hunks(), text, 3),
+                marks_over(hunks(), 0..5, text)
+            ),
+            (
+                (std::iter::once(1..4).collect(), Some(1), 1),
+                vec![None, modified, modified, modified, None],
+            ),
+            "one stop, position one of one, and the blank row marked",
+        );
+    }
+
+    /// A row that holds text between two hunks keeps them two changes.
+    #[test]
+    fn hunks_a_text_row_apart_stay_two_changes() {
+        let text = "0\n1\n2\n3\n4\n";
+        let hunks = vec![
+            refined_hunk(1..2, Vec::new()),
+            refined_hunk(3..4, Vec::new()),
+        ];
+        assert_eq!(
+            live_answer(hunks, text, 3),
+            (vec![1..2, 3..4], Some(2), 2),
+            "two stops, and the second hunk at position two of two",
+        );
+    }
+
+    /// The gap starts at the upper hunk's last marked row, so a brace row the
+    /// hunk holds but does not mark keeps the two hunks apart.
+    #[test]
+    fn an_unmarked_brace_row_keeps_two_hunks_apart() {
+        let text = "a\n}\n\n\nc\n";
+        let hunks = vec![
+            refined_hunk(0..3, std::iter::once(0..1).collect()),
+            refined_hunk(4..5, Vec::new()),
+        ];
+        assert_eq!(
+            live_answer(hunks, text, 4),
+            (vec![0..3, 4..5], Some(2), 2),
+            "the brace row splits the two hunks",
+        );
+    }
+
+    /// A gap that reaches into the hunks marks too. The rows past the upper
+    /// hunk's last run and before the lower hunk's first run belong to the one
+    /// change.
+    #[test]
+    fn refined_hunks_a_blank_gap_apart_mark_across_it() {
+        let text = "a\n\n\n\nb\n";
+        let hunks = || {
+            vec![
+                refined_hunk(0..2, std::iter::once(0..1).collect()),
+                refined_hunk(3..5, std::iter::once(4..5).collect()),
+            ]
+        };
+        assert_eq!(
+            (
+                live_answer(hunks(), text, 4),
+                marks_over(hunks(), 0..5, text)
+            ),
+            (
+                (std::iter::once(0..5).collect(), Some(1), 1),
+                vec![Some(DiffHunkStatus::Modified); 5],
+            ),
+            "one stop, one change, and every row of the gap marked",
         );
     }
     /// The whole point: a hunk whose real change is two tokens marks two rows,

@@ -4428,16 +4428,8 @@ fn walk_split(rope: &Rope, hunk_rows: &[Range<u32>], cursor_row: u32, dir: Chang
 /// after the removed lines, where the gutter paints its mark.
 fn landing_row(rope: &Rope, rows: &Range<u32>) -> u32 {
     (rows.start..rows.end)
-        .find(|&row| row_holds_text(rope, row))
+        .find(|&row| diff_map::row_holds_text(rope, row))
         .unwrap_or(rows.start)
-}
-
-/// Whether buffer `row` holds a non-whitespace char.
-fn row_holds_text(rope: &Rope, row: u32) -> bool {
-    let start = rope.point_to_offset(Point::new(row, 0));
-    rope.chars_at(start)
-        .take_while(|&ch| ch != '\n')
-        .any(|ch| !ch.is_whitespace())
 }
 
 /// Row ranges change navigation stops on, in document order.

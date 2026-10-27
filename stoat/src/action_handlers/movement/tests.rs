@@ -6762,12 +6762,12 @@ fn repeat_last_motion_replays_a_change_jump() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nc\n");
     h.open_file(&path);
-    install_diff_hunks(&mut h, &[2, 5, 6]);
+    install_diff_hunks(&mut h, &[2, 4, 6]);
 
     h.type_keys("f c");
     assert_eq!(h.primary_head_offset(), 4, "the find lands first");
     dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
-    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
+    assert_eq!(h.selection_spans(), vec![(8, 9, false)]);
 
     dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
     assert_eq!(
