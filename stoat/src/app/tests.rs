@@ -2670,6 +2670,7 @@ fn workspace_watches_cover_the_source_tree_and_the_git_refs() {
         ("/repo/target/debug/gen.rs", "gen".as_bytes()),
         ("/repo/node_modules/pkg/i.js", "js".as_bytes()),
         ("/repo/.git/refs/heads/main", "sha".as_bytes()),
+        ("/repo/.git/refs/heads/lee/topic", "sha".as_bytes()),
         ("/repo/.git/objects/ab/cdef", "obj".as_bytes()),
     ]);
     let watcher = FakeFsWatcher::new();
@@ -2677,17 +2678,19 @@ fn workspace_watches_cover_the_source_tree_and_the_git_refs() {
     watch_workspace_dirs(&fs, &watcher, Path::new("/repo"));
 
     assert_eq!(
-        watcher.watched_paths(),
-        [
-            PathBuf::from("/repo"),
-            PathBuf::from("/repo/.git"),
-            PathBuf::from("/repo/.git/refs"),
-            PathBuf::from("/repo/.git/refs/heads"),
-            PathBuf::from("/repo/src"),
-            PathBuf::from("/repo/src/deep"),
-        ],
-        "the source tree plus the three .git directories that carry HEAD, \
-             the index, and the branch tips, and nothing from a built tree or \
+        (watcher.watched_paths(), watcher.recursive_paths()),
+        (
+            vec![
+                PathBuf::from("/repo"),
+                PathBuf::from("/repo/.git"),
+                PathBuf::from("/repo/.git/refs"),
+                PathBuf::from("/repo/src"),
+                PathBuf::from("/repo/src/deep"),
+            ],
+            vec![PathBuf::from("/repo/.git/refs")],
+        ),
+        "the source tree, .git flat for HEAD and the index, and the whole \
+             refs tree for every branch tip, with nothing from a built tree or \
              the object store",
     );
 }

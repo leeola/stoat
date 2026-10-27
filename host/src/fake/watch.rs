@@ -3,7 +3,7 @@ use crate::{
     watch::{merge_event_kind, FsEventKind, FsWatchEvent, FsWatchHost, WakeFn, WatchToken},
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, Weak},
@@ -22,6 +22,7 @@ struct FakeWatchState {
     next_id: u64,
     tokens: BTreeMap<WatchToken, PathBuf>,
     paths: BTreeMap<PathBuf, Vec<WatchToken>>,
+    recursive: BTreeSet<WatchToken>,
     queue: VecDeque<FsWatchEvent>,
 }
 
@@ -38,6 +39,7 @@ impl FakeFsWatcher {
                 next_id: 0,
                 tokens: BTreeMap::new(),
                 paths: BTreeMap::new(),
+                recursive: BTreeSet::new(),
                 queue: VecDeque::new(),
             }),
             wake: Mutex::new(None),
@@ -100,6 +102,20 @@ impl FakeFsWatcher {
         state.paths.keys().cloned().collect()
     }
 
+    /// Snapshot of the paths watched through [`FsWatchHost::watch_recursive`].
+    ///
+    /// [`Self::watched_paths`] lists these beside the flat ones, so this is
+    /// what tells a whole-tree watch from a flat watch on the same path.
+    pub fn recursive_paths(&self) -> Vec<PathBuf> {
+        let state = self.state.lock().expect("FakeFsWatcher poisoned");
+        let paths: BTreeSet<&PathBuf> = state
+            .recursive
+            .iter()
+            .filter_map(|token| state.tokens.get(token))
+            .collect();
+        paths.into_iter().cloned().collect()
+    }
+
     /// Whether `path` is currently watched by at least one token.
     pub fn is_watching(&self, path: &Path) -> bool {
         let state = self.state.lock().expect("FakeFsWatcher poisoned");
@@ -146,7 +162,13 @@ impl FsWatchHost for FakeFsWatcher {
     }
 
     fn watch_recursive(&self, path: &Path) -> io::Result<WatchToken> {
-        self.watch(path)
+        let token = self.watch(path)?;
+        self.state
+            .lock()
+            .expect("FakeFsWatcher poisoned")
+            .recursive
+            .insert(token);
+        Ok(token)
     }
 
     fn unwatch(&self, token: WatchToken) {
@@ -154,6 +176,7 @@ impl FsWatchHost for FakeFsWatcher {
         let Some(path) = state.tokens.remove(&token) else {
             return;
         };
+        state.recursive.remove(&token);
         let now_empty = match state.paths.get_mut(&path) {
             Some(tokens) => {
                 tokens.retain(|t| *t != token);
@@ -219,8 +242,18 @@ mod tests {
     #[test]
     fn watch_recursive_records_path() {
         let watcher = FakeFsWatcher::new();
-        watcher.watch_recursive(Path::new("/root")).unwrap();
-        assert_eq!(watcher.watched_paths(), [PathBuf::from("/root")]);
+        watcher.watch(Path::new("/flat")).unwrap();
+        let token = watcher.watch_recursive(Path::new("/root")).unwrap();
+        assert_eq!(
+            (watcher.watched_paths(), watcher.recursive_paths()),
+            (
+                vec![PathBuf::from("/flat"), PathBuf::from("/root")],
+                vec![PathBuf::from("/root")],
+            ),
+        );
+
+        watcher.unwatch(token);
+        assert_eq!(watcher.recursive_paths(), Vec::<PathBuf>::new());
     }
 
     #[test]

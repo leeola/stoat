@@ -406,21 +406,21 @@ pub(crate) fn install_highlight_maps(registry: &LanguageRegistry, styles: &Synta
 /// directories, enough to exhaust the platform's watch limit and so leave the
 /// workspace unwatched entirely.
 ///
-/// The three `.git` directories are added back on purpose. `HEAD`, `index`,
+/// `.git` and its `refs` tree are added back on purpose. `HEAD`, `index`,
 /// `packed-refs`, and branch-tip writes all land in them, and those are what
-/// stale every diff base. Deeper `.git` paths going unwatched is the accepted
-/// tradeoff for not walking an object store.
+/// stale every diff base.
+///
+/// `.git` itself is watched flat, so the object store below it costs no
+/// watches. The `refs` tree is watched whole, because a branch ref lives at the
+/// depth of its name. The ref of a `lee/topic` branch sits in `refs/heads/lee`.
 ///
 /// Reads the tree, so it belongs on the blocking pool rather than the run loop.
 /// Failures are counted rather than reported one by one, since a watch limit
 /// reached partway through fails for every remaining directory.
 fn watch_workspace_dirs(fs: &dyn FsHost, watcher: &dyn FsWatchHost, root: &Path) {
     let git_dir = root.join(".git");
-    let dirs = fs.walk_workspace_dirs(root).into_iter().chain([
-        git_dir.clone(),
-        git_dir.join("refs"),
-        git_dir.join("refs").join("heads"),
-    ]);
+    let refs = git_dir.join("refs");
+    let dirs = fs.walk_workspace_dirs(root).into_iter().chain([git_dir]);
 
     let (mut watched, mut failed) = (0usize, 0usize);
     for dir in dirs {
@@ -428,6 +428,10 @@ fn watch_workspace_dirs(fs: &dyn FsHost, watcher: &dyn FsWatchHost, root: &Path)
             Ok(_) => watched += 1,
             Err(_) => failed += 1,
         }
+    }
+    match watcher.watch_recursive(&refs) {
+        Ok(_) => watched += 1,
+        Err(_) => failed += 1,
     }
 
     if failed > 0 {
