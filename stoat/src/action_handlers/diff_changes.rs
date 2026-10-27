@@ -21,7 +21,7 @@ use crate::{
     workspace::Workspace,
 };
 use slotmap::SlotMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use stoat_scheduler::Executor;
 use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
 
@@ -556,6 +556,61 @@ fn editor_landing(stoat: &mut Stoat) -> Option<Landing> {
         column: point.column,
         screen_row,
     })
+}
+
+/// Move the focused changes view's cursor to the first hunk of `path`, and
+/// report whether the focused changes view shows `path`.
+///
+/// A folded excerpt takes the cursor at once. An excerpt that waits on its
+/// diff map takes it once it folds. The move pushes no jumplist entry, since
+/// the changes view stays and its own hops push none.
+pub(super) fn land_pick(stoat: &mut Stoat, path: &Path) -> bool {
+    let Some(id) = stoat.active_workspace().focused_diff_changes_id() else {
+        return false;
+    };
+    let Some(workdir) = repo_workdir(stoat) else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(&workdir) else {
+        return false;
+    };
+    let rel_path = relative.display().to_string();
+
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = stoat.active_workspace_mut();
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return false;
+    };
+    let Some(excerpt) = state
+        .excerpts
+        .iter()
+        .find(|excerpt| excerpt.rel_path == rel_path)
+    else {
+        return false;
+    };
+    let row = editors
+        .get_mut(excerpt.editor_id)
+        .and_then(|editor| diff_changes::hunk_starts(editor).first().copied())
+        .unwrap_or(0);
+    state.pending_landing = Some(Landing {
+        buffer_id: excerpt.buffer_id,
+        rel_path,
+        row,
+        column: 0,
+        screen_row: None,
+    });
+    state.held_screen_row = None;
+
+    diff_changes::pump_diff_changes_stack(stoat);
+    tracing::info!(
+        target: "stoat::picker",
+        path = %path.display(),
+        "file finder pick landed in the changes view"
+    );
+    true
 }
 
 /// The focused excerpt's file, relative to the repository, and the buffer
@@ -1479,6 +1534,61 @@ mod tests {
                 place(&mut h),
             ),
             (Some("diff_changes"), true, at("b.txt", 5)),
+        );
+    }
+
+    /// A file finder pick of a file the stack shows keeps the changes view and
+    /// lands on the file's first hunk, below the context rows a fold leaves.
+    #[test]
+    fn a_finder_pick_lands_on_the_files_first_hunk() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        h.type_keys("b enter");
+        h.settle();
+        assert_eq!(
+            (h.stoat.current_view(), place(&mut h)),
+            (Some("diff_changes"), at("b.txt", 8))
+        );
+    }
+
+    #[test]
+    fn a_buffer_pick_lands_on_the_files_first_hunk() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/b.txt"));
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+        let titled = h.snapshot().content.contains("file finder (buffers, diff)");
+        h.type_keys("b enter");
+        h.settle();
+        assert_eq!(
+            (titled, h.stoat.current_view(), place(&mut h)),
+            (true, Some("diff_changes"), at("b.txt", 8))
+        );
+    }
+
+    #[test]
+    fn a_pick_with_no_excerpt_opens_the_file_over_the_covered_view() {
+        let mut h = two_files();
+        h.fake_git().add_repo("/repo").head_file("c.txt", "c\n");
+        h.fake_fs().insert_file("/repo/c.txt", "c\n");
+        h.open_file(Path::new("/repo/c.txt"));
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+
+        dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
+        h.type_keys("c enter");
+        h.settle();
+        assert_eq!(
+            (h.stoat.current_view(), focused_path(&h)),
+            (Some("file"), Some(PathBuf::from("/repo/c.txt")))
         );
     }
 

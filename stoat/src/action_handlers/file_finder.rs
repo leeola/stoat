@@ -598,6 +598,9 @@ fn push_ancestor_dirs(
 /// Handle a submit keypress while the finder is open. Returns `Some(effect)`
 /// when the finder consumed the submission, `None` if no finder is open so
 /// the caller can fall through to other prompt consumers.
+///
+/// Over the changes view, a pick of a file the stack shows moves the cursor to
+/// that file's excerpt and keeps the changes view, unless the pick splits.
 pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     settle_finder_scan(stoat);
     let (path, term, intent) = {
@@ -618,6 +621,9 @@ pub(super) fn file_finder_submit(stoat: &mut Stoat) -> Option<UpdateEffect> {
     close_file_finder(stoat);
     if let Some(term) = term {
         return Some(super::terminal::show_terminal(stoat, term, intent));
+    }
+    if intent == OpenIntent::Replace && super::diff_changes::land_pick(stoat, &path) {
+        return Some(UpdateEffect::Redraw);
     }
     match intent {
         OpenIntent::Replace => {},

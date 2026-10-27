@@ -112,6 +112,13 @@ pub(crate) fn render_file_finder(
     };
     let suffix = if finder.fallback_active() {
         ", ignored"
+    } else if finder.diff_paths.is_some()
+        && matches!(
+            finder.scope(),
+            FinderScope::Buffers | FinderScope::ModifiedBuffers
+        )
+    {
+        ", diff"
     } else {
         ""
     };
