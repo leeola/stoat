@@ -2334,8 +2334,9 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
 /// buffer.
 ///
 /// A `block` of bytes, the declaration a link names, frames in the pane per
-/// [`super::view::frame_jump_on_block`]. A jump with no block follows the
-/// cursor with the least scroll.
+/// [`super::view::frame_jump_on_block`]. A jump with no block lands per
+/// [`super::view::land_jump`], centered when the cursor leaves the padding
+/// band.
 pub(crate) fn apply_jump(
     stoat: &mut Stoat,
     path: &Path,
@@ -2360,18 +2361,18 @@ pub(crate) fn apply_jump(
         return;
     };
 
-    // Landing in another file means a freshly shown editor with no prior view to
-    // glide from, so it snaps.
+    // Landing in another file shows its editor in the pane, so the center
+    // waits for the rows the next paint measures.
     let same_buffer = Some(editor.buffer_id) == buffer_before;
     match (block, same_buffer) {
         (Some(block), _) => {
             super::view::frame_jump_on_block(editor, block, scrolloff, same_buffer);
         },
         (None, true) => {
-            super::view::follow_jump(editor, scrolloff);
+            super::view::land_jump(editor, scrolloff);
         },
         (None, false) => {
-            super::view::ensure_cursor_in_view(editor, scrolloff);
+            editor.pending_center = Some(scrolloff);
         },
     }
 }

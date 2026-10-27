@@ -8,7 +8,7 @@ use super::{
     jump,
     movement::{self, ChangeDir},
     pane, review,
-    view::{self, PageDir, ViewAlign},
+    view::{self, PageDir},
 };
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -155,7 +155,7 @@ pub(crate) fn close_diff_changes_for_open(
 ///
 /// The cursor's line keeps the screen row it held in the stack, where the file
 /// has rows enough above and below it. A cursor off the stack's painted rows
-/// opens with its line centered.
+/// lands as a jump does, centered against the rows the diff paints.
 pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     let Some(((rel_path, point), workdir)) = focused_target(stoat).zip(repo_workdir(stoat)) else {
         let status = no_target_status(stoat.active_workspace());
@@ -195,8 +195,11 @@ pub(super) fn diff_changes_open(stoat: &mut Stoat) -> UpdateEffect {
     review::enter_diff_view(stoat);
     if let Some(row) = screen_row {
         hold_screen_row(stoat, row);
-    } else if let Some(editor) = super::focused_editor_mut(stoat) {
-        view::align_view(editor, ViewAlign::Center);
+    } else {
+        let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+        if let Some(editor) = super::focused_editor_mut(stoat) {
+            editor.pending_center = Some(scrolloff);
+        }
     }
     UpdateEffect::Redraw
 }
@@ -1763,6 +1766,23 @@ mod tests {
             .get(editor)
             .map(|state| state.held_screen_row);
         assert_eq!(held, Some(None));
+    }
+
+    /// A cursor the stack scrolled off holds no stack row, so the flip lands it
+    /// as a jump does, centered against the rows the diff paints.
+    #[test]
+    fn a_flip_from_a_cursor_off_the_stack_lands_it_centered_on_the_painted_rows() {
+        let mut h = long_files(24);
+        stack_on_b(&mut h);
+        h.stoat
+            .active_workspace_mut()
+            .focused_diff_changes_mut()
+            .expect("a changes view")
+            .scroll = 1000;
+
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        let (scroll_row, cursor_row, viewport, _) = frame_view(&mut h);
+        assert_eq!(scroll_row, cursor_row - (viewport - 1) / 2);
     }
 
     #[test]

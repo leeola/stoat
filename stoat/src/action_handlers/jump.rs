@@ -175,12 +175,12 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
             .replace_with(entry.selections.clone(), buf_snap);
     }
 
-    // A cross-buffer jump lands in a freshly shown editor with no prior view to
-    // glide from, so it snaps.
+    // A cross-buffer jump shows the entry's editor in the pane again, so the
+    // center waits for the rows the next paint measures.
     if swapped_buffer {
-        super::view::ensure_cursor_in_view(editor, scrolloff);
+        editor.pending_center = Some(scrolloff);
     } else {
-        super::view::follow_jump(editor, scrolloff);
+        super::view::land_jump(editor, scrolloff);
     }
 }
 
@@ -274,6 +274,51 @@ mod tests {
             .selections
             .all_anchors()
             .len()
+    }
+
+    /// A 200-line `a.rs` in a 12-row window with the cursor on row 150 and the
+    /// view still at the top.
+    fn far_cursor_in_a(h: &mut TestHarness) {
+        let body: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+        let a = h.write_file("a.rs", &body);
+        h.open_file(&a);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        action_handlers::movement::set_cursor_row(editor, 150);
+    }
+
+    /// The focused view's top row, and the top row that centers row 150 in it.
+    fn top_and_center(h: &mut TestHarness) -> (u32, u32) {
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let viewport = editor.viewport_rows.expect("a painted view");
+        (editor.scroll_row, 150 - (viewport - 1) / 2)
+    }
+
+    #[test]
+    fn a_walk_back_in_one_buffer_lands_the_entry_centered() {
+        let mut h = TestHarness::with_size(40, 12);
+        far_cursor_in_a(&mut h);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        action_handlers::movement::set_cursor_row(editor, 0);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        let (top, center) = top_and_center(&mut h);
+        assert_eq!(top, center);
+    }
+
+    /// The entry's buffer comes back in an editor the pane shows again, so the
+    /// center lands at the paint that measures its rows.
+    #[test]
+    fn a_walk_back_into_another_buffer_lands_the_entry_centered_at_the_paint() {
+        let mut h = TestHarness::with_size(40, 12);
+        far_cursor_in_a(&mut h);
+        let b = h.write_file("b.rs", "b\n");
+        h.open_file(&b);
+
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        h.snapshot();
+        let (top, center) = top_and_center(&mut h);
+        assert_eq!(top, center);
     }
 
     #[test]

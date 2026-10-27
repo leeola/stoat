@@ -274,8 +274,8 @@ pub(super) fn restore_origin_view(stoat: &mut Stoat, view: (u32, f32)) {
 /// A no-op when no prompt is open, or when the query has not changed since the
 /// last sync. Otherwise the jump runs again from the selections captured at
 /// open, so the preview shown is always the one that query alone produces. The
-/// view follows the landing from where it stands, so a keystroke that keeps its
-/// match moves nothing on screen.
+/// view lands as [`super::view::land_jump`] lands a jump, so a keystroke that
+/// keeps its match inside the padding band moves nothing on screen.
 ///
 /// The preview is deliberately silent. A query that wraps, matches nothing, or
 /// does not compile yet is an ordinary state mid-typing, so none of them raises
@@ -317,7 +317,7 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
     {
         let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
         if let Some(editor) = pane_editor(stoat) {
-            super::view::follow_jump(editor, scrolloff);
+            super::view::land_jump(editor, scrolloff);
         }
     } else {
         restore_origin_view(stoat, view);
@@ -2030,6 +2030,20 @@ mod tests {
             (first > 0, row > first, offset, glide),
             (true, true, first as f32, ScrollGlide::Page),
         );
+    }
+
+    /// A match off the view lands on the middle row, rather than on the edge
+    /// the view moved toward.
+    #[test]
+    fn a_preview_lands_a_far_match_centered() {
+        let mut h = TestHarness::with_size(40, 12);
+        seed(&mut h, &lines_with(&[(80, "needle")]));
+        h.type_keys("/");
+
+        preview(&mut h, "needle");
+        let editor = super::pane_editor(&mut h.stoat).expect("pane holds an editor");
+        let viewport = editor.viewport_rows.expect("a painted view");
+        assert_eq!(editor.scroll_row, 80 - (viewport - 1) / 2);
     }
 
     /// Enter keeps the view where the preview left it, rather than gliding in

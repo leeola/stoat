@@ -3992,6 +3992,8 @@ fn a_same_file_jump_glides_while_a_cross_file_jump_snaps() {
 
     super::apply_jump(&mut h.stoat, &root.join("b.rs"), long.len(), None);
     h.settle();
+    // A cross-file jump lands at the paint, against the rows the paint measures.
+    h.snapshot();
     let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
     assert!(
         editor.scroll_row > 20,
@@ -4002,4 +4004,36 @@ fn a_same_file_jump_glides_while_a_cross_file_jump_snaps() {
         ScrollGlide::None,
         "a fresh editor has no origin to glide from, so it snaps"
     );
+}
+
+/// A jump with no block lands its cursor on the middle row, in the same file
+/// at once and in another file at the paint that shows it.
+#[test]
+fn an_lsp_jump_lands_the_cursor_centered_in_either_file() {
+    let mut h = TestHarness::with_size(40, 12);
+    let long: String = (0..200).map(|i| format!("line {i:03}\n")).collect();
+    let root = seed(&mut h, &[("a.rs", long.as_str()), ("b.rs", long.as_str())]);
+    crate::action_handlers::dispatch(
+        &mut h.stoat,
+        &OpenFile {
+            path: root.join("a.rs"),
+        },
+    );
+    h.settle();
+    h.snapshot();
+    let row_150 = 150 * "line 000\n".len();
+    let top_and_center = |h: &mut TestHarness| {
+        let editor =
+            crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let viewport = editor.viewport_rows.expect("a painted view");
+        (editor.scroll_row, 150 - (viewport - 1) / 2)
+    };
+
+    super::apply_jump(&mut h.stoat, &root.join("a.rs"), row_150, None);
+    let same = top_and_center(&mut h);
+    super::apply_jump(&mut h.stoat, &root.join("b.rs"), row_150, None);
+    h.settle();
+    h.snapshot();
+    let other = top_and_center(&mut h);
+    assert_eq!([same.0, other.0], [same.1, other.1]);
 }
