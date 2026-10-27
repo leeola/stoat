@@ -513,7 +513,17 @@ pub(crate) fn respawn_diff_changes_panes(stoat: &mut Stoat) {
 ///
 /// A parked stack opens again with its excerpts, and the first pump lists the
 /// files anew against it, keeping the excerpts still listed.
+///
+/// An open re-reads the git state. It stales every diff map and the repository
+/// tally, since a commit or a write that no watcher event reported otherwise
+/// leaves the stack on the tree before it.
 fn open_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
+    // Before the landing's map is wanted below, so that want reads fresh blobs
+    // rather than landing superseded and diffing a second time.
+    let ws = stoat.active_workspace_mut();
+    ws.invalidate_all_diffs();
+    ws.diff_warmed = false;
+
     let landing = editor_landing(stoat);
     let (covered, covered_diff) = {
         let ws = stoat.active_workspace();
@@ -1590,6 +1600,83 @@ mod tests {
         );
     }
 
+    /// An open re-reads the git state, so a commit that no watcher event
+    /// reported leaves no file of the tree before it in the list.
+    #[test]
+    fn an_open_after_an_unseen_commit_lists_the_tree_as_it_stands() {
+        let mut h = deep_files();
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+        h.fake_git()
+            .add_repo("/repo")
+            .clear_changes()
+            .head_file("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\nNINE\n")
+            .head_file("b.txt", "a\nb\nc\nd\ne\nf\ng\nh\nI\n");
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle_diff_jobs();
+        assert_eq!(
+            (h.stoat.current_view(), listed_paths(&h)),
+            (Some("diff_changes"), Vec::<String>::new()),
+        );
+    }
+
+    /// An open re-reads the git state, so a file changed after the last tally
+    /// with no watcher event joins the list.
+    ///
+    /// The stack parks across a flip to the diff, and its excerpts keep their
+    /// current maps, so the open that brings it back wants no map. A want is
+    /// what owes a tally otherwise.
+    #[test]
+    fn an_open_lists_a_file_changed_since_the_last_tally() {
+        let mut h = deep_files();
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle_diff_jobs();
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle_diff_jobs();
+        h.fake_fs().insert_file(Path::new("/repo/c.txt"), b"C\n");
+        h.fake_git()
+            .add_repo("/repo")
+            .modified("c.txt", "c\n", "C\n");
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle_diff_jobs();
+        assert_eq!(listed_paths(&h), ["a.txt", "b.txt", "c.txt"]);
+    }
+
+    /// An open re-arms the background warm, whose cache holds diffs against the
+    /// git state that the open re-reads.
+    #[test]
+    fn an_open_rearms_the_diff_warm() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        h.stoat.active_workspace_mut().diff_warmed = true;
+
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        assert!(
+            !h.stoat.active_workspace().diff_warmed,
+            "the next background pump warms the cache again",
+        );
+    }
+
+    /// The files of the focused changes view's excerpts, in stack order.
+    fn listed_paths(h: &TestHarness) -> Vec<String> {
+        let ws = h.stoat.active_workspace();
+        ws.focused_diff_changes_id()
+            .and_then(|id| ws.diff_changes_views.get(id))
+            .map(|state| {
+                state
+                    .excerpts
+                    .iter()
+                    .map(|excerpt| excerpt.rel_path.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// A file finder pick of a file the stack shows keeps the changes view and
     /// lands on the file's first hunk, below the context rows a fold leaves.
     #[test]
@@ -1959,6 +2046,10 @@ mod tests {
 
     /// A flip and a flip back read the root the workspace resolved, so neither
     /// opens a repository.
+    ///
+    /// The flip back opens the changes view, which re-reads the git state in
+    /// jobs on the pool. The pool holds those jobs while the flips run, so the
+    /// count holds the flips' own work alone.
     #[test]
     fn a_flip_and_back_open_no_repository() {
         let mut h = long_files(24);
@@ -1967,11 +2058,18 @@ mod tests {
         h.settle();
         let opened = h.fake_git().discover_calls();
 
+        h.hold_blocking();
         h.type_keys("Ctrl-t");
         h.settle();
         h.type_keys("Ctrl-t");
         h.settle();
-        assert_eq!(h.fake_git().discover_calls() - opened, 0);
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                h.fake_git().discover_calls() - opened
+            ),
+            (Some("diff_changes"), 0),
+        );
     }
 
     /// A close after a flip back releases the stack as a close always does, so
