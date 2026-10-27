@@ -414,7 +414,10 @@ pub(crate) fn pane_cache_key(
         _ => return None,
     };
     let editor = editors.get_mut(editor_id)?;
-    if editor.conflict_view.is_some() || editor.held_screen_row.is_some() {
+    if editor.conflict_view.is_some()
+        || editor.held_screen_row.is_some()
+        || editor.pending_center.is_some()
+    {
         return None;
     }
 

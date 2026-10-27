@@ -462,6 +462,44 @@ pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     scrolled
 }
 
+/// Land the view on the primary cursor after a jump, and report whether the
+/// view moved.
+///
+/// A cursor inside the `scrolloff` band stays where the reader sees it. One
+/// outside the band lands centered, as Helix centers a jump that leaves the
+/// view. Near the file's end the center stops where the last line sits the
+/// bottom padding above the view's bottom edge, with that many blank rows
+/// under it.
+///
+/// A move over one row glides from the row before the jump, as
+/// [`follow_jump`] does.
+///
+/// See also:
+/// - [`follow_jump`] for plain motion, which follows the cursor to the edge.
+pub(crate) fn land_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let cursor_row = cursor_display_row(editor);
+    let line_count = editor.display_map.snapshot().line_count();
+    let top = scrolloff.min(viewport.saturating_sub(1) / 2);
+    let bottom = scrolloff.min(viewport / 2);
+
+    let prev = editor.scroll_row;
+    if cursor_row >= prev + top && cursor_row + bottom < prev + viewport {
+        return false;
+    }
+    editor.scroll_row = cursor_row
+        .saturating_sub(viewport.saturating_sub(1) / 2)
+        .min(max_scroll_row(line_count, viewport) + bottom);
+    // A jump lands on the row grid, whatever fraction the wheel last rested on.
+    editor.scroll_frac = 0.0;
+
+    if prev.abs_diff(editor.scroll_row) > 1 {
+        editor.scroll_offset = prev as f32;
+        editor.scroll_glide = ScrollGlide::Page;
+    }
+    editor.scroll_row != prev
+}
+
 /// Frame a jump's `block` of buffer bytes in the view, and report whether the
 /// view moved.
 ///
@@ -670,33 +708,42 @@ fn center_jump_on_rows(
     editor.scroll_row != prev
 }
 
-/// Scroll `editor` so its primary cursor's row sits on the held screen row,
-/// and drop the hold once the rows it measured are final.
+/// Scroll `editor` so its primary cursor's row sits on the held screen row, or
+/// land its pending jump, and drop each once the rows it measured are final.
 ///
 /// The paint calls this after it fits the display to the width, so the row it
 /// measures is the row it paints. A held row past the view's last row holds on
 /// the last row, and the scroll stops where the last display row reaches the
 /// bottom. The move is a swap, so it clears a glide and the wheel fraction.
 ///
+/// A pending center lands as [`land_jump`] lands a jump, and as a swap too,
+/// since the editor it waits on has no view on screen to glide from.
+///
 /// A new width on a long file rewraps on the pool, and the paints before the
 /// rewrap lands show the rows of the old wrapping. The landing moves every row
-/// below a line that wraps differently, so the hold stays over those paints
-/// and places the cursor again on the paint after the landing.
+/// below a line that wraps differently, so both stay over those paints and
+/// place the cursor again on the paint after the landing.
 pub(crate) fn apply_held_screen_row(editor: &mut EditorState) {
-    let Some(screen_row) = editor.held_screen_row else {
-        return;
-    };
-    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
-    let cursor_row = cursor_display_row(editor);
-    let line_count = editor.display_map.snapshot().line_count();
-    editor.scroll_row = cursor_row
-        .saturating_sub(screen_row.min(viewport - 1))
-        .min(max_scroll_row(line_count, viewport));
-    editor.scroll_frac = 0.0;
-    editor.scroll_offset = editor.scroll_row as f32;
-    editor.scroll_glide = ScrollGlide::None;
+    if let Some(screen_row) = editor.held_screen_row {
+        let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+        let cursor_row = cursor_display_row(editor);
+        let line_count = editor.display_map.snapshot().line_count();
+        editor.scroll_row = cursor_row
+            .saturating_sub(screen_row.min(viewport - 1))
+            .min(max_scroll_row(line_count, viewport));
+        editor.scroll_frac = 0.0;
+        editor.scroll_offset = editor.scroll_row as f32;
+        editor.scroll_glide = ScrollGlide::None;
+    }
+    if let Some(scrolloff) = editor.pending_center
+        && land_jump(editor, scrolloff)
+    {
+        editor.scroll_offset = editor.scroll_row as f32;
+        editor.scroll_glide = ScrollGlide::None;
+    }
     if !editor.display_map.rewrap_pending() {
         editor.held_screen_row = None;
+        editor.pending_center = None;
     }
 }
 
@@ -881,6 +928,7 @@ mod tests {
             stoat, TestHarness,
         },
     };
+    use crossterm::event::Event;
     use std::sync::Arc;
     use stoat_action::{AddSelectionBelow, HalfPageDown, PageDown, PageUp};
     use stoat_text::Point;
@@ -1305,6 +1353,125 @@ mod tests {
             ScrollGlide::None,
             "no view move arms no glide"
         );
+    }
+
+    #[test]
+    fn land_jump_centers_a_cursor_past_the_band() {
+        let mut h = jump_fixture(50, 0);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let moved = land_jump(editor, 3);
+        assert_eq!(
+            (
+                moved,
+                editor.scroll_row,
+                editor.scroll_offset,
+                editor.scroll_glide
+            ),
+            (true, 46, 0.0, ScrollGlide::Page),
+            "the cursor lands on the middle row, gliding from the pre-jump row",
+        );
+    }
+
+    #[test]
+    fn land_jump_leaves_a_cursor_inside_the_band() {
+        let mut h = jump_fixture(45, 39);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let moved = land_jump(editor, 3);
+        assert_eq!(
+            (moved, editor.scroll_row, editor.scroll_glide),
+            (false, 39, ScrollGlide::None),
+            "a cursor six rows down a ten-row view sits inside the band, off the center row",
+        );
+    }
+
+    #[test]
+    fn land_jump_floats_the_last_rows_by_the_padding() {
+        let mut h = jump_fixture(100, 0);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let max_scroll = max_scroll_row(editor.display_map.snapshot().line_count(), 10);
+        land_jump(editor, 3);
+        assert_eq!(editor.scroll_row, max_scroll + 3);
+    }
+
+    #[test]
+    fn land_jump_pins_the_top() {
+        let mut h = jump_fixture(2, 50);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        land_jump(editor, 3);
+        assert_eq!(editor.scroll_row, 0);
+    }
+
+    /// The view paints once before the center is set, so a paint that
+    /// replays its cached pane leaves the view where it was.
+    #[test]
+    fn a_pending_center_lands_at_the_paint() {
+        let mut h = jump_fixture(50, 0);
+        h.snapshot();
+        focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .pending_center = Some(3);
+        h.snapshot();
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let viewport = editor.viewport_rows.expect("a painted view");
+        assert_eq!(
+            (
+                editor.scroll_row,
+                editor.scroll_glide,
+                editor.pending_center
+            ),
+            (50 - (viewport - 1) / 2, ScrollGlide::None, None),
+        );
+    }
+
+    /// A long file paints a new width with its old wrapping while the rewrap
+    /// runs on the pool, and the center lands again once the rows rewrap.
+    #[test]
+    fn a_pending_center_waits_for_the_rewrap() {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..150)
+            .map(|i| format!("line {i:03} {}\n", "word ".repeat(12)))
+            .collect();
+        let path = h.write_file("wrapped.rs", &body);
+        h.open_file(&path);
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        movement::set_cursor_row(editor, 120);
+        editor.pending_center = Some(3);
+
+        h.stoat.update(Event::Resize(30, 12));
+        h.stoat.render();
+        let rewrapping = focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .display_map
+            .rewrap_pending();
+        h.run_until_parked();
+        h.stoat.render();
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let viewport = editor.viewport_rows.expect("a painted view");
+        let cursor_row = cursor_display_row(editor);
+        assert_eq!(
+            (rewrapping, editor.scroll_row, editor.pending_center),
+            (true, cursor_row - (viewport - 1) / 2, None),
+        );
+    }
+
+    /// A 100-line file in a 10-row view, with the cursor on `cursor_row`, the
+    /// view at `scroll_row`, and the file's first wrap off the pool.
+    fn jump_fixture(cursor_row: u32, scroll_row: u32) -> TestHarness {
+        let mut h = TestHarness::with_size(40, 12);
+        let body: String = (0..100).map(|i| format!("line {i:02}\n")).collect();
+        let path = h.write_file("long.rs", &body);
+        h.open_file(&path);
+        h.settle();
+
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        editor.viewport_rows = Some(10);
+        movement::set_cursor_row(editor, cursor_row);
+        editor.scroll_row = scroll_row;
+        editor.scroll_offset = scroll_row as f32;
+        editor.scroll_glide = ScrollGlide::None;
+        h
     }
 
     #[test]

@@ -132,6 +132,13 @@ pub(crate) struct EditorState {
     /// A layout flip sets it, so the line under the cursor stays on the screen
     /// row it held in the layout the flip left. Transient, not persisted.
     pub(crate) held_screen_row: Option<u32>,
+    /// The `scrolloff` padding that the next paint lands a jump with, once it
+    /// fits the display to the width.
+    ///
+    /// A jump into an editor with no painted view sets it, so the center is
+    /// measured against the rows the editor paints rather than a default
+    /// height. Transient, not persisted.
+    pub(crate) pending_center: Option<u32>,
     /// Per-editor soft-wrap override, toggled by `ToggleWrap`. `Some` forces this
     /// editor's wrap mode regardless of the global `editor.wrap` setting; `None`
     /// follows the setting. Transient, not persisted.
@@ -295,6 +302,7 @@ impl EditorState {
             pool_current_line: None,
             viewport_rows: None,
             held_screen_row: None,
+            pending_center: None,
             wrap_override: None,
             diff_view: false,
             conflict_view: None,
