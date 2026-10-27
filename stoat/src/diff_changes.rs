@@ -630,9 +630,11 @@ fn changed_files(stoat: &Stoat) -> BTreeMap<String, PathBuf> {
 /// it out, so a scratch file beside the work does not fill the stack. The
 /// per-file walk enters it, so the finder over the per-file diff lists it.
 ///
-/// Every open buffer under the working directory whose diff map holds a hunk
-/// joins the list, so an unsaved edit shows. Under the index base only an
-/// unstaged hunk counts, as the tally counts.
+/// An open buffer under the working directory whose diff map holds a hunk
+/// joins the list, so an unsaved edit shows. A buffer with no unsaved edit
+/// joins only while its map is current for its content and the git state. A
+/// file that a commit cleaned then leaves the list when the tally lands. Under
+/// the index base only an unstaged hunk counts, as the tally counts.
 ///
 /// Outside a repository the list is empty. The working directory is the
 /// workspace's resolved [`Workspace::repo_root`], so a list opens no
@@ -665,18 +667,24 @@ pub(crate) fn listed_files(stoat: &Stoat, keep_untracked: bool) -> BTreeMap<Stri
         },
     };
     let open = ws.buffers.open_paths().into_iter().filter(|path| {
-        path.starts_with(&workdir)
-            && ws
-                .buffers
-                .id_for_path(path)
-                .and_then(|id| ws.buffers.get(id))
-                .is_some_and(|buffer| {
-                    let buffer = buffer.read().expect("buffer poisoned");
-                    buffer
-                        .diff_map
-                        .as_ref()
-                        .is_some_and(|map| map.hunks().any(|hunk| !index_base || !hunk.staged()))
-                })
+        if !path.starts_with(&workdir) {
+            return false;
+        }
+        let Some(id) = ws.buffers.id_for_path(path) else {
+            return false;
+        };
+        // A clean buffer's content is the disk's, which the tally reads. Its map
+        // adds a file only while the map is current. An unsaved edit shows in
+        // the map alone.
+        let current = ws.diff_map_current(id) || ws.hunks_installed(id);
+        ws.buffers.get(id).is_some_and(|buffer| {
+            let buffer = buffer.read().expect("buffer poisoned");
+            (buffer.dirty || current)
+                && buffer
+                    .diff_map
+                    .as_ref()
+                    .is_some_and(|map| map.hunks().any(|hunk| !index_base || !hunk.staged()))
+        })
     });
 
     listed
@@ -1143,8 +1151,8 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        excerpt_rows, fold_range, gaps, kept_runs, landing_row, pump_diff_changes_stack,
-        DiffChangesState, Landing, StackStamp,
+        excerpt_rows, fold_range, gaps, kept_runs, landing_row, listed_files,
+        pump_diff_changes_stack, DiffChangesState, Landing, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -1735,6 +1743,53 @@ mod tests {
         let staged = stamp(&h);
         h.stoat.active_workspace_mut().invalidate_all_diffs();
         assert_eq!((first != staged, staged != stamp(&h)), (true, true));
+    }
+
+    /// A clean buffer's content is the disk's, so after a commit cleans its
+    /// file, the map a hidden buffer keeps from before the commit lists nothing.
+    #[test]
+    fn a_clean_buffer_with_a_stale_map_lists_from_the_tally_alone() {
+        let h = commit_behind_a_hidden_buffer(|_| {});
+        assert_eq!(listed_rel_paths(&h), ["b.txt"]);
+    }
+
+    /// The tally reads the disk, which an unsaved edit has not reached, so the
+    /// edited buffer stays listed from its map whatever the map's age.
+    #[test]
+    fn an_unsaved_buffer_with_a_stale_map_stays_listed() {
+        let h = commit_behind_a_hidden_buffer(|h| h.type_keys("i x escape"));
+        assert_eq!(listed_rel_paths(&h), ["a.txt", "b.txt"]);
+    }
+
+    /// A repo where `a.txt` and `b.txt` differ from HEAD, and a commit of
+    /// `a.txt` lands while `b.txt` hides it, with the diff jobs and the tally
+    /// settled after it.
+    ///
+    /// The hidden `a.txt` keeps the map from before the commit. `before_hide`
+    /// runs on `a.txt` while it has the focus.
+    fn commit_behind_a_hidden_buffer(before_hide: impl FnOnce(&mut TestHarness)) -> TestHarness {
+        let mut h = TestHarness::with_size(100, 24);
+        h.stoat.set_diff_warm_auto(true);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
+        h.stoat.sync_repo_root();
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle_diff_jobs();
+        before_hide(&mut h);
+        h.open_file(Path::new("/repo/b.txt"));
+
+        h.fake_git()
+            .add_repo("/repo")
+            .clear_changes()
+            .head_file("a.txt", "A\n")
+            .modified("b.txt", "b\n", "B\n");
+        h.stoat.active_workspace_mut().invalidate_all_diffs();
+        h.settle_diff_jobs();
+        h
+    }
+
+    /// The files the changes view lists, by their path in the repository.
+    fn listed_rel_paths(h: &TestHarness) -> Vec<String> {
+        listed_files(&h.stoat, false).into_keys().collect()
     }
 
     /// An open and a close move the stamp's path part, and a diff landing its
