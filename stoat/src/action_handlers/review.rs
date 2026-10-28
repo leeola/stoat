@@ -1902,7 +1902,7 @@ mod tests {
     };
     use crate::{
         badge::BadgeSource,
-        diff_map::MarkKind,
+        diff_map::{MarkKind, MarkState},
         display_map::syntax_theme::SyntaxStyles,
         review_session::DiffDocument,
         test_harness::TestHarness,
@@ -4308,12 +4308,12 @@ mod tests {
         h
     }
 
-    /// The focused buffer's hunks as `(first row, staged)`, whether buffer row
-    /// `row` reads staged, and the map's mark kind.
+    /// The focused buffer's hunks as `(first row, staged)`, the staged state of
+    /// buffer row `row`, and the map's mark kind.
     fn approval_marks(
         h: &TestHarness,
         row: u32,
-    ) -> (Vec<(u32, bool)>, Option<bool>, Option<MarkKind>) {
+    ) -> (Vec<(u32, bool)>, Option<MarkState>, Option<MarkKind>) {
         let id = h.stoat.focused_editor_ids().expect("editor").1;
         let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
         let guard = buffer.read().expect("buffer poisoned");
@@ -4363,15 +4363,27 @@ mod tests {
                 h.stoat.active_workspace().approved_rows(path).is_none(),
             ),
             (
-                (vec![(1, false)], Some(false), Some(MarkKind::Approved)),
+                (
+                    vec![(1, false)],
+                    Some(MarkState::Unapproved),
+                    Some(MarkKind::Approved)
+                ),
                 (
                     Some("approved hunk".to_string()),
-                    (vec![(1, true)], Some(true), Some(MarkKind::Approved))
+                    (
+                        vec![(1, true)],
+                        Some(MarkState::Approved),
+                        Some(MarkKind::Approved)
+                    )
                 ),
                 Some(true),
                 (
                     Some("unapproved hunk".to_string()),
-                    (vec![(1, false)], Some(false), Some(MarkKind::Approved))
+                    (
+                        vec![(1, false)],
+                        Some(MarkState::Unapproved),
+                        Some(MarkKind::Approved)
+                    )
                 ),
                 Vec::<String>::new(),
                 true,
@@ -4408,8 +4420,12 @@ mod tests {
             ),
             (
                 Some("approved line"),
-                (vec![(1, false)], Some(true), Some(MarkKind::Approved)),
-                Some(false),
+                (
+                    vec![(1, false)],
+                    Some(MarkState::Approved),
+                    Some(MarkKind::Approved)
+                ),
+                Some(MarkState::Unapproved),
                 vec![(1, true)],
                 Some("no hunk under the cursor"),
                 true,

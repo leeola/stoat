@@ -577,6 +577,8 @@ pub mod scope {
     pub const DIFF_CURRENT_HUNK: &str = "diff.current_hunk";
     pub const DIFF_STAGED: &str = "diff.staged";
     pub const DIFF_UNSTAGED: &str = "diff.unstaged";
+    pub const DIFF_APPROVED: &str = "diff.approved";
+    pub const DIFF_UNAPPROVED: &str = "diff.unapproved";
 
     pub const UI_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
     pub const UI_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";
@@ -1047,10 +1049,15 @@ mod tests {
             scope::DIFF_MOVED,
         ]
         .map(fg);
-        let clashes: Vec<&str> = [scope::DIFF_STAGED, scope::DIFF_UNSTAGED]
-            .into_iter()
-            .filter(|state| kinds.contains(&fg(state)))
-            .collect();
+        let clashes: Vec<&str> = [
+            scope::DIFF_STAGED,
+            scope::DIFF_UNSTAGED,
+            scope::DIFF_APPROVED,
+            scope::DIFF_UNAPPROVED,
+        ]
+        .into_iter()
+        .filter(|state| kinds.contains(&fg(state)))
+        .collect();
         assert_eq!(clashes, Vec::<&str>::new(), "states in a change-kind color");
     }
 }

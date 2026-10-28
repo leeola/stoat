@@ -122,6 +122,8 @@ theme default_dark {
     diff.current_hunk    = { fg: info, modifiers: [bold] };
     diff.staged.fg       = primary;
     diff.unstaged.fg     = muted;
+    diff.approved.fg     = special;
+    diff.unapproved.fg   = dim;
 
     ui.diagnostic.error.fg   = danger;
     ui.diagnostic.warning.fg = warning;

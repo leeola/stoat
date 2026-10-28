@@ -5,7 +5,7 @@ use crate::{
         build_diagnostic_span_cache, diagnostic_at_offset, severity_rank, DiagnosticSpanCache,
         ResolvedDiag,
     },
-    diff_map::DiffHunkStatus,
+    diff_map::{DiffHunkStatus, MarkState},
     display_map::{
         display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot,
         PaintVersion, TabPoint,
@@ -1120,7 +1120,7 @@ pub(crate) struct GutterGeometryCache {
     geometry_key: u64,
     folded: Vec<(u32, u16)>,
     width_digits: u16,
-    marks: BTreeMap<u32, (DiffHunkStatus, bool)>,
+    marks: BTreeMap<u32, (DiffHunkStatus, MarkState)>,
     lines_key: Option<u64>,
     lines: Vec<GutterLine>,
     scene_key: Option<u64>,
@@ -1321,6 +1321,9 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
 /// [`crate::theme::Theme::get`]'s progressive scope-broadening fallback, so a
 /// theme omitting `diff.modified` or `diff.moved` still yields a color that
 /// agrees with the minimap lane.
+///
+/// The four mark-state colors paint the state bar beside the change bar, in
+/// the scopes [`mark_state_scope`] picks.
 #[derive(Clone, Copy, Hash)]
 pub(crate) struct DiffMarkColors {
     added: [u8; 3],
@@ -1329,6 +1332,8 @@ pub(crate) struct DiffMarkColors {
     deleted: [u8; 3],
     staged: [u8; 3],
     unstaged: [u8; 3],
+    approved: [u8; 3],
+    unapproved: [u8; 3],
 }
 
 impl DiffMarkColors {
@@ -1342,6 +1347,8 @@ impl DiffMarkColors {
             deleted: get(s::DIFF_DELETED),
             staged: get(s::DIFF_STAGED),
             unstaged: get(s::DIFF_UNSTAGED),
+            approved: get(mark_state_scope(theme, MarkState::Approved)),
+            unapproved: get(mark_state_scope(theme, MarkState::Unapproved)),
         }
     }
 
@@ -1351,6 +1358,15 @@ impl DiffMarkColors {
             DiffHunkStatus::Modified => self.modified,
             DiffHunkStatus::Moved => self.moved,
             DiffHunkStatus::Deleted => self.deleted,
+        }
+    }
+
+    fn for_state(&self, state: MarkState) -> [u8; 3] {
+        match state {
+            MarkState::Staged => self.staged,
+            MarkState::Unstaged => self.unstaged,
+            MarkState::Approved => self.approved,
+            MarkState::Unapproved => self.unapproved,
         }
     }
 
@@ -1364,7 +1380,30 @@ impl DiffMarkColors {
             deleted: dim_rgb(self.deleted, bg, amount),
             staged: dim_rgb(self.staged, bg, amount),
             unstaged: dim_rgb(self.unstaged, bg, amount),
+            approved: dim_rgb(self.approved, bg, amount),
+            unapproved: dim_rgb(self.unapproved, bg, amount),
         }
+    }
+}
+
+/// The theme scope a row's state bar paints in for `state`.
+///
+/// A theme that styles neither `diff.approved` nor a scope above it paints an
+/// approved row in `diff.staged`. An unapproved row takes `diff.unstaged` by
+/// the same rule. A theme that sets only the staged scopes thus keeps two
+/// distinct state colors under a review, and the diff view keeps its rich
+/// gutter.
+pub(crate) fn mark_state_scope(theme: &Theme, state: MarkState) -> &'static str {
+    use crate::theme::scope as s;
+    let (scope, fallback) = match state {
+        MarkState::Staged => return s::DIFF_STAGED,
+        MarkState::Unstaged => return s::DIFF_UNSTAGED,
+        MarkState::Approved => (s::DIFF_APPROVED, s::DIFF_STAGED),
+        MarkState::Unapproved => (s::DIFF_UNAPPROVED, s::DIFF_UNSTAGED),
+    };
+    match theme.try_get(scope) {
+        Some(_) => scope,
+        None => fallback,
     }
 }
 
@@ -1678,12 +1717,12 @@ pub(crate) fn gutter_display_number(absolute: u32, current_line: Option<u32>) ->
 ///
 /// `current_line` selects relative numbering per [`gutter_display_number`]. The
 /// diagnostic mark stays keyed to the absolute buffer line.
-/// Map each folded row a diff hunk marks to its `(status, staged)` pair, for the
+/// Map each folded row a diff hunk marks to its `(status, state)` pair, for the
 /// gutter's git bar. Rows outside any hunk are absent from the result.
 pub(crate) fn gutter_diff_marks(
     snapshot: &DisplaySnapshot,
     folded: &[(u32, u16)],
-) -> BTreeMap<u32, (DiffHunkStatus, bool)> {
+) -> BTreeMap<u32, (DiffHunkStatus, MarkState)> {
     let Some(diff_map) = snapshot.diff_map() else {
         return BTreeMap::new();
     };
@@ -1702,7 +1741,7 @@ pub(crate) fn gutter_diff_marks(
 pub(crate) fn gutter_diff_marks_from(
     live: &crate::diff_map::LiveHunks<'_>,
     folded: &[(u32, u16)],
-) -> BTreeMap<u32, (DiffHunkStatus, bool)> {
+) -> BTreeMap<u32, (DiffHunkStatus, MarkState)> {
     folded
         .iter()
         .filter_map(|&(number, _)| {
@@ -1715,7 +1754,7 @@ pub(crate) fn gutter_diff_marks_from(
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
     row_severity: &RowSeverity,
-    diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
+    diff_marks: &BTreeMap<u32, (DiffHunkStatus, MarkState)>,
     diff_colors: &DiffMarkColors,
     colors: &SeverityColors,
     current_line: Option<u32>,
@@ -1727,13 +1766,9 @@ pub(crate) fn gutter_component_lines(
             height,
             git: diff_marks
                 .get(&(number - 1))
-                .map(|&(status, staged)| GitMark {
+                .map(|&(status, state)| GitMark {
                     color: diff_colors.for_status(status),
-                    staged_color: if staged {
-                        diff_colors.staged
-                    } else {
-                        diff_colors.unstaged
-                    },
+                    staged_color: diff_colors.for_state(state),
                     seam: status == DiffHunkStatus::Deleted,
                 }),
             diagnostic: row_severity.at(number - 1).map(|sev| Diagnostic {
@@ -1996,7 +2031,7 @@ pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
     row_severity: &RowSeverity,
-    diff_marks: &BTreeMap<u32, (DiffHunkStatus, bool)>,
+    diff_marks: &BTreeMap<u32, (DiffHunkStatus, MarkState)>,
     current_line: Option<u32>,
     inner: Rect,
     theme: &Theme,
@@ -2020,9 +2055,9 @@ pub(crate) fn draw_fallback_line_numbers(
     // scope resolves on the first row that wants it and is remembered for the
     // rest, which also leaves an unmarked gutter resolving none of them.
     //
-    // The slots cannot run out. A row paints one of four severities, one of four
-    // diff statuses, and one of two staged states.
-    let mut resolved: [Option<(&'static str, Style)>; 10] = [None; 10];
+    // Twelve slots hold every scope a row paints. A row paints one of four
+    // severities, one of four diff statuses, and one of four mark states.
+    let mut resolved: [Option<(&'static str, Style)>; 12] = [None; 12];
     let mut style_for =
         |scope: &'static str| match resolved.iter().flatten().find(|(known, _)| *known == scope) {
             Some(&(_, style)) => style,
@@ -2031,7 +2066,7 @@ pub(crate) fn draw_fallback_line_numbers(
                 let free = resolved
                     .iter_mut()
                     .find(|slot| slot.is_none())
-                    .expect("a gutter paints at most ten distinct mark scopes");
+                    .expect("a gutter paints at most twelve distinct mark scopes");
                 *free = Some((scope, style));
                 style
             },
@@ -2061,7 +2096,7 @@ pub(crate) fn draw_fallback_line_numbers(
             buf.set_stringn(start, y, &number, max_width, number_style);
         }
 
-        if let Some(&(status, staged)) = diff_marks.get(&(line - 1)) {
+        if let Some(&(status, state)) = diff_marks.get(&(line - 1)) {
             let (mark, scope) = match status {
                 DiffHunkStatus::Deleted => ('▔', s::DIFF_DELETED),
                 DiffHunkStatus::Added => ('▎', s::DIFF_ADDED),
@@ -2073,14 +2108,10 @@ pub(crate) fn draw_fallback_line_numbers(
                     .set_char(mark)
                     .set_style(style_for(scope));
             }
-            let staged_scope = match staged {
-                true => s::DIFF_STAGED,
-                false => s::DIFF_UNSTAGED,
-            };
             if staged_x < right {
                 buf[(staged_x, y)]
                     .set_char('▎')
-                    .set_style(style_for(staged_scope));
+                    .set_style(style_for(mark_state_scope(theme, state)));
             }
         }
         top += height;
@@ -2769,7 +2800,7 @@ mod tests {
     use super::RowSeverity;
     use crate::{
         action_handlers::{self, dispatch},
-        diff_map::{DiffHunkStatus, DiffMap, StagedMark},
+        diff_map::{DiffHunkStatus, DiffMap, MarkKind, MarkState, StagedMark},
         render::review::DiffDials,
         theme::scope as s,
         Stoat,
@@ -2783,6 +2814,7 @@ mod tests {
     use std::path::PathBuf;
     use stoat_action::{ExtendToLineEnd, MoveDown, MoveRight, OpenFile, OpenFileFinder};
     use stoat_config::{LineNumbers, WrapMode};
+    use stoat_language::structural_diff;
     use stoat_text::{Bias, Point, SelectionGoal};
 
     /// Overlapping spans of mixed severity, so the sweep has to keep the worst
@@ -3488,7 +3520,7 @@ mod tests {
         let theme = crate::theme::Theme::empty();
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, (DiffHunkStatus::Modified, false));
+        diff_marks.insert(0u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
         let area = Rect::new(0, 0, 12, 2);
         let mut buf = Buffer::empty(area);
 
@@ -3534,7 +3566,7 @@ mod tests {
         let theme = crate::theme::Theme::empty();
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, (DiffHunkStatus::Modified, false));
+        diff_marks.insert(0u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
 
         let width = super::draw_fallback_line_numbers(
@@ -3572,8 +3604,8 @@ mod tests {
 
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, (DiffHunkStatus::Modified, false));
-        diff_marks.insert(1u32, (DiffHunkStatus::Modified, false));
+        diff_marks.insert(0u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
+        diff_marks.insert(1u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
         let area = Rect::new(0, 0, 12, 2);
         let mut buf = Buffer::empty(area);
 
@@ -4895,27 +4927,25 @@ mod tests {
         );
     }
 
-    /// A staged mark is a change the index holds with no hunk over it. Its row
-    /// takes the change glyph in its kind's color and the staged glyph.
-    #[test]
-    fn gutter_marks_a_staged_change_with_no_hunk() {
+    /// A harness with `text` open from a directory no repo holds, so no diff
+    /// job replaces a map that [`install_diff_map`] puts in place.
+    fn open_outside_a_repo(text: &str) -> crate::test_harness::TestHarness {
         let mut h = Stoat::test();
-        let root = PathBuf::from("/staged-mark");
+        let root = PathBuf::from("/no-repo");
         let path = root.join("a.txt");
-        h.fake_fs().insert_file(&path, b"a\nb\nc");
+        h.fake_fs().insert_file(&path, text.as_bytes());
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
+        h
+    }
 
-        let mut dm = DiffMap::from_hunks([], Some(String::from("a\nb\nc").into()));
-        dm.set_staged_marks(vec![StagedMark {
-            status: DiffHunkStatus::Modified,
-            base_lines: 1..2,
-        }]);
-        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+    /// Install `dm` as the focused buffer's diff map.
+    fn install_diff_map(stoat: &mut Stoat, dm: DiffMap) {
+        let buffer_id = action_handlers::focused_editor_mut(stoat)
             .expect("focused editor")
             .buffer_id;
-        h.stoat
+        stoat
             .active_workspace()
             .buffers
             .get(buffer_id)
@@ -4923,6 +4953,31 @@ mod tests {
             .write()
             .expect("poisoned")
             .diff_map = Some(dm);
+    }
+
+    /// A range review's map of `text` against `base`, where every change reads
+    /// approved except the one on row 3.
+    fn approved_map(base: &str, text: &str) -> DiffMap {
+        DiffMap::from_structural_changes_staged(
+            structural_diff::diff(base, text),
+            base.to_string().into(),
+            text,
+            &std::iter::once(3..4).collect::<Vec<_>>(),
+        )
+        .with_mark_kind(MarkKind::Approved)
+    }
+
+    /// A staged mark is a change the index holds with no hunk over it. Its row
+    /// takes the change glyph in its kind's color and the staged glyph.
+    #[test]
+    fn gutter_marks_a_staged_change_with_no_hunk() {
+        let mut h = open_outside_a_repo("a\nb\nc");
+        let mut dm = DiffMap::from_hunks([], Some(String::from("a\nb\nc").into()));
+        dm.set_staged_marks(vec![StagedMark {
+            status: DiffHunkStatus::Modified,
+            base_lines: 1..2,
+        }]);
+        install_diff_map(&mut h.stoat, dm);
 
         let theme = h.stoat.theme.clone();
         let color = |scope: &str| theme.get(scope).fg.expect("the theme sets it");
@@ -4946,35 +5001,46 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rich_gutter_change_bar_by_status_staged_bar_by_state() {
-        use crate::diff_map::DiffHunkStatus;
-        let folded = [(1u32, 1u16), (2, 1), (3, 1)];
-        let diff_colors = super::DiffMarkColors {
+    /// Mark colors with a different value per field, so a bar's color names
+    /// the field it took.
+    fn distinct_mark_colors() -> super::DiffMarkColors {
+        super::DiffMarkColors {
             added: [10, 20, 30],
             modified: [40, 50, 60],
             moved: [70, 80, 90],
             deleted: [100, 110, 120],
             staged: [1, 2, 3],
             unstaged: [4, 5, 6],
-        };
-        let severity = super::SeverityColors {
+            approved: [7, 8, 9],
+            unapproved: [11, 12, 13],
+        }
+    }
+
+    /// Severity colors for a gutter test with no diagnostic in it.
+    fn no_severity() -> super::SeverityColors {
+        super::SeverityColors {
             error: [0, 0, 0],
             warning: [0, 0, 0],
             info: [0, 0, 0],
             hint: [0, 0, 0],
-        };
+        }
+    }
+
+    #[test]
+    fn rich_gutter_change_bar_by_status_staged_bar_by_state() {
+        use crate::diff_map::DiffHunkStatus;
+        let folded = [(1u32, 1u16), (2, 1), (3, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0, (DiffHunkStatus::Modified, false));
-        diff_marks.insert(1, (DiffHunkStatus::Modified, true));
-        diff_marks.insert(2, (DiffHunkStatus::Deleted, false));
+        diff_marks.insert(0, (DiffHunkStatus::Modified, MarkState::Unstaged));
+        diff_marks.insert(1, (DiffHunkStatus::Modified, MarkState::Staged));
+        diff_marks.insert(2, (DiffHunkStatus::Deleted, MarkState::Unstaged));
 
         let lines = super::gutter_component_lines(
             &folded,
             &RowSeverity::default(),
             &diff_marks,
-            &diff_colors,
-            &severity,
+            &distinct_mark_colors(),
+            &no_severity(),
             None,
         );
 
@@ -4996,6 +5062,118 @@ mod tests {
             "a staged row's staged bar takes diff.staged",
         );
         assert!(git(2).seam, "a deletion is a seam mark");
+    }
+
+    /// Under a range review the map reads approvals, so an approved row's state
+    /// bar takes the approved color and an unapproved row's the unapproved one.
+    #[test]
+    fn rich_gutter_state_bar_takes_the_approval_colors_under_a_review() {
+        let dm = approved_map("a\nb\nc\nd\n", "a\nB\nc\nD\n");
+        let folded: Vec<(u32, u16)> = (1..=4).map(|number| (number, 1)).collect();
+        let marks = (0..4)
+            .filter_map(|row| dm.gutter_mark_for_line(row).map(|mark| (row, mark)))
+            .collect();
+
+        let lines = super::gutter_component_lines(
+            &folded,
+            &RowSeverity::default(),
+            &marks,
+            &distinct_mark_colors(),
+            &no_severity(),
+            None,
+        );
+
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.git.map(|git| git.staged_color))
+                .collect::<Vec<_>>(),
+            [None, Some([7, 8, 9]), None, Some([11, 12, 13])],
+            "row 1 reads approved and row 3 unapproved",
+        );
+    }
+
+    /// Under a range review the fallback gutter's state glyph takes the
+    /// approval scopes, which the shipped theme colors apart from the staged
+    /// scopes.
+    #[test]
+    fn fallback_gutter_paints_the_approval_scopes_under_a_review() {
+        let text = "a\nB\nc\nD\n";
+        let mut h = open_outside_a_repo(text);
+        install_diff_map(&mut h.stoat, approved_map("a\nb\nc\nd\n", text));
+
+        let theme = h.stoat.theme.clone();
+        let color = |scope: &str| theme.get(scope).fg.expect("the theme sets it");
+        let cell = |state| ("▎".to_string(), color(state), color(s::DIFF_MODIFIED));
+        let cells = gutter_mark_cells(&mut h.stoat, 4);
+        assert_eq!(
+            [cells[1].clone(), cells[3].clone()],
+            [cell(s::DIFF_APPROVED), cell(s::DIFF_UNAPPROVED)],
+            "row 1 reads approved and row 3 unapproved: {cells:?}",
+        );
+    }
+
+    /// A theme that styles no approval scope paints approvals in its staged
+    /// scopes, so its rows keep two state colors under a review.
+    #[test]
+    fn approval_scopes_take_the_staged_scopes_in_a_theme_without_them() {
+        let bare = {
+            let (config, _) = stoat_config::parse(r##"theme t { diff.staged.fg = "#00ffff"; }"##);
+            crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
+                .expect("theme loads")
+        };
+        let shipped = Stoat::test().stoat.theme.clone();
+        let scopes = |theme: &crate::theme::Theme| {
+            [
+                MarkState::Staged,
+                MarkState::Unstaged,
+                MarkState::Approved,
+                MarkState::Unapproved,
+            ]
+            .map(|state| super::mark_state_scope(theme, state))
+        };
+
+        assert_eq!(
+            [scopes(&bare), scopes(&shipped)],
+            [
+                [
+                    s::DIFF_STAGED,
+                    s::DIFF_UNSTAGED,
+                    s::DIFF_STAGED,
+                    s::DIFF_UNSTAGED
+                ],
+                [
+                    s::DIFF_STAGED,
+                    s::DIFF_UNSTAGED,
+                    s::DIFF_APPROVED,
+                    s::DIFF_UNAPPROVED
+                ],
+            ],
+        );
+    }
+
+    /// The gutter's mark colors carry the shipped theme's approval colors, and
+    /// an unfocused pane dims them with the rest.
+    #[test]
+    fn mark_colors_carry_and_dim_the_approval_colors() {
+        let theme = Stoat::test().stoat.theme.clone();
+        let rgb =
+            |scope: &str| super::color_to_rgb(theme.get(scope).fg.expect("the theme sets it"));
+        let colors = super::DiffMarkColors::resolve(&theme);
+        let dimmed = colors.dim([0, 0, 0], 0.5);
+        let states = [MarkState::Approved, MarkState::Unapproved];
+        let half = |scope| super::dim_rgb(rgb(scope), [0, 0, 0], 0.5);
+
+        assert_eq!(
+            [
+                states.map(|state| colors.for_state(state)),
+                states.map(|state| dimmed.for_state(state)),
+            ],
+            [
+                [rgb(s::DIFF_APPROVED), rgb(s::DIFF_UNAPPROVED)],
+                [half(s::DIFF_APPROVED), half(s::DIFF_UNAPPROVED)],
+            ],
+        );
     }
 
     #[test]

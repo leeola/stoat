@@ -233,6 +233,8 @@ pub struct LiveHunks<'a> {
     /// The map's staged marks as the buffer rows they paint on now, sorted by
     /// row, each with its mark's status.
     staged: Vec<(Range<u32>, DiffHunkStatus)>,
+    /// What the hunks' staged state means in the map.
+    kind: MarkKind,
 }
 
 /// One hunk as it sits in the buffer now.
@@ -260,9 +262,13 @@ impl<'a> LiveHunks<'a> {
     /// A row in the gap between two hunks that only whitespace-only rows
     /// separate takes the mark and the staged flag of the hunk above it, so the
     /// two read as one change.
-    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+    ///
+    /// The map's [`MarkKind`] decides whether the state is a git state or an
+    /// approval state.
+    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, MarkState)> {
         self.hunk_mark_for_line(line)
             .or_else(|| staged_row_mark(&self.staged, line))
+            .map(|(status, marked)| (status, MarkState::of(self.kind, marked)))
     }
 
     /// The mark a hunk paints at buffer `line`, before the staged marks.
@@ -557,6 +563,34 @@ pub enum MarkKind {
     Approved,
 }
 
+/// The staged state of one row, as a state bar paints it.
+///
+/// The map's [`MarkKind`] and the row's staged flag pick one of four states. A
+/// painter then picks one color per state and never reads the kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MarkState {
+    /// The index, or the commit under review, holds the row's change.
+    Staged,
+    /// The row's change is not in the index or the commit under review.
+    Unstaged,
+    /// A range review approved the row.
+    Approved,
+    /// A range review did not approve the row.
+    Unapproved,
+}
+
+impl MarkState {
+    /// The state of a row in a map of `kind`, staged when `marked`.
+    pub(crate) fn of(kind: MarkKind, marked: bool) -> Self {
+        match (kind, marked) {
+            (MarkKind::Staged, true) => Self::Staged,
+            (MarkKind::Staged, false) => Self::Unstaged,
+            (MarkKind::Approved, true) => Self::Approved,
+            (MarkKind::Approved, false) => Self::Unapproved,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
@@ -628,7 +662,10 @@ struct LiveRowsCache {
 impl LiveRowsCache {
     /// The answer [`DiffMap::live_hunks`] gives for this resolve, where `hunk`
     /// names each hunk by its index in tree order.
-    fn answer<'a>(&self, hunk: impl Fn(usize) -> &'a DiffHunk) -> LiveHunks<'a> {
+    ///
+    /// `kind` comes from the map on each call. Clones of one map share this
+    /// cache, and [`DiffMap::with_mark_kind`] sets the kind on one clone alone.
+    fn answer<'a>(&self, hunk: impl Fn(usize) -> &'a DiffHunk, kind: MarkKind) -> LiveHunks<'a> {
         let mut change = 0;
         let hunks = self
             .order
@@ -650,6 +687,7 @@ impl LiveRowsCache {
         LiveHunks {
             hunks,
             staged: self.staged.clone(),
+            kind,
         }
     }
 }
@@ -889,7 +927,7 @@ impl DiffMap {
             .filter(|held| held.buffer_version == buffer_version)
         {
             let hunks: Vec<&DiffHunk> = self.hunks.iter().collect();
-            return held.answer(|i| hunks[i]);
+            return held.answer(|i| hunks[i], self.mark_kind);
         }
 
         // A hunk built before anchoring, or by a caller that never anchored,
@@ -940,7 +978,7 @@ impl DiffMap {
             joined,
             staged,
         });
-        held.answer(|i| live[i].0)
+        held.answer(|i| live[i].0, self.mark_kind)
     }
 
     pub fn version(&self) -> usize {
@@ -1004,17 +1042,19 @@ impl DiffMap {
     ///
     /// A row inside a hunk's `buffer_line_range` reports that hunk's status. A
     /// row a [`DiffHunkStatus::Deleted`] hunk anchors -- its removed content
-    /// rendered just above -- reports `Deleted`, the deletion seam. The bool is
-    /// the row's git-index staged state for a contained row, or the whole
-    /// hunk's for a deletion or move seam. A row no hunk marks answers the
-    /// staged mark on it, if any.
+    /// rendered just above -- reports `Deleted`, the deletion seam. The state
+    /// is the row's staged state for a contained row, or the whole hunk's for a
+    /// deletion or move seam. A row no hunk marks answers the staged mark on
+    /// it, if any. The map's [`MarkKind`] decides whether the state is a git
+    /// state or an approval state.
     ///
     /// Reports whole hunk ranges. The live counterpart
     /// [`LiveHunks::gutter_mark_for_line`] narrows a refined hunk to the rows
     /// its runs name, which is what the render paths read.
-    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, MarkState)> {
         self.hunk_mark_for_line(line)
             .or_else(|| staged_row_mark(&self.staged_rows, line))
+            .map(|(status, marked)| (status, MarkState::of(self.mark_kind, marked)))
     }
 
     /// The mark a hunk paints at buffer `line`, before the staged marks.
@@ -1039,14 +1079,14 @@ impl DiffMap {
         None
     }
 
-    /// The git-index staged state of the hunk containing `line`, or `None`
-    /// when no hunk or staged mark covers it.
+    /// The staged state of the hunk that contains `line`, or `None` when no
+    /// hunk or staged mark covers it.
     ///
-    /// `Some(true)` marks a hunk already applied to the index, `Some(false)`
-    /// an unstaged one. A row no hunk covers answers `Some(true)` when a staged
-    /// mark covers it. Deletions occupy no buffer rows, so no line resolves to
-    /// one here.
-    pub fn staged_for_line(&self, line: u32) -> Option<bool> {
+    /// The map's [`MarkKind`] decides whether the state is a git state or an
+    /// approval state. A row no hunk covers reads staged when a staged mark
+    /// covers it. Deletions occupy no buffer rows, so no line resolves to one
+    /// here.
+    pub fn staged_for_line(&self, line: u32) -> Option<MarkState> {
         let target = HunkKeyRef(Some(&line));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
         cursor.seek(&target, Bias::Right);
@@ -1063,6 +1103,7 @@ impl DiffMap {
                     .last()
                     .and_then(|(rows, _)| rows.contains(&line).then_some(true))
             })
+            .map(|marked| MarkState::of(self.mark_kind, marked))
     }
 
     /// Count hunks by staged state as `(staged, unstaged)` for a statusline.
@@ -1460,13 +1501,18 @@ impl DiffMap {
         self.base_changes.clone()
     }
 
-    /// The git-index staged state of the hunk that removed content at base
-    /// `line`, or `None` when no hunk did.
+    /// The staged state of the hunk that removed content at base `line`, or
+    /// `None` when no hunk did.
     ///
     /// Serves the diff view's removed left-column rows, whose base lines have no
     /// buffer counterpart for [`Self::staged_for_line`] to resolve.
-    pub(crate) fn base_line_staged(&self, line: u32) -> Option<bool> {
-        self.base_staged.get(&line).map(|mark| mark.staged)
+    ///
+    /// The map's [`MarkKind`] decides whether the state is a git state or an
+    /// approval state.
+    pub(crate) fn base_line_staged(&self, line: u32) -> Option<MarkState> {
+        self.base_staged
+            .get(&line)
+            .map(|mark| MarkState::of(self.mark_kind, mark.staged))
     }
 
     /// Whether the hunk that replaced base `line` names the line's changed
@@ -1478,13 +1524,17 @@ impl DiffMap {
         self.base_staged.get(&line).is_some_and(|mark| mark.refined)
     }
 
-    /// The status of the staged mark at base `line`, or `None` when no mark
-    /// covers it.
+    /// The status of the staged mark at base `line` and the staged state it
+    /// paints, or `None` when no mark covers it.
     ///
     /// What the diff view's left column marks at `line` beyond the removed rows
     /// [`Self::base_line_staged`] covers. A deletion's empty mark answers at
-    /// the line it sits at, the line that followed the removed text.
-    pub(crate) fn staged_mark_at_base_line(&self, line: u32) -> Option<DiffHunkStatus> {
+    /// the line it sits at, the line that followed the removed text. A mark
+    /// reads staged under the map's [`MarkKind`], as a staged gutter row does.
+    pub(crate) fn staged_mark_at_base_line(
+        &self,
+        line: u32,
+    ) -> Option<(DiffHunkStatus, MarkState)> {
         let end = self
             .staged_marks
             .partition_point(|mark| mark.base_lines.start <= line);
@@ -1496,7 +1546,7 @@ impl DiffMap {
                 mark.base_lines.contains(&line)
                     || (mark.base_lines.is_empty() && mark.base_lines.start == line)
             })
-            .map(|mark| mark.status)
+            .map(|mark| (mark.status, MarkState::of(self.mark_kind, true)))
     }
 
     pub fn total_deleted_lines(&self) -> u32 {
@@ -2554,8 +2604,8 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, ProseChange, StagedMark,
-        TokenDetail,
+        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, MarkState,
+        ProseChange, StagedMark, TokenDetail,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -2786,7 +2836,7 @@ mod tests {
         let live = dm.live_hunks(&multi.snapshot());
         assert_eq!(
             live.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Added, false)),
+            Some((DiffHunkStatus::Added, MarkState::Unstaged)),
             "the added last line is marked with no newline after it",
         );
         assert_eq!(
@@ -2835,12 +2885,12 @@ mod tests {
         );
         assert_eq!(
             live.gutter_mark_for_line(3),
-            Some((DiffHunkStatus::Deleted, false)),
+            Some((DiffHunkStatus::Deleted, MarkState::Unstaged)),
             "and the deletion seam keeps its mark",
         );
         assert_eq!(
             live.gutter_mark_for_line(5),
-            Some((DiffHunkStatus::Moved, false)),
+            Some((DiffHunkStatus::Moved, MarkState::Unstaged)),
             "as does the move seam",
         );
     }
@@ -2874,7 +2924,7 @@ mod tests {
         );
         assert_eq!(
             live.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Deleted, false)),
+            Some((DiffHunkStatus::Deleted, MarkState::Unstaged)),
             "and paints the deletion mark there",
         );
     }
@@ -2949,7 +2999,7 @@ mod tests {
         dm: &DiffMap,
         text: &str,
         rows: std::ops::Range<u32>,
-    ) -> Vec<Option<(DiffHunkStatus, bool)>> {
+    ) -> Vec<Option<(DiffHunkStatus, MarkState)>> {
         let multi = buffer_holding(text);
         let snapshot = multi.snapshot();
         let live = dm.live_hunks(&snapshot);
@@ -2983,9 +3033,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 None,
-                Some(DiffHunkStatus::Modified),
-                Some(DiffHunkStatus::Modified),
-                Some(DiffHunkStatus::Deleted),
+                Some((DiffHunkStatus::Modified, MarkState::Staged)),
+                Some((DiffHunkStatus::Modified, MarkState::Staged)),
+                Some((DiffHunkStatus::Deleted, MarkState::Staged)),
                 None,
             ],
             "marks set out of order answer by base line",
@@ -3031,7 +3081,7 @@ mod tests {
         );
         let text = "b0\nn1\nn2\nb1\nb2\nb3\nb4\n";
 
-        let unstaged_add = Some((DiffHunkStatus::Added, false));
+        let unstaged_add = Some((DiffHunkStatus::Added, MarkState::Unstaged));
         assert_eq!(
             staged_gutter(&dm, text, 0..7),
             [
@@ -3040,7 +3090,7 @@ mod tests {
                 unstaged_add,
                 None,
                 None,
-                Some((DiffHunkStatus::Modified, true)),
+                Some((DiffHunkStatus::Modified, MarkState::Staged)),
                 None,
             ],
             "the mark lands two rows below its base line",
@@ -3049,7 +3099,15 @@ mod tests {
             (0..7)
                 .map(|row| dm.staged_for_line(row))
                 .collect::<Vec<_>>(),
-            [None, Some(false), Some(false), None, None, Some(true), None],
+            [
+                None,
+                Some(MarkState::Unstaged),
+                Some(MarkState::Unstaged),
+                None,
+                None,
+                Some(MarkState::Staged),
+                None
+            ],
             "and reads staged there",
         );
     }
@@ -3068,8 +3126,8 @@ mod tests {
             staged_gutter(&dm, text, 0..4),
             [
                 None,
-                Some((DiffHunkStatus::Modified, false)),
-                Some((DiffHunkStatus::Modified, true)),
+                Some((DiffHunkStatus::Modified, MarkState::Unstaged)),
+                Some((DiffHunkStatus::Modified, MarkState::Staged)),
                 None,
             ],
             "the hunk holds row 1 and the mark keeps row 2",
@@ -3082,6 +3140,34 @@ mod tests {
         );
     }
 
+    /// A second read of one buffer version comes from the rows the first read
+    /// cached, and it keeps the map's mark kind as the first read does.
+    #[test]
+    fn a_cached_resolve_keeps_the_mark_kind() {
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\n",
+            vec![modified_hunk(1..2, 3..5)],
+            vec![mark(DiffHunkStatus::Modified, 1..3)],
+        )
+        .with_mark_kind(MarkKind::Approved);
+        let multi = buffer_holding("b0\nX1\nb2\nb3\n");
+        let snapshot = multi.snapshot();
+        let read = || {
+            let live = dm.live_hunks(&snapshot);
+            [1, 2].map(|row| live.gutter_mark_for_line(row))
+        };
+        let approval = [
+            Some((DiffHunkStatus::Modified, MarkState::Unapproved)),
+            Some((DiffHunkStatus::Modified, MarkState::Approved)),
+        ];
+
+        assert_eq!(
+            [read(), read()],
+            [approval, approval],
+            "the cached read answers as the fresh one",
+        );
+    }
+
     /// A staged deletion took its lines out of the index, so it covers no row
     /// and marks the row after the removed text.
     #[test]
@@ -3090,7 +3176,12 @@ mod tests {
         let dm = staged_map(text, Vec::new(), vec![mark(DiffHunkStatus::Deleted, 2..2)]);
         assert_eq!(
             staged_gutter(&dm, text, 0..4),
-            [None, None, Some((DiffHunkStatus::Deleted, true)), None],
+            [
+                None,
+                None,
+                Some((DiffHunkStatus::Deleted, MarkState::Staged)),
+                None
+            ],
             "the deletion marks row 2",
         );
         assert_eq!(dm.staged_for_line(2), None, "and covers no row to stage");
@@ -3249,11 +3340,11 @@ mod tests {
 
         assert_eq!(
             dm.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Added, true)),
+            Some((DiffHunkStatus::Added, MarkState::Staged)),
         );
         assert_eq!(
             dm.gutter_mark_for_line(2),
-            Some((DiffHunkStatus::Added, true)),
+            Some((DiffHunkStatus::Added, MarkState::Staged)),
         );
         assert_eq!(
             dm.gutter_mark_for_line(3),
@@ -3262,11 +3353,11 @@ mod tests {
         );
         assert_eq!(
             dm.gutter_mark_for_line(5),
-            Some((DiffHunkStatus::Modified, false)),
+            Some((DiffHunkStatus::Modified, MarkState::Unstaged)),
         );
         assert_eq!(
             dm.gutter_mark_for_line(9),
-            Some((DiffHunkStatus::Deleted, true)),
+            Some((DiffHunkStatus::Deleted, MarkState::Staged)),
             "the deletion seam anchors on the row below the removed lines",
         );
         assert_eq!(dm.gutter_mark_for_line(0), None);
@@ -3290,7 +3381,7 @@ mod tests {
 
         assert_eq!(
             dm.gutter_mark_for_line(3),
-            Some((DiffHunkStatus::Moved, false)),
+            Some((DiffHunkStatus::Moved, MarkState::Unstaged)),
             "the moved-away seam anchors a Moved gutter mark",
         );
         assert_eq!(dm.gutter_mark_for_line(2), None);
@@ -4711,12 +4802,12 @@ mod tests {
         );
         assert_eq!(
             dm.staged_for_line(1),
-            Some(true),
+            Some(MarkState::Staged),
             "line 1 matches the index, so it reads staged"
         );
         assert_eq!(
             dm.staged_for_line(2),
-            Some(false),
+            Some(MarkState::Unstaged),
             "line 2 still differs from the index, so it reads unstaged"
         );
     }
@@ -4779,16 +4870,16 @@ mod tests {
         let dm = DiffMap::from_hunks([hunk], None);
         assert_eq!(
             dm.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Modified, true)),
+            Some((DiffHunkStatus::Modified, MarkState::Staged)),
             "row one is staged within the hunk"
         );
         assert_eq!(
             dm.gutter_mark_for_line(2),
-            Some((DiffHunkStatus::Modified, false)),
+            Some((DiffHunkStatus::Modified, MarkState::Unstaged)),
             "row two is still unstaged"
         );
-        assert_eq!(dm.staged_for_line(1), Some(true));
-        assert_eq!(dm.staged_for_line(2), Some(false));
+        assert_eq!(dm.staged_for_line(1), Some(MarkState::Staged));
+        assert_eq!(dm.staged_for_line(2), Some(MarkState::Unstaged));
         assert_eq!(
             dm.staged_counts(),
             (0, 1),

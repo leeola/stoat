@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::Stoat,
-    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, ProseChange},
+    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
         BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot, RowHighlightCursor,
@@ -306,7 +306,7 @@ pub(crate) enum DiffRowKind {
 pub(crate) struct DiffRowState {
     pub(crate) kind: DiffRowKind,
     pub(crate) status: DiffStatus,
-    pub(crate) staged: Option<bool>,
+    pub(crate) staged: Option<MarkState>,
     /// Whether a base row sits beside this one in the left column.
     ///
     /// A modified hunk pairs base row i with live row i as far as its base text
@@ -919,7 +919,7 @@ pub(crate) fn paint_diff_rows(
                         theme.get(s::DIFF_MOVED).add_modifier(Modifier::ITALIC),
                     );
                 }
-                if !continuation && let Some(staged) = staged {
+                if !continuation && let Some(state) = staged {
                     let change_scope = match status {
                         DiffStatus::Added => s::DIFF_ADDED,
                         DiffStatus::Modified => s::DIFF_MODIFIED,
@@ -933,7 +933,7 @@ pub(crate) fn paint_diff_rows(
                         status_right_x,
                         y,
                         change_scope,
-                        staged,
+                        state,
                         false,
                         theme,
                     );
@@ -975,7 +975,7 @@ pub(crate) fn paint_diff_rows(
                             line_base + 1,
                             dim_style,
                         );
-                        if let Some(status) = snapshot
+                        if let Some((status, state)) = snapshot
                             .diff_map()
                             .and_then(|dm| dm.staged_mark_at_base_line(line_base))
                         {
@@ -986,7 +986,7 @@ pub(crate) fn paint_diff_rows(
                                 status_left_x,
                                 y,
                                 staged_mark_scope(status),
-                                true,
+                                state,
                                 status == DiffHunkStatus::Deleted,
                                 theme,
                             );
@@ -1692,16 +1692,16 @@ fn base_token_spans(
 /// Paint the diff view's two-cell status column for a hunk row.
 ///
 /// The first cell carries the change-kind bar in `change_scope`. The second
-/// carries a staged-state bar scoped `diff.staged` when `staged` else
-/// `diff.unstaged`. Both use the `▎` bar, mirroring the editor gutter's two
-/// bars, except that a `seam` change cell takes the gutter's `▔` deletion
-/// mark. The staged cell is skipped when it falls outside the buffer.
+/// carries a state bar in the scope [`editor::mark_state_scope`] gives
+/// `state`. Both use the `▎` bar, as the editor gutter's two bars do, except
+/// that a `seam` change cell takes the gutter's `▔` deletion mark. A state
+/// cell outside the buffer gets no paint.
 fn paint_status_bars(
     buf: &mut Buffer,
     x: u16,
     y: u16,
     change_scope: &str,
-    staged: bool,
+    state: MarkState,
     seam: bool,
     theme: &crate::theme::Theme,
 ) {
@@ -1713,14 +1713,9 @@ fn paint_status_bars(
         .set_char(change_mark)
         .set_style(theme.get(change_scope));
     if x + 1 < buf.area.x + buf.area.width {
-        let staged_scope = if staged {
-            s::DIFF_STAGED
-        } else {
-            s::DIFF_UNSTAGED
-        };
         buf[(x + 1, y)]
             .set_char('▎')
-            .set_style(theme.get(staged_scope));
+            .set_style(theme.get(editor::mark_state_scope(theme, state)));
     }
 }
 
@@ -1896,7 +1891,7 @@ fn paint_base_side(
     // The row is there for the removal, so the removal's status wins over a
     // staged mark on the same base line.
     match staged {
-        Some(staged) => {
+        Some(state) => {
             let change_scope = if changes
                 .iter()
                 .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
@@ -1912,13 +1907,13 @@ fn paint_base_side(
                 status_x,
                 y,
                 change_scope,
-                staged,
+                state,
                 false,
                 theme,
             );
         },
         None => {
-            if let Some(status) = snapshot
+            if let Some((status, state)) = snapshot
                 .diff_map()
                 .and_then(|dm| dm.staged_mark_at_base_line(base_line))
             {
@@ -1929,7 +1924,7 @@ fn paint_base_side(
                     status_x,
                     y,
                     staged_mark_scope(status),
-                    true,
+                    state,
                     status == DiffHunkStatus::Deleted,
                     theme,
                 );
@@ -2315,7 +2310,7 @@ struct DiffRichGutter<'a> {
 ///
 /// The per-row change bar color is read from the row's change scope, so the
 /// resolver validates every change scope is RGB up front and this stores only
-/// the dim, background, and staged/unstaged colors used directly. `dim_amount`
+/// the dim, background, and four mark-state colors used directly. `dim_amount`
 /// fades every bar toward the background on a pooled unfocused page.
 #[derive(Clone, Copy)]
 struct DiffRichColors {
@@ -2323,6 +2318,8 @@ struct DiffRichColors {
     bg: [u8; 3],
     staged: [u8; 3],
     unstaged: [u8; 3],
+    approved: [u8; 3],
+    unapproved: [u8; 3],
     dim_amount: f32,
 }
 
@@ -2336,6 +2333,9 @@ impl DiffRichColors {
 /// Extract every diff gutter color as RGB, or `None` when any is missing or not
 /// an RGB color, which disables rich mode for the frame so the ASCII and rich
 /// paths never mix.
+///
+/// An approval scope the theme leaves unstyled takes its staged counterpart
+/// through [`editor::mark_state_scope`], so it never disables rich mode alone.
 fn resolve_diff_rich_colors(
     theme: &crate::theme::Theme,
     fallback_style: Style,
@@ -2361,6 +2361,24 @@ fn resolve_diff_rich_colors(
         bg,
         staged: dim_rgb(style_rgb(theme.get(s::DIFF_STAGED).fg)?, bg, dim_amount),
         unstaged: dim_rgb(style_rgb(theme.get(s::DIFF_UNSTAGED).fg)?, bg, dim_amount),
+        approved: dim_rgb(
+            style_rgb(
+                theme
+                    .get(editor::mark_state_scope(theme, MarkState::Approved))
+                    .fg,
+            )?,
+            bg,
+            dim_amount,
+        ),
+        unapproved: dim_rgb(
+            style_rgb(
+                theme
+                    .get(editor::mark_state_scope(theme, MarkState::Unapproved))
+                    .fg,
+            )?,
+            bg,
+            dim_amount,
+        ),
         dim_amount,
     })
 }
@@ -2414,7 +2432,7 @@ fn draw_diff_status(
     status_x: u16,
     y: u16,
     change_scope: &str,
-    staged: bool,
+    state: MarkState,
     seam: bool,
     theme: &crate::theme::Theme,
 ) {
@@ -2423,10 +2441,11 @@ fn draw_diff_status(
             let change = rg
                 .colors
                 .faded(style_rgb(theme.get(change_scope).fg).unwrap_or(rg.colors.dim));
-            let staged_color = if staged {
-                rg.colors.staged
-            } else {
-                rg.colors.unstaged
+            let staged_color = match state {
+                MarkState::Staged => rg.colors.staged,
+                MarkState::Unstaged => rg.colors.unstaged,
+                MarkState::Approved => rg.colors.approved,
+                MarkState::Unapproved => rg.colors.unapproved,
             };
             let x0 = ((status_x - inner.x) * 16) as i16;
             let y0 = ((y - inner.y) * 16) as i16;
@@ -2447,7 +2466,7 @@ fn draw_diff_status(
             }
             .render(inner, buf, &mut *rg.scene);
         },
-        None => paint_status_bars(buf, status_x, y, change_scope, staged, seam, theme),
+        None => paint_status_bars(buf, status_x, y, change_scope, state, seam, theme),
     }
 }
 
@@ -2546,7 +2565,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::{BufferId, TextBuffer},
-        diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
+        diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, TokenDetail},
         display_map::InlayKind,
         render::paint::FAINT_CONTRAST_FLOOR,
         theme::{
@@ -2559,6 +2578,7 @@ mod tests {
     use stoat_language::structural_diff;
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::Bias;
+    use stoatty_protocol::command::{encode_bar, BarCommand};
 
     fn buffer_text(buf: &Buffer, y: u16) -> String {
         (buf.area.x..buf.area.x + buf.area.width)
@@ -3005,6 +3025,8 @@ mod tests {
             diff.moved.fg    = "#0000ff";
             diff.staged.fg   = "#00ffff";
             diff.unstaged.fg = "#ff00ff";
+            diff.approved.fg = "#ff8000";
+            diff.unapproved.fg = "#8000ff";
             ui.background.bg = "#282c34";
         }"##;
         let (config, _) = stoat_config::parse(src);
@@ -3187,6 +3209,75 @@ mod tests {
         );
     }
 
+    /// Under a range review both columns' state bars take the approval scopes,
+    /// in the ASCII cells and in the rich bars alike.
+    #[test]
+    fn diff_view_state_bars_take_the_approval_scopes_under_a_review() {
+        let (base, text) = ("a\nb\nc\nd\n", "a\nB\nc\nD\n");
+        let dm = DiffMap::from_structural_changes_staged(
+            structural_diff::diff(base, text),
+            Arc::new(base.to_string()),
+            text,
+            &std::iter::once(3..4).collect::<Vec<_>>(),
+        )
+        .with_mark_kind(MarkKind::Approved);
+        let mut editor = diff_editor_with_map(text, dm);
+
+        let cells = status_cells(&mut editor);
+        let row = |state| {
+            [
+                glyph("▎", s::DIFF_DELETED),
+                glyph("▎", state),
+                glyph("▎", s::DIFF_MODIFIED),
+                glyph("▎", state),
+            ]
+        };
+        assert_eq!(
+            [cells[1].clone(), cells[3].clone()],
+            [row(s::DIFF_APPROVED), row(s::DIFF_UNAPPROVED)],
+            "row 1 reads approved and row 3 unapproved: {cells:?}",
+        );
+
+        let area = Rect::new(0, 0, 120, 8);
+        let mut scene = ApcScene::new();
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut Buffer::empty(area),
+            true,
+            None,
+            None,
+            false,
+            Some(&mut scene),
+            true,
+            DiffDials::shipped(),
+        );
+        let columns = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let bytes = scene.buffer();
+        let bars = |row: u16, scope: &str| {
+            let color = style_rgb(rgb_diff_theme().get(scope).fg).expect("an rgb color");
+            [columns.status_left_x, columns.status_right_x].map(|x| {
+                let frame = encode_bar(&BarCommand {
+                    x: (x * 16 + 7) as i16,
+                    y: (row * 16) as i16,
+                    width: 5,
+                    height: 16,
+                    color,
+                });
+                bytes
+                    .windows(frame.len())
+                    .any(|window| window == frame.as_slice())
+            })
+        };
+        assert_eq!(
+            [bars(1, s::DIFF_APPROVED), bars(3, s::DIFF_UNAPPROVED)],
+            [[true, true], [true, true]],
+            "each column's rich state bar takes the approval color",
+        );
+    }
+
     /// A pure removal leaves the right column blank where its lines were. The
     /// first row of the run marks the gap with a tick, and no other row does.
     #[test]
@@ -3316,8 +3407,6 @@ mod tests {
 
     #[test]
     fn diff_view_rich_gutter_emits_bars_and_suppresses_ascii() {
-        use stoatty_protocol::command::{encode_bar, BarCommand};
-
         fn contains(haystack: &[u8], needle: &[u8]) -> bool {
             haystack.windows(needle.len()).any(|w| w == needle)
         }

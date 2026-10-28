@@ -797,6 +797,8 @@ mod tests {
             diff.moved.fg    = "#0000ff";
             diff.staged.fg   = "#00ffff";
             diff.unstaged.fg = "#ff00ff";
+            diff.approved.fg = "#ff8000";
+            diff.unapproved.fg = "#8000ff";
             ui.background.bg = "#282c34";
         }"##;
         let (config, _) = stoat_config::parse(src);

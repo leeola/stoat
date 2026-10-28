@@ -2260,7 +2260,9 @@ mod tests {
         action_handlers::{self, movement},
         app,
         buffer::BufferId,
-        diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, StagedMark},
+        diff_map::{
+            BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, MarkState, StagedMark,
+        },
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
         pane::View,
@@ -3937,7 +3939,7 @@ mod tests {
         let (mut h, buffer_id) = open_unstaged_change();
         assert_eq!(
             staged_on_row_one(&h, buffer_id),
-            Some(false),
+            Some(MarkState::Unstaged),
             "the change starts unstaged"
         );
 
@@ -3953,7 +3955,7 @@ mod tests {
 
         assert_eq!(
             staged_on_row_one(&h, buffer_id),
-            Some(true),
+            Some(MarkState::Staged),
             "the next drive reads the staged blob"
         );
     }
@@ -3966,7 +3968,7 @@ mod tests {
         let (mut h, buffer_id) = open_unstaged_change();
         assert_eq!(
             staged_on_row_one(&h, buffer_id),
-            Some(false),
+            Some(MarkState::Unstaged),
             "the change starts unstaged"
         );
 
@@ -3990,7 +3992,7 @@ mod tests {
         h.stoat.drive_background();
         assert_eq!(
             staged_on_row_one(&h, buffer_id),
-            Some(true),
+            Some(MarkState::Staged),
             "the diff the landing started reads the staged blob"
         );
     }
@@ -4047,7 +4049,7 @@ mod tests {
         let (mut h, buffer_id) = open_unstaged_change();
         assert_eq!(
             staged_on_row_one(&h, buffer_id),
-            Some(false),
+            Some(MarkState::Unstaged),
             "the change starts unstaged"
         );
 
@@ -4062,7 +4064,7 @@ mod tests {
         h.stoat.drive_background();
         assert_eq!(
             staged_on_row_one(&h, buffer_id),
-            Some(true),
+            Some(MarkState::Staged),
             "the job in flight at the .git write still paints"
         );
         assert!(
@@ -4091,8 +4093,8 @@ mod tests {
         (h, buffer_id)
     }
 
-    /// Whether the installed map marks row 1's change as staged.
-    fn staged_on_row_one(h: &TestHarness, buffer_id: BufferId) -> Option<bool> {
+    /// The staged state the installed map gives row 1's change.
+    fn staged_on_row_one(h: &TestHarness, buffer_id: BufferId) -> Option<MarkState> {
         let ws = h.stoat.active_workspace();
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let guard = buffer.read().expect("poisoned");
@@ -4431,7 +4433,7 @@ mod tests {
         );
         assert_eq!(
             dm.staged_mark_at_base_line(1),
-            Some(DiffHunkStatus::Modified),
+            Some((DiffHunkStatus::Modified, MarkState::Staged)),
             "b->B is a staged mark on base line 1",
         );
         assert_eq!(dm.staged_counts(), (1, 1), "the mark and the hunk");
