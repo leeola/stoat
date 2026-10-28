@@ -2190,7 +2190,7 @@ mod tests {
     }
 
     #[test]
-    fn palette_up_recalls_and_reexecutes_a_recorded_command() {
+    fn palette_ctrl_up_recalls_and_reexecutes_a_recorded_command() {
         let mut h = Stoat::test();
         let root = PathBuf::from("/hist");
         let sub = root.join("sub");
@@ -2203,11 +2203,11 @@ mod tests {
 
         h.stoat.active_workspace_mut().git_root = root;
         h.type_text(":");
-        h.type_keys("up enter");
+        h.type_keys("ctrl-up enter");
         assert_eq!(
             h.stoat.active_workspace().git_root,
             sub,
-            "Up recalls the recorded cd line and Enter re-runs it"
+            "Ctrl-Up recalls the recorded cd line and Enter re-runs it"
         );
     }
 
@@ -2222,7 +2222,7 @@ mod tests {
             InputHistory::from_entries(vec![format!("cd {}", sub.display()), "w".to_string()]);
 
         h.type_text(":sub");
-        h.type_keys("up enter");
+        h.type_keys("ctrl-up enter");
         assert_eq!(
             h.stoat.active_workspace().git_root,
             sub,
@@ -2237,7 +2237,7 @@ mod tests {
             InputHistory::from_entries(vec!["cd /alpha".to_string(), "cd /beta".to_string()]);
 
         h.type_text(":");
-        h.type_keys("up");
+        h.type_keys("ctrl-up");
         assert_eq!(
             palette_text(&h),
             "cd /beta",
@@ -2246,11 +2246,11 @@ mod tests {
 
         h.type_text("x");
         h.stoat.drive_background();
-        h.type_keys("up");
+        h.type_keys("ctrl-up");
         assert_eq!(
             palette_text(&h),
             "cd /betax",
-            "the edit ends the walk, so Up captures the new needle (which matches nothing)"
+            "the edit ends the walk, so Ctrl-Up captures the new needle (which matches nothing)"
         );
     }
 
@@ -2277,29 +2277,44 @@ mod tests {
     }
 
     #[test]
-    fn palette_arrows_recall_history_not_the_list() {
+    fn palette_arrows_move_the_list_not_history() {
         let mut h = Stoat::test();
         h.stoat.active_workspace_mut().palette_history =
             InputHistory::from_entries(vec!["w".to_string()]);
-        let place = |h: &TestHarness| {
-            (
-                h.stoat.command_palette.as_ref().expect("open").selected,
-                palette_text(h),
-            )
-        };
 
         h.type_text(":");
-        h.type_keys("up");
-        assert_eq!(
-            place(&h),
-            (0, "w".to_string()),
-            "Up recalls the history and leaves the list selection"
-        );
         h.type_keys("down");
         assert_eq!(
-            place(&h),
+            palette_place(&h),
+            (1, String::new()),
+            "Down moves the list selection down and recalls no history"
+        );
+        h.type_keys("up");
+        assert_eq!(
+            palette_place(&h),
             (0, String::new()),
-            "Down past the newest restores the typed text and leaves the list selection"
+            "Up moves the list selection up and recalls no history"
+        );
+    }
+
+    #[test]
+    fn palette_ctrl_arrows_recall_history_not_the_list() {
+        let mut h = Stoat::test();
+        h.stoat.active_workspace_mut().palette_history =
+            InputHistory::from_entries(vec!["w".to_string()]);
+
+        h.type_text(":");
+        h.type_keys("ctrl-up");
+        assert_eq!(
+            palette_place(&h),
+            (0, "w".to_string()),
+            "Ctrl-Up recalls the history and leaves the list selection"
+        );
+        h.type_keys("ctrl-down");
+        assert_eq!(
+            palette_place(&h),
+            (0, String::new()),
+            "Ctrl-Down past the newest restores the typed text and leaves the list selection"
         );
     }
 
@@ -2547,6 +2562,20 @@ mod tests {
             .expect("palette open")
             .input
             .text(h.stoat.active_workspace())
+    }
+
+    /// The palette's list selection and input text.
+    ///
+    /// One assertion on the pair shows if a key moved the list or recalled history.
+    fn palette_place(h: &TestHarness) -> (usize, String) {
+        (
+            h.stoat
+                .command_palette
+                .as_ref()
+                .expect("palette open")
+                .selected,
+            palette_text(h),
+        )
     }
 
     #[test]
@@ -3918,7 +3947,8 @@ mod tests {
         h.snapshot();
         assert_eq!(arg_picker(&h).core.picklist.selected, 0);
 
-        // Arg-picker navigation rides Ctrl-p/Ctrl-n. Bare Up/Down recall history.
+        // Arg-picker navigation rides Up/Down and Ctrl-p/Ctrl-n. Ctrl-Up and
+        // Ctrl-Down recall history.
         h.type_keys("ctrl-n");
         h.snapshot();
         assert_eq!(arg_picker(&h).core.picklist.selected, 1);

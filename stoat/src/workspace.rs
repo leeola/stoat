@@ -218,7 +218,8 @@ pub struct Workspace {
     /// what a reconnect is for.
     pub(crate) remote: Option<RemoteTarget>,
     /// Fish-style recall history of executed command-palette lines, walked by
-    /// bare Up/Down in the palette. Persisted per workspace.
+    /// Ctrl-Up/Ctrl-Down and Alt-Up/Alt-Down in the palette. Persisted per
+    /// workspace.
     pub(crate) palette_history: InputHistory,
     /// Fish-style recall history of submitted search patterns, walked by
     /// Alt-Up/Alt-Down in the `/` and `?` prompts. Persisted per workspace.

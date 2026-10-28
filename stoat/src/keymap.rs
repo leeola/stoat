@@ -2847,10 +2847,6 @@ mod tests {
                     ("workspace_picker", KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                         "SubmitPromptInput"
                     },
-                    // The palette walks its command history on the arrows and
-                    // keeps Ctrl-p and Ctrl-n for the list.
-                    ("palette", KeyCode::Up, KeyModifiers::NONE) => "PromptHistoryPrev",
-                    ("palette", KeyCode::Down, KeyModifiers::NONE) => "PromptHistoryNext",
                     _ => action,
                 };
                 let bound = keymap
@@ -2861,6 +2857,19 @@ mod tests {
                 assert_eq!(bound, action, "{modal} answers {code:?} with {action}");
             }
         }
+
+        // The arrows belong to the list, so the palette recalls its command
+        // history on Ctrl-Up and Ctrl-Down.
+        let palette = TestState::new()
+            .set("modal", StateValue::String("palette".into()))
+            .set("mode", StateValue::String("insert".into()));
+        let ctrl =
+            |code| action_names(keymap.lookup(&palette, &key_event(code, KeyModifiers::CONTROL)));
+        assert_eq!(
+            (ctrl(KeyCode::Up), ctrl(KeyCode::Down)),
+            (only("PromptHistoryPrev"), only("PromptHistoryNext")),
+            "the palette recalls its history on Ctrl-Up and Ctrl-Down"
+        );
 
         // Ctrl-d and Ctrl-u belong to the preview, so only the modals that
         // show one bind them. The workspace picker has none.

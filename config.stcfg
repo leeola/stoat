@@ -1316,8 +1316,10 @@ on key {
         BackTab -> CodeSearchModeToggle();
     }
     modal == palette && mode == insert {
-        Up -> PromptHistoryPrev();
-        Down -> PromptHistoryNext();
+        Up -> PickerPrev();
+        Down -> PickerNext();
+        Ctrl-Up -> PromptHistoryPrev();
+        Ctrl-Down -> PromptHistoryNext();
         Alt-Up -> PromptHistoryPrev();
         Alt-Down -> PromptHistoryNext();
         Ctrl-p -> PickerPrev();
