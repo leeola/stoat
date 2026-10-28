@@ -4,7 +4,7 @@ use crate::{
     badge::BadgeSource,
     buffer_registry::OpenOrigin,
     commit_list::PendingPreview,
-    commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
+    commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits, RangeFrom},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
     review_walk::{ReturnRef, ReviewWalk, WalkSpan},
@@ -55,17 +55,15 @@ pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
 /// Review `from` against `against` as a walk of one commit, the tip of `from`
 /// diffed against the merge base of the two.
 ///
-/// With no `against`, the branch `from` forked from stands in, as
-/// [`fork_branch`] picks it. The refs resolve on the git queue, behind every
-/// write queued before the press. A review walk or a rebase that holds HEAD
-/// at that turn refuses the review, as it refuses a checkout.
+/// With no `from`, the commit list opens over HEAD's history to pick both
+/// ends, as [`CommitPickerRole::PickRange`] describes. With no `against`, the
+/// branch `from` forked from stands in, as [`fork_branch`] picks it. The refs
+/// resolve on the git queue, behind every write queued before the press. A
+/// review walk or a rebase that holds HEAD at that turn refuses the review, as
+/// it refuses a checkout.
 pub(crate) fn review(stoat: &mut Stoat, from: Option<&str>, against: Option<&str>) -> UpdateEffect {
     let Some(from) = from else {
-        return review_error(
-            stoat,
-            "review needs a revision",
-            Some("usage: review <from> [against]".to_string()),
-        );
+        return open_range_picker(stoat);
     };
 
     let (from, against) = (from.to_string(), against.map(str::to_string));
@@ -86,6 +84,28 @@ pub(crate) fn review(stoat: &mut Stoat, from: Option<&str>, against: Option<&str
     });
     git_jobs::enqueue(stoat, job);
     UpdateEffect::Redraw
+}
+
+/// Open the commit list over HEAD's history to pick both ends of a range
+/// review, once the refusals a checkout runs let it.
+fn open_range_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(repo) = checkout_repo(stoat) else {
+        return UpdateEffect::Redraw;
+    };
+    let Some(workdir) = repo.workdir() else {
+        return UpdateEffect::Redraw;
+    };
+    let Some(head) = repo.resolve_rev("HEAD") else {
+        return review_error(stoat, "no commits on this branch", None);
+    };
+    open_commit_picker(
+        stoat,
+        &repo,
+        CommitPickerRole::PickRange,
+        workdir,
+        head,
+        None,
+    )
 }
 
 /// The tip of `from` and the span that reviews it against `against`, or the
@@ -341,11 +361,15 @@ fn open_commit_picker(
         let ref_sha = ref_sha.clone();
         move || {
             // A browser shows the real DAG, so a merged branch's commits are
-            // rows of their own. A base picker keeps the first-parent walk,
-            // because the review chain a pick seeds is defined over
-            // first-parent history.
+            // rows of their own. A range pick shows it too, since a commit on
+            // a merged branch is a `from` as well. A branch HEAD does not reach lists in
+            // neither, and a review of one names it. A base picker keeps the
+            // first-parent walk, because the review chain a pick seeds is
+            // defined over first-parent history.
             let commits = match role {
-                CommitPickerRole::Browse => repo.log_graph(&ref_sha, WALK_LIMIT),
+                CommitPickerRole::Browse | CommitPickerRole::PickRange => {
+                    repo.log_graph(&ref_sha, WALK_LIMIT)
+                },
                 CommitPickerRole::PickBase => repo.log_from(&ref_sha, WALK_LIMIT),
             };
             let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
@@ -493,7 +517,15 @@ pub(crate) fn commit_picker_back(stoat: &mut Stoat) -> UpdateEffect {
     // A drill whose walk has not landed goes here. Otherwise it arrives later
     // and pushes its scope over the scope the reader returns to.
     let drilling = picker.pending_commits.take().is_some();
-    let Some(query) = picker.pop_scope() else {
+    let popped = picker.pop_scope();
+    if picker
+        .range_from
+        .as_ref()
+        .is_some_and(|range| picker.scope_stack.len() <= range.depth)
+    {
+        picker.range_from = None;
+    }
+    let Some(query) = popped else {
         return match drilling {
             true => UpdateEffect::Redraw,
             false => UpdateEffect::None,
@@ -555,7 +587,69 @@ pub(crate) fn commit_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     match picker.role {
         CommitPickerRole::PickBase => install_walk(stoat),
         CommitPickerRole::Browse => commit_picker_close(stoat),
+        CommitPickerRole::PickRange => pick_range_step(stoat),
     }
+}
+
+/// Take the selected commit as one end of a range review.
+///
+/// The first pick is `from`, and the list re-scopes to `from`'s first-parent
+/// history, where the second pick is `against`. The picker stays up behind the
+/// second pick until the walk starts, so a refused review leaves both picks in
+/// place. A second pick of `from` itself has nothing to review.
+fn pick_range_step(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(picker) = stoat.commit_picker.as_ref() else {
+        return UpdateEffect::None;
+    };
+    let Some(selected) = picker.selected_commit().cloned() else {
+        return UpdateEffect::None;
+    };
+
+    let Some(from) = picker.range_from.as_ref().map(|range| &range.commit) else {
+        let query = picker.input.text(stoat.active_workspace());
+        let depth = picker.scope_stack.len();
+        let task = spawn_history_walk(&stoat.executor, stoat.redraw_notify.clone(), {
+            let repo = Arc::clone(&picker.repo);
+            let sha = selected.sha.clone();
+            let label = format!("review {} against", selected.short_sha);
+            move || LoadedCommits::Scope {
+                commits: repo.log_from(&sha, WALK_LIMIT),
+                label,
+                ref_sha: sha,
+                query_before: query,
+            }
+        });
+        let Some(picker) = stoat.commit_picker.as_mut() else {
+            return UpdateEffect::None;
+        };
+        picker.range_from = Some(RangeFrom {
+            commit: selected,
+            depth,
+        });
+        picker.pending_commits = Some(task);
+        return UpdateEffect::Redraw;
+    };
+
+    if from.sha == selected.sha {
+        return review_error(
+            stoat,
+            "nothing to review",
+            Some("pick an older commit".to_string()),
+        );
+    }
+    let [from, against] = [from, &selected].map(|commit| revision_name(picker, commit));
+    review(stoat, Some(&from), Some(&against))
+}
+
+/// The name a range review reads `commit` by, the first local branch at it,
+/// or else its short sha, which resolves as a prefix.
+fn revision_name(picker: &CommitPicker, commit: &CommitInfo) -> String {
+    picker
+        .branch_tips
+        .get(&commit.sha)
+        .and_then(|names| names.first())
+        .unwrap_or(&commit.short_sha)
+        .clone()
 }
 
 fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
@@ -592,8 +686,8 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
 /// the press landed. So a walk started while an ended walk's return waits in
 /// the queue records the ref that return restores, not the ended walk's commit.
 ///
-/// A refused start badges and leaves a base picker up, so the base the user
-/// picked is still selected when they come back to it. A walk started while
+/// A refused start badges and leaves a base or range picker up, so what the
+/// user picked is still selected when they come back to it. A walk started while
 /// this one waited keeps its place.
 ///
 /// A walkthrough's walk, of `kind` [`WalkLandingKind::Walkthrough`], starts
@@ -635,11 +729,12 @@ pub(super) fn queue_walk_start(
                 return None;
             };
 
-            if stoat
-                .commit_picker
-                .as_ref()
-                .is_some_and(|picker| picker.role == CommitPickerRole::PickBase)
-            {
+            if stoat.commit_picker.as_ref().is_some_and(|picker| {
+                matches!(
+                    picker.role,
+                    CommitPickerRole::PickBase | CommitPickerRole::PickRange
+                )
+            }) {
                 commit_picker_close(stoat);
             }
             stoat.active_workspace_mut().review_walk = Some(ReviewWalk {
@@ -969,6 +1064,11 @@ fn install_pending_commits(stoat: &mut Stoat) -> bool {
             }
             if let Some(picker) = stoat.commit_picker.as_mut() {
                 picker.push_scope(label, ref_sha, commits, query_before);
+                // The second step of a range pick lands where the first did,
+                // on the nearest tip of a branch other than the one listed.
+                if picker.role == CommitPickerRole::PickRange {
+                    picker.selected = picker.default_selection();
+                }
             }
             // The query clears only once the drilled scope shows, so a drill
             // canceled or empty leaves the query as typed.
@@ -3225,9 +3325,8 @@ mod tests {
         );
     }
 
-    /// A bare `:review`, a revision that names nothing, a `from` that `against`
-    /// already holds, and a review while a walk holds HEAD each badge why and
-    /// start nothing.
+    /// A revision that names nothing, a `from` that `against` already holds,
+    /// and a review while a walk holds HEAD each badge why and start nothing.
     #[test]
     fn review_refuses_what_it_cannot_review() {
         let mut walking = fork_harness();
@@ -3240,7 +3339,6 @@ mod tests {
         let refused = |label: &str| (Vec::new(), None, Some(label.to_string()), Vec::new());
         assert_eq!(
             [
-                reviewed(":review"),
                 reviewed(":review junk"),
                 reviewed(":review b2c3d4e5 main"),
                 (
@@ -3251,7 +3349,6 @@ mod tests {
                 ),
             ],
             [
-                refused("review needs a revision"),
                 refused("unknown revision"),
                 refused("nothing to review"),
                 (
@@ -3346,6 +3443,189 @@ mod tests {
             (
                 Some("review feature"),
                 Some("reviewing feature against main")
+            ),
+        );
+    }
+
+    /// [`fork_harness`] with HEAD on `feature`, and a `topic` branch at
+    /// `d4e5f6a7` for each step of a range pick to land on.
+    fn range_pick_harness() -> TestHarness {
+        let h = fork_harness();
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("topic", "d4e5f6a7")
+            .set_head("e5f6a7b8")
+            .set_head_branch("feature");
+        h
+    }
+
+    /// A bare `:review` opened over [`range_pick_harness`], with its list in.
+    fn open_range_pick() -> TestHarness {
+        let mut h = range_pick_harness();
+        h.type_text(":review");
+        h.type_keys("enter");
+        h.settle();
+        h
+    }
+
+    /// Put the commit picker's cursor on the row for `sha`.
+    fn select_row(h: &mut TestHarness, sha: &str) {
+        let picker = h.stoat.commit_picker.as_mut().expect("picker");
+        picker.selected = picker
+            .filtered
+            .iter()
+            .position(|&idx| picker.commits[idx].sha == sha)
+            .unwrap_or_else(|| panic!("no row {sha}"));
+    }
+
+    /// The picker's role, scope label, listed shas, and the sha under its
+    /// cursor.
+    type PickerState = (
+        Option<CommitPickerRole>,
+        Option<String>,
+        Vec<String>,
+        Option<String>,
+    );
+
+    fn picker_state(h: &TestHarness) -> PickerState {
+        let picker = h.stoat.commit_picker.as_ref();
+        (
+            picker.map(|picker| picker.role),
+            picker.and_then(|picker| picker.scope_label.clone()),
+            picker_shas(h),
+            picker
+                .and_then(|picker| picker.selected_commit())
+                .map(|commit| commit.sha.clone()),
+        )
+    }
+
+    /// A bare `:review` picks both ends from the commit list over HEAD's
+    /// graph. The first pick re-scopes the list to its first-parent history,
+    /// and each step lands on the nearest tip of another branch. The second
+    /// pick starts the review, which names `from` by its branch and `against`
+    /// by its short sha.
+    #[test]
+    fn a_bare_review_picks_both_ends_from_the_commit_list() {
+        let mut h = open_range_pick();
+        let first = picker_state(&h);
+
+        select_row(&mut h, "e5f6a7b8");
+        super::commit_picker_select(&mut h.stoat);
+        h.settle();
+        let second = picker_state(&h);
+
+        select_row(&mut h, "b2c3d4e5");
+        super::commit_picker_select(&mut h.stoat);
+        h.settle();
+
+        let history: Vec<String> = ["e5f6a7b8", "d4e5f6a7", "b2c3d4e5", "a1b2c3d4"]
+            .map(String::from)
+            .to_vec();
+        let topic = Some("d4e5f6a7".to_string());
+        assert_eq!(
+            (
+                first,
+                second,
+                h.stoat.commit_picker.is_none(),
+                walk_shas(&h),
+                diff_base(&h),
+                review_badge(&h),
+            ),
+            (
+                (
+                    Some(CommitPickerRole::PickRange),
+                    None,
+                    history.clone(),
+                    topic.clone()
+                ),
+                (
+                    Some(CommitPickerRole::PickRange),
+                    Some("review e5f6a7b against".to_string()),
+                    history,
+                    topic,
+                ),
+                true,
+                vec!["e5f6a7b8".to_string()],
+                Some(Some("b2c3d4e5".to_string())),
+                Some("reviewing feature against b2c3d4e".to_string()),
+            ),
+        );
+    }
+
+    /// Back from the second step drops the first pick, whether the second
+    /// list has landed or not, and a second pick of the first commit has
+    /// nothing to review.
+    #[test]
+    fn a_range_pick_backs_out_and_refuses_one_commit_twice() {
+        let mut h = open_range_pick();
+        let pick_tip = |h: &mut TestHarness| {
+            select_row(h, "e5f6a7b8");
+            super::commit_picker_select(&mut h.stoat);
+        };
+        let dropped = |h: &TestHarness| {
+            h.stoat
+                .commit_picker
+                .as_ref()
+                .map(|picker| (picker.scope_label.clone(), picker.range_from.is_none()))
+        };
+
+        pick_tip(&mut h);
+        super::commit_picker_back(&mut h.stoat);
+        let before_landing = dropped(&h);
+
+        pick_tip(&mut h);
+        h.settle();
+        super::commit_picker_back(&mut h.stoat);
+        let after_landing = dropped(&h);
+
+        pick_tip(&mut h);
+        h.settle();
+        pick_tip(&mut h);
+        h.settle();
+        let badge = {
+            let ws = h.stoat.active_workspace();
+            ws.badges
+                .find_by_source(BadgeSource::Review)
+                .and_then(|id| ws.badges.get(id))
+                .map(|badge| (badge.label.clone(), badge.detail.clone()))
+        };
+
+        assert_eq!(
+            (before_landing, after_landing, badge, walk_shas(&h)),
+            (
+                Some((None, true)),
+                Some((None, true)),
+                Some((
+                    "nothing to review".to_string(),
+                    Some("pick an older commit".to_string())
+                )),
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// The first step lists HEAD's whole graph, so a merged branch's commits
+    /// are rows of their own, and the second lists the pick's first-parent
+    /// history.
+    #[test]
+    fn a_range_pick_lists_the_graph_then_first_parents() {
+        let mut h = merged_harness();
+        h.type_text(":review");
+        h.type_keys("enter");
+        h.settle();
+        let first = picker_shas(&h);
+
+        select_row(&mut h, "m9999999");
+        super::commit_picker_select(&mut h.stoat);
+        h.settle();
+
+        assert_eq!(
+            (first, picker_shas(&h)),
+            (
+                MERGED_DAG.map(String::from).to_vec(),
+                ["m9999999", "b2c3d4e5", "a1b2c3d4"]
+                    .map(String::from)
+                    .to_vec()
             ),
         );
     }

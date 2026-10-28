@@ -424,7 +424,8 @@ const REVIEW_PARAMS: &[ParamDef] = &[
         kind: ParamKind::String,
         value_source: ValueSource::Revisions,
         required: false,
-        description: "Branch or commit under review. Its tip is checked out.",
+        description: "Branch or commit under review. Its tip is checked out. Omit \
+                      it to pick both ends from the commit list.",
     },
     ParamDef {
         name: "against",
@@ -444,8 +445,9 @@ define_action_def!(
     "review a revision against another",
     "Check the tip of `from` out detached and diff it against the merge base \
      of `from` and `against`, so the diff holds the work of `from` alone. \
-     With no `against`, the branch `from` forked from stands in. \
-     `:review done` returns the tree. Refuses while a review walk or a \
+     With no `against`, the branch `from` forked from stands in, and with no \
+     `from` the commit list opens to pick `from` and then, from its history, \
+     `against`. `:review done` returns the tree. Refuses while a review walk or a \
      rebase holds HEAD, and while tracked files hold uncommitted changes.",
     ActionPriority::Common,
     command_name = "review",

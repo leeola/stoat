@@ -28,6 +28,10 @@ pub(crate) enum CommitPickerRole {
     /// Read-only listing. Selecting a row dismisses the picker without
     /// touching the working tree.
     Browse,
+    /// Choose the two ends of a range review. The first pick is the commit
+    /// under review, and the second, from that commit's own history, is the
+    /// commit to review it against.
+    PickRange,
 }
 
 /// Columns of the commit table, in display order.
@@ -131,6 +135,17 @@ pub(crate) struct CommitScope {
     filter_column: Option<CommitColumn>,
 }
 
+/// The first pick of a range review, held while the picker asks for the second.
+pub(crate) struct RangeFrom {
+    pub(crate) commit: CommitInfo,
+    /// How many scopes stood on the stack at the first pick.
+    ///
+    /// The second step pushes one more. Back to this depth or below leaves the
+    /// second step, which drops the pick, while Back out of a merge drilled
+    /// inside the second step keeps it.
+    pub(crate) depth: usize,
+}
+
 /// A finished history walk, and which list it is.
 ///
 /// The two differ in what has to be installed alongside the commits, and both
@@ -223,6 +238,9 @@ pub(crate) struct CommitPicker {
     /// What the current scope is called, or `None` at the root scope, where the
     /// title comes from the picker's role instead.
     pub(crate) scope_label: Option<String>,
+    /// The first pick under [`CommitPickerRole::PickRange`], `None` while the
+    /// picker still asks for it and under every other role.
+    pub(crate) range_from: Option<RangeFrom>,
     /// Lane layout over [`Self::commits`], with the lane count the widest row
     /// needs, computed once per scope.
     ///
@@ -312,6 +330,7 @@ impl CommitPicker {
             preview_scroll: 0,
             scope_stack: Vec::new(),
             scope_label: None,
+            range_from: None,
             graph: (Vec::new(), 0),
             graph_lanes: None,
             col_widest: [0; COMMIT_COLUMNS],
@@ -637,10 +656,10 @@ impl CommitPicker {
 
     /// The filtered row to start on.
     ///
-    /// Under [`CommitPickerRole::PickBase`] this is the newest commit carrying
-    /// a local branch other than the ref the picker was opened over, falling
-    /// back to the newest row. Opening `:git review main` from `main` most
-    /// often means reviewing what another branch added, so the nearest such
+    /// Under [`CommitPickerRole::PickBase`] and [`CommitPickerRole::PickRange`]
+    /// this is the newest commit carrying a local branch other than the ref the
+    /// current list was opened over, falling back to the newest row. Opening `:git review main`
+    /// from `main` most often means reviewing what another branch added, so the nearest such
     /// branch tip is a better landing spot than the tip the user is already
     /// sitting on.
     ///
@@ -759,6 +778,7 @@ mod tests {
             now_epoch: 0,
             scope_stack: Vec::new(),
             scope_label: None,
+            range_from: None,
             graph: (Vec::new(), 0),
             graph_lanes: None,
             col_widest: [0; COMMIT_COLUMNS],

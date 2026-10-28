@@ -164,7 +164,7 @@ pub(crate) fn render_commit_picker(
         return;
     };
 
-    // The same rows serve both roles, so the title is what tells the user
+    // The same rows serve every role, so the title is what tells the user
     // whether picking one starts a review or just closes the listing. A drilled
     // scope names itself instead, since which commits are listed matters more
     // there than which role listed them.
@@ -173,6 +173,7 @@ pub(crate) fn render_commit_picker(
         None => match picker.role {
             CommitPickerRole::PickBase => " review from commit ".to_string(),
             CommitPickerRole::Browse => " git log ".to_string(),
+            CommitPickerRole::PickRange => " review from ".to_string(),
         },
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
