@@ -290,8 +290,8 @@ fn render_palette_arg_picker(
     );
 }
 
-/// Render the body for a free-typed argument, a command whose first argument
-/// has no inline picker (`ValueSource::None`, e.g. `:RenameWorkspace `).
+/// Render the body for a free-typed argument, one with no inline picker
+/// (`ValueSource::None`, e.g. `:RenameWorkspace `).
 ///
 /// Shows the command's usage line, the parameter being collected with its
 /// description, then the command's long description, so the modal describes
@@ -342,7 +342,7 @@ fn render_palette_free_arg(
         text_style,
         end_x,
     );
-    if let Some(param) = entry.def.params().first()
+    if let Some(param) = palette.arg_param()
         && body_top + 1 < body_bottom
     {
         let hint = format!("{}  {}", param.name, param.description);

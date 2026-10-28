@@ -605,7 +605,8 @@ pub(super) fn palette_scope_toggle(stoat: &mut Stoat) -> UpdateEffect {
 /// In argument mode it completes the selected row of any picker-sourced
 /// argument. Pressing it again without editing the tail in between steps to the
 /// next candidate the typed text matched, wrapping at the end, so a run of
-/// presses walks the whole match list.
+/// presses walks the whole match list. A command with more than one parameter
+/// completes the token being typed and keeps the tokens before it as typed.
 ///
 /// A browse-mode tail keeps the typed directory prefix and appends the
 /// highlighted child, and no completion appends a trailing `/`, so the browse
@@ -650,9 +651,15 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
         }
         let ws = &stoat.workspaces[active_idx];
         let text = palette.input.text(ws);
-        let Some((_, head, typed_tail)) = command_palette::split_head(&text, &palette.availability)
+        let Some((entry, head, typed_tail)) =
+            command_palette::split_head(&text, &palette.availability)
         else {
             return UpdateEffect::None;
+        };
+        let (kept, typed_tail) = if entry.def.params().len() > 1 {
+            command_palette::split_last_token(typed_tail)
+        } else {
+            ("", typed_tail)
         };
 
         let git_root = &ws.git_root;
@@ -679,7 +686,7 @@ pub(super) fn palette_complete(stoat: &mut Stoat) -> UpdateEffect {
             },
         };
 
-        format!("{head} {tail}")
+        format!("{head} {kept}{tail}")
     };
 
     {

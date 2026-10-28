@@ -15,7 +15,7 @@ use std::{
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
-use stoat_action::{registry, ActionKind, ParamValue, ValueSource};
+use stoat_action::{registry, ActionKind, ParamDef, ParamValue, ValueSource};
 use stoat_language::LanguageRegistry;
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -37,6 +37,12 @@ pub struct CommandPalette {
     /// the palette is collecting that command's trailing argument inline. The
     /// argument text is the input tail after the command token.
     pub(crate) command: Option<&'static registry::RegistryEntry>,
+    /// Which parameter of [`Self::command`] the token being typed fills, as
+    /// [`arg_index`] counts it in the input tail.
+    ///
+    /// Derived from the same parse as [`Self::command`], so the two change
+    /// together, and only when the input does.
+    typed_arg: usize,
     /// The command group the input's first token names while no command
     /// parses, such as `git` for `:git `. The list then holds only that
     /// group's commands, and the text after the token narrows them.
@@ -581,6 +587,18 @@ pub(crate) enum PaletteOutcome {
     Dispatch(&'static registry::RegistryEntry, Vec<ParamValue>, String),
 }
 
+/// Why [`parse_args`] refused the tokens typed for a command with more than one
+/// parameter.
+#[derive(Debug, PartialEq)]
+enum ArgsError {
+    /// A token does not parse as its parameter's kind.
+    Invalid { param: &'static str, arg: String },
+    /// A required parameter has no token.
+    Missing { param: &'static str },
+    /// A token falls past the last parameter, so no parameter takes it.
+    Extra { arg: String },
+}
+
 impl CommandPalette {
     pub fn new(ws: &mut Workspace, executor: Executor, availability: Availability) -> Self {
         let input = InputView::create(ws, executor, SubmitTarget::PaletteFilter, "", "insert");
@@ -606,6 +624,7 @@ impl CommandPalette {
             match_indices,
             selected,
             command: None,
+            typed_arg: 0,
             group: None,
             scope,
             availability,
@@ -680,16 +699,24 @@ impl CommandPalette {
         }
     }
 
-    /// The value source of the current command's first argument when it drives
-    /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
+    /// The parameter the argument being typed fills.
+    ///
+    /// `None` while no command parses, and once the typed tokens run past the
+    /// last parameter. A command with one parameter takes the whole tail as its
+    /// value, so that parameter answers however many spaces the tail holds.
+    pub(crate) fn arg_param(&self) -> Option<&'static ParamDef> {
+        param_at(self.command?.def.params(), self.typed_arg)
+    }
+
+    /// The value source of the argument being typed when it drives an inline
+    /// picker ([`ValueSource::Files`], [`ValueSource::Directories`],
     /// [`ValueSource::Buffers`], [`ValueSource::Themes`],
     /// [`ValueSource::Branches`], [`ValueSource::Revisions`], or
     /// [`ValueSource::Values`], e.g. `:o `,
     /// `:cd `, `:b `, `:SetTheme `, `:git log `, or `:auto-reload `), or `None`
     /// otherwise. Gates rendering the picker and routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
-        let param = self.command?.def.params().first()?;
-        match param.value_source {
+        match self.arg_param()?.value_source {
             ValueSource::None => None,
             source => Some(source),
         }
@@ -699,10 +726,18 @@ impl CommandPalette {
     /// Drives the inline picker's filter. The tail is everything after the
     /// command's head, as [`split_head`] finds it, so a path argument keeps
     /// its spaces.
+    ///
+    /// A command with more than one parameter filters on the token being typed
+    /// alone, which is empty right after a space.
     pub(crate) fn arg_tail(&self, ws: &Workspace) -> Option<String> {
         self.arg_source()?;
         let text = self.input.text(ws);
-        let (_, _, tail) = split_head(&text, &self.availability)?;
+        let (entry, _, tail) = split_head(&text, &self.availability)?;
+        let tail = if entry.def.params().len() > 1 {
+            split_last_token(tail).1
+        } else {
+            tail
+        };
         Some(tail.to_string())
     }
 
@@ -787,7 +822,9 @@ impl CommandPalette {
         self.last_filter_key = key;
         self.generation = picker::next_generation();
 
-        self.command = parse_command(&text, &self.availability).map(|(entry, _)| entry);
+        let parsed = parse_command(&text, &self.availability);
+        self.command = parsed.map(|(entry, _)| entry);
+        self.typed_arg = parsed.map_or(0, |(_, arg)| arg_index(arg));
         self.group = input_group(&text, &self.availability);
         if self.command.is_some() {
             self.filtered.clear();
@@ -809,7 +846,9 @@ impl CommandPalette {
     /// Invoke the effective "submit" step for the palette.
     ///
     /// In arg mode (the input parses as `<command> <arg>`) the trailing
-    /// argument is parsed into the command's first parameter and dispatched.
+    /// argument is parsed into the command's parameters and dispatched. A
+    /// command with one parameter takes the whole tail as its value, and one
+    /// with more takes a token per parameter through [`parse_args`].
     /// Otherwise the selected action is taken. A zero-arg action dispatches
     /// immediately, while a parameter-taking action rewrites the input to
     /// `"<name> "` to begin inline argument entry. Called from the
@@ -817,7 +856,35 @@ impl CommandPalette {
     pub(crate) fn handle_submit(&mut self, ws: &mut Workspace) -> PaletteOutcome {
         let text = self.input.text(ws);
         if let Some((entry, arg)) = parse_command(&text, &self.availability) {
-            let param = &entry.def.params()[0];
+            let params = entry.def.params();
+            if params.len() > 1 {
+                let picked = param_at(params, arg_index(arg)).and_then(|param| {
+                    let picker = self
+                        .arg_picker
+                        .as_ref()
+                        .filter(|picker| picker.source() == param.value_source)?;
+                    let row = picker.selected_path()?.to_string_lossy();
+                    Some(chosen_value(param.value_source, &row).to_string())
+                });
+                return match parse_args(params, arg, picked.as_deref()) {
+                    Ok((values, tokens)) => {
+                        self.input.dispose(ws);
+                        let line = format!("{} {tokens}", history_head(entry));
+                        PaletteOutcome::Dispatch(entry, values, line)
+                    },
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "stoat::command",
+                            command = entry.def.name(),
+                            ?err,
+                            "command arguments rejected"
+                        );
+                        PaletteOutcome::None
+                    },
+                };
+            }
+
+            let param = &params[0];
             // An explicit `/` or `~` path browses the real filesystem, so a
             // highlighted browse directory wins and Enter descends into it.
             // With no browse selection (a bare `~`, or an empty browse list)
@@ -992,6 +1059,82 @@ pub(crate) fn split_head<'a>(
         }
     }
     resolve(first).map(|entry| (entry, first, rest))
+}
+
+/// Which parameter the token being typed at the end of `tail` fills, counting
+/// from zero.
+///
+/// A space ends a token, so a tail that ends in whitespace starts the next
+/// parameter before its first character arrives.
+fn arg_index(tail: &str) -> usize {
+    let tokens = tail.split_whitespace().count();
+    if tail.ends_with(char::is_whitespace) {
+        tokens
+    } else {
+        tokens.saturating_sub(1)
+    }
+}
+
+/// `tail` split before the token being typed, as the text kept ahead of it and
+/// the token itself.
+///
+/// The token is empty when `tail` ends in whitespace. The kept text holds its
+/// whitespace byte for byte, so a completion written after it keeps the
+/// spacing the user typed.
+pub(crate) fn split_last_token(tail: &str) -> (&str, &str) {
+    let start = tail.trim_end_matches(|c: char| !c.is_whitespace()).len();
+    tail.split_at(start)
+}
+
+/// The parameter of `params` that the argument at `index` fills.
+///
+/// A lone parameter takes the whole tail, spaces and all, so it answers every
+/// index. `None` past the last of several.
+fn param_at(params: &'static [ParamDef], index: usize) -> Option<&'static ParamDef> {
+    match params {
+        [only] => Some(only),
+        _ => params.get(index),
+    }
+}
+
+/// The values a command with more than one parameter takes from `tail`, and
+/// the tokens as one space-separated line for palette history.
+///
+/// Each whitespace-separated token fills the next parameter in order.
+/// `picked` is the highlighted row of the picker for the token being typed.
+/// It stands in for that token, or follows the tokens when `tail` ends in
+/// whitespace, so Enter takes the row as it does for a lone parameter.
+fn parse_args(
+    params: &'static [ParamDef],
+    tail: &str,
+    picked: Option<&str>,
+) -> Result<(Vec<ParamValue>, String), ArgsError> {
+    let mut tokens: Vec<&str> = tail.split_whitespace().collect();
+    if let Some(picked) = picked {
+        match tokens.get_mut(arg_index(tail)) {
+            Some(token) => *token = picked,
+            None => tokens.push(picked),
+        }
+    }
+    if let Some(extra) = tokens.get(params.len()) {
+        return Err(ArgsError::Extra {
+            arg: extra.to_string(),
+        });
+    }
+
+    let mut values = Vec::with_capacity(tokens.len());
+    for (param, token) in params.iter().zip(&tokens) {
+        let value = ParamValue::parse(param.kind, token).map_err(|_| ArgsError::Invalid {
+            param: param.name,
+            arg: token.to_string(),
+        })?;
+        values.push(value);
+    }
+    if let Some(param) = params[tokens.len()..].iter().find(|param| param.required) {
+        return Err(ArgsError::Missing { param: param.name });
+    }
+
+    Ok((values, tokens.join(" ")))
 }
 
 /// The command group the palette lists for `text`, which the text's first token
@@ -1187,6 +1330,7 @@ mod tests {
         picker::PREVIEW_DIR_LIMIT,
         test_harness::{editor, TestHarness},
     };
+    use stoat_action::ParamKind;
 
     /// Seed `files` into the harness' fake fs under a fixed virtual root and
     /// point the active workspace at it, so the palette's inline file picker
@@ -2469,6 +2613,30 @@ mod tests {
                 .selected_path()
                 .is_some_and(|p| p == root.join("wsdir")),
             "the completed workspace dir is the highlighted row",
+        );
+    }
+
+    /// A lone parameter takes the whole tail, so a path with a space filters as
+    /// one value and Tab completes it in one piece.
+    #[test]
+    fn a_lone_parameter_takes_its_tail_spaces_and_all() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(&mut h, &[("my notes.md", ""), ("other.md", "")]);
+
+        h.type_text(":o my no");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+        let typed = palette_arg_tail(&h);
+
+        h.type_keys("tab");
+        let _ = h.snapshot();
+        h.settle();
+        let _ = h.snapshot();
+
+        assert_eq!(
+            (typed.as_deref(), palette_text(&h)),
+            (Some("my no"), "o my notes.md".to_string()),
         );
     }
 
@@ -4020,6 +4188,102 @@ mod tests {
                 chosen_value(ValueSource::Branches, "c2 chore"),
             ],
             ["c2", "main", "c2 chore"],
+        );
+    }
+
+    /// A required revision and an optional count, standing in for a command
+    /// with two parameters.
+    const REV_AND_COUNT: &[ParamDef] = &[
+        ParamDef {
+            name: "rev",
+            kind: ParamKind::String,
+            value_source: ValueSource::Revisions,
+            required: true,
+            description: "",
+        },
+        ParamDef {
+            name: "count",
+            kind: ParamKind::Number,
+            value_source: ValueSource::None,
+            required: false,
+            description: "",
+        },
+    ];
+
+    #[test]
+    fn arg_index_counts_the_token_being_typed() {
+        assert_eq!(
+            ["", "a", "a ", "a b", "a b "].map(arg_index),
+            [0, 0, 1, 1, 2]
+        );
+    }
+
+    #[test]
+    fn split_last_token_keeps_the_text_before_the_token() {
+        assert_eq!(
+            ["feature ma", "feature ", "feature", "", "a  b"].map(split_last_token),
+            [
+                ("feature ", "ma"),
+                ("feature ", ""),
+                ("", "feature"),
+                ("", ""),
+                ("a  ", "b"),
+            ],
+        );
+    }
+
+    #[test]
+    fn param_at_gives_a_lone_parameter_every_index() {
+        let names = |params: &'static [ParamDef]| {
+            [0, 1, 2].map(|index| param_at(params, index).map(|param| param.name))
+        };
+        assert_eq!(
+            [names(REV_AND_COUNT), names(&REV_AND_COUNT[..1])],
+            [[Some("rev"), Some("count"), None], [Some("rev"); 3]],
+        );
+    }
+
+    /// A picked row stands in for the token being typed, or follows the tokens
+    /// after a trailing space.
+    #[test]
+    fn parse_args_reads_one_token_per_parameter() {
+        let parse = |tail: &str, picked: Option<&str>| parse_args(REV_AND_COUNT, tail, picked);
+        let rev = || ParamValue::String("feature".to_string());
+        let count = || ParamValue::Number(4.0);
+        assert_eq!(
+            [
+                parse("feature", None),
+                parse("fea", Some("feature")),
+                parse("feature 4", None),
+                parse("feature ", Some("4")),
+            ],
+            [
+                Ok((vec![rev()], "feature".to_string())),
+                Ok((vec![rev()], "feature".to_string())),
+                Ok((vec![rev(), count()], "feature 4".to_string())),
+                Ok((vec![rev(), count()], "feature 4".to_string())),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_args_refuses_what_no_parameter_takes() {
+        assert_eq!(
+            [
+                parse_args(REV_AND_COUNT, "", None),
+                parse_args(REV_AND_COUNT, "feature x", None),
+                parse_args(REV_AND_COUNT, "feature 4 extra", None),
+            ],
+            [
+                Err(ArgsError::Missing { param: "rev" }),
+                Err(ArgsError::Invalid {
+                    param: "count",
+                    arg: "x".to_string()
+                }),
+                Err(ArgsError::Extra {
+                    arg: "extra".to_string()
+                }),
+            ],
         );
     }
 

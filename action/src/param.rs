@@ -56,6 +56,12 @@ pub enum ValueSource {
     Values(&'static [&'static str]),
 }
 
+/// One parameter a command takes.
+///
+/// A command with one parameter takes the whole argument text as its value, so
+/// a path keeps its spaces. A command with more than one takes one
+/// whitespace-separated token per parameter, in order, so each of its values
+/// is free of whitespace.
 pub struct ParamDef {
     pub name: &'static str,
     pub kind: ParamKind,
