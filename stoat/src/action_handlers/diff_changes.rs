@@ -21,13 +21,16 @@ use crate::{
     workspace::{diff::DiffLanding, Workspace},
 };
 use slotmap::SlotMap;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_scheduler::Executor;
-use stoat_text::{cursor_offset, Bias, Point, SelectionGoal};
+use stoat_text::{cursor_offset, Anchor, Bias, BufferId, Point, Selection, SelectionGoal};
 
 /// Open a changes view over the focused view, or close the focused one.
 ///
-/// On a focused changes view this closes it and puts back the view it covered.
+/// On a focused changes view this closes it and lands on the cursor's file.
 /// Anywhere else it shows a changes view over the focused view. `DiffFiles`
 /// opens the per-file diff from a changes view.
 pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
@@ -37,27 +40,92 @@ pub(super) fn toggle_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
     open_diff_changes(stoat)
 }
 
-/// Close the changes view the focused pane shows and put back the view it
-/// covered.
+/// Close the changes view the focused pane shows and land the pane on the
+/// focused excerpt's file, at the excerpt's cursor with its selections.
 ///
-/// The excerpts close with it, and so does each buffer only the stack opened.
-/// A covered view that is gone closes the pane instead, and a last pane gets a
-/// fresh scratch editor. A changes view opened from a per-file diff returns to
-/// that diff, so a close peels back one layer.
+/// The cursor keeps the screen row it held in the stack, as a flip to the
+/// per-file diff does. A changes view opened from a per-file diff returns to
+/// that diff on the landed file, so a close peels back one layer. A backward
+/// jump and `g a` return to the file the changes view covered.
+///
+/// The excerpts close with it, and so does each buffer only the stack opened,
+/// except the one the pane lands on. With no folded excerpt in focus the close
+/// puts back the view the changes view covered. A covered view that is gone
+/// closes the pane instead, and a last pane gets a fresh scratch editor.
 pub(crate) fn close_diff_changes(stoat: &mut Stoat) -> UpdateEffect {
-    let ws = stoat.active_workspace_mut();
-    if ws.focused_diff_changes_id().is_none() {
+    if stoat.active_workspace().focused_diff_changes_id().is_none() {
         return UpdateEffect::None;
     }
+    let landing = focused_target_selections(stoat);
+    let screen_row = landing.is_some().then(|| stack_screen_row(stoat)).flatten();
+
+    let ws = stoat.active_workspace_mut();
     let focus = ws.panes.focus();
     let Some(state) = take_down(ws, focus) else {
         return UpdateEffect::None;
     };
     let (covered, covered_diff) = (state.covered, state.covered_diff);
-    diff_changes::release_excerpts(stoat, state.excerpts);
-    put_back_covered(stoat, focus, covered, covered_diff);
+    match landing {
+        Some(landing) => {
+            if put_back_covered(stoat, focus, covered, false) {
+                land_on_excerpt(stoat, focus, landing, covered_diff, screen_row);
+            }
+            // After the landing, so the pane's editor holds the landed buffer
+            // and the release leaves it open.
+            diff_changes::release_excerpts(stoat, state.excerpts);
+        },
+        None => {
+            diff_changes::release_excerpts(stoat, state.excerpts);
+            put_back_covered(stoat, focus, covered, covered_diff);
+        },
+    }
     tracing::info!(target: "stoat::review", "changes view closed");
     UpdateEffect::Redraw
+}
+
+/// Show `landing`'s buffer in pane `focus` with its selections, at
+/// `screen_row` when the cursor had one in the stack.
+///
+/// A pane that shows the buffer keeps its editor. Another buffer replaces the
+/// pane's editor with a jump recorded. A pane that shows no editor keeps its
+/// view. With `covered_diff` the pane re-enters the per-file diff on the landed
+/// buffer.
+fn land_on_excerpt(
+    stoat: &mut Stoat,
+    focus: PaneId,
+    (buffer_id, selections): (BufferId, Arc<[Selection<Anchor>]>),
+    covered_diff: bool,
+    screen_row: Option<u32>,
+) {
+    let workspace = stoat.active_workspace;
+    let ws = stoat.active_workspace();
+    let View::Editor(editor_id) = ws.panes.pane(focus).view else {
+        return;
+    };
+    let shown = ws.editors.get(editor_id).map(|editor| editor.buffer_id);
+    if shown != Some(buffer_id) {
+        let Some(buffer) = ws.buffers.get(buffer_id) else {
+            return;
+        };
+        jump::record_pane_switch(stoat, workspace, focus, buffer_id);
+        let executor = stoat.executor.clone();
+        buffer_lifecycle::show_buffer_in_pane(stoat, workspace, focus, buffer_id, buffer, executor);
+    }
+
+    if let Some(editor) = super::focused_editor_mut(stoat) {
+        editor.selections.restore(selections);
+    }
+    if covered_diff {
+        review::enter_diff_view(stoat);
+    }
+    if let Some(row) = screen_row {
+        hold_screen_row(stoat, row);
+    } else {
+        let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+        if let Some(editor) = super::focused_editor_mut(stoat) {
+            editor.pending_center = Some(scrolloff);
+        }
+    }
 }
 
 /// Take down the changes view the focused pane shows and park its stack, so
@@ -88,24 +156,34 @@ fn park_diff_changes(stoat: &mut Stoat) {
 }
 
 /// Show `covered` in pane `focus` once its changes view is gone, in normal
-/// mode.
+/// mode, and answer whether the pane still stands.
 ///
 /// A covered view that is gone closes the pane instead, and a last pane gets a
 /// fresh scratch editor. With `covered_diff`, a covered editor returns to the
 /// per-file diff it showed.
-fn put_back_covered(stoat: &mut Stoat, focus: PaneId, covered: Option<View>, covered_diff: bool) {
+fn put_back_covered(
+    stoat: &mut Stoat,
+    focus: PaneId,
+    covered: Option<View>,
+    covered_diff: bool,
+) -> bool {
     let ws = stoat.active_workspace();
     let live = pane::view_is_live(ws, covered.as_ref());
     let rediff = live && covered_diff && matches!(covered, Some(View::Editor(_)));
-    if live {
+    let stands = if live {
         pane::show_view_or_scratch(stoat, focus, covered);
+        true
     } else if !pane::close_pane_by_id(stoat, focus) {
         pane::show_view_or_scratch(stoat, focus, None);
-    }
+        true
+    } else {
+        false
+    };
     stoat.set_focused_mode("normal".to_string());
     if rediff {
         review::enter_diff_view(stoat);
     }
+    stands
 }
 
 /// Take down the changes view that pane `pane_id` of `ws` shows, before a
@@ -654,6 +732,18 @@ fn focused_target(stoat: &mut Stoat) -> Option<(String, Point)> {
     Some((rel_path, diff_changes::cursor_point(editor)))
 }
 
+/// The focused excerpt's buffer and the selections of its editor, which a
+/// close carries to the pane.
+///
+/// `None` with no folded excerpt in focus.
+fn focused_target_selections(stoat: &Stoat) -> Option<(BufferId, Arc<[Selection<Anchor>]>)> {
+    let ws = stoat.active_workspace();
+    let excerpt = ws.focused_diff_changes()?.focused_excerpt()?;
+    excerpt.folded_version?;
+    let editor = ws.editors.get(excerpt.editor_id)?;
+    Some((excerpt.buffer_id, editor.selections.shared_anchors()))
+}
+
 /// The status row's answer to a key that finds no folded excerpt in focus on
 /// the focused changes view.
 ///
@@ -1070,6 +1160,28 @@ mod tests {
             .buffers
             .path_for(buffer)
             .map(Path::to_path_buf)
+    }
+
+    /// The focused editor's file and its selections as buffer offsets, read
+    /// from the focused excerpt in a changes view.
+    fn focused_selections(h: &mut TestHarness) -> (Option<PathBuf>, Vec<(usize, usize, bool)>) {
+        let path = focused_path(h);
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer = snapshot.buffer_snapshot();
+        let spans = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    buffer.resolve_anchor(&sel.start),
+                    buffer.resolve_anchor(&sel.end),
+                    sel.reversed,
+                )
+            })
+            .collect();
+        (path, spans)
     }
 
     /// A second tab of two panes whose focused pane shows a shell over an
@@ -1758,6 +1870,88 @@ mod tests {
                 h.stoat.focused_editor_ids().map(|(id, _)| id),
             ),
             (at("a.txt", 8), true, Some("diff"), Some(editor)),
+        );
+    }
+
+    /// `q` lands on the focused excerpt's file with the excerpt's selections,
+    /// so the close leaves the cursor where it was in the stack.
+    #[test]
+    fn q_lands_on_the_focused_excerpts_file_with_its_selections() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("j j j j j v l l v");
+        let in_stack = focused_selections(&mut h);
+        h.type_keys("q");
+        assert_eq!(
+            (
+                in_stack.0.clone(),
+                h.stoat.current_view(),
+                focused_selections(&mut h)
+            ),
+            (Some(PathBuf::from("/repo/b.txt")), Some("file"), in_stack),
+        );
+    }
+
+    /// A changes view opened from the per-file diff returns to the diff, on
+    /// the file the cursor ended in.
+    #[test]
+    fn q_from_a_covered_diff_lands_in_the_diff_on_the_excerpt_file() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("j j j j j");
+        h.type_keys("q");
+        assert_eq!(
+            (h.stoat.current_view(), focused_path(&h)),
+            (Some("diff"), Some(PathBuf::from("/repo/b.txt"))),
+        );
+    }
+
+    /// With the cursor in the file the changes view covered, `q` keeps the
+    /// pane's editor and moves its selections to the excerpt's.
+    #[test]
+    fn q_with_the_cursor_in_the_covered_file_keeps_the_pane_editor() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        let (editor, _) = h.stoat.focused_editor_ids().expect("editor");
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let landed = place(&mut h);
+        let in_stack = focused_selections(&mut h);
+        h.type_keys("q");
+        assert_eq!(
+            (
+                landed,
+                h.stoat.focused_editor_ids().map(|(id, _)| id),
+                focused_selections(&mut h)
+            ),
+            (at("a.txt", 5), Some(editor), in_stack),
+        );
+    }
+
+    /// The close that lands on another file records the covered one, so `g a`
+    /// returns to it.
+    #[test]
+    fn q_records_the_covered_buffer_for_goto_last_accessed() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        h.type_keys("j j j j j");
+        h.type_keys("q");
+        let landed = focused_path(&h);
+        dispatch(&mut h.stoat, &stoat_action::GotoLastAccessed);
+        assert_eq!(
+            (landed, focused_path(&h)),
+            (
+                Some(PathBuf::from("/repo/b.txt")),
+                Some(PathBuf::from("/repo/a.txt"))
+            ),
         );
     }
 
