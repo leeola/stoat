@@ -3323,6 +3323,20 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_x_in_the_workspace_picker_closes_the_rows_session() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let picker = TestState::new()
+            .set("modal", StateValue::String("workspace_picker".into()))
+            .set("mode", StateValue::String("insert".into()));
+        let ctrl_x = key_event(KeyCode::Char('x'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            action_names(keymap.lookup(&picker, &ctrl_x)),
+            only("WorkspacePickerCloseSession")
+        );
+    }
+
+    #[test]
     fn ca_t_tab_mode_chords_cycle_and_rename() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
