@@ -22,9 +22,9 @@ use crate::{
     config::{self, Config, CursorAnimation},
     input::{
         alternate_scroll_bytes, cell_at, chord_char, chord_csi_u, encode_key, font_step,
-        font_step_target, ipc_button, ipc_button_for_code, modifier_bits, paste_bytes,
-        sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size,
-        swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u,
+        font_step_target, ipc_button, ipc_button_for_code, is_modifier_key, modifier_bits,
+        paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes,
+        stepped_font_size, swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u, KeyPress,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -77,6 +77,7 @@ use winit::{
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState},
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
     window::{UserAttentionType, Window, WindowAttributes, WindowId},
 };
 
@@ -1828,13 +1829,27 @@ impl ApplicationHandler<PtyEvent> for App {
 
                 // A guard taken in the `if let` scrutinee stays alive through
                 // the body, where `Input::key` locks again and deadlocks.
-                let app_cursor = state.terminal.lock().app_cursor();
-                if let Some(bytes) = encode_key(&event.logical_key, state.modifiers, app_cursor) {
-                    Input {
-                        terminal: &state.terminal,
-                        pty: &mut state.pty,
+                let (app_cursor, keyboard) = {
+                    let terminal = state.terminal.lock();
+                    (terminal.app_cursor(), terminal.keyboard_modes())
+                };
+                let unmodified = event.key_without_modifiers();
+                let press = KeyPress {
+                    logical: &event.logical_key,
+                    unmodified: &unmodified,
+                    text: event.text_with_all_modifiers(),
+                    location: event.location,
+                };
+                if let Some(bytes) = encode_key(&press, state.modifiers, app_cursor, keyboard) {
+                    if is_modifier_key(&event.logical_key) {
+                        let _ = state.pty.write(&bytes);
+                    } else {
+                        Input {
+                            terminal: &state.terminal,
+                            pty: &mut state.pty,
+                        }
+                        .key(&bytes);
                     }
-                    .key(&bytes);
                 }
             },
             WindowEvent::MouseWheel { delta, .. } => {

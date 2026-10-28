@@ -5,10 +5,11 @@
 //! pure map from an event to the bytes a terminal expects, which is what makes
 //! it testable without a window, a GPU, or a running child.
 
+use alacritty_terminal::term::TermMode;
 use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
 use winit::{
     event::{MouseButton, MouseScrollDelta},
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::{Key, KeyLocation, ModifiersState, NamedKey},
 };
 
 /// Smallest font size the live zoom allows, so cells never collapse to an
@@ -92,6 +93,25 @@ impl XtermKey {
             Self::Tilde(number) => format!("\x1b[{number};{param}~").into_bytes(),
         }
     }
+}
+
+/// One key press as the encoder reads it.
+///
+/// Built from a winit key event at the call site and kept apart from it,
+/// because winit builds no event by hand and the tests need presses of their
+/// own.
+pub(crate) struct KeyPress<'a> {
+    /// The key the layout produced with the held modifiers applied.
+    pub(crate) logical: &'a Key,
+    /// The key with every modifier released, which names the base key of a
+    /// shifted symbol, such as `;` under `:`.
+    pub(crate) unmodified: &'a Key,
+    /// The text the press types with every modifier applied, so Ctrl-a types
+    /// `\x01`. `None` when the press types nothing.
+    pub(crate) text: Option<&'a str>,
+    /// Where the key sits, which tells a left modifier from a right one and a
+    /// keypad key from its twin in the main block.
+    pub(crate) location: KeyLocation,
 }
 
 /// The font-size step a key press maps to, or `None` when it is not the
@@ -201,6 +221,26 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
     cfg!(target_os = "macos") && modifiers.super_key()
 }
 
+/// Whether `key` is a bare modifier, which reaches the child only under the
+/// report-all flag of the kitty keyboard protocol.
+///
+/// The caller writes such a press without the selection clear that typing
+/// does. A modifier held on the way to the copy combo then keeps the selection
+/// that the combo copies.
+pub(crate) fn is_modifier_key(key: &Key) -> bool {
+    matches!(
+        key,
+        Key::Named(
+            NamedKey::Shift
+                | NamedKey::Control
+                | NamedKey::Alt
+                | NamedKey::Super
+                | NamedKey::Hyper
+                | NamedKey::Meta
+        )
+    )
+}
+
 /// Encode a key press into the bytes a terminal sends to the shell, or `None`
 /// for a key with no terminal encoding, such as a bare modifier, so the caller
 /// writes nothing.
@@ -231,8 +271,29 @@ pub(crate) fn swallow_super_combo(modifiers: ModifiersState) -> bool {
 /// place of `ESC [ X`. A program turns the mode on when it reads keys by their
 /// terminfo strings, and the `xterm-256color` entry lists these SS3 forms. A
 /// modified cursor key keeps its CSI form.
-pub(crate) fn encode_key(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
-    encode_key_with(key, mods, cfg!(target_os = "macos"), app_cursor)
+///
+/// `keyboard` holds the kitty keyboard protocol flags the child pushed, as
+/// [`Terminal::keyboard_modes`](stoatty_term::term::Terminal::keyboard_modes)
+/// reports them. With none pushed, every key keeps the bytes above. So it does
+/// with the alternate-keys or associated-text flag alone, because those only
+/// reshape a CSI form that another flag asked for.
+///
+/// The disambiguate flag sends Escape, a keypad key, and a key with a modifier
+/// other than Shift alone as `CSI code ; mods u`, so Ctrl-Shift-s reaches the
+/// child apart from Ctrl-s. Typed text, a Shift-only character, and an
+/// unmodified Enter, Tab, or Backspace keep their bytes. The report-all flag
+/// sends every key in the CSI form, a bare modifier included. The
+/// alternate-keys flag adds the shifted codepoint after a colon, and the
+/// associated-text flag adds the typed text. Super takes the modifier bit 8 in
+/// the CSI form. An unmodified cursor key in application cursor mode keeps its
+/// SS3 form under every flag.
+pub(crate) fn encode_key(
+    press: &KeyPress<'_>,
+    mods: ModifiersState,
+    app_cursor: bool,
+    keyboard: TermMode,
+) -> Option<Vec<u8>> {
+    encode_key_with(press, mods, cfg!(target_os = "macos"), app_cursor, keyboard)
 }
 
 /// [`encode_key`] with the macOS Option rule as a parameter, so a test run on
@@ -241,16 +302,28 @@ pub(crate) fn encode_key(key: &Key, mods: ModifiersState, app_cursor: bool) -> O
 /// `option_composes` is whether Option turns a character key without Ctrl into
 /// the composed character, as it does on macOS.
 fn encode_key_with(
-    key: &Key,
+    press: &KeyPress<'_>,
     mods: ModifiersState,
     option_composes: bool,
     app_cursor: bool,
+    keyboard: TermMode,
 ) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     let shift = mods.shift_key();
     let alt = mods.alt_key();
 
-    match key {
+    // An Alt that Option composed into the character is part of the character,
+    // so neither form reports it as a modifier.
+    let composed = option_composes && !ctrl && matches!(press.logical, Key::Character(_));
+    let csi_mods = match composed {
+        true => mods.difference(ModifiersState::ALT),
+        false => mods,
+    };
+    if takes_csi_u(press, csi_mods, app_cursor, keyboard) {
+        return csi_u_sequence(press, csi_mods, keyboard);
+    }
+
+    match press.logical {
         Key::Named(NamedKey::Enter) => Some(alt_prefixed(alt, b"\r")),
         Key::Named(NamedKey::Backspace) => Some(alt_prefixed(alt, &[0x7f])),
         Key::Named(NamedKey::Tab) if shift => Some(b"\x1b[Z".to_vec()),
@@ -318,6 +391,9 @@ fn ctrl_byte(s: &str) -> Option<u8> {
 /// typed text. Shift is dropped because the logical character already embodies
 /// it: the press that produced `?` reaches the program as `?` with ctrl, not as
 /// `/` with ctrl and shift.
+///
+/// This serves the legacy encoding. A child that pushed the kitty keyboard
+/// protocol gets [`csi_u_sequence`] instead.
 fn csi_u_ctrl(s: &str, alt: bool) -> Option<Vec<u8>> {
     let mut chars = s.chars();
     let c = chars.next()?;
@@ -327,6 +403,324 @@ fn csi_u_ctrl(s: &str, alt: bool) -> Option<Vec<u8>> {
 
     let field = if alt { 7 } else { 5 };
     Some(format!("\x1b[{};{field}u", c as u32).into_bytes())
+}
+
+/// Whether `press` takes the kitty keyboard protocol's CSI form under the
+/// flags in `keyboard`, in place of its legacy bytes.
+///
+/// The disambiguate and report-all flags ask for the form. The alternate-keys
+/// and associated-text flags only reshape it, so alone they keep the legacy
+/// bytes. An unmodified cursor key in application cursor mode keeps its SS3
+/// form under every flag, since a program turns that mode on to read it.
+fn takes_csi_u(
+    press: &KeyPress<'_>,
+    mods: ModifiersState,
+    app_cursor: bool,
+    keyboard: TermMode,
+) -> bool {
+    let report_all = keyboard.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    if !report_all && !keyboard.contains(TermMode::DISAMBIGUATE_ESC_CODES) {
+        return false;
+    }
+    let cursor_key = matches!(
+        press.logical,
+        Key::Named(named) if matches!(XtermKey::of(*named), Some(XtermKey::Csi(_)))
+    );
+    if app_cursor && mods.is_empty() && cursor_key {
+        return false;
+    }
+    if report_all {
+        return true;
+    }
+
+    // Shift alone shapes the text a key types. On Tab, Enter, and Backspace it
+    // shapes no text, so only the CSI form reports it.
+    let shift_counts = matches!(
+        press.logical,
+        Key::Named(NamedKey::Tab | NamedKey::Enter | NamedKey::Backspace)
+    );
+    let modified = !mods.is_empty() && (mods != ModifiersState::SHIFT || shift_counts);
+    let escape = matches!(press.logical, Key::Named(NamedKey::Escape));
+    if modified || escape || press.location == KeyLocation::Numpad {
+        return true;
+    }
+
+    // A key that types no text reaches the child as a key.
+    match press.logical {
+        Key::Named(named) => named.to_text().is_none(),
+        _ => press.text.is_none_or(str::is_empty),
+    }
+}
+
+/// The kitty keyboard protocol's CSI form of `press` under the flags in
+/// `keyboard`, or `None` for a key the protocol gives no code.
+///
+/// The form is `CSI code ; mods u`, or the legacy CSI shape `CSI 1 ; mods X`
+/// or `CSI n ; mods ~` for a navigation or function key. The modifier field is
+/// `1 + shift + 2 alt + 4 ctrl + 8 super`, left out when it is 1 and no text
+/// follows. The alternate-keys flag adds a shifted codepoint to the code, and
+/// the associated-text flag adds the typed text after the field.
+fn csi_u_sequence(
+    press: &KeyPress<'_>,
+    mods: ModifiersState,
+    keyboard: TermMode,
+) -> Option<Vec<u8>> {
+    let report_all = keyboard.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    let mut modifiers = kitty_modifier_bits(mods);
+    let text = press.text.filter(|text| {
+        keyboard.contains(TermMode::REPORT_ASSOCIATED_TEXT)
+            && !text.is_empty()
+            && !is_control_text(text)
+    });
+
+    let field_follows = modifiers != 0 || text.is_some();
+    let (code, terminator) = match keypad_code(press)
+        .or_else(|| kitty_function_code(press))
+        .or_else(|| xterm_function_code(press, field_follows))
+    {
+        Some(code) => code,
+        None => control_or_modifier_code(press, report_all, &mut modifiers)
+            .or_else(|| character_code(press, modifiers, keyboard, text))?,
+    };
+
+    let mut sequence = format!("\x1b[{code}");
+    if modifiers != 0 || text.is_some() {
+        sequence.push_str(&format!(";{}", modifiers + 1));
+    }
+    for (i, ch) in text.into_iter().flat_map(str::chars).enumerate() {
+        let separator = if i == 0 { ';' } else { ':' };
+        sequence.push_str(&format!("{separator}{}", u32::from(ch)));
+    }
+    sequence.push(terminator);
+    Some(sequence.into_bytes())
+}
+
+/// The protocol's code for a key on the numeric keypad, which tells it apart
+/// from its twin in the main block.
+fn keypad_code(press: &KeyPress<'_>) -> Option<(String, char)> {
+    if press.location != KeyLocation::Numpad {
+        return None;
+    }
+    let code = match press.logical {
+        Key::Character(s) => match s.as_str() {
+            "." => 57409,
+            "/" => 57410,
+            "*" => 57411,
+            "-" => 57412,
+            "+" => 57413,
+            "=" => 57415,
+            digit => {
+                let mut chars = digit.chars();
+                let value = chars.next()?.to_digit(10)?;
+                if chars.next().is_some() {
+                    return None;
+                }
+                57399 + value
+            },
+        },
+        Key::Named(named) => match named {
+            NamedKey::Enter => 57414,
+            NamedKey::ArrowLeft => 57417,
+            NamedKey::ArrowRight => 57418,
+            NamedKey::ArrowUp => 57419,
+            NamedKey::ArrowDown => 57420,
+            NamedKey::PageUp => 57421,
+            NamedKey::PageDown => 57422,
+            NamedKey::Home => 57423,
+            NamedKey::End => 57424,
+            NamedKey::Insert => 57425,
+            NamedKey::Delete => 57426,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+/// The protocol's own code for a function key that it numbers apart from the
+/// legacy sequence.
+///
+/// Those keys are F3, whose `CSI 1 ; mods R` reads as a cursor position
+/// report, F13 and up, and the lock, print, pause, menu, and media keys.
+fn kitty_function_code(press: &KeyPress<'_>) -> Option<(String, char)> {
+    let Key::Named(named) = press.logical else {
+        return None;
+    };
+    let code = match named {
+        NamedKey::F3 => return Some(("13".to_owned(), '~')),
+        NamedKey::F13 => 57376,
+        NamedKey::F14 => 57377,
+        NamedKey::F15 => 57378,
+        NamedKey::F16 => 57379,
+        NamedKey::F17 => 57380,
+        NamedKey::F18 => 57381,
+        NamedKey::F19 => 57382,
+        NamedKey::F20 => 57383,
+        NamedKey::F21 => 57384,
+        NamedKey::F22 => 57385,
+        NamedKey::F23 => 57386,
+        NamedKey::F24 => 57387,
+        NamedKey::F25 => 57388,
+        NamedKey::F26 => 57389,
+        NamedKey::F27 => 57390,
+        NamedKey::F28 => 57391,
+        NamedKey::F29 => 57392,
+        NamedKey::F30 => 57393,
+        NamedKey::F31 => 57394,
+        NamedKey::F32 => 57395,
+        NamedKey::F33 => 57396,
+        NamedKey::F34 => 57397,
+        NamedKey::F35 => 57398,
+        NamedKey::ScrollLock => 57359,
+        NamedKey::PrintScreen => 57361,
+        NamedKey::Pause => 57362,
+        NamedKey::ContextMenu => 57363,
+        NamedKey::MediaPlay => 57428,
+        NamedKey::MediaPause => 57429,
+        NamedKey::MediaPlayPause => 57430,
+        NamedKey::MediaStop => 57432,
+        NamedKey::MediaFastForward => 57433,
+        NamedKey::MediaRewind => 57434,
+        NamedKey::MediaTrackNext => 57435,
+        NamedKey::MediaTrackPrevious => 57436,
+        NamedKey::MediaRecord => 57437,
+        NamedKey::AudioVolumeDown => 57438,
+        NamedKey::AudioVolumeUp => 57439,
+        NamedKey::AudioVolumeMute => 57440,
+        _ => return None,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+/// The legacy CSI shape of a navigation key or a function key up to F12.
+///
+/// The arrows, Home, End, and F1 to F4 take `CSI X`, with a `1` ahead of the
+/// modifier field when one follows. F1 to F4 drop their legacy SS3 form,
+/// because the protocol reads every key as CSI. The rest take `CSI n ~`.
+fn xterm_function_code(press: &KeyPress<'_>, field_follows: bool) -> Option<(String, char)> {
+    let Key::Named(named) = press.logical else {
+        return None;
+    };
+    match XtermKey::of(*named)? {
+        XtermKey::Csi(final_byte) | XtermKey::Ss3(final_byte) => {
+            let code = if field_follows { "1" } else { "" };
+            Some((code.to_owned(), char::from(final_byte)))
+        },
+        XtermKey::Tilde(number) => Some((number.to_string(), '~')),
+    }
+}
+
+/// The code of Tab, Enter, Escape, Space, or Backspace, or under the report-all
+/// flag of a bare modifier or lock key.
+///
+/// A pressed modifier also sets its own bit in `modifiers`. The protocol counts
+/// it as held from its own press, and the window system reports the new
+/// modifier state only after the press.
+fn control_or_modifier_code(
+    press: &KeyPress<'_>,
+    report_all: bool,
+    modifiers: &mut u8,
+) -> Option<(String, char)> {
+    let Key::Named(named) = press.logical else {
+        return None;
+    };
+    let code = match (named, press.location) {
+        (NamedKey::Tab, _) => 9,
+        (NamedKey::Enter, _) => 13,
+        (NamedKey::Escape, _) => 27,
+        (NamedKey::Space, _) => 32,
+        (NamedKey::Backspace, _) => 127,
+        _ if !report_all => return None,
+        (NamedKey::Shift, KeyLocation::Left) => 57441,
+        (NamedKey::Control, KeyLocation::Left) => 57442,
+        (NamedKey::Alt, KeyLocation::Left) => 57443,
+        (NamedKey::Super, KeyLocation::Left) => 57444,
+        (NamedKey::Hyper, KeyLocation::Left) => 57445,
+        (NamedKey::Meta, KeyLocation::Left) => 57446,
+        (NamedKey::Shift, _) => 57447,
+        (NamedKey::Control, _) => 57448,
+        (NamedKey::Alt, _) => 57449,
+        (NamedKey::Super, _) => 57450,
+        (NamedKey::Hyper, _) => 57451,
+        (NamedKey::Meta, _) => 57452,
+        (NamedKey::CapsLock, _) => 57358,
+        (NamedKey::NumLock, _) => 57360,
+        _ => return None,
+    };
+    *modifiers |= match named {
+        NamedKey::Shift => 1,
+        NamedKey::Alt => 2,
+        NamedKey::Control => 4,
+        NamedKey::Super => 8,
+        _ => 0,
+    };
+    Some((code.to_string(), 'u'))
+}
+
+/// The code of a character key, which is its unshifted codepoint.
+///
+/// When the alternate-keys flag asks for it and the two differ, the shifted
+/// codepoint follows after a colon. The unshifted codepoint of a letter is its
+/// lowercase form. A symbol has no case, so it takes the key with every
+/// modifier released, and `:` reports `59:58`.
+///
+/// A key that types several characters names no codepoint. It reports code 0
+/// under the report-all flag when its text follows, and nothing otherwise.
+fn character_code(
+    press: &KeyPress<'_>,
+    modifiers: u8,
+    keyboard: TermMode,
+    text: Option<&str>,
+) -> Option<(String, char)> {
+    let Key::Character(character) = press.logical else {
+        return None;
+    };
+    let mut chars = character.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        let report_all = keyboard.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+        return (report_all && text.is_some()).then(|| ("0".to_owned(), 'u'));
+    };
+
+    let shift = modifiers & 1 != 0;
+    let shifted = u32::from(ch);
+    let mut code = match shift {
+        true => ch.to_lowercase().next().map_or(shifted, u32::from),
+        false => shifted,
+    };
+    if shift
+        && code == shifted
+        && let Key::Character(base) = press.unmodified
+        && let Some(base) = base.chars().next()
+    {
+        code = u32::from(base);
+    }
+
+    let code = match keyboard.contains(TermMode::REPORT_ALTERNATE_KEYS) && code != shifted {
+        true => format!("{code}:{shifted}"),
+        false => code.to_string(),
+    };
+    Some((code, 'u'))
+}
+
+/// Pack the active keyboard modifiers into the bits of the kitty keyboard
+/// protocol's modifier field, with shift at `1`, alt at `2`, control at `4`,
+/// and super at `8`.
+///
+/// Distinct from [`modifier_bits`], which packs the same modifiers into this
+/// project's own IPC layout. These bits go on the wire to a child process, so
+/// their values belong to the protocol.
+fn kitty_modifier_bits(mods: ModifiersState) -> u8 {
+    u8::from(mods.shift_key())
+        | u8::from(mods.alt_key()) << 1
+        | u8::from(mods.control_key()) << 2
+        | u8::from(mods.super_key()) << 3
+}
+
+/// Whether `text` is one control character, such as the `\x01` that Ctrl-a
+/// types, which the associated-text flag leaves out.
+fn is_control_text(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!((chars.next(), chars.next()), (Some(ch), None) if ch.is_control())
 }
 
 /// Encode clipboard `text` for the PTY on paste.
@@ -820,9 +1214,8 @@ mod tests {
 
     #[test]
     fn encode_key_maps_keys_to_terminal_bytes() {
-        let named = |key| encode_key(&Key::Named(key), ModifiersState::empty(), false);
-        let printable =
-            |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::empty(), false);
+        let named = |key| legacy(&Key::Named(key), ModifiersState::empty(), false);
+        let printable = |s: &str| legacy(&Key::Character(s.into()), ModifiersState::empty(), false);
 
         assert_eq!(
             printable("a"),
@@ -874,8 +1267,8 @@ mod tests {
 
     #[test]
     fn encode_key_maps_ctrl_to_control_bytes() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL, false);
-        let space = |mods| encode_key(&Key::Named(NamedKey::Space), mods, false);
+        let ctrl = |s: &str| legacy(&Key::Character(s.into()), ModifiersState::CONTROL, false);
+        let space = |mods| legacy(&Key::Named(NamedKey::Space), mods, false);
 
         assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
         assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
@@ -903,7 +1296,7 @@ mod tests {
     /// is what makes such a combo bindable.
     #[test]
     fn encode_key_maps_ctrl_punctuation_to_csi_u() {
-        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), ModifiersState::CONTROL, false);
+        let ctrl = |s: &str| legacy(&Key::Character(s.into()), ModifiersState::CONTROL, false);
 
         assert_eq!(
             ctrl("?"),
@@ -925,12 +1318,12 @@ mod tests {
     #[test]
     fn encode_key_shift_tab_sends_csi_z() {
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, false),
+            legacy(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, false),
             Some(b"\x1b[Z".to_vec()),
             "Shift-Tab sends CSI Z so stoat decodes BackTab"
         );
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::Tab), ModifiersState::empty(), false),
+            legacy(&Key::Named(NamedKey::Tab), ModifiersState::empty(), false),
             Some(vec![b'\t']),
             "plain Tab still sends a tab"
         );
@@ -959,20 +1352,27 @@ mod tests {
         for option_composes in [false, true] {
             for (key, mods, bytes) in &under_both_rules {
                 assert_eq!(
-                    encode_key_with(key, *mods, option_composes, false),
+                    encode_key_with(
+                        &press(key),
+                        *mods,
+                        option_composes,
+                        false,
+                        TermMode::empty()
+                    ),
                     Some(bytes.to_vec()),
                     "{key:?} with {mods:?}, option composes: {option_composes}"
                 );
             }
         }
 
+        let empty = TermMode::empty();
         assert_eq!(
-            encode_key_with(&character("d"), alt, false, false),
+            encode_key_with(&press(&character("d")), alt, false, false, empty),
             Some(b"\x1bd".to_vec()),
             "Alt-d where Option does not compose"
         );
         assert_eq!(
-            encode_key_with(&character("\u{2202}"), alt, true, false),
+            encode_key_with(&press(&character("\u{2202}")), alt, true, false, empty),
             Some("\u{2202}".as_bytes().to_vec()),
             "the character Option composed takes no prefix"
         );
@@ -997,7 +1397,7 @@ mod tests {
         ];
         for (key, mods, bytes) in cases {
             assert_eq!(
-                encode_key(&Key::Named(key), mods, false),
+                legacy(&Key::Named(key), mods, false),
                 Some(bytes.to_vec()),
                 "{key:?} with {mods:?}"
             );
@@ -1018,17 +1418,215 @@ mod tests {
         ];
         for (key, mods, bytes) in cases {
             assert_eq!(
-                encode_key(&Key::Named(key), mods, true),
+                legacy(&Key::Named(key), mods, true),
                 Some(bytes.to_vec()),
                 "{key:?} with {mods:?}"
             );
         }
 
         assert_eq!(
-            encode_key(&Key::Named(NamedKey::ArrowUp), plain, false),
+            legacy(&Key::Named(NamedKey::ArrowUp), plain, false),
             Some(b"\x1b[A".to_vec()),
             "Up outside application cursor mode",
         );
+    }
+
+    #[test]
+    fn csi_u_reports_ctrl_shift_letters_apart() {
+        let (ctrl, shift, plain) = (
+            ModifiersState::CONTROL,
+            ModifiersState::SHIFT,
+            ModifiersState::empty(),
+        );
+        let character = |s: &str| Key::Character(s.into());
+
+        let cases: [(Key, ModifiersState, &[u8]); 11] = [
+            (character("S"), ctrl | shift, b"\x1b[115;6u"),
+            (Key::Named(NamedKey::Tab), shift, b"\x1b[9;2u"),
+            (character("s"), ctrl, b"\x1b[115;5u"),
+            (character("c"), ctrl, b"\x1b[99;5u"),
+            (Key::Named(NamedKey::Escape), plain, b"\x1b[27u"),
+            (Key::Named(NamedKey::Enter), ctrl, b"\x1b[13;5u"),
+            (Key::Named(NamedKey::Space), ctrl, b"\x1b[32;5u"),
+            (character("a"), plain, b"a"),
+            (Key::Named(NamedKey::Enter), plain, b"\r"),
+            (character("A"), shift, b"A"),
+            (Key::Named(NamedKey::ArrowLeft), ctrl, b"\x1b[1;5D"),
+        ];
+        for (key, mods, bytes) in &cases {
+            assert_eq!(
+                under(TermMode::DISAMBIGUATE_ESC_CODES, key, *mods),
+                Some(bytes.to_vec()),
+                "{key:?} with {mods:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn csi_u_reports_the_shifted_key_after_a_colon() {
+        let flags = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALTERNATE_KEYS;
+        let [colon, semicolon, upper, lower] =
+            [":", ";", "S", "s"].map(|s| Key::Character(s.into()));
+        let shifted = |key: &Key, base: &Key| {
+            let shifted_press = KeyPress {
+                unmodified: base,
+                ..press(key)
+            };
+            encode_key(
+                &shifted_press,
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                false,
+                flags,
+            )
+        };
+
+        assert_eq!(
+            (shifted(&colon, &semicolon), shifted(&upper, &lower)),
+            (
+                Some(b"\x1b[59:58;6u".to_vec()),
+                Some(b"\x1b[115:83;6u".to_vec())
+            ),
+            "the base key leads and the shifted one follows the colon"
+        );
+    }
+
+    #[test]
+    fn csi_u_encodes_every_key_under_report_all() {
+        let flags = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let plain = ModifiersState::empty();
+        let shift_key = Key::Named(NamedKey::Shift);
+        let left_shift = KeyPress {
+            location: KeyLocation::Left,
+            ..press(&shift_key)
+        };
+
+        assert_eq!(
+            (
+                under(flags, &Key::Character("a".into()), plain),
+                under(flags, &Key::Named(NamedKey::Enter), plain),
+                encode_key(&left_shift, plain, false, flags),
+            ),
+            (
+                Some(b"\x1b[97u".to_vec()),
+                Some(b"\x1b[13u".to_vec()),
+                Some(b"\x1b[57441;2u".to_vec()),
+            ),
+            "text and Enter take the CSI form, and a pressed Shift holds its own bit"
+        );
+    }
+
+    #[test]
+    fn csi_u_appends_associated_text() {
+        let flags = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ASSOCIATED_TEXT;
+        let a = Key::Character("a".into());
+        let ctrl_a = KeyPress {
+            text: Some("\x01"),
+            ..press(&a)
+        };
+
+        assert_eq!(
+            (
+                under(flags, &a, ModifiersState::ALT),
+                encode_key(&ctrl_a, ModifiersState::CONTROL, false, flags),
+            ),
+            (
+                Some(b"\x1b[97;3;97u".to_vec()),
+                Some(b"\x1b[97;5u".to_vec())
+            ),
+            "Alt-a carries its text, and the control character Ctrl-a types carries none"
+        );
+    }
+
+    /// The alternate-keys flag alone reshapes no CSI form, application cursor
+    /// mode keeps its SS3 form, and an Alt that Option composed stays part of
+    /// the character.
+    #[test]
+    fn csi_u_keeps_the_legacy_bytes_no_flag_asks_to_change() {
+        let disambiguate = TermMode::DISAMBIGUATE_ESC_CODES;
+        let (ctrl, alt, plain) = (
+            ModifiersState::CONTROL,
+            ModifiersState::ALT,
+            ModifiersState::empty(),
+        );
+        let up = Key::Named(NamedKey::ArrowUp);
+        let in_app_cursor = |mods, flags| encode_key(&press(&up), mods, true, flags);
+        let composed = Key::Character("\u{2202}".into());
+
+        assert_eq!(
+            (
+                under(
+                    TermMode::REPORT_ALTERNATE_KEYS,
+                    &Key::Character("s".into()),
+                    ctrl
+                ),
+                in_app_cursor(plain, disambiguate),
+                in_app_cursor(plain, TermMode::REPORT_ALL_KEYS_AS_ESC),
+                in_app_cursor(ctrl, disambiguate),
+                encode_key_with(&press(&composed), alt, true, false, disambiguate),
+            ),
+            (
+                Some(vec![0x13]),
+                Some(b"\x1bOA".to_vec()),
+                Some(b"\x1bOA".to_vec()),
+                Some(b"\x1b[1;5A".to_vec()),
+                Some("\u{2202}".as_bytes().to_vec()),
+            ),
+        );
+    }
+
+    #[test]
+    fn csi_u_gives_keypad_and_function_keys_their_own_codes() {
+        let flags = TermMode::DISAMBIGUATE_ESC_CODES;
+        let plain = ModifiersState::empty();
+        let enter = Key::Named(NamedKey::Enter);
+        let keypad_enter = KeyPress {
+            location: KeyLocation::Numpad,
+            ..press(&enter)
+        };
+        let function = |key| under(flags, &Key::Named(key), plain);
+
+        assert_eq!(
+            (
+                encode_key(&keypad_enter, plain, false, flags),
+                function(NamedKey::F1),
+                function(NamedKey::F3),
+                function(NamedKey::F5),
+            ),
+            (
+                Some(b"\x1b[57414u".to_vec()),
+                Some(b"\x1b[P".to_vec()),
+                Some(b"\x1b[13~".to_vec()),
+                Some(b"\x1b[15~".to_vec()),
+            ),
+            "F3 takes 13~, since its CSI R form reads as a cursor position report"
+        );
+    }
+
+    /// A press of `key` that types the key's own character, as a press with no
+    /// Ctrl held does.
+    fn press(key: &Key) -> KeyPress<'_> {
+        let text = match key {
+            Key::Character(s) => Some(s.as_str()),
+            _ => None,
+        };
+        KeyPress {
+            logical: key,
+            unmodified: key,
+            text,
+            location: KeyLocation::Standard,
+        }
+    }
+
+    /// The bytes `key` sends with `mods` to a child that pushed no keyboard
+    /// flags.
+    fn legacy(key: &Key, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
+        encode_key(&press(key), mods, app_cursor, TermMode::empty())
+    }
+
+    /// The bytes `key` sends with `mods` under the keyboard flags `keyboard`,
+    /// outside application cursor mode.
+    fn under(keyboard: TermMode, key: &Key, mods: ModifiersState) -> Option<Vec<u8>> {
+        encode_key(&press(key), mods, false, keyboard)
     }
 
     #[test]
