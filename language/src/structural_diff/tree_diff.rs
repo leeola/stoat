@@ -1275,6 +1275,12 @@ mod tests {
             .unwrap()
     }
 
+    fn fish_lang() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .for_path(std::path::Path::new("a.fish"))
+            .unwrap()
+    }
+
     fn markdown_lang() -> Arc<Language> {
         LanguageRegistry::standard()
             .for_path(std::path::Path::new("a.md"))
@@ -2188,6 +2194,27 @@ mod tests {
         let lhs = "echo a\n";
         let rhs = "echo b\n";
         let result = diff_with_language(&bash_lang(), lhs, rhs).unwrap();
+        assert!(
+            !result.fell_back_to_line_diff,
+            "structural pass must handle this"
+        );
+
+        let covered: Vec<&str> = result
+            .changes
+            .iter()
+            .map(|c| match c.side {
+                Side::Lhs => &lhs[c.byte_range.clone()],
+                Side::Rhs => &rhs[c.byte_range.clone()],
+            })
+            .collect();
+        assert_eq!(covered, ["a", "b"], "the argument is the whole change");
+    }
+
+    #[test]
+    fn a_changed_fish_word_is_the_whole_change() {
+        let lhs = "echo a\n";
+        let rhs = "echo b\n";
+        let result = diff_with_language(&fish_lang(), lhs, rhs).unwrap();
         assert!(
             !result.fell_back_to_line_diff,
             "structural pass must handle this"

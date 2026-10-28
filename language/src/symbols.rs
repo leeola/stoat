@@ -377,7 +377,7 @@ fn main() {
 
     /// The RON grammar names `enum_variant`, so it passes as the Rust grammar
     /// does. RON ships no outline query, which keeps it out of the index. The
-    /// bash grammar names no symbol kind, since its functions are
+    /// bash and fish grammars name no symbol kind, since their functions are
     /// `function_definition`.
     #[test]
     fn only_the_rust_and_ron_grammars_yield_symbols() {
@@ -393,6 +393,7 @@ fn main() {
             [
                 ("bash", false),
                 ("csv", false),
+                ("fish", false),
                 ("json", false),
                 ("markdown", false),
                 ("markdown-inline", false),

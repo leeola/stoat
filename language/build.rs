@@ -24,6 +24,11 @@ fn main() {
     // a06c2e4415e9bc0346c6b86d401879ffb44058f7, the rev the vendored Helix
     // query targets.
     compile_grammar("tree-sitter-bash", "tree-sitter-bash", "src", true);
+    // ram02z/tree-sitter-fish,
+    // f435b0bd772578c70e5d158b85267bb886316f88, the rev the vendored Helix
+    // query targets. Its generator ships parser.h alone, which the scanner
+    // includes through the include path.
+    compile_grammar("tree-sitter-fish", "tree-sitter-fish", "src", true);
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",
