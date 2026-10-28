@@ -33,6 +33,7 @@ use crate::{
     keymap_state,
     lsp::sync,
     pane::{FocusTarget, PaneId, View},
+    reload_landing,
     workspace::WorkspaceId,
 };
 use std::{
@@ -801,23 +802,42 @@ fn reload_from_disk(
             buffer.write().expect("buffer poisoned").mark_clean();
         }
     } else {
-        let mut guard = buffer.write().expect("buffer poisoned");
-        let old_text = guard.snapshot.visible_text.to_string();
+        let old_text = buffer
+            .read()
+            .expect("buffer poisoned")
+            .snapshot
+            .visible_text
+            .to_string();
         let hunks = structural_diff::line_hunks(&old_text, &normalized);
+        // Read before the write guard, since each editor resolves its cursor
+        // through a snapshot that reads the buffer.
+        let landings = item_landings(stoat, id, &old_text, &normalized, &hunks);
+
         let edits: Vec<(Range<usize>, &str)> = hunks
             .iter()
             .rev()
             .map(|(old, new)| (old.clone(), &normalized[new.clone()]))
             .collect();
-        // A dispatched action groups only the focused buffer's edits, and a
-        // reload of every open buffer edits the rest too, so the hunks take a
-        // group of their own and undo as one step.
-        let grouped = guard.try_begin_group(|| Arc::from([]));
-        guard.edit_batch(&edits);
-        if grouped {
-            guard.seal_group(Arc::from([]));
+        {
+            let mut guard = buffer.write().expect("buffer poisoned");
+            // A dispatched action groups only the focused buffer's edits, and a
+            // reload of every open buffer edits the rest too, so the hunks take
+            // a group of their own and undo as one step.
+            let grouped = guard.try_begin_group(|| Arc::from([]));
+            guard.edit_batch(&edits);
+            if grouped {
+                guard.seal_group(Arc::from([]));
+            }
+            guard.mark_clean();
         }
-        guard.mark_clean();
+
+        let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
+        let ws = stoat.active_workspace_mut();
+        for (editor_id, offset) in landings {
+            if let Some(editor) = ws.editors.get_mut(editor_id) {
+                collapse_to_offset(editor, offset, scrolloff);
+            }
+        }
     }
     stoat
         .active_workspace_mut()
@@ -835,6 +855,55 @@ fn reload_from_disk(
     } else {
         ReloadOutcome::Reloaded
     }
+}
+
+/// Where each editor of buffer `id` whose cursor lies inside a changed region
+/// lands after a reload from `old_text` to `new_text`, by the item it sat in.
+///
+/// `hunks` are the regions [`structural_diff::line_hunks`] gives. A cursor on
+/// a line both texts share needs no landing, since the region-wise edit keeps
+/// it on that line. A buffer with no language, a text that does not parse,
+/// and an item with no counterpart land nothing, and the edit leaves those
+/// cursors at their region's edge.
+fn item_landings(
+    stoat: &mut Stoat,
+    id: BufferId,
+    old_text: &str,
+    new_text: &str,
+    hunks: &[(Range<usize>, Range<usize>)],
+) -> Vec<(EditorId, usize)> {
+    let seats: Vec<(EditorId, usize, usize)> = stoat
+        .active_workspace_mut()
+        .editors
+        .iter_mut()
+        .filter(|(_, editor)| editor.buffer_id == id)
+        .filter_map(|(editor_id, editor)| {
+            let offset = editor_cursor_offset(editor);
+            let (_, new) = hunks.iter().find(|(old, _)| old.contains(&offset))?;
+            Some((editor_id, offset, new.start))
+        })
+        .collect();
+    if seats.is_empty() {
+        return Vec::new();
+    }
+
+    let Some(language) = stoat.active_workspace().buffers.language_for(id) else {
+        return Vec::new();
+    };
+    let (Some((old_rope, old_defs)), Some((new_rope, new_defs))) = (
+        reload_landing::symbols_of(&language, old_text),
+        reload_landing::symbols_of(&language, new_text),
+    ) else {
+        return Vec::new();
+    };
+    seats
+        .into_iter()
+        .filter_map(|(editor_id, offset, near)| {
+            let seat = reload_landing::seat_at(&old_defs, &old_rope, offset)?;
+            let landed = reload_landing::offset_for_seat(&new_defs, &new_rope, &seat, near)?;
+            Some((editor_id, landed))
+        })
+        .collect()
 }
 
 /// The mtime of `path` on disk, or `None` when its metadata does not read.
@@ -1472,6 +1541,14 @@ fn editor_cursor_row(editor: &mut EditorState) -> u32 {
     buf_snap.rope().offset_to_point(head).row
 }
 
+/// The buffer offset of `editor`'s primary cursor, the head
+/// [`editor_cursor_row`] reads the row of.
+fn editor_cursor_offset(editor: &mut EditorState) -> usize {
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    buf_snap.resolve_anchor(&editor.selections.newest_anchor().head())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1953,6 +2030,36 @@ mod tests {
         dispatch(&mut h.stoat, &Undo);
 
         assert_eq!(h.buffer_text(id), "l0\nl1\nl2\nl3\n");
+    }
+
+    /// A cursor inside a function the reload rewrote lands in that function,
+    /// at the same row offset, though the function above it grew.
+    #[test]
+    fn reload_lands_a_cursor_in_its_rewritten_function() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-landing");
+        let path = root.join("a.rs");
+        let old = b"fn a() {\n    1\n}\n\nfn b() {\n    let x = 1;\n    x\n}\n";
+        let new = "fn a() {\n    1\n    2\n    3\n    4\n}\n\nfn b() {\n    let y = 2;\n    y\n}\n";
+        let id = open_plain(&mut h, root, "a.rs", old);
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+            let snapshot = editor.display_map.snapshot();
+            let offset = snapshot
+                .buffer_snapshot()
+                .rope()
+                .point_to_offset(stoat_text::Point::new(6, 4));
+            collapse_to_offset(editor, offset, 0);
+        }
+
+        h.fake_fs().insert_file(&path, new.as_bytes());
+        reload_focused(&mut h.stoat, false);
+
+        assert_eq!(
+            (h.buffer_text(id), focused_cursor_row(&mut h)),
+            (new.to_string(), 9),
+            "two rows into fn b, the `y` row",
+        );
     }
 
     #[test]
