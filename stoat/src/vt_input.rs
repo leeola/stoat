@@ -126,6 +126,16 @@ fn csi_sequence(bytes: &[u8]) -> (Option<Event>, usize) {
     if final_byte == b'~' && params == b"201" {
         return (None, len);
     }
+    // The terminal sends these DECSET 1004 reports when its window gains and
+    // loses focus, so a report that lands during the handshake replay decodes
+    // too.
+    if params.is_empty() {
+        match final_byte {
+            b'I' => return (Some(Event::FocusGained), len),
+            b'O' => return (Some(Event::FocusLost), len),
+            _ => {},
+        }
+    }
 
     let Some((number, modifiers)) = csi_params(params) else {
         return (None, len);
@@ -356,6 +366,8 @@ mod tests {
                 b"\x1b[200~pasted\x1b[201~",
                 vec![Event::Paste("pasted".into())],
             ),
+            (b"\x1b[I", vec![Event::FocusGained]),
+            (b"\x1b[O", vec![Event::FocusLost]),
         ];
 
         for (bytes, want) in cases {

@@ -24,8 +24,9 @@ use crate::{
 use crossterm::{
     cursor::Show,
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, queue,
     terminal::{
@@ -183,7 +184,7 @@ pub fn install_panic_hook() {
         panic::set_hook(Box::new(move |info| {
             let _ = execute!(io::stdout(), DisableMouseCapture);
             pop_keyboard_flags();
-            let _ = execute!(io::stdout(), DisableBracketedPaste);
+            let _ = execute!(io::stdout(), DisableBracketedPaste, DisableFocusChange);
             ratatui::restore();
             // When the UI thread's terminal drops, it shows a hidden cursor
             // through its frame buffer, and a panicking thread discards that
@@ -249,7 +250,9 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
             let mut terminal = init_terminal().expect("failed to initialize terminal");
             // Without this a paste arrives as its characters, which normal mode
             // would run as commands. Bracketed, it arrives whole as one event.
-            execute!(io::stdout(), EnableBracketedPaste)?;
+            // The focus reports say when the terminal window loses and regains OS
+            // focus.
+            execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
             if mouse_captured {
                 execute!(io::stdout(), EnableMouseCapture)?;
             }
@@ -262,7 +265,7 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
             pop_keyboard_flags();
-            let _ = execute!(io::stdout(), DisableBracketedPaste);
+            let _ = execute!(io::stdout(), DisableBracketedPaste, DisableFocusChange);
             ratatui::restore();
             result
         })
@@ -479,7 +482,12 @@ async fn run(
                     // flags go back on after the alternate screen, onto the
                     // stack that the teardown pops.
                     UiControl::Resume => {
-                        execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
+                        execute!(
+                            io::stdout(),
+                            EnterAlternateScreen,
+                            EnableBracketedPaste,
+                            EnableFocusChange
+                        )?;
                         if mouse_captured {
                             execute!(io::stdout(), EnableMouseCapture)?;
                         }
