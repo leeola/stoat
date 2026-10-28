@@ -140,6 +140,18 @@ impl DiffBase {
             origin: RevOrigin::ParentOf(commit.to_string()),
         }
     }
+
+    /// `base`, the merge base of `from` and `against`, as the base of a review
+    /// of `from` against `against`.
+    pub(crate) fn review(base: String, from: &str, against: &str) -> Self {
+        Self::Rev {
+            sha: Some(base),
+            origin: RevOrigin::Review {
+                from: from.to_string(),
+                against: against.to_string(),
+            },
+        }
+    }
 }
 
 /// How a [`DiffBase::Rev`] became the base.
@@ -152,6 +164,10 @@ pub(crate) enum RevOrigin {
     /// The revision is the parent of this commit, which a review checked out
     /// under the buffers. It holds the commit's full sha.
     ParentOf(String),
+    /// A review of `from` against `against`, both as the reader typed them,
+    /// whose revision is their merge base. The tip of `from` is checked out
+    /// under the buffers.
+    Review { from: String, against: String },
 }
 
 /// The other open file that one file measures against, for two files git does
@@ -1323,6 +1339,7 @@ pub(crate) fn diff_sides(base: Option<&DiffBase>) -> (String, String) {
                     };
                     (left, format!("commit {}", short_sha(commit)))
                 },
+                RevOrigin::Review { from, against } => (format!("{against} {base}"), from.clone()),
             }
         },
         // An agent's proposal sits under no revision. The base is the file as
@@ -1771,6 +1788,11 @@ fn resolve_base(
 /// empty text rather than abandoning the diff, so a file the commit adds still
 /// diffs against nothing.
 ///
+/// A range review ([`RevOrigin::Review`]) reads the rev on both sides, so no
+/// hunk reads staged. Every hunk of a range sits in the checked-out tip. With
+/// HEAD on the staged side every hunk reads staged, which tells the reader
+/// nothing.
+///
 /// Under a [`DiffBase::Memory`] both sides are the supplied text, which leaves
 /// every hunk unstaged. Nothing has applied an agent's proposal anywhere. A path
 /// the map does not carry diffs against the index, as with no override.
@@ -1788,13 +1810,18 @@ pub(crate) fn base_texts(
     base_override: Option<&DiffBase>,
 ) -> Option<DiffBaseText> {
     match base_override {
-        Some(DiffBase::Rev { sha, .. }) => {
-            let rev = match sha {
+        Some(DiffBase::Rev { sha, origin }) => {
+            let rev = Arc::new(match sha {
                 Some(sha) => repo.content_at(sha, path).unwrap_or_default(),
                 None => String::new(),
+            });
+            let staged = match origin {
+                RevOrigin::Review { .. } => rev.clone(),
+                RevOrigin::Named(_) | RevOrigin::ParentOf(_) => {
+                    Arc::new(repo.head_content(path).unwrap_or_default())
+                },
             };
-            let head = repo.head_content(path).unwrap_or_default();
-            Some(DiffBaseText::new(Arc::new(rev), Arc::new(head), None))
+            Some(DiffBaseText::new(rev, staged, None))
         },
         Some(DiffBase::Head) => {
             let (head, index) = working_tree_texts(repo, path)?;
@@ -2247,6 +2274,37 @@ mod tests {
             h.fake_git().rename_source_calls(&workdir),
             after_open,
             "and the recorded base answers every settle after it",
+        );
+    }
+
+    /// A range review reads its merge base on both sides, so no hunk of the
+    /// range reads staged. A commit review keeps HEAD on the staged side.
+    #[test]
+    fn a_range_review_reads_its_base_on_both_sides() {
+        let h = TestHarness::with_size(40, 12);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit("b1", &[("a.rs", "base\n")])
+            .head_file("a.rs", "tip\n");
+        let texts = |base: DiffBase| {
+            let texts = resolve_base(
+                &**h.fake_git(),
+                Path::new("/repo"),
+                Path::new("/repo/a.rs"),
+                Some(&base),
+            )
+            .expect("a file in the repo");
+            (texts.base.to_string(), texts.staged_text.to_string())
+        };
+        assert_eq!(
+            [
+                texts(DiffBase::review("b1".to_string(), "feature", "main")),
+                texts(DiffBase::parent_of("t1", Some("b1".to_string()))),
+            ],
+            [
+                ("base\n".to_string(), "base\n".to_string()),
+                ("base\n".to_string(), "tip\n".to_string()),
+            ],
         );
     }
 

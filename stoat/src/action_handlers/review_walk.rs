@@ -7,7 +7,7 @@ use crate::{
     commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
-    review_walk::{ReturnRef, ReviewWalk},
+    review_walk::{ReturnRef, ReviewWalk, WalkSpan},
     workspace::diff::DiffBase,
 };
 use std::{
@@ -50,6 +50,135 @@ pub(crate) fn git_review(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
         ref_sha,
         None,
     )
+}
+
+/// Review `from` against `against` as a walk of one commit, the tip of `from`
+/// diffed against the merge base of the two.
+///
+/// With no `against`, the branch `from` forked from stands in, as
+/// [`fork_branch`] picks it. The refs resolve on the git queue, behind every
+/// write queued before the press. A review walk or a rebase that holds HEAD
+/// at that turn refuses the review, as it refuses a checkout.
+pub(crate) fn review(stoat: &mut Stoat, from: Option<&str>, against: Option<&str>) -> UpdateEffect {
+    let Some(from) = from else {
+        return review_error(
+            stoat,
+            "review needs a revision",
+            Some("usage: review <from> [against]".to_string()),
+        );
+    };
+
+    let (from, against) = (from.to_string(), against.map(str::to_string));
+    let job = GitJob::new("review", None, move |stoat: &mut Stoat| {
+        let repo = checkout_repo(stoat)?;
+        let workdir = repo.workdir()?;
+        Some(Box::new(move || {
+            let resolved = resolve_review(&*repo, &from, against.as_deref());
+            Box::new(move |stoat: &mut Stoat| match resolved {
+                Ok((commit, span)) => {
+                    queue_walk_start(stoat, workdir, vec![commit], WalkLandingKind::Walk, span);
+                },
+                Err((label, detail)) => {
+                    review_error(stoat, label, detail);
+                },
+            }) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// The tip of `from` and the span that reviews it against `against`, or the
+/// badge label and detail that refuse the review, on whatever thread calls.
+///
+/// A `from` that `against` already holds has nothing to review, since the
+/// merge base is then `from` itself.
+fn resolve_review(
+    repo: &dyn crate::host::GitRepo,
+    from: &str,
+    against: Option<&str>,
+) -> Result<(CommitInfo, WalkSpan), (&'static str, Option<String>)> {
+    let unknown = |rev: &str| ("unknown revision", Some(format!("no revision named {rev}")));
+    let from_sha = repo.resolve_rev(from).ok_or_else(|| unknown(from))?;
+    let (against, against_sha) = match against {
+        Some(against) => {
+            let sha = repo.resolve_rev(against).ok_or_else(|| unknown(against))?;
+            (against.to_string(), sha)
+        },
+        None => fork_branch(repo, from, &from_sha).ok_or_else(|| {
+            (
+                "no branch to review against",
+                Some(format!("{from} forked from no other local branch")),
+            )
+        })?,
+    };
+
+    let base = repo.merge_base(&from_sha, &against_sha).ok_or_else(|| {
+        (
+            "no common ancestor",
+            Some(format!("{from} and {against} share no history")),
+        )
+    })?;
+    if base == from_sha {
+        return Err((
+            "nothing to review",
+            Some(format!("{from} is merged into {against}")),
+        ));
+    }
+
+    let commit = repo
+        .log_from(&from_sha, 1)
+        .into_iter()
+        .next()
+        .ok_or_else(|| unknown(from))?;
+    Ok((
+        commit,
+        WalkSpan::Range {
+            base,
+            from: from.to_string(),
+            against,
+        },
+    ))
+}
+
+/// The local branch `from` forked from, as its name and tip sha.
+///
+/// Every local branch but `from` itself, and but any whose tip is `from_sha`,
+/// is a candidate. The winner's merge base with `from_sha` comes first along
+/// `from`'s first-parent history, which makes it the newest fork point. Ties
+/// go to `main`, then `master`, then the first name in order. A merge base past
+/// the first [`WALK_LIMIT`] commits ranks after every one within them.
+///
+/// `None` when no candidate shares history with `from`.
+fn fork_branch(
+    repo: &dyn crate::host::GitRepo,
+    from: &str,
+    from_sha: &str,
+) -> Option<(String, String)> {
+    let history: Vec<String> = repo
+        .log_from(from_sha, WALK_LIMIT)
+        .into_iter()
+        .map(|commit| commit.sha)
+        .collect();
+    let rank = |name: &str| match name {
+        "main" => 0,
+        "master" => 1,
+        _ => 2,
+    };
+
+    repo.local_branches()
+        .into_iter()
+        .filter(|(name, tip)| name != from && tip != from_sha)
+        .filter_map(|(name, tip)| {
+            let base = repo.merge_base(from_sha, &tip)?;
+            let depth = history
+                .iter()
+                .position(|sha| *sha == base)
+                .unwrap_or(usize::MAX);
+            Some((depth, rank(&name), name, tip))
+        })
+        .min()
+        .map(|(_, _, name, tip)| (name, tip))
 }
 
 /// List a ref's history read-only, defaulting to the current branch.
@@ -443,12 +572,21 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
     let mut commits = picker.commits[..=base_idx].to_vec();
     commits.reverse();
 
-    queue_walk_start(stoat, workdir, commits, WalkLandingKind::Walk);
+    queue_walk_start(
+        stoat,
+        workdir,
+        commits,
+        WalkLandingKind::Walk,
+        WalkSpan::Commits,
+    );
     UpdateEffect::Redraw
 }
 
 /// Queue the start of a walk over `commits`, which records where HEAD goes
 /// back to and checks the first commit out.
+///
+/// `span` decides what the walk diffs each commit against, as [`WalkSpan`]
+/// describes.
 ///
 /// The start reads HEAD at the job's turn, after every git write queued before
 /// the press landed. So a walk started while an ended walk's return waits in
@@ -466,6 +604,7 @@ pub(super) fn queue_walk_start(
     workdir: PathBuf,
     commits: Vec<CommitInfo>,
     kind: WalkLandingKind,
+    span: WalkSpan,
 ) {
     let job = GitJob::new(
         "walk start",
@@ -508,6 +647,7 @@ pub(super) fn queue_walk_start(
                 commits,
                 cursor: 0,
                 return_ref,
+                span,
             });
 
             let (workdir, sha, standing) = walk_position(stoat)?;
@@ -557,7 +697,13 @@ pub(super) fn walk_one_commit(
     workdir: PathBuf,
     commit: CommitInfo,
 ) -> UpdateEffect {
-    queue_walk_start(stoat, workdir, vec![commit], WalkLandingKind::Walk);
+    queue_walk_start(
+        stoat,
+        workdir,
+        vec![commit],
+        WalkLandingKind::Walk,
+        WalkSpan::Commits,
+    );
     UpdateEffect::Redraw
 }
 
@@ -1038,6 +1184,9 @@ pub(super) fn queue_walk_landing(
 /// The git work that checks `sha` out for a walk or an edit pause, from a job's
 /// start.
 ///
+/// The span is read here, at the job's start, so the work knows which base a
+/// range review lands against. A rebase pause has no walk and reads none.
+///
 /// Returns `None`, with the failure reported, when `workdir` holds no
 /// repository.
 fn walk_checkout_work(
@@ -1047,12 +1196,21 @@ fn walk_checkout_work(
     sha: String,
     standing: String,
 ) -> Option<GitWork> {
+    let range_base = stoat
+        .active_workspace()
+        .review_walk
+        .as_ref()
+        .filter(|_| kind.follows_walk())
+        .and_then(|walk| match &walk.span {
+            WalkSpan::Range { base, .. } => Some(base.clone()),
+            WalkSpan::Commits => None,
+        });
     let Some(repo) = stoat.git_host.discover(&workdir) else {
         report_failure(stoat, kind, WalkFailure::NoRepository);
         return None;
     };
     Some(Box::new(move || {
-        let landed = walk_landing(&*repo, kind, &sha);
+        let landed = walk_landing(&*repo, kind, &workdir, &sha, range_base.as_deref());
         Box::new(move |stoat: &mut Stoat| {
             land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed);
         }) as GitLanding
@@ -1060,10 +1218,16 @@ fn walk_checkout_work(
 }
 
 /// Check `sha` out and read what the landing needs, on whatever thread calls.
+///
+/// Under a `range_base` the first path is the first tracked file the whole
+/// range changed against that base, rather than the first file the commit
+/// touched, since the review reads as one diff against the base.
 fn walk_landing(
     repo: &dyn crate::host::GitRepo,
     kind: WalkLandingKind,
+    workdir: &Path,
     sha: &str,
+    range_base: Option<&str>,
 ) -> Result<WalkLanding, WalkFailure> {
     if repo.resolve_rev("HEAD").as_deref() != Some(sha) {
         if kind.follows_walk() && repo.has_tracked_changes() {
@@ -1074,9 +1238,17 @@ fn walk_landing(
         }
     }
 
+    let first_path = match range_base {
+        Some(base) => repo
+            .changed_files_from(base)
+            .into_iter()
+            .find(|file| !file.untracked)
+            .and_then(|file| file.path.strip_prefix(workdir).ok().map(Path::to_path_buf)),
+        None => repo.commit_first_path(sha),
+    };
     Ok(WalkLanding {
         parent: repo.parent_sha(sha),
-        first_path: repo.commit_first_path(sha),
+        first_path,
     })
 }
 
@@ -1119,7 +1291,8 @@ fn land_walk_checkout(
 /// path on screen.
 ///
 /// The same three steps [`super::review::land_diff_on_commit`] takes, against
-/// values the job already read rather than reads made here.
+/// values the job already read rather than reads made here. A range review
+/// takes its merge base as the diff base instead, named by both refs.
 ///
 /// A walkthrough's landing hands the screen to the tour instead, which opens
 /// the file its stop names on `sha`.
@@ -1131,9 +1304,21 @@ fn land_walk(
     sha: &str,
     landing: WalkLanding,
 ) {
-    stoat
-        .active_workspace_mut()
-        .set_diff_base(Some(DiffBase::parent_of(sha, landing.parent)));
+    let span = stoat
+        .active_workspace()
+        .review_walk
+        .as_ref()
+        .filter(|_| kind.follows_walk())
+        .map(|walk| &walk.span);
+    let base = match span {
+        Some(WalkSpan::Range {
+            base,
+            from,
+            against,
+        }) => DiffBase::review(base.clone(), from, against),
+        Some(WalkSpan::Commits) | None => DiffBase::parent_of(sha, landing.parent),
+    };
+    stoat.active_workspace_mut().set_diff_base(Some(base));
     super::review::emit_review_info_badge(stoat, standing);
 
     if kind == WalkLandingKind::Walkthrough {
@@ -1178,27 +1363,32 @@ fn report_failure(stoat: &mut Stoat, kind: WalkLandingKind, failure: WalkFailure
         },
     }
 }
-/// Where the walk cursor stands: its workdir, sha, and badge text.
+/// The workdir, sha, and badge text of the commit under the walk cursor.
+///
+/// A range review names its two refs in the badge, since its one commit is
+/// the tip of `from` and a position among one says nothing.
 fn walk_position(stoat: &Stoat) -> Option<(PathBuf, String, String)> {
     stoat.active_workspace().review_walk.as_ref().map(|walk| {
-        (
-            walk.workdir.clone(),
-            walk.current().sha.clone(),
-            format!(
+        let standing = match &walk.span {
+            WalkSpan::Range { from, against, .. } => {
+                format!("reviewing {from} against {against}")
+            },
+            WalkSpan::Commits => format!(
                 "reviewing {} ({}/{})",
                 walk.current().short_sha,
                 walk.cursor + 1,
                 walk.commits.len()
             ),
-        )
+        };
+        (walk.workdir.clone(), walk.current().sha.clone(), standing)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        queue_walk_landing, walk_navigate_as, walk_one_commit, ReturnRef, ReviewWalk,
-        WalkLandingKind,
+        queue_walk_landing, queue_walk_start, walk_navigate_as, walk_one_commit, ReturnRef,
+        ReviewWalk, WalkLandingKind, WalkSpan,
     };
     use crate::{
         app::Stoat,
@@ -1252,6 +1442,38 @@ mod tests {
         h.fake_fs()
             .insert_file("/repo/a.rs", b"fn a() {}\nfn a2() {}\n");
         h.fake_fs().insert_file("/repo/b.rs", b"fn b() {}\n");
+        h
+    }
+
+    /// `a.rs` as the fork leaves it.
+    const FORK_A: &str = "fn a() {}\nfn a2() {}\nfn fork() {}\n";
+
+    /// [`harness`]'s three commits, plus a two-commit `feature` forked from
+    /// `b2c3d4e5` with no `b.rs`. On it, `d4e5f6a7` changes `a.rs` and
+    /// `e5f6a7b8` adds `c.rs`. HEAD stays on `main` at `c3d4e5f6`, and an
+    /// untracked scratch file sits beside the work.
+    ///
+    /// The fake's HEAD files and the tree on disk hold the tip of `feature`,
+    /// which is what a checkout of it leaves, since the fake moves HEAD
+    /// without writing the tree.
+    fn fork_harness() -> TestHarness {
+        let h = harness();
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_parent_message("d4e5f6a7", "b2c3d4e5", "feat: fork", &[("a.rs", FORK_A)])
+            .commit_with_parent_message(
+                "e5f6a7b8",
+                "d4e5f6a7",
+                "feat: add c.rs",
+                &[("a.rs", FORK_A), ("c.rs", "fn c() {}\n")],
+            )
+            .branch("feature", "e5f6a7b8")
+            .set_head("c3d4e5f6")
+            .head_file("a.rs", FORK_A)
+            .head_file("c.rs", "fn c() {}\n")
+            .untracked("0-scratch.txt");
+        h.fake_fs().insert_file("/repo/a.rs", FORK_A.as_bytes());
+        h.fake_fs().insert_file("/repo/c.rs", b"fn c() {}\n");
         h
     }
 
@@ -2412,6 +2634,7 @@ mod tests {
             commits,
             cursor: 0,
             return_ref: ReturnRef::Branch("main".to_string()),
+            span: WalkSpan::Commits,
         }
     }
 
@@ -2860,6 +3083,270 @@ mod tests {
                 "ref:main"
             ],
             "ending the new walk goes back to main",
+        );
+    }
+
+    /// A range review checks the tip of `from` out once and diffs it against
+    /// the merge base, named by both refs as typed. It opens the first tracked
+    /// file the whole range changed, where the tip commit alone changed
+    /// `c.rs`. It holds one commit, so a step moves nothing, and
+    /// `:review-done` returns the tree.
+    #[test]
+    fn a_range_review_diffs_the_tip_against_the_merge_base() {
+        let mut h = fork_harness();
+        let tip = {
+            let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+            repo.log_from("e5f6a7b8", 1)
+                .into_iter()
+                .next()
+                .expect("the tip of feature")
+        };
+        let span = WalkSpan::Range {
+            base: "b2c3d4e5".to_string(),
+            from: "feature".to_string(),
+            against: "main".to_string(),
+        };
+        queue_walk_start(
+            &mut h.stoat,
+            PathBuf::from("/repo"),
+            vec![tip],
+            WalkLandingKind::Walk,
+            span,
+        );
+        h.settle();
+        let landed = (
+            diff_base(&h),
+            review_badge(&h),
+            open_path(&h),
+            checkouts(&h),
+            diff::diff_sides(h.stoat.active_workspace().diff_base()),
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewNextCommit);
+        h.settle();
+        let stepped = checkouts(&h);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle();
+        let listed: Vec<String> = {
+            let ws = h.stoat.active_workspace();
+            ws.focused_diff_changes_id()
+                .and_then(|id| ws.diff_changes_views.get(id))
+                .map(|view| {
+                    view.excerpts
+                        .iter()
+                        .map(|excerpt| excerpt.rel_path.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewDone);
+        h.settle();
+
+        assert_eq!(
+            (
+                landed,
+                stepped,
+                listed,
+                checkouts(&h).last().cloned(),
+                diff_base(&h)
+            ),
+            (
+                (
+                    Some(Some("b2c3d4e5".to_string())),
+                    Some("reviewing feature against main".to_string()),
+                    Some(PathBuf::from("/repo/a.rs")),
+                    vec!["detached:e5f6a7b8".to_string()],
+                    ("main b2c3d4e".to_string(), "feature".to_string()),
+                ),
+                vec!["detached:e5f6a7b8".to_string()],
+                vec!["a.rs".to_string(), "c.rs".to_string()],
+                Some("ref:main".to_string()),
+                None,
+            ),
+        );
+    }
+
+    /// The walk, base, badge, and checkouts that `command` leaves once it is
+    /// typed into the palette over [`fork_harness`] and submitted.
+    fn reviewed(
+        command: &str,
+    ) -> (
+        Vec<String>,
+        Option<Option<String>>,
+        Option<String>,
+        Vec<String>,
+    ) {
+        let mut h = fork_harness();
+        h.type_text(command);
+        let _ = h.snapshot();
+        h.type_keys("enter");
+        h.settle();
+        (
+            walk_shas(&h),
+            diff_base(&h),
+            review_badge(&h),
+            checkouts(&h),
+        )
+    }
+
+    /// `:review <from>` reviews `from` against the branch it forked from, and a
+    /// named `against`, a branch or a sha, lands the same base. `:review main`
+    /// reads against `feature`, and HEAD already sits on its tip.
+    #[test]
+    fn review_takes_the_tip_of_from_against_the_merge_base() {
+        let range = |against: &str| {
+            (
+                vec!["e5f6a7b8".to_string()],
+                Some(Some("b2c3d4e5".to_string())),
+                Some(format!("reviewing feature against {against}")),
+                vec!["detached:e5f6a7b8".to_string()],
+            )
+        };
+        assert_eq!(
+            [
+                reviewed(":review feature"),
+                reviewed(":review feature main"),
+                reviewed(":review feature c3d4e5f6"),
+                reviewed(":review main"),
+            ],
+            [
+                range("main"),
+                range("main"),
+                range("c3d4e5f6"),
+                (
+                    vec!["c3d4e5f6".to_string()],
+                    Some(Some("b2c3d4e5".to_string())),
+                    Some("reviewing main against feature".to_string()),
+                    Vec::new(),
+                ),
+            ],
+        );
+    }
+
+    /// A bare `:review`, a revision that names nothing, a `from` that `against`
+    /// already holds, and a review while a walk holds HEAD each badge why and
+    /// start nothing.
+    #[test]
+    fn review_refuses_what_it_cannot_review() {
+        let mut walking = fork_harness();
+        for _ in 0..2 {
+            walking.type_text(":review feature");
+            walking.type_keys("enter");
+            walking.settle();
+        }
+
+        let refused = |label: &str| (Vec::new(), None, Some(label.to_string()), Vec::new());
+        assert_eq!(
+            [
+                reviewed(":review"),
+                reviewed(":review junk"),
+                reviewed(":review b2c3d4e5 main"),
+                (
+                    walk_shas(&walking),
+                    diff_base(&walking),
+                    review_badge(&walking),
+                    checkouts(&walking),
+                ),
+            ],
+            [
+                refused("review needs a revision"),
+                refused("unknown revision"),
+                refused("nothing to review"),
+                (
+                    vec!["e5f6a7b8".to_string()],
+                    Some(Some("b2c3d4e5".to_string())),
+                    Some("a review walk is open".to_string()),
+                    vec!["detached:e5f6a7b8".to_string()],
+                ),
+            ],
+        );
+    }
+
+    /// `:review done` ends a range review as `:review-done` ends a walk.
+    #[test]
+    fn review_done_ends_a_range_review() {
+        let mut h = fork_harness();
+        h.type_text(":review feature");
+        h.type_keys("enter");
+        h.settle();
+        h.type_text(":review done");
+        h.type_keys("enter");
+        h.settle();
+
+        assert_eq!(
+            (
+                checkouts(&h),
+                h.stoat.active_workspace().review_walk.is_none()
+            ),
+            (
+                vec!["detached:e5f6a7b8".to_string(), "ref:main".to_string()],
+                true
+            ),
+        );
+    }
+
+    /// The branch `from` forked from is the one with the newest fork point.
+    /// A tie goes to `main` over a name that sorts before it, and a repo with
+    /// no other branch has none.
+    #[test]
+    fn fork_branch_takes_the_newest_fork_point() {
+        let fork = |extra: &[(&str, &str)]| {
+            let h = fork_harness();
+            for (name, sha) in extra {
+                h.fake_git().add_repo("/repo").branch(name, sha);
+            }
+            let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+            super::fork_branch(&*repo, "feature", "e5f6a7b8").map(|(name, _)| name)
+        };
+        let lone = {
+            let h = Stoat::test();
+            h.seed_linear_history("/repo", &[("a1b2c3d4", "one", &[("a.rs", "1\n")])]);
+            h.fake_git().add_repo("/repo").branch("main", "a1b2c3d4");
+            let repo = h.stoat.git_host.discover(Path::new("/repo")).expect("repo");
+            super::fork_branch(&*repo, "main", "a1b2c3d4")
+        };
+
+        assert_eq!(
+            [
+                fork(&[]),
+                fork(&[("alpha", "b2c3d4e5")]),
+                fork(&[("topic", "d4e5f6a7")]),
+                lone.map(|(name, _)| name),
+            ],
+            [
+                Some("main".to_string()),
+                Some("main".to_string()),
+                Some("topic".to_string()),
+                None,
+            ],
+        );
+    }
+
+    /// The palette completes `:review`'s first argument from the branches, and
+    /// Enter takes the highlighted row for the second.
+    #[test]
+    fn the_palette_completes_both_review_arguments() {
+        let mut h = fork_harness();
+        h.type_text(":review featu");
+        let _ = h.snapshot();
+        h.type_keys("tab");
+        let completed = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .map(|palette| palette.input.text(h.stoat.active_workspace()));
+
+        assert_eq!(
+            (
+                completed.as_deref(),
+                reviewed(":review feature ma").2.as_deref()
+            ),
+            (
+                Some("review feature"),
+                Some("reviewing feature against main")
+            ),
         );
     }
 

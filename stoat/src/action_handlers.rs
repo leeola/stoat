@@ -68,7 +68,8 @@ use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitCheckout,
     GitLs, GitRebase, GitReview, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs,
-    OpenReviewAgentEdits, RenameTab, RenameWorkspace, Run, SetCwd, SetTheme, Ssh, WalkthroughOpen,
+    OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run, SetCwd, SetTheme, Ssh,
+    WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -773,6 +774,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .downcast_ref::<GitReview>()
                 .expect("GitReview action downcast");
             review_walk::git_review(stoat, &action.reference)
+        },
+        ActionKind::Review => {
+            let action = action
+                .as_any()
+                .downcast_ref::<Review>()
+                .expect("Review action downcast");
+            review_walk::review(stoat, action.from.as_deref(), action.against.as_deref())
         },
         ActionKind::GitLs => {
             let action = action

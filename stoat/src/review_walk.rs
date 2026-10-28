@@ -12,6 +12,24 @@ pub(crate) enum ReturnRef {
     Detached(String),
 }
 
+/// What a walk diffs its commits against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WalkSpan {
+    /// Each commit against its parent, so a step shows that commit alone.
+    Commits,
+    /// One commit, the tip of `from`, against `base`, the merge base of `from`
+    /// and `against`.
+    ///
+    /// The diff holds all of `from`'s work since the fork and none of what
+    /// landed on `against` after it. Both names stay as the reader typed them,
+    /// which is how the badge and the sides bar name the review.
+    Range {
+        base: String,
+        from: String,
+        against: String,
+    },
+}
+
 /// A walk through a run of commits, showing each one's diff in turn.
 ///
 /// The working tree follows the cursor. Stepping checks the current commit out
@@ -20,11 +38,14 @@ pub(crate) enum ReturnRef {
 ///
 /// `commits` runs oldest-first from the chosen base up to the ref tip, so
 /// stepping forward moves toward the tip the way reading history forward does.
+/// A range review is a walk of one commit, whose [`WalkSpan::Range`] names the
+/// base it reads against.
 pub(crate) struct ReviewWalk {
     pub(crate) workdir: PathBuf,
     pub(crate) commits: Vec<CommitInfo>,
     pub(crate) cursor: usize,
     pub(crate) return_ref: ReturnRef,
+    pub(crate) span: WalkSpan,
 }
 
 impl ReviewWalk {
@@ -61,7 +82,7 @@ impl ReviewWalk {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReturnRef, ReviewWalk};
+    use super::{ReturnRef, ReviewWalk, WalkSpan};
     use crate::host::CommitInfo;
     use std::path::PathBuf;
 
@@ -81,6 +102,7 @@ mod tests {
                 .collect(),
             cursor: 0,
             return_ref: ReturnRef::Branch("main".into()),
+            span: WalkSpan::Commits,
         }
     }
 

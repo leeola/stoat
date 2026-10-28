@@ -373,6 +373,7 @@ define_action!(
      was on when the walk started and closing any open diff. Keeps the walk \
      so it can be retried when the checkout back fails.",
     ActionPriority::Rare,
+    aliases = &["review done"],
     command_name = "review-done"
 );
 
@@ -408,6 +409,60 @@ impl GitReview {
 }
 
 impl Action for GitReview {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+const REVIEW_PARAMS: &[ParamDef] = &[
+    ParamDef {
+        name: "from",
+        kind: ParamKind::String,
+        value_source: ValueSource::Revisions,
+        required: false,
+        description: "Branch or commit under review. Its tip is checked out.",
+    },
+    ParamDef {
+        name: "against",
+        kind: ParamKind::String,
+        value_source: ValueSource::Revisions,
+        required: false,
+        description: "Branch or commit to review against. The diff base is the \
+                      merge base of the two. Omit it to review against the \
+                      branch `from` forked from.",
+    },
+];
+
+define_action_def!(
+    ReviewDef,
+    "Review",
+    ActionKind::Review,
+    "review a revision against another",
+    "Check the tip of `from` out detached and diff it against the merge base \
+     of `from` and `against`, so the diff holds the work of `from` alone. \
+     With no `against`, the branch `from` forked from stands in. \
+     `:review done` returns the tree. Refuses while a review walk or a \
+     rebase holds HEAD, and while tracked files hold uncommitted changes.",
+    ActionPriority::Common,
+    command_name = "review",
+    params = REVIEW_PARAMS
+);
+
+#[derive(Debug)]
+pub struct Review {
+    pub from: Option<String>,
+    pub against: Option<String>,
+}
+
+impl Review {
+    pub const DEF: &ReviewDef = &ReviewDef;
+}
+
+impl Action for Review {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }

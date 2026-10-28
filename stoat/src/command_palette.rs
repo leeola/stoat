@@ -556,7 +556,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        GitLs | GitReview | GitCheckout | GitCommit | GitRebase => ctx.in_repo,
+        GitLs | GitReview | Review | GitCheckout | GitCommit | GitRebase => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1045,6 +1045,10 @@ fn parse_command<'a>(
 /// one. A head resolves as a conditional command first, then through
 /// [`registry::lookup_alias`]. Returns `None` when no space ends a head that
 /// names a command.
+///
+/// A two-token command that takes no argument, such as `review done`, is
+/// whole with no space after it, and answers with an empty tail. Without that,
+/// a one-token head such as `review` takes the second token as its argument.
 pub(crate) fn split_head<'a>(
     text: &'a str,
     ctx: &Availability,
@@ -1057,6 +1061,8 @@ pub(crate) fn split_head<'a>(
         if let Some(entry) = resolve(head) {
             return Some((entry, head, tail));
         }
+    } else if let Some(entry) = resolve(text).filter(|entry| entry.def.params().is_empty()) {
+        return Some((entry, text, ""));
     }
     resolve(first).map(|entry| (entry, first, rest))
 }
@@ -1740,6 +1746,26 @@ mod tests {
                 None,
                 None,
                 Some(("OpenFile", "src/a b")),
+            ],
+        );
+    }
+
+    /// A two-token command that takes no argument is whole with no space after
+    /// it, so `review done` ends a review where `review feature` names a
+    /// revision. One that takes an argument still waits for the space, so
+    /// `git log` stays filter text for the git group.
+    #[test]
+    fn a_whole_two_token_command_wins_over_its_first_token() {
+        let split = |text: &'static str| {
+            split_head(text, &Availability::default())
+                .map(|(entry, head, tail)| (entry.def.name(), head, tail))
+        };
+        assert_eq!(
+            ["review done", "review feature", "git log"].map(split),
+            [
+                Some(("ReviewDone", "review done", "")),
+                Some(("Review", "review", "feature")),
+                None,
             ],
         );
     }

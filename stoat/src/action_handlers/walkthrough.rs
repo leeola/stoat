@@ -10,6 +10,7 @@ use crate::{
         text::text_width,
         walkthrough::{SlideParts, EXIT_MS},
     },
+    review_walk::WalkSpan,
     walkthrough::{
         self,
         run::{part, WalkthroughRun},
@@ -132,7 +133,13 @@ fn open_commit_tour(stoat: &mut Stoat, run: WalkthroughRun, git_root: &Path) -> 
     let first = commits[0].sha.clone();
     stoat.active_workspace_mut().walkthrough = Some(run);
     clear_trail(stoat);
-    super::review_walk::queue_walk_start(stoat, workdir, commits, WalkLandingKind::Walkthrough);
+    super::review_walk::queue_walk_start(
+        stoat,
+        workdir,
+        commits,
+        WalkLandingKind::Walkthrough,
+        WalkSpan::Commits,
+    );
     stoat.set_status(format!("checking out {first:.7}"));
     UpdateEffect::Redraw
 }

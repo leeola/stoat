@@ -398,6 +398,7 @@ action_kinds! {
     FormatSelections,
     Format,
     GitReview,
+    Review,
     GitLs,
     GitCheckout,
     GitCommitConfirm,

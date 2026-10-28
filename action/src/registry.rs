@@ -115,7 +115,7 @@ use crate::{
             ChangeWalkWrap, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
             DiffBaseToggle, DiffBold, DiffFiles, DiffForward, DiffPair, DiffSyntax, DiffTintDown,
             DiffTintUp, DiffUnderline, GitReview, JumpToMoveSource, JumpToMoveTarget,
-            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, ReviewDone,
+            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, Review, ReviewDone,
             ReviewNextCommit, ReviewPrevCommit, ToggleStageHunk, ToggleStageLine,
         },
         run::{
@@ -420,6 +420,26 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             })?;
         Ok(Box::new(GitReview {
             reference: reference.to_owned(),
+        }))
+    });
+    add(Review::DEF, |params| {
+        let optional = |index: usize, name: &'static str| {
+            params
+                .get(index)
+                .map(|param| {
+                    param
+                        .as_string()
+                        .map(str::to_owned)
+                        .context(WrongKindSnafu {
+                            name,
+                            expected: ParamKind::String,
+                        })
+                })
+                .transpose()
+        };
+        Ok(Box::new(Review {
+            from: optional(0, "from")?,
+            against: optional(1, "against")?,
         }))
     });
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
@@ -1360,6 +1380,7 @@ mod tests {
         "ReviewNextCommit",
         "ReviewPrevCommit",
         "ReviewDone",
+        "Review",
         "OpenCommits",
         "CloseCommits",
         "CommitsNext",
@@ -1979,6 +2000,7 @@ mod tests {
         // + 1 OpenWorkspaceFileFinder.
         // + 4 /Prev/Select/Close.
         // + 1 GitReview.
+        // + 1 Review.
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
         // + 1 GitCheckout.
@@ -2017,7 +2039,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 459);
+        assert_eq!(all().count(), 460);
     }
 
     #[test]
