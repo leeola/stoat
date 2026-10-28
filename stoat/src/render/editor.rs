@@ -10,7 +10,7 @@ use crate::{
         display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot,
         PaintVersion, TabPoint,
     },
-    editor_state::{EditorState, SearchMatchCache},
+    editor_state::EditorState,
     minimap::color_to_rgb,
     render::{
         conflict_view::render_conflict_view,
@@ -117,8 +117,6 @@ pub(crate) fn render_editor(
         None,
         None,
         None,
-        false,
-        None,
         None,
         true,
         None,
@@ -152,8 +150,6 @@ pub(crate) fn render_editor_with_overlay(
     insert_mode: bool,
     hover_cell: Option<(u16, u16)>,
     goto_word_labels: Option<&BTreeMap<String, (usize, usize)>>,
-    search_query: Option<&str>,
-    search_smart_case: bool,
     diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
     mut scene: Option<&mut ApcScene>,
     delegates_cursor: bool,
@@ -182,8 +178,6 @@ pub(crate) fn render_editor_with_overlay(
             buf,
             is_focused,
             goto_word_labels,
-            search_query,
-            search_smart_case,
             scene,
             delegates_cursor,
             dials,
@@ -443,18 +437,6 @@ pub(crate) fn render_editor_with_overlay(
             );
         }
     }
-
-    paint_search_matches(
-        editor,
-        &snapshot,
-        inner,
-        end_row,
-        &visible,
-        search_query,
-        search_smart_case,
-        theme,
-        buf,
-    );
 
     if !is_focused {
         return;
@@ -812,106 +794,6 @@ pub(crate) fn screen_cell(
     let y = text.y + (display.row - scroll_row) as u16;
     let x = text.x + display.column as u16;
     (x < text.x + text.width && y < text.y + text.height).then_some((x, y))
-}
-
-/// Wash every match of `query` that reaches the display rows
-/// `scroll_row..end_row` into `inner`, in `ui.search.match`.
-///
-/// `visible` is the byte range of those rows, as [`visible_byte_range`] answers
-/// it. An absent or empty `query` paints nothing. The matches are cached on
-/// `editor`, so a frame with the buffer version, query, rows, and case mode of
-/// the one before it searches nothing.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn paint_search_matches(
-    editor: &mut EditorState,
-    snapshot: &DisplaySnapshot,
-    inner: Rect,
-    end_row: u32,
-    visible: &Range<usize>,
-    query: Option<&str>,
-    smart_case: bool,
-    theme: &Theme,
-    buf: &mut Buffer,
-) {
-    let Some(query) = query.filter(|q| !q.is_empty()) else {
-        return;
-    };
-    let right = inner.x + inner.width;
-    let bottom = inner.y + inner.height;
-    let buffer_snapshot = snapshot.buffer_snapshot();
-
-    let version = buffer_snapshot.version();
-    let rope = buffer_snapshot.rope();
-    let stale = match &editor.search_match_cache {
-        Some(cache) => {
-            cache.version != version
-                || cache.query != query
-                || cache.visible != *visible
-                || cache.smart_case != smart_case
-        },
-        None => true,
-    };
-    if stale {
-        // Reuse the compiled regex while the query text and the case mode
-        // both hold, so only a new query or a flipped setting pays a fresh
-        // compile. A cached None from a failed compile is reused too, so an
-        // invalid query does not recompile every frame.
-        let (mut window, regex) = match editor.search_match_cache.take() {
-            Some(cache) if cache.query == query && cache.smart_case == smart_case => {
-                (cache.window, cache.regex)
-            },
-            Some(cache) => (
-                cache.window,
-                crate::action_handlers::search::compile_search_regex(query, smart_case).ok(),
-            ),
-            None => (
-                String::new(),
-                crate::action_handlers::search::compile_search_regex(query, smart_case).ok(),
-            ),
-        };
-        window.clear();
-        for chunk in rope.chunks_in_range(visible.clone()) {
-            window.push_str(chunk);
-        }
-        let matches = match &regex {
-            Some(regex) => regex
-                .find_iter(&window)
-                .filter(|m| m.end() > m.start())
-                .map(|m| (m.start() + visible.start, m.end() + visible.start))
-                .collect(),
-            None => Vec::new(),
-        };
-        editor.search_match_cache = Some(SearchMatchCache {
-            version,
-            query: query.to_string(),
-            visible: visible.clone(),
-            smart_case,
-            matches,
-            window,
-            regex,
-        });
-    }
-
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
-    let cache = editor.search_match_cache.as_ref().expect("set above");
-    for &(match_start, match_end) in &cache.matches {
-        paint_offset_range(
-            rope,
-            snapshot,
-            match_start..match_end,
-            None,
-            &mut |_, _, cell| {
-                cell.set_style(match_style);
-            },
-            editor.scroll_row,
-            end_row,
-            inner,
-            right,
-            bottom,
-            buf,
-            None,
-        );
-    }
 }
 
 /// Draw each goto-word label over the start of the word it names, for the
@@ -2545,7 +2427,7 @@ fn render_diagnostic_popover(
 /// skipping newlines and `skip_offset` when it is set.
 ///
 /// `skip_offset` is the cursor offset during selection painting, which the
-/// caller renders separately. Search-match painting passes `None`.
+/// caller renders separately. Diagnostic painting passes `None`.
 ///
 /// The display anchor is resolved once per buffer-row segment via
 /// [`DisplaySnapshot::buffer_to_display`]. On a row with no folds, inlays, or
@@ -3087,92 +2969,6 @@ mod tests {
         h.settle();
     }
 
-    /// Render the focused editor with `query` active and return the cached match
-    /// byte-ranges.
-    fn render_search(stoat: &mut Stoat, area: Rect, query: &str) -> Vec<(usize, usize)> {
-        let theme = crate::theme::Theme::empty();
-        let fallback = theme.get(crate::theme::scope::UI_TEXT);
-        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
-        let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
-        let mut buf = Buffer::empty(area);
-        super::render_editor_with_overlay(
-            editor,
-            area,
-            fallback,
-            &theme,
-            &chrome,
-            &mut buf,
-            true,
-            false,
-            LineNumbers::Off,
-            false,
-            None,
-            None,
-            Some(query),
-            false,
-            None,
-            None,
-            true,
-            None,
-            0.0,
-            DiffDials::shipped(),
-            WrapMode::None,
-            80,
-            0,
-        );
-        editor
-            .search_match_cache
-            .as_ref()
-            .expect("a search render populates the cache")
-            .matches
-            .clone()
-    }
-
-    #[test]
-    fn search_reuses_the_cached_regex_without_recompiling() {
-        let mut h = Stoat::test();
-        open_search_buffer(&mut h, "foo bar");
-        let area = Rect::new(0, 0, 20, 4);
-
-        assert_eq!(
-            render_search(&mut h.stoat, area, "foo"),
-            vec![(0, 3)],
-            "the query matches foo"
-        );
-
-        // Swap the cached regex for one matching "bar" while keeping the query,
-        // then force the stale path the way an edit would, with a bumped version.
-        // A recompile from the query would match "foo". Reusing the swapped
-        // object instead matches "bar".
-        {
-            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
-            let cache = editor.search_match_cache.as_mut().expect("cache set");
-            cache.regex =
-                Some(action_handlers::search::compile_search_regex("bar", false).expect("valid"));
-            cache.version = cache.version.wrapping_sub(1);
-        }
-
-        assert_eq!(
-            render_search(&mut h.stoat, area, "foo"),
-            vec![(4, 7)],
-            "the reused regex still matches bar, so the query was not recompiled"
-        );
-    }
-
-    #[test]
-    fn search_recompiles_on_a_new_query() {
-        let mut h = Stoat::test();
-        open_search_buffer(&mut h, "foo bar");
-        let area = Rect::new(0, 0, 20, 4);
-
-        assert_eq!(render_search(&mut h.stoat, area, "foo"), vec![(0, 3)]);
-        assert_eq!(
-            render_search(&mut h.stoat, area, "bar"),
-            vec![(4, 7)],
-            "a new query recompiles and matches the new pattern"
-        );
-    }
-
     #[test]
     fn inlay_hints_paint_in_the_virtual_style() {
         let mut h = Stoat::test();
@@ -3212,8 +3008,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,
@@ -3290,8 +3084,6 @@ mod tests {
                 false,
                 None,
                 None,
-                None,
-                false,
                 None,
                 None,
                 true,
@@ -3386,8 +3178,6 @@ mod tests {
                 false,
                 None,
                 None,
-                None,
-                false,
                 None,
                 None,
                 true,
@@ -3787,8 +3577,6 @@ mod tests {
             None,
             None,
             None,
-            false,
-            None,
             None,
             true,
             None,
@@ -3904,8 +3692,6 @@ mod tests {
             None,
             None,
             None,
-            false,
-            None,
             None,
             true,
             None,
@@ -3945,8 +3731,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,
@@ -4084,8 +3868,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,
@@ -4259,8 +4041,6 @@ mod tests {
                 None,
                 None,
                 None,
-                false,
-                None,
                 None,
                 true,
                 None,
@@ -4306,8 +4086,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,
@@ -4471,8 +4249,6 @@ mod tests {
             None,
             None,
             None,
-            false,
-            None,
             Some(&mut scene),
             true,
             None,
@@ -4553,8 +4329,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             Some(&mut scene),
             true,
@@ -4659,8 +4433,6 @@ mod tests {
             None,
             None,
             None,
-            false,
-            None,
             None,
             true,
             None,
@@ -4710,8 +4482,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,
@@ -4857,8 +4627,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,
@@ -5247,8 +5015,6 @@ mod tests {
             None,
             None,
             None,
-            false,
-            None,
             None,
             true,
             None,
@@ -5309,8 +5075,6 @@ mod tests {
             false,
             None,
             None,
-            None,
-            false,
             None,
             None,
             true,

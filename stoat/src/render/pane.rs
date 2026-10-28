@@ -119,8 +119,6 @@ pub(crate) fn render_pane(
                     frame.mode == "insert",
                     if is_focused { frame.hover_cell } else { None },
                     labels,
-                    frame.search_query,
-                    frame.search_smart_case,
                     diagnostic_info,
                     // The editor's rich surfaces -- gutter, minimap strip, review
                     // decorations -- fork on having a scene at all, so a dead one

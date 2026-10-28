@@ -90,12 +90,11 @@ pub(crate) struct LastSearch {
     /// rather than a rebuild on every press.
     ///
     /// `None` for a pattern that does not compile. The query is kept either
-    /// way, because it is also what the search register pastes and what the
-    /// highlight pass reads, neither of which needs it to be searchable.
+    /// way, because it is also what the search register pastes, which does not
+    /// need it to be searchable.
     ///
     /// Compiled for the cursor engine rather than the plain one, so a repeat
-    /// runs over the buffer's chunks instead of a flattened copy of it. The
-    /// highlight pass compiles its own, over the window it paints.
+    /// runs over the buffer's chunks instead of a flattened copy of it.
     regex: Option<CursorRegex>,
 }
 
@@ -322,10 +321,6 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
     } else {
         restore_origin_view(stoat, view);
     }
-
-    // The frame reads the query straight off the prompt rather than through a
-    // display layer, so nothing else reports that the highlighted matches moved.
-    stoat.paint_generation += 1;
 }
 
 /// Submit the search query and keep where the preview landed.
@@ -353,7 +348,6 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
 
     if query.is_empty() {
         restore_origin_view(stoat, state.origin_view);
-        stoat.paint_generation += 1;
         return true;
     }
 
@@ -384,9 +378,6 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         ?outcome,
         "search"
     );
-    // The query reaches the frame directly rather than through any display
-    // layer, so nothing else reports that the highlighted matches moved.
-    stoat.paint_generation += 1;
     stoat.last_search = Some(last);
     true
 }
@@ -434,7 +425,6 @@ pub(crate) fn search_cancel(stoat: &mut Stoat) -> bool {
     state.input.dispose(ws);
 
     restore_origin(stoat, state.origin_selections, state.origin_view);
-    stoat.paint_generation += 1;
     true
 }
 
@@ -570,9 +560,6 @@ pub(crate) fn set_pattern(stoat: &mut Stoat, pattern: String) {
         SearchDirection::Forward,
         smart_case,
     ));
-    // The highlight pass reads the stored query straight off the app, so
-    // nothing else reports that a different set of matches now lights up.
-    stoat.paint_generation += 1;
 }
 
 /// Whether a word starts at `index`, which is where a `\b` before the selection
@@ -810,7 +797,8 @@ pub(crate) fn smart_case(stoat: &Stoat) -> bool {
 /// case-sensitive.
 ///
 /// The rule lives here rather than at each call site so both compile paths
-/// answer the same way, and the jump and the highlight agree about what matched.
+/// answer the same way, and the buffer search and the code search agree about
+/// what matched.
 fn case_insensitive(pattern: &str, smart_case: bool) -> bool {
     smart_case && !pattern.chars().any(char::is_uppercase)
 }
@@ -831,8 +819,8 @@ pub(crate) fn compile_search_regex(
 /// same multiline and case modes [`compile_search_regex`] uses.
 ///
 /// The two exist side by side because they suit different haystacks. This one
-/// searches the buffer without flattening it. The plain one is what the
-/// highlight pass runs over the window it has already built as a string.
+/// searches the buffer without flattening it. The plain one is what the code
+/// search runs over the text of each file it reads.
 pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<CursorRegex> {
     CursorRegex::builder()
         .syntax(
@@ -876,21 +864,6 @@ mod tests {
         })
     }
 
-    /// How many matches the last paint lit in the pane editor.
-    ///
-    /// Reads the pane rather than the focused editor, which while a prompt is
-    /// open is the prompt's own input view. That one paints no highlights, so
-    /// it holds no cache to count.
-    fn cached_match_count(h: &mut TestHarness) -> usize {
-        super::pane_editor(&mut h.stoat)
-            .expect("pane holds an editor")
-            .search_match_cache
-            .as_ref()
-            .expect("search active so the render populated the match cache")
-            .matches
-            .len()
-    }
-
     /// The match becomes the selection, not a cursor parked at its start, so
     /// the operation after a search acts on the matched text.
     #[test]
@@ -903,6 +876,34 @@ mod tests {
         h.type_keys("enter");
         assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// The selection is the one mark a search leaves on screen. The other
+    /// matches paint as plain text, as in Helix.
+    #[test]
+    fn a_search_washes_no_match_outside_the_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+
+        let match_bg = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_SEARCH_MATCH)
+            .bg
+            .expect("a search match background");
+        let buf = h.render_composited();
+        let washed: Vec<(u16, u16)> = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .filter(|&cell| buf[cell].bg == match_bg)
+            .collect();
+        assert_eq!(
+            (h.selection_spans(), washed),
+            (vec![(8, 11, false)], Vec::new()),
+            "the search selects one match and washes no cell",
+        );
     }
 
     #[test]
@@ -1645,38 +1646,26 @@ mod tests {
         assert_eq!(h.stoat.pending_message.as_deref(), Some("invalid regex: ["),);
     }
 
-    /// Every query change moves the paint generation, and moving the cursor
-    /// does not.
-    ///
-    /// The query is read straight off the app when a frame is built, so no
-    /// display layer reports that the highlighted matches changed. That holds
-    /// for each previewed query as much as for the submit. A motion changes
-    /// what is selected, which the display map already answers for.
+    /// A search reaches the panes through the selection and the view it moves,
+    /// which the display map and the pane key answer for, so no step of it
+    /// repaints every pane. The prompt shows in the status row, which paints on
+    /// every frame.
     #[test]
-    fn every_query_change_moves_the_paint_generation() {
+    fn a_search_leaves_the_paint_generation_alone() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc def\nabc\n");
         let before = h.stoat.paint_generation;
 
         h.type_keys("j");
-        assert_eq!(
-            h.stoat.paint_generation, before,
-            "a cursor motion paints from the display map alone",
-        );
-
+        let moved = h.stoat.paint_generation;
         h.type_keys("/");
         h.type_text("abc");
         let previewed = h.stoat.paint_generation;
-        assert!(
-            previewed > before,
-            "a previewed query changes which matches are highlighted",
-        );
-
         h.type_keys("enter");
         assert_eq!(
-            h.stoat.paint_generation,
-            previewed + 1,
-            "and the submit that keeps the landing moves it once more",
+            [moved, previewed, h.stoat.paint_generation],
+            [before; 3],
+            "a motion, a previewed query, and the submit paint from the display map",
         );
     }
 
@@ -2130,16 +2119,6 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_search_match_highlight() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "abc def abc xyz abc\n");
-        h.type_keys("/");
-        h.type_text("abc");
-        h.type_keys("enter");
-        h.assert_snapshot("search_match_highlight");
-    }
-
-    #[test]
     fn regex_pattern_matches_first_occurrence() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc 123 def 456\n");
@@ -2168,136 +2147,5 @@ mod tests {
         h.type_text("[unclosed");
         h.type_keys("enter");
         assert_eq!(h.primary_head_offset(), before);
-    }
-
-    #[test]
-    fn snapshot_regex_variable_length_match_highlight() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "abc 1 22 333 4444 end\n");
-        h.type_keys("/");
-        h.type_text("\\d+");
-        h.type_keys("enter");
-        h.assert_snapshot("regex_variable_length_match_highlight");
-    }
-
-    #[test]
-    fn search_match_cache_recomputes_on_query_change() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "aaa\n");
-
-        h.type_keys("/");
-        h.type_text("aa");
-        h.type_keys("enter");
-        assert_eq!(
-            cached_match_count(&mut h),
-            1,
-            "non-overlapping 'aa' in 'aaa' matches once",
-        );
-
-        h.type_keys("/");
-        h.type_text("a");
-        h.type_keys("enter");
-        assert_eq!(
-            cached_match_count(&mut h),
-            3,
-            "changing the query recomputes the cache: 'a' matches three times",
-        );
-    }
-
-    /// An open prompt lights its own query, and closing it hands the highlights
-    /// back to the stored one.
-    ///
-    /// The user judges a query by the matches on screen, so a prompt showing
-    /// the previous search's matches lights the wrong text throughout the typing
-    /// the preview exists to serve.
-    #[test]
-    fn an_open_prompt_highlights_the_query_being_typed() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "aaa\n");
-
-        h.type_keys("/");
-        h.type_text("aa");
-        h.type_keys("enter");
-        assert_eq!(
-            cached_match_count(&mut h),
-            1,
-            "the submitted 'aa' matches once in 'aaa'",
-        );
-
-        h.type_keys("/");
-        h.type_text("a");
-        let _ = h.render_composited();
-        assert_eq!(
-            cached_match_count(&mut h),
-            3,
-            "the typed query lights its own matches before Enter",
-        );
-
-        h.type_keys("escape");
-        let _ = h.render_composited();
-        assert_eq!(
-            cached_match_count(&mut h),
-            1,
-            "and abandoning the prompt lights the stored query again",
-        );
-    }
-
-    /// The regex prompt picks selections rather than searching, so while it is
-    /// open the highlights stay on the stored query that `n` walks.
-    ///
-    /// A keystroke in the prompt moves nothing the pane's replay key holds, so
-    /// the content replays and the highlight pass does not run. The test moves
-    /// the paint generation to force the repaint that any other change brings,
-    /// such as a selection preview or a buffer edit.
-    #[test]
-    fn the_regex_prompt_leaves_the_highlights_on_the_stored_query() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "aaa\n");
-        h.type_keys("/");
-        h.type_text("aa");
-        h.type_keys("enter");
-
-        h.type_keys("s");
-        h.type_text("a");
-        h.stoat.paint_generation += 1;
-        let _ = h.render_composited();
-        assert_eq!(
-            (
-                h.stoat.split_selection_input.is_some(),
-                cached_match_count(&mut h)
-            ),
-            (true, 1),
-            "the stored 'aa' lights its one match while the typed 'a' waits in the prompt",
-        );
-    }
-
-    /// The painted matches follow the setting, not just the query text.
-    ///
-    /// Smart case decides what the query compiles to, and the cache carries its
-    /// compiled regex across rebuilds. A config reload moves the setting while
-    /// the query and the buffer hold still, which is the one way the two get
-    /// out of step. The jump path recompiles per press, so a cache that misses
-    /// the flip paints matches the next n never lands on.
-    #[test]
-    fn search_match_cache_recomputes_when_smart_case_flips() {
-        let mut h = TestHarness::with_size(40, 10);
-        seed(&mut h, "abc ABC\n");
-
-        h.type_keys("/");
-        h.type_text("abc");
-        h.type_keys("enter");
-        assert_eq!(
-            cached_match_count(&mut h),
-            2,
-            "a lowercase query under smart case matches both spellings",
-        );
-
-        h.stoat.settings.search_smart_case = Some(false);
-        let _ = h.render_composited();
-        assert_eq!(
-            cached_match_count(&mut h),
-            1,
-            "turning smart case off leaves only the exact-case match",
-        );
     }
 }

@@ -180,9 +180,8 @@ impl DiffDials {
 /// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
 /// components, otherwise it falls back to the ASCII gutter.
 ///
-/// Search matches wash over the right column, and a focused pane paints its
-/// selections, cursors, and goto-word labels over them, as a plain pane does
-/// through [`editor::paint_search_matches`], [`editor::paint_selections`], and
+/// A focused pane paints its selections, cursors, and goto-word labels over the
+/// right column, as a plain pane does through [`editor::paint_selections`] and
 /// [`editor::paint_goto_word_labels`]. An unfocused pane paints no selection,
 /// cursor, or label. With a `scene` and `delegates_cursor` the terminal draws
 /// the primary cursor, so the paint leaves that cell to it.
@@ -195,8 +194,6 @@ pub(crate) fn render_diff_view(
     buf: &mut Buffer,
     is_focused: bool,
     goto_word_labels: Option<&BTreeMap<String, (usize, usize)>>,
-    search_query: Option<&str>,
-    search_smart_case: bool,
     scene: Option<&mut ApcScene>,
     delegates_cursor: bool,
     dials: DiffDials,
@@ -232,27 +229,16 @@ pub(crate) fn render_diff_view(
 
     let end_row = (editor.scroll_row + inner.height as u32).min(snapshot.line_count());
     let text = editor.text_rect.expect("set above");
+    if !is_focused {
+        return;
+    }
+
     let visible = editor::visible_byte_range(
         &snapshot,
         snapshot.buffer_snapshot().rope(),
         editor.scroll_row,
         end_row,
     );
-    editor::paint_search_matches(
-        editor,
-        &snapshot,
-        text,
-        end_row,
-        &visible,
-        search_query,
-        search_smart_case,
-        theme,
-        buf,
-    );
-    if !is_focused {
-        return;
-    }
-
     editor::paint_selections(
         editor,
         &snapshot,
@@ -2568,10 +2554,7 @@ mod tests {
         diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, TokenDetail},
         display_map::InlayKind,
         render::paint::FAINT_CONTRAST_FLOOR,
-        theme::{
-            scope::{UI_SEARCH_MATCH, UI_SELECTION_EDITOR},
-            Theme,
-        },
+        theme::{scope::UI_SELECTION_EDITOR, Theme},
         workspace::diff::WorktreeBase,
     };
     use std::sync::{Arc, RwLock};
@@ -2937,8 +2920,6 @@ mod tests {
             None,
             None,
             false,
-            None,
-            false,
             DiffDials::shipped(),
         );
 
@@ -3077,8 +3058,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -3138,8 +3117,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -3248,8 +3225,6 @@ mod tests {
             &mut Buffer::empty(area),
             true,
             None,
-            None,
-            false,
             Some(&mut scene),
             true,
             DiffDials::shipped(),
@@ -3383,8 +3358,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -3425,8 +3398,6 @@ mod tests {
             &mut rich_buf,
             true,
             None,
-            None,
-            false,
             Some(&mut scene),
             true,
             DiffDials::shipped(),
@@ -3497,8 +3468,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -3539,8 +3508,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -3609,8 +3576,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -3648,8 +3613,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -3716,8 +3679,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -3764,8 +3725,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -3875,8 +3834,6 @@ mod tests {
             &mut buf,
             false,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials {
@@ -4186,8 +4143,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -4217,8 +4172,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -4245,8 +4198,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             Some(&mut ApcScene::new()),
             true,
             DiffDials::shipped(),
@@ -4273,8 +4224,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             Some(&mut ApcScene::new()),
             true,
             DiffDials::shipped(),
@@ -4341,33 +4290,6 @@ mod tests {
             wash_and_cursor_after("x"),
             ((68..81).collect(), vec![81]),
             "`x` washes the thirteen glyphs and puts the cursor on the newline",
-        );
-    }
-
-    /// A submitted search selects its match, and the selection paints over the
-    /// match wash, so `g k` moves the cursor off the match before the frame is
-    /// read.
-    #[test]
-    fn a_search_washes_its_match_in_the_live_column() {
-        let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
-        h.type_text("/other");
-        h.type_keys("enter g k");
-        h.snapshot();
-
-        let match_bg = h
-            .stoat
-            .theme
-            .get(UI_SEARCH_MATCH)
-            .bg
-            .expect("a search match background");
-        let buf = h.rendered_buffer();
-        let row = row_holding(buf, 68..buf.area.width, "fn other");
-        assert_eq!(
-            (0..buf.area.width)
-                .filter(|&x| buf[(x, row)].bg == match_bg)
-                .collect::<Vec<_>>(),
-            (71..76).collect::<Vec<_>>(),
-            "the wash covers `other` in the live column and nothing in the base column",
         );
     }
 
@@ -4658,8 +4580,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -4692,8 +4612,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -4984,7 +4902,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            editor, area, fallback, &theme, &mut buf, true, None, None, false, None, true, dials,
+            editor, area, fallback, &theme, &mut buf, true, None, None, true, dials,
         );
         row_cells_with(&buf, "beta", modifier)
     }
@@ -5242,8 +5160,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -5301,8 +5217,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -5421,8 +5335,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials::shipped(),
         );
@@ -5454,8 +5366,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -5491,8 +5401,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials::shipped(),
@@ -6089,8 +5997,6 @@ mod tests {
             true,
             None,
             None,
-            false,
-            None,
             true,
             DiffDials {
                 soften_scale: 0.0,
@@ -6120,8 +6026,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials {
@@ -6166,8 +6070,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials {
@@ -6221,8 +6123,6 @@ mod tests {
             &mut buf,
             true,
             None,
-            None,
-            false,
             None,
             true,
             DiffDials {

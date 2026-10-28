@@ -94,8 +94,8 @@ pub(crate) struct PaneCacheKey {
     /// The pane's position in the layout, which is the id its minimap strip is
     /// published under.
     pub(crate) pane_index: usize,
-    /// The theme and the search query, neither of which passes through a
-    /// display layer.
+    /// The theme and the settings the paint reads off the app, neither of which
+    /// passes through a display layer.
     pub(crate) paint_generation: u64,
     /// The dim an unfocused pane's cells and minimap palette are blended by,
     /// as bits so the key stays comparable.
@@ -158,10 +158,6 @@ pub(crate) struct PaneCacheKey {
     /// whether or not it moves anything else in the pane, so this field
     /// repaints the cell when nothing else does.
     pub(crate) terminal_cursor: bool,
-    /// Whether the search query compiles under smart case, which decides the
-    /// matches the pane paints. Read off the settings like the dim, so no
-    /// generation moves with it.
-    pub(crate) search_smart_case: bool,
     /// The excerpts a changes view's window shows, hashed with the focused
     /// index, the window's rows, and whether the terminal composites the
     /// stack. Each one counts its buffer, placement, rows, path, fold,
@@ -470,7 +466,6 @@ pub(crate) fn pane_cache_key(
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
-        search_smart_case: frame.search_smart_case,
         stack: 0,
     })
 }
@@ -593,7 +588,6 @@ fn stack_cache_key(
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
-        search_smart_case: frame.search_smart_case,
         stack: stack.finish(),
     })
 }
@@ -705,7 +699,6 @@ mod tests {
             hover_cell: None,
             scene_live: false,
             terminal_cursor: false,
-            search_smart_case: false,
             stack: 0,
         }
     }
@@ -719,7 +712,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 24] = [
+        let moved: [(&str, PaneCacheKey); 23] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -871,13 +864,6 @@ mod tests {
                 "terminal_cursor",
                 PaneCacheKey {
                     terminal_cursor: true,
-                    ..base
-                },
-            ),
-            (
-                "search_smart_case",
-                PaneCacheKey {
-                    search_smart_case: true,
                     ..base
                 },
             ),

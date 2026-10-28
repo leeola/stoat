@@ -8073,14 +8073,13 @@ fn a_background_tick_paints_no_pane() {
 /// with nothing to say it had, which is why each is moved through the real
 /// session rather than by building two keys by hand.
 ///
-/// The assertion is on the key rather than on a paint count, because the
-/// harness renders a frame per keystroke and the search case is several of
-/// them. A key that moved is a replay refused, since the lookup compares
-/// keys for equality before it hands anything back.
+/// The assertion is on the key rather than on a paint count. A key that moved
+/// is a replay refused, since the lookup compares keys for equality before it
+/// hands anything back.
 #[test]
 fn each_input_that_moves_reaches_the_key() {
     type Case = (&'static str, fn(&mut crate::test_harness::TestHarness));
-    let cases: [Case; 7] = [
+    let cases: [Case; 6] = [
         ("theme", |h| {
             action_handlers::dispatch(
                 &mut h.stoat,
@@ -8088,11 +8087,6 @@ fn each_input_that_moves_reaches_the_key() {
                     name: "gruvbox-light".to_string(),
                 },
             );
-        }),
-        ("search", |h| {
-            h.type_keys("/");
-            h.type_text("alpha");
-            h.type_keys("enter");
         }),
         ("inactive dim", |h| {
             h.stoat.settings.ui_inactive_dim = Some(0.6);

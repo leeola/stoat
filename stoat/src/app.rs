@@ -2355,9 +2355,9 @@ pub struct Stoat {
     ///
     /// A pane's own content is answered by
     /// [`DisplaySnapshot::paint_version`](crate::display_map::DisplaySnapshot::paint_version),
-    /// but the theme, the settings the renderer reads straight off this struct,
-    /// and the search query all reach the screen without passing through any
-    /// display layer. A cache keyed on the snapshot alone would hold a pane
+    /// but the theme and the settings the renderer reads straight off this
+    /// struct reach the screen without passing through any display layer.
+    /// Without this count, a cache keyed on the snapshot alone holds a pane
     /// still through a theme switch.
     ///
     /// Distinct from [`Self::theme_epoch`], which answers the narrower question

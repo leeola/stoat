@@ -114,7 +114,7 @@ reference these, not raw hex:
 let accent  = cyan;      # highlights, focus, key labels
 let primary = blue;      # the normal-mode identity color
 let success = green;     # additions, ok states
-let warning = yellow;    # attention, prompts, search matches
+let warning = yellow;    # attention, prompts, picker matches
 let danger  = red;       # errors, deletions
 let info    = cyan;      # informational accents
 let special = magenta;   # distinctive one-off accents
@@ -160,7 +160,7 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   ranges. The editor lifts text under the `ui.selection.editor` wash toward
   white or black when the two are close in brightness, so selected text stays
   legible in a theme that pairs them.
-- `ui.search.match` -- search hits.
+- `ui.search.match` -- the characters a picker's query matched.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,

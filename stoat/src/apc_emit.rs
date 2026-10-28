@@ -12,7 +12,7 @@
 //! the pages that moved.
 
 use crate::{
-    action_handlers::{search, view},
+    action_handlers::view,
     app::{modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
     buffer_registry::BufferRegistry,
     commit_list::Preview,
@@ -432,8 +432,6 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             &stoat.settings.mode_badges,
         ),
         diagnostics: &stoat.diagnostics,
-        search_query: None,
-        search_smart_case: true,
         status_prompt: None,
         terminal_cursor_editor,
         composited_stacks: &[],
@@ -1060,14 +1058,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // Found before the closures below borrow `stoat` for the rest of the emit,
     // because the search measures the focused editor through a mutable borrow.
     let spotlight = walkthrough::spotlight_of(stoat);
-    // A changes view's pages paint under the live frame's search query, which
-    // only a search prompt types. Found here for the same reason, since the
-    // prompt editor's snapshot takes the whole app mutably.
-    let typed_query = match !stack_panes.is_empty() && stoat.search_input.is_some() {
-        true => search::prompt_display(stoat).map(|prompt| prompt.text),
-        false => None,
-    };
-    let search_smart_case = search::smart_case(stoat);
     let preview_dials = crate::render::commits::PreviewDials::from_stoat(stoat);
     let paint_generation = stoat.paint_generation;
     let syntax_highlight = stoat.syntax_highlight;
@@ -1436,10 +1426,6 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             goto_word_labels: stoat.pending_goto_word.as_ref(),
             mode_label: ("", Color::Reset),
             diagnostics: &stoat.diagnostics,
-            search_query: typed_query
-                .as_deref()
-                .or(stoat.last_search.as_ref().map(|last| last.query.as_str())),
-            search_smart_case,
             status_prompt: None,
             terminal_cursor_editor: focused_editor,
             composited_stacks: &[],

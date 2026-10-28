@@ -3321,19 +3321,6 @@ fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
     );
 }
 
-/// A search changes which matches a page paints, so it refills the page under
-/// the resting composite.
-#[test]
-fn a_search_refills_the_composited_page() {
-    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
-    emit_raw(&mut h, &mut rx);
-    h.type_keys("/");
-    h.type_text("x");
-    h.type_keys("enter");
-    h.stoat.render();
-    assert_eq!(pool_fills(&emit_raw(&mut h, &mut rx), pool), [0]);
-}
-
 /// One file of `lines` lines, each changed, as `(head, working)` texts, so its
 /// excerpt shows one paired row per line.
 fn changed_lines(lines: usize) -> (String, String) {

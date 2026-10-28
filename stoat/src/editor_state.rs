@@ -6,7 +6,6 @@ use crate::{
     selection::SelectionsCollection,
 };
 use ratatui::layout::Rect;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use slotmap::new_key_type;
 use std::{path::PathBuf, sync::Arc};
@@ -16,40 +15,6 @@ use stoat_text::{Anchor, Selection};
 use tokio::sync::Notify;
 
 new_key_type! { pub struct EditorId; }
-
-/// Cached in-buffer search matches for one `(version, query, visible span)`.
-///
-/// Lets `render_editor` reuse match byte-ranges across frames instead of
-/// re-materializing the visible rope slice and re-scanning with the regex every
-/// frame a search is active. Recomputed when the buffer version, the query, or
-/// the visible byte span changes. The visible span covers scrolling and
-/// folding, which move the window. The per-match display mapping stays
-/// per-frame.
-///
-/// The compiled regex survives a rebuild whose query is unchanged, so a scroll
-/// or edit re-scans the window without paying a fresh compile on the paint path.
-pub(crate) struct SearchMatchCache {
-    pub(crate) version: u64,
-    pub(crate) query: String,
-    /// Visible buffer byte span the matches were scanned over. Part of the key
-    /// because a scroll moves it without bumping `version`.
-    pub(crate) visible: std::ops::Range<usize>,
-    /// Smart-case mode the `regex` was compiled under. Part of the key because
-    /// a config reload flips the setting while the query text holds, and the
-    /// two together decide whether the pattern compiled case-insensitive.
-    pub(crate) smart_case: bool,
-    /// Byte ranges `[start, end)` of each non-empty match within `visible`,
-    /// stored as absolute buffer offsets.
-    pub(crate) matches: Vec<(usize, usize)>,
-    /// Scratch holding the scanned window text, retained across rebuilds to
-    /// reuse the allocation. Not part of the cache key.
-    pub(crate) window: String,
-    /// The query compiled to a [`Regex`], carried across rebuilds while the
-    /// query text holds so the pattern compiles once per query, not once per
-    /// frame. `None` when the query failed to compile, which leaves `matches`
-    /// empty until the query changes. Not part of the cache key.
-    pub(crate) regex: Option<Regex>,
-}
 
 /// Which scroll glide, if any, is easing an editor's `scroll_offset` toward its
 /// `scroll_row` target.
@@ -180,9 +145,6 @@ pub(crate) struct EditorState {
     /// Resolved offsets rather than anchors, which is what makes an edit
     /// between two expands read as the chain break it is.
     pub(crate) expansion_tip: Option<Vec<std::ops::Range<usize>>>,
-    /// Cached search-match byte ranges for the current `(version, query)`.
-    /// See [`SearchMatchCache`]. Transient render state, not persisted.
-    pub(crate) search_match_cache: Option<SearchMatchCache>,
     /// Cached visible syntax-highlight endpoints, keyed by buffer version,
     /// highlight identity, and visible byte range. Lets `render_editor` reuse
     /// resolved endpoints across repaints that change none of those. Transient
@@ -310,7 +272,6 @@ impl EditorState {
             move_source_cursor: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
-            search_match_cache: None,
             highlight_endpoint_cache: None,
             diff_row_cache: None,
             status_filename: None,

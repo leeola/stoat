@@ -252,8 +252,6 @@ pub(crate) fn paint_stack_rows(
             } else {
                 None
             },
-            frame.search_query,
-            frame.search_smart_case,
             diagnostic_info,
             match scene.live() {
                 true => Some(&mut *scene),
@@ -653,8 +651,6 @@ mod tests {
             goto_word_labels: None,
             mode_label: ("", Color::Reset),
             diagnostics: &stoat.diagnostics,
-            search_query: None,
-            search_smart_case: true,
             status_prompt: None,
             terminal_cursor_editor: stoat.focused_editor_ids().map(|(id, _)| id),
             composited_stacks: &[],

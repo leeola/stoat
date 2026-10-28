@@ -370,19 +370,6 @@ pub(crate) struct FrameCtx<'a> {
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
     pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
-    /// The in-buffer search query every editor pane lights visible matches for,
-    /// in the `ui.search.match` style, so users see all hits at once.
-    ///
-    /// An open `/` or `?` prompt supplies the query, so the highlights track
-    /// what the user types rather than the last search. An emptied prompt shows
-    /// no matches. With no prompt open the query is the most recently submitted
-    /// one, which the highlights return to as the prompt closes.
-    pub(crate) search_query: Option<&'a str>,
-    /// Whether [`Self::search_query`] compiles under smart case, resolved from
-    /// `search.smart_case` (default on). It travels with the query because the
-    /// paint compiles its own regex, and a highlight disagreeing with the jump
-    /// lights up a different set of matches than `n` walks.
-    pub(crate) search_smart_case: bool,
     /// The open search or regex prompt, painted over the focused pane's
     /// status-bar left segments so the user reads the pattern as they type it.
     /// `None` whenever neither input is open.
@@ -1127,9 +1114,6 @@ pub(crate) fn frame(
     // the end of the function. Nothing between here and the chain opens or closes
     // a modal, so the value still holds there.
     let painted_modal = active_modal(stoat);
-    // Resolved here for the same reason. It reads the whole &Stoat, where the
-    // search query it travels with is read below through a disjoint field.
-    let search_smart_case = search::smart_case(stoat);
     // Resolved here for the same reason. Both constructors read the whole
     // &Stoat, and the dials are separate fields on it.
     let diff_dials = DiffDials::from_stoat(stoat);
@@ -1235,17 +1219,6 @@ pub(crate) fn frame(
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_label: pane::mode_segment(mode, &stoat.theme, &stoat.settings.mode_badges),
         diagnostics: &stoat.diagnostics,
-        // Only a search prompt types a query. The regex prompt's pattern picks
-        // selections inside the current ones, so the highlights stay on the
-        // stored search, which is also what `n` walks.
-        search_query: match status_prompt
-            .as_ref()
-            .filter(|_| stoat.search_input.is_some())
-        {
-            Some(prompt) => Some(prompt.text.as_str()),
-            None => stoat.last_search.as_ref().map(|s| s.query.as_str()),
-        },
-        search_smart_case,
         status_prompt: status_prompt.as_ref(),
         terminal_cursor_editor,
         composited_stacks: &composited_stacks,
