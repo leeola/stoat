@@ -1,7 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     host::ClipboardKind,
-    pane::View,
     paths,
     register::Register,
 };
@@ -201,12 +200,10 @@ fn replace_selections_with(stoat: &mut Stoat, register: Register, count: usize) 
         return UpdateEffect::None;
     }
 
-    let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
     };
+    let ws = stoat.active_workspace_mut();
 
     let (buffer_id, entries) = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
@@ -489,15 +486,11 @@ fn focused_document_name(stoat: &mut Stoat) -> String {
 
 /// Build one index fragment per selection ("1", "2", ..., "N") for the
 /// focused editor, so paste distributes one index to each selection.
-/// Returns `None` when the focused pane is not an editor or has no
+/// Returns `None` when no editor takes input or it has no
 /// selections.
 fn selection_index_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
+    let (editor_id, _) = stoat.focused_editor_ids()?;
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return None,
-    };
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let count = editor.selections.all_anchors().len();
     if count == 0 {
@@ -530,7 +523,7 @@ struct PasteEntry {
 /// selection ends as a range over the text it inserted, facing the way it faced
 /// before.
 ///
-/// No-op when every fragment is empty or the focused pane is not an editor.
+/// No-op when every fragment is empty or no editor takes input.
 fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> UpdateEffect {
     if fragments.iter().all(String::is_empty) {
         return UpdateEffect::None;
@@ -545,12 +538,10 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
 
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
 
-    let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return UpdateEffect::None,
+    let Some((editor_id, _)) = stoat.focused_editor_ids() else {
+        return UpdateEffect::None;
     };
+    let ws = stoat.active_workspace_mut();
 
     let (buffer_id, mut entries) = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
@@ -1442,6 +1433,43 @@ mod tests {
         h.type_keys("v l l");
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
         assert_eq!(h.buffer_text_at(&path), "abcxyz\n");
+    }
+
+    /// A changes view's paste edits the focused excerpt's file, as typing
+    /// there does.
+    #[test]
+    fn paste_clipboard_after_in_a_changes_view_edits_the_excerpt_file() {
+        let mut h = TestHarness::with_size(100, 12);
+        let path = changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "xyz")
+            .unwrap();
+        set_selections(&mut h, &[(0, 9, false)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
+        assert_eq!(h.buffer_text_at(&path), "// file 0xyz\nfn g() {}\n");
+    }
+
+    #[test]
+    fn replace_with_clipboard_in_a_changes_view_replaces_the_selection() {
+        let mut h = TestHarness::with_size(100, 12);
+        let path = changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "xyz")
+            .unwrap();
+        set_selections(&mut h, &[(0, 9, false)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ReplaceWithClipboard);
+        assert_eq!(h.buffer_text_at(&path), "xyz\nfn g() {}\n");
+    }
+
+    /// The selection-index register numbers the focused excerpt's selections.
+    /// The changes view walks hunks on `p`, so the paste goes before.
+    #[test]
+    fn paste_selection_index_in_a_changes_view_numbers_the_excerpt_selection() {
+        let mut h = TestHarness::with_size(100, 12);
+        let path = changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
+        set_selections(&mut h, &[(0, 9, false)]);
+        h.type_keys("\" # P");
+        assert_eq!(h.buffer_text_at(&path), "1// file 0\nfn g() {}\n");
     }
 
     /// Clipboard text arrives normalized, so a CRLF clipboard cannot put a
