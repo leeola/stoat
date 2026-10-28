@@ -9,6 +9,13 @@ use tree_sitter::{CaptureQuantifier, Language as TsLanguage, Query};
 pub struct Language {
     pub name: &'static str,
     pub extensions: &'static [&'static str],
+    /// File names that select this language whole, such as `.bashrc`, for
+    /// files that carry no extension.
+    ///
+    /// A name matches a path's whole file name, case-sensitively, ahead of its
+    /// extension. The tools that read these files find them by their exact
+    /// spelling, so `pkgbuild` is not a `PKGBUILD`.
+    pub file_names: &'static [&'static str],
     pub grammar: TsLanguage,
     /// The query every paint reads, compiled on first use through
     /// [`Self::highlight_query`].
@@ -540,12 +547,22 @@ impl LanguageRegistry {
         self.languages.iter().find(|l| l.name == name).cloned()
     }
 
-    /// The language a file's name selects, by its extension.
+    /// The language a file's name selects, by its whole name or by its
+    /// extension.
+    ///
+    /// A whole name that a language lists, such as `.bashrc`, selects that
+    /// language ahead of any extension. A dotfile has no extension to match.
     ///
     /// A `.gz` suffix names a compression, not a language, so the extension
     /// under it decides, and `main.rs.gz` reads as Rust. Only one `.gz` layer
     /// is looked through, so `a.gz` and `a.rs.gz.gz` select nothing.
     pub fn for_path(&self, path: &Path) -> Option<Arc<Language>> {
+        if let Some(name) = path.file_name().and_then(|name| name.to_str())
+            && let Some(lang) = self.languages.iter().find(|l| l.file_names.contains(&name))
+        {
+            return Some(lang.clone());
+        }
+
         let ext = match path.extension()?.to_str()? {
             gz if gz.eq_ignore_ascii_case("gz") => {
                 Path::new(path.file_stem()?).extension()?.to_str()?
@@ -643,6 +660,7 @@ fn make_language_with_injections(
     Language {
         name,
         extensions,
+        file_names: &[],
         grammar,
         highlight: HighlightQuery::new(highlight_src),
         highlight_map: Mutex::new(HighlightMap::default()),
@@ -886,19 +904,38 @@ fn make_bash() -> Language {
     // The shell dialects among the grammar's file types. A zsh or ksh construct
     // that bash lacks parses as an error node, and the rest of the script keeps
     // its colors.
-    make_language(
-        "bash",
-        &["sh", "bash", "zsh", "dash", "ksh", "ash"],
-        grammar::bash(),
-        include_str!("../../vendor/helix/runtime/queries/bash/highlights.scm"),
-        AuxQuerySources {
-            textobjects: Some(include_str!(
-                "../../vendor/helix/runtime/queries/bash/textobjects.scm"
-            )),
-            line_comments: &["#"],
-            ..Default::default()
-        },
-    )
+    Language {
+        file_names: &[
+            ".bashrc",
+            ".bash_profile",
+            ".bash_login",
+            ".bash_logout",
+            ".bash_aliases",
+            ".profile",
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".zlogin",
+            ".zlogout",
+            ".xinitrc",
+            ".xprofile",
+            "PKGBUILD",
+            "APKBUILD",
+        ],
+        ..make_language(
+            "bash",
+            &["sh", "bash", "zsh", "dash", "ksh", "ash"],
+            grammar::bash(),
+            include_str!("../../vendor/helix/runtime/queries/bash/highlights.scm"),
+            AuxQuerySources {
+                textobjects: Some(include_str!(
+                    "../../vendor/helix/runtime/queries/bash/textobjects.scm"
+                )),
+                line_comments: &["#"],
+                ..Default::default()
+            },
+        )
+    }
 }
 
 fn make_fish() -> Language {
@@ -1126,6 +1163,22 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.RS")).unwrap().name, "rust");
         assert!(reg.for_path(Path::new("a.txt")).is_none());
         assert!(reg.for_path(Path::new("noext")).is_none());
+    }
+
+    #[test]
+    fn for_path_resolves_file_names() {
+        let reg = LanguageRegistry::standard();
+        let name = |path: &str| reg.for_path(Path::new(path)).map(|l| l.name);
+
+        assert_eq!(
+            [".bashrc", "/home/u/.profile", "PKGBUILD"].map(name),
+            [Some("bash"); 3]
+        );
+        assert_eq!(
+            [".bashrc.bak", "pkgbuild"].map(name),
+            [None, None],
+            "a name matches whole and in its exact case",
+        );
     }
 
     #[test]
