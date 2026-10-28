@@ -59,8 +59,8 @@ impl PaintLayout {
 /// Paint the stack `state` holds into `pane`'s rows above its status row.
 ///
 /// [`render_pane_status`](crate::render::pane::render_pane_status) paints the
-/// status row, into the pane's status lane, so a replay of this paint keeps a
-/// fresh row.
+/// pane status row through the focused excerpt, into the pane's status lane,
+/// so a replay of this paint keeps a fresh row.
 ///
 /// The stack paints from the scroll of `state`, which first moves so the
 /// focused excerpt's cursor shows. A screen row that a landing holds takes the

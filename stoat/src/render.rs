@@ -1326,6 +1326,7 @@ pub(crate) fn frame(
             &mut ws.editors,
             &ws.buffers,
             &ws.terms,
+            &ws.diff_changes_views,
         );
         if status_row.badge.is_some() {
             lsp_badge_rect = status_row.badge;

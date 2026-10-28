@@ -3,6 +3,7 @@ use crate::{
     app::SPINNER_FRAMES,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
+    diff_changes::{DiffChangesId, DiffChangesState},
     editor_state::{EditorId, EditorState},
     pane::{Divider, DividerOrientation, Pane, Placement, View},
     render::{
@@ -187,8 +188,9 @@ pub(crate) fn render_pane(
             dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
         },
-        // The changes view's status row names its screen, as the list's does.
-        // The row rides the status lane, so a replay of the content keeps it.
+        // The changes view paints the pane status row through its focused
+        // excerpt. The row rides the status lane, so a replay of the content
+        // keeps it.
         View::DiffChanges(id) => {
             if let Some(state) = diff_changes_views.get_mut(*id) {
                 diff_changes::render_diff_changes(
@@ -745,13 +747,6 @@ pub(crate) fn render_pane_status(
     scene: &mut ApcScene,
 ) {
     scene.set_lane(status_lane(pane.index));
-    // A changes view paints the bar a list paints, which names its screen, in
-    // place of the segments the frame builds for an editor.
-    if matches!(pane.view, View::DiffChanges(_)) {
-        let (_, area) = split_pane_status(pane.area);
-        render_overlay_status(area, is_focused, Some("diff_changes"), frame, buf, scene);
-        return;
-    }
     let (_, area) = pane_areas(pane.area, frame.minimap_band);
     if area.width == 0 || area.height == 0 {
         return;
@@ -803,8 +798,9 @@ pub(crate) struct StatusRow {
 
 /// The status row that [`render_pane`] paints for `pane`.
 ///
-/// Empty for a commits view, which paints a status row of its own, and for a
-/// pane with no room for the row.
+/// A changes view's row reads its focused excerpt, as an editor pane's row
+/// reads its editor. Empty for a commits view, which paints a status row of
+/// its own, and for a pane with no room for the row.
 pub(crate) fn status_row(
     pane: &Pane,
     is_focused: bool,
@@ -812,12 +808,10 @@ pub(crate) fn status_row(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
+    changes: &SlotMap<DiffChangesId, DiffChangesState>,
 ) -> StatusRow {
     let (_, area) = pane_areas(pane.area, frame.minimap_band);
-    if area.width == 0
-        || area.height == 0
-        || matches!(pane.view, View::Commits(_) | View::DiffChanges(_))
-    {
+    if area.width == 0 || area.height == 0 || matches!(pane.view, View::Commits(_)) {
         return StatusRow::default();
     }
 
@@ -830,6 +824,7 @@ pub(crate) fn status_row(
         editors,
         buffers,
         terms,
+        changes,
         &mut badge,
     );
     StatusRow { left, right, badge }
@@ -883,6 +878,7 @@ pub(crate) fn pane_status_cells(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
+    changes: &SlotMap<DiffChangesId, DiffChangesState>,
     badge: Option<u32>,
 ) -> PaneStatusCells {
     let base_style = if is_focused {
@@ -892,7 +888,7 @@ pub(crate) fn pane_status_cells(
     };
 
     let (mut left, right) = status_segments(
-        view, is_focused, area, frame, editors, buffers, terms, &mut None,
+        view, is_focused, area, frame, editors, buffers, terms, changes, &mut None,
     );
 
     if let Some(digit) = badge {
@@ -1170,6 +1166,7 @@ fn status_segments(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
+    changes: &SlotMap<DiffChangesId, DiffChangesState>,
     badge_rect: &mut Option<Rect>,
 ) -> (Vec<StatusSeg>, Vec<StatusSeg>) {
     let theme = frame.theme;
@@ -1225,6 +1222,7 @@ fn status_segments(
         editors,
         buffers,
         terms,
+        changes,
     );
     let cursor_pos = status.cursor_pos;
     if let Some(name) = &status.filename
@@ -1793,6 +1791,7 @@ fn pane_status_info(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     terms: &SlotMap<TermId, TermSession>,
+    changes: &SlotMap<DiffChangesId, DiffChangesState>,
 ) -> PaneStatusInfo {
     let owned = |name: &str| PaneStatusInfo {
         filename: Some(name.to_string()),
@@ -1800,34 +1799,7 @@ fn pane_status_info(
     };
     match view {
         View::Editor(editor_id) => {
-            let Some(editor) = editors.get_mut(*editor_id) else {
-                return PaneStatusInfo::default();
-            };
-            let buffer_id = editor.buffer_id;
-            let filename =
-                status_filename(editor, buffers.path_for(buffer_id), workspace_root, home)
-                    .to_string();
-            // Both fields come off the same buffer at the same moment, and the
-            // bar wants them together, so one acquisition answers for both
-            // rather than the staged label taking a lock of its own.
-            let shared = buffers.get(buffer_id);
-            let (dirty, staged_counts) = shared
-                .as_ref()
-                .and_then(|b| b.read().ok())
-                .map(|g| (g.dirty, g.diff_map.as_ref().map(|dm| dm.staged_counts())))
-                .unwrap_or_default();
-            PaneStatusInfo {
-                filename: Some(filename),
-                buffer_id: Some(buffer_id),
-                read_only: buffers.read_only(buffer_id).is_some(),
-                dirty,
-                cursor_pos: editor_cursor_position(editor),
-                selections: Some((
-                    editor.selections.primary_index() + 1,
-                    editor.selections.all_anchors().len(),
-                )),
-                staged_counts,
-            }
+            editor_status_info(*editor_id, workspace_root, home, editors, buffers)
         },
         View::Run(_) => owned("[run]"),
         View::Agent(id) => owned(
@@ -1844,8 +1816,51 @@ fn pane_status_info(
         ),
         View::Image { path, .. } => owned(&crate::action_handlers::file::display_name(path)),
         View::Commits(_) => owned("[commits]"),
-        View::DiffChanges(_) => owned("[diff-changes]"),
+        View::DiffChanges(id) => match changes.get(*id).and_then(|state| state.focused_excerpt()) {
+            Some(excerpt) => {
+                editor_status_info(excerpt.editor_id, workspace_root, home, editors, buffers)
+            },
+            None => owned("[diff-changes]"),
+        },
         View::Label(label) => owned(label),
+    }
+}
+
+/// What the status bar reads off editor `editor_id`, which an editor pane
+/// shows and a changes view shows as its focused excerpt.
+fn editor_status_info(
+    editor_id: EditorId,
+    workspace_root: &Path,
+    home: Option<&Path>,
+    editors: &mut SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+) -> PaneStatusInfo {
+    let Some(editor) = editors.get_mut(editor_id) else {
+        return PaneStatusInfo::default();
+    };
+    let buffer_id = editor.buffer_id;
+    let filename =
+        status_filename(editor, buffers.path_for(buffer_id), workspace_root, home).to_string();
+    // Both fields come off the same buffer at the same moment, and the bar
+    // wants them together, so one acquisition answers for both rather than the
+    // staged label taking a lock of its own.
+    let shared = buffers.get(buffer_id);
+    let (dirty, staged_counts) = shared
+        .as_ref()
+        .and_then(|b| b.read().ok())
+        .map(|g| (g.dirty, g.diff_map.as_ref().map(|dm| dm.staged_counts())))
+        .unwrap_or_default();
+    PaneStatusInfo {
+        filename: Some(filename),
+        buffer_id: Some(buffer_id),
+        read_only: buffers.read_only(buffer_id).is_some(),
+        dirty,
+        cursor_pos: editor_cursor_position(editor),
+        selections: Some((
+            editor.selections.primary_index() + 1,
+            editor.selections.all_anchors().len(),
+        )),
+        staged_counts,
     }
 }
 
@@ -2832,6 +2847,89 @@ mod tests {
                 "stoatty {stoatty}",
             );
         }
+    }
+
+    /// A changes view's status row is the diff view's row with the screen
+    /// named `changes`, read through the focused excerpt. A walk puts the
+    /// cursor on the first chunk, so the hunk reads `1/1`.
+    #[test]
+    fn the_changes_view_bar_reads_the_focused_excerpts_hunks() {
+        let mut h = crate::test_harness::TestHarness::with_size(112, 12);
+        h.stage_index_scenario(
+            "/repo",
+            &[("f.txt", "a\nb\nc\nd\n", "a\nB\nc\nd\n", "a\nB\nc\nD\n")],
+        );
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/f.txt"));
+        h.stoat
+            .active_workspace_mut()
+            .set_worktree_base(WorktreeBase::Index);
+        h.cover_with_diff_changes(false);
+        h.settle_diff_jobs();
+        h.type_keys("n");
+
+        let row = bar_row(&h.render_composited()).replace('─', " ");
+        let point = crate::test_harness::editor::focused_cursor_point(&mut h.stoat);
+        assert_eq!(
+            row.split_whitespace().collect::<Vec<_>>().join(" "),
+            format!(
+                "NOR repo changes f.txt repo 0 staged / 1 unstaged · file 1/1 · 1 staged / 1 \
+                 unstaged · hunk 1/1 {}:{}",
+                point.row + 1,
+                point.column + 1,
+            ),
+        );
+    }
+
+    /// The changes view's status row reclaims the single-minimap band's width,
+    /// as an editor pane's row does, so the cells under the band carry the
+    /// focused bar.
+    #[test]
+    fn the_changes_view_bar_spans_the_minimap_band() {
+        let mut h = crate::test_harness::TestHarness::with_size(200, 24);
+        h.stoat.settings.editor_minimap = Some(stoat_config::MinimapMode::Single);
+        h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n")]);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        let buf = h.stoat.render();
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let bar = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
+            .bg
+            .expect("the theme colors the focused bar");
+        let row = band.y + band.height;
+        assert_eq!(
+            (band.x..band.x + band.width)
+                .map(|x| buf[(x, row)].bg)
+                .collect::<Vec<_>>(),
+            vec![bar; usize::from(band.width)],
+        );
+    }
+
+    /// A changes view whose stack lists no file names the view in the row's
+    /// file slot, as a view with no file of its own does.
+    #[test]
+    fn the_changes_view_bar_names_an_empty_stack() {
+        let mut h = crate::test_harness::TestHarness::with_size(112, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git().add_repo("/repo").head_file("a.txt", "a\n");
+        h.fake_fs().insert_file("/repo/a.txt", "a\n");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.txt"));
+        h.cover_with_diff_changes(false);
+        h.settle_diff_jobs();
+
+        let row = bar_row(&h.render_composited()).replace('─', " ");
+        assert_eq!(
+            row.split_whitespace().collect::<Vec<_>>().join(" "),
+            "NOR repo changes [diff-changes]",
+        );
     }
 
     /// Recording takes every keypress until it is toggled off, and the status
