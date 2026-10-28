@@ -12,8 +12,8 @@
 use crate::signals;
 use crate::{
     anim::{
-        advance_pool_glide, advance_sketches, anchored_shift, block_corners, cursor_in_region,
-        cursor_position, forced_damage, intersect_scissor, project_frame,
+        advance_pool_glide, advance_sketches, anchored_shift, block_corners, cell_in_region,
+        cursor_in_region, cursor_position, forced_damage, intersect_scissor, project_frame,
         refresh_popover_overflows, region_scissor, seed_settle_flight, shift_scissor, step_cursor,
         step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
         ActivePool, AnchorRide, FrameProjection, PoolAnim, PoolFrame, PoolStep, PopoverScroll,
@@ -22,8 +22,8 @@ use crate::{
     config::{self, Config, CursorAnimation},
     input::{
         alternate_scroll_bytes, cell_at, chord_char, chord_csi_u, encode_key, font_step,
-        font_step_target, ipc_button, modifier_bits, paste_bytes, sgr_button_bytes,
-        sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size,
+        font_step_target, ipc_button, ipc_button_for_code, modifier_bits, paste_bytes,
+        sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes, stepped_font_size,
         swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u,
     },
     pty::{self, Pty, PtyOutput},
@@ -860,6 +860,15 @@ struct State {
     /// or `None` when none is, tracked from `MouseInput` so a drag-motion report
     /// can encode which button is being dragged.
     pressed_button: Option<u8>,
+    /// The terminal pool a held button's press landed in and the pool cell last
+    /// reported for it, or `None` outside such a gesture.
+    ///
+    /// The drag and the release ride the window socket too, so no SGR report
+    /// of the gesture reaches the child.
+    pool_gesture: Option<(u32, (usize, usize))>,
+    /// The physical pixel position of the pointer, tracked from `CursorMoved`,
+    /// so a press in a terminal pool names the pool's cell under it.
+    pointer_pixels: (f64, f64),
     /// The side button held down in this window, or `None` when none is.
     ///
     /// A focus loss sends its release, because a release after the focus moves
@@ -1203,6 +1212,8 @@ impl ApplicationHandler<PtyEvent> for App {
             wheel_pixels: 0.0,
             pointer_cell: (0, 0),
             pressed_button: None,
+            pool_gesture: None,
+            pointer_pixels: (0.0, 0.0),
             held_side_button: None,
             pointer_side_right: false,
             native_drag: false,
@@ -1883,6 +1894,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 let previous = state.pointer_cell;
                 let previous_side = state.pointer_side_right;
                 state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
+                state.pointer_pixels = (position.x, position.y);
                 state.pointer_side_right = position.x
                     - state.pointer_cell.0 as f64 * cell_size[0] as f64
                     > cell_size[0] as f64 / 2.0;
@@ -1897,6 +1909,31 @@ impl ApplicationHandler<PtyEvent> for App {
                             .lock()
                             .update_selection(row, col, state.pointer_side_right);
                         state.window.request_redraw();
+                    }
+                    return;
+                }
+
+                // A gesture pressed in a terminal pool reports the pool's cell,
+                // which moves inside one grid cell, so it goes ahead of the
+                // crossing gate below.
+                if let Some((pool, held)) = state.pool_gesture {
+                    let cell = state
+                        .pool_frame
+                        .pools
+                        .iter()
+                        .find(|view| view.id == pool)
+                        .map(|view| pointer_pool_cell(state, view));
+                    let button = state.pressed_button.and_then(ipc_button_for_code);
+                    if let (Some(cell), Some(button)) = (cell, button)
+                        && cell != held
+                    {
+                        state.pool_gesture = Some((pool, cell));
+                        let mods = modifier_bits(state.modifiers);
+                        let kind = MouseKind::Drag(button);
+                        send_window_event(
+                            state,
+                            pool_mouse_event(pool, kind, state.pointer_cell, cell, mods),
+                        );
                     }
                     return;
                 }
@@ -1950,6 +1987,27 @@ impl ApplicationHandler<PtyEvent> for App {
                     terminal.mouse_mode() && terminal.sgr_mouse()
                 };
 
+                // A release ends a gesture pressed in a terminal pool on the
+                // window socket, whatever the modifiers. It goes ahead of the
+                // native selection, which takes a release with shift held.
+                if !pressed && let Some((pool, held)) = state.pool_gesture.take() {
+                    let cell = state
+                        .pool_frame
+                        .pools
+                        .iter()
+                        .find(|view| view.id == pool)
+                        .map_or(held, |view| pointer_pool_cell(state, view));
+                    if let Some(button) = ipc_button(button) {
+                        let mods = modifier_bits(state.modifiers);
+                        let kind = MouseKind::Release(button);
+                        send_window_event(
+                            state,
+                            pool_mouse_event(pool, kind, state.pointer_cell, cell, mods),
+                        );
+                    }
+                    return;
+                }
+
                 // The left button drives a native grid selection when the child
                 // is not SGR-reporting, or always on shift (the escape from a
                 // mouse-capturing app). Otherwise the press is reported below.
@@ -1973,6 +2031,24 @@ impl ApplicationHandler<PtyEvent> for App {
                     }
                     state.window.request_redraw();
                     return;
+                }
+
+                // A press in a terminal pool names the pool's own cell, which only
+                // this side knows, so the gesture rides the window socket in
+                // place of an SGR report until its release.
+                if sgr && pressed {
+                    let press = terminal_pool_at(&state.pool_frame.pools, state.pointer_cell)
+                        .map(|view| (view.id, pointer_pool_cell(state, view)));
+                    if let (Some((pool, cell)), Some(button)) = (press, ipc_button(button)) {
+                        state.pool_gesture = Some((pool, cell));
+                        let mods = modifier_bits(state.modifiers);
+                        let kind = MouseKind::Press(button);
+                        send_window_event(
+                            state,
+                            pool_mouse_event(pool, kind, state.pointer_cell, cell, mods),
+                        );
+                        return;
+                    }
                 }
 
                 if sgr {
@@ -2265,6 +2341,78 @@ fn aux_drag_event(
         row: cell.1,
         mods,
     })
+}
+
+/// The terminal pool on the primary grid whose region holds grid cell `cell`,
+/// or `None` when the cell is in none.
+///
+/// A gesture pressed there rides the window socket as `pool_mouse`, since the
+/// pool draws at the terminal font size and only this side knows which of its
+/// cells is under the pointer.
+fn terminal_pool_at(pools: &[PoolView], cell: (usize, usize)) -> Option<&PoolView> {
+    pools.iter().find(|pool| {
+        pool.region.kind == PoolKind::Terminal
+            && pool.region.window == 0
+            && cell_in_region(cell.0, cell.1, pool.region)
+    })
+}
+
+/// The `(col, row)` cell of terminal pool `pool` under physical pixel (`x`,
+/// `y`).
+///
+/// The pool's region starts on a grid cell of `ui_cell` pixels, and its pages
+/// hold cells of the terminal font, of `term_cell` pixels. The cell is clamped
+/// to the pool's grid, so a drag that leaves the region names the edge cell.
+fn pool_cell(
+    pool: &PoolView,
+    x: f64,
+    y: f64,
+    ui_cell: [f32; 2],
+    term_cell: [f32; 2],
+) -> (usize, usize) {
+    let (rows, cols) = pool.grid;
+    let axis = |pixel: f64, start: u16, ui: f32, term: f32, cells: usize| {
+        let offset = (pixel - f64::from(start) * f64::from(ui)) / f64::from(term);
+        (offset.max(0.0) as usize).min(cells.saturating_sub(1))
+    };
+    (
+        axis(x, pool.region.left, ui_cell[0], term_cell[0], cols),
+        axis(y, pool.region.top, ui_cell[1], term_cell[1], rows),
+    )
+}
+
+/// The cell of terminal pool `view` under the pointer, at the window's grid and
+/// terminal font sizes.
+fn pointer_pool_cell(state: &State, view: &PoolView) -> (usize, usize) {
+    let scale = state.scale_factor as f32;
+    let (x, y) = state.pointer_pixels;
+    pool_cell(
+        view,
+        x,
+        y,
+        render::cell_size(state.font_size, scale),
+        render::cell_size(state.terminal_font_size, scale),
+    )
+}
+
+/// The `pool_mouse` report of `kind` in `pool`, at grid cell `grid` and pool
+/// cell `cell`, both as `(col, row)`.
+fn pool_mouse_event(
+    pool: u32,
+    kind: MouseKind,
+    grid: (usize, usize),
+    cell: (usize, usize),
+    mods: u8,
+) -> WindowIpcEvent {
+    WindowIpcEvent::PoolMouse {
+        pool,
+        kind,
+        col: grid.0 as u16,
+        row: grid.1 as u16,
+        cell_col: cell.0 as u16,
+        cell_row: cell.1 as u16,
+        mods,
+    }
 }
 
 /// The report the primary window sends for a side button going down or up at
@@ -4071,11 +4219,11 @@ mod tests {
     use super::{
         app_has_focus, aux_content_hash, aux_drag_event, aux_geometry_hash, bell_should_ring,
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
-        grid_window_size, net_font_step, notification_should_show, pool_composite,
+        grid_window_size, net_font_step, notification_should_show, pool_cell, pool_composite,
         pool_grid_reports, selection_copy_text, side_button_event, snap_shift_to_pixels,
-        step_popovers, swallow_super_combo, update_cell_pixels, wheel_upstream, zoom_route,
-        ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite, TermEvent,
-        Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
+        step_popovers, swallow_super_combo, terminal_pool_at, update_cell_pixels, wheel_upstream,
+        zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite,
+        TermEvent, Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -5576,6 +5724,53 @@ mod tests {
                 })
             ),
             "the report carries its window and the button being held"
+        );
+    }
+
+    /// The pool's region starts on grid cell (10, 2) of 8 by 16 pixels, and its
+    /// cells are 7 by 14. A grid pool and an aux window's terminal pool over the
+    /// same cells come first in the list and take no gesture.
+    #[test]
+    fn a_pool_gesture_names_the_terminal_cell_under_the_pointer() {
+        let view = |id, window, kind| PoolView {
+            id,
+            region: PoolRegion {
+                pool: id,
+                window,
+                top: 2,
+                left: 10,
+                width: 40,
+                height: 20,
+                kind,
+                dim: 0,
+                resident: true,
+            },
+            scroll_target: DocumentOffset::default(),
+            cursor_anchor: None,
+            anchor: None,
+            content_version: 0,
+            grid: (26, 46),
+            serial: 0,
+        };
+        let pools = [
+            view(1, 0, PoolKind::Grid),
+            view(2, 3, PoolKind::Terminal),
+            view(4, 0, PoolKind::Terminal),
+        ];
+        let (ui_cell, term_cell) = ([8.0, 16.0], [7.0, 14.0]);
+        let pool = terminal_pool_at(&pools, (12, 3)).expect("a cell inside the region");
+
+        assert_eq!(
+            (
+                pool.id,
+                pool_cell(pool, 102.0, 103.0, ui_cell, term_cell),
+                pool_cell(pool, 480.0, 103.0, ui_cell, term_cell),
+                pool_cell(pool, 0.0, 0.0, ui_cell, term_cell),
+                terminal_pool_at(&pools, (9, 3)).map(|pool| pool.id),
+            ),
+            (4, (3, 5), (45, 5), (0, 0), None),
+            "the primary terminal pool's cell, clamped to its grid on both \
+             sides, and no pool outside the region",
         );
     }
 

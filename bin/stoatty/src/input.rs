@@ -363,6 +363,17 @@ pub(crate) fn ipc_button(button: MouseButton) -> Option<IpcMouseButton> {
     }
 }
 
+/// Map the SGR button code of a held press (0 left, 1 middle, 2 right) to the
+/// protocol button, or `None` for any other code.
+pub(crate) fn ipc_button_for_code(code: u8) -> Option<IpcMouseButton> {
+    match code {
+        0 => Some(IpcMouseButton::Left),
+        1 => Some(IpcMouseButton::Middle),
+        2 => Some(IpcMouseButton::Right),
+        _ => None,
+    }
+}
+
 /// Pack the active keyboard modifiers into a bitmask, with shift at `0x1`,
 /// control at `0x2`, alt at `0x4`, and super at `0x8`.
 pub(crate) fn modifier_bits(mods: ModifiersState) -> u8 {

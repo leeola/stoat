@@ -437,8 +437,11 @@ pub(crate) fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
 
 /// Whether the cursor cell falls within `region`.
 pub(crate) fn cursor_in_region(cursor: Cursor, region: PoolRegion) -> bool {
-    let col = cursor.col;
-    let row = cursor.row;
+    cell_in_region(cursor.col, cursor.row, region)
+}
+
+/// Whether the grid cell at `col`, `row` falls within `region`.
+pub(crate) fn cell_in_region(col: usize, row: usize, region: PoolRegion) -> bool {
     col >= region.left as usize
         && col < region.left as usize + region.width as usize
         && row >= region.top as usize

@@ -2047,12 +2047,11 @@ fn handle_editor_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, r
 /// nothing. Coordinates are pane-relative cells.
 ///
 /// A split pane's terminal that stoatty draws at its own font size holds other
-/// cells than the pane's content area. A `pool_mouse` report names the terminal
-/// cell under the pointer, which [`Stoat::pool_pointer`] carries. A report in
-/// grid cells maps a content cell to the terminal cell under it through the
-/// ratio of the two.
+/// cells than the pane's content area. Its gestures arrive by `pool_mouse`,
+/// which names the terminal cell under the pointer through
+/// [`Stoat::pool_pointer`]. Any other report in such a pane is not consumed.
 fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16, row: u16) -> bool {
-    let Some((term_id, area)) = focused_term_target(stoat) else {
+    let Some((term_id, _)) = focused_term_target(stoat) else {
         return false;
     };
     let (rows, cols, pooled, pool) = {
@@ -2073,13 +2072,7 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
     let (col, row) = match pooled {
         true => match stoat.pool_pointer.filter(|(named, ..)| *named == pool) {
             Some((_, cell_col, cell_row)) => (cell_col, cell_row),
-            None => {
-                let (content, _) = crate::render::layout::split_pane_status(area);
-                (
-                    terminal_cell(col, cols, content.width),
-                    terminal_cell(row, rows, content.height),
-                )
-            },
+            None => return false,
         },
         false => (col, row),
     };
@@ -2150,15 +2143,6 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
         },
         _ => false,
     }
-}
-
-/// The terminal cell under content cell `cell`, for a terminal of `cells` cells
-/// spread over `span` content cells.
-///
-/// Floored, so a content cell maps to the terminal cell at its leading edge,
-/// which is the cell under the pointer to within one terminal cell.
-fn terminal_cell(cell: u16, cells: usize, span: u16) -> u16 {
-    (usize::from(cell) * cells / usize::from(span.max(1))) as u16
 }
 
 /// Drop any mouse selection on `term_id`, so the next keystroke, click, or

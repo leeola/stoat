@@ -5764,11 +5764,10 @@ fn a_repeated_terminal_drag_on_the_settled_cell_costs_no_frame() {
 }
 
 /// stoatty names the pool's own cell under the pointer. One grid cell spans
-/// more than one terminal cell, so its ratio lands on row 0 where the named
-/// cell is on row 1.
+/// more than one terminal cell, so the grid cell alone does not name it.
 #[test]
 fn a_pool_mouse_gesture_selects_the_terminal_cell_it_names() {
-    let (mut h, pool) = pooled_terminal_pane(b"hello\r\nsecond");
+    let (mut h, _, pool) = pooled_terminal_pane(b"hello\r\nsecond");
 
     for (kind, cell_col) in [
         (MouseKind::Press(IpcMouseButton::Left), 0),
@@ -5792,11 +5791,9 @@ fn a_pool_mouse_gesture_selects_the_terminal_cell_it_names() {
 }
 
 /// A report that names the left pool with the pointer over the right pane
-/// raced a layout change. The right pane maps the grid cell by its ratio, 80
-/// terminal columns over 40 content cells, and selects its own row 0 rather
-/// than the named row 1.
+/// raced a layout change, so the right pane takes no cell from it.
 #[test]
-fn a_pool_mouse_gesture_naming_another_pool_takes_the_grid_cell() {
+fn a_pool_mouse_gesture_naming_another_pool_selects_nothing() {
     let mut h = Stoat::test();
     let (left_pool, right_term) = {
         let ws = h.stoat.active_workspace_mut();
@@ -5816,24 +5813,27 @@ fn a_pool_mouse_gesture_naming_another_pool_takes_the_grid_cell() {
         .term
         .feed(b"first\r\nsecond");
 
-    for (kind, grid_col, cell_col) in [
+    let effects = [
         (MouseKind::Press(IpcMouseButton::Left), 40, 0),
         (MouseKind::Drag(IpcMouseButton::Left), 42, 5),
         (MouseKind::Release(IpcMouseButton::Left), 42, 5),
-    ] {
+    ]
+    .map(|(kind, grid_col, cell_col)| {
         h.stoat
-            .handle_window_ipc(pool_gesture(left_pool, kind, (grid_col, 0), (cell_col, 1)));
-    }
+            .handle_window_ipc(pool_gesture(left_pool, kind, (grid_col, 0), (cell_col, 1)))
+    });
 
-    assert_eq!(h.fake_clipboard().writes(), vec!["first"]);
+    assert_eq!(
+        (effects, h.fake_clipboard().writes()),
+        ([UpdateEffect::None; 3], Vec::<String>::new()),
+    );
 }
 
-/// The pool cell lasts for its own event alone. A grid report after it maps
-/// its cell by the ratio, 120 terminal columns over 80 content cells, so a
-/// drag to grid column 2 copies through terminal column 3.
+/// A pooled terminal's gestures arrive by `pool_mouse`, so a grid report in it
+/// selects nothing, also after a pool gesture whose cell is routed no more.
 #[test]
-fn a_grid_report_after_a_pool_gesture_takes_the_ratio() {
-    let (mut h, pool) = pooled_terminal_pane(b"hello\r\nsecond");
+fn a_grid_report_in_a_pooled_terminal_selects_nothing() {
+    let (mut h, term_id, pool) = pooled_terminal_pane(b"hello\r\nsecond");
     for kind in [
         MouseKind::Press(IpcMouseButton::Left),
         MouseKind::Release(IpcMouseButton::Left),
@@ -5845,17 +5845,25 @@ fn a_grid_report_after_a_pool_gesture_takes_the_ratio() {
     for (kind, col) in [
         (MouseEventKind::Down(MouseButton::Left), 0),
         (MouseEventKind::Drag(MouseButton::Left), 2),
-        (MouseEventKind::Up(MouseButton::Left), 2),
     ] {
         h.stoat.update(mouse_event(kind, col, 0));
     }
 
-    assert_eq!(h.fake_clipboard().writes(), vec!["hell"]);
+    assert_eq!(
+        (
+            h.stoat.active_workspace().terms[term_id]
+                .selection
+                .is_none(),
+            h.stoat.terminal_drag,
+        ),
+        (true, None),
+    );
 }
 
 /// A harness whose focused split pane is a terminal holding `content`, drawn
-/// as a pool of 40 rows by 120 columns, and that pool's id.
-fn pooled_terminal_pane(content: &[u8]) -> (crate::test_harness::TestHarness, u32) {
+/// as a pool of 40 rows by 120 columns, with that terminal's id and its pool's
+/// id.
+fn pooled_terminal_pane(content: &[u8]) -> (crate::test_harness::TestHarness, TermId, u32) {
     let mut h = Stoat::test();
     let term_id = focused_terminal_pane(&mut h, content);
     h.stoat
@@ -5867,7 +5875,7 @@ fn pooled_terminal_pane(content: &[u8]) -> (crate::test_harness::TestHarness, u3
         let ws = h.stoat.active_workspace();
         ws.panes.pane(ws.panes.focus()).index
     };
-    (h, pool)
+    (h, term_id, pool)
 }
 
 /// A `pool_mouse` report of `kind` in `pool`, at grid cell `grid` and pool cell
@@ -6020,12 +6028,9 @@ fn a_pooled_terminal_pane_leaves_its_live_area_blank() {
 }
 
 /// A drag over a terminal that stoatty draws at its own font size selects the
-/// terminal cells under the pointer, through the ratio of its cells to the
-/// pane's content cells.
+/// terminal cells under the pointer, which its `pool_mouse` reports name.
 #[test]
-fn a_drag_over_a_pooled_terminal_selects_through_the_grid_ratio() {
-    use crossterm::event::MouseButton;
-
+fn a_drag_over_a_pooled_terminal_selects_the_reported_pool_cells() {
     let mut h = Stoat::test();
     let (term_id, index, _) = pooled_terminal(&mut h);
     let content = {
@@ -6039,17 +6044,19 @@ fn a_drag_over_a_pooled_terminal_selects_through_the_grid_ratio() {
         .term
         .feed(b"hello world");
 
-    h.stoat
-        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 0));
-    h.stoat
-        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
-    h.stoat
-        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 4, 0));
+    for (kind, grid_col, cell_col) in [
+        (MouseKind::Press(IpcMouseButton::Left), 2, 4),
+        (MouseKind::Drag(IpcMouseButton::Left), 4, 8),
+        (MouseKind::Release(IpcMouseButton::Left), 4, 8),
+    ] {
+        h.stoat
+            .handle_window_ipc(pool_gesture(index, kind, (grid_col, 0), (cell_col, 0)));
+    }
 
     assert_eq!(
         h.fake_clipboard().writes(),
         vec!["o wor"],
-        "content cells 2 to 4 cover terminal cells 4 to 8",
+        "the reported terminal cells 4 to 8",
     );
 }
 
