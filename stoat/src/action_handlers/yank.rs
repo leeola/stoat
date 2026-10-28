@@ -343,15 +343,11 @@ fn paste_clipboard(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
 }
 
 /// Extract the focused editor's primary selection content as a
-/// `String`. Returns `None` when the focused pane is not an
-/// editor or the primary selection is collapsed.
+/// `String`. Returns `None` when no editor takes input or the
+/// primary selection is collapsed.
 fn primary_selection_text(stoat: &mut Stoat) -> Option<String> {
+    let (editor_id, _) = stoat.focused_editor_ids()?;
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return None,
-    };
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
@@ -377,15 +373,11 @@ enum PasteSide {
 
 /// Walk every selection in the focused editor in start-offset order and
 /// slice each range out of the rope, one fragment per selection like Helix. A
-/// collapsed selection yields an empty fragment. Returns `None` when the
-/// focused pane is not an editor.
+/// collapsed selection yields an empty fragment. Returns `None` when no
+/// editor takes input.
 pub(super) fn selection_fragments(stoat: &mut Stoat) -> Option<Vec<String>> {
+    let (editor_id, _) = stoat.focused_editor_ids()?;
     let ws = stoat.active_workspace_mut();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        View::Editor(id) => id,
-        _ => return None,
-    };
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
@@ -706,6 +698,24 @@ mod tests {
             })
             .collect();
         editor.selections.replace_with(built, buf);
+    }
+
+    /// The base text of the one changed file under [`changes_view_over`].
+    const CHANGED_BASE: &str = "// file 0\nfn f() {}\n";
+
+    /// The working text of that file, which differs on its second line.
+    const CHANGED_WORK: &str = "// file 0\nfn g() {}\n";
+
+    /// A changes view over one file changed from `base` to `work`, settled so
+    /// its focused excerpt is the editor typing there edits, and that file's
+    /// path.
+    fn changes_view_over(h: &mut TestHarness, base: &str, work: &str) -> PathBuf {
+        h.stage_review_scenario("/repo", &[("f0.rs", base, work)]);
+        let path = PathBuf::from("/repo/f0.rs");
+        h.open_file(&path);
+        h.cover_with_diff_changes(false);
+        h.settle_diff_jobs();
+        path
     }
 
     /// Delete yanks what it removes, so deleting nothing must not reach the
@@ -1310,6 +1320,41 @@ mod tests {
         make_two_selections(&mut h);
         crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
         assert_eq!(h.fake_clipboard().writes(), vec!["abc\ndef".to_string()]);
+    }
+
+    /// A changes view's yank reads the focused excerpt, the editor typing
+    /// there edits.
+    #[test]
+    fn yank_to_clipboard_from_a_changes_view_writes_the_excerpt_selection() {
+        let mut h = TestHarness::with_size(100, 12);
+        changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
+        set_selections(&mut h, &[(0, 9, false)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), vec!["// file 0".to_string()]);
+    }
+
+    #[test]
+    fn yank_main_to_clipboard_from_a_changes_view_writes_the_primary_selection() {
+        let mut h = TestHarness::with_size(100, 12);
+        changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
+        set_selections(&mut h, &[(0, 9, false)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankMainToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), vec!["// file 0".to_string()]);
+    }
+
+    #[test]
+    fn yank_from_a_changes_view_fills_the_register() {
+        let mut h = TestHarness::with_size(100, 12);
+        changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
+        set_selections(&mut h, &[(0, 9, false)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        assert_eq!(
+            h.stoat
+                .registers
+                .read(crate::register::Register::Unnamed)
+                .map(<[String]>::to_vec),
+            Some(vec!["// file 0".to_string()]),
+        );
     }
 
     /// The space menu opens from select mode too, and its arms hand back normal
