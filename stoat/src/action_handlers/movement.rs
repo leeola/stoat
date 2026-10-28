@@ -5027,10 +5027,19 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
     );
 
     let focused_pane = stoat.active_workspace().panes.focus();
+    let viewport_rows = focused_editor_mut(stoat).and_then(|editor| editor.viewport_rows);
     if crate::buffer_lifecycle::open_file_in_pane(stoat, focused_pane, &path, OpenOrigin::Visited)
         .is_none()
     {
         return true;
+    }
+
+    // The landed editor paints in the pane the hop left, so the height that
+    // editor measured is its height until its own paint measures it.
+    if let Some(editor) = focused_editor_mut(stoat)
+        && editor.viewport_rows.is_none()
+    {
+        editor.viewport_rows = viewport_rows;
     }
 
     // The hop carries the view of the file it left, so a latched switch that
