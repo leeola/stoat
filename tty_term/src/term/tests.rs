@@ -1089,6 +1089,21 @@ fn answers_fish_startup_handshake() {
 }
 
 #[test]
+fn replies_follow_the_order_of_their_queries() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+
+    terminal.advance(b"\x1b[6n\x1b[>0q");
+
+    let mut expected = b"\x1b[1;1R".to_vec();
+    expected.extend_from_slice(XTVERSION_REPLY.as_bytes());
+    assert_eq!(
+        terminal.take_responses(),
+        expected,
+        "the cursor report comes first, because its query came first"
+    );
+}
+
+#[test]
 fn xtversion_query_split_across_advances_is_answered() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
 

@@ -47,9 +47,13 @@ pub(super) enum EscEvent<'a> {
         interior: Range<usize>,
         end: usize,
     },
-    /// An XTVERSION query (`CSI > Ps q`) completed. The parameters are dropped,
-    /// since the reply is fixed.
-    XtVersion,
+    /// An XTVERSION query (`CSI > Ps q`) completed, paired with the offset one
+    /// past its final byte. The parameters are dropped, since the reply is
+    /// fixed.
+    ///
+    /// The offset lets a caller answer the query in stream order, after the
+    /// parser has answered the queries before it.
+    XtVersion { end: usize },
     /// An OSC 9 or OSC 777 notification, as its code and the bytes after the
     /// code's `;`.
     OscNotify { code: u32, payload: &'a [u8] },
@@ -324,7 +328,7 @@ impl EscScanner {
                         // Parameter and intermediate bytes keep the sequence open.
                         0x20..=0x3f => EscState::CsiGt,
                         b'q' => {
-                            emit(EscEvent::XtVersion);
+                            emit(EscEvent::XtVersion { end: i + 1 });
                             EscState::Ground
                         },
                         ESC => EscState::Escape,
@@ -1121,7 +1125,7 @@ mod tests {
         let mut resets = 0;
         scanner.scan(input, &mut |event| match event {
             EscEvent::Apc { payload, .. } => apc.push(payload.to_vec()),
-            EscEvent::XtVersion => queries += 1,
+            EscEvent::XtVersion { .. } => queries += 1,
             EscEvent::OscNotify { code, payload } => notes.push((code, payload.to_vec())),
             EscEvent::Ris => resets += 1,
             EscEvent::OscImage { .. } => panic!("this stream carries no image escape"),
@@ -1216,7 +1220,7 @@ mod tests {
     fn scan_xtversion(scanner: &mut EscScanner, bytes: &[u8]) -> usize {
         let mut hits = 0;
         scanner.scan(bytes, &mut |event| {
-            if matches!(event, EscEvent::XtVersion) {
+            if matches!(event, EscEvent::XtVersion { .. }) {
                 hits += 1;
             }
         });

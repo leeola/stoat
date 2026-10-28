@@ -210,12 +210,14 @@ pub struct Terminal {
     /// [`Self::advance`] answers with [`XTVERSION_REPLY`], and the OSC 9 and
     /// OSC 777 notifications it surfaces as [`TermEvent::Notification`].
     esc: EscScanner,
-    /// Reused buffer for one advance's decoded APC frames, so the busy decode
-    /// path does not allocate a fresh Vec per chunk.
+    /// Reused buffer for one advance's decoded APC frames and XTVERSION
+    /// queries, so the busy decode path does not allocate a fresh Vec per
+    /// chunk.
     ///
     /// Each frame is paired with the range its payload occupied in the scanned
-    /// slice and the offset one past its terminator.
-    frames_scratch: Vec<(Option<Command>, Range<usize>, usize)>,
+    /// slice and the offset one past its terminator. A query has no payload, so
+    /// its range is empty at that offset.
+    frames_scratch: Vec<(FrameAction, Range<usize>, usize)>,
     /// Reused per-argument decode buffers threaded through
     /// [`command::decode_with`], so the busy decode path allocates nothing per
     /// APC frame argument once warm.
@@ -1150,6 +1152,17 @@ enum CaptureTarget {
     TextRun(TextRunCommand),
 }
 
+/// What [`Terminal::advance`] does at one scanned escape's place in a chunk.
+enum FrameAction {
+    /// Apply a decoded command, or nothing when the escape's bytes are only
+    /// cut from what the parser sees.
+    Command(Option<Command>),
+    /// Answer an XTVERSION query with [`XTVERSION_REPLY`]. The answer waits
+    /// until the parser has the bytes before the query, so it follows the
+    /// parser's replies to the queries that came before it.
+    XtVersionReply,
+}
+
 impl Terminal {
     /// Create a `rows` by `cols` terminal with an empty screen, resolving colors
     /// against `theme`.
@@ -1262,6 +1275,8 @@ impl Terminal {
     /// XTVERSION queries (`CSI > Ps q`) are answered here too. The vte parser
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
+    /// The reply takes the query's place among the parser's replies, so a burst
+    /// of queries gets its replies in the order it asked.
     ///
     /// An OSC that trips its cap after earlier chunks gave the parser part of it
     /// replaces the parser that holds it, since every way out of the string
@@ -1324,7 +1339,6 @@ impl Terminal {
         let mut frames = mem::take(&mut self.frames_scratch);
         frames.clear();
         let scratch = &mut self.frame_scratch;
-        let responses = &self.responses;
         let events = &mut self.pending_events;
         let mut reset = false;
         let mut reset_parser = false;
@@ -1334,7 +1348,8 @@ impl Terminal {
                 interior,
                 end,
             } => {
-                frames.push((command::decode_with(payload, scratch), interior, end));
+                let command = command::decode_with(payload, scratch);
+                frames.push((FrameAction::Command(command), interior, end));
             },
             // Excised like an APC frame, and for a harder reason: an image on an
             // OSC is bytes the vte parser buffers without bound. A payload the
@@ -1346,7 +1361,7 @@ impl Terminal {
                 end,
             } => {
                 let command = payload.and_then(iterm::parse_file).map(Command::ItermFile);
-                frames.push((command, interior, end));
+                frames.push((FrameAction::Command(command), interior, end));
             },
             // Cut like a refused image payload, and for the same reason. Nothing
             // is read from these bytes, so no command travels with the range.
@@ -1356,9 +1371,11 @@ impl Terminal {
                 reset: replace,
             } => {
                 reset_parser |= replace;
-                frames.push((None, interior, end));
+                frames.push((FrameAction::Command(None), interior, end));
             },
-            EscEvent::XtVersion => responses.push(XTVERSION_REPLY.as_bytes()),
+            EscEvent::XtVersion { end } => {
+                frames.push((FrameAction::XtVersionReply, end..end, end));
+            },
             EscEvent::OscNotify { code, payload } => {
                 if let Some(event) = notification_from_osc(code, payload) {
                     events.push(event);
@@ -1385,26 +1402,32 @@ impl Terminal {
         // synchronized-update accounting the redirect path cannot. Only the
         // frame payloads are held back, which that parser would walk past.
         let involves_redirect = redirecting
-            || frames.iter().any(|(command, _, _)| {
+            || frames.iter().any(|(action, _, _)| {
                 matches!(
-                    command,
-                    Some(Command::Fill(_))
-                        | Some(Command::FillRows(_))
-                        | Some(Command::FillDecorations(_))
-                        | Some(Command::Popover(_))
-                        | Some(Command::TextRun(_))
+                    action,
+                    FrameAction::Command(Some(
+                        Command::Fill(_)
+                            | Command::FillRows(_)
+                            | Command::FillDecorations(_)
+                            | Command::Popover(_)
+                            | Command::TextRun(_)
+                    ))
                 )
             });
         let prefix = bytes.len() - scan.len();
         if !involves_redirect {
             let mut fed = 0;
             let mut start = 0;
-            for (command, interior, _) in frames.drain(..) {
+            for (action, interior, _) in frames.drain(..) {
                 fed += self.feed_live(&bytes[start..prefix + interior.start]);
                 start = prefix + interior.end;
 
-                if let Some(command) = command {
-                    self.apply_command(command);
+                match action {
+                    FrameAction::Command(Some(command)) => self.apply_command(command),
+                    FrameAction::Command(None) => {},
+                    FrameAction::XtVersionReply => {
+                        self.responses.push(XTVERSION_REPLY.as_bytes());
+                    },
                 }
             }
             fed += self.feed_live(&bytes[start..]);
@@ -1425,11 +1448,18 @@ impl Terminal {
         // `prefix` rebases the scan-relative offsets when a memchr skip left a
         // plain head bound for the live screen.
         let mut start = 0;
-        for (command, interior, end) in frames.drain(..) {
+        for (action, interior, end) in frames.drain(..) {
             self.feed_segment(&bytes[start..prefix + interior.start]);
             self.feed_segment(&bytes[prefix + interior.end..prefix + end]);
             start = prefix + end;
 
+            let command = match action {
+                FrameAction::Command(command) => command,
+                FrameAction::XtVersionReply => {
+                    self.responses.push(XTVERSION_REPLY.as_bytes());
+                    continue;
+                },
+            };
             if let Some(command) = command {
                 // Fill and capture controls always act. A Bar and a TextRun's
                 // capture are page-targeted decorations the open fill stores on
