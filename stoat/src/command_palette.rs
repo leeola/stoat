@@ -141,7 +141,8 @@ impl ArgPicker {
     ) -> Self {
         let mut core = PathPicker::new(ws, executor, git_root, walk);
         core.all_paths = all_paths;
-        core.picklist.keeps_base_order = source == ValueSource::Branches;
+        core.picklist.keeps_base_order =
+            matches!(source, ValueSource::Branches | ValueSource::Revisions);
         Self {
             source,
             core,
@@ -188,7 +189,8 @@ impl ArgPicker {
             self.cycle = None;
             return None;
         };
-        let completed = paths::display_relative(selected, git_root);
+        let completed =
+            chosen_value(self.source, &paths::display_relative(selected, git_root)).to_string();
 
         self.cycle = Some(TabCycle {
             query,
@@ -358,9 +360,9 @@ impl ArgPicker {
 
     /// Sync the preview pane per this picker's source. A buffer source previews
     /// the live in-memory buffer, falling back to the disk file when the path
-    /// has none. A directory source shows nothing, as do a fixed value set and
-    /// a branch list, whose rows name values rather than readable files. Every
-    /// other source reads the file from disk.
+    /// has none. A directory source shows nothing, as do a fixed value set, a
+    /// branch list, and a revision list, whose rows name values rather than
+    /// readable files. Every other source reads the file from disk.
     fn sync_preview(
         &mut self,
         ws: &mut Workspace,
@@ -373,6 +375,7 @@ impl ArgPicker {
             ValueSource::Themes
             | ValueSource::Walkthroughs
             | ValueSource::Branches
+            | ValueSource::Revisions
             | ValueSource::Values(_) => PreviewPolicy::NoPreview,
             _ => PreviewPolicy::File,
         };
@@ -680,7 +683,8 @@ impl CommandPalette {
     /// The value source of the current command's first argument when it drives
     /// an inline picker ([`ValueSource::Files`], [`ValueSource::Directories`],
     /// [`ValueSource::Buffers`], [`ValueSource::Themes`],
-    /// [`ValueSource::Branches`], or [`ValueSource::Values`], e.g. `:o `,
+    /// [`ValueSource::Branches`], [`ValueSource::Revisions`], or
+    /// [`ValueSource::Values`], e.g. `:o `,
     /// `:cd `, `:b `, `:SetTheme `, `:git log `, or `:auto-reload `), or `None`
     /// otherwise. Gates rendering the picker and routing selection keys to it.
     pub(crate) fn arg_source(&self) -> Option<ValueSource> {
@@ -835,7 +839,9 @@ impl CommandPalette {
                     .as_ref()
                     .filter(|picker| picker.source() == param.value_source)
                     .and_then(|picker| picker.selected_path())
-                    .map(|path| path.to_string_lossy().into_owned())
+                    .map(|path| {
+                        chosen_value(param.value_source, &path.to_string_lossy()).to_string()
+                    })
                     .unwrap_or_else(|| arg.to_string())
             };
             return match ParamValue::parse(param.kind, &chosen) {
@@ -1026,6 +1032,19 @@ fn history_head(entry: &registry::RegistryEntry) -> &'static str {
         .first()
         .copied()
         .unwrap_or_else(|| entry.def.name())
+}
+
+/// The value a picker row under `source` stands for.
+///
+/// A [`ValueSource::Revisions`] row names a branch, or a commit as its short
+/// sha and summary. The argument takes the revision alone, so the row is cut
+/// at its first space. Every other source's row is its value whole, which
+/// keeps a path with spaces in one piece.
+fn chosen_value(source: ValueSource, row: &str) -> &str {
+    match source {
+        ValueSource::Revisions => row.split_once(' ').map_or(row, |(value, _)| value),
+        _ => row,
+    }
 }
 
 /// Whether `entry` belongs in the palette's list under `scope`.
@@ -3989,6 +4008,57 @@ mod tests {
         assert_eq!(
             (narrowed, label.as_deref()),
             (vec!["feature".to_string()], Some("git log feature")),
+        );
+    }
+
+    #[test]
+    fn chosen_value_cuts_a_revision_row_at_its_sha() {
+        assert_eq!(
+            [
+                chosen_value(ValueSource::Revisions, "c2 chore: tweak a"),
+                chosen_value(ValueSource::Revisions, "main"),
+                chosen_value(ValueSource::Branches, "c2 chore"),
+            ],
+            ["c2", "main", "c2 chore"],
+        );
+    }
+
+    /// A revision list keeps its rows in order on an empty query, and Tab on a
+    /// commit row writes its sha, with the next press stepping to the next row.
+    #[test]
+    fn a_revision_picker_keeps_its_order_and_tabs_in_shas() {
+        let mut h = Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let root = PathBuf::from("/repo");
+        let rows = ["main", "feature", "c2 chore: tweak a", "c1 commit c1"];
+        let mut picker = ArgPicker::new(
+            h.stoat.active_workspace_mut(),
+            executor,
+            ValueSource::Revisions,
+            root.clone(),
+            None,
+            rows.map(PathBuf::from).to_vec(),
+        );
+
+        picker.active_core().refilter("");
+        let listed: Vec<String> = {
+            let picklist = &picker.core.picklist;
+            picklist
+                .filtered
+                .iter()
+                .map(|&i| picklist.base[i].display().to_string())
+                .collect()
+        };
+        picker.active_core().picklist.selected = 2;
+        let first = picker.advance_tab_cycle("", &root);
+        let second = first
+            .clone()
+            .and_then(|tail| picker.advance_tab_cycle(&tail, &root));
+        picker.dispose(h.stoat.active_workspace_mut());
+
+        assert_eq!(
+            (listed, first.as_deref(), second.as_deref()),
+            (rows.map(String::from).to_vec(), Some("c2"), Some("c1")),
         );
     }
 

@@ -14,6 +14,13 @@ use stoat_action::ValueSource;
 use stoat_scheduler::Task;
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// The most commits a revision argument lists after the branches.
+///
+/// The list is read on the run loop as the picker opens, where
+/// [`branch_candidates`] already reads the repo, so the walk stops here rather
+/// than reading the whole history.
+const REVISION_ROWS: usize = 100;
+
 /// Candidates feeding a palette argument's inline value-picker, resolved from a
 /// [`ValueSource`] by [`arg_candidates`].
 pub(super) enum ArgCandidates {
@@ -37,7 +44,8 @@ pub(super) enum ArgCandidates {
 /// background walk the file finder uses. `Directories` derives the workspace's
 /// directories from that same list or walk. `Buffers` returns the
 /// currently-open buffer paths. `Branches` returns the local branch names with
-/// HEAD's first, and none outside a repository. `Values` returns the argument's
+/// HEAD's first, and none outside a repository. `Revisions` adds the newest
+/// commits of HEAD's history after them. `Values` returns the argument's
 /// accepted spellings. `None` yields no picker.
 ///
 /// The non-path sources still ride [`ArgCandidates::Paths`]: the picker filters
@@ -88,6 +96,10 @@ pub(super) fn arg_candidates(stoat: &Stoat, source: ValueSource) -> Option<ArgCa
             stoat,
             &stoat.active_workspace().git_root,
         ))),
+        ValueSource::Revisions => Some(ArgCandidates::Paths(revision_candidates(
+            stoat,
+            &stoat.active_workspace().git_root,
+        ))),
         ValueSource::Values(values) => Some(ArgCandidates::Paths(
             values.iter().map(PathBuf::from).collect(),
         )),
@@ -127,6 +139,27 @@ fn branch_candidates(stoat: &Stoat, git_root: &Path) -> Vec<PathBuf> {
         names[..=at].rotate_right(1);
     }
     names.into_iter().map(PathBuf::from).collect()
+}
+
+/// The rows of [`branch_candidates`], then the newest commits of HEAD's
+/// first-parent history as `<short sha> <summary>` rows.
+///
+/// Only the branches when HEAD names no commit, and empty outside a
+/// repository.
+fn revision_candidates(stoat: &Stoat, git_root: &Path) -> Vec<PathBuf> {
+    let mut rows = branch_candidates(stoat, git_root);
+    let Some(repo) = stoat.git_host.discover(git_root) else {
+        return rows;
+    };
+
+    if let Some(head) = repo.resolve_rev("HEAD") {
+        rows.extend(
+            repo.log_from(&head, REVISION_ROWS)
+                .into_iter()
+                .map(|commit| PathBuf::from(format!("{} {}", commit.short_sha, commit.summary))),
+        );
+    }
+    rows
 }
 
 /// Open the command palette with `seed` already typed.
@@ -712,9 +745,32 @@ fn close_palette(stoat: &mut Stoat) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::list_child_dirs;
-    use crate::host::FakeFs;
-    use std::path::PathBuf;
+    use super::{list_child_dirs, revision_candidates};
+    use crate::{app::Stoat, host::FakeFs};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn revision_candidates_list_branches_then_head_history() {
+        let h = Stoat::test();
+        h.fake_git()
+            .add_repo("/repo")
+            .commit("c1", &[])
+            .commit_with_parent_message("c2", "c1", "chore: tweak a", &[])
+            .branch("main", "c2")
+            .branch("feature", "c1")
+            .set_head_branch("main");
+        h.fake_git().add_repo("/bare").branch("main", "c9");
+
+        assert_eq!(
+            revision_candidates(&h.stoat, Path::new("/repo")),
+            ["main", "feature", "c2 chore: tweak a", "c1 commit c1"].map(PathBuf::from),
+        );
+        assert_eq!(
+            revision_candidates(&h.stoat, Path::new("/bare")),
+            [PathBuf::from("main")],
+            "a HEAD that names no commit leaves the branches alone",
+        );
+    }
 
     #[test]
     fn list_child_dirs_lists_one_level_sorted_hidden_last() {

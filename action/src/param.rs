@@ -43,6 +43,13 @@ pub enum ValueSource {
     /// listed branch, such as a sha or `HEAD~2`, passes through as typed, so
     /// the list suggests values rather than restricting them.
     Branches,
+    /// Local branch names, HEAD's branch first, then the short sha and summary
+    /// of the newest commits HEAD reaches by first parent.
+    ///
+    /// A chosen row's value is the text before its first space, so a commit row
+    /// yields its short sha and a branch row its name. Free text passes through
+    /// as typed, as under [`Self::Branches`].
+    Revisions,
     /// A closed set of accepted values, listed verbatim. Arguments that read
     /// as an enum (`on`, `off`, `follow`) carry their spellings here so the
     /// picker can offer them instead of leaving the user to recall them.
