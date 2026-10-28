@@ -2796,6 +2796,32 @@ mod tests {
         );
     }
 
+    /// Escape in the changes view does what it does in the per-file diff, so
+    /// the key never closes the view, and q alone closes it.
+    #[test]
+    fn escape_in_the_changes_view_matches_the_per_file_diff() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let state = |view: &str| {
+            TestState::new()
+                .set("mode", StateValue::String("normal".into()))
+                .set("view", StateValue::String(view.into()))
+                .set("pane", StateValue::String("editor".into()))
+        };
+        let (changes, diff) = (state("diff_changes"), state("diff"));
+        let key = |state: &TestState, code| {
+            action_names(keymap.lookup(state, &key_event(code, KeyModifiers::NONE)))
+        };
+
+        assert_eq!(
+            (
+                key(&changes, KeyCode::Esc),
+                key(&changes, KeyCode::Char('q'))
+            ),
+            (key(&diff, KeyCode::Esc), only("CloseDiffChanges")),
+        );
+    }
+
     /// Every list modal answers the same keys with the same verbs.
     ///
     /// The scheme drifted once already, each picker minting its own actions

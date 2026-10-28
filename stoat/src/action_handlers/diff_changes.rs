@@ -2278,7 +2278,7 @@ mod tests {
         h.settle();
         h.type_keys("Ctrl-t");
         h.settle();
-        h.type_keys("Escape");
+        h.type_keys("q");
         h.settle();
         let ws = h.stoat.active_workspace();
         assert_eq!(

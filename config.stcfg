@@ -1187,9 +1187,10 @@ on key {
     # leaves out acts on the excerpt's file. j, k, and the pages cross into the
     # next file at an excerpt's edge. n, p, the Alt notches, and the side
     # buttons walk the hunks across the excerpts, as the diff view's walk
-    # crosses into the next changed file.
+    # crosses into the next changed file. q closes the view. Escape is left
+    # to the normal block, as the per-file diff leaves it, so the key
+    # dismisses the hints and never closes the view.
     view == diff_changes && mode == normal {
-        Escape -> CloseDiffChanges();
         q -> CloseDiffChanges();
         Ctrl-t -> DiffFiles();
         Enter -> DiffChangesOpen();

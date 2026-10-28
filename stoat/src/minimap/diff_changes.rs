@@ -1779,7 +1779,7 @@ mod tests {
             (held, splices, drops)
         };
 
-        let pressed = ["Ctrl-t", "Ctrl-t", "Escape"].map(|key| press(&mut h, key));
+        let pressed = ["Ctrl-t", "Ctrl-t", "q"].map(|key| press(&mut h, key));
         assert_eq!(
             pressed,
             [
