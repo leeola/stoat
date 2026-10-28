@@ -5358,8 +5358,8 @@ impl Stoat {
         }
     }
 
-    /// Where `ws` persists, or `None` when it should not be persisted at all.
-    fn workspace_save_path(&self, ws: &Workspace) -> Option<PathBuf> {
+    /// Where `ws` persists, or `None` when it is not persisted at all.
+    pub(crate) fn workspace_save_path(&self, ws: &Workspace) -> Option<PathBuf> {
         if self.persistence_disabled || ws.is_fresh() {
             return None;
         }

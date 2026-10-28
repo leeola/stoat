@@ -56,6 +56,17 @@ define_action!(
 );
 
 define_action!(
+    WorkspacePickerCloseSessionDef,
+    WorkspacePickerCloseSession,
+    "WorkspacePickerCloseSession",
+    ActionKind::WorkspacePickerCloseSession,
+    "close the picker row's open session",
+    "Save the open session under the workspace picker's selection and end it in the running instance, with its shells and runs. The session stays in the list as a saved session to enter again. The active row and a saved row are refused. Delete removes a session instead.",
+    ActionPriority::Normal,
+    palette_visible = false
+);
+
+define_action!(
     CloseWorkspaceDef,
     CloseWorkspace,
     "CloseWorkspace",

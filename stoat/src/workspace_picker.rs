@@ -375,6 +375,21 @@ impl WorkspacePicker {
         self.rank(&query);
     }
 
+    /// Turn the row at `entry_idx` into the row of a session saved at
+    /// `state_path`, for a workspace that left the instance after a save.
+    ///
+    /// The row then reads as the registry lists a saved session, so Enter
+    /// restores it from `state_path`. It keeps its place and its match, because
+    /// a row's haystack holds only its name, host, and root.
+    pub(crate) fn mark_closed(&mut self, entry_idx: usize, state_path: PathBuf) {
+        let entry = &mut self.entries[entry_idx];
+        entry.id = None;
+        entry.status = WorkspaceStatus::Inactive;
+        entry.run_count = 0;
+        entry.editor_count = 0;
+        entry.state_path = Some(state_path);
+    }
+
     /// Drop the selected row's entry, as the delete of a session without
     /// sub-sessions does. A no-op on an empty list.
     #[cfg(test)]

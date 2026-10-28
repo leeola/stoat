@@ -478,5 +478,6 @@ action_kinds! {
     HelpScopeToggle,
     WorkspacePickerScopeToggle,
     WorkspacePickerCreateSub,
+    WorkspacePickerCloseSession,
     CloseHelp,
 }

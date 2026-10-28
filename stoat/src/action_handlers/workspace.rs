@@ -357,6 +357,65 @@ fn deleted_status(basename: &str, subs: usize) -> String {
     }
 }
 
+/// Close the open session under the workspace picker's selection and keep it
+/// on disk.
+///
+/// The workspace saves, then leaves the running instance. Its shells and runs
+/// end, and its hook server stops. Its row stays in the list as a saved
+/// session, which Enter restores. [`workspace_picker_delete`] removes a session
+/// from the list and the disk instead.
+///
+/// The close takes the selected row alone. A sub-session is a workspace of its
+/// own, tied to its family only by its parent uid, so it stays open. A
+/// workspace with no save path, because persistence is off or the workspace is
+/// fresh, leaves no session to list, so its row goes.
+///
+/// The active row is refused, because the picker's own input lives in it. A
+/// saved row is refused, because it has no open session. A failed save keeps
+/// the workspace open, because a close after it ends state that no file holds.
+pub(super) fn workspace_picker_close_session(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((entry_idx, id, basename)) = stoat.workspace_picker.as_ref().and_then(|picker| {
+        let entry_idx = *picker.filtered().get(picker.selected())?;
+        let entry = &picker.entries()[entry_idx];
+        Some((entry_idx, entry.id, entry.basename.clone()))
+    }) else {
+        return UpdateEffect::None;
+    };
+
+    let Some(id) = id else {
+        stoat.set_status(format!("session {basename} is not open"));
+        return UpdateEffect::Redraw;
+    };
+    if id == stoat.active_workspace {
+        stoat.set_status("cannot close the active workspace");
+        return UpdateEffect::Redraw;
+    }
+
+    let state_path = stoat.workspace_save_path(&stoat.workspaces[id]);
+    if let Some(path) = &state_path
+        && let Err(err) = stoat.workspaces[id].save_state(path, &*stoat.fs_host)
+    {
+        tracing::warn!(target: "stoat::workspace", ?path, ?err, "failed to save closing workspace");
+        stoat.set_status(format!("cannot close session {basename}: its save failed"));
+        return UpdateEffect::Redraw;
+    }
+
+    // The save above took a newer gate number than any save still queued, so
+    // a queued write lands nothing.
+    stoat.pending_workspace_saves.remove(&id);
+    release_workspace(stoat, id);
+    stoat.workspaces.remove(id);
+
+    if let Some(picker) = stoat.workspace_picker.as_mut() {
+        match state_path {
+            Some(path) => picker.mark_closed(entry_idx, path),
+            None => picker.remove_entries(&[entry_idx]),
+        }
+    }
+    stoat.set_status(format!("closed session {basename}"));
+    UpdateEffect::Redraw
+}
+
 /// Remove the session files of the open workspace `id`, after stopping every
 /// write still queued for it.
 ///
@@ -880,7 +939,7 @@ mod tests {
             registry::{RegistryEntry, WorkspaceMeta},
             SaveGate,
         },
-        workspace_picker::WorkspacePicker,
+        workspace_picker::{WorkspacePicker, WorkspaceStatus},
     };
     use std::{
         sync::Arc,
@@ -1357,6 +1416,193 @@ mod tests {
         );
     }
 
+    /// A picker over the launch workspace `alpha`, edited so it saves, which a
+    /// `NewWorkspace` left in the background, with persistence on.
+    ///
+    /// The fresh active row is omitted, so the selection sits on the launch
+    /// row. Returns the launch workspace and the state file its save lands at.
+    fn picker_over_an_edited_launch(harness: &mut TestHarness) -> (WorkspaceId, PathBuf) {
+        harness.stoat.persistence_disabled = false;
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        harness.seed_focused_buffer("edited\n");
+        let launch = harness.stoat.active_workspace;
+        let path = {
+            let ws = harness.stoat.active_workspace();
+            state_path_for(&ws.git_root, ws.uid, &*harness.stoat.fs_host).expect("state path")
+        };
+
+        harness.type_action("NewWorkspace()");
+        open_workspace_picker_over(&mut harness.stoat, Vec::new());
+        (launch, path)
+    }
+
+    /// The id, status, and state path of the picker's selected row.
+    fn selected_row(stoat: &Stoat) -> (Option<WorkspaceId>, WorkspaceStatus, Option<PathBuf>) {
+        let entry = stoat
+            .workspace_picker
+            .as_ref()
+            .and_then(WorkspacePicker::selected_entry)
+            .expect("a selected row");
+        (entry.id, entry.status, entry.state_path.clone())
+    }
+
+    #[test]
+    fn closing_an_open_background_row_saves_it_and_lists_it_inactive() {
+        let mut harness = Stoat::test();
+        let (launch, path) = picker_over_an_edited_launch(&mut harness);
+        let files = [registry::meta_path_for(&path), path.clone()];
+        // The switch to the new workspace saved the launch one. Without its
+        // files, every file after the close is the close's own save.
+        for file in &files {
+            harness
+                .stoat
+                .fs_host
+                .remove_file(file)
+                .expect("the switch saved the launch workspace");
+        }
+        let on_disk = |stoat: &Stoat| files.each_ref().map(|file| stoat.fs_host.exists(file));
+
+        assert_eq!(
+            workspace_picker_close_session(&mut harness.stoat),
+            UpdateEffect::Redraw
+        );
+
+        let stoat = &harness.stoat;
+        assert_eq!(
+            (
+                stoat.workspaces.contains_key(launch),
+                on_disk(stoat),
+                selected_row(stoat),
+                stoat.pending_message.as_deref(),
+            ),
+            (
+                false,
+                [true; 2],
+                (None, WorkspaceStatus::Inactive, Some(path)),
+                Some("closed session alpha"),
+            ),
+            "the session leaves the instance, keeps its files, and lists as saved"
+        );
+    }
+
+    #[test]
+    fn closing_a_row_whose_save_fails_keeps_its_session_open() {
+        let mut harness = Stoat::test();
+        let (launch, path) = picker_over_an_edited_launch(&mut harness);
+        harness
+            .fake_fs()
+            .fail_writes_to(&path, std::io::ErrorKind::PermissionDenied);
+
+        workspace_picker_close_session(&mut harness.stoat);
+
+        let stoat = &harness.stoat;
+        assert_eq!(
+            (
+                stoat.workspaces.contains_key(launch),
+                selected_row(stoat),
+                stoat.pending_message.as_deref(),
+            ),
+            (
+                true,
+                (Some(launch), WorkspaceStatus::Background, None),
+                Some("cannot close session alpha: its save failed"),
+            ),
+            "a failed save keeps the session open and its row as it was"
+        );
+    }
+
+    #[test]
+    fn closing_a_background_row_with_no_save_path_drops_its_row() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+        let second = {
+            let ws = Workspace::new(
+                PathBuf::from("/tmp/beta"),
+                &stoat.executor,
+                stoat.redraw_notify.clone(),
+            );
+            let id = stoat.workspaces.insert(ws);
+            stoat.workspaces[id].id = id;
+            stoat.workspaces[id].name = "beta".to_string();
+            id
+        };
+        let input = picker_input(stoat);
+        let picker =
+            WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, Vec::new(), input);
+        stoat.workspace_picker = Some(picker);
+
+        workspace_picker_close_session(stoat);
+
+        assert_eq!(
+            (
+                stoat.workspaces.contains_key(second),
+                picker_rows(stoat),
+                stoat.pending_message.as_deref(),
+            ),
+            (
+                false,
+                vec!["alpha".to_string()],
+                Some("closed session beta")
+            ),
+            "a session with no save path leaves the list as well as the instance"
+        );
+    }
+
+    #[test]
+    fn closing_the_active_row_is_refused() {
+        let mut harness = Stoat::test();
+        harness.stoat.active_workspace_mut().name = "alpha".to_string();
+        let stoat = &mut harness.stoat;
+        let input = picker_input(stoat);
+        let picker =
+            WorkspacePicker::new(&stoat.workspaces, stoat.active_workspace, Vec::new(), input);
+        stoat.workspace_picker = Some(picker);
+
+        assert_eq!(workspace_picker_close_session(stoat), UpdateEffect::Redraw);
+
+        assert_eq!(
+            (
+                stoat.workspaces.len(),
+                picker_rows(stoat),
+                stoat.pending_message.as_deref(),
+            ),
+            (
+                1,
+                vec!["alpha".to_string()],
+                Some("cannot close the active workspace")
+            ),
+            "the active workspace stays open and listed"
+        );
+    }
+
+    #[test]
+    fn closing_a_saved_row_is_refused() {
+        let mut harness = Stoat::test();
+        let stoat = &mut harness.stoat;
+        open_workspace_picker_over(stoat, vec![saved_session(WorkspaceUid(424242), "proj")]);
+
+        assert_eq!(workspace_picker_close_session(stoat), UpdateEffect::Redraw);
+
+        assert_eq!(
+            (
+                stoat.workspaces.len(),
+                selected_row(stoat),
+                stoat.pending_message.as_deref(),
+            ),
+            (
+                1,
+                (
+                    None,
+                    WorkspaceStatus::Inactive,
+                    Some(PathBuf::from("/state/hash/1.ron"))
+                ),
+                Some("session proj is not open"),
+            ),
+            "a saved row has no open session to close"
+        );
+    }
+
     #[test]
     fn renaming_an_open_background_row_sets_its_name() {
         let mut harness = Stoat::test();
@@ -1623,18 +1869,32 @@ mod tests {
         assert_eq!([files_left(false), files_left(true)], [[false; 2]; 2]);
     }
 
-    /// Closing a workspace or deleting its open row ends the run and the shell
-    /// of that workspace, and stops its hook server.
+    /// Closing a workspace, deleting its open row, or closing its row's session
+    /// ends the run and the shell of that workspace, and stops its hook server.
     #[test]
     fn closing_or_deleting_an_open_workspace_ends_its_sessions() {
-        let released_after = |delete: bool| {
+        /// Put the launch workspace under a picker whose selection sits on the
+        /// background row of the workspace that holds the run and the shell.
+        fn pick_second(stoat: &mut Stoat) {
+            let first = stoat
+                .workspaces
+                .keys()
+                .find(|&id| id != stoat.active_workspace)
+                .expect("the launch workspace");
+            stoat.active_workspace = first;
+            let input = picker_input(stoat);
+            let mut picker = WorkspacePicker::new(&stoat.workspaces, first, Vec::new(), input);
+            picker.select_next();
+            stoat.workspace_picker = Some(picker);
+        }
+
+        let released_after = |remove: fn(&mut Stoat) -> UpdateEffect| {
             let mut harness = Stoat::test();
             harness.allow_host_swap();
             harness
                 .stoat
                 .set_agent_socket_dir("/stoat-test-never-served".into());
             harness.stoat.set_serve_agent_sockets(true);
-            let first = harness.stoat.active_workspace;
             harness.type_action("NewWorkspace()");
 
             // The terminal covers the run and keeps it alive. A run opened
@@ -1646,17 +1906,7 @@ mod tests {
             let killed = || [run.was_killed(), shell.was_killed()];
             assert_eq!(killed(), [false, false], "both live before the removal");
 
-            let stoat = &mut harness.stoat;
-            if delete {
-                stoat.active_workspace = first;
-                let input = picker_input(stoat);
-                let mut picker = WorkspacePicker::new(&stoat.workspaces, first, Vec::new(), input);
-                picker.select_next();
-                stoat.workspace_picker = Some(picker);
-                workspace_picker_delete(stoat);
-            } else {
-                close_workspace(stoat);
-            }
+            remove(&mut harness.stoat);
             harness.run_until_parked();
             (
                 harness.stoat.workspaces.len(),
@@ -1666,8 +1916,18 @@ mod tests {
         };
 
         assert_eq!(
-            [released_after(false), released_after(true)],
-            [(1, [true, true], 0); 2],
+            [
+                released_after(close_workspace),
+                released_after(|stoat| {
+                    pick_second(stoat);
+                    workspace_picker_delete(stoat)
+                }),
+                released_after(|stoat| {
+                    pick_second(stoat);
+                    workspace_picker_close_session(stoat)
+                }),
+            ],
+            [(1, [true, true], 0); 3],
         );
     }
 
