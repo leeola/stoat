@@ -397,8 +397,10 @@ on key {
     Ctrl-? -> ToggleKeyHints();
     # The palette, bound at the root so every mode and every modal answers it.
     # The `!modal` guards do not cover a root key, so the handler closes an
-    # open modal before the palette opens.
+    # open modal before the palette opens. `Ctrl-;` binds it too, because a
+    # keyboard that types `:` with Shift reaches `Ctrl-:` only as `Ctrl-Shift-;`.
     Ctrl-: -> OpenCommandPalette();
+    Ctrl-; -> OpenCommandPalette();
 
     # The modes named here bind `?` to something of their own. This block
     # outranks theirs on atom count, so a mode that takes the key has to be
@@ -1244,6 +1246,7 @@ on key {
         Ctrl-a -> SetMode(prefix);
         Ctrl-? -> ToggleKeyHints();
         Ctrl-: -> OpenCommandPalette();
+        Ctrl-; -> OpenCommandPalette();
         # Shift walks the pane's own history, the xterm convention, which
         # leaves plain PageUp and PageDown with the child.
         Shift-PageUp -> PageUp();

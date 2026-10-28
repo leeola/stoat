@@ -426,9 +426,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
         ActionKind::OpenCommandPalette if stoat.command_palette.is_some() => UpdateEffect::None,
         ActionKind::OpenCommandPalette => {
-            // `Ctrl-:` binds at the keymap's root, past every `!modal` guard,
-            // so the modal it fires over closes and the palette owns the keys
-            // alone. A finished run is the one modal that close leaves open.
+            // `Ctrl-:` and `Ctrl-;` bind at the keymap's root, past every
+            // `!modal` guard, so the modal they fire over closes and the
+            // palette owns the keys alone. A finished run is the one modal
+            // that close leaves open.
             if stoat.modal_run.is_some() {
                 run::run_modal_dismiss(stoat);
             } else {

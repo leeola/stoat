@@ -4680,7 +4680,7 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
         .collect();
     assert_eq!(
         keys,
-        ["C-a", "C-?", "C-:", "S-PgUp", "S-PgDn"],
+        ["C-a", "C-?", "C-:, C-;", "S-PgUp", "S-PgDn"],
         "a terminal at rest lists only the keys it takes from its child"
     );
 }
@@ -5119,17 +5119,19 @@ fn ctrl_question_in_a_terminal_toggles_the_hints_and_sends_nothing() {
 }
 
 #[test]
-fn ctrl_colon_in_a_terminal_opens_the_palette_and_sends_nothing() {
+fn ctrl_colon_and_ctrl_semicolon_in_a_terminal_open_the_palette_and_send_nothing() {
     for make_view in [View::Terminal, View::Agent] {
-        let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
+        for c in [':', ';'] {
+            let (mut stoat, _id, fake) = stoat_with_focused_term(make_view);
 
-        stoat.handle_key(ctrl(':'));
+            stoat.handle_key(ctrl(c));
 
-        assert_eq!(
-            (stoat.command_palette.is_some(), fake.sent_bytes()),
-            (true, Vec::<Vec<u8>>::new()),
-            "Ctrl-: opens the palette and never reaches the child",
-        );
+            assert_eq!(
+                (stoat.command_palette.is_some(), fake.sent_bytes()),
+                (true, Vec::<Vec<u8>>::new()),
+                "Ctrl-{c} opens the palette and never reaches the child",
+            );
+        }
     }
 }
 

@@ -3021,13 +3021,12 @@ mod tests {
         }
     }
 
-    /// The palette is bound at the root of `on key` too, so every mode answers
-    /// the key, and so does a prompt that a modal owns.
+    /// Both palette chords are bound at the root of `on key` too, so every mode
+    /// answers them, and so does a prompt that a modal owns.
     #[test]
-    fn ctrl_colon_opens_the_palette_from_every_mode() {
+    fn ctrl_colon_and_ctrl_semicolon_open_the_palette_from_every_mode() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let ctrl_colon = key_event(KeyCode::Char(':'), KeyModifiers::CONTROL);
         let in_mode = |mode: &str| TestState::new().set("mode", StateValue::String(mode.into()));
         let in_finder = in_mode("insert").set("modal", StateValue::String("finder".into()));
 
@@ -3037,14 +3036,16 @@ mod tests {
             ("space_goto mode", in_mode("space_goto")),
             ("an open finder", in_finder),
         ] {
-            let bound = keymap
-                .lookup(&state, &ctrl_colon)
-                .unwrap_or_else(|| panic!("Ctrl-: is bound in {name}"));
-            assert_eq!(
-                (bound.len(), bound[0].name.as_str()),
-                (1, "OpenCommandPalette"),
-                "Ctrl-: opens the palette in {name} and switches no mode",
-            );
+            for c in [':', ';'] {
+                let bound = keymap
+                    .lookup(&state, &key_event(KeyCode::Char(c), KeyModifiers::CONTROL))
+                    .unwrap_or_else(|| panic!("Ctrl-{c} is bound in {name}"));
+                assert_eq!(
+                    (bound.len(), bound[0].name.as_str()),
+                    (1, "OpenCommandPalette"),
+                    "Ctrl-{c} opens the palette in {name} and switches no mode",
+                );
+            }
         }
     }
 
@@ -3105,7 +3106,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_at_rest_answers_ctrl_a_ctrl_question_and_ctrl_colon() {
+    fn a_pane_at_rest_answers_ctrl_a_ctrl_question_ctrl_colon_and_ctrl_semicolon() {
         let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
         let ctrl = |c| key_event(KeyCode::Char(c), KeyModifiers::CONTROL);
         let bare = |code| key_event(code, KeyModifiers::NONE);
@@ -3128,6 +3129,7 @@ mod tests {
                     scoped(&at_rest(), ctrl('a')),
                     scoped(&at_rest(), ctrl('?')),
                     scoped(&at_rest(), ctrl(':')),
+                    scoped(&at_rest(), ctrl(';')),
                     scoped(&at_rest(), bare(KeyCode::Esc)),
                     scoped(&at_rest(), bare(KeyCode::Tab)),
                     scoped(&at_rest(), ctrl('d')),
@@ -3140,13 +3142,14 @@ mod tests {
                     )]),
                     Some(vec![("ToggleKeyHints".to_string(), Vec::new())]),
                     Some(vec![("OpenCommandPalette".to_string(), Vec::new())]),
+                    Some(vec![("OpenCommandPalette".to_string(), Vec::new())]),
                     None,
                     None,
                     None,
                     None,
                 ),
-                "the {pane} pane takes back only Ctrl-a, Ctrl-?, and Ctrl-:, and only with no \
-                 modal open"
+                "the {pane} pane takes back only Ctrl-a, Ctrl-?, Ctrl-:, and Ctrl-;, and only \
+                 with no modal open"
             );
         }
     }
