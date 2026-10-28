@@ -985,6 +985,52 @@ pub(crate) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     close_buffer_by_id(stoat, buffer_id)
 }
 
+/// Close every buffer that has a path, whether or not its file still exists,
+/// as [`close_buffer`] closes one.
+///
+/// The tabs and the pane tree stay, and each pane that showed a closed buffer
+/// goes back to the buffer it showed before or to a scratch buffer. Scratch
+/// buffers stay open, since the modals, the prompts, and the previews own them.
+///
+/// Without `force`, unsaved edits in any of the buffers refuse the whole close,
+/// and the status names those buffers. With `force` the edits go with them.
+pub(crate) fn close_all_buffers(stoat: &mut Stoat, force: bool) -> UpdateEffect {
+    let targets: Vec<_> = stoat
+        .active_workspace()
+        .buffers
+        .summaries()
+        .into_iter()
+        .filter(|summary| summary.path.is_some() && !summary.preview)
+        .collect();
+    if targets.is_empty() {
+        stoat.set_status("no buffers open");
+        return UpdateEffect::Redraw;
+    }
+
+    let unsaved: Vec<String> = targets
+        .iter()
+        .filter(|summary| summary.dirty)
+        .filter_map(|summary| summary.path.as_deref().map(display_name))
+        .collect();
+    if !force && !unsaved.is_empty() {
+        stoat.set_status(format!(
+            "{} unsaved: {} (buffer-close-all! discards)",
+            unsaved.len(),
+            unsaved.join(", ")
+        ));
+        return UpdateEffect::Redraw;
+    }
+
+    for summary in &targets {
+        close_buffer_by_id(stoat, summary.id);
+    }
+    stoat.set_status(match targets.len() {
+        1 => "closed 1 buffer".to_string(),
+        count => format!("closed {count} buffers"),
+    });
+    UpdateEffect::Redraw
+}
+
 /// Drop `buffer_id` from the active workspace, whatever its dirty state.
 ///
 /// The caller answers for unsaved edits. The panes, the session state, and the
@@ -1159,8 +1205,8 @@ mod tests {
         test_harness::{self, editor, TestHarness},
     };
     use stoat_action::{
-        CloseBuffer, DiffFiles, FocusLeft, GotoLastAccessed, OpenBuffer, OpenFile, SetMark,
-        SplitRight,
+        CloseAllBuffers, CloseBuffer, DiffFiles, FocusLeft, ForceCloseAllBuffers, GotoLastAccessed,
+        OpenBuffer, OpenFile, SetMark, SplitRight,
     };
 
     fn focused_buffer_id(stoat: &mut Stoat) -> BufferId {
@@ -1953,6 +1999,77 @@ mod tests {
             .get(new_id)
             .expect("scratch buffer exists");
         assert_eq!(new_buffer.read().expect("poisoned").rope().to_string(), "");
+    }
+
+    /// Every buffer with a path closes, the one whose file is gone too, and the
+    /// tab stays with its pane on a fresh scratch buffer.
+    #[test]
+    fn close_all_buffers_closes_every_path_buffer_and_keeps_the_tab() {
+        let mut h = Stoat::test();
+        open_two(&mut h);
+        h.stoat
+            .fs_host
+            .remove_file(Path::new("/last-accessed/a.txt"))
+            .expect("a.txt removes");
+        dispatch(&mut h.stoat, &CloseAllBuffers);
+
+        let focused = focused_buffer_id(&mut h.stoat);
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.buffers.open_paths(),
+                ws.tabs.len(),
+                ws.buffers.is_untouched_scratch(focused),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (Vec::<PathBuf>::new(), 1, true, Some("closed 2 buffers")),
+        );
+    }
+
+    /// One unsaved buffer keeps every buffer open, and the status names it.
+    #[test]
+    fn close_all_buffers_refuses_whole_with_an_unsaved_buffer() {
+        let mut h = Stoat::test();
+        let (_, b) = open_two(&mut h);
+        h.edit_focused(0..0, "x");
+        dispatch(&mut h.stoat, &CloseAllBuffers);
+
+        let focused = focused_buffer_id(&mut h.stoat);
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.buffers.open_paths(),
+                focused,
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                vec![
+                    PathBuf::from("/last-accessed/a.txt"),
+                    PathBuf::from("/last-accessed/b.txt")
+                ],
+                b,
+                Some("1 unsaved: b.txt (buffer-close-all! discards)"),
+            ),
+        );
+    }
+
+    #[test]
+    fn force_close_all_buffers_discards_unsaved_edits() {
+        let mut h = Stoat::test();
+        open_two(&mut h);
+        h.edit_focused(0..0, "x");
+        dispatch(&mut h.stoat, &ForceCloseAllBuffers);
+
+        let focused = focused_buffer_id(&mut h.stoat);
+        let ws = h.stoat.active_workspace();
+        assert_eq!(
+            (
+                ws.buffers.open_paths(),
+                ws.buffers.is_untouched_scratch(focused),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (Vec::<PathBuf>::new(), true, Some("closed 2 buffers")),
+        );
     }
 
     #[test]

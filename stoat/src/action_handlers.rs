@@ -541,6 +541,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::FollowReload => auto_reload::toggle_follow_reload(stoat),
         ActionKind::WriteQuit => file::write_quit(stoat),
         ActionKind::CloseBuffer => crate::buffer_lifecycle::close_buffer(stoat),
+        ActionKind::CloseAllBuffers => crate::buffer_lifecycle::close_all_buffers(stoat, false),
+        ActionKind::ForceCloseAllBuffers => crate::buffer_lifecycle::close_all_buffers(stoat, true),
         ActionKind::GotoLastAccessed => crate::buffer_lifecycle::goto_last_accessed(stoat),
         ActionKind::AutoReload => {
             let auto = action

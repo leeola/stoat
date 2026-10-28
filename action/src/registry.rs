@@ -22,27 +22,28 @@ use crate::{
         editor::{
             AcceptCompletion, AddNewlineAbove, AddNewlineBelow, AddSelectionAbove,
             AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter, AlignViewTop,
-            AppendMode, ChangeSelection, ChangeSelectionNoYank, CloseBuffer, CollapseSelection,
-            CommitUndoCheckpoint, Decrement, DeleteSelection, DeleteSelectionNoYank, Earlier,
-            EnsureSelectionsForward, EnterInsertMode, ExpandSelection, ExtendDown,
-            ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
-            ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoLineNumber,
-            ExtendGotoNextParagraph, ExtendGotoPrevParagraph, ExtendGotoWindowBottom,
-            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendLineBelow,
-            ExtendLineDown, ExtendLineUp, ExtendMatchBrackets, ExtendMoveParentNodeEnd,
-            ExtendMoveParentNodeStart, ExtendNextLongWordEnd, ExtendNextLongWordStart,
-            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevLongWordEnd, ExtendPrevLongWordStart,
-            ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendSearchNext,
-            ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
-            ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart, ExtendToWord, ExtendUp,
-            FindNextChar, FindPrevChar, FlipSelections, GotoCallee, GotoCaller, GotoColumn,
-            GotoDiffCalleeDown, GotoDiffCallerUp, GotoFileStart, GotoFirstChange,
-            GotoFirstDiagnostic, GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed,
-            GotoLastChange, GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd,
-            GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
-            GotoNextComment, GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter,
-            GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment,
-            GotoPrevEntry, GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
+            AppendMode, ChangeSelection, ChangeSelectionNoYank, CloseAllBuffers, CloseBuffer,
+            CollapseSelection, CommitUndoCheckpoint, Decrement, DeleteSelection,
+            DeleteSelectionNoYank, Earlier, EnsureSelectionsForward, EnterInsertMode,
+            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
+            ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
+            ExtendGotoLineNumber, ExtendGotoNextParagraph, ExtendGotoPrevParagraph,
+            ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
+            ExtendLineBelow, ExtendLineDown, ExtendLineUp, ExtendMatchBrackets,
+            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextLongWordEnd,
+            ExtendNextLongWordStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevLongWordEnd,
+            ExtendPrevLongWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+            ExtendSearchNext, ExtendSearchPrev, ExtendTillNextChar, ExtendTillPrevChar,
+            ExtendToFileStart, ExtendToLineBounds, ExtendToLineEnd, ExtendToLineStart,
+            ExtendToWord, ExtendUp, FindNextChar, FindPrevChar, FlipSelections,
+            ForceCloseAllBuffers, GotoCallee, GotoCaller, GotoColumn, GotoDiffCalleeDown,
+            GotoDiffCallerUp, GotoFileStart, GotoFirstChange, GotoFirstDiagnostic,
+            GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed, GotoLastChange,
+            GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber,
+            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
+            GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
+            GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
+            GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
             GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
             GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertAtLineEnd,
             InsertAtLineStart, InsertRegister, InsertTab, JoinSelections, JoinSelectionsSpace,
@@ -590,6 +591,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PinMode::DEF, |_| Ok(Box::new(PinMode)));
     add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
+    add(CloseAllBuffers::DEF, |_| Ok(Box::new(CloseAllBuffers)));
+    add(ForceCloseAllBuffers::DEF, |_| {
+        Ok(Box::new(ForceCloseAllBuffers))
+    });
     add(GotoLastAccessed::DEF, |_| Ok(Box::new(GotoLastAccessed)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
     add(SmartTab::DEF, |_| Ok(Box::new(SmartTab)));
@@ -1568,6 +1573,7 @@ mod tests {
             ("cd", "SetCwd"),
             ("ssh", "Ssh"),
             ("mosh", "Mosh"),
+            ("bca", "CloseAllBuffers"),
         ] {
             assert_eq!(
                 lookup_alias(token).map(|e| e.def.name()),
@@ -1645,6 +1651,16 @@ mod tests {
             assert_eq!(
                 lookup_alias(token).expect(token).def.name(),
                 "ForceSaveBuffer",
+            );
+        }
+    }
+
+    #[test]
+    fn force_close_all_buffers_aliases_resolve() {
+        for token in ["bca!", "buffer-close-all!", "BCA!"] {
+            assert_eq!(
+                lookup_alias(token).expect(token).def.name(),
+                "ForceCloseAllBuffers",
             );
         }
     }
@@ -1881,6 +1897,7 @@ mod tests {
         // + 2 ReloadAll/ForceReloadAll.
         // + 1 WriteQuit.
         // + 1 CloseBuffer.
+        // + 2 CloseAllBuffers / ForceCloseAllBuffers.
         // + 1 GotoLastAccessed.
         // + 1 AcceptCompletion.
         // + 2 SmartTab/TriggerCompletion.
@@ -2045,7 +2062,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 461);
+        assert_eq!(all().count(), 463);
     }
 
     #[test]

@@ -185,6 +185,8 @@ action_kinds! {
     ForceSaveBuffer,
     WriteQuit,
     CloseBuffer,
+    CloseAllBuffers,
+    ForceCloseAllBuffers,
     GotoLastAccessed,
     AutoReload,
     AutoReloadConfig,

@@ -799,6 +799,29 @@ define_action!(
 );
 
 define_action!(
+    CloseAllBuffersDef,
+    CloseAllBuffers,
+    "CloseAllBuffers",
+    ActionKind::CloseAllBuffers,
+    "close every buffer that has a path",
+    "Close every buffer that has a path, whether or not its file still exists, as CloseBuffer closes one. The tabs and the panes stay, and each pane shows the buffer it showed before or a scratch buffer. When any of the buffers has unsaved edits, nothing closes and the status names those buffers. buffer-close-all! closes them with the edits discarded.",
+    ActionPriority::Common,
+    aliases = &["bca"],
+    command_name = "buffer-close-all"
+);
+
+define_action!(
+    ForceCloseAllBuffersDef,
+    ForceCloseAllBuffers,
+    "ForceCloseAllBuffers",
+    ActionKind::ForceCloseAllBuffers,
+    "close every buffer that has a path, discarding unsaved edits",
+    "Close what CloseAllBuffers closes, and discard the unsaved edits that CloseAllBuffers refuses over, as w! is to w.",
+    ActionPriority::Common,
+    aliases = &["bca!", "buffer-close-all!"]
+);
+
+define_action!(
     GotoLastAccessedDef,
     GotoLastAccessed,
     "GotoLastAccessed",
