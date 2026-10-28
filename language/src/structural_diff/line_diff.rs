@@ -50,6 +50,47 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
     }
 }
 
+/// The changed regions of a line diff between `lhs` and `rhs`, as the lhs
+/// and rhs byte ranges of each region in ascending order.
+///
+/// Each range covers whole lines with their newlines, so replacing every lhs
+/// range with its rhs text, from the last region to the first, turns `lhs`
+/// into `rhs`, and the lines between the regions stay as they are. A region
+/// that one side lacks has an empty range on that side, at the start of the
+/// line it sits before. The regions come from the histogram pass
+/// [`diff_lines`] runs.
+pub fn line_hunks(lhs: &str, rhs: &str) -> Vec<(Range<usize>, Range<usize>)> {
+    let lhs_lines = lines_with_offsets(lhs);
+    let rhs_lines = lines_with_offsets(rhs);
+
+    let input = InternedInput::new(sources::lines(lhs), sources::lines(rhs));
+    let mut diff = Diff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
+
+    diff.hunks()
+        .map(|hunk| {
+            (
+                line_bytes(&lhs_lines, lhs.len(), hunk.before),
+                line_bytes(&rhs_lines, rhs.len(), hunk.after),
+            )
+        })
+        .collect()
+}
+
+/// The bytes of the lines `lines` names, newlines included, in a text `len`
+/// bytes long whose lines are `records`.
+///
+/// A line index past the last record is the text's end. That index names an
+/// insertion after a last line with no newline of its own.
+fn line_bytes(records: &[LineRecord], len: usize, lines: Range<u32>) -> Range<usize> {
+    let start_of = |line: u32| {
+        records
+            .get(line as usize)
+            .map_or(len, |record| record.start)
+    };
+    start_of(lines.start)..start_of(lines.end)
+}
+
 /// Pairs the lines of one changed region, matching lines that differ only in
 /// whitespace.
 ///
@@ -348,6 +389,47 @@ mod tests {
         let lhs = "alpha\nbeta\ngamma\n";
         let rhs = "alpha\nbeta\ngamma\n";
         assert!(changes(lhs, rhs).is_empty());
+    }
+
+    /// Each hunk covers whole lines with their newlines, and the side a region
+    /// lacks sits at the start of the line it comes before.
+    #[test]
+    fn line_hunks_cover_whole_lines() {
+        let lhs = "a\nb\nc\nd\ne\n";
+        assert_eq!(
+            [
+                line_hunks(lhs, "x\na\nb\nc\nd\ne\n"),
+                line_hunks(lhs, "a\nb\nc\nd\n"),
+                line_hunks(lhs, "a\nb\nX\nd\ne\n"),
+            ],
+            [vec![(0..0, 0..2)], vec![(8..10, 8..8)], vec![(4..6, 4..6)],],
+            "an insertion at the top, a deletion at the end, and a replacement",
+        );
+    }
+
+    /// Replacing each hunk's lhs bytes with its rhs bytes, from the last hunk
+    /// to the first, rebuilds the rhs, a last line without a newline included.
+    #[test]
+    fn line_hunks_applied_in_reverse_rebuild_the_rhs() {
+        let apply = |lhs: &str, rhs: &str| {
+            let mut out = lhs.to_string();
+            for (old, new) in line_hunks(lhs, rhs).into_iter().rev() {
+                out.replace_range(old, &rhs[new]);
+            }
+            out
+        };
+        let cases = [
+            (
+                "l0\nl1\nl2\nl3\nl4\nl5\n",
+                "NEW\nl0\nl1\nl2\nl3\nl4\nCHANGED\n",
+            ),
+            ("a\nb", "a\nb\nc"),
+            ("a\nb\n", "a\nb"),
+        ];
+        assert_eq!(
+            cases.map(|(lhs, rhs)| apply(lhs, rhs)),
+            cases.map(|(_, rhs)| rhs.to_string()),
+        );
     }
 
     #[test]

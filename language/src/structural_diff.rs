@@ -46,7 +46,7 @@ mod unchanged;
 use crate::{parse, test_util::rust_lang};
 pub use arena::{Atom, List, Syntax, SyntaxArena, SyntaxId};
 pub use content_id::ContentId;
-pub use line_diff::{align_lines, diff_lines};
+pub use line_diff::{align_lines, diff_lines, line_hunks};
 pub use lower::lower_tree;
 pub use moves::{find_moves, ChangesetMoveRecord, FileMoveInput, MoveRecord};
 use std::{ops::Range, path::PathBuf, sync::Arc};

@@ -42,6 +42,7 @@ use std::{
     sync::{Arc, Mutex},
     time::SystemTime,
 };
+use stoat_language::structural_diff;
 use stoat_scheduler::Task;
 use stoat_text::{Bias, LineEnding, Rope, SelectionGoal};
 
@@ -765,7 +766,8 @@ enum ReloadOutcome {
 /// [`ReloadOutcome::Missing`] and leaves the buffer untouched. A file already
 /// byte-identical to the buffer is left un-edited to avoid version churn, but
 /// the buffer is still marked clean and its mtime baseline refreshed. Otherwise
-/// the whole buffer is replaced in one undoable edit and marked clean.
+/// the buffer takes the changed lines of a line diff in one undoable step and
+/// is marked clean, so an anchor on a line both texts share stays on it.
 fn reload_from_disk(
     stoat: &mut Stoat,
     id: BufferId,
@@ -800,8 +802,21 @@ fn reload_from_disk(
         }
     } else {
         let mut guard = buffer.write().expect("buffer poisoned");
-        let (old_span, new_span) = changed_span(&guard.snapshot.visible_text, &normalized);
-        guard.edit(old_span, &normalized[new_span]);
+        let old_text = guard.snapshot.visible_text.to_string();
+        let hunks = structural_diff::line_hunks(&old_text, &normalized);
+        let edits: Vec<(Range<usize>, &str)> = hunks
+            .iter()
+            .rev()
+            .map(|(old, new)| (old.clone(), &normalized[new.clone()]))
+            .collect();
+        // A dispatched action groups only the focused buffer's edits, and a
+        // reload of every open buffer edits the rest too, so the hunks take a
+        // group of their own and undo as one step.
+        let grouped = guard.try_begin_group(|| Arc::from([]));
+        guard.edit_batch(&edits);
+        if grouped {
+            guard.seal_group(Arc::from([]));
+        }
         guard.mark_clean();
     }
     stoat
@@ -1482,7 +1497,7 @@ mod tests {
         collections::HashSet,
         path::{Path, PathBuf},
     };
-    use stoat_action::{LiveReload, MoveDown, OpenFile};
+    use stoat_action::{LiveReload, MoveDown, OpenFile, Undo};
 
     /// Latin-1 bytes, which are not valid UTF-8.
     const NOT_UTF8: &[u8] = b"caf\xe9 au lait\n";
@@ -1903,6 +1918,41 @@ mod tests {
 
         assert_eq!(h.buffer_text(id), "l0\nCHANGED\nl2\nl3\nl4\n");
         assert_eq!(anchored_rows(&mut h, id), (3, 3, 3));
+    }
+
+    /// A line both texts share keeps its anchors when the file changed above
+    /// and below it. One span from the first change to the last covers the
+    /// line and collapses them to its edge.
+    #[test]
+    fn reload_keeps_anchors_between_two_changes() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-anchors");
+        let path = root.join("a.txt");
+        let id = open_plain(&mut h, root, "a.txt", b"l0\nl1\nl2\nl3\nl4\nl5\n");
+        anchor_row_3(&mut h, id);
+
+        h.fake_fs()
+            .insert_file(&path, b"NEW\nl0\nl1\nl2\nl3\nl4\nCHANGED\n");
+        reload_focused(&mut h.stoat, false);
+
+        assert_eq!(h.buffer_text(id), "NEW\nl0\nl1\nl2\nl3\nl4\nCHANGED\n");
+        assert_eq!(anchored_rows(&mut h, id), (4, 4, 4));
+    }
+
+    /// A reload that changes two separate regions undoes in one step.
+    #[test]
+    fn a_reload_of_two_changes_undoes_in_one_step() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-undo");
+        let path = root.join("a.txt");
+        let id = open_plain(&mut h, root, "a.txt", b"l0\nl1\nl2\nl3\n");
+
+        h.fake_fs()
+            .insert_file(&path, b"NEW\nl0\nl1\nl2\nCHANGED\n");
+        reload_focused(&mut h.stoat, false);
+        dispatch(&mut h.stoat, &Undo);
+
+        assert_eq!(h.buffer_text(id), "l0\nl1\nl2\nl3\n");
     }
 
     #[test]
