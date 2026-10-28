@@ -33,6 +33,12 @@ use tempfile::TempDir;
 
 /// The APC introducer plus the namespace tag every stoatty frame opens with.
 const APC_INTRODUCER: &[u8] = b"\x1b_Gstoatty;";
+/// The primary device attributes request that stoat sends behind its keyboard
+/// protocol query, which every real terminal answers at once.
+const DA1_QUERY: &[u8] = b"\x1b[c";
+/// The answer to [`DA1_QUERY`] that stoat's own terminal screen gives, which
+/// tells the query that the terminal has no keyboard protocol.
+const DA1_REPLY: &[u8] = b"\x1b[?6c";
 
 /// Pause after each key, long enough for a frame to be painted and flushed.
 const KEY_SETTLE: Duration = Duration::from_millis(600);
@@ -79,7 +85,7 @@ const ATTACH_NAME: &str = "guard";
 struct Session {
     child: Box<dyn Child + Send + Sync>,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     output: Arc<Mutex<Vec<u8>>>,
     collector: JoinHandle<()>,
     dirs: (TempDir, TempDir),
@@ -153,21 +159,39 @@ impl Session {
         // EOF when it exits rather than blocking forever on this one.
         drop(pair.slave);
 
-        let writer = pair.master.take_writer().expect("pty writer");
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("pty writer")));
         let mut reader = pair.master.try_clone_reader().expect("pty reader");
         let output = Arc::new(Mutex::new(Vec::new()));
         let collector = thread::spawn({
             let output = Arc::clone(&output);
+            // Weak, so the session's own drop of the writer still closes it.
+            let answers = Arc::downgrade(&writer);
             move || {
                 let mut chunk = [0u8; 8192];
                 while let Ok(read) = reader.read(&mut chunk) {
                     if read == 0 {
                         break;
                     }
-                    output
-                        .lock()
-                        .expect("output lock")
-                        .extend_from_slice(&chunk[..read]);
+                    // A real terminal answers the keyboard query's DA1 request,
+                    // so a session here does not wait out the query's timeout.
+                    // The search reaches back into the bytes before this read,
+                    // so it finds a request that a read boundary split.
+                    let requests = {
+                        let mut output = output.lock().expect("output lock");
+                        let from = output.len().saturating_sub(DA1_QUERY.len() - 1);
+                        output.extend_from_slice(&chunk[..read]);
+                        output[from..]
+                            .windows(DA1_QUERY.len())
+                            .filter(|window| *window == DA1_QUERY)
+                            .count()
+                    };
+                    if let Some(writer) = answers.upgrade() {
+                        let mut writer = writer.lock().expect("writer lock");
+                        for _ in 0..requests {
+                            let _ = writer.write_all(DA1_REPLY);
+                        }
+                        let _ = writer.flush();
+                    }
                 }
             }
         });
@@ -184,8 +208,9 @@ impl Session {
     }
 
     fn send(&mut self, keys: &str) {
-        self.writer.write_all(keys.as_bytes()).expect("write keys");
-        self.writer.flush().expect("flush keys");
+        let mut writer = self.writer.lock().expect("writer lock");
+        writer.write_all(keys.as_bytes()).expect("write keys");
+        writer.flush().expect("flush keys");
     }
 
     /// Resize the pty, which has the kernel send the session a SIGWINCH.

@@ -24,7 +24,8 @@ use crate::{
 use crossterm::{
     cursor::Show,
     event::{
-        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, queue,
     terminal::{
@@ -41,7 +42,10 @@ use std::{
     io::{self, PipeReader, Read, Stdout, Write},
     os::{fd::AsRawFd, unix::net::UnixStream},
     panic,
-    sync::{Arc, Once},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Once,
+    },
     thread,
     time::Duration,
 };
@@ -66,6 +70,12 @@ use tokio::{
 /// many pages takes longer. The frame then goes out without the rest of the
 /// refill, so no job holds the screen for longer than this.
 const FRAME_BATCH_WAIT: Duration = Duration::from_millis(4);
+
+/// Whether this session pushed its keyboard flags onto the terminal's stack.
+///
+/// A static, because the panic hook pops them too, and it runs on whichever
+/// thread panicked, with no handle to the UI thread's state.
+static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 
 /// One rendered frame published from the main thread to the UI thread.
 ///
@@ -172,6 +182,7 @@ pub fn install_panic_hook() {
         let prior = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
             let _ = execute!(io::stdout(), DisableMouseCapture);
+            pop_keyboard_flags();
             let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();
             // When the UI thread's terminal drops, it shows a hidden cursor
@@ -250,6 +261,7 @@ pub fn spawn(mut channels: UiChannels, mouse_captured: bool) -> thread::JoinHand
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);
             }
+            pop_keyboard_flags();
             let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();
             result
@@ -266,6 +278,17 @@ fn init_terminal() -> io::Result<Terminal<FrameBackend<Stdout>>> {
     enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
     Terminal::new(FrameBackend::new(io::stdout()))
+}
+
+/// Pop the keyboard flags this session pushed, so the shell after it reads keys
+/// as the terminal sent them before.
+///
+/// The panic hook and the teardown both call this, and the flag swap makes the
+/// second call pop nothing.
+fn pop_keyboard_flags() {
+    if KEYBOARD_PUSHED.swap(false, Ordering::Relaxed) {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
 }
 
 async fn run(
@@ -301,8 +324,13 @@ async fn run(
     // The app renders its first frames while this is still waiting for a reply,
     // so they go out through the foreign-terminal fallback and the report is
     // what upgrades the session once one arrives.
-    let (stoatty, typed) = stoatty_handshake();
+    //
+    // The keyboard answer rides the channel that the input thread uses for a
+    // terminal that attaches later, so the loop below pushes the flags for both.
+    let (keyboard_tx, mut keyboard_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (stoatty, typed, keyboard) = identify_terminal();
     let _ = stoatty_tx.send(stoatty);
+    let _ = keyboard_tx.send(keyboard);
     let _ = cell_pixels_tx.send(tty_cell_pixels());
 
     // What was typed while the handshake owned fd 0, replayed before the input
@@ -332,13 +360,14 @@ async fn run(
                     event_tx: &event_tx,
                     cell_pixels_tx: &cell_pixels_tx,
                     stoatty_tx: &stoatty_tx,
+                    keyboard_tx: &keyboard_tx,
                     slot: &slot,
                 },
                 crossterm::event::poll,
                 crossterm::event::read,
                 tty::read_stdin,
                 tty::winsize,
-                stoatty_handshake,
+                identify_terminal,
                 || wait_idle(slot.wake_reader(), &winch),
             )
         }
@@ -385,6 +414,9 @@ async fn run(
                     // The remote's exit left the alternate screen, which took
                     // this session's screen with it. Raw mode is local termios
                     // the remote's bytes never touched, so it is not re-applied.
+                    // The keyboard flags are not pushed again either. The remote
+                    // pushed and popped its own on top of this session's push,
+                    // which stays on the stack.
                     UiControl::Resume => {
                         execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
                         if mouse_captured {
@@ -394,6 +426,23 @@ async fn run(
                         stamp = UndercurlStamp::default();
                     },
                 }
+            }
+
+            // A terminal's answer to the keyboard protocol query, at startup or
+            // after an attach. A yes pushes the flags that tell Ctrl-Shift-s
+            // from Ctrl-s and Shift-Enter from Enter.
+            Some(supported) = keyboard_rx.recv() => {
+                terminal.backend_mut().flush()?;
+                if supported {
+                    execute!(
+                        io::stdout(),
+                        PushKeyboardEnhancementFlags(
+                            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                        )
+                    )?;
+                }
+                KEYBOARD_PUSHED.store(supported, Ordering::Relaxed);
             }
 
             changed = render_rx.changed() => {
@@ -487,6 +536,16 @@ async fn run(
     Ok(())
 }
 
+/// Identify the terminal that a session starts on or that attaches later.
+///
+/// Returns [`stoatty_handshake`]'s two answers, then whether the terminal speaks
+/// the kitty keyboard protocol. Both probes read fd 0, so they run back to back
+/// on the thread that owns stdin at the time.
+fn identify_terminal() -> (Option<u32>, Vec<u8>, bool) {
+    let (stoatty, typed) = stoatty_handshake();
+    (stoatty, typed, query_keyboard())
+}
+
 /// Announce this editor to the terminal and report whether a stoatty answered.
 ///
 /// Thin wrapper over [`detect::handshake`], which does the probing. This
@@ -521,6 +580,22 @@ fn stoatty_handshake() -> (Option<u32>, Vec<u8>) {
         None => tracing::info!("no stoatty ident reply (headless or foreign terminal)"),
     }
     (reply.map(|reply| reply.protocol), leftover)
+}
+
+/// Whether the terminal speaks the kitty keyboard protocol.
+///
+/// crossterm writes the query and reads the reply through its event reader, so
+/// this runs only where nothing else reads stdin. A key typed meanwhile stays
+/// queued for the next read. A terminal that answers neither the query nor the
+/// device attributes request behind it costs the 2 seconds crossterm waits.
+fn query_keyboard() -> bool {
+    // crossterm writes the query to /dev/tty, past the stdout lock. Held here,
+    // the lock keeps the query out of a frame that the UI thread writes at the
+    // same time, such as the repaint after an attach.
+    let _frame_writes = io::stdout().lock();
+    let supported = crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    tracing::info!(supported, "kitty keyboard protocol query");
+    supported
 }
 
 /// Frames between periodic input-to-flush latency log lines.
@@ -600,6 +675,10 @@ struct InputChannels<'a> {
     /// The ident handshake's answer. Sent once at startup by the UI thread, and
     /// again from here for each terminal that attaches later.
     stoatty_tx: &'a UnboundedSender<Option<u32>>,
+    /// Whether the terminal answered the kitty keyboard protocol query, sent
+    /// as the handshake's answer is. The query reads fd 0 too, so it runs where
+    /// the handshake does.
+    keyboard_tx: &'a UnboundedSender<bool>,
     /// What fd 0 feeds, which the app moves between the editor, a remote
     /// session, and a handshake.
     slot: &'a PassthroughSlot,
@@ -620,8 +699,9 @@ struct InputChannels<'a> {
 ///   exists.
 /// - Active: write every raw byte to the session, and poll the window size, because the raw read
 ///   watches fd 0 alone.
-/// - Handshake: identify the terminal that just attached and report it, then go idle. The probe
-///   reads raw fd 0, so it belongs on this thread and nowhere else.
+/// - Handshake: identify the terminal that just attached, ask whether it speaks the kitty keyboard
+///   protocol, report both, then go idle. The probe and the query read fd 0, so they belong on this
+///   thread and nowhere else.
 ///
 /// Sound because crossterm 0.29 reads fd 0 on the calling thread, so nothing
 /// else reads stdin while this one does.
@@ -638,13 +718,14 @@ fn forward_input(
     mut read: impl FnMut() -> io::Result<Event>,
     mut read_raw: impl FnMut(&mut [u8], Duration) -> io::Result<usize>,
     mut winsize: impl FnMut() -> Option<libc::winsize>,
-    mut handshake: impl FnMut() -> (Option<u32>, Vec<u8>),
+    mut handshake: impl FnMut() -> (Option<u32>, Vec<u8>, bool),
     mut wait_idle: impl FnMut() -> io::Result<IdleWake>,
 ) {
     let InputChannels {
         event_tx,
         cell_pixels_tx,
         stoatty_tx,
+        keyboard_tx,
         slot,
     } = channels;
 
@@ -741,8 +822,13 @@ fn forward_input(
                 }
             },
             SlotState::Handshake => {
-                let (stoatty, typed) = handshake();
+                let (stoatty, typed, keyboard) = handshake();
                 if stoatty_tx.send(stoatty).is_err() {
+                    return;
+                }
+                // The terminal that attached has a keyboard stack of its own,
+                // which holds none of the flags pushed into the one that left.
+                if keyboard_tx.send(keyboard).is_err() {
                     return;
                 }
                 // Typed while the probe owned fd 0, so it belongs to the user
@@ -1173,18 +1259,20 @@ mod tests {
     ) {
         let (slot, _ack_rx) = PassthroughSlot::new();
         let (stoatty_tx, _stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (keyboard_tx, _keyboard_rx) = tokio::sync::mpsc::unbounded_channel();
         forward_input(
             InputChannels {
                 event_tx,
                 cell_pixels_tx,
                 stoatty_tx: &stoatty_tx,
+                keyboard_tx: &keyboard_tx,
                 slot: &slot,
             },
             |_| Ok(true),
             read,
             |_, _| Ok(0),
             || None,
-            || (None, Vec::new()),
+            || (None, Vec::new(), false),
             || Ok(IdleWake::Input),
         );
     }
@@ -1265,11 +1353,13 @@ mod tests {
         let mut pass = 0;
         let chunks: [&[u8]; 2] = [b"typed early", b"and later"];
         let (stoatty_tx, _stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (keyboard_tx, _keyboard_rx) = tokio::sync::mpsc::unbounded_channel();
         forward_input(
             InputChannels {
                 event_tx: &tx,
                 cell_pixels_tx: &px_tx,
                 stoatty_tx: &stoatty_tx,
+                keyboard_tx: &keyboard_tx,
                 slot: &slot,
             },
             |_| Ok(true),
@@ -1294,7 +1384,7 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
-            || (None, Vec::new()),
+            || (None, Vec::new(), false),
             || Ok(IdleWake::Input),
         );
 
@@ -1371,6 +1461,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stoatty_tx, _stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (keyboard_tx, _keyboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let (slot, _ack_rx) = PassthroughSlot::new();
         let held = RefCell::new(VecDeque::new());
         let mut arriving = Some(arriving);
@@ -1381,6 +1472,7 @@ mod tests {
                 event_tx: &tx,
                 cell_pixels_tx: &px_tx,
                 stoatty_tx: &stoatty_tx,
+                keyboard_tx: &keyboard_tx,
                 slot: &slot,
             },
             |_| Ok(!held.borrow().is_empty()),
@@ -1394,7 +1486,7 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
-            || (None, Vec::new()),
+            || (None, Vec::new(), false),
             || {
                 let events = arriving.take().ok_or_else(eof)?;
                 held.borrow_mut().extend(events);
@@ -1441,14 +1533,16 @@ mod tests {
         unsafe { libc::poll(&raw mut poll_fd, 1, 0) > 0 }
     }
 
-    /// The probe reads raw fd 0, so it belongs on this thread. What was typed
-    /// while it owned the terminal is the user's, and the app laid out against
-    /// the terminal that left, so the new one's size follows.
+    /// The probe and the keyboard query read raw fd 0, so they belong on this
+    /// thread. What was typed while the probe owned the terminal is the user's,
+    /// and the app laid out against the terminal that left, so the new one's
+    /// size follows.
     #[test]
     fn a_rehandshake_identifies_the_new_terminal_and_replays_what_was_typed() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (px_tx, _px_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stoatty_tx, mut stoatty_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (keyboard_tx, mut keyboard_rx) = tokio::sync::mpsc::unbounded_channel();
         let (slot, _ack_rx) = PassthroughSlot::new();
         slot.rehandshake();
 
@@ -1459,6 +1553,7 @@ mod tests {
                 event_tx: &tx,
                 cell_pixels_tx: &px_tx,
                 stoatty_tx: &stoatty_tx,
+                keyboard_tx: &keyboard_tx,
                 slot: &slot,
             },
             |_| Ok(true),
@@ -1472,14 +1567,14 @@ mod tests {
                     ws_ypixel: 0,
                 })
             },
-            || (Some(3), b"x".to_vec()),
+            || (Some(3), b"x".to_vec(), true),
             || Ok(IdleWake::Input),
         );
 
         assert_eq!(
-            stoatty_rx.try_recv(),
-            Ok(Some(3)),
-            "the new terminal's protocol reaches the app",
+            (stoatty_rx.try_recv(), keyboard_rx.try_recv()),
+            (Ok(Some(3)), Ok(true)),
+            "the new terminal's protocol and its keyboard answer reach the UI",
         );
         assert!(
             matches!(slot.state(), SlotState::Idle),
