@@ -17230,7 +17230,7 @@ fn connect_retires_the_terminal_state_and_arms_the_slot() {
     h.stoat.zoom_claimed = true;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
-    let (slot, _ui_rx) = install_passthrough(&mut h.stoat);
+    let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
 
     let mut declared = Vec::new();
     stoat_widgets::pool::emit_into(
@@ -17267,6 +17267,10 @@ fn connect_retires_the_terminal_state_and_arms_the_slot() {
     assert!(
         matches!(slot.state(), ssh::SlotState::Pending),
         "and the input thread is told to stop parsing fd 0",
+    );
+    assert!(
+        matches!(ui_rx.try_recv(), Ok(ssh::UiControl::HandOver)),
+        "and the UI thread takes the keyboard flags off for the remote",
     );
 }
 
@@ -17314,6 +17318,10 @@ fn a_remote_session_spawns_pipes_its_output_and_reports_its_exit() {
             args: vec!["~/proj".to_owned()],
         }),
         "the workspace records where its window went",
+    );
+    assert!(
+        matches!(ui_rx.try_recv(), Ok(ssh::UiControl::HandOver)),
+        "the keyboard flags come off before the remote starts",
     );
     assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::None);
 
@@ -17390,6 +17398,37 @@ fn a_remote_session_spawns_pipes_its_output_and_reports_its_exit() {
             args: vec!["~/proj".to_owned()],
         }),
         "and a dropped link keeps the target for the next reopen",
+    );
+}
+
+/// A spawn that fails leaves no session, and the UI thread takes the screen
+/// back, which puts the keyboard flags back on.
+#[test]
+fn a_failed_spawn_gives_the_screen_back() {
+    let mut h = Stoat::test();
+    let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
+    h.fake_terminal_host()
+        .fail_next_spawn(io::ErrorKind::NotFound);
+
+    ssh::connect(&mut h.stoat, ssh::Transport::Ssh, Some("box"), &[]);
+    assert_eq!(ssh::spawn_armed(&mut h.stoat), UpdateEffect::Redraw);
+
+    assert!(h.stoat.passthrough.is_none(), "no session runs");
+    assert!(
+        matches!(slot.state(), ssh::SlotState::Idle),
+        "and fd 0 feeds the editor again",
+    );
+    assert_eq!(
+        h.stoat.pending_message.as_deref(),
+        Some("ssh failed to start: entity not found"),
+    );
+    let controls: Vec<_> = std::iter::from_fn(|| ui_rx.try_recv().ok()).collect();
+    assert!(
+        matches!(
+            controls.as_slice(),
+            [ssh::UiControl::HandOver, ssh::UiControl::Resume]
+        ),
+        "the flags come off for the remote and go back on with the screen",
     );
 }
 
@@ -17531,6 +17570,7 @@ fn an_attach_while_a_remote_runs_leaves_the_passthrough_alone() {
     let mut h = Stoat::test();
     let (slot, mut ui_rx) = install_passthrough(&mut h.stoat);
     ssh::connect(&mut h.stoat, ssh::Transport::Ssh, Some("box"), &[]);
+    assert!(matches!(ui_rx.try_recv(), Ok(ssh::UiControl::HandOver)));
 
     assert_eq!(ssh::terminal_replaced(&mut h.stoat), UpdateEffect::None);
 

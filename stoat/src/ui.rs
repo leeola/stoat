@@ -280,14 +280,70 @@ fn init_terminal() -> io::Result<Terminal<FrameBackend<Stdout>>> {
     Terminal::new(FrameBackend::new(io::stdout()))
 }
 
-/// Pop the keyboard flags this session pushed, so the shell after it reads keys
-/// as the terminal sent them before.
+/// Pop the keyboard flags this session pushed, so the shell after it, or a
+/// remote session it hands the terminal to, reads keys as the terminal sent
+/// them before.
 ///
-/// The panic hook and the teardown both call this, and the flag swap makes the
-/// second call pop nothing.
+/// The panic hook, the teardown, and a hand-over call this, and the flag swap
+/// makes a second call pop nothing.
 fn pop_keyboard_flags() {
     if KEYBOARD_PUSHED.swap(false, Ordering::Relaxed) {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
+}
+
+/// Push the flags that tell Ctrl-Shift-s from Ctrl-s and Shift-Enter from
+/// Enter, and record the push for [`pop_keyboard_flags`].
+fn push_keyboard_flags() -> io::Result<()> {
+    execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+        )
+    )?;
+    KEYBOARD_PUSHED.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// The UI thread's record of when its keyboard flags belong on the terminal's
+/// stack.
+///
+/// The terminal's answer to the protocol query says whether they go on at all.
+/// A remote session reads keys with the flags off, so its ssh or mosh reads a
+/// Ctrl-C as the byte that interrupts it. The flags come off when a session
+/// takes the terminal and go back on when it returns. A terminal that attaches
+/// brings a stack of its own, so its own answer pushes, and the return to it
+/// pushes nothing.
+#[derive(Default)]
+struct KeyboardFlags {
+    /// Whether the terminal speaks the kitty keyboard protocol.
+    supported: bool,
+    /// Whether a remote session owns the terminal.
+    handed_over: bool,
+}
+
+impl KeyboardFlags {
+    /// Records the terminal's answer and returns whether to push the flags now.
+    ///
+    /// An answer during a hand-over waits for the return. A stored target
+    /// reconnects as soon as the terminal reports, so the hand-over sometimes
+    /// reaches the UI thread ahead of the startup answer.
+    fn answered(&mut self, supported: bool) -> bool {
+        self.supported = supported;
+        supported && !self.handed_over
+    }
+
+    /// Records that a remote session holds the terminal.
+    fn hand_over(&mut self) {
+        self.handed_over = true;
+    }
+
+    /// Records that the screen is back and returns whether to push the flags.
+    fn resume(&mut self) -> bool {
+        let push = self.handed_over && self.supported;
+        self.handed_over = false;
+        push
     }
 }
 
@@ -380,6 +436,7 @@ async fn run(
     // What the terminal shows, cell for cell, so a frame writes only the cells
     // it changed.
     let mut shown = ShownFrame::default();
+    let mut keyboard_flags = KeyboardFlags::default();
 
     // UI-thread-local input-to-flush latency, logged periodically. The main
     // thread keeps its own PerfStats, so this needs no cross-thread channel.
@@ -404,6 +461,10 @@ async fn run(
                 // the frame buffer go out first.
                 terminal.backend_mut().flush()?;
                 match ctl {
+                    UiControl::HandOver => {
+                        keyboard_flags.hand_over();
+                        pop_keyboard_flags();
+                    },
                     // No synchronized-update wrapper. The remote frames its own,
                     // and a local wrapper closing mid-frame tears it.
                     UiControl::Raw(bytes) => {
@@ -414,13 +475,16 @@ async fn run(
                     // The remote's exit left the alternate screen, which took
                     // this session's screen with it. Raw mode is local termios
                     // the remote's bytes never touched, so it is not re-applied.
-                    // The keyboard flags are not pushed again either. The remote
-                    // pushed and popped its own on top of this session's push,
-                    // which stays on the stack.
+                    // The terminal keeps one keyboard stack per screen, so the
+                    // flags go back on after the alternate screen, onto the
+                    // stack that the teardown pops.
                     UiControl::Resume => {
                         execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste)?;
                         if mouse_captured {
                             execute!(io::stdout(), EnableMouseCapture)?;
+                        }
+                        if keyboard_flags.resume() {
+                            push_keyboard_flags()?;
                         }
                         shown.repaint_all(terminal)?;
                         stamp = UndercurlStamp::default();
@@ -429,20 +493,14 @@ async fn run(
             }
 
             // A terminal's answer to the keyboard protocol query, at startup or
-            // after an attach. A yes pushes the flags that tell Ctrl-Shift-s
-            // from Ctrl-s and Shift-Enter from Enter.
+            // after an attach. A terminal that attached holds none of the flags
+            // pushed into the one that left, so that push needs no pop.
             Some(supported) = keyboard_rx.recv() => {
                 terminal.backend_mut().flush()?;
-                if supported {
-                    execute!(
-                        io::stdout(),
-                        PushKeyboardEnhancementFlags(
-                            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                        )
-                    )?;
+                KEYBOARD_PUSHED.store(false, Ordering::Relaxed);
+                if keyboard_flags.answered(supported) {
+                    push_keyboard_flags()?;
                 }
-                KEYBOARD_PUSHED.store(supported, Ordering::Relaxed);
             }
 
             changed = render_rx.changed() => {
@@ -1592,6 +1650,41 @@ mod tests {
                 Event::Resize(120, 40),
             ],
             "what was typed at the probe goes first, then the new size",
+        );
+    }
+
+    /// A remote session reads keys with the flags off, and they go back on when
+    /// it returns. A terminal that attached answers for itself.
+    #[test]
+    fn the_keyboard_flags_come_off_for_each_remote_session() {
+        let mut session = KeyboardFlags::default();
+        let at_startup = session.answered(true);
+        session.hand_over();
+        let on_return = session.resume();
+        let after_an_attach = session.resume();
+
+        let mut early = KeyboardFlags::default();
+        early.hand_over();
+        let during_hand_over = early.answered(true);
+        let after_early_return = early.resume();
+
+        let mut unsupported = KeyboardFlags::default();
+        let refused = unsupported.answered(false);
+        unsupported.hand_over();
+        let refused_return = unsupported.resume();
+
+        assert_eq!(
+            [
+                at_startup,
+                on_return,
+                after_an_attach,
+                during_hand_over,
+                after_early_return,
+                refused,
+                refused_return,
+            ],
+            [true, true, false, false, true, false, false],
+            "a push at a yes and at each return from a remote, and none during one",
         );
     }
 

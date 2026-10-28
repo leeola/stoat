@@ -140,6 +140,7 @@ impl TerminalSession for FakeTerminalSession {
 pub struct FakeTerminalHost {
     session: Arc<FakeTerminalSession>,
     spawns: Mutex<Vec<SpawnArgs>>,
+    spawn_error: Mutex<Option<io::ErrorKind>>,
 }
 
 impl FakeTerminalHost {
@@ -147,6 +148,7 @@ impl FakeTerminalHost {
         Self {
             session,
             spawns: Mutex::new(Vec::new()),
+            spawn_error: Mutex::new(None),
         }
     }
 
@@ -155,12 +157,21 @@ impl FakeTerminalHost {
     pub fn spawns(&self) -> Vec<SpawnArgs> {
         self.spawns.lock().unwrap().clone()
     }
+
+    /// Make the next [`TerminalHost::spawn`] fail with `kind`, as a missing
+    /// program does. The failed spawn still shows in [`Self::spawns`].
+    pub fn fail_next_spawn(&self, kind: io::ErrorKind) {
+        *self.spawn_error.lock().unwrap() = Some(kind);
+    }
 }
 
 #[async_trait]
 impl TerminalHost for FakeTerminalHost {
     async fn spawn(&self, args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>> {
         self.spawns.lock().unwrap().push(args);
+        if let Some(kind) = self.spawn_error.lock().unwrap().take() {
+            return Err(io::Error::from(kind));
+        }
         Ok(Box::new(ArcTerminalSession(self.session.clone())))
     }
 }

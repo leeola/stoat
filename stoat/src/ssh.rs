@@ -68,9 +68,17 @@ pub(crate) struct RemoteTarget {
 /// What the app tells the UI thread to do while a remote session owns the
 /// screen.
 pub enum UiControl {
+    /// A remote session takes the terminal. Pop the keyboard flags, so ssh or
+    /// mosh reads keys as the terminal sends them with nothing pushed, and a
+    /// Ctrl-C at a password prompt interrupts it.
+    HandOver,
     /// Remote bytes to write to stdout as they are, framing included.
     Raw(Vec<u8>),
-    /// The remote exited. Re-enter the alternate screen and repaint.
+    /// The screen is this session's again, after a remote session or for a
+    /// terminal that attached. Re-enter the alternate screen and repaint.
+    ///
+    /// After a [`Self::HandOver`], push the keyboard flags again when the
+    /// terminal speaks the protocol.
     Resume,
 }
 
@@ -363,7 +371,10 @@ pub(crate) fn connect(
     stoat.active_workspace_mut().remote = Some(target);
     stoat.save_workspace(stoat.active_workspace);
 
+    // The keyboard flags come off before the arm. From the arm on, the input
+    // thread passes what is typed to the remote session.
     if let Some(link) = &stoat.passthrough_link {
+        let _ = link.ui_tx.send(UiControl::HandOver);
         link.slot.arm();
     }
     UpdateEffect::None
@@ -511,10 +522,12 @@ pub(crate) fn spawn_armed(stoat: &mut Stoat) -> UpdateEffect {
 /// Give up on a spawn that never produced a session.
 ///
 /// The forgotten emitter caches make the next frame re-declare everything, so a
-/// failed spawn needs no undo beyond releasing the slot.
+/// failed spawn needs no undo beyond releasing the slot and taking the screen
+/// back, which puts the keyboard flags back on.
 fn abandon(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(link) = &stoat.passthrough_link {
         link.slot.release();
+        let _ = link.ui_tx.send(UiControl::Resume);
     }
     stoat.passthrough = None;
     UpdateEffect::Redraw
