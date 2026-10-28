@@ -35,6 +35,7 @@ mod editor_state;
 pub(crate) mod emoji_expand;
 pub mod file_finder;
 pub mod image_emit;
+mod review_approval;
 mod review_walk;
 // Materializes real sample repositories on disk for the CLI by design.
 pub(crate) mod code_search;

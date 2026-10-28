@@ -542,6 +542,21 @@ pub(crate) struct StagedMark {
     pub(crate) base_lines: Range<u32>,
 }
 
+/// The meaning of the staged state in one diff map.
+///
+/// The staged state is one flag per row, whatever produced it. The gutter, the
+/// diff view, the tally, and the changes view all read that flag. A range
+/// review sets it from its approvals, so the approvals reach each of those
+/// views. This names which source set it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkKind {
+    /// The index, or the commit under review, holds the change.
+    #[default]
+    Staged,
+    /// A range review approved the rows.
+    Approved,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
@@ -580,6 +595,8 @@ pub struct DiffMap {
     /// hunks in place. Nothing else takes the tree mutably, so the count stays
     /// in step with it.
     staged_tally: (usize, usize),
+    /// What the hunks' staged state means in this map.
+    mark_kind: MarkKind,
     version: usize,
     /// What [`Self::live_hunks`] last resolved, so the four callers that ask
     /// per frame pay for one walk between them.
@@ -674,9 +691,21 @@ impl DiffMap {
             staged_marks: Arc::default(),
             staged_rows: Arc::default(),
             staged_tally,
+            mark_kind: MarkKind::default(),
             version: Self::next_version(),
             resolved_rows: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// This map, with its staged state read as `kind`.
+    pub(crate) fn with_mark_kind(mut self, kind: MarkKind) -> Self {
+        self.mark_kind = kind;
+        self
+    }
+
+    /// What the hunks' staged state means in this map.
+    pub fn mark_kind(&self) -> MarkKind {
+        self.mark_kind
     }
 
     /// Attach base-text syntax highlights for the diff view's left column.
@@ -920,12 +949,12 @@ impl DiffMap {
 
     /// Whether `other` would decorate the buffer exactly as this map does.
     ///
-    /// Compares the hunks, the base text, and the staged marks, which is
-    /// everything rendering reads. The base change spans, the staged map, the
-    /// staged rows, and the staged tally are all derived from those, and the
-    /// base highlights from the base text and the style table. The marks are
-    /// set after construction rather than derived, so they are compared on
-    /// their own.
+    /// Compares the hunks, the base text, the staged marks, and the mark kind,
+    /// which is everything rendering reads. The base change spans, the staged
+    /// map, the staged rows, and the staged tally are all derived from those,
+    /// and the base highlights from the base text and the style table. The
+    /// marks and the mark kind are set after construction rather than derived,
+    /// so they are compared on their own.
     ///
     /// Deliberately not the version. A version is minted per construction, and
     /// preserving it across a recompute that changed nothing is the whole point
@@ -942,6 +971,7 @@ impl DiffMap {
         };
         same_base
             && self.staged_marks == other.staged_marks
+            && self.mark_kind == other.mark_kind
             && self.hunks.iter().eq(other.hunks.iter())
     }
 
@@ -1607,6 +1637,46 @@ pub(crate) fn mark_staged(hunks: &mut [DiffHunk], index_changed: &[Range<u32>]) 
                 .map(|c| c.start.max(range.start)..c.end.min(range.end))
                 .collect();
         }
+    }
+}
+
+/// Record which of each hunk's rows a range review did not approve.
+///
+/// `approved` is sorted and disjoint, as
+/// [`ApprovedRows::ranges`](crate::review_approval::ApprovedRows::ranges)
+/// keeps it. A zero-width hunk at row `a` reads approved when `a..a + 1` is
+/// approved. Every other hunk keeps as unstaged the rows of its range that no
+/// approved range covers, so a hunk approved whole reads staged.
+pub(crate) fn mark_approved(hunks: &mut [DiffHunk], approved: &[Range<u32>]) {
+    for hunk in hunks.iter_mut() {
+        let range = hunk.buffer_line_range.clone();
+        if range.start == range.end {
+            let row = range.start..range.start + 1;
+            let covered = approved
+                .iter()
+                .any(|rows| rows.start <= row.start && row.end <= rows.end);
+            hunk.unstaged_lines = match covered {
+                true => Vec::new(),
+                false => vec![range],
+            };
+            continue;
+        }
+
+        let mut unstaged = Vec::new();
+        let mut next = range.start;
+        for rows in approved
+            .iter()
+            .filter(|rows| rows.start < range.end && range.start < rows.end)
+        {
+            if next < rows.start {
+                unstaged.push(next..rows.start);
+            }
+            next = next.max(rows.end);
+        }
+        if next < range.end {
+            unstaged.push(next..range.end);
+        }
+        hunk.unstaged_lines = unstaged;
     }
 }
 

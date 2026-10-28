@@ -1473,8 +1473,8 @@ on key {
     # Escape. Escape switches and nothing else, which is what releases the pin.
     #
     # `s` and `S` toggle the hunk and the line under the cursor in and out of
-    # the index, or of the commit under review, so a second press undoes the
-    # first.
+    # the index, or of the commit under review. Under a range review they mark
+    # the hunk or the line approved instead. A second press undoes the first.
     #
     # `r` re-reads the open buffers, so an external tool's edits reach the diff
     # without leaving the chord. It spells the same verb `space r` does.

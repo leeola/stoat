@@ -930,7 +930,8 @@ pub(super) enum StageOutcome {
 ///
 /// The press captures the cursor row, the text, and the review base. The diff
 /// and the write run as a queued git job, and the status and the gutter follow
-/// when the job lands.
+/// when the job lands. Under a range review the press marks the hunk approved
+/// instead, with no git write, through [`toggle_approval`].
 pub(super) fn stage_hunk(stoat: &mut Stoat) -> UpdateEffect {
     queue_stage(stoat, AmendUnit::Hunk)
 }
@@ -952,7 +953,8 @@ pub(super) fn stage_hunk(stoat: &mut Stoat) -> UpdateEffect {
 /// [`stage_hunk`] moves the whole hunk the same way.
 ///
 /// The press captures the cursor row, the text, and the review base. The status
-/// and the gutter follow when the queued git job lands.
+/// and the gutter follow when the queued git job lands. Under a range review the
+/// press marks the line approved instead, with no git write.
 pub(super) fn stage_line(stoat: &mut Stoat) -> UpdateEffect {
     queue_stage(stoat, AmendUnit::Line)
 }
@@ -1021,6 +1023,25 @@ fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
         "staging press"
     );
 
+    // A range review has nothing to write into, so the press marks the rows
+    // itself rather than queue git work. A file that measures against another
+    // file goes to the job, which refuses it.
+    let reviewing = {
+        let ws = stoat.active_workspace();
+        ws.pair_for(&path).is_none()
+            && matches!(
+                ws.diff_base(),
+                Some(DiffBase::Rev {
+                    origin: RevOrigin::Review { .. },
+                    ..
+                })
+            )
+    };
+    if reviewing {
+        let hunk_rows = drawn.and_then(|(hunk, _)| hunk).map(|(_, rows, _)| rows);
+        return toggle_approval(stoat, buffer_id, &path, cursor_row, unit, hunk_rows);
+    }
+
     let job = GitJob::new("stage", None, move |stoat: &mut Stoat| {
         // The index route diffs against HEAD and the amend route writes into
         // the commit, so after a base move both act on a checkout the captured
@@ -1053,6 +1074,18 @@ fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
         let target = match amend::amend_route(stoat, &*repo, &path) {
             AmendRoute::Index => None,
             AmendRoute::Commit(target) => Some(target),
+            // The press marks rows under a review and queues nothing, so a
+            // review base at this turn arrived after a press on another base.
+            AmendRoute::Approve => {
+                tracing::warn!(
+                    target: "stoat::review",
+                    path = %path.display(),
+                    status = %BASE_MOVED,
+                    "staging press refused"
+                );
+                stoat.set_status(BASE_MOVED);
+                return None;
+            },
             AmendRoute::Refused(why) => {
                 tracing::warn!(
                     target: "stoat::review",
@@ -1100,6 +1133,68 @@ fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Mark the change under the cursor approved under a range review, or take the
+/// mark back when every row of it is already approved.
+///
+/// The press writes nothing to git. The workspace stores the rows per file and
+/// the buffer re-diffs, so the gutter, the diff view, and the changes view read
+/// the mark through the staged state they already show. `hunk_rows` is the
+/// live hunk under the cursor, and a zero-width hunk at row `a` stands for row
+/// `a`. With no hunk there, the press sets the status the staging keys set and
+/// marks nothing.
+fn toggle_approval(
+    stoat: &mut Stoat,
+    buffer_id: BufferId,
+    path: &Path,
+    cursor_row: u32,
+    unit: AmendUnit,
+    hunk_rows: Option<Range<u32>>,
+) -> UpdateEffect {
+    let (approved_status, unapproved_status, nothing) = match unit {
+        AmendUnit::Line => ("approved line", "unapproved line", LINE_MESSAGES.2),
+        AmendUnit::Hunk | AmendUnit::Rows(_) => {
+            ("approved hunk", "unapproved hunk", RUN_MESSAGES.2)
+        },
+    };
+    let Some(hunk_rows) = hunk_rows else {
+        stoat.set_status(nothing);
+        return UpdateEffect::Redraw;
+    };
+    let rows = match unit {
+        AmendUnit::Rows(rows) => rows,
+        AmendUnit::Hunk if hunk_rows.is_empty() => hunk_rows.start..hunk_rows.start + 1,
+        AmendUnit::Hunk => hunk_rows,
+        AmendUnit::Line => cursor_row..cursor_row + 1,
+    };
+
+    let ws = stoat.active_workspace_mut();
+    let mut approved = ws
+        .approved_rows(path)
+        .map(|approved| (*approved).clone())
+        .unwrap_or_default();
+    let status = match approved.covers(&rows) {
+        true => {
+            approved.unapprove(rows.clone());
+            unapproved_status
+        },
+        false => {
+            approved.approve(rows.clone());
+            approved_status
+        },
+    };
+    ws.set_approved_rows(buffer_id, path, approved);
+
+    tracing::info!(
+        target: "stoat::review",
+        path = %path.display(),
+        ?rows,
+        %status,
+        "approval press landed"
+    );
+    stoat.set_status(status);
     UpdateEffect::Redraw
 }
 
@@ -1807,6 +1902,7 @@ mod tests {
     };
     use crate::{
         badge::BadgeSource,
+        diff_map::MarkKind,
         display_map::syntax_theme::SyntaxStyles,
         review_session::DiffDocument,
         test_harness::TestHarness,
@@ -4182,6 +4278,143 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         crate::action_handlers::movement::set_cursor_row(editor, 1);
         h
+    }
+
+    /// A range review over `base0`, whose `a.txt` the working file changes to
+    /// `working`, with the diff settled and the cursor on `row`.
+    ///
+    /// A text file, so no tree pass narrows a hunk and `s` moves it whole.
+    fn reviewing_a_range(working: &str, row: u32) -> TestHarness {
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .commit("base0", &[("a.txt", "a\nb\nc\nd\n")])
+            .head_file("a.txt", working);
+        h.fake_fs().insert_file("/work/a.txt", working.as_bytes());
+        h.stoat
+            .active_workspace_mut()
+            .set_diff_base(Some(DiffBase::review(
+                "base0".to_string(),
+                "feature",
+                "main",
+            )));
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("a.txt"));
+        h.settle_diff_jobs();
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        crate::action_handlers::movement::set_cursor_row(editor, row);
+        h
+    }
+
+    /// The focused buffer's hunks as `(first row, staged)`, whether buffer row
+    /// `row` reads staged, and the map's mark kind.
+    fn approval_marks(
+        h: &TestHarness,
+        row: u32,
+    ) -> (Vec<(u32, bool)>, Option<bool>, Option<MarkKind>) {
+        let id = h.stoat.focused_editor_ids().expect("editor").1;
+        let buffer = h.stoat.active_workspace().buffers.get(id).expect("buffer");
+        let guard = buffer.read().expect("buffer poisoned");
+        let map = guard.diff_map.as_ref();
+        (
+            map.map(|map| {
+                map.hunks()
+                    .map(|hunk| (hunk.buffer_start_line, hunk.staged()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+            map.and_then(|map| map.staged_for_line(row)),
+            map.map(|map| map.mark_kind()),
+        )
+    }
+
+    /// Under a range review the map reads approvals before the first press.
+    /// `s` marks the hunk under the cursor approved with no git write, a second
+    /// `s` takes the mark back, and a base change drops the review's rows.
+    #[test]
+    fn s_under_a_range_review_approves_the_hunk_with_no_git_write() {
+        let mut h = reviewing_a_range("a\nP\nQ\nd\n", 1);
+        let path = Path::new("/work/a.txt");
+        let press = |h: &mut TestHarness| {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
+            h.settle_diff_jobs();
+            (h.stoat.pending_message.clone(), approval_marks(h, 1))
+        };
+
+        let before = approval_marks(&h, 1);
+        let approved = press(&mut h);
+        let rows = h
+            .stoat
+            .active_workspace()
+            .approved_rows(path)
+            .map(|rows| rows.covers(&(1..3)));
+        let unapproved = press(&mut h);
+        h.stoat.active_workspace_mut().set_diff_base(None);
+
+        assert_eq!(
+            (
+                before,
+                approved,
+                rows,
+                unapproved,
+                h.fake_git().applied_patches(&PathBuf::from("/work")),
+                h.stoat.active_workspace().approved_rows(path).is_none(),
+            ),
+            (
+                (vec![(1, false)], Some(false), Some(MarkKind::Approved)),
+                (
+                    Some("approved hunk".to_string()),
+                    (vec![(1, true)], Some(true), Some(MarkKind::Approved))
+                ),
+                Some(true),
+                (
+                    Some("unapproved hunk".to_string()),
+                    (vec![(1, false)], Some(false), Some(MarkKind::Approved))
+                ),
+                Vec::<String>::new(),
+                true,
+            ),
+        );
+    }
+
+    /// Under a range review `S` approves the cursor's row alone, so a two-row
+    /// hunk reads partly approved. `s` on a deletion approves it through the
+    /// row it sits above, and `s` off every hunk marks nothing.
+    #[test]
+    fn line_deletion_and_off_hunk_presses_under_a_range_review() {
+        let pressed = |working: &str, row: u32, action: &dyn Action| {
+            let mut h = reviewing_a_range(working, row);
+            crate::action_handlers::dispatch(&mut h.stoat, action);
+            h.settle_diff_jobs();
+            h
+        };
+        let line = pressed("a\nP\nQ\nd\n", 2, &stoat_action::ToggleStageLine);
+        let deletion = pressed("a\nc\nd\n", 1, &stoat_action::ToggleStageHunk);
+        let off = pressed("a\nP\nQ\nd\n", 0, &stoat_action::ToggleStageHunk);
+
+        assert_eq!(
+            (
+                line.stoat.pending_message.as_deref(),
+                approval_marks(&line, 2),
+                approval_marks(&line, 1).1,
+                approval_marks(&deletion, 1).0,
+                off.stoat.pending_message.as_deref(),
+                off.stoat
+                    .active_workspace()
+                    .approved_rows(Path::new("/work/a.txt"))
+                    .is_none(),
+            ),
+            (
+                Some("approved line"),
+                (vec![(1, false)], Some(true), Some(MarkKind::Approved)),
+                Some(false),
+                vec![(1, true)],
+                Some("no hunk under the cursor"),
+                true,
+            ),
+        );
     }
 
     /// A base with nothing safe to rewrite under it gets the transport's own

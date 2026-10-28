@@ -28,6 +28,7 @@ use crate::{
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
     render::{layout::split_pane_status, text, walkthrough::SlideParts},
+    review_approval::ApprovedRows,
     run::{RunId, RunState},
     ssh::RemoteTarget,
     syntax_parse::{parse_buffer_step, ParseJobOutput},
@@ -1182,6 +1183,25 @@ impl Workspace {
     /// map against `path`'s fresh blobs. See [`DiffState::invalidate`].
     pub(crate) fn invalidate_diff(&mut self, id: BufferId, path: &Path) {
         self.diff.invalidate(id, Some(path));
+        self.diff_changes_epoch += 1;
+    }
+
+    /// The rows the range review approved in `path`, `None` before its first
+    /// approval.
+    pub(crate) fn approved_rows(&self, path: &Path) -> Option<Arc<ApprovedRows>> {
+        self.diff.approved.get(path).cloned()
+    }
+
+    /// Record `rows` as the rows the range review approved in `path`, and
+    /// re-diff `id`, the file's buffer, so its hunks read them.
+    ///
+    /// The cached blobs stay, since an approval writes nothing to git. A base
+    /// change drops every file's rows.
+    pub(crate) fn set_approved_rows(&mut self, id: BufferId, path: &Path, rows: ApprovedRows) {
+        self.diff
+            .approved
+            .insert(path.to_path_buf(), Arc::new(rows));
+        self.diff.invalidate(id, None);
         self.diff_changes_epoch += 1;
     }
 

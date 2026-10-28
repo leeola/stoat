@@ -7,8 +7,13 @@
 
 use super::review::{self, StageOutcome};
 use crate::{
-    app::Stoat, diff_map::line_starts, host::GitRepo, rebase::RebasePause,
-    review_apply::base_line_range, review_walk::ReturnRef, workspace::diff::DiffBase,
+    app::Stoat,
+    diff_map::line_starts,
+    host::GitRepo,
+    rebase::RebasePause,
+    review_apply::base_line_range,
+    review_walk::ReturnRef,
+    workspace::diff::{DiffBase, RevOrigin},
 };
 use std::{ops::Range, path::Path};
 
@@ -36,6 +41,9 @@ pub(super) enum AmendRoute {
     Index,
     /// The tree sits on a commit the user is free to rewrite.
     Commit(AmendTarget),
+    /// The workspace runs a range review, whose base no commit sits over. The
+    /// keys mark the rows approved rather than write git.
+    Approve,
     /// No transport fits the installed base. The text is what the staging keys
     /// report.
     Refused(&'static str),
@@ -71,6 +79,10 @@ pub(super) fn amend_route(stoat: &Stoat, repo: &dyn GitRepo, path: &Path) -> Ame
     }
     let base_sha = match ws.diff_base() {
         None | Some(DiffBase::Head) => return AmendRoute::Index,
+        Some(DiffBase::Rev {
+            origin: RevOrigin::Review { .. },
+            ..
+        }) => return AmendRoute::Approve,
         Some(DiffBase::Rev { sha, .. }) => sha.clone(),
         // An agent's proposal sits under no commit, so there is nothing to
         // amend it into.

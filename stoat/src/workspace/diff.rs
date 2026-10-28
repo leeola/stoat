@@ -20,14 +20,15 @@ use crate::{
     diff::{self, ReviewFileInput},
     diff_cache::ContentHash,
     diff_map::{
-        changes_to_hunks, line_starts, mark_staged, merge_structural_detail, staged_marks,
-        BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap,
+        changes_to_hunks, line_starts, mark_approved, mark_staged, merge_structural_detail,
+        staged_marks, BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, MarkKind,
     },
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
     host::{git::HunkTallies, FsHost, GitHost, GitRepo},
     jumplist::JumpEntry,
     multi_buffer::MultiBuffer,
+    review_approval::ApprovedRows,
     syntax_parse,
 };
 use codegraph::FileId;
@@ -361,6 +362,11 @@ pub(crate) struct DiffState {
     /// A landing whose hunks render the same as the installed map installs
     /// nothing, and moves nothing.
     pub(super) maps_epoch: u64,
+    /// The rows a range review approved, keyed by absolute path.
+    ///
+    /// A base change clears them, so they live as long as the review that set
+    /// them. A diff of the file reads them as its staged state.
+    pub(super) approved: HashMap<PathBuf, Arc<ApprovedRows>>,
 }
 
 impl DiffState {
@@ -374,6 +380,26 @@ impl DiffState {
             WorktreeBase::Head => Some(&HEAD_BASE),
             WorktreeBase::Index => None,
         })
+    }
+
+    /// The approvals a diff of `path` reads under `diff_base`, `None` where
+    /// the staged state comes from git.
+    ///
+    /// A range review answers even with no row approved, so its map reads
+    /// approvals rather than the staged side. Any other base answers the rows
+    /// stored for `path`, which a base change clears.
+    fn approved_for(&self, path: &Path, diff_base: Option<&DiffBase>) -> Option<Arc<ApprovedRows>> {
+        let review = matches!(
+            diff_base,
+            Some(DiffBase::Rev {
+                origin: RevOrigin::Review { .. },
+                ..
+            })
+        );
+        self.approved
+            .get(path)
+            .cloned()
+            .or_else(|| review.then(|| Arc::new(ApprovedRows::default())))
     }
 
     /// The base a diff job measures `path` against, its pair when it has one
@@ -477,7 +503,7 @@ impl DiffState {
     }
 
     /// Stale every buffer's diff map for a new base, and drop the jobs in
-    /// flight.
+    /// flight and the approvals of the review the base replaces.
     ///
     /// A job in flight read the base that the change replaces. After a `.git`
     /// write, [`Self::invalidate_all`] keeps such a job, because its blobs are
@@ -485,6 +511,7 @@ impl DiffState {
     /// base the reader has left, so the job goes.
     pub(super) fn reset_for_new_base(&mut self) {
         self.jobs.clear();
+        self.approved.clear();
         self.invalidate_all();
     }
 
@@ -675,6 +702,7 @@ impl DiffState {
             let syntax_styles = syntax_styles.clone();
             let base_cache = base_cache.clone();
             let diff_base = self.base_for(&path);
+            let approved = self.approved_for(&path, diff_base.as_ref());
             let cached_base = self.base_text.get(&path).cloned();
             let tree_cache = whole.then(|| self.tree_cache.clone());
             move || {
@@ -684,6 +712,7 @@ impl DiffState {
                     path,
                     diff_base.as_ref(),
                     cached_base,
+                    approved,
                     &buffer_snapshot,
                     target_version,
                     id,
@@ -999,6 +1028,7 @@ impl DiffState {
                 let base_cache = base_cache.clone();
                 let path = path.clone();
                 let diff_base = self.base_for(&path);
+                let approved = self.approved_for(&path, diff_base.as_ref());
                 let tree_cache = self.tree_cache.clone();
                 move || {
                     let out = run_diff_job(
@@ -1007,6 +1037,7 @@ impl DiffState {
                         path,
                         diff_base.as_ref(),
                         cached_base,
+                        approved,
                         &buffer_snapshot,
                         cur_version,
                         buffer_id,
@@ -1256,6 +1287,8 @@ fn settle_timer(executor: &Executor, redraw_notify: &Arc<Notify>) -> Task<()> {
 /// With a language, the run also parses the base for the diff view's colors
 /// and refines the hunks structurally, reusing `tree_memo` and `buffer_tree`.
 /// With `anchor`, the hunks are anchored against the snapshot.
+/// `approved` holds a range review's approved rows, which mark the hunks
+/// staged in place of the base's staged side.
 #[allow(clippy::too_many_arguments)]
 fn run_diff_job(
     git_host: &dyn GitHost,
@@ -1263,6 +1296,7 @@ fn run_diff_job(
     path: PathBuf,
     diff_base: Option<&DiffBase>,
     cached_base: Option<Option<DiffBaseText>>,
+    approved: Option<Arc<ApprovedRows>>,
     buffer_snapshot: &TextBufferSnapshot,
     target_version: u64,
     buffer_id: BufferId,
@@ -1281,13 +1315,15 @@ fn run_diff_job(
         Some(base) => base,
         None => resolve_base(git_host, git_root, &path, diff_base),
     };
+    // The approvals go on a copy, so the base filed for reuse never holds
+    // rows that the next press moves.
     let diff_map = base.as_ref().and_then(|base| {
         compute_diff_map(
             &buffer_text,
             language,
             syntax_styles,
             base_cache,
-            base,
+            &base.clone().with_approved(approved),
             tree_memo,
             buffer_tree,
         )
@@ -1499,6 +1535,12 @@ pub(crate) struct DiffBaseText {
     /// settle, where a blob only changes when something writes under `.git`.
     base_hash: [u8; 32],
     staged_hash: [u8; 32],
+    /// The rows a range review approved, which mark hunks staged in place of
+    /// the staged text, `None` where git decides.
+    ///
+    /// Attached per diff through [`Self::with_approved`] and never cached,
+    /// since a press moves the rows while the blobs do not change.
+    approved: Option<Arc<ApprovedRows>>,
 }
 
 impl DiffBaseText {
@@ -1511,7 +1553,14 @@ impl DiffBaseText {
             staged_from,
             base_hash,
             staged_hash,
+            approved: None,
         }
+    }
+
+    /// These texts, where `approved` marks the hunks staged.
+    fn with_approved(mut self, approved: Option<Arc<ApprovedRows>>) -> Self {
+        self.approved = approved;
+        self
     }
 }
 
@@ -1615,7 +1664,8 @@ pub(crate) type BaseHighlightCache = Arc<Mutex<BaseHighlightMemo>>;
 /// The hunks describe what the buffer changes from the base text, and a hunk
 /// reads staged when the staged text already holds it. With a `staged_from`
 /// text, the changes the base text holds over it become the map's staged
-/// marks.
+/// marks. When `base` holds a range review's approved rows, those rows decide
+/// which hunks read staged, and the map reads [`MarkKind::Approved`].
 ///
 /// The tree pass and the base-text highlights cost the most. A caller on the
 /// UI thread passes no `language`, which skips both, so the line pass alone
@@ -1682,8 +1732,13 @@ pub(super) fn compute_diff_map(
             let anchor = 0..0;
             // The removal is staged once the staged side is gone too. The
             // line differ answers this wrong. Against an empty staged text it
-            // reads the removed buffer's lone newline as an added line.
-            let unstaged_lines = match buffer_removed(staged_text) {
+            // reads the removed buffer's lone newline as an added line. Under
+            // a review, the approval of the anchor's row decides.
+            let staged = match &base.approved {
+                Some(approved) => approved.covers(&(0..1)),
+                None => buffer_removed(staged_text),
+            };
+            let unstaged_lines = match staged {
                 true => Vec::new(),
                 false => vec![anchor.clone()],
             };
@@ -1704,6 +1759,9 @@ pub(super) fn compute_diff_map(
     } else {
         let mut hunks = changes_to_hunks(&result.changes, base_text, buffer_text);
         mark_staged(&mut hunks, &staged_changed);
+        if let Some(approved) = &base.approved {
+            mark_approved(&mut hunks, approved.ranges());
+        }
 
         // The tree pass answers only what the washes mark. It details only the
         // hunks the line pass found, so a file with no hunk skips it. A parse
@@ -1747,6 +1805,9 @@ pub(super) fn compute_diff_map(
             base_cache,
             tree_memo,
         ));
+    }
+    if base.approved.is_some() {
+        diff_map = diff_map.with_mark_kind(MarkKind::Approved);
     }
     Some(diff_map)
 }
@@ -2199,11 +2260,12 @@ mod tests {
         action_handlers::{self, movement},
         app,
         buffer::BufferId,
-        diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, StagedMark},
+        diff_map::{BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, StagedMark},
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
         pane::View,
         review::ReviewFileInput,
+        review_approval::ApprovedRows,
         test_harness::TestHarness,
         theme::Theme,
         workspace::Workspace,
@@ -2838,6 +2900,73 @@ mod tests {
             "the base's change over the text behind it",
         );
         assert_eq!(dm.staged_counts(), (1, 1), "the mark and the hunk");
+    }
+
+    /// `base` read on both sides, as a range review reads it, with `rows`
+    /// approved, or none.
+    fn reviewed(base: &str, rows: Option<Range<u32>>) -> DiffBaseText {
+        let mut approved = ApprovedRows::default();
+        if let Some(rows) = rows {
+            approved.approve(rows);
+        }
+        diff_base(base, base, None).with_approved(Some(Arc::new(approved)))
+    }
+
+    /// Each hunk's first row and whether it reads staged, with the map's mark
+    /// kind.
+    fn approval_marks(dm: &DiffMap) -> (Vec<(u32, bool)>, MarkKind) {
+        (
+            dm.hunks()
+                .map(|hunk| (hunk.buffer_start_line, hunk.staged()))
+                .collect(),
+            dm.mark_kind(),
+        )
+    }
+
+    /// Under a range review the approved rows decide which hunks read staged,
+    /// and with none approved every hunk reads unstaged. A base with no
+    /// approvals keeps git's meaning for the staged state.
+    #[test]
+    fn approved_rows_mark_the_hunks_they_cover() {
+        let (base, buffer) = ("a\nb\nc\nd\ne\n", "a\nB\nc\nD\ne\n");
+        assert_eq!(
+            [
+                approval_marks(&plain_diff(buffer, &reviewed(base, Some(1..2)))),
+                approval_marks(&plain_diff(buffer, &reviewed(base, None))),
+                approval_marks(&plain_diff(buffer, &diff_base(base, base, None))),
+            ],
+            [
+                (vec![(1, true), (3, false)], MarkKind::Approved),
+                (vec![(1, false), (3, false)], MarkKind::Approved),
+                (vec![(1, false), (3, false)], MarkKind::Staged),
+            ],
+        );
+    }
+
+    /// A deletion has no row of its own, so it approves through the row it
+    /// sits above, and a file removed whole approves through row 0.
+    #[test]
+    fn a_deletion_approves_through_its_anchor_row() {
+        let deleted = |rows: Option<Range<u32>>| {
+            approval_marks(&plain_diff("a\nc\n", &reviewed("a\nb\nc\n", rows))).0
+        };
+        let removed = |rows: Option<Range<u32>>| {
+            approval_marks(&plain_diff("\n", &reviewed("x\ny\n", rows))).0
+        };
+        assert_eq!(
+            [
+                deleted(Some(1..2)),
+                deleted(None),
+                removed(Some(0..1)),
+                removed(None)
+            ],
+            [
+                vec![(1, true)],
+                vec![(1, false)],
+                vec![(0, true)],
+                vec![(0, false)]
+            ],
+        );
     }
 
     /// A file removed in the index leaves an empty base with the file's text
