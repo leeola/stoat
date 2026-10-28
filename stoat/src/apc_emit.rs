@@ -2916,7 +2916,7 @@ fn emit_terminal_pool(
         pane.is_focused.hash(&mut hasher);
         pane.dim.to_bits().hash(&mut hasher);
         term.term.generation().hash(&mut hasher);
-        term.painted_selection().hash(&mut hasher);
+        selection_key(term).hash(&mut hasher);
         hasher.finish()
     };
     if state.already_emitted(pool, version) {
@@ -2971,6 +2971,19 @@ fn emit_terminal_pool(
         out.extend_from_slice(&page)
     });
     vec![batch]
+}
+
+/// The endpoints of the mouse selection `term` paints, as the line and column
+/// numbers a page version hashes, since a grid point derives no `Hash`.
+fn selection_key(term: &TermSession) -> Option<(i32, usize, i32, usize)> {
+    term.painted_selection().map(|range| {
+        (
+            range.start.line.0,
+            range.start.column.0,
+            range.end.line.0,
+            range.end.column.0,
+        )
+    })
 }
 
 /// The `fill_rows` batches that bring `held`, page `index` that stoatty holds
@@ -3148,7 +3161,7 @@ pub(crate) fn window_content_version(
             0u8.hash(&mut hasher);
             term_id.hash(&mut hasher);
             term.term.generation().hash(&mut hasher);
-            term.painted_selection().hash(&mut hasher);
+            selection_key(term).hash(&mut hasher);
         },
         View::Run(run_id) => {
             let run = ws.runs.get(*run_id)?;

@@ -22,7 +22,6 @@ use crate::{
         walkthrough::Spotlight,
     },
     run::GridSelection,
-    term_session::TermSelection,
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_sizing,
@@ -5648,7 +5647,7 @@ fn dragging_over_a_terminal_pane_selects_and_copies() {
     assert_eq!(
         (
             h.stoat.active_workspace().terms[term_id]
-                .selection
+                .painted_selection()
                 .is_none(),
             h.stoat.pending_message.as_deref()
         ),
@@ -5732,7 +5731,7 @@ fn a_zero_width_terminal_selection_reads_no_text() {
     let mut h = Stoat::test();
     let term_id = focused_terminal_pane(&mut h, b"hello");
     let session = &mut h.stoat.active_workspace_mut().terms[term_id];
-    session.selection = Some(TermSelection::new(0, 0));
+    session.term.start_selection(0, 0);
 
     assert_eq!(session.selection_text(), None);
 }
@@ -5852,7 +5851,7 @@ fn a_grid_report_in_a_pooled_terminal_selects_nothing() {
     assert_eq!(
         (
             h.stoat.active_workspace().terms[term_id]
-                .selection
+                .painted_selection()
                 .is_none(),
             h.stoat.terminal_drag,
         ),
@@ -5906,16 +5905,42 @@ fn a_keystroke_clears_the_terminal_selection() {
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 0));
     assert!(h.stoat.active_workspace().terms[term_id]
-        .selection
+        .painted_selection()
         .is_some());
 
     h.stoat.update(Event::Key(key(KeyCode::Char('x'))));
     assert!(
         h.stoat.active_workspace().terms[term_id]
-            .selection
+            .painted_selection()
             .is_none(),
         "typing into the terminal clears the selection",
     );
+}
+
+/// Output that scrolls the screen mid-drag carries the selection with its
+/// text, so the release copies the row the drag marked rather than the row
+/// that scrolled under it.
+#[test]
+fn a_terminal_drag_keeps_its_text_when_output_scrolls() {
+    let mut h = Stoat::test();
+    let lines: Vec<String> = (0..40).map(|i| format!("l{i}")).collect();
+    let term_id = focused_terminal_pane(&mut h, lines.join("\r\n").as_bytes());
+    let marked = {
+        let term = &h.stoat.active_workspace().terms[term_id].term;
+        format!("l{}", 40 - term.rows() + 1)
+    };
+
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 1));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 1));
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"\r\nl40");
+    h.stoat
+        .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1));
+
+    assert_eq!(h.fake_clipboard().writes(), vec![marked]);
 }
 
 #[test]
@@ -5932,7 +5957,7 @@ fn a_click_without_drag_leaves_no_terminal_selection() {
 
     assert!(
         h.stoat.active_workspace().terms[term_id]
-            .selection
+            .painted_selection()
             .is_none(),
         "a plain click leaves no selection",
     );
@@ -6118,7 +6143,7 @@ fn a_wheel_over_a_terminal_pane_walks_its_history() {
         let top: String = session.term.row(0).iter().map(|cell| cell.ch).collect();
         (
             session.term.display_offset(),
-            session.selection.is_some(),
+            session.painted_selection().is_some(),
             top.trim_end().to_string(),
         )
     };
@@ -9171,25 +9196,30 @@ fn a_terminal_pane_versions_on_everything_its_render_reads() {
         "a resized pane must re-declare its region"
     );
 
-    h.stoat.active_workspace_mut().terms[term_id].selection = Some(TermSelection::new(1, 1));
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .start_selection(1, 1);
     assert_eq!(
         base,
         version(h.stoat.active_workspace(), true, 0, region),
         "a press marks no cell, so it moves nothing"
     );
     h.stoat.active_workspace_mut().terms[term_id]
-        .selection
-        .as_mut()
-        .expect("the press left a selection")
-        .extend_to(1, 3);
+        .term
+        .extend_selection(1, 3);
     let selected = version(h.stoat.active_workspace(), true, 0, region);
     assert_ne!(base, selected, "a selection tints the cells it covers");
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .extend_selection(1, 5);
+    let longer = version(h.stoat.active_workspace(), true, 0, region);
+    assert_ne!(selected, longer, "a longer drag tints more cells");
 
     h.stoat.active_workspace_mut().terms[term_id]
         .term
         .feed(b"output");
     assert_ne!(
-        selected,
+        longer,
         version(h.stoat.active_workspace(), true, 0, region),
         "output repaints the screen"
     );

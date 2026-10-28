@@ -24,7 +24,7 @@ use crate::{
     rebase::RebasePause,
     render::commit_picker::MIN_LIST_ROWS,
     run::GridSelection,
-    term_session::{TermId, TermSelection},
+    term_session::TermId,
     workspace::Workspace,
 };
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -2087,7 +2087,7 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
             {
                 let ws = stoat.active_workspace_mut();
                 let session = ws.terms.get_mut(term_id).expect("focused term exists");
-                session.selection = Some(TermSelection::new(cell_row, cell_col));
+                session.term.start_selection(cell_row, cell_col);
             }
             stoat.terminal_drag = Some((term_id, false));
             true
@@ -2104,12 +2104,9 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
             stoat.terminal_drag = Some((term_id, true));
             let ws = stoat.active_workspace_mut();
             let session = ws.terms.get_mut(term_id).expect("focused term exists");
-            match session.selection.as_mut() {
-                // Reporting no change is what drops the frame for a drag
-                // that landed back on the cell the head already holds.
-                Some(selection) => selection.extend_to(cell_row, cell_col),
-                None => true,
-            }
+            // Reporting no change is what drops the frame for a drag that
+            // landed back on the cell the head already holds.
+            session.term.extend_selection(cell_row, cell_col)
         },
         MouseEventKind::Up(MouseButton::Left) => {
             let Some((drag_term, moved)) = stoat.terminal_drag.take() else {
@@ -2149,7 +2146,7 @@ fn handle_terminal_pane_mouse(stoat: &mut Stoat, kind: MouseEventKind, col: u16,
 /// drag starts fresh.
 pub(crate) fn clear_term_selection(stoat: &mut Stoat, term_id: TermId) {
     if let Some(session) = stoat.active_workspace_mut().terms.get_mut(term_id) {
-        session.selection = None;
+        session.term.clear_selection();
     }
 }
 

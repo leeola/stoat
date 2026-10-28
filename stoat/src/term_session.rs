@@ -10,6 +10,7 @@ use crate::{
     pane::{DockId, PaneId},
     term_screen::TermScreen,
 };
+use alacritty_terminal::selection::SelectionRange;
 use futures::FutureExt;
 use slotmap::new_key_type;
 use std::sync::{
@@ -25,69 +26,6 @@ new_key_type! {
     /// Workspace-scoped key for a [`TermSession`] in the workspace's term
     /// collection.
     pub struct TermId;
-}
-
-/// A linear text selection over a terminal viewport's cells.
-///
-/// `anchor` is the cell where the drag began and `head` the cell it currently
-/// reaches, both `(row, col)` and viewport-relative. The selection runs in
-/// reading order between the two regardless of drag direction, so a row lying
-/// fully between the endpoints is selected end to end.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TermSelection {
-    anchor: (usize, usize),
-    head: (usize, usize),
-}
-
-impl TermSelection {
-    /// A zero-width selection anchored at `(row, col)`, before a drag extends it.
-    pub fn new(row: usize, col: usize) -> Self {
-        Self {
-            anchor: (row, col),
-            head: (row, col),
-        }
-    }
-
-    /// Move the reaching end to `(row, col)`, leaving the anchor fixed, and
-    /// report whether that moved it.
-    ///
-    /// A terminal in any-motion tracking reports a drag per pointer motion
-    /// rather than per cell, so a sweep across one character arrives many
-    /// times over. The answer is what lets a caller drop the repeats.
-    pub fn extend_to(&mut self, row: usize, col: usize) -> bool {
-        let moved = self.head != (row, col);
-        self.head = (row, col);
-        moved
-    }
-
-    /// Whether the reaching end sits on the anchor cell.
-    ///
-    /// That is the state a press leaves, and a drag that returns to its start.
-    /// Either way the selection marks no text, so it paints and copies nothing.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.anchor == self.head
-    }
-
-    /// The endpoints in reading order, `(start, end)` with `start <= end`.
-    fn ordered(&self) -> ((usize, usize), (usize, usize)) {
-        if self.anchor <= self.head {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        }
-    }
-
-    /// Whether the cell `(row, col)` falls within the selection, inclusive of
-    /// both endpoints.
-    pub(crate) fn contains(&self, row: usize, col: usize) -> bool {
-        let ((start_row, start_col), (end_row, end_col)) = self.ordered();
-        if row < start_row || row > end_row {
-            return false;
-        }
-        let after_start = row > start_row || col >= start_col;
-        let before_end = row < end_row || col <= end_col;
-        after_start && before_end
-    }
 }
 
 /// Where a view shows, which is a split or detached pane of a tab, or a dock.
@@ -109,13 +47,6 @@ pub(crate) enum ViewLocation {
 pub struct TermSession {
     pub term: TermScreen,
     pub session: Arc<dyn TerminalSession>,
-    /// The active mouse selection over the screen, or `None` when nothing is
-    /// selected.
-    ///
-    /// A press sets a zero-width selection at its cell, which paints and copies
-    /// nothing until a drag extends it. The release that copies a drag clears
-    /// it, and so do the next keystroke, click, or wheel notch, and a new drag.
-    pub selection: Option<TermSelection>,
     /// The pane's input mode.
     ///
     /// `"normal"` is the mode the pane rests in, and there its keys go to the
@@ -149,33 +80,25 @@ impl TermSession {
         Self {
             term,
             session,
-            selection: None,
             mode: "normal".into(),
             token,
         }
     }
 
-    /// The selection the pane paints and copies, or `None` when nothing is
-    /// selected or when no drag extended the selection past its anchor.
+    /// The mouse selection the pane paints and copies, in grid points, or
+    /// `None` when no selection marks a cell.
     ///
-    /// A zero-width selection marks no cell, being what a press leaves before a
-    /// drag, so whatever the selection drives reads this rather than
-    /// [`Self::selection`].
-    pub(crate) fn painted_selection(&self) -> Option<TermSelection> {
-        self.selection.filter(|sel| !sel.is_empty())
+    /// A press marks no cell before a drag extends it, and the release that
+    /// copies a drag clears it, as do the next keystroke, click, or wheel
+    /// notch. See [`TermScreen::selection_range`].
+    pub(crate) fn painted_selection(&self) -> Option<SelectionRange> {
+        self.term.selection_range()
     }
 
-    /// The selected text, or `None` when nothing is selected, when no drag
-    /// extended the selection past its anchor, or when the selection covers only
-    /// blank cells.
-    ///
-    /// The selection reads as [`TermScreen::span_text`] reads a span, which is
-    /// how a terminal copies a selection.
+    /// The selected text, or `None` when no selection marks a cell or the
+    /// selection covers only blank cells. See [`TermScreen::selection_text`].
     pub fn selection_text(&self) -> Option<String> {
-        let selection = self.painted_selection()?;
-        let (start, end) = selection.ordered();
-        let text = self.term.span_text(start, end);
-        (!text.trim().is_empty()).then_some(text)
+        self.term.selection_text()
     }
 
     /// Resize the emulator and its PTY to `rows` by `cols` so the child reflows
@@ -201,7 +124,7 @@ impl TermSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{TermSelection, TermSession};
+    use super::TermSession;
     use crate::test_fixture::fake_term_session;
     use std::collections::HashSet;
 
@@ -211,10 +134,11 @@ mod tests {
         session
     }
 
-    fn selection(anchor: (usize, usize), head: (usize, usize)) -> TermSelection {
-        let mut sel = TermSelection::new(anchor.0, anchor.1);
-        sel.extend_to(head.0, head.1);
-        sel
+    /// Select from viewport cell `anchor` to `head`, both `(row, col)`, as a
+    /// press and a drag do.
+    fn select(session: &mut TermSession, anchor: (usize, usize), head: (usize, usize)) {
+        session.term.start_selection(anchor.0, anchor.1);
+        session.term.extend_selection(head.0, head.1);
     }
 
     // Other tests mint tokens on their own threads, so this asserts only
@@ -227,19 +151,22 @@ mod tests {
 
     #[test]
     fn contains_spans_full_middle_rows_in_reading_order() {
-        let sel = selection((0, 3), (2, 1));
+        let mut session = session_with(b"");
+        select(&mut session, (0, 3), (2, 1));
+        let range = session.painted_selection().expect("the drag marked cells");
+        let contains = |row, col| range.contains(session.term.grid_point(row, col));
         assert!(
-            !sel.contains(0, 2),
+            !contains(0, 2),
             "a col before the anchor on the first row is out"
         );
-        assert!(sel.contains(0, 3), "the anchor cell is in");
+        assert!(contains(0, 3), "the anchor cell is in");
         assert!(
-            sel.contains(1, 19),
+            contains(1, 19),
             "any col on a fully-spanned middle row is in"
         );
-        assert!(sel.contains(2, 1), "the head cell is in");
+        assert!(contains(2, 1), "the head cell is in");
         assert!(
-            !sel.contains(2, 2),
+            !contains(2, 2),
             "a col past the head on the last row is out"
         );
     }
@@ -247,21 +174,21 @@ mod tests {
     #[test]
     fn selection_text_reads_a_single_row_span() {
         let mut session = session_with(b"hello world");
-        session.selection = Some(selection((0, 0), (0, 4)));
+        select(&mut session, (0, 0), (0, 4));
         assert_eq!(session.selection_text().as_deref(), Some("hello"));
     }
 
     #[test]
     fn selection_text_joins_rows_and_trims_trailing_blanks() {
         let mut session = session_with(b"abc\r\ndef");
-        session.selection = Some(selection((0, 0), (1, 2)));
+        select(&mut session, (0, 0), (1, 2));
         assert_eq!(session.selection_text().as_deref(), Some("abc\ndef"));
     }
 
     #[test]
     fn selection_text_is_none_over_blank_cells() {
         let mut session = session_with(b"");
-        session.selection = Some(selection((0, 0), (0, 5)));
+        select(&mut session, (0, 0), (0, 5));
         assert_eq!(session.selection_text(), None);
     }
 
@@ -305,7 +232,7 @@ mod tests {
     /// `text`.
     fn read_span(text: &str, anchor: (usize, usize), head: (usize, usize)) -> Option<String> {
         let mut session = session_with(text.as_bytes());
-        session.selection = Some(selection(anchor, head));
+        select(&mut session, anchor, head);
         session.selection_text()
     }
 }

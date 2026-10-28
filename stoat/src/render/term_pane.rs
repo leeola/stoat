@@ -19,10 +19,12 @@ use ratatui::{
 /// the focused pane. A drag hides it, so the pane never shows a second cursor
 /// beside the selection.
 ///
-/// A mouse selection over the pane ([`TermSession::selection`]) tints its cells
-/// with the theme's selection style so the highlight follows the drag and
-/// persists until it is cleared. The zero-width selection a click leaves paints
-/// nothing, so a click draws no cell that reads as a cursor.
+/// A mouse selection over the pane
+/// ([`TermScreen::selection_range`](crate::term_screen::TermScreen::selection_range))
+/// tints its cells with the theme's selection style, so the highlight follows
+/// the drag and the text under it, and persists until it is cleared. The
+/// zero-width selection a click leaves paints nothing, so a click draws no
+/// cell that reads as a cursor.
 pub(crate) fn render_term_pane(
     agent: &TermSession,
     theme: &crate::theme::Theme,
@@ -55,7 +57,7 @@ pub(crate) fn render_term_pane(
                 style = style.bg(bg);
             }
             style = style.add_modifier(cell.modifiers);
-            if selection.is_some_and(|sel| sel.contains(row_idx, col)) {
+            if selection.is_some_and(|range| range.contains(term.grid_point(row_idx, col))) {
                 style = style.patch(selection_style);
             }
             let target = &mut buf[(x, y)];

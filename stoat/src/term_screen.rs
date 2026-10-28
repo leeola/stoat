@@ -19,7 +19,8 @@ use crate::{
 use alacritty_terminal::{
     event::{Event, EventListener},
     grid::{Dimensions, Scroll},
-    index::{Column, Line, Point},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionRange, SelectionType},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
         Config, TermMode,
@@ -405,6 +406,95 @@ impl TermScreen {
         moved
     }
 
+    /// Anchor a mouse selection at viewport cell (`row`, `col`), which marks
+    /// no cell until a drag extends it.
+    ///
+    /// The selection holds grid points, so output that scrolls the screen and
+    /// a resize carry it with its text. A column change, an erase over its
+    /// rows, and a switch of screens drop it.
+    pub fn start_selection(&mut self, row: usize, col: usize) {
+        let point = self.grid_point(row, col);
+        self.term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+    }
+
+    /// Move the selection's reaching end to viewport cell (`row`, `col`), and
+    /// report whether the selected range changed.
+    ///
+    /// Both endpoints stay inclusive in either drag direction. A head back on
+    /// the anchor marks no cell, as a press does. With no selection, nothing
+    /// moves.
+    ///
+    /// A terminal in any-motion tracking reports a drag per pointer motion
+    /// rather than per cell, so the answer is what lets a caller drop the
+    /// repeats.
+    pub fn extend_selection(&mut self, row: usize, col: usize) -> bool {
+        let point = self.grid_point(row, col);
+        let before = self.selection_range();
+        let Some(selection) = self.term.selection.as_mut() else {
+            return false;
+        };
+        selection.update(point, Side::Left);
+        selection.include_all();
+
+        // Inclusive sides give the anchor cell alone a range of one cell,
+        // which only a head back on the anchor makes.
+        if self
+            .selection_range()
+            .is_some_and(|range| range.start == range.end)
+        {
+            self.term.selection = Some(Selection::new(SelectionType::Simple, point, Side::Left));
+        }
+        self.selection_range() != before
+    }
+
+    /// Drop the mouse selection.
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// The selected range in grid points, or `None` when no selection marks a
+    /// cell.
+    ///
+    /// A press leaves a selection that marks none, so whatever the selection
+    /// paints or copies reads this.
+    pub fn selection_range(&self) -> Option<SelectionRange> {
+        self.term.selection.as_ref()?.to_range(&self.term)
+    }
+
+    /// The grid point that viewport cell (`row`, `col`) shows, which
+    /// [`Self::selection_range`] is measured in.
+    pub fn grid_point(&self, row: usize, col: usize) -> Point {
+        Point::new(self.grid_line(row), Column(col))
+    }
+
+    /// The selected text, or `None` when no selection marks a cell or the
+    /// selection covers only blank cells.
+    ///
+    /// A wide character reads once, also from its second column, and a
+    /// combining mark stays with its base. A tab reads as a tab, not as the
+    /// blank columns up to its stop. The empty cells at the end of a row drop,
+    /// and a row the program wrapped joins the next one with no line break.
+    pub fn selection_text(&self) -> Option<String> {
+        let SelectionRange { start, mut end, .. } = self.selection_range()?;
+
+        // `bounds_to_string` looks on the row above for the character that a
+        // wrapped wide spacer stands for, and the oldest row the grid holds has
+        // no row above it. The spacer reads as nothing and its row wraps, so a
+        // range that stops short of it loses no text and no line break.
+        let last = self.term.last_column();
+        if end.column == last
+            && last.0 > 0
+            && self.term.grid()[end.line][last]
+                .flags
+                .contains(TermFlags::LEADING_WIDE_CHAR_SPACER)
+        {
+            end.column -= 1;
+        }
+
+        let text = self.term.bounds_to_string(start, end);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     /// The styled cells of viewport row `idx`, left to right.
     ///
     /// Always returns [`Self::cols`] cells. A row index past the viewport
@@ -473,47 +563,6 @@ impl TermScreen {
         }
         text.truncate(text.trim_end_matches('\n').len());
         text
-    }
-
-    /// The text from viewport cell `start` through cell `end`, as a copy of
-    /// that span reads.
-    ///
-    /// Each cell is `(row, col)`, and `start` comes first in reading order. A
-    /// cell past the viewport reads as the nearest cell inside it.
-    ///
-    /// A wide character reads once, also from its second column, and a
-    /// combining mark stays with its base. A tab reads as a tab, not as the
-    /// blank columns up to its stop. The empty cells at the end of a row drop,
-    /// and a row the program wrapped joins the next one with no line break.
-    pub fn span_text(&self, start: (usize, usize), end: (usize, usize)) -> String {
-        let last_row = self.rows() - 1;
-        let last_col = self.cols() - 1;
-        let end_row = end.0.min(last_row);
-        let mut end_col = end.1.min(last_col);
-
-        // `bounds_to_string` looks on the row above for the character that a
-        // wrapped wide spacer stands for. The oldest row the grid holds has no
-        // row above it, and it is the top row of the view when no history
-        // exists or when the view is at the top of history. The spacer reads as
-        // nothing and its row wraps, so a span that stops short of it loses no
-        // text and no line break.
-        let line = &self.term.grid()[self.grid_line(end_row)];
-        if end_col == last_col
-            && end_col > 0
-            && line[Column(end_col)]
-                .flags
-                .contains(TermFlags::LEADING_WIDE_CHAR_SPACER)
-        {
-            end_col -= 1;
-        }
-
-        self.term.bounds_to_string(
-            Point::new(
-                self.grid_line(start.0.min(last_row)),
-                Column(start.1.min(last_col)),
-            ),
-            Point::new(self.grid_line(end_row), Column(end_col)),
-        )
     }
 
     /// The cursor cell, or `None` when the program has hidden it.
@@ -1109,11 +1158,13 @@ mod tests {
     }
 
     #[test]
-    fn span_text_reads_the_scrolled_rows() {
+    fn selection_text_reads_the_scrolled_rows() {
         let mut term = six_lines_on_four_rows();
         term.scroll_lines(2);
+        term.start_selection(0, 0);
+        term.extend_selection(1, 1);
 
-        assert_eq!(term.span_text((0, 0), (1, 1)), "l0\nl1");
+        assert_eq!(term.selection_text().as_deref(), Some("l0\nl1"));
     }
 
     #[test]
@@ -1126,5 +1177,56 @@ mod tests {
 
         term.feed(b"\x1b[?1049l");
         assert!(!term.alternate_scroll());
+    }
+
+    /// A drag selects both of its end cells in either direction. A press marks
+    /// no cell, and neither does a drag that returns to it. A drag with no
+    /// press moves nothing.
+    #[test]
+    fn a_selection_marks_both_ends_until_the_drag_returns_to_its_anchor() {
+        let mut term = TermScreen::new(2, 10);
+        term.feed(b"hello");
+        assert!(!term.extend_selection(0, 3), "no press, so nothing moves");
+        term.start_selection(0, 1);
+        let pressed = term.selection_range();
+        term.extend_selection(0, 3);
+        let forward = term.selection_text();
+        term.start_selection(0, 3);
+        term.extend_selection(0, 1);
+        let backward = term.selection_text();
+        term.extend_selection(0, 3);
+
+        assert_eq!(
+            (pressed, forward, backward, term.selection_range()),
+            (None, Some("ell".to_string()), Some("ell".to_string()), None),
+        );
+    }
+
+    /// A line of output scrolls the selected row up the screen, and the
+    /// selection rides it. A view moved into history finds it a row lower.
+    #[test]
+    fn a_selection_follows_its_rows_when_output_scrolls() {
+        let mut term = TermScreen::new(4, 20);
+        term.feed(b"aa\r\nbb\r\nc\r\nd");
+        term.start_selection(1, 0);
+        term.extend_selection(1, 1);
+
+        term.feed(b"\r\ne");
+        let range = term.selection_range().expect("the drag marked cells");
+        let live = (
+            term.selection_text(),
+            range.contains(term.grid_point(0, 0)),
+            range.contains(term.grid_point(1, 0)),
+        );
+        term.scroll_lines(1);
+        let scrolled = term
+            .selection_range()
+            .is_some_and(|range| range.contains(term.grid_point(1, 0)));
+
+        assert_eq!(live, (Some("bb".to_string()), true, false));
+        assert!(
+            scrolled,
+            "the view one row back shows the selection a row lower"
+        );
     }
 }
