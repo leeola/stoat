@@ -95,7 +95,17 @@ impl XtermKey {
     }
 }
 
-/// One key press as the encoder reads it.
+/// Whether a key event is the first press, an autorepeat, or the release.
+///
+/// The kitty keyboard protocol tells them apart under its event-types flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyEventKind {
+    Press,
+    Repeat,
+    Release,
+}
+
+/// One key press, repeat, or release as the encoder reads it.
 ///
 /// Built from a winit key event at the call site and kept apart from it,
 /// because winit builds no event by hand and the tests need presses of their
@@ -112,6 +122,8 @@ pub(crate) struct KeyPress<'a> {
     /// Where the key sits, which tells a left modifier from a right one and a
     /// keypad key from its twin in the main block.
     pub(crate) location: KeyLocation,
+    /// Whether this is the first press, an autorepeat, or the release.
+    pub(crate) kind: KeyEventKind,
 }
 
 /// The font-size step a key press maps to, or `None` when it is not the
@@ -287,6 +299,12 @@ pub(crate) fn is_modifier_key(key: &Key) -> bool {
 /// associated-text flag adds the typed text. Super takes the modifier bit 8 in
 /// the CSI form. An unmodified cursor key in application cursor mode keeps its
 /// SS3 form under every flag.
+///
+/// A repeat sends the bytes of a press. A release has no legacy bytes, so it
+/// sends nothing unless the child pushed the event-types flag. A release of
+/// Enter, Tab, or Backspace also needs the report-all flag. Under the
+/// event-types flag, the CSI form of a repeat appends `:2` to the modifier
+/// field, and the CSI form of a release appends `:3`.
 pub(crate) fn encode_key(
     press: &KeyPress<'_>,
     mods: ModifiersState,
@@ -319,6 +337,23 @@ fn encode_key_with(
         true => mods.difference(ModifiersState::ALT),
         false => mods,
     };
+
+    // A release has no legacy bytes, so it reaches the child only under the
+    // event-types flag. Enter, Tab, and Backspace keep their legacy press
+    // bytes below the report-all flag, and the protocol holds back their
+    // release below it too.
+    if press.kind == KeyEventKind::Release {
+        let legacy_press = matches!(
+            press.logical,
+            Key::Named(NamedKey::Enter | NamedKey::Tab | NamedKey::Backspace)
+        );
+        if !keyboard.contains(TermMode::REPORT_EVENT_TYPES)
+            || (legacy_press && !keyboard.contains(TermMode::REPORT_ALL_KEYS_AS_ESC))
+        {
+            return None;
+        }
+        return csi_u_sequence(press, csi_mods, keyboard);
+    }
     if takes_csi_u(press, csi_mods, app_cursor, keyboard) {
         return csi_u_sequence(press, csi_mods, keyboard);
     }
@@ -457,9 +492,12 @@ fn takes_csi_u(
 ///
 /// The form is `CSI code ; mods u`, or the legacy CSI shape `CSI 1 ; mods X`
 /// or `CSI n ; mods ~` for a navigation or function key. The modifier field is
-/// `1 + shift + 2 alt + 4 ctrl + 8 super`, left out when it is 1 and no text
+/// `1 + shift + 2 alt + 4 ctrl + 8 super`, left out when it is 1 and nothing
 /// follows. The alternate-keys flag adds a shifted codepoint to the code, and
 /// the associated-text flag adds the typed text after the field.
+///
+/// Under the event-types flag a repeat appends `:2` to the field and a release
+/// `:3`, and a release carries no text.
 fn csi_u_sequence(
     press: &KeyPress<'_>,
     mods: ModifiersState,
@@ -467,13 +505,20 @@ fn csi_u_sequence(
 ) -> Option<Vec<u8>> {
     let report_all = keyboard.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
     let mut modifiers = kitty_modifier_bits(mods);
+    let event_type = match press.kind {
+        _ if !keyboard.contains(TermMode::REPORT_EVENT_TYPES) => None,
+        KeyEventKind::Press => None,
+        KeyEventKind::Repeat => Some('2'),
+        KeyEventKind::Release => Some('3'),
+    };
     let text = press.text.filter(|text| {
         keyboard.contains(TermMode::REPORT_ASSOCIATED_TEXT)
+            && press.kind != KeyEventKind::Release
             && !text.is_empty()
             && !is_control_text(text)
     });
 
-    let field_follows = modifiers != 0 || text.is_some();
+    let field_follows = modifiers != 0 || event_type.is_some() || text.is_some();
     let (code, terminator) = match keypad_code(press)
         .or_else(|| kitty_function_code(press))
         .or_else(|| xterm_function_code(press, field_follows))
@@ -484,8 +529,12 @@ fn csi_u_sequence(
     };
 
     let mut sequence = format!("\x1b[{code}");
-    if modifiers != 0 || text.is_some() {
+    if modifiers != 0 || event_type.is_some() || text.is_some() {
         sequence.push_str(&format!(";{}", modifiers + 1));
+    }
+    if let Some(event_type) = event_type {
+        sequence.push(':');
+        sequence.push(event_type);
     }
     for (i, ch) in text.into_iter().flat_map(str::chars).enumerate() {
         let separator = if i == 0 { ';' } else { ':' };
@@ -613,9 +662,10 @@ fn xterm_function_code(press: &KeyPress<'_>, field_follows: bool) -> Option<(Str
 /// The code of Tab, Enter, Escape, Space, or Backspace, or under the report-all
 /// flag of a bare modifier or lock key.
 ///
-/// A pressed modifier also sets its own bit in `modifiers`. The protocol counts
-/// it as held from its own press, and the window system reports the new
-/// modifier state only after the press.
+/// A pressed modifier also sets its own bit in `modifiers`, and a released one
+/// clears it. The protocol counts a modifier as held from its own press to its
+/// own release, and the window system reports the new modifier state only after
+/// the key event.
 fn control_or_modifier_code(
     press: &KeyPress<'_>,
     report_all: bool,
@@ -647,13 +697,17 @@ fn control_or_modifier_code(
         (NamedKey::NumLock, _) => 57360,
         _ => return None,
     };
-    *modifiers |= match named {
+    let bit = match named {
         NamedKey::Shift => 1,
         NamedKey::Alt => 2,
         NamedKey::Control => 4,
         NamedKey::Super => 8,
         _ => 0,
     };
+    match press.kind {
+        KeyEventKind::Release => *modifiers &= !bit,
+        KeyEventKind::Press | KeyEventKind::Repeat => *modifiers |= bit,
+    }
     Some((code.to_string(), 'u'))
 }
 
@@ -1602,6 +1656,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_release_reports_under_event_types() {
+        let events = TermMode::REPORT_EVENT_TYPES;
+        let disambiguate = TermMode::DISAMBIGUATE_ESC_CODES;
+        let report_all = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let with_text = events | report_all | TermMode::REPORT_ASSOCIATED_TEXT;
+        let a = Key::Character("a".into());
+        let escape = Key::Named(NamedKey::Escape);
+        let enter = Key::Named(NamedKey::Enter);
+        let shift_key = Key::Named(NamedKey::Shift);
+        let send = |key: &Key, kind, flags| {
+            let event = KeyPress { kind, ..press(key) };
+            encode_key(&event, ModifiersState::empty(), false, flags)
+        };
+        let release = KeyEventKind::Release;
+        let repeat = KeyEventKind::Repeat;
+        let left_shift_release = KeyPress {
+            location: KeyLocation::Left,
+            kind: release,
+            ..press(&shift_key)
+        };
+
+        assert_eq!(
+            [
+                send(&a, release, events),
+                send(&a, release, TermMode::empty()),
+                send(&a, release, disambiguate),
+                send(&a, release, with_text),
+                send(&a, repeat, with_text),
+                send(&escape, repeat, disambiguate | events),
+                send(&escape, repeat, disambiguate),
+                send(&enter, release, events),
+                send(&enter, release, events | report_all),
+                encode_key(
+                    &left_shift_release,
+                    ModifiersState::SHIFT,
+                    false,
+                    events | report_all
+                ),
+            ],
+            [
+                Some(b"\x1b[97;1:3u".to_vec()),
+                None,
+                None,
+                Some(b"\x1b[97;1:3u".to_vec()),
+                Some(b"\x1b[97;1:2;97u".to_vec()),
+                Some(b"\x1b[27;1:2u".to_vec()),
+                Some(b"\x1b[27u".to_vec()),
+                None,
+                Some(b"\x1b[13;1:3u".to_vec()),
+                Some(b"\x1b[57441;1:3u".to_vec()),
+            ],
+            "only the event-types flag adds the kind, a release drops its text, and a \
+             released Shift clears its own bit"
+        );
+    }
+
     /// A press of `key` that types the key's own character, as a press with no
     /// Ctrl held does.
     fn press(key: &Key) -> KeyPress<'_> {
@@ -1614,6 +1725,7 @@ mod tests {
             unmodified: key,
             text,
             location: KeyLocation::Standard,
+            kind: KeyEventKind::Press,
         }
     }
 

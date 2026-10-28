@@ -24,7 +24,8 @@ use crate::{
         alternate_scroll_bytes, cell_at, chord_char, chord_csi_u, encode_key, font_step,
         font_step_target, ipc_button, ipc_button_for_code, is_modifier_key, modifier_bits,
         paste_bytes, sgr_button_bytes, sgr_modifier_bits, sgr_motion_bytes, sgr_wheel_bytes,
-        stepped_font_size, swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u, KeyPress,
+        stepped_font_size, swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u,
+        KeyEventKind, KeyPress,
     },
     pty::{self, Pty, PtyOutput},
     stoat_bin,
@@ -74,9 +75,9 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::{Key, ModifiersState},
+    keyboard::{Key, ModifiersState, PhysicalKey},
     platform::modifier_supplement::KeyEventExtModifierSupplement,
     window::{UserAttentionType, Window, WindowAttributes, WindowId},
 };
@@ -681,6 +682,15 @@ struct State {
     /// The most recent modifier state, tracked from `ModifiersChanged` so a key
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
+    /// The physical keys whose press reached the child and whose release has
+    /// not arrived.
+    ///
+    /// The kitty keyboard protocol reports a release only for a key whose press
+    /// the child read. The zoom, chord, and clipboard arms and the macOS Cmd
+    /// swallow keep some presses from the child, and the modifiers at the
+    /// release do not show which. On macOS a Cmd release arrives with Cmd still
+    /// held, though its press arrived without it.
+    forwarded_presses: Vec<PhysicalKey>,
     /// Whether the child has claimed the platform zoom combo for its session, so
     /// each press is forwarded upstream instead of stepping the font size.
     ///
@@ -1175,6 +1185,7 @@ impl ApplicationHandler<PtyEvent> for App {
             terminal_font_size: self.terminal_font_size,
             scale_factor,
             modifiers: ModifiersState::empty(),
+            forwarded_presses: Vec::new(),
             zoom_capture: false,
             zoom_inband: false,
             focused: true,
@@ -1704,7 +1715,10 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.modifiers = modifiers.state();
             },
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state != ElementState::Pressed {
+                // The arms below act on presses, so a release of a zoom, chord,
+                // or clipboard key steps or pastes nothing.
+                if event.state == ElementState::Released {
+                    send_key(state, &event, KeyEventKind::Release);
                     return;
                 }
 
@@ -1827,30 +1841,12 @@ impl ApplicationHandler<PtyEvent> for App {
                     return;
                 }
 
-                // A guard taken in the `if let` scrutinee stays alive through
-                // the body, where `Input::key` locks again and deadlocks.
-                let (app_cursor, keyboard) = {
-                    let terminal = state.terminal.lock();
-                    (terminal.app_cursor(), terminal.keyboard_modes())
+                let kind = if event.repeat {
+                    KeyEventKind::Repeat
+                } else {
+                    KeyEventKind::Press
                 };
-                let unmodified = event.key_without_modifiers();
-                let press = KeyPress {
-                    logical: &event.logical_key,
-                    unmodified: &unmodified,
-                    text: event.text_with_all_modifiers(),
-                    location: event.location,
-                };
-                if let Some(bytes) = encode_key(&press, state.modifiers, app_cursor, keyboard) {
-                    if is_modifier_key(&event.logical_key) {
-                        let _ = state.pty.write(&bytes);
-                    } else {
-                        Input {
-                            terminal: &state.terminal,
-                            pty: &mut state.pty,
-                        }
-                        .key(&bytes);
-                    }
-                }
+                send_key(state, &event, kind);
             },
             WindowEvent::MouseWheel { delta, .. } => {
                 let cell_height =
@@ -2206,6 +2202,53 @@ fn apply_font_step(state: &mut State, delta: i32) {
         .resize(rows as u16, cols as u16, pixel_width, pixel_height);
 
     state.window.request_redraw();
+}
+
+/// Send one key event to the child in the encoding its keyboard modes ask for.
+///
+/// A release reaches the child only for a key whose press or repeat did. A
+/// release or a bare modifier leaves the selection and the view as they are,
+/// and any other key supersedes them as typing does.
+fn send_key(state: &mut State, event: &KeyEvent, kind: KeyEventKind) {
+    if kind == KeyEventKind::Release {
+        let forwarded = state
+            .forwarded_presses
+            .iter()
+            .position(|key| *key == event.physical_key);
+        let Some(i) = forwarded else {
+            return;
+        };
+        state.forwarded_presses.swap_remove(i);
+    }
+
+    // A guard taken in the `if let` scrutinee stays alive through
+    // the body, where `Input::key` locks again and deadlocks.
+    let (app_cursor, keyboard) = {
+        let terminal = state.terminal.lock();
+        (terminal.app_cursor(), terminal.keyboard_modes())
+    };
+    let unmodified = event.key_without_modifiers();
+    let press = KeyPress {
+        logical: &event.logical_key,
+        unmodified: &unmodified,
+        text: event.text_with_all_modifiers(),
+        location: event.location,
+        kind,
+    };
+    if let Some(bytes) = encode_key(&press, state.modifiers, app_cursor, keyboard) {
+        if kind != KeyEventKind::Release && !state.forwarded_presses.contains(&event.physical_key) {
+            state.forwarded_presses.push(event.physical_key);
+        }
+        if kind == KeyEventKind::Release || is_modifier_key(&event.logical_key) {
+            let _ = state.pty.write(&bytes);
+        } else {
+            Input {
+                terminal: &state.terminal,
+                pty: &mut state.pty,
+            }
+            .key(&bytes);
+        }
+    }
 }
 
 /// Somewhere the shell's input goes.
