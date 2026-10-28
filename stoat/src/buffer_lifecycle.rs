@@ -26,6 +26,7 @@ use crate::{
 };
 use lsp_types::{DidCloseTextDocumentParams, TextDocumentIdentifier};
 use std::{
+    borrow::Cow,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::SystemTime,
@@ -39,6 +40,14 @@ use stoat_text::{LineEnding, Rope};
 /// finishes (see [`install_pending_opens`]), so a huge file or slow mount does
 /// not stall input before first paint.
 const OPEN_SYNC_MAX_BYTES: u64 = 1 << 20;
+
+/// The most of a rope's first row an open copies to look for a shebang.
+///
+/// A rope arrives for a file over [`OPEN_SYNC_MAX_BYTES`] and for a gzip file,
+/// and its first row runs the length of the file when the file is one long
+/// line. Linux reads no more than 256 bytes of a shebang line, so an
+/// interpreter named past the bound never runs there.
+const SHEBANG_MAX_CHARS: usize = 256;
 
 /// A large file reading on the blocking pool, awaiting install.
 ///
@@ -662,7 +671,18 @@ fn register_open(
     disk_mtime: Option<SystemTime>,
     origin: OpenOrigin,
 ) -> Option<(BufferId, SharedBuffer)> {
-    let lang = stoat.language_registry.for_path(absolute);
+    let lang = {
+        let first_row = match &content {
+            OpenBody::Text { text, .. } => Cow::Borrowed(text.lines().next().unwrap_or("")),
+            OpenBody::Rope { rope, .. } => Cow::Owned(
+                rope.chars()
+                    .take_while(|&c| c != '\n')
+                    .take(SHEBANG_MAX_CHARS)
+                    .collect(),
+            ),
+        };
+        stoat.language_registry.for_file(absolute, &first_row)
+    };
 
     let (buffer_id, buffer, read_only, existed) = {
         let ws = stoat.workspaces.get_mut(workspace)?;
@@ -1211,6 +1231,39 @@ mod tests {
                 false,
                 bytes,
             ),
+        );
+    }
+
+    /// A script with no extension opens in the language its shebang names,
+    /// whether its read happens in place or on the pool.
+    #[test]
+    fn a_script_with_no_extension_opens_in_its_shebang_language() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = Path::new("/scripts");
+        let plain = root.join("run");
+        let packed = root.join("hook.gz");
+        h.fake_fs()
+            .insert_file(&plain, b"#!/usr/bin/env bash\necho hi\n");
+        h.fake_fs().insert_file(
+            &packed,
+            test_harness::gzip(b"#!/usr/bin/env fish\necho hi\n"),
+        );
+        h.stoat.active_workspace_mut().git_root = root.to_path_buf();
+
+        for path in [&plain, &packed] {
+            dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        }
+        h.settle();
+        install_pending_opens(&mut h.stoat);
+
+        let buffers = &h.stoat.active_workspace().buffers;
+        let language = |path: &Path| {
+            let id = buffers.id_for_path(path)?;
+            buffers.language_for(id).map(|l| l.name)
+        };
+        assert_eq!(
+            [language(&plain), language(&packed)],
+            [Some("bash"), Some("fish")],
         );
     }
 

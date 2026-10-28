@@ -16,6 +16,12 @@ pub struct Language {
     /// extension. The tools that read these files find them by their exact
     /// spelling, so `pkgbuild` is not a `PKGBUILD`.
     pub file_names: &'static [&'static str],
+    /// Interpreter names that select this language from a script's shebang,
+    /// such as `bash` in `#!/usr/bin/env bash`.
+    ///
+    /// Only a file that its name leaves without a language reads its shebang,
+    /// through [`LanguageRegistry::for_file`].
+    pub shebangs: &'static [&'static str],
     pub grammar: TsLanguage,
     /// The query every paint reads, compiled on first use through
     /// [`Self::highlight_query`].
@@ -575,6 +581,34 @@ impl LanguageRegistry {
             .cloned()
     }
 
+    /// The language a script's first line names as its interpreter, as in
+    /// `#!/bin/sh` or `#!/usr/bin/env -S bash -e`.
+    ///
+    /// The interpreter is the last path component of the line's first word.
+    /// When that is `env`, the first later word that is not a flag names the
+    /// interpreter. A line that does not start with `#!` names none.
+    pub fn for_shebang(&self, first_line: &str) -> Option<Arc<Language>> {
+        let mut words = first_line.strip_prefix("#!")?.split_whitespace();
+        let mut interpreter = words.next()?.rsplit('/').next()?;
+        if interpreter == "env" {
+            interpreter = words.find(|word| !word.starts_with('-'))?;
+        }
+
+        self.languages
+            .iter()
+            .find(|l| l.shebangs.contains(&interpreter))
+            .cloned()
+    }
+
+    /// The language a file selects by its name, or else by the interpreter its
+    /// first line names.
+    ///
+    /// The name decides first, so `main.rs` reads as Rust whatever its first
+    /// line names.
+    pub fn for_file(&self, path: &Path, first_line: &str) -> Option<Arc<Language>> {
+        self.for_path(path).or_else(|| self.for_shebang(first_line))
+    }
+
     pub fn languages(&self) -> &[Arc<Language>] {
         &self.languages
     }
@@ -661,6 +695,7 @@ fn make_language_with_injections(
         name,
         extensions,
         file_names: &[],
+        shebangs: &[],
         grammar,
         highlight: HighlightQuery::new(highlight_src),
         highlight_map: Mutex::new(HighlightMap::default()),
@@ -922,6 +957,7 @@ fn make_bash() -> Language {
             "PKGBUILD",
             "APKBUILD",
         ],
+        shebangs: &["sh", "bash", "dash", "zsh"],
         ..make_language(
             "bash",
             &["sh", "bash", "zsh", "dash", "ksh", "ash"],
@@ -939,19 +975,22 @@ fn make_bash() -> Language {
 }
 
 fn make_fish() -> Language {
-    make_language(
-        "fish",
-        &["fish"],
-        grammar::fish(),
-        include_str!("../../vendor/helix/runtime/queries/fish/highlights.scm"),
-        AuxQuerySources {
-            textobjects: Some(include_str!(
-                "../../vendor/helix/runtime/queries/fish/textobjects.scm"
-            )),
-            line_comments: &["#"],
-            ..Default::default()
-        },
-    )
+    Language {
+        shebangs: &["fish"],
+        ..make_language(
+            "fish",
+            &["fish"],
+            grammar::fish(),
+            include_str!("../../vendor/helix/runtime/queries/fish/highlights.scm"),
+            AuxQuerySources {
+                textobjects: Some(include_str!(
+                    "../../vendor/helix/runtime/queries/fish/textobjects.scm"
+                )),
+                line_comments: &["#"],
+                ..Default::default()
+            },
+        )
+    }
 }
 
 fn make_markdown() -> Language {
@@ -1179,6 +1218,39 @@ mod tests {
             [None, None],
             "a name matches whole and in its exact case",
         );
+    }
+
+    #[test]
+    fn for_shebang_names_the_interpreter() {
+        let reg = LanguageRegistry::standard();
+        let name = |line: &str| reg.for_shebang(line).map(|l| l.name);
+
+        assert_eq!(
+            [
+                "#!/bin/sh",
+                "#!/bin/bash",
+                "#!/usr/bin/env bash",
+                "#!/usr/bin/env -S bash -e",
+                "#!/bin/dash",
+                "#!/bin/zsh",
+            ]
+            .map(name),
+            [Some("bash"); 6],
+        );
+        assert_eq!(name("#!/usr/bin/env fish"), Some("fish"));
+        assert_eq!(
+            ["#!/bin/python3", "/bin/sh"].map(name),
+            [None, None],
+            "an unknown interpreter or a line with no #! names nothing",
+        );
+    }
+
+    #[test]
+    fn for_file_prefers_the_extension() {
+        let reg = LanguageRegistry::standard();
+        let name = |path: &str| reg.for_file(Path::new(path), "#!/bin/sh").map(|l| l.name);
+
+        assert_eq!(["a.rs", "run"].map(name), [Some("rust"), Some("bash")]);
     }
 
     #[test]
