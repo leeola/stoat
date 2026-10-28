@@ -6496,20 +6496,24 @@ impl Stoat {
     /// encoding is swallowed. A key that a pane-scoped binding takes never
     /// reaches here. See [`Self::passthrough_binding`].
     ///
-    /// The cursor keys follow the child's own application cursor mode, read
-    /// from its screen, the way a paste follows its bracketed-paste mode.
+    /// The cursor keys follow the child's own application cursor mode, and every
+    /// key the kitty keyboard flags the child pushed, both read from its screen,
+    /// the way a paste follows its bracketed-paste mode.
     ///
     /// The view returns to the live screen first, so the key lands in sight.
     fn route_key_to_term(&mut self, agent_id: TermId, key: KeyEvent) -> UpdateEffect {
         mouse::clear_term_selection(self, agent_id);
         let effect = self.show_term_live_screen(agent_id);
-        let app_cursor = self
+        let Some((app_cursor, keyboard)) = self
             .active_workspace()
             .terms
             .get(agent_id)
-            .is_some_and(|session| session.term.app_cursor());
+            .map(|session| (session.term.app_cursor(), session.term.keyboard_modes()))
+        else {
+            return effect;
+        };
 
-        if let Some(bytes) = term_keys::encode(&key, app_cursor) {
+        if let Some(bytes) = term_keys::encode(&key, app_cursor, keyboard) {
             self.write_to_term(agent_id, &bytes);
         }
         effect

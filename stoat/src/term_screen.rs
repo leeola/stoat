@@ -174,8 +174,12 @@ impl TermScreen {
         // same depth. The grid allocates a history row only when the screen
         // scrolls one out, and a column change reflows only the rows it holds,
         // so both costs scale with the output rather than with the cap.
+        //
+        // The default config turns the kitty keyboard protocol off, and with it
+        // off the parser drops every push, pop, and query of the key flags.
         let config = Config {
             scrolling_history: MAX_SCROLLBACK_ROWS,
+            kitty_keyboard: true,
             ..Config::default()
         };
 
@@ -346,6 +350,17 @@ impl TermScreen {
     /// which is the key string a program reads once it turns the mode on.
     pub fn app_cursor(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// The kitty keyboard protocol flags the program asked for, which decide
+    /// how the pane encodes a key press. Empty when the program asked for none.
+    ///
+    /// A program pushes flags with `CSI > flags u`, pops them with `CSI < u`,
+    /// and changes the top entry with `CSI = flags u`. Each screen keeps its
+    /// own stack, so the alternate screen starts empty and the main screen's
+    /// flags return when the program leaves it.
+    pub fn keyboard_modes(&self) -> TermMode {
+        *self.term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL
     }
 
     /// Whether a wheel over this screen belongs to the child as arrow keys.
@@ -979,6 +994,18 @@ mod tests {
     fn da1_query_replies_with_device_attributes() {
         let mut term = TermScreen::new(24, 80);
         assert_eq!(term.feed(b"\x1b[c"), b"\x1b[?6c".to_vec());
+    }
+
+    #[test]
+    fn keyboard_flags_follow_the_push_and_answer_the_query() {
+        let mut term = TermScreen::new(24, 80);
+        term.feed(b"\x1b[>1u");
+
+        assert_eq!(
+            (term.keyboard_modes(), term.feed(b"\x1b[?u")),
+            (TermMode::DISAMBIGUATE_ESC_CODES, b"\x1b[?1u".to_vec()),
+            "the pushed flags are the screen's, and its reply names them",
+        );
     }
 
     #[test]
