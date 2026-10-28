@@ -8832,6 +8832,29 @@ fn count_prefix_goto_file_start_extends_in_select() {
     assert_eq!(h.selection_spans(), vec![(0, 5, false)]);
 }
 
+/// `g g` is the file-start key too, so a count before it jumps to that line.
+#[test]
+fn count_prefix_g_g_jumps_to_line() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n");
+    h.open_file(&path);
+    h.type_keys("l");
+
+    h.type_keys("1 0 g g");
+    assert_eq!(h.cursor_display_positions(), vec![(9, 0)]);
+}
+
+#[test]
+fn count_prefix_g_g_extends_in_select() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    h.type_keys("v");
+
+    h.type_keys("3 g g");
+    assert_eq!(h.selection_spans(), vec![(0, 5, false)]);
+}
+
 #[test]
 fn goto_file_start_without_count_still_reaches_the_top() {
     let mut h = TestHarness::with_size(20, 10);

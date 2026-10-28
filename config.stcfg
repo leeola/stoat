@@ -687,6 +687,8 @@ on key {
         }
 
         j -> [GotoLastLine(), SetMode(normal)];
+        # Both g g, the Helix spelling, and g k go to the file start.
+        g -> [GotoFileStart(), SetMode(normal)];
         k -> [GotoFileStart(), SetMode(normal)];
         h -> [GotoLineStart(), SetMode(normal)];
         l -> [GotoLineEnd(), SetMode(normal)];
@@ -1018,6 +1020,7 @@ on key {
         ? -> [SetMode(select), OpenReverseSearchInput()];
         i -> [ExtendGotoFirstNonwhitespace(), SetMode(select)];
         j -> [ExtendGotoLastLine(), SetMode(select)];
+        g -> [ExtendGotoFileStart(), SetMode(select)];
         k -> [ExtendGotoFileStart(), SetMode(select)];
         h -> [ExtendToLineStart(), SetMode(select)];
         l -> [ExtendToLineEnd(), SetMode(select)];
