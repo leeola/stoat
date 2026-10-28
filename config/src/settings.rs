@@ -184,6 +184,11 @@ pub struct Settings {
     /// disables dimming. Set `ui.inactive_dim = 0.4;` in stcfg. The raw value
     /// is stored here and clamped to 0.0..=1.0 at the consumer.
     pub ui_inactive_dim: Option<f64>,
+    /// Whether the unfocused-pane fade paints only while the terminal window
+    /// has OS focus. `None` falls back to on. Set
+    /// `ui.inactive_dim_follows_focus = false;` in stcfg to keep the fade
+    /// through an alt-tab.
+    pub ui_inactive_dim_follows_focus: Option<bool>,
     /// Whether a pinned chord mode hides the key-hints overlay it would
     /// otherwise auto-show. `None` falls back to enabled. Set
     /// `ui.pin_hides_hints = false;` in stcfg to keep the box through a pinned
@@ -350,6 +355,9 @@ impl Settings {
             editor_wrap_column: other.editor_wrap_column.or(self.editor_wrap_column),
             ui_tab_bar: other.ui_tab_bar.or(self.ui_tab_bar),
             ui_inactive_dim: other.ui_inactive_dim.or(self.ui_inactive_dim),
+            ui_inactive_dim_follows_focus: other
+                .ui_inactive_dim_follows_focus
+                .or(self.ui_inactive_dim_follows_focus),
             ui_pin_hides_hints: other.ui_pin_hides_hints.or(self.ui_pin_hides_hints),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             session_retention_days: other.session_retention_days.or(self.session_retention_days),
@@ -567,6 +575,11 @@ impl Settings {
                     self.ui_inactive_dim = Some(n);
                 }
             },
+            ["ui", "inactive_dim_follows_focus"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_inactive_dim_follows_focus = Some(b);
+                }
+            },
             ["terminal", "shell"] => {
                 if let Value::Ident(s) | Value::String(s) = &setting.value.node {
                     self.terminal_shell = Some(s.clone());
@@ -717,6 +730,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -859,6 +873,21 @@ mod tests {
         assert_eq!(dim("on init { ui.inactive_dim = 0.4; }"), Some(0.4));
         assert_eq!(dim("on init { ui.inactive_dim = 0; }"), Some(0.0));
         assert_eq!(dim("on init { }"), None, "absent falls back at consumer");
+    }
+
+    #[test]
+    fn from_config_extracts_ui_inactive_dim_follows_focus() {
+        let follows =
+            |src: &str| Settings::from_config(&parse_ok(src)).ui_inactive_dim_follows_focus;
+        assert_eq!(
+            [
+                follows("on init { ui.inactive_dim_follows_focus = false; }"),
+                follows("on init { ui.inactive_dim_follows_focus = true; }"),
+                follows("on init { }"),
+            ],
+            [Some(false), Some(true), None],
+            "absent falls back at the consumer",
+        );
     }
 
     #[test]
@@ -1089,6 +1118,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1139,6 +1169,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1198,6 +1229,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_inactive_dim_follows_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1240,6 +1272,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_inactive_dim_follows_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1284,6 +1317,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1331,6 +1365,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_inactive_dim_follows_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1376,6 +1411,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1434,6 +1470,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1484,6 +1521,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1531,6 +1569,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_inactive_dim_follows_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1573,6 +1612,7 @@ mod tests {
             editor_wrap_column: None,
             ui_tab_bar: None,
             ui_inactive_dim: None,
+            ui_inactive_dim_follows_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,

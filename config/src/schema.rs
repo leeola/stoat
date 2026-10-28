@@ -227,6 +227,15 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "0.25",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("inactive_dim_follows_focus")],
+            shape: ValueShape::Bool,
+            doc: "Whether the unfocused-pane fade paints only while the terminal \
+                  window has OS focus. With the window in the background every \
+                  pane paints unfaded, so the fade marks the focused pane only \
+                  while a keystroke can reach it.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("terminal"), Lit("shell")],
             shape: ValueShape::String,
             doc: "Program a terminal pane spawns as its subshell.",

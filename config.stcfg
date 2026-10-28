@@ -193,6 +193,13 @@ on init {
     # workspace holds a second tab, always pins it, never hides it.
     ui.tab_bar = auto;
 
+    # Fade the unfocused panes only while the stoatty window has focus. The
+    # fade marks the pane a keystroke reaches, and with the window in the
+    # background no keystroke reaches any, so every pane paints plain until
+    # focus returns. Set false to keep the fade through an alt-tab. The
+    # fraction itself is ui.inactive_dim.
+    ui.inactive_dim_follows_focus = true;
+
     # Gutter line numbering: relative (distance from the cursor line),
     # absolute (each line's own number), or off (diagnostic marks only).
     editor.line_numbers = relative;

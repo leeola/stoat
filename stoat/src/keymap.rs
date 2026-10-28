@@ -3943,6 +3943,7 @@ mod tests {
                 editor_wrap_column: None,
                 ui_tab_bar: Some(TabBarMode::Auto),
                 ui_inactive_dim: None,
+                ui_inactive_dim_follows_focus: Some(true),
                 ui_pin_hides_hints: None,
                 highlight_retention: Some(64),
                 session_retention_days: Some(14),
