@@ -16,6 +16,7 @@ use crate::{
 use alacritty_terminal::{
     grid::Dimensions,
     index::{Column, Line, Point},
+    term::TermMode,
 };
 use stoatty_protocol::command::{
     encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_decorations_scope,
@@ -956,6 +957,49 @@ fn tracks_app_cursor_mode() {
 }
 
 #[test]
+fn tracks_pushed_keyboard_modes() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    let mut after = |bytes: &[u8]| {
+        terminal.advance(bytes);
+        terminal.keyboard_modes()
+    };
+    let disambiguate = TermMode::DISAMBIGUATE_ESC_CODES;
+
+    assert_eq!(
+        [
+            after(b""),
+            after(b"\x1b[>1u"),
+            after(b"\x1b[>5u"),
+            after(b"\x1b[<1u"),
+            after(b"\x1b[?1049h"),
+            after(b"\x1b[?1049l"),
+        ],
+        [
+            TermMode::empty(),
+            disambiguate,
+            disambiguate | TermMode::REPORT_ALTERNATE_KEYS,
+            disambiguate,
+            TermMode::empty(),
+            disambiguate,
+        ],
+        "a push replaces the flags, a pop restores them, and each screen keeps its own stack"
+    );
+}
+
+#[test]
+fn a_keyboard_query_reports_the_pushed_flags() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+
+    terminal.advance(b"\x1b[>1u");
+    terminal.advance(b"\x1b[?u");
+    assert_eq!(
+        terminal.take_responses(),
+        b"\x1b[?1u".to_vec(),
+        "the reply names the flags at the top of the stack"
+    );
+}
+
+#[test]
 fn surfaces_osc9_notification() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
 
@@ -1079,11 +1123,12 @@ fn a_reset_out_of_the_alternate_screen_is_a_leave() {
 fn answers_fish_startup_handshake() {
     let mut terminal = Terminal::new(4, 8, Theme::default());
 
-    // fish's startup burst: kitty-keyboard query (unanswered by default),
-    // XTVERSION, then DA1 as its sentinel. The replies come back in order.
+    // fish's startup burst: kitty-keyboard query, XTVERSION, then DA1 as its
+    // sentinel. The replies come back in order.
     terminal.advance(b"\x1b[?u\x1b[>0q\x1b[0c");
 
-    let mut expected = XTVERSION_REPLY.as_bytes().to_vec();
+    let mut expected = b"\x1b[?0u".to_vec();
+    expected.extend_from_slice(XTVERSION_REPLY.as_bytes());
     expected.extend_from_slice(b"\x1b[?6c");
     assert_eq!(terminal.take_responses(), expected);
 }

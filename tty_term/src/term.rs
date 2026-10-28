@@ -1168,7 +1168,12 @@ impl Terminal {
     /// against `theme`.
     pub fn new(rows: usize, cols: usize, theme: Theme) -> Terminal {
         let responses = ResponseSink::default();
-        let config = Config::default();
+        // The default config turns the kitty keyboard protocol off, and with it
+        // off the parser drops every push, pop, and query of the key flags.
+        let config = Config {
+            kitty_keyboard: true,
+            ..Config::default()
+        };
         let scrollback_limit = config.scrolling_history;
         let term = Term::new(config, &GridSize { rows, cols }, responses.clone());
         let palette = default_palette(&theme);
@@ -3459,6 +3464,17 @@ impl Terminal {
     /// unmodified cursor key send its SS3 form in place of its CSI form.
     pub fn app_cursor(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// The kitty keyboard protocol flags the program asked for, which decide
+    /// how a key press encodes. Empty when the program asked for none.
+    ///
+    /// A program pushes flags with `CSI > flags u`, pops them with `CSI < u`,
+    /// and changes the top entry with `CSI = flags u`. Each screen keeps its
+    /// own stack, so the alternate screen starts empty and the main screen's
+    /// flags return when the program leaves it.
+    pub fn keyboard_modes(&self) -> TermMode {
+        *self.term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL
     }
 
     /// Whether focus reporting (DECSET 1004) is on, so the app should send a
