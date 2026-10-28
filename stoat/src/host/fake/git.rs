@@ -1309,6 +1309,22 @@ impl GitRepo for FakeGitRepo {
         None
     }
 
+    fn merge_base(&self, a: &str, b: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        if !state.commits.contains_key(a) || !state.commits.contains_key(b) {
+            return None;
+        }
+        let reachable = state.ancestors_inclusive(b);
+
+        // The walk lists newer commits first, so the first shared commit is the
+        // one nearest both tips of a fork.
+        state
+            .walk_graph(a.to_string(), usize::MAX)
+            .into_iter()
+            .find(|commit| reachable.contains(&commit.sha))
+            .map(|commit| commit.sha)
+    }
+
     fn local_branches(&self) -> Vec<(String, String)> {
         let state = self.state.lock().unwrap();
         state
@@ -2363,6 +2379,29 @@ mod tests {
         assert!(repo.log_range("missing", "c2", 10).is_empty());
         assert!(repo.log_range("f2", "missing", 10).is_empty());
         assert!(repo.log_range("f2", "c2", 0).is_empty());
+    }
+
+    #[test]
+    fn merge_base_is_the_nearest_shared_commit() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("f1", "c1", &[])
+            .commit_with_parent("f2", "f1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .commit("r1", &[]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            [
+                repo.merge_base("f2", "c2"),
+                repo.merge_base("f2", "f1"),
+                repo.merge_base("f2", "r1"),
+                repo.merge_base("f2", "zz"),
+            ],
+            [Some("c1".to_string()), Some("f1".to_string()), None, None],
+            "a fork, an ancestor, a separate root, an unknown sha",
+        );
     }
 
     #[test]

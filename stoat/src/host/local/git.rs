@@ -660,6 +660,13 @@ impl GitRepo for LocalGitRepo {
         Some(commit.id().to_string())
     }
 
+    fn merge_base(&self, a: &str, b: &str) -> Option<String> {
+        let a = git2::Oid::from_str(a).ok()?;
+        let b = git2::Oid::from_str(b).ok()?;
+        let repo = self.repo.lock().expect("git repo lock");
+        repo.merge_base(a, b).ok().map(|oid| oid.to_string())
+    }
+
     fn local_branches(&self) -> Vec<(String, String)> {
         let repo = self.repo.lock().expect("git repo lock");
         let Ok(branches) = repo.branches(Some(BranchType::Local)) else {
@@ -2236,6 +2243,41 @@ mod tests {
         assert!(git.log_range(&unknown, &shas[2], 10).is_empty());
         assert!(git.log_range(&branch[1], &unknown, 10).is_empty());
         assert!(git.log_range(&branch[1], &shas[2], 0).is_empty());
+    }
+
+    #[test]
+    fn merge_base_is_the_nearest_shared_commit() {
+        let (dir, repo, shas) = seeded_repo();
+        let sig = Signature::now("test", "t@t").unwrap();
+        let commit_at = |sha: &str| repo.find_commit(Oid::from_str(sha).unwrap()).unwrap();
+
+        // Committed with no ref to update, so `side` forks from shas[1] while
+        // `main` stays at shas[2], and `orphan` shares no history with either.
+        let side = {
+            let fork = commit_at(&shas[1]);
+            let tree = fork.tree().unwrap();
+            repo.commit(None, &sig, &sig, "side", &tree, &[&fork])
+                .unwrap()
+                .to_string()
+        };
+        let orphan = {
+            let tree = commit_at(&shas[0]).tree().unwrap();
+            repo.commit(None, &sig, &sig, "orphan", &tree, &[])
+                .unwrap()
+                .to_string()
+        };
+
+        let git = discover(&dir);
+        assert_eq!(
+            [
+                git.merge_base(&shas[2], &side),
+                git.merge_base(&shas[1], &shas[2]),
+                git.merge_base(&shas[2], &orphan),
+                git.merge_base(&shas[2], &"0".repeat(40)),
+            ],
+            [Some(shas[1].clone()), Some(shas[1].clone()), None, None],
+            "a fork, an ancestor, a separate root, an unknown sha",
+        );
     }
 
     #[test]

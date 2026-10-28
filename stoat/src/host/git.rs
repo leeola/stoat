@@ -413,6 +413,18 @@ pub trait GitRepo: Send + Sync {
     /// at rather than the tag object. `None` when the revision names nothing.
     fn resolve_rev(&self, rev: &str) -> Option<String>;
 
+    /// The nearest commit that both `a` and `b` descend from, as a full sha.
+    ///
+    /// A diff of a branch against this commit shows the branch's own work and
+    /// none of what landed on the other side after the fork. Each sha counts
+    /// as its own descendant, so a commit and one of its ancestors answer the
+    /// ancestor. After criss-cross merges, more than one commit qualifies, and
+    /// the answer is one of them.
+    ///
+    /// Both arguments are full shas. `None` when either is unknown or the two
+    /// histories share no commit.
+    fn merge_base(&self, a: &str, b: &str) -> Option<String>;
+
     /// Every local branch as `(short name, tip sha)`, e.g. `("main", sha)`.
     ///
     /// Local branches only. Remote-tracking branches are excluded because the
