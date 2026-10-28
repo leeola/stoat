@@ -2472,6 +2472,15 @@ fn snapshot_open_csv_file_highlights() {
 }
 
 #[test]
+fn snapshot_open_bash_file_highlights() {
+    let mut h = crate::test_harness::TestHarness::with_size(40, 6);
+    let path = h.write_file("sample.sh", "for f in a b; do\n  echo \"$f\" # c\ndone\n");
+
+    h.open_file(&path);
+    h.assert_snapshot("snapshot_open_bash_file_highlights");
+}
+
+#[test]
 fn snapshot_open_markdown_file_highlights() {
     let mut h = crate::test_harness::TestHarness::with_size(40, 6);
     let path = h.write_file("sample.md", "# Title\n\nbody\n");

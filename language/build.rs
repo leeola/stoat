@@ -20,6 +20,10 @@ fn main() {
     // d3dbf916446131417e4c2ea9eb8591b23b466d27. The grammar is named csv, so
     // its entry point is tree_sitter_csv though its repo has another name.
     compile_grammar("tree-sitter-csv", "rainbow-csv-tree-sitter", "src", false);
+    // tree-sitter/tree-sitter-bash,
+    // a06c2e4415e9bc0346c6b86d401879ffb44058f7, the rev the vendored Helix
+    // query targets.
+    compile_grammar("tree-sitter-bash", "tree-sitter-bash", "src", true);
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",

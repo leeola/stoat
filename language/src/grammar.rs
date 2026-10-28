@@ -11,6 +11,7 @@ unsafe extern "C" {
     fn tree_sitter_yaml() -> *const ();
     fn tree_sitter_ron() -> *const ();
     fn tree_sitter_csv() -> *const ();
+    fn tree_sitter_bash() -> *const ();
     fn tree_sitter_markdown() -> *const ();
     fn tree_sitter_markdown_inline() -> *const ();
 }
@@ -51,6 +52,12 @@ pub fn csv() -> Language {
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_csv) })
 }
 
+pub fn bash() -> Language {
+    // SAFETY: from_raw takes a function that returns a tree-sitter language
+    // pointer, which is what the grammar's entry point returns.
+    Language::new(unsafe { LanguageFn::from_raw(tree_sitter_bash) })
+}
+
 pub fn markdown() -> Language {
     // SAFETY: from_raw takes a function that returns a tree-sitter language
     // pointer, which is what the grammar's entry point returns.
@@ -65,7 +72,7 @@ pub fn markdown_inline() -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::{csv, json, markdown, markdown_inline, ron, rust, toml, yaml};
+    use super::{bash, csv, json, markdown, markdown_inline, ron, rust, toml, yaml};
     use tree_sitter::Parser;
 
     #[test]
@@ -124,6 +131,14 @@ mod tests {
         p.set_language(&csv()).unwrap();
         let tree = p.parse("a,b\n1,2\n", None).unwrap();
         assert_eq!(tree.root_node().kind(), "csv");
+    }
+
+    #[test]
+    fn loads_bash() {
+        let mut p = Parser::new();
+        p.set_language(&bash()).unwrap();
+        let tree = p.parse("echo hi\n", None).unwrap();
+        assert_eq!(tree.root_node().kind(), "program");
     }
 
     #[test]

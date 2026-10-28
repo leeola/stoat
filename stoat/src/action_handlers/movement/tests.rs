@@ -5517,6 +5517,17 @@ fn toggle_line_comments_ignores_a_block_commented_row() {
     );
 }
 
+/// A shell script comments a row with its own `#` token.
+#[test]
+fn toggle_comments_in_a_shell_script_takes_its_hash() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.sh", "echo hi\n");
+    h.open_file(&path);
+
+    dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+    assert_eq!(h.focused_buffer_text(), "# echo hi\n");
+}
+
 /// The margin is one decision for the whole set, not one per row.
 ///
 /// A row whose token carries no space forces every row to keep its own, so the

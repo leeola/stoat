@@ -1574,7 +1574,9 @@ mod b {
 
     /// JSON and markdown ship outline queries, but their grammars name no node
     /// kind a symbol comes from. The RON grammar names `enum_variant`, but RON
-    /// ships no query. So the index takes nothing from any language but Rust.
+    /// ships no query. Bash ships no outline or tags query, and its grammar
+    /// names no symbol kind. So the index takes nothing from any language but
+    /// Rust.
     #[test]
     fn only_the_rust_language_is_indexable() {
         let registry = LanguageRegistry::standard();
@@ -1587,6 +1589,7 @@ mod b {
         assert_eq!(
             indexed,
             [
+                ("bash", false),
                 ("csv", false),
                 ("json", false),
                 ("markdown", false),

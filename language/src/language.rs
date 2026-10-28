@@ -504,6 +504,7 @@ impl LanguageRegistry {
                 Arc::new(make_yaml()),
                 Arc::new(make_ron()),
                 Arc::new(make_csv()),
+                Arc::new(make_bash()),
                 Arc::new(make_markdown()),
                 Arc::new(make_markdown_inline()),
             ],
@@ -880,6 +881,25 @@ fn make_csv() -> Language {
     )
 }
 
+fn make_bash() -> Language {
+    // The shell dialects among the grammar's file types. A zsh or ksh construct
+    // that bash lacks parses as an error node, and the rest of the script keeps
+    // its colors.
+    make_language(
+        "bash",
+        &["sh", "bash", "zsh", "dash", "ksh", "ash"],
+        grammar::bash(),
+        include_str!("../../vendor/helix/runtime/queries/bash/highlights.scm"),
+        AuxQuerySources {
+            textobjects: Some(include_str!(
+                "../../vendor/helix/runtime/queries/bash/textobjects.scm"
+            )),
+            line_comments: &["#"],
+            ..Default::default()
+        },
+    )
+}
+
 fn make_markdown() -> Language {
     // Inline nodes the block grammar emits parse as markdown-inline, for
     // emphasis, links and code spans.
@@ -1006,13 +1026,14 @@ mod tests {
         );
     }
 
-    const NAMES: [&str; 8] = [
+    const NAMES: [&str; 9] = [
         "rust",
         "json",
         "toml",
         "yaml",
         "ron",
         "csv",
+        "bash",
         "markdown",
         "markdown-inline",
     ];
@@ -1072,6 +1093,12 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.yml")).unwrap().name, "yaml");
         assert_eq!(reg.for_path(Path::new("a.ron")).unwrap().name, "ron");
         assert_eq!(reg.for_path(Path::new("a.csv")).unwrap().name, "csv");
+        assert_eq!(
+            ["a.sh", "a.bash", "a.zsh", "a.dash", "a.ksh", "a.ash"]
+                .map(|path| reg.for_path(Path::new(path)).map(|lang| lang.name)),
+            [Some("bash"); 6],
+            "every shell dialect parses with the bash grammar",
+        );
         assert_eq!(reg.for_path(Path::new("a.md")).unwrap().name, "markdown");
         assert_eq!(
             reg.for_path(Path::new("a.markdown")).unwrap().name,
@@ -1108,6 +1135,12 @@ mod tests {
         assert_eq!(name("RS"), Some("rust"));
         assert_eq!(name("md"), Some("markdown"));
 
+        // A shell fence names its dialect, which the bash grammar parses.
+        assert_eq!(
+            ["sh", "bash", "zsh"].map(name),
+            [Some("bash"), Some("bash"), Some("bash")]
+        );
+
         // Surrounding whitespace is trimmed off the token.
         assert_eq!(name("  rust  "), Some("rust"));
 
@@ -1137,6 +1170,7 @@ mod tests {
                 "yaml",
                 "ron",
                 "csv",
+                "bash",
                 "markdown",
                 "markdown-inline"
             ],
@@ -1243,6 +1277,18 @@ mod tests {
         assert!(
             json.textobjects_query().is_none(),
             "json has no textobjects.scm; query should be None"
+        );
+    }
+
+    /// A textobjects query that fails against its grammar yields nothing in
+    /// silence, so the bash query's compile is asserted on its own.
+    #[test]
+    fn bash_textobjects_query_compiles() {
+        let reg = LanguageRegistry::standard();
+        let bash = reg.languages().iter().find(|l| l.name == "bash").unwrap();
+        assert!(
+            bash.textobjects_query().is_some(),
+            "bash textobjects.scm must compile against the bundled grammar"
         );
     }
 
