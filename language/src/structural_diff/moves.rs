@@ -57,6 +57,24 @@ fn precompute_leaf_counts(arena: &SyntaxArena) -> Vec<usize> {
         .collect()
 }
 
+/// Whether each node's subtree holds an atom with an identity of its own.
+///
+/// An atom whose kind is its own text is a fixed token of its grammar, a
+/// keyword or punctuation. An identifier, a literal, a string, a comment, and a
+/// primitive type each carry a kind other than their text. A subtree of fixed
+/// tokens alone, such as `pub(super)` or `} else {`, reads the same wherever it
+/// sits, so a pairing of two of them as a move says nothing.
+fn precompute_has_identity(arena: &SyntaxArena) -> Vec<bool> {
+    let mut has_identity = vec![false; arena.len()];
+    for i in 0..arena.len() {
+        has_identity[i] = match arena.get(SyntaxId(i)) {
+            Syntax::Atom(atom) => arena.text(atom) != atom.kind,
+            Syntax::List(list) => list.children.iter().any(|c| has_identity[c.0]),
+        };
+    }
+    has_identity
+}
+
 /// Whether each node's subtree holds an atom that `changes` leaves
 /// [`ChangeKind::Pending`].
 ///
@@ -96,6 +114,10 @@ fn precompute_depths(parents: &[Option<SyntaxId>]) -> Vec<usize> {
 /// rejecting lone return/break punctuation. Raising to 8+ starts
 /// missing valid single-statement moves; lowering to 2 produces noisy
 /// pair-the-punctuation matches.
+///
+/// The leaf count only sizes a move. A run of fixed tokens of any size, such
+/// as `pub(super)` or `} else {`, reads the same wherever it sits, so a
+/// separate identity gate rejects it.
 pub const MIN_LEAVES: usize = 4;
 
 /// Maximum number of candidates on a side with the same
@@ -181,8 +203,9 @@ pub fn find_moves(
 /// file 1's RHS pairs across the file boundary.
 ///
 /// See [`find_moves`] for the single-file conventions this generalises
-/// (indexes only subtrees that hold a `Pending` atom, applies
-/// [`MIN_LEAVES`] / [`MAX_AMBIGUITY`] / [`is_trivial`] gates).
+/// (indexes only subtrees that hold a `Pending` atom and an atom with an
+/// identity of its own, applies [`MIN_LEAVES`] / [`MAX_AMBIGUITY`] /
+/// [`is_trivial`] gates).
 pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMoveRecord> {
     let n = files.len();
 
@@ -194,6 +217,8 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     let mut rhs_depths_per: Vec<Vec<usize>> = Vec::with_capacity(n);
     let mut lhs_pending_per: Vec<Vec<bool>> = Vec::with_capacity(n);
     let mut rhs_pending_per: Vec<Vec<bool>> = Vec::with_capacity(n);
+    let mut lhs_identity_per: Vec<Vec<bool>> = Vec::with_capacity(n);
+    let mut rhs_identity_per: Vec<Vec<bool>> = Vec::with_capacity(n);
     for f in files.iter() {
         let lhs_parents = build_parent_map(f.lhs_arena);
         let rhs_parents = build_parent_map(f.rhs_arena);
@@ -209,6 +234,8 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
         rhs_depths_per.push(rhs_depths);
         lhs_pending_per.push(precompute_has_pending(f.lhs_arena, f.lhs_changes));
         rhs_pending_per.push(precompute_has_pending(f.rhs_arena, f.rhs_changes));
+        lhs_identity_per.push(precompute_has_identity(f.lhs_arena));
+        rhs_identity_per.push(precompute_has_identity(f.rhs_arena));
     }
 
     let mut lhs_by_cid = CidIndex::default();
@@ -218,6 +245,7 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
             f.lhs_arena,
             &lhs_leaf_counts_per[file_idx],
             &lhs_pending_per[file_idx],
+            &lhs_identity_per[file_idx],
             file_idx,
             &mut lhs_by_cid,
         );
@@ -225,6 +253,7 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
             f.rhs_arena,
             &rhs_leaf_counts_per[file_idx],
             &rhs_pending_per[file_idx],
+            &rhs_identity_per[file_idx],
             file_idx,
             &mut rhs_by_cid,
         );
@@ -320,8 +349,9 @@ type NodeSet = HashSet<FileNode, FxBuildHasher>;
 ///
 /// A subtree that the search matched in full is no candidate. A copy of it on
 /// the other side is then an addition, not a move of an original that stayed
-/// in place. The [`is_trivial`] denylist and the [`MIN_LEAVES`] threshold also
-/// apply at index time, so noise candidates never enter the pairing loop.
+/// in place. The [`is_trivial`] denylist, the [`MIN_LEAVES`] threshold, and the
+/// identity gate of [`precompute_has_identity`] also apply at index time, so
+/// noise candidates never enter the pairing loop.
 ///
 /// Every file of a side fills one shared `out`, so a content id that spans
 /// files accumulates its candidates in place. Grouping per file and merging
@@ -330,6 +360,7 @@ fn index_candidates(
     arena: &SyntaxArena,
     leaf_counts: &[usize],
     has_pending: &[bool],
+    has_identity: &[bool],
     file_idx: usize,
     out: &mut CidIndex,
 ) {
@@ -342,6 +373,9 @@ fn index_candidates(
             continue;
         }
         if leaf_count < MIN_LEAVES {
+            continue;
+        }
+        if !has_identity[i] {
             continue;
         }
         out.entry(arena.get(id).content_id())
@@ -925,6 +959,55 @@ mod tests {
                 "move target must meet MIN_LEAVES threshold"
             );
         }
+    }
+
+    /// A visibility modifier is a run of keywords and punctuation, so the same
+    /// modifier removed in one place and added in another never pairs as a
+    /// move.
+    #[test]
+    fn a_visibility_modifier_never_moves() {
+        let lhs = "mod m { pub(super) fn foo() {} fn bar() {} pub(crate) fn qux() {} }";
+        let rhs = "mod m { fn foo() {} fn bar() {} pub(super) fn qux() {} }";
+        let (lhs_arena, rhs_arena, _, _, _, records) = find_moves_in(lhs, rhs);
+        let pairs: Vec<(Vec<&str>, &str)> = records
+            .iter()
+            .map(|record| {
+                (
+                    record
+                        .lhs_sources
+                        .iter()
+                        .map(|src| &lhs[full_byte_range(&lhs_arena, *src)])
+                        .collect(),
+                    &rhs[full_byte_range(&rhs_arena, record.rhs_target)],
+                )
+            })
+            .collect();
+        assert!(
+            pairs.iter().all(|(sources, target)| {
+                !target.contains("pub(super)")
+                    && sources.iter().all(|source| !source.contains("pub(super)"))
+            }),
+            "no move pairs a pub(super) modifier: {pairs:?}",
+        );
+    }
+
+    /// A statement of names keeps its moves, because its identifiers give it
+    /// an identity of its own.
+    #[test]
+    fn a_statement_of_names_still_moves() {
+        let lhs = "fn first() { work(a, b, c); keep(); }\nfn second() { other(); }";
+        let rhs = "fn first() { keep(); }\nfn second() { other(); work(a, b, c); }";
+        let (_, rhs_arena, _, _, _, records) = find_moves_in(lhs, rhs);
+        let targets: Vec<&str> = records
+            .iter()
+            .map(|record| &rhs[full_byte_range(&rhs_arena, record.rhs_target)])
+            .collect();
+        assert!(
+            targets
+                .iter()
+                .any(|target| target.contains("work(a, b, c)")),
+            "the call moves between the functions: {targets:?}",
+        );
     }
 
     #[test]

@@ -5093,6 +5093,29 @@ mod tests {
         );
     }
 
+    /// A removed visibility modifier is no move, even when the same modifier
+    /// appears on another line, so its base bytes keep their removal span.
+    #[test]
+    fn a_removed_visibility_modifier_marks_its_base_span_when_it_appears_elsewhere() {
+        let base = "mod m {\npub(super) fn foo() {}\nfn bar() {}\npub(crate) fn qux() {}\n}\n";
+        let buffer = "mod m {\nfn foo() {}\nfn bar() {}\npub(super) fn qux() {}\n}\n";
+        let at = base.find("pub(super)").expect("modifier in base");
+        let first = rust_detail(base, buffer).into_iter().next().flatten();
+        assert_eq!(
+            first.map(|detail| (detail.base_spans.clone(), detail.buffer_spans.clone())),
+            Some((
+                vec![ChangeSpan {
+                    byte_range: at..at + "pub(super)".len(),
+                    kind: ChangeKind::Novel,
+                    move_metadata: None,
+                    prose: ProseChange::None,
+                }],
+                Vec::new(),
+            )),
+            "the first hunk marks the removed modifier on the left and nothing on the right",
+        );
+    }
+
     /// One string change reaches the two hunks its first and third lines
     /// make, and each hunk takes the part of it on its own lines.
     #[test]
