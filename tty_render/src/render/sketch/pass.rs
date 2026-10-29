@@ -272,7 +272,10 @@ pub struct SketchPass {
     /// An `Option` rather than a version starting at zero, because a fresh pass
     /// and a grid that has never declared a mark both start there, and the
     /// first frame must generate rather than trust a counter it never read.
-    last_generated: Option<(GridVersion, CellMetrics)>,
+    ///
+    /// The [`RowAnchor`] joins the key, because a resize can move the last row
+    /// without a grid change, and that moves every mark that reaches it.
+    last_generated: Option<(GridVersion, CellMetrics, RowAnchor)>,
     count: u32,
     /// Runs of instances of marks riding a compositing pool, each with its
     /// host's scissor. Drawn after that pool's composite instead of with the
@@ -432,7 +435,7 @@ impl SketchPass {
     ///
     /// `anchored` names the pools compositing this frame, so a mark anchored to
     /// one is shifted and held back for [`Self::draw_riding`]. `anchor` places
-    /// the occluder rows.
+    /// the marks' rows and the occluder rows.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -464,7 +467,7 @@ impl SketchPass {
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        self.regenerate(device, queue, grid);
+        self.regenerate(device, queue, grid, anchor);
         let cut = build_instances(
             grid.sketches(),
             &self.geometry,
@@ -566,8 +569,12 @@ impl SketchPass {
     /// A mark is wobbled in pixels rather than scaled, so the same list at a new
     /// font size is different geometry. A cache keyed on the list alone keeps
     /// serving the old size's points, which is why the metrics are in the key.
-    fn regenerate(&mut self, device: &Device, queue: &Queue, grid: &Grid) {
-        let key = (GridVersion::new(grid, grid.sketches_epoch()), self.metrics);
+    fn regenerate(&mut self, device: &Device, queue: &Queue, grid: &Grid, anchor: RowAnchor) {
+        let key = (
+            GridVersion::new(grid, grid.sketches_epoch()),
+            self.metrics,
+            anchor,
+        );
         if self.last_generated == Some(key) {
             return;
         }
@@ -576,6 +583,7 @@ impl SketchPass {
         let points = generate_marks(
             grid.sketches(),
             self.metrics,
+            anchor,
             BUDGET,
             &mut self.geometry,
             &mut self.warned_budget,
@@ -919,6 +927,7 @@ fn rgba(color: [u8; 3], alpha: f32) -> [f32; 4] {
 fn generate_marks(
     sketches: &[Sketch],
     metrics: CellMetrics,
+    anchor: RowAnchor,
     budget: Budget,
     out: &mut Vec<MarkGeometry>,
     warned: &mut bool,
@@ -938,8 +947,8 @@ fn generate_marks(
             continue;
         }
 
-        let resolve = |id: u32| component_bounds(sketches, id, metrics);
-        let generated = rough::geometry(&sketch.command, metrics, &resolve);
+        let resolve = |id: u32| component_bounds(sketches, id, metrics, anchor);
+        let generated = rough::geometry(&sketch.command, metrics, anchor, &resolve);
         let chunks: Vec<Vec<Chunk>> = generated
             .strokes
             .iter()
@@ -1053,14 +1062,23 @@ fn ride_shift(
 /// decided by the geometry generator, which sees both ends; this only says
 /// where the box is. An unknown id yields `None`, which drops the connector,
 /// because a line to nowhere points at the wrong thing.
-fn component_bounds(sketches: &[Sketch], id: u32, metrics: CellMetrics) -> Option<ComponentBox> {
+fn component_bounds(
+    sketches: &[Sketch],
+    id: u32,
+    metrics: CellMetrics,
+    anchor: RowAnchor,
+) -> Option<ComponentBox> {
     let target = sketches.iter().find(|sketch| sketch.command.id == id)?;
-    shape_bounds(&target.command.shape, metrics)
+    shape_bounds(&target.command.shape, metrics, anchor)
 }
 
 /// A boxed shape's pixel rectangle and how its outline rounds inside it, or
 /// `None` for a connector, which has no box of its own to point at.
-fn shape_bounds(shape: &SketchShape, metrics: CellMetrics) -> Option<ComponentBox> {
+fn shape_bounds(
+    shape: &SketchShape,
+    metrics: CellMetrics,
+    anchor: RowAnchor,
+) -> Option<ComponentBox> {
     let (cw, ch) = (metrics.width, metrics.height);
     let (bounds, rounding) = match shape {
         SketchShape::Ellipse { bounds, .. } => (bounds, Rounding::Ellipse),
@@ -1075,14 +1093,16 @@ fn shape_bounds(shape: &SketchShape, metrics: CellMetrics) -> Option<ComponentBo
         },
     };
     let x = f32::from(bounds.x) / 16.0 * cw;
-    let y = f32::from(bounds.y) / 16.0 * ch;
+    let (top, height) = (f32::from(bounds.y) / 16.0, f32::from(bounds.h) / 16.0);
+    let y = anchor.row_y(top, ch);
+    // A box that ends above the last row keeps the uniform height, and one that
+    // reaches it ends where that row does, as the generator draws it.
+    let bottom = match top + height < anchor.last_row as f32 {
+        true => y + height * ch,
+        false => anchor.row_y(top + height, ch),
+    };
     Some(ComponentBox {
-        bounds: [
-            x,
-            y,
-            x + f32::from(bounds.w) / 16.0 * cw,
-            y + f32::from(bounds.h) / 16.0 * ch,
-        ],
+        bounds: [x, y, x + f32::from(bounds.w) / 16.0 * cw, bottom],
         rounding,
     })
 }

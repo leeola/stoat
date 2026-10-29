@@ -194,11 +194,7 @@ impl GridLayout {
     /// A row past the last hangs from `bottom_row_y` too, so `row_y(rows)` is
     /// the bottom edge of the last row.
     pub fn row_y(&self, row: usize, cell_h: f32) -> f32 {
-        let last = self.rows.saturating_sub(1);
-        if row < last {
-            return row as f32 * cell_h;
-        }
-        self.bottom_row_y + (row - last) as f32 * cell_h
+        self.row_anchor().row_y(row as f32, cell_h)
     }
 
     /// Returns the pixel y at and below which an element whose rows end at
@@ -242,6 +238,34 @@ impl RowAnchor {
         bottom_row_y: 1e9,
         last_row: u32::MAX,
     };
+
+    /// Returns the pixel y of row coordinate `row` for rows `cell_h` pixels
+    /// tall, as `rows.wgsl` places it.
+    ///
+    /// A row before `last_row` keeps the uniform pitch. A row from `last_row`
+    /// on, whole or fractional, hangs from `bottom_row_y`.
+    pub(crate) fn row_y(&self, row: f32, cell_h: f32) -> f32 {
+        let last = self.last_row as f32;
+        if row < last {
+            return row * cell_h;
+        }
+        self.bottom_row_y + (row - last) * cell_h
+    }
+
+    /// Returns how far an element whose rows end at `end_row` moves to sit on
+    /// the anchored last row.
+    ///
+    /// An element that reaches the last row moves as a whole, by the distance
+    /// from the uniform pitch to `bottom_row_y`. Its own rows keep their pitch,
+    /// and its last row paints where the grid's does. An element that ends
+    /// above the last row stays where it is.
+    pub(crate) fn last_row_shift(&self, end_row: f32, cell_h: f32) -> f32 {
+        let last = self.last_row as f32;
+        if end_row <= last {
+            return 0.0;
+        }
+        self.bottom_row_y - last * cell_h
+    }
 }
 
 /// A panel's cell rectangle plus its declaration-order seq, uploaded to a
@@ -1080,7 +1104,7 @@ mod tests {
     use super::{
         build_occluders_into, exposed_rows, globals_offset, globals_upload_needed, grid_dims,
         grid_layout, grid_size, pool_occluders_into, rotate_row_cache, row_runs, row_uploads,
-        upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder, PoolOccluders,
+        upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder, PoolOccluders, RowAnchor,
         GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
 
@@ -1124,6 +1148,30 @@ mod tests {
         };
         let ys = [0, 49, 50, 51].map(|row| layout.row_y(row, 20.0));
         assert_eq!(ys, [0.0, 980.0, 993.0, 1013.0]);
+
+        let anchor = layout.row_anchor();
+        assert_eq!(
+            [49.5, 50.5].map(|row| anchor.row_y(row, 20.0)),
+            [990.0, 1003.0],
+            "a fraction of a row places on the side of the anchor its row is on",
+        );
+    }
+
+    /// An element that reaches the last row moves up onto it whole, while one
+    /// that ends above it, or any element of a pool, stays.
+    #[test]
+    fn only_an_element_reaching_the_last_row_shifts_onto_it() {
+        let anchor = GridLayout {
+            rows: 51,
+            cols: 80,
+            bottom_row_y: 993.0,
+        }
+        .row_anchor();
+        assert_eq!(
+            [49.0, 50.0, 50.5, 52.0].map(|end_row| anchor.last_row_shift(end_row, 20.0)),
+            [0.0, 0.0, -7.0, -7.0],
+        );
+        assert_eq!(RowAnchor::UNIFORM.last_row_shift(1e6, 20.0), 0.0);
     }
 
     /// A surface too small for one cell still reports a grid, because a

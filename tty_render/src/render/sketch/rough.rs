@@ -20,7 +20,7 @@
 //! output, so the transcription follows the reference's call order rather than
 //! the order that reads most naturally.
 
-use crate::render::CellMetrics;
+use crate::render::{CellMetrics, RowAnchor};
 use std::{array, f64::consts::PI};
 use stoatty_protocol::command::{
     SketchBounds, SketchCommand, SketchEnd, SketchFill, SketchFillStyle, SketchShape, SketchSide,
@@ -313,6 +313,7 @@ enum RoughKind {
 pub(crate) fn geometry<Resolve>(
     command: &SketchCommand,
     metrics: CellMetrics,
+    anchor: RowAnchor,
     resolve: &Resolve,
 ) -> Geometry
 where
@@ -323,6 +324,7 @@ where
         f64::from(metrics.width) / scale,
         f64::from(metrics.height) / scale,
     );
+    let rows = Rows::new(anchor, ch, scale);
     // A component's bounds arrive in physical pixels, so they join the logical
     // frame the rest of the generation runs in.
     let resolve = |id: u32| resolve(id).map(|component| component.logical(metrics.scale_factor));
@@ -331,7 +333,7 @@ where
     match &command.shape {
         SketchShape::Ellipse { bounds, fill } => {
             let (bounds, fill) = (*bounds, *fill);
-            let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
+            let (x, y, w, h) = pixel_bounds(bounds, cw, rows);
             let mut options = shape_options(command, w, h);
             // An ellipse alone pins its fitting, so its radii do not wander and
             // the ring hugs the box it was declared with. A focus ring that
@@ -363,7 +365,7 @@ where
             fill,
         } => {
             let (bounds, radius, fill) = (*bounds, *radius, *fill);
-            let (x, y, w, h) = pixel_bounds(bounds, cw, ch);
+            let (x, y, w, h) = pixel_bounds(bounds, cw, rows);
             let mut options = shape_options(command, w, h);
             let radius_px = (f64::from(radius) / CELL_FRACTION * cw)
                 .min(w / 2.0)
@@ -411,12 +413,12 @@ where
                 bend: *bend,
                 heads: *heads,
             };
-            line_geometry(command, connector, cw, ch, scale, &resolve, &mut random)
+            line_geometry(command, connector, cw, rows, scale, &resolve, &mut random)
         },
         SketchShape::Path { points } => {
             let points: Vec<[f64; 2]> = points
                 .iter()
-                .map(|point| point_px(point.x, point.y, cw, ch))
+                .map(|point| point_px(point.x, point.y, cw, rows))
                 .collect();
             let (w, h) = extents(&points);
             let options = shape_options(command, w, h);
@@ -429,7 +431,7 @@ where
         SketchShape::Elbow { points, radius } => {
             let points: Vec<[f64; 2]> = points
                 .iter()
-                .map(|point| point_px(point.x, point.y, cw, ch))
+                .map(|point| point_px(point.x, point.y, cw, rows))
                 .collect();
             let (w, h) = extents(&points);
             let mut options = shape_options(command, w, h);
@@ -528,13 +530,56 @@ pub(crate) fn inset_quad(corners: [[f32; 2]; 4], radius: f32) -> [[f32; 2]; 4] {
 /// one scale by different numbers. A mark spanning three cells across and three
 /// down covers the same cells at every font size, which is what the unit is
 /// for.
-fn pixel_bounds(bounds: SketchBounds, cw: f64, ch: f64) -> (f64, f64, f64, f64) {
+fn pixel_bounds(bounds: SketchBounds, cw: f64, rows: Rows) -> (f64, f64, f64, f64) {
     (
         f64::from(bounds.x) / CELL_FRACTION * cw,
-        f64::from(bounds.y) / CELL_FRACTION * ch,
+        rows.y(f64::from(bounds.y)),
         f64::from(bounds.w) / CELL_FRACTION * cw,
-        f64::from(bounds.h) / CELL_FRACTION * ch,
+        rows.span(f64::from(bounds.y), f64::from(bounds.h)),
     )
+}
+
+/// The logical row pitch a mark is laid out on, and where the grid's last row
+/// hangs in that frame.
+///
+/// Places a row the way [`RowAnchor::row_y`] does, in f64 in the logical frame
+/// the generator runs in. A box that ends above the last row keeps the
+/// arithmetic the uniform pitch gives, so its jitter matches what that pitch
+/// draws.
+#[derive(Clone, Copy)]
+struct Rows {
+    pitch: f64,
+    bottom_row_y: f64,
+    last_row: f64,
+}
+
+impl Rows {
+    fn new(anchor: RowAnchor, pitch: f64, scale: f64) -> Rows {
+        Rows {
+            pitch,
+            bottom_row_y: f64::from(anchor.bottom_row_y) / scale,
+            last_row: f64::from(anchor.last_row),
+        }
+    }
+
+    /// The logical y `sixteenths` of a cell down.
+    fn y(self, sixteenths: f64) -> f64 {
+        let row = sixteenths / CELL_FRACTION;
+        if row < self.last_row {
+            return row * self.pitch;
+        }
+        self.bottom_row_y + (row - self.last_row) * self.pitch
+    }
+
+    /// The logical height of a span `height` sixteenths tall whose top is
+    /// `top` sixteenths down. A span that reaches the last row ends where that
+    /// row does.
+    fn span(self, top: f64, height: f64) -> f64 {
+        if (top + height) / CELL_FRACTION < self.last_row {
+            return height / CELL_FRACTION * self.pitch;
+        }
+        self.y(top + height) - self.y(top)
+    }
 }
 
 /// The width and height of the box around `points`, which is the size a
@@ -589,7 +634,7 @@ fn line_geometry<Resolve>(
     command: &SketchCommand,
     connector: Connector,
     cw: f64,
-    ch: f64,
+    rows: Rows,
     scale: f64,
     resolve: &Resolve,
     random: &mut Random,
@@ -611,14 +656,14 @@ where
     // side is Auto has no position until that side is picked. The two centers
     // break the circle: they are known before either side is.
     let (Some(from_center), Some(to_center)) = (
-        end_center(from, cw, ch, resolve),
-        end_center(to, cw, ch, resolve),
+        end_center(from, cw, rows, resolve),
+        end_center(to, cw, rows, resolve),
     ) else {
         return empty;
     };
     let (Some((start, from_side)), Some((end, to_side))) = (
-        attach(from, cw, ch, to_center, resolve),
-        attach(to, cw, ch, from_center, resolve),
+        attach(from, cw, rows, to_center, resolve),
+        attach(to, cw, rows, from_center, resolve),
     ) else {
         return empty;
     };
@@ -707,12 +752,12 @@ fn s_curve_controls(
 
 /// Where one end sits before its side is chosen: a fixed point as itself, a
 /// component as the center of its box.
-fn end_center<Resolve>(end: SketchEnd, cw: f64, ch: f64, resolve: &Resolve) -> Option<[f64; 2]>
+fn end_center<Resolve>(end: SketchEnd, cw: f64, rows: Rows, resolve: &Resolve) -> Option<[f64; 2]>
 where
     Resolve: Fn(u32) -> Option<ComponentBox>,
 {
     match end {
-        SketchEnd::Point { x, y } => Some(point_px(x, y, cw, ch)),
+        SketchEnd::Point { x, y } => Some(point_px(x, y, cw, rows)),
         SketchEnd::Component { id, .. } => {
             let [min_x, min_y, max_x, max_y] = resolve(id)?.bounds.map(f64::from);
             Some([(min_x + max_x) / 2.0, (min_y + max_y) / 2.0])
@@ -727,7 +772,7 @@ where
 fn attach<Resolve>(
     end: SketchEnd,
     cw: f64,
-    ch: f64,
+    rows: Rows,
     toward: [f64; 2],
     resolve: &Resolve,
 ) -> Option<([f64; 2], SketchSide)>
@@ -735,7 +780,7 @@ where
     Resolve: Fn(u32) -> Option<ComponentBox>,
 {
     match end {
-        SketchEnd::Point { x, y } => Some((point_px(x, y, cw, ch), SketchSide::Auto)),
+        SketchEnd::Point { x, y } => Some((point_px(x, y, cw, rows), SketchSide::Auto)),
         SketchEnd::Component { id, side } => {
             let component = resolve(id)?;
             let side = match side {
@@ -826,11 +871,8 @@ fn side_point(component: &ComponentBox, side: SketchSide, toward: [f64; 2]) -> [
     }
 }
 
-fn point_px(x: i16, y: i16, cw: f64, ch: f64) -> [f64; 2] {
-    [
-        f64::from(x) / CELL_FRACTION * cw,
-        f64::from(y) / CELL_FRACTION * ch,
-    ]
+fn point_px(x: i16, y: i16, cw: f64, rows: Rows) -> [f64; 2] {
+    [f64::from(x) / CELL_FRACTION * cw, rows.y(f64::from(y))]
 }
 
 /// Wobble one segment, as the base pass or as the overlay that doubles it.

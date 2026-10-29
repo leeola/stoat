@@ -11,7 +11,7 @@
 use crate::{
     atlas::{AtlasKind, GlyphAtlas, GlyphInfo},
     render::{
-        exposed_rows, globals_offset, globals_slot_index, rgb_f32, row_len, row_uploads,
+        exposed_rows, globals_offset, globals_slot_index, overlay, rgb_f32, row_len, row_uploads,
         CellMetrics, CompositeSlot, CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder,
         OccluderBuffer, PoolOccluders, RowAnchor, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
         MAX_COMPOSITE_POOLS,
@@ -207,7 +207,7 @@ struct RidingRuns {
 struct RidingBuild {
     /// The runs and the mark list the instances were built against, or `None`
     /// before the first build. See [`TextPass::last_text_runs`].
-    text_runs: Option<(GridVersion, u64)>,
+    text_runs: Option<(GridVersion, u64, RowAnchor)>,
     /// The [`Atlas::content_epoch`] the instances resolved against.
     atlas_epoch: u64,
     glyphs: Vec<TextInstance>,
@@ -615,7 +615,10 @@ pub struct TextPass {
     /// last built against, or `None` before the first build. `prepare` reuses
     /// those instances while this and the atlas epoch below both still match,
     /// since the runs are unchanged and their atlas UVs have not moved.
-    last_text_runs: Option<(GridVersion, u64)>,
+    ///
+    /// The [`RowAnchor`] the runs were placed by joins the key. A resize can move
+    /// the last row without a grid change, and that moves every run on it.
+    last_text_runs: Option<(GridVersion, u64, RowAnchor)>,
     /// The [`Atlas::content_epoch`] those same instances resolved against.
     last_atlas_epoch: u64,
     /// How many times this pass has rebuilt the live text-run instances, and how
@@ -678,6 +681,10 @@ pub struct TextPass {
     /// A change means an eviction moved a glyph, so the bases are rebuilt even
     /// when the content held.
     last_overlay_atlas_epoch: u64,
+    /// The [`RowAnchor`] [`Self::overlay_base_scissors`] and the uploaded
+    /// overlay instances were placed by. A resize can move the last row without
+    /// a grid change, and that moves every overlay that reaches the last row.
+    last_overlay_anchor: Option<RowAnchor>,
     /// The popover scroll offsets the uploaded overlay instances carry. While
     /// the bases are reused and these still match, the shift and upload are
     /// skipped entirely.
@@ -1168,6 +1175,7 @@ impl TextPass {
             overlay_base_scissors: Vec::new(),
             last_popovers: None,
             last_overlay_atlas_epoch: 0,
+            last_overlay_anchor: None,
             last_popover_scrolls: Vec::new(),
             region_instances,
             region_capacity: INITIAL_CAPACITY,
@@ -1453,9 +1461,9 @@ impl TextPass {
     /// inside one draws nothing, since the pool repaints it, unless it meets one
     /// of `occluders`.
     ///
-    /// `anchor` places the rows of the grid, region, and underline draws. The
-    /// screen-anchored draws keep the uniform pitch, because their builders place
-    /// them in pixels.
+    /// `row_anchor` places the rows of the grid, region, and underline draws. A
+    /// screen-anchored run on the last row, or an overlay that reaches that
+    /// row, moves onto it.
     ///
     /// Runs in two phases: every visible glyph is rasterized first (which may
     /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
@@ -1473,7 +1481,7 @@ impl TextPass {
         occluders: &[Occluder],
         anchored: &[HostRide],
         covered: &[[u32; 4]],
-        anchor: RowAnchor,
+        row_anchor: RowAnchor,
     ) {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
@@ -1588,6 +1596,7 @@ impl TextPass {
         let text_runs = (
             GridVersion::new(grid, grid.text_runs_epoch()),
             grid.sketches_epoch(),
+            row_anchor,
         );
         let runs_rebuilt = self.last_text_runs != Some(text_runs)
             || self.atlas.content_epoch() != self.last_atlas_epoch
@@ -1595,7 +1604,15 @@ impl TextPass {
         if runs_rebuilt {
             let epoch_at_build = self.atlas.content_epoch();
             let mut instances = mem::take(&mut self.text_run_build_scratch);
-            self.build_text_run_instances_into(device, queue, grid, [0.0; 2], 0, &mut instances);
+            self.build_text_run_instances_into(
+                device,
+                queue,
+                grid,
+                [0.0; 2],
+                0,
+                row_anchor,
+                &mut instances,
+            );
             // Packing a run glyph can move the UVs the instances already emitted
             // this pass froze. An eviction reuses a slot without resizing the
             // texture, so only the content epoch reveals it. Every run glyph is
@@ -1607,13 +1624,14 @@ impl TextPass {
                     grid,
                     [0.0; 2],
                     0,
+                    row_anchor,
                     &mut instances,
                 );
             }
             self.text_run_build_scratch = instances;
 
             let mut rects = mem::take(&mut self.run_rect_build_scratch);
-            self.build_run_rects_into(grid, &mut rects);
+            self.build_run_rects_into(grid, row_anchor, &mut rects);
             self.run_rect_build_scratch = rects;
 
             self.last_text_runs = Some(text_runs);
@@ -1695,6 +1713,7 @@ impl TextPass {
                 region.width,
                 region.height,
                 [0.0, 0.0],
+                row_anchor,
                 resolution,
                 self.face.metrics,
             )
@@ -1716,6 +1735,7 @@ impl TextPass {
         let content_epoch = self.atlas.content_epoch();
         let bases_reused = pending_reused
             && content_epoch == self.last_overlay_atlas_epoch
+            && self.last_overlay_anchor == Some(row_anchor)
             && self.overlay_bases.len() == overlays.len()
             && self.overlay_windows.len() == overlays.len()
             && (0..overlays.len()).all(|index| {
@@ -1756,7 +1776,7 @@ impl TextPass {
                 );
                 self.overlay_windows.push(window);
 
-                let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
+                let anchor = overlay_offset(overlay, row_anchor, metrics.height);
                 // Held off the border ring, which is drawn inside the box edge
                 // and which content scrolled against that edge would otherwise
                 // paint over. The content's own one-cell inset already clears
@@ -1768,6 +1788,7 @@ impl TextPass {
                         overlay.width,
                         overlay.height,
                         anchor,
+                        RowAnchor::UNIFORM,
                         resolution,
                         metrics,
                     )
@@ -1779,6 +1800,7 @@ impl TextPass {
             self.overlay_bases = bases;
             self.overlay_base_scissors = scissors;
             self.last_overlay_atlas_epoch = content_epoch;
+            self.last_overlay_anchor = Some(row_anchor);
         }
 
         // A scroll-only frame only slides each overlay's content within its box,
@@ -1801,7 +1823,7 @@ impl TextPass {
 
             for (index, (overlay, base)) in overlays.iter().zip(&self.overlay_bases).enumerate() {
                 let start = overlay_instances.len() as u32;
-                let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
+                let anchor = overlay_offset(overlay, row_anchor, metrics.height);
                 let scroll_px = scroll_at(index) * metrics.height;
                 overlay_instances.extend(base.iter().map(|instance| {
                     let mut instance = *instance;
@@ -1925,14 +1947,14 @@ impl TextPass {
             queue,
             &self.globals,
             0,
-            globals_with(grid_scroll_y, 0, grid_rotation, cover, anchor),
+            globals_with(grid_scroll_y, 0, grid_rotation, cover, row_anchor),
             &mut self.last_globals,
         );
         crate::render::upload_globals(
             queue,
             &self.region_globals,
             0,
-            globals_with(region_scroll_y, 0, grid_rotation, cover, anchor),
+            globals_with(region_scroll_y, 0, grid_rotation, cover, row_anchor),
             &mut self.last_region_globals,
         );
         // The screen-anchored draws keep the uniform pitch, as their builders and
@@ -2297,9 +2319,10 @@ impl TextPass {
                 grid,
                 origin_cells,
                 run_anchor,
+                RowAnchor::UNIFORM,
                 &mut run_instances,
             );
-            self.build_run_rects_into(grid, &mut run_rects);
+            self.build_run_rects_into(grid, RowAnchor::UNIFORM, &mut run_rects);
 
             let target = self.composite_slots.entry(pool, || new_slot(device));
             target.rects.count = run_rects.len() as u32;
@@ -2366,6 +2389,7 @@ impl TextPass {
                 grid,
                 origin_cells,
                 run_anchor,
+                RowAnchor::UNIFORM,
                 &mut run_instances,
             );
         }
@@ -2698,8 +2722,17 @@ impl TextPass {
                 let (glyphs_from, rects_from) =
                     (build.glyphs.len() as u32, build.rects.len() as u32);
                 let follow = follow_slot(grid, run.follow);
-                self.push_run_glyphs(device, queue, run, follow, [0.0; 2], 0, &mut build.glyphs);
-                if let Some(rect) = self.run_rect(grid, run) {
+                self.push_run_glyphs(
+                    device,
+                    queue,
+                    run,
+                    follow,
+                    [0.0; 2],
+                    0,
+                    RowAnchor::UNIFORM,
+                    &mut build.glyphs,
+                );
+                if let Some(rect) = self.run_rect(grid, run, RowAnchor::UNIFORM) {
                     build.rects.push(rect);
                 }
 
@@ -2797,7 +2830,7 @@ impl TextPass {
     /// the rect's left edge lands on the pixel its first glyph starts on, and
     /// two runs at one column back the same pixels. Sizing from the raw product
     /// instead leaves each run's width to its own rounding.
-    fn run_rect(&self, grid: &Grid, run: &TextRun) -> Option<RectInstance> {
+    fn run_rect(&self, grid: &Grid, run: &TextRun, row_anchor: RowAnchor) -> Option<RectInstance> {
         let bg = run.bg?;
         let scale = f32::from(run.scale) / 256.0;
         if scale <= 0.0 {
@@ -2812,8 +2845,9 @@ impl TextPass {
         let row = f32::from(run.row) / 16.0;
         let left = snap_cell(col, 0.0, self.face.metrics.width);
         let right = snap_cell(col + chars * scale, 0.0, self.face.metrics.width);
-        let top = snap_cell(row, 0.0, self.face.metrics.height);
-        let bottom = snap_cell(row + 1.0, 0.0, self.face.metrics.height);
+        let row_top = row_anchor.row_y(row, self.face.metrics.height);
+        let top = row_top.round();
+        let bottom = (row_top + self.face.metrics.height).round();
         Some(RectInstance {
             pos: [left, top],
             dim: [right - left, bottom - top],
@@ -2836,6 +2870,7 @@ impl TextPass {
         follow: u32,
         origin: [f32; 2],
         anchor: u32,
+        row_anchor: RowAnchor,
         out: &mut Vec<TextInstance>,
     ) {
         let scale = f32::from(run.scale) / 256.0;
@@ -2872,6 +2907,7 @@ impl TextPass {
                 self.face.baseline,
                 self.face.metrics,
                 origin,
+                row_anchor,
             );
             out.push(TextInstance {
                 pos,
@@ -2897,7 +2933,15 @@ impl TextPass {
         anchor: u32,
     ) -> Vec<TextInstance> {
         let mut instances = Vec::new();
-        self.build_text_run_instances_into(device, queue, grid, origin, anchor, &mut instances);
+        self.build_text_run_instances_into(
+            device,
+            queue,
+            grid,
+            origin,
+            anchor,
+            RowAnchor::UNIFORM,
+            &mut instances,
+        );
         instances
     }
 
@@ -2918,8 +2962,12 @@ impl TextPass {
     /// passes zero. A rotated one passes the slot its rotation puts row zero
     /// in, which is what keeps the rotation off a run that never scrolls.
     ///
+    /// `row_anchor` places the row each run anchors at, as [`text_run_origin`]
+    /// reads it.
+    ///
     /// `out` is cleared first, so a reused scratch buffer holds only this
     /// frame's instances.
+    #[allow(clippy::too_many_arguments)]
     fn build_text_run_instances_into(
         &mut self,
         device: &Device,
@@ -2927,6 +2975,7 @@ impl TextPass {
         grid: &Grid,
         origin: [f32; 2],
         anchor: u32,
+        row_anchor: RowAnchor,
         out: &mut Vec<TextInstance>,
     ) {
         out.clear();
@@ -2935,7 +2984,7 @@ impl TextPass {
                 continue;
             }
             let follow = follow_slot(grid, run.follow);
-            self.push_run_glyphs(device, queue, run, follow, origin, anchor, out);
+            self.push_run_glyphs(device, queue, run, follow, origin, anchor, row_anchor, out);
         }
     }
 
@@ -2943,7 +2992,7 @@ impl TextPass {
     #[cfg(test)]
     fn build_run_rects(&self, grid: &Grid) -> Vec<RectInstance> {
         let mut rects = Vec::new();
-        self.build_run_rects_into(grid, &mut rects);
+        self.build_run_rects_into(grid, RowAnchor::UNIFORM, &mut rects);
         rects
     }
 
@@ -2959,7 +3008,12 @@ impl TextPass {
     ///
     /// `out` is cleared first, so a reused scratch buffer holds only this
     /// frame's rects.
-    fn build_run_rects_into(&self, grid: &Grid, out: &mut Vec<RectInstance>) {
+    fn build_run_rects_into(
+        &self,
+        grid: &Grid,
+        row_anchor: RowAnchor,
+        out: &mut Vec<RectInstance>,
+    ) {
         out.clear();
         for run in grid.text_runs() {
             if rides_a_pool(run, &self.riding_hosts) {
@@ -2967,7 +3021,7 @@ impl TextPass {
             }
             // A run on the live grid rides no glide, so it takes the same rect
             // as a riding one at rest.
-            if let Some(rect) = self.run_rect(grid, run) {
+            if let Some(rect) = self.run_rect(grid, run, row_anchor) {
                 out.push(rect);
             }
         }
@@ -4894,6 +4948,9 @@ fn cell_box(
 /// the same pixels the live grid puts it on. The centering is an offset within
 /// the row rather than a cell coordinate, so it rides inside the round without
 /// the origin scaling it.
+///
+/// `row_anchor` places the row the run anchors at, so a run on the last row
+/// paints where that row does.
 #[allow(clippy::too_many_arguments)]
 fn text_run_origin(
     col: f32,
@@ -4904,9 +4961,10 @@ fn text_run_origin(
     baseline: f32,
     metrics: CellMetrics,
     origin: [f32; 2],
+    row_anchor: RowAnchor,
 ) -> [f32; 2] {
     let pen_x = snap_cell(col + index as f32 * scale, origin[0], metrics.width);
-    let centered_top = ((row + origin[1]) * metrics.height
+    let centered_top = (row_anchor.row_y(row + origin[1], metrics.height)
         + (metrics.height - metrics.height * scale) / 2.0)
         .round()
         - origin[1] * metrics.height;
@@ -5111,28 +5169,47 @@ fn visible_lines(height: u16, scale: usize, scroll: f32, lines: usize) -> Range<
     first..end.clamp(first, lines)
 }
 
+/// The pixel offset `popover`'s content and scissor take, for rows `cell_h`
+/// pixels tall that `row_anchor` places.
+///
+/// The declared offset, plus the shift [`overlay::last_row_shift`] gives the
+/// box, so a popover that reaches the last row moves onto it with its text.
+fn overlay_offset(popover: &Overlay, row_anchor: RowAnchor, cell_h: f32) -> [f32; 2] {
+    [
+        popover.offset[0] as f32,
+        popover.offset[1] as f32 + overlay::last_row_shift(popover, row_anchor, cell_h),
+    ]
+}
+
 /// The pixel rect `[x, y, w, h]` to scissor a draw to a `width` by `height` cell
 /// rectangle anchored at (`top`, `left`).
+///
+/// Both row edges go through `row_anchor`, so a region that ends at the top of
+/// the last row ends where that row paints.
 ///
 /// The rect is clamped to the surface, which a scissor rect requires. `None`
 /// when the clamped rectangle has no area, which a zero-size scissor would
 /// reject.
+#[allow(clippy::too_many_arguments)]
 fn cell_rect_scissor(
     top: u16,
     left: u16,
     width: u16,
     height: u16,
     offset: [f32; 2],
+    row_anchor: RowAnchor,
     resolution: [f32; 2],
     metrics: CellMetrics,
 ) -> Option<[u32; 4]> {
     let res_w = resolution[0] as u32;
     let res_h = resolution[1] as u32;
+    let top_px = row_anchor.row_y(f32::from(top), metrics.height);
+    let bottom_px = row_anchor.row_y(f32::from(top) + f32::from(height), metrics.height);
 
     let x = ((left as f32 * metrics.width + offset[0]).max(0.0) as u32).min(res_w);
-    let y = ((top as f32 * metrics.height + offset[1]).max(0.0) as u32).min(res_h);
+    let y = ((top_px + offset[1]).max(0.0) as u32).min(res_h);
     let w = ((width as f32 * metrics.width) as u32).min(res_w - x);
-    let h = ((height as f32 * metrics.height) as u32).min(res_h - y);
+    let h = ((bottom_px - top_px) as u32).min(res_h - y);
 
     (w > 0 && h > 0).then_some([x, y, w, h])
 }

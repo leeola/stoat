@@ -62,10 +62,7 @@ struct Globals {
     cell_size: [f32; 2],
     /// Physical pixels per logical pixel, which the border weight scales by.
     scale_factor: f32,
-    /// The [`RowAnchor`] the box edges are placed by.
-    bottom_row_y: f32,
-    last_row: u32,
-    _pad: u32,
+    _pad: f32,
 }
 
 /// The instanced overlay pipeline and its per-frame buffers.
@@ -94,10 +91,7 @@ impl OverlayPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("overlay"),
             source: ShaderSource::Wgsl(
-                crate::render::with_shadow(&crate::render::with_rows(include_str!(
-                    "../shaders/overlay.wgsl"
-                )))
-                .into(),
+                crate::render::with_shadow(include_str!("../shaders/overlay.wgsl")).into(),
             ),
         });
 
@@ -200,8 +194,9 @@ impl OverlayPass {
     /// Upload the frame's uniform and one instance per grid overlay.
     ///
     /// `resolution` is the surface size in physical pixels. `anchor` places the
-    /// box edges. Reallocates the instance buffer only when the overlay count
-    /// outgrows the current capacity.
+    /// grid's last row, which a box that reaches it moves onto. Reallocates the
+    /// instance buffer only when the overlay count outgrows the current
+    /// capacity.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -222,13 +217,17 @@ impl OverlayPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             scale_factor: self.metrics.scale_factor,
-            bottom_row_y: anchor.bottom_row_y,
-            last_row: anchor.last_row,
-            _pad: 0,
+            _pad: 0.0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
-        build_overlay_instances_into(grid.overlays(), self.metrics.scale_factor, &mut self.built);
+        build_overlay_instances_into(
+            grid.overlays(),
+            self.metrics.scale_factor,
+            anchor,
+            self.metrics.height,
+            &mut self.built,
+        );
         self.count = self.built.len() as u32;
         if self.built.is_empty() {
             return;
@@ -275,7 +274,13 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 #[cfg(test)]
 fn build_overlay_instances(overlays: &[Overlay], scale_factor: f32) -> Vec<OverlayInstance> {
     let mut instances = Vec::new();
-    build_overlay_instances_into(overlays, scale_factor, &mut instances);
+    build_overlay_instances_into(
+        overlays,
+        scale_factor,
+        RowAnchor::UNIFORM,
+        1.0,
+        &mut instances,
+    );
     instances
 }
 
@@ -289,11 +294,16 @@ fn build_overlay_instances(overlays: &[Overlay], scale_factor: f32) -> Vec<Overl
 /// Each product rounds, so the box edges land on the whole pixels the cell
 /// rectangle already uses.
 ///
+/// A box that reaches the last row takes [`last_row_shift`] in its anchor
+/// offset, for rows `cell_h` pixels tall that `anchor` places.
+///
 /// `out` is cleared first, so a reused scratch buffer holds only this frame's
 /// overlays.
 fn build_overlay_instances_into(
     overlays: &[Overlay],
     scale_factor: f32,
+    anchor: RowAnchor,
+    cell_h: f32,
     out: &mut Vec<OverlayInstance>,
 ) {
     out.clear();
@@ -310,14 +320,28 @@ fn build_overlay_instances_into(
         corner_radius: (CORNER_RADIUS * scale_factor).round(),
         anchor_offset: [
             (overlay.offset[0] as f32 * scale_factor).round(),
-            (overlay.offset[1] as f32 * scale_factor).round(),
+            (overlay.offset[1] as f32 * scale_factor).round()
+                + last_row_shift(overlay, anchor, cell_h),
         ],
     }));
+}
+
+/// How far `overlay` moves to sit on the anchored last row, in pixels for rows
+/// `cell_h` tall that `anchor` places.
+///
+/// A popover keeps the uniform pitch inside its box, so one that reaches the
+/// last row moves as a whole rather than mapping each of its rows. Its rows
+/// never overlap one another, and a content scroll never jumps at the
+/// boundary. The box and its text both take this shift, which keeps the text
+/// on the box.
+pub(crate) fn last_row_shift(overlay: &Overlay, anchor: RowAnchor, cell_h: f32) -> f32 {
+    anchor.last_row_shift(overlay.top as f32 + overlay.height as f32, cell_h)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{build_overlay_instances, build_overlay_instances_into, OverlayInstance};
+    use crate::render::{GridLayout, RowAnchor};
     use stoatty_term::grid::{Overlay, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -326,8 +350,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_rows(
-            include_str!("../shaders/overlay.wgsl"),
+        let module = wgsl::parse_str(&crate::render::with_shadow(include_str!(
+            "../shaders/overlay.wgsl"
         )))
         .expect("parse overlay");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -353,7 +377,7 @@ mod tests {
 
         let mut scratch = build_overlay_instances(&overlays, 1.0);
         scratch.extend(build_overlay_instances(&overlays, 1.0));
-        build_overlay_instances_into(&overlays, 1.0, &mut scratch);
+        build_overlay_instances_into(&overlays, 1.0, RowAnchor::UNIFORM, 1.0, &mut scratch);
 
         assert_eq!(
             bytemuck::cast_slice::<OverlayInstance, u8>(&scratch),
@@ -403,5 +427,41 @@ mod tests {
         assert_eq!(dense[0].shadow_margin, super::SHADOW_MARGIN * 2.0);
         assert_eq!(dense[0].corner_radius, super::CORNER_RADIUS * 2.0);
         assert_eq!(dense[0].anchor_offset, [-8.0, 12.0]);
+    }
+
+    /// A popover that reaches the last row moves up onto it whole, and one that
+    /// ends above that row stays.
+    #[test]
+    fn a_box_reaching_the_last_row_moves_onto_it() {
+        let anchor = GridLayout {
+            rows: 10,
+            cols: 40,
+            bottom_row_y: 172.0,
+        }
+        .row_anchor();
+        let rows_tall = |height| Overlay {
+            top: 5,
+            left: 0,
+            width: 8,
+            height,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(0, 0, 0),
+            scale: 1,
+            offset: [0, 6],
+            bold: false,
+            content: String::new(),
+        };
+
+        let mut built = Vec::new();
+        build_overlay_instances_into(&[rows_tall(4), rows_tall(5)], 1.0, anchor, 20.0, &mut built);
+        assert_eq!(
+            built
+                .iter()
+                .map(|instance| instance.anchor_offset)
+                .collect::<Vec<_>>(),
+            [[0.0, 6.0], [0.0, -2.0]],
+            "the box over rows 5 to 9 moves up the 8 pixels the last row rose",
+        );
     }
 }

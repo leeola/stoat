@@ -11,10 +11,7 @@ struct Globals {
     // logical pixels, so a 2x display draws it twice as wide and the box keeps
     // its weight against the panel chrome beside it.
     scale_factor: f32,
-    // The pixel y the last row's top paints at, and that row, which rows.wgsl
-    // places the box edges by.
-    bottom_row_y: f32,
-    last_row: u32,
+    pad0: f32,
 }
 
 @group(0) @binding(0)
@@ -62,11 +59,8 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    // Both edges go through row_y, so a box that ends at the top of the last row
-    // ends where that row paints, and a box that reaches it ends at its bottom.
-    let placed = place_box(cell_pos, size, globals.cell_size, globals.bottom_row_y, globals.last_row);
-    let box_min_px = placed.lo + anchor_offset;
-    let box_size_px = placed.hi - placed.lo;
+    let box_min_px = cell_pos * globals.cell_size + anchor_offset;
+    let box_size_px = size * globals.cell_size;
 
     // Expand the quad so the offset, blurred shadow is fully contained on every
     // side. The down-right edge must reach box + offset + margin, so pad by the

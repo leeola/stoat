@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::{
-    render::{self, sketch::rough::COMPONENT_GAP, HostRide},
+    render::{self, sketch::rough::COMPONENT_GAP, GridLayout, HostRide},
     test_support::{read_back, require_headless_device},
 };
 use stoatty_protocol::command::{
@@ -83,7 +83,14 @@ fn boxed(x: i16, y: i16, w: u16, h: u16) -> SketchBounds {
 /// The strokes and their shared points for one mark list at one cell size.
 fn marks(sketches: &[Sketch]) -> (Vec<[f32; 2]>, Vec<MarkGeometry>) {
     let mut geometry = Vec::new();
-    let points = generate_marks(sketches, metrics(), BUDGET, &mut geometry, &mut false);
+    let points = generate_marks(
+        sketches,
+        metrics(),
+        RowAnchor::UNIFORM,
+        BUDGET,
+        &mut geometry,
+        &mut false,
+    );
     (points, geometry)
 }
 
@@ -181,6 +188,7 @@ fn a_mark_past_the_span_cap_builds_nothing() {
     generate_marks(
         &[sketch(2, zigzag.clone())],
         metrics(),
+        RowAnchor::UNIFORM,
         unbounded,
         &mut uncapped,
         &mut false,
@@ -210,7 +218,14 @@ fn a_mark_past_the_span_cap_builds_nothing() {
         ),
     ];
     let (mut geometry, mut warned) = (Vec::new(), false);
-    generate_marks(&list, metrics(), BUDGET, &mut geometry, &mut warned);
+    generate_marks(
+        &list,
+        metrics(),
+        RowAnchor::UNIFORM,
+        BUDGET,
+        &mut geometry,
+        &mut warned,
+    );
     assert_eq!(
         (
             geometry[1].strokes.len(),
@@ -263,7 +278,14 @@ fn generation_stops_at_the_list_point_and_span_caps() {
     };
     let generate = |budget: Budget| {
         let mut geometry = Vec::new();
-        generate_marks(&list, metrics(), budget, &mut geometry, &mut false);
+        generate_marks(
+            &list,
+            metrics(),
+            RowAnchor::UNIFORM,
+            budget,
+            &mut geometry,
+            &mut false,
+        );
         geometry
     };
     // Each mark's own (points, spans), none of them filled.
@@ -918,7 +940,7 @@ fn a_connector_ends_outside_the_component_it_names() {
         "a resolvable connector draws",
     );
 
-    let target = shape_bounds(&list[0].command.shape, metrics())
+    let target = shape_bounds(&list[0].command.shape, metrics(), RowAnchor::UNIFORM)
         .expect("an ellipse has bounds")
         .bounds;
     let leftmost = geometry[1]
@@ -1681,7 +1703,7 @@ fn an_auto_side_faces_the_connector_s_other_end() {
             fill: None,
         },
     );
-    let box_px = shape_bounds(&target.command.shape, metrics())
+    let box_px = shape_bounds(&target.command.shape, metrics(), RowAnchor::UNIFORM)
         .expect("an ellipse has bounds")
         .bounds;
 
@@ -1776,7 +1798,7 @@ fn a_tall_box_is_met_level_with_its_other_end() {
             fill: None,
         },
     );
-    let box_px = shape_bounds(&target.command.shape, metrics())
+    let box_px = shape_bounds(&target.command.shape, metrics(), RowAnchor::UNIFORM)
         .expect("a rect has bounds")
         .bounds;
 
@@ -1829,7 +1851,7 @@ fn a_ring_is_met_on_its_own_curve() {
             fill: None,
         },
     );
-    let box_px = shape_bounds(&target.command.shape, metrics())
+    let box_px = shape_bounds(&target.command.shape, metrics(), RowAnchor::UNIFORM)
         .expect("an ellipse has bounds")
         .bounds;
     let [min_x, min_y, max_x, max_y] = box_px;
@@ -1870,5 +1892,34 @@ fn a_ring_is_met_on_its_own_curve() {
     assert!(
         (on_curve - 1.0).abs() < 0.01,
         "and on the ring's own curve before the gap, got {met:?} at {on_curve}",
+    );
+}
+
+/// A connector's target on the last row is bounded where the generator draws
+/// it, so a line to it still meets the box.
+#[test]
+fn a_component_on_the_last_row_is_bounded_where_it_draws() {
+    // Ten 16-pixel rows whose last row rose 6 pixels.
+    let anchor = GridLayout {
+        rows: 10,
+        cols: 40,
+        bottom_row_y: 138.0,
+    }
+    .row_anchor();
+    let bounds = |y, h| {
+        let shape = SketchShape::Rect {
+            bounds: SketchBounds { x: 0, y, w: 16, h },
+            radius: 0,
+            fill: None,
+        };
+        shape_bounds(&shape, metrics(), anchor).map(|component| component.bounds)
+    };
+
+    assert_eq!(
+        [bounds(9 * 16, 16), bounds(7 * 16, 32)],
+        [
+            Some([0.0, 138.0, 8.0, 154.0]),
+            Some([0.0, 112.0, 8.0, 138.0])
+        ],
     );
 }

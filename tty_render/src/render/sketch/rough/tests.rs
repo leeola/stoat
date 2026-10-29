@@ -1,6 +1,7 @@
 //! Tests for the hand-drawn geometry generator.
 
 use super::*;
+use crate::render::GridLayout;
 use stoatty_protocol::command::{
     SketchEasing, SketchFill, SketchFillStyle, SketchPhase, SketchPoint, SketchStyle, SketchTiming,
 };
@@ -85,7 +86,7 @@ fn an_ellipse_stays_near_its_center() {
     for seed in 1..=16 {
         let mut command = command(shape.clone(), 64);
         command.style.seed = seed;
-        let geometry = geometry(&command, metrics(), &nothing_resolves);
+        let geometry = geometry(&command, metrics(), RowAnchor::UNIFORM, &nothing_resolves);
 
         for stroke in &geometry.strokes {
             for point in &stroke.points {
@@ -118,7 +119,12 @@ fn a_large_ellipse_tessellates_to_its_perimeter_estimate() {
         },
         fill: None,
     };
-    let geometry = geometry(&command(shape, 0), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 0),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     let counts: Vec<usize> = geometry
         .strokes
@@ -172,7 +178,12 @@ fn a_preserved_corner_meets_the_sides_it_joins() {
         radius: 8,
         fill: None,
     };
-    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
     assert_eq!(
         geometry.strokes.len(),
         16,
@@ -401,7 +412,12 @@ fn a_declared_box_lands_where_the_metrics_put_it() {
             style: SketchFillStyle::Solid,
         }),
     };
-    let geometry = geometry(&command(shape, 0), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 0),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     assert_eq!(
         geometry.fill,
@@ -410,6 +426,41 @@ fn a_declared_box_lands_where_the_metrics_put_it() {
             radius: 0.0,
         }),
         "one cell across is a cell width, one cell down is a cell height",
+    );
+}
+
+/// A box on the last row lands where the layout hangs that row, and a box that
+/// ends at the top of the last row stops where that row paints.
+#[test]
+fn a_box_on_the_last_row_lands_on_the_anchored_row() {
+    // Ten 20-pixel rows whose last row rose 6 pixels.
+    let anchor = GridLayout {
+        rows: 10,
+        cols: 40,
+        bottom_row_y: 174.0,
+    }
+    .row_anchor();
+    let corners = |y, h| {
+        let shape = SketchShape::Rect {
+            bounds: SketchBounds { x: 16, y, w: 32, h },
+            radius: 0,
+            fill: Some(SketchFill {
+                color: [0, 0, 255],
+                alpha: 128,
+                style: SketchFillStyle::Solid,
+            }),
+        };
+        geometry(&command(shape, 0), metrics(), anchor, &nothing_resolves)
+            .fill
+            .map(|fill| fill.corners)
+    };
+
+    assert_eq!(
+        [corners(9 * 16, 16), corners(7 * 16, 32)],
+        [
+            Some([[10.0, 174.0], [30.0, 174.0], [30.0, 194.0], [10.0, 194.0]]),
+            Some([[10.0, 140.0], [30.0, 140.0], [30.0, 174.0], [10.0, 174.0]]),
+        ],
     );
 }
 
@@ -425,7 +476,12 @@ fn an_open_box_carries_no_fill() {
         radius: 0,
         fill: None,
     };
-    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     assert_eq!(geometry.fill, None);
     assert!(!geometry.strokes.is_empty(), "the box is still stroked");
@@ -445,7 +501,12 @@ fn a_connector_to_a_missing_component_draws_nothing() {
         bend: 0,
         heads: 0,
     };
-    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     assert_eq!(geometry.strokes, Vec::new());
 }
@@ -458,7 +519,12 @@ fn a_zero_length_connector_draws_nothing() {
         bend: 0,
         heads: 0,
     };
-    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     assert_eq!(geometry.strokes, Vec::new());
 }
@@ -474,7 +540,12 @@ fn a_bend_carries_the_connector_off_the_chord() {
             bend,
             heads: 0,
         };
-        geometry(&command(shape, 0), metrics(), &nothing_resolves)
+        geometry(
+            &command(shape, 0),
+            metrics(),
+            RowAnchor::UNIFORM,
+            &nothing_resolves,
+        )
     };
 
     let straight = line(0);
@@ -507,7 +578,13 @@ fn a_path_passes_through_each_of_its_points() {
     let shape = SketchShape::Path {
         points: points.iter().map(|&(x, y)| SketchPoint { x, y }).collect(),
     };
-    let strokes = geometry(&command(shape, 0), metrics(), &nothing_resolves).strokes;
+    let strokes = geometry(
+        &command(shape, 0),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    )
+    .strokes;
     assert!(!strokes.is_empty(), "a path of three points draws");
 
     let cell = metrics();
@@ -531,7 +608,12 @@ fn a_path_of_one_point_draws_nothing() {
     let shape = SketchShape::Path {
         points: vec![SketchPoint { x: 16, y: 16 }],
     };
-    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     assert_eq!(geometry.strokes, Vec::new());
 }
@@ -547,6 +629,7 @@ fn elbow_strokes(points: &[(i16, i16)], radius: u8, roughness: u8) -> Vec<Stroke
     geometry(
         &command(elbow_shape(points, radius), roughness),
         metrics(),
+        RowAnchor::UNIFORM,
         &nothing_resolves,
     )
     .strokes
@@ -650,9 +733,14 @@ fn each_head_bit_adds_its_arrow() {
             bend: 0,
             heads,
         };
-        geometry(&command(shape, 64), metrics(), &nothing_resolves)
-            .strokes
-            .len()
+        geometry(
+            &command(shape, 64),
+            metrics(),
+            RowAnchor::UNIFORM,
+            &nothing_resolves,
+        )
+        .strokes
+        .len()
     };
 
     let bare = count(0);
@@ -676,7 +764,7 @@ fn one_command_regenerates_the_same_geometry() {
         fill: None,
     };
     let command = command(shape, 96);
-    let draw = || geometry(&command, metrics(), &nothing_resolves);
+    let draw = || geometry(&command, metrics(), RowAnchor::UNIFORM, &nothing_resolves);
 
     assert_eq!(draw(), draw());
 }
@@ -721,8 +809,8 @@ fn the_wobble_is_stated_in_logical_pixels() {
 
     for shape in shapes {
         let command = command(shape, 64);
-        let at_1x = geometry(&command, metrics(), &nothing_resolves);
-        let at_2x = geometry(&command, dense, &nothing_resolves);
+        let at_1x = geometry(&command, metrics(), RowAnchor::UNIFORM, &nothing_resolves);
+        let at_2x = geometry(&command, dense, RowAnchor::UNIFORM, &nothing_resolves);
 
         let points = |mark: &Geometry| -> Vec<[f32; 2]> {
             mark.strokes.iter().flat_map(|s| s.points.clone()).collect()
@@ -762,7 +850,12 @@ fn the_draw_order_is_pinned_to_its_transcription() {
         radius: 0,
         fill: None,
     };
-    let geometry = geometry(&command(shape, 64), metrics(), &nothing_resolves);
+    let geometry = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
 
     assert_eq!(geometry.strokes.len(), 8, "four sides, each stroked twice");
 
@@ -808,7 +901,7 @@ fn two_components_are_joined_by_an_s_curve() {
             1 => Some(boxed_at([0.0, 0.0, 8.0, 8.0])),
             _ => Some(boxed_at([100.0, 0.0, 108.0, 8.0])),
         };
-        geometry(&command(shape, 0), metrics(), &resolve)
+        geometry(&command(shape, 0), metrics(), RowAnchor::UNIFORM, &resolve)
     };
 
     let straight = ends(
@@ -923,7 +1016,7 @@ fn connector_low(from: [f32; 4], to: [f32; 4]) -> f32 {
         1 => Some(boxed_at(from)),
         _ => Some(boxed_at(to)),
     };
-    geometry(&command(shape, 0), metrics(), &resolve)
+    geometry(&command(shape, 0), metrics(), RowAnchor::UNIFORM, &resolve)
         .strokes
         .iter()
         .flat_map(|stroke| &stroke.points)
@@ -945,7 +1038,12 @@ fn a_rounded_box_strokes_its_corners_inside_its_bounds() {
             radius,
             fill: None,
         };
-        geometry(&command(shape, 0), metrics(), &nothing_resolves)
+        geometry(
+            &command(shape, 0),
+            metrics(),
+            RowAnchor::UNIFORM,
+            &nothing_resolves,
+        )
     };
 
     let square = box_at(0);
@@ -1002,7 +1100,12 @@ fn a_rounded_corners_jitter_does_not_grow_with_its_radius() {
                 radius,
                 fill: None,
             };
-            geometry(&command(shape, roughness), metrics(), &nothing_resolves)
+            geometry(
+                &command(shape, roughness),
+                metrics(),
+                RowAnchor::UNIFORM,
+                &nothing_resolves,
+            )
         };
 
         // Measured against the roughness-zero corner as a path rather than
@@ -1056,7 +1159,7 @@ fn a_fill_quad_is_nudged_and_stays_convex() {
         };
         let mut command = command(shape, 64);
         command.style.seed = seed;
-        geometry(&command, metrics(), &nothing_resolves)
+        geometry(&command, metrics(), RowAnchor::UNIFORM, &nothing_resolves)
             .fill
             .expect("a filled box carries a quad")
             .corners
@@ -1119,9 +1222,14 @@ fn a_rounded_boxs_fill_carries_its_radius_and_insets_by_it() {
             style: SketchFillStyle::Solid,
         }),
     };
-    let fill = geometry(&command(shape, 64), metrics(), &nothing_resolves)
-        .fill
-        .expect("a filled box carries a fill");
+    let fill = geometry(
+        &command(shape, 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    )
+    .fill
+    .expect("a filled box carries a fill");
     assert_eq!(
         fill.radius,
         metrics().width,
@@ -1205,7 +1313,12 @@ fn a_cross_hatched_box_taller_than_a_screen_is_bounded() {
         fill,
     };
 
-    let outline = geometry(&command(rect(None), 64), metrics(), &nothing_resolves);
+    let outline = geometry(
+        &command(rect(None), 64),
+        metrics(),
+        RowAnchor::UNIFORM,
+        &nothing_resolves,
+    );
     assert_eq!(outline.strokes.len(), 8, "four wobbled sides");
 
     let mut hatched = command(
@@ -1221,7 +1334,7 @@ fn a_cross_hatched_box_taller_than_a_screen_is_bounded() {
     // Two angles, one chord per scanline over a convex shape, and a chord
     // wobbles into two strokes.
     assert_eq!(
-        geometry(&hatched, metrics(), &nothing_resolves)
+        geometry(&hatched, metrics(), RowAnchor::UNIFORM, &nothing_resolves)
             .strokes
             .len(),
         4 * MAX_HACHURE_LINES + outline.strokes.len(),

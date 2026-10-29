@@ -10,7 +10,8 @@ use super::{
 use crate::{
     atlas::{AtlasKind, GlyphInfo},
     render::{
-        row_uploads, CellMetrics, Frame, HostRide, PoolOccluders, RowAnchor, Scroll, SketchReveal,
+        row_uploads, CellMetrics, Frame, GridLayout, HostRide, PoolOccluders, RowAnchor, Scroll,
+        SketchReveal,
     },
     test_support::{require_headless_device, still_frame},
 };
@@ -266,7 +267,17 @@ fn a_pooled_glyph_lands_on_the_same_pixel_as_the_live_grid() {
     // A pooled row carrying a scaled text run snaps the same way, so a
     // pooled gutter's runs sit where the screen-anchored ones do.
     for index in 0..4 {
-        let pooled = text_run_origin(2.0, 3.0, index, 0.625, [1, 2], baseline, metrics, region);
+        let pooled = text_run_origin(
+            2.0,
+            3.0,
+            index,
+            0.625,
+            [1, 2],
+            baseline,
+            metrics,
+            region,
+            RowAnchor::UNIFORM,
+        );
         let live = text_run_origin(
             2.0 + region[0],
             3.0 + region[1],
@@ -276,6 +287,7 @@ fn a_pooled_glyph_lands_on_the_same_pixel_as_the_live_grid() {
             baseline,
             metrics,
             [0.0; 2],
+            RowAnchor::UNIFORM,
         );
 
         assert_eq!(
@@ -466,7 +478,17 @@ fn text_run_origin_matches_glyph_origin_at_unit_scale() {
     // The first glyph of a unit-scale run lands exactly on the cell grid, so
     // a run at scale 1 is indistinguishable from cell text.
     assert_eq!(
-        text_run_origin(3.0, 2.0, 0, 1.0, [1, 10], baseline, metrics, [0.0; 2]),
+        text_run_origin(
+            3.0,
+            2.0,
+            0,
+            1.0,
+            [1, 10],
+            baseline,
+            metrics,
+            [0.0; 2],
+            RowAnchor::UNIFORM
+        ),
         glyph_origin(3, 2, [1, 10], baseline, metrics, [0.0; 2])
     );
 }
@@ -476,7 +498,17 @@ fn text_run_origin_scales_advance_and_centers_in_row() {
     let metrics = CellMetrics::from_font_size(30, 1.0);
     let baseline = 14.0;
 
-    let origin = text_run_origin(0.0, 0.0, 2, 0.5, [0, 0], baseline, metrics, [0.0; 2]);
+    let origin = text_run_origin(
+        0.0,
+        0.0,
+        2,
+        0.5,
+        [0, 0],
+        baseline,
+        metrics,
+        [0.0; 2],
+        RowAnchor::UNIFORM,
+    );
 
     // Two half-scale glyphs advance one cell, and the shorter line is
     // centered within the full row's height above its scaled baseline.
@@ -486,6 +518,25 @@ fn text_run_origin_scales_advance_and_centers_in_row() {
             metrics.width,
             (metrics.height - metrics.height * 0.5) / 2.0 + baseline * 0.5
         ]
+    );
+}
+
+/// A run on the last row lands where the layout hangs that row, and a run above
+/// it keeps the uniform pitch.
+#[test]
+fn a_run_on_the_last_row_takes_the_anchored_row() {
+    let metrics = CellMetrics::from_font_size(30, 1.0);
+    let anchor = GridLayout {
+        rows: 5,
+        cols: 10,
+        bottom_row_y: 4.0 * metrics.height - 16.0,
+    }
+    .row_anchor();
+    let top = |row| text_run_origin(0.0, row, 0, 1.0, [0, 0], 0.0, metrics, [0.0; 2], anchor)[1];
+
+    assert_eq!(
+        [top(3.0), top(4.0)],
+        [3.0 * metrics.height, 4.0 * metrics.height - 16.0]
     );
 }
 
@@ -500,7 +551,19 @@ fn a_fractional_run_snaps_every_glyph_to_a_whole_pixel() {
     // Three quarters of an 18px cell advances 13.5px, so every other pen
     // lands mid-pixel before the rounding.
     let pens: Vec<f32> = (0..5)
-        .map(|index| text_run_origin(0.0, 0.0, index, 0.75, [0, 0], baseline, metrics, [0.0; 2])[0])
+        .map(|index| {
+            text_run_origin(
+                0.0,
+                0.0,
+                index,
+                0.75,
+                [0, 0],
+                baseline,
+                metrics,
+                [0.0; 2],
+                RowAnchor::UNIFORM,
+            )[0]
+        })
         .collect();
 
     assert!(
@@ -672,7 +735,16 @@ fn cell_rect_scissor_clamps_to_surface() {
     let resolution = [metrics.width * 10.0, metrics.height * 5.0];
 
     assert_eq!(
-        cell_rect_scissor(1, 2, 3, 2, [0.0, 0.0], resolution, metrics),
+        cell_rect_scissor(
+            1,
+            2,
+            3,
+            2,
+            [0.0, 0.0],
+            RowAnchor::UNIFORM,
+            resolution,
+            metrics
+        ),
         Some([
             (2.0 * metrics.width) as u32,
             metrics.height as u32,
@@ -683,7 +755,16 @@ fn cell_rect_scissor_clamps_to_surface() {
     );
 
     assert_eq!(
-        cell_rect_scissor(1, 2, 3, 2, [4.0, -metrics.height], resolution, metrics),
+        cell_rect_scissor(
+            1,
+            2,
+            3,
+            2,
+            [4.0, -metrics.height],
+            RowAnchor::UNIFORM,
+            resolution,
+            metrics
+        ),
         Some([
             (2.0 * metrics.width) as u32 + 4,
             0,
@@ -693,14 +774,60 @@ fn cell_rect_scissor_clamps_to_surface() {
         "the offset shifts the rect and clamps a negative origin to zero"
     );
 
-    let [x, y, w, h] = cell_rect_scissor(4, 8, 6, 4, [0.0, 0.0], resolution, metrics).unwrap();
+    let [x, y, w, h] = cell_rect_scissor(
+        4,
+        8,
+        6,
+        4,
+        [0.0, 0.0],
+        RowAnchor::UNIFORM,
+        resolution,
+        metrics,
+    )
+    .unwrap();
     assert_eq!(x + w, resolution[0] as u32, "width clamps to the surface");
     assert_eq!(y + h, resolution[1] as u32, "height clamps to the surface");
 
     assert_eq!(
-        cell_rect_scissor(5, 0, 2, 2, [0.0, 0.0], resolution, metrics),
+        cell_rect_scissor(
+            5,
+            0,
+            2,
+            2,
+            [0.0, 0.0],
+            RowAnchor::UNIFORM,
+            resolution,
+            metrics
+        ),
         None,
         "an anchor at the bottom edge has no area"
+    );
+
+    let anchor = GridLayout {
+        rows: 5,
+        cols: 10,
+        bottom_row_y: 4.0 * metrics.height - 16.0,
+    }
+    .row_anchor();
+    let region =
+        |top, height| cell_rect_scissor(top, 0, 4, height, [0.0, 0.0], anchor, resolution, metrics);
+    assert_eq!(
+        [region(2, 2), region(4, 1)],
+        [
+            Some([
+                0,
+                (2.0 * metrics.height) as u32,
+                (4.0 * metrics.width) as u32,
+                (2.0 * metrics.height) as u32 - 16,
+            ]),
+            Some([
+                0,
+                (4.0 * metrics.height) as u32 - 16,
+                (4.0 * metrics.width) as u32,
+                metrics.height as u32,
+            ]),
+        ],
+        "a region that ends at the last row stops where it paints, and one on it starts there"
     );
 }
 
@@ -1298,7 +1425,15 @@ fn a_run_glyph_packs_its_follow_slot_above_its_row() {
     let grid = followed(5, 5);
 
     let mut instances = Vec::new();
-    pass.build_text_run_instances_into(&device, &queue, &grid, [0.0; 2], 3, &mut instances);
+    pass.build_text_run_instances_into(
+        &device,
+        &queue,
+        &grid,
+        [0.0; 2],
+        3,
+        RowAnchor::UNIFORM,
+        &mut instances,
+    );
 
     assert!(!instances.is_empty(), "the run builds glyphs");
     for instance in &instances {
@@ -1406,12 +1541,50 @@ fn build_run_rects_into_clears_prior_scratch() {
     // reuse yields exactly the fresh result rather than accumulating.
     let mut scratch = pass.build_run_rects(&grid);
     scratch.extend(pass.build_run_rects(&grid));
-    pass.build_run_rects_into(&grid, &mut scratch);
+    pass.build_run_rects_into(&grid, RowAnchor::UNIFORM, &mut scratch);
 
     assert_eq!(
         bytemuck::cast_slice::<RectInstance, u8>(&scratch),
         bytemuck::cast_slice::<RectInstance, u8>(&fresh),
         "reuse clears the stale rects and rebuilds only the run's rect"
+    );
+}
+
+/// A run on the last row backs that row where the layout hangs it, and a run
+/// above it keeps the uniform pitch.
+#[test]
+fn a_run_on_the_last_row_backs_the_anchored_row() {
+    let (_device, _queue, pass) = headless_text_pass();
+    let cell_h = pass.face.metrics.height;
+    let mut grid = Grid::new(5, 12);
+    let run = |row| TextRun {
+        col: 0,
+        row,
+        scale: 256,
+        color: Rgb::new(1, 2, 3),
+        bg: Some(Rgb::new(4, 5, 6)),
+        follow: 0,
+        anchor: None,
+        text: "42".into(),
+        seq: 1,
+    };
+    grid.set_text_runs(vec![run(3 * 16), run(4 * 16)]);
+    let anchor = GridLayout {
+        rows: 5,
+        cols: 12,
+        bottom_row_y: 4.0 * cell_h - 7.0,
+    }
+    .row_anchor();
+
+    let mut rects = Vec::new();
+    pass.build_run_rects_into(&grid, anchor, &mut rects);
+    assert_eq!(
+        rects
+            .iter()
+            .map(|rect| (rect.pos[1], rect.dim[1]))
+            .collect::<Vec<_>>(),
+        [(3.0 * cell_h, cell_h), (4.0 * cell_h - 7.0, cell_h)],
+        "the run above keeps the pitch, and the one on the last row rises 7 pixels",
     );
 }
 
@@ -4058,6 +4231,63 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         pass.overlay_draws.len(),
         2,
         "each overlay records its own draw range"
+    );
+}
+
+/// A resize that moves the last row, with the grid unchanged, moves a popover
+/// that reaches that row onto it, scissor and text together.
+#[test]
+fn a_moved_last_row_moves_an_overlay_that_reaches_it() {
+    let (device, queue, mut pass) = headless_text_pass();
+    let cell_h = pass.face.metrics.height;
+    let mut grid = Grid::new(6, 20);
+    grid.set_overlays(vec![Overlay {
+        top: 3,
+        left: 0,
+        width: 6,
+        height: 3,
+        fill: Rgb::new(0, 0, 0),
+        border: Rgb::new(0, 0, 0),
+        content_fg: Rgb::new(255, 255, 255),
+        scale: 1,
+        offset: [0, 0],
+        bold: false,
+        content: "ab".to_owned(),
+    }]);
+    let idle = Damage::Partial(vec![None; 6]);
+    let frame = still_frame(&idle, &idle);
+    let mut drawn = |anchor| {
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            [640.0, 480.0],
+            &frame,
+            &[],
+            &[],
+            &[],
+            anchor,
+        );
+        (
+            pass.overlay_draws[0].scissor.map(|rect| rect[1]),
+            pass.overlay_instance_scratch[0].pos[1],
+        )
+    };
+
+    let at_pitch = drawn(RowAnchor::UNIFORM);
+    let anchored = drawn(
+        GridLayout {
+            rows: 6,
+            cols: 20,
+            bottom_row_y: 5.0 * cell_h - 7.0,
+        }
+        .row_anchor(),
+    );
+
+    assert_eq!(
+        (anchored.0.map(|y| y + 7), anchored.1 + 7.0),
+        at_pitch,
+        "the scissor and the text rise the 7 pixels the last row rose",
     );
 }
 
