@@ -299,6 +299,7 @@ pub(crate) fn drain_fs_watch_events(stoat: &mut Stoat) {
                 .ok()
                 .flatten()
                 .is_some_and(|meta| !meta.is_dir)
+            && !file_ignored(stoat, &path, &repo_root, &mut repo)
         {
             auto_reload::note_followed_change(stoat, path.clone());
         }
@@ -459,12 +460,8 @@ fn note_finder_change(
     // The ignored-directory filter above cleared the parent, which leaves the
     // file's own verdict. A walk applies both, so a list standing in for one
     // has to as well.
-    if arrived.is_some() {
-        let git_host = stoat.git_host.clone();
-        let repo = repo.get_or_insert_with(|| git_host.discover(git_root));
-        if repo.as_ref().is_some_and(|r| r.is_path_ignored(path)) {
-            return true;
-        }
+    if arrived.is_some() && file_ignored(stoat, path, git_root, repo) {
+        return true;
     }
 
     changes.push((path.to_path_buf(), arrived.is_some()));
@@ -593,6 +590,28 @@ pub(crate) fn parent_dir_ignored(
         return false;
     };
     dir_ignored(stoat, parent, repo_root, repo)
+}
+
+/// Whether the workspace walk from `root` or git excludes the file `path`
+/// itself.
+///
+/// [`parent_dir_ignored`] answers for the directory that holds the file, and
+/// this answers for the file. A walk applies both, so a caller that stands in
+/// for a walk asks both. No cache backs this, because the directory filter
+/// drops build churn first and a file past it is rare.
+///
+/// `repo` memoizes the repository discovery across one drain batch.
+pub(crate) fn file_ignored(
+    stoat: &Stoat,
+    path: &Path,
+    root: &Path,
+    repo: &mut Option<Option<Arc<dyn GitRepo>>>,
+) -> bool {
+    fs::walk_excludes(&*stoat.fs_host, root, path, false) || {
+        let git_host = stoat.git_host.clone();
+        let repo = repo.get_or_insert_with(|| git_host.discover(root));
+        repo.as_ref().is_some_and(|r| r.is_path_ignored(path))
+    }
 }
 
 /// Whether the workspace walk or git excludes `dir`, answering from
@@ -2019,6 +2038,37 @@ mod tests {
             .inject(Path::new(path), FsEventKind::Modified);
         drain_fs_watch_events(&mut h.stoat);
         h.stoat.active_workspace().tally_pending()
+    }
+
+    /// A file that the walk's own ignore file names stays out of the cached
+    /// finder list, as a walk leaves it out.
+    #[test]
+    fn finder_changes_drop_a_file_the_walk_ignores() {
+        let mut h = ignored_dir_harness();
+        let epoch = h.stoat.finder_path_epoch;
+        h.stoat.finder_path_cache = Some(FinderPathCache {
+            root: PathBuf::from("/repo"),
+            paths: Arc::new(Vec::new()),
+            epoch,
+            display: None,
+        });
+        h.fake_fs().insert_file("/repo/.stoatignore", b"b.rs\n");
+        h.fake_fs().insert_file("/repo/b.rs", "");
+        h.fake_fs_watcher()
+            .inject(Path::new("/repo/b.rs"), FsEventKind::Created);
+
+        drain_fs_watch_events(&mut h.stoat);
+
+        let listed = h
+            .stoat
+            .finder_path_cache
+            .as_ref()
+            .map(|cache| cache.paths.as_ref().clone());
+        assert_eq!(
+            (listed, h.stoat.finder_path_epoch),
+            (Some(Vec::new()), epoch),
+            "the ignored file stays off the list, and the list stands in for a walk",
+        );
     }
 
     #[test]

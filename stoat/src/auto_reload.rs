@@ -1119,9 +1119,10 @@ fn set_live_reload(stoat: &mut Stoat, on: bool) {
 ///
 /// Each moved file feeds the live-reload window. With follow on, the newest one
 /// that the follow mode lands on also feeds the follow window. That is a
-/// working-tree file under the repo root, outside the git directory and any
-/// ignored directory, as the drain decides for a write. A log outside the
-/// working tree moves on every line, and the rule keeps the follow off it.
+/// working-tree file under the repo root, outside the git directory, and
+/// neither ignored nor in an ignored directory, as the drain decides for a
+/// write. A log outside the working tree moves on every line, and the rule
+/// keeps the follow off it.
 fn catch_up_live_reload(stoat: &mut Stoat) {
     let (repo_root, moved) = {
         let ws = stoat.active_workspace();
@@ -1148,6 +1149,7 @@ fn catch_up_live_reload(stoat: &mut Stoat) {
             && path.starts_with(&repo_root)
             && !path.starts_with(&git_dir)
             && !debounce::parent_dir_ignored(stoat, &path, &repo_root, &mut repo)
+            && !debounce::file_ignored(stoat, &path, &repo_root, &mut repo)
         {
             newest = Some((mtime, path.clone()));
         }
@@ -2442,6 +2444,33 @@ mod tests {
         assert_eq!(landing(&mut h), (PathBuf::from("/repo/a.rs"), false, 0));
     }
 
+    /// Neither a git rule nor the walk's own ignore file lets a write to the
+    /// file it names pull the pane.
+    #[test]
+    fn a_write_to_an_ignored_file_is_not_followed() {
+        let rules: [fn(&mut TestHarness); 2] = [
+            |h| {
+                h.fake_git().add_repo("/repo").ignored("b.rs");
+            },
+            |h| h.fake_fs().insert_file("/repo/.stoatignore", b"b.rs\n"),
+        ];
+        let landings = rules.map(|ignore| {
+            let mut h = follow_harness();
+            ignore(&mut h);
+            watched_write(&mut h, "/repo/b.rs", FsEventKind::Modified);
+            h.advance_clock(FS_WATCH_DEBOUNCE);
+            landing(&mut h)
+        });
+        assert_eq!(
+            landings,
+            [
+                (PathBuf::from("/repo/a.rs"), false, 0),
+                (PathBuf::from("/repo/a.rs"), false, 0),
+            ],
+            "a git-ignored and a stoatignored write each leave the pane on a.rs",
+        );
+    }
+
     /// The pair turns both modes on, and a second press turns both off and
     /// drops the write each mode holds in its window.
     #[test]
@@ -2514,18 +2543,20 @@ mod tests {
     }
 
     /// A log moves on every line it gains, so an open log outside the repo, one
-    /// under an ignored directory, and a file in the git directory are each
-    /// newer than the moved working-tree file. None of them is followed, and
-    /// each still reloads.
+    /// under an ignored directory, a file in the git directory, and an ignored
+    /// file are each newer than the moved working-tree file. None of them is
+    /// followed, and each still reloads.
     #[test]
     fn turning_follow_reload_on_follows_only_a_working_tree_file() {
         let (mut h, _, _) = live_reload_harness();
         h.stoat.live_reload = false;
-        h.fake_fs().insert_file("/repo/.stoatignore", b".logs/\n");
+        h.fake_fs()
+            .insert_file("/repo/.stoatignore", b".logs/\nskip.rs\n");
         let others = [
             "/logs/stoat.log",
             "/repo/.logs/stoat.log",
             "/repo/.git/COMMIT_EDITMSG",
+            "/repo/skip.rs",
         ];
         let ids = others.map(|path| {
             h.fake_fs().insert_file(path, b"one\n");
@@ -2549,7 +2580,7 @@ mod tests {
             (landing(&mut h), ids.map(|id| h.buffer_text(id))),
             (
                 (PathBuf::from("/repo/a.rs"), true, 2),
-                ["one\ntwo\n", "one\ntwo\n", "one\ntwo\n"].map(String::from)
+                ["one\ntwo\n", "one\ntwo\n", "one\ntwo\n", "one\ntwo\n"].map(String::from)
             ),
             "only the working-tree write is followed, and every moved buffer reloads",
         );
