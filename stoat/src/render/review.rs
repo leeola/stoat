@@ -791,7 +791,7 @@ pub(crate) fn paint_diff_rows(
                     BaseRow::segment(snapshot, text, line_base, segment, &mut base_layout),
                     &base_changes,
                     tints.as_ref(),
-                    (del_style, dim_style, fallback_style),
+                    (del_style, dim_style, fallback_style, moved_style),
                     theme,
                     dials,
                 );
@@ -1000,6 +1000,7 @@ pub(crate) fn paint_diff_rows(
                         token_spans,
                         dim_style,
                         dim_style,
+                        dim_style,
                         &[],
                         tints.as_ref(),
                         soften_row,
@@ -1037,7 +1038,7 @@ pub(crate) fn paint_diff_rows(
                         BaseRow::segment(snapshot, text, line_base, line_row, &mut base_layout),
                         &base_changes,
                         tints.as_ref(),
-                        (del_style, dim_style, fallback_style),
+                        (del_style, dim_style, fallback_style, moved_style),
                         theme,
                         dials,
                     );
@@ -1472,6 +1473,7 @@ pub(crate) fn paint_base_row(
         token_spans,
         fallback,
         fallback,
+        fallback,
         change_spans,
         tints,
         soften_row,
@@ -1493,7 +1495,9 @@ pub(crate) fn paint_base_row(
 /// `gap_fallback` takes the place of `fallback` for a byte outside every token
 /// span and every change span. A refined line passes the text style there, so
 /// its unchanged bytes read as unchanged text and its changed bytes keep the
-/// removed color.
+/// removed color. `moved_fallback` takes the place of `fallback` inside a moved
+/// span. A removed line that the tree pass relocated in part then shows the
+/// move without token colors.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_segment(
     buf: &mut Buffer,
@@ -1508,6 +1512,7 @@ fn paint_base_segment(
     token_spans: &[(std::ops::Range<usize>, HighlightStyle)],
     fallback: Style,
     gap_fallback: Style,
+    moved_fallback: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, ProseChange)],
     tints: Option<&DiffTints>,
     soften_row: Option<[u8; 3]>,
@@ -1551,9 +1556,10 @@ fn paint_base_segment(
         {
             span_cursor += 1;
         }
-        let in_span = change_spans
+        let span_kind = change_spans
             .get(span_cursor)
-            .is_some_and(|(range, ..)| range.start <= byte_idx);
+            .filter(|(range, ..)| range.start <= byte_idx)
+            .map(|(_, kind, _)| kind);
 
         while token_spans
             .get(token_cursor)
@@ -1563,8 +1569,11 @@ fn paint_base_segment(
         }
         let mut style = match token_spans.get(token_cursor) {
             Some((range, hs)) if range.start <= byte_idx => hs.to_ratatui_style(),
-            _ if in_span => fallback,
-            _ => gap_fallback,
+            _ => match span_kind {
+                Some(ChangeKind::Moved) => moved_fallback,
+                Some(_) => fallback,
+                None => gap_fallback,
+            },
         };
         if let Some(bg) = soften_row.filter(|_| dials.soften_scale > 0.0) {
             style = soften_style(
@@ -1789,7 +1798,7 @@ impl<'a> BaseRow<'a> {
 /// from.
 ///
 /// `columns` is `(number, status, text, content width)` for the left side, and
-/// `styles` is `(removed, dim, text)`.
+/// `styles` is `(removed, dim, text, moved)`.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_side(
     snapshot: &DisplaySnapshot,
@@ -1803,12 +1812,12 @@ fn paint_base_side(
     row: BaseRow<'_>,
     base_changes: &crate::diff_map::BaseChangeSpans,
     tints: Option<&DiffTints>,
-    styles: (Style, Style, Style),
+    styles: (Style, Style, Style, Style),
     theme: &crate::theme::Theme,
     dials: DiffDials,
 ) {
     let (num_x, status_x, text_x, content_w) = columns;
-    let (del_style, dim_style, text_style) = styles;
+    let (del_style, dim_style, text_style, moved_style) = styles;
 
     if row.first {
         draw_diff_num(
@@ -1864,6 +1873,7 @@ fn paint_base_side(
         token_spans,
         del_style,
         gap_fallback,
+        moved_style,
         changes,
         tints,
         None,
@@ -3943,6 +3953,50 @@ mod tests {
         );
     }
 
+    /// A moved span inside a removed base line keeps its own color, so with no
+    /// token color the relocated chars read as a move inside the removed line.
+    #[test]
+    fn a_moved_span_in_a_removed_base_line_falls_back_to_the_moved_color() {
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Deleted,
+                unstaged_lines: Vec::new(),
+                marked_rows: Vec::new(),
+                buffer_start_line: 1,
+                buffer_line_range: 1..1,
+                base_byte_range: 3..8,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: vec![ChangeSpan {
+                        byte_range: 3..5,
+                        kind: ChangeKind::Moved,
+                        move_metadata: None,
+                        prose: ProseChange::None,
+                    }],
+                })),
+            }],
+            Some(Arc::new("aa\nbbxx\ncc\n".to_string())),
+        );
+        let mut editor = diff_editor_with_map("aa\ncc\n", dm);
+        let buf = render_over_fallback(&mut editor, Style::default().fg(Color::Rgb(1, 2, 3)));
+        let lx = DiffColumns::compute(buf.area, DiffLayout::DIFF_VIEW).left_text_x;
+        let y = row_holding(&buf, lx..right_text_x(buf.area), "bbxx");
+        assert_eq!(
+            (lx..lx + 4)
+                .map(|x| buf[(x, y)].style().fg)
+                .collect::<Vec<_>>(),
+            [
+                Some(Color::Rgb(0, 0, 255)),
+                Some(Color::Rgb(0, 0, 255)),
+                Some(Color::Rgb(255, 0, 0)),
+                Some(Color::Rgb(255, 0, 0)),
+            ],
+            "the moved chars take the moved color and the rest of the removed line \
+             keeps the deleted color",
+        );
+    }
+
     #[test]
     fn diff_view_left_column_carries_base_token_colors() {
         use crate::{action_handlers::focused_editor_mut, test_harness::TestHarness};
@@ -5591,6 +5645,7 @@ mod tests {
                     ..HighlightStyle::default()
                 },
             )],
+            Style::default(),
             Style::default(),
             Style::default(),
             &[(3..7, ChangeKind::Replaced, ProseChange::None)],
