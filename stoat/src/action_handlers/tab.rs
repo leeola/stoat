@@ -219,7 +219,13 @@ fn relayout(stoat: &mut Stoat) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, pane::View, term_session::TermId, test_harness::TestHarness};
+    use crate::{
+        app::{Stoat, UpdateEffect},
+        pane::View,
+        term_session::TermId,
+        test_harness::TestHarness,
+    };
+    use crossterm::event::Event;
     use stoat_action::registry;
     use stoat_config::TabBarMode;
 
@@ -495,6 +501,33 @@ mod tests {
             h.stoat.inactive_dim()
         });
         assert_eq!(dims, [1.0, 0.0]);
+    }
+
+    /// The fade goes while the window is in the background and comes back with
+    /// its focus, and `:pane-fade` reads the configured fade throughout.
+    #[test]
+    fn the_painted_fade_follows_the_window_focus() {
+        let mut h = Stoat::test();
+        let lost = h.stoat.update(Event::FocusLost);
+        let in_background = (h.stoat.painted_inactive_dim(), h.stoat.inactive_dim());
+        let gained = h.stoat.update(Event::FocusGained);
+        assert_eq!(
+            (lost, gained, in_background, h.stoat.painted_inactive_dim()),
+            (
+                UpdateEffect::Redraw,
+                UpdateEffect::Redraw,
+                (0.0, 0.25),
+                0.25
+            ),
+        );
+    }
+
+    #[test]
+    fn the_painted_fade_stays_when_the_setting_is_off() {
+        let mut h = Stoat::test();
+        h.stoat.settings.ui_inactive_dim_follows_focus = Some(false);
+        h.stoat.update(Event::FocusLost);
+        assert_eq!(h.stoat.painted_inactive_dim(), 0.25);
     }
 
     /// The row has to carry both numbered labels and distinguish the active tab

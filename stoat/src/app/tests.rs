@@ -8079,7 +8079,7 @@ fn a_background_tick_paints_no_pane() {
 #[test]
 fn each_input_that_moves_reaches_the_key() {
     type Case = (&'static str, fn(&mut crate::test_harness::TestHarness));
-    let cases: [Case; 6] = [
+    let cases: [Case; 7] = [
         ("theme", |h| {
             action_handlers::dispatch(
                 &mut h.stoat,
@@ -8093,6 +8093,9 @@ fn each_input_that_moves_reaches_the_key() {
         }),
         ("pane fade", |h| {
             h.stoat.pane_fade_override = Some(false);
+        }),
+        ("window focus", |h| {
+            h.stoat.window_focused = false;
         }),
         ("line numbers", |h| {
             h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);

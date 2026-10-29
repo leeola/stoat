@@ -920,7 +920,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .then(|| hover_frozen.or_else(|| crate::render::hover::hover_popup_layout(stoat)))
         .flatten();
 
-    let inactive_dim = stoat.inactive_dim();
+    let inactive_dim = stoat.painted_inactive_dim();
 
     // A terminal or agent pane draws at the terminal font size as a terminal
     // pool, which a terminal before that protocol does not know. The live grid

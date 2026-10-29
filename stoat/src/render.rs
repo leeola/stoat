@@ -1056,7 +1056,7 @@ pub(crate) fn frame(
     let single_minimap_rect = stoat.single_minimap_rect;
     let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
-    let inactive_dim = stoat.inactive_dim();
+    let inactive_dim = stoat.painted_inactive_dim();
 
     stoat.refresh_minimap_palettes(minimap_enabled, inactive_dim);
 

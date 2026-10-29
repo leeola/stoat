@@ -2440,6 +2440,27 @@ fn a_focus_move_between_terminal_panes_sends_their_cursor_rows_alone() {
 /// the live grid paints it.
 #[test]
 fn a_pane_fade_turned_off_declares_an_unfaded_region() {
+    assert_eq!(
+        unfocused_region_dims(|h| h.stoat.pane_fade_override = Some(false)),
+        (vec![51], vec![0]),
+    );
+}
+
+/// A window in the background declares an unfocused terminal pane's region
+/// unfaded, as the live grid paints it.
+#[test]
+fn a_window_out_of_focus_declares_an_unfaded_region() {
+    assert_eq!(
+        unfocused_region_dims(|h| h.stoat.window_focused = false),
+        (vec![51], vec![0]),
+    );
+}
+
+/// The dims an unfocused terminal pane's region declares under a fade of 0.2,
+/// before and after `change`.
+fn unfocused_region_dims(
+    change: impl FnOnce(&mut crate::test_harness::TestHarness),
+) -> (Vec<u8>, Vec<u8>) {
     use stoatty_protocol::command::Command;
 
     let mut h = Stoat::test();
@@ -2469,9 +2490,8 @@ fn a_pane_fade_turned_off_declares_an_unfaded_region() {
             .collect()
     };
     let faded = dims(&mut h);
-    h.stoat.pane_fade_override = Some(false);
-    let unfaded = dims(&mut h);
-    assert_eq!((faded, unfaded), (vec![51], vec![0]));
+    change(&mut h);
+    (faded, dims(&mut h))
 }
 
 /// Under protocol 10 an unfocused pane's fade lands in its page's cells, so a

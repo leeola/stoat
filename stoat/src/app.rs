@@ -1331,6 +1331,13 @@ pub struct Stoat {
     /// Session-only override of the `ui.inactive_dim` setting, set by
     /// `:pane-fade`. `None` leaves the configured fade in force.
     pub(crate) pane_fade_override: Option<bool>,
+    /// Whether the terminal window holds OS focus, as its focus reports last
+    /// said.
+    ///
+    /// True at startup, because a terminal sends no report when the reports
+    /// turn on, and the first report corrects it. [`Self::painted_inactive_dim`]
+    /// reads it.
+    pub(crate) window_focused: bool,
     /// The extent of each tab that the last paint drew in the tab bar.
     ///
     /// The extents run in tab order, in sixteenths of a cell from the window's
@@ -2738,6 +2745,7 @@ impl Stoat {
             minimap_override: None,
             tab_bar_override: None,
             pane_fade_override: None,
+            window_focused: true,
             tab_bar_spans: Vec::new(),
             single_minimap_rect: None,
             lsp_badge_rect: None,
@@ -4024,6 +4032,20 @@ impl Stoat {
     /// Whether unfocused panes fade this frame.
     pub(crate) fn pane_fade_enabled(&self) -> bool {
         self.inactive_dim() > 0.0
+    }
+
+    /// The fade a frame paints the unfocused panes with.
+    ///
+    /// The configured fade while the terminal window has OS focus, and none
+    /// while it is in the background with `ui.inactive_dim_follows_focus` on.
+    /// [`Self::pane_fade_enabled`] and `:pane-fade` read the configured fade, so
+    /// a toggle in the background still flips it.
+    pub(crate) fn painted_inactive_dim(&self) -> f32 {
+        let follows_focus = self.settings.ui_inactive_dim_follows_focus.unwrap_or(true);
+        if !self.window_focused && follows_focus {
+            return 0.0;
+        }
+        self.inactive_dim()
     }
 
     /// Convenience wrapper that dispatches the [`OpenFile`] action with `path`.
@@ -5526,6 +5548,14 @@ impl Stoat {
             },
             Event::Mouse(mouse) => self.route_mouse(mouse),
             Event::Paste(text) => self.handle_paste(&text),
+            Event::FocusGained => {
+                self.window_focused = true;
+                UpdateEffect::Redraw
+            },
+            Event::FocusLost => {
+                self.window_focused = false;
+                UpdateEffect::Redraw
+            },
             _ => UpdateEffect::None,
         };
         crate::lsp::sync::notify_buffer_changes_pending(self);
