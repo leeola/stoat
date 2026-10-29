@@ -89,9 +89,9 @@ pub(crate) struct LastSearch {
     /// [`Self::query`] compiled, so repeating the search costs a refcount bump
     /// rather than a rebuild on every press.
     ///
-    /// `None` for a pattern that does not compile. The query is kept either
-    /// way, because it is also what the search register pastes, which does not
-    /// need it to be searchable.
+    /// `None` until the first repeat compiles it, and for a pattern that does
+    /// not compile. The query is kept either way, because it is also what the
+    /// search register pastes, which does not need it to be searchable.
     ///
     /// Compiled for the cursor engine rather than the plain one, so a repeat
     /// runs over the buffer's chunks instead of a flattened copy of it.
@@ -378,7 +378,7 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
         ?outcome,
         "search"
     );
-    stoat.last_search = Some(last);
+    stoat.active_workspace_mut().last_search = Some(last);
     true
 }
 
@@ -555,7 +555,7 @@ pub(super) fn search_selection(stoat: &mut Stoat, detect_word_boundaries: bool) 
 /// its own words.
 pub(crate) fn set_pattern(stoat: &mut Stoat, pattern: String) {
     let smart_case = smart_case(stoat);
-    stoat.last_search = Some(LastSearch::new(
+    stoat.active_workspace_mut().last_search = Some(LastSearch::new(
         pattern,
         SearchDirection::Forward,
         smart_case,
@@ -593,9 +593,12 @@ fn is_at_word_end(rope: &Rope, index: usize) -> bool {
 }
 
 /// The pattern and direction a repeat press searches with, or `None` when
-/// nothing has been searched for or the stored pattern never compiled.
+/// nothing has been searched for or the stored pattern does not compile.
 ///
-/// Reports the stored pattern that never compiled, and stays silent when no
+/// A stored pattern with no compiled regex compiles here, under the current
+/// smart-case setting, and keeps the result for the presses after it.
+///
+/// Reports the stored pattern that does not compile, and stays silent when no
 /// search has happened at all. The user typed a pattern in the first case and
 /// earned an answer. The second names nothing that failed.
 ///
@@ -603,7 +606,11 @@ fn is_at_word_end(rope: &Rope, index: usize) -> bool {
 /// [`LastSearch`], which copies the query text on every press. The query is
 /// copied on the failure arm alone, which is not a press being repeated.
 fn repeat_target(stoat: &mut Stoat) -> Option<(CursorRegex, SearchDirection)> {
-    let last = stoat.last_search.as_ref()?;
+    let smart_case = smart_case(stoat);
+    let last = stoat.active_workspace_mut().last_search.as_mut()?;
+    if last.regex.is_none() {
+        last.regex = compile_cursor_regex(&last.query, smart_case);
+    }
     if let Some(regex) = last.regex.clone() {
         return Some((regex, last.direction));
     }
@@ -834,7 +841,7 @@ pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<Cu
 
 #[cfg(test)]
 mod tests {
-    use super::SearchDirection;
+    use super::{LastSearch, SearchDirection};
     use crate::{
         editor_state::ScrollGlide, test_fixture::open_scratch_at, test_harness::TestHarness,
     };
@@ -1246,7 +1253,11 @@ mod tests {
 
     /// The stored pattern, or `None` when nothing has been searched for.
     fn stored_pattern(h: &TestHarness) -> Option<&str> {
-        h.stoat.last_search.as_ref().map(|s| s.query.as_str())
+        h.stoat
+            .active_workspace()
+            .last_search
+            .as_ref()
+            .map(|s| s.query.as_str())
     }
 
     fn select_ranges(h: &mut TestHarness, ranges: &[(usize, usize)]) {
@@ -1628,7 +1639,11 @@ mod tests {
 
         assert_eq!(h.primary_head_offset(), before, "no match, so no jump");
         assert_eq!(
-            h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
+            h.stoat
+                .active_workspace()
+                .last_search
+                .as_ref()
+                .map(|s| s.query.as_str()),
             Some("["),
         );
         assert_eq!(
@@ -1679,7 +1694,11 @@ mod tests {
         h.type_keys("enter");
         assert_eq!(h.primary_head_offset(), before);
         assert_eq!(
-            h.stoat.last_search.as_ref().map(|s| s.query.as_str()),
+            h.stoat
+                .active_workspace()
+                .last_search
+                .as_ref()
+                .map(|s| s.query.as_str()),
             Some("zzz"),
         );
     }
@@ -1692,8 +1711,35 @@ mod tests {
         h.type_keys("/");
         h.type_keys("enter");
         assert_eq!(h.primary_head_offset(), before);
-        assert!(h.stoat.last_search.is_none());
+        assert!(h.stoat.active_workspace().last_search.is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// A stored pattern with no compiled regex compiles on its first repeat,
+    /// and the repeat keeps the result.
+    #[test]
+    fn a_restored_pattern_compiles_on_its_first_repeat() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "foo bar foo\n");
+        h.stoat.active_workspace_mut().last_search = Some(LastSearch {
+            query: "foo".into(),
+            direction: SearchDirection::Forward,
+            regex: None,
+        });
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
+
+        let compiled = h
+            .stoat
+            .active_workspace()
+            .last_search
+            .as_ref()
+            .is_some_and(|last| last.regex.is_some());
+        assert_eq!(
+            (h.selection_spans(), compiled),
+            (vec![(8, 11, false)], true),
+            "the first repeat lands on the next foo and keeps the compiled pattern",
+        );
     }
 
     #[test]
@@ -1705,7 +1751,7 @@ mod tests {
         h.type_text("abc");
         h.type_keys("escape");
         assert_eq!(h.primary_head_offset(), before);
-        assert!(h.stoat.last_search.is_none());
+        assert!(h.stoat.active_workspace().last_search.is_none());
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
@@ -1902,7 +1948,10 @@ mod tests {
             [(4, 7)],
             "the preview sits on the match"
         );
-        assert!(h.stoat.last_search.is_none(), "nothing is stored yet");
+        assert!(
+            h.stoat.active_workspace().last_search.is_none(),
+            "nothing is stored yet"
+        );
     }
 
     /// Every preview recomputes from the origin, never from where the previous
@@ -2063,7 +2112,10 @@ mod tests {
 
         h.type_keys("escape");
         assert_eq!(pane_spans(&mut h), origin, "escape puts it back");
-        assert!(h.stoat.last_search.is_none(), "and stores no search");
+        assert!(
+            h.stoat.active_workspace().last_search.is_none(),
+            "and stores no search"
+        );
     }
 
     /// Enter keeps the preview's landing, and `C-o` returns to where the search
@@ -2079,7 +2131,11 @@ mod tests {
         h.type_keys("enter");
         assert_eq!(pane_spans(&mut h), [(4, 7)], "the landing survives submit");
         assert_eq!(
-            h.stoat.last_search.as_ref().map(|last| last.query.as_str()),
+            h.stoat
+                .active_workspace()
+                .last_search
+                .as_ref()
+                .map(|last| last.query.as_str()),
             Some("def"),
             "and the query is stored for n / N",
         );

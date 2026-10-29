@@ -1565,9 +1565,6 @@ pub struct Stoat {
     /// [`action_handlers::search::search_submit`] or
     /// [`action_handlers::search::search_cancel`].
     pub(crate) search_input: Option<action_handlers::search::SearchInputState>,
-    /// Persisted query + direction from the most recent submitted
-    /// search. Drives `SearchNext` / `SearchPrev` repeats.
-    pub(crate) last_search: Option<action_handlers::search::LastSearch>,
     /// Buffer accumulating text typed during the current
     /// insert-mode session. `Some` while `mode == "insert"` (or
     /// equivalent), `None` outside.
@@ -2790,7 +2787,6 @@ impl Stoat {
             pending_surround_count: 1,
             pending_textobject_select: None,
             search_input: None,
-            last_search: None,
             current_insert_run: None,
             restore_cursor: false,
             group_held_for_insert: false,

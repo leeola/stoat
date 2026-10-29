@@ -6,6 +6,7 @@ pub(crate) mod registry;
 #[cfg(test)]
 use crate::diff_map::DiffMap;
 use crate::{
+    action_handlers::search::LastSearch,
     agent_ipc::BridgeOutcome,
     agent_status::AgentStatus,
     badge::BadgeTray,
@@ -234,6 +235,10 @@ pub struct Workspace {
     /// languages: a buffer search takes a cursor regex, code search takes a
     /// regex or an AST pattern, and neither is worth recalling into the other.
     pub(crate) code_search_history: InputHistory,
+    /// The pattern `n` and `N` repeat, with the direction it was opened in.
+    /// Each session keeps its own, so a repeat never searches for a pattern
+    /// typed in another session.
+    pub(crate) last_search: Option<LastSearch>,
     /// The active tab's pane layout. Every render, focus, and navigation site
     /// reads this and never sees the parked tabs.
     pub panes: PaneTree,
@@ -535,6 +540,7 @@ impl Workspace {
             palette_history: InputHistory::default(),
             search_history: InputHistory::default(),
             code_search_history: InputHistory::default(),
+            last_search: None,
             panes,
             tabs: vec![Tab {
                 parked: None,
