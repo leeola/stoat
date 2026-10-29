@@ -1166,8 +1166,16 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
     let viewport = editor.viewport_rows.unwrap_or(strip.height as u32).max(1);
     let strip_local_row = screen_row.saturating_sub(strip.y);
     // The strip is drawn in buffer lines, so the click resolves against the
-    // same window the emit ships rather than the editor's display rows.
-    let (view_top, view_visible) = minimap_view_window(&snapshot, editor.scroll_offset, viewport);
+    // same window the emit ships rather than the editor's display rows. The
+    // emit ships the window of the declared rest, the row plus the wheel
+    // fraction, and the window of the eased offset only while a glide is in
+    // flight.
+    let rest = editor.scroll_row as f32 + editor.scroll_frac;
+    let shown_offset = match editor.scroll_glide {
+        ScrollGlide::None => rest,
+        ScrollGlide::Page | ScrollGlide::Wheel => editor.scroll_offset,
+    };
+    let (view_top, view_visible) = minimap_view_window(&snapshot, shown_offset, viewport);
     let buffer_lines = snapshot.buffer_line_count();
     let target_line = minimap::click_target_line(
         strip.height,
@@ -1191,11 +1199,12 @@ fn scrub_minimap_editor(stoat: &mut Stoat, editor_id: EditorId, strip: Rect, scr
         .saturating_sub(viewport.saturating_sub(1));
     let target_row = target_display.saturating_sub(viewport / 2).min(max_scroll);
 
-    let prev = editor.scroll_row;
     editor.scroll_row = target_row;
     editor.scroll_frac = 0.0;
-    if editor.scroll_offset.floor() as u32 != prev {
-        editor.scroll_offset = prev as f32;
+    // The glide starts from the declared rest before the scrub, as a page
+    // motion's does, because a follow or a jump leaves the offset behind it.
+    if editor.scroll_offset != rest {
+        editor.scroll_offset = rest;
     }
     editor.scroll_glide = ScrollGlide::Page;
 }

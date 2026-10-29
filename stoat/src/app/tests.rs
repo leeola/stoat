@@ -11401,6 +11401,48 @@ fn minimap_click_scrolls_to_the_proportional_line() {
     );
 }
 
+/// A follow or a jump leaves the eased offset on its old sub-row, and a strip
+/// press reads the declared rest instead, as the emit does. Strip cell row 5
+/// points at line 50 under the window of row 10 and at line 51 under 10.75, so
+/// the press centers row 40 or row 41.
+#[test]
+fn minimap_click_reads_the_declared_rest() {
+    let mut h = Stoat::test();
+    h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+    let body: String = (0..200)
+        .map(|i| format!("line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    open_scratch_file(&mut h, &body);
+    let editor_id = h.stoat.focused_editor_ids().expect("editor").0;
+
+    let mut press_at_rest = |frac: f32| {
+        {
+            let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+            editor.minimap_rect = Some(Rect::new(72, 0, 8, 10));
+            editor.viewport_rows = Some(20);
+            editor.scroll_row = 10;
+            editor.scroll_frac = frac;
+            editor.scroll_offset = 10.75;
+            editor.scroll_glide = ScrollGlide::None;
+        }
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 5));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 74, 5));
+        let editor = &h.stoat.active_workspace().editors[editor_id];
+        (editor.scroll_row, editor.scroll_offset, editor.scroll_glide)
+    };
+    assert_eq!(
+        (press_at_rest(0.0), press_at_rest(0.75)),
+        (
+            (40, 10.0, ScrollGlide::Page),
+            (41, 10.75, ScrollGlide::Page)
+        ),
+        "a stale sub-row resolves and glides from the row, a wheel rest from its fraction"
+    );
+}
+
 /// The strip draws one row per buffer line, so a click resolves to a buffer
 /// line and must be converted before it drives the display-row scroll. With
 /// every line wrapped in two, an unconverted target lands halfway up the
