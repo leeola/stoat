@@ -23,6 +23,11 @@ struct Globals {
     // pool composited at its own font size lays its bars out at cell_size, but
     // the boxes over it are cells of the live grid.
     occluder_cell: vec2<f32>,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the bar edges and the occluder rows by. A pool composite carries a
+    // last_row that no row reaches.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -76,10 +81,13 @@ fn vs_main(
     // to row. Above it the two-edge snap stands, because a fixed width puts a
     // bar's right edge off where its neighbour's left edge snapped to and a
     // tiled run gaps.
+    //
+    // Both edges go through row_y, so a bar that ends at the top of the last
+    // row ends where that row paints, not on the uniform pitch.
     let shift_px = vec2<f32>(0.0, globals.shift_rows * globals.cell_size.y);
-    let min_px = round((origin + globals.origin_cells) * globals.cell_size) + shift_px;
+    let min_px = round(cell_px(origin + globals.origin_cells)) + shift_px;
     let snapped = max(
-        round((origin + globals.origin_cells + size) * globals.cell_size) + shift_px,
+        round(cell_px(origin + globals.origin_cells + size)) + shift_px,
         min_px + vec2<f32>(1.0, 1.0)
     );
     let size_px = size * globals.cell_size;
@@ -112,7 +120,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.occluder_cell,
                 o.corner_radius,
-                o.inset_x
+                o.inset_x,
+                globals.bottom_row_y,
+                globals.last_row
             );
             if sdf < -0.5 {
                 discard;

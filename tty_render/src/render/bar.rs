@@ -9,7 +9,7 @@
 
 use crate::render::{
     globals_offset, rgb_f32, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
-    PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -46,7 +46,7 @@ struct BarInstance {
 /// cell size the vertex shader maps cell-fraction coordinates through, the
 /// panel-occluder count the fragment shader loops over, and the `occlude_all`
 /// flag that bypasses the seq test for a pool composite beneath every box.
-/// Padded to 48 bytes to match the WGSL uniform layout.
+/// Padded to 64 bytes to match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
@@ -73,9 +73,13 @@ struct Globals {
     ///
     /// A pool composited at its own font size lays its bars out at
     /// [`Self::cell_size`], but the boxes over it are cells of the live grid.
-    /// Also rounds the struct to the 48 bytes a uniform's 16-byte alignment
-    /// wants.
     occluder_cell: [f32; 2],
+    /// The [`RowAnchor`] the bar edges and the occluder rows are placed by.
+    /// The padding rounds the struct up to the 16-byte multiple WGSL sizes it
+    /// to.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad1: [u32; 2],
 }
 
 /// The instanced color-bar pipeline and its per-frame buffers.
@@ -132,7 +136,10 @@ impl BarPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("bar"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/bar.wgsl")).into(),
+                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
+                    "../shaders/bar.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -255,6 +262,8 @@ impl BarPass {
     ///
     /// `resolution` is the surface size in physical pixels. `occluders` are the
     /// live panels' rects, built once per frame and shared with the icon pass.
+    /// `anchor` places the bar edges.
+    ///
     /// Reallocates the instance or occluder buffer only when its count outgrows
     /// the current capacity, and skips the instance upload when they match what
     /// was last sent.
@@ -265,6 +274,7 @@ impl BarPass {
         bars: &[Bar],
         occluders: &[Occluder],
         resolution: [f32; 2],
+        anchor: RowAnchor,
     ) {
         // With no bar to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
@@ -286,6 +296,9 @@ impl BarPass {
             _pad0: 0,
             origin_cells: [0.0; 2],
             occluder_cell: [self.metrics.width, self.metrics.height],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad1: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -392,6 +405,9 @@ impl BarPass {
             _pad0: 0,
             origin_cells,
             occluder_cell: [self.metrics.width, self.metrics.height],
+            bottom_row_y: RowAnchor::UNIFORM.bottom_row_y,
+            last_row: RowAnchor::UNIFORM.last_row,
+            _pad1: [0; 2],
         };
         queue.write_buffer(
             &self.globals,
@@ -536,7 +552,7 @@ fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
 mod tests {
     use super::{build_bar_instances_into, BarInstance, BarPass};
     use crate::{
-        render::{background::BackgroundPass, CellMetrics, PoolOccluders},
+        render::{background::BackgroundPass, CellMetrics, PoolOccluders, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
     use stoatty_term::grid::{Bar, Grid, Rgb};
@@ -647,7 +663,14 @@ mod tests {
                 seq: 0,
             };
             let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
-            bars.prepare(&device, &queue, &[bar], &[], [TARGET as f32, TARGET as f32]);
+            bars.prepare(
+                &device,
+                &queue,
+                &[bar],
+                &[],
+                [TARGET as f32, TARGET as f32],
+                RowAnchor::UNIFORM,
+            );
             let rgba = render_rgba(&device, &queue, |pass| bars.draw(pass));
             (0..TARGET)
                 .filter(|col| rgba[((3 * TARGET + col) * 4) as usize] > 0)
@@ -751,8 +774,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/bar.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+            include_str!("../shaders/bar.wgsl"),
         )))
         .expect("parse bar");
         Validator::new(ValidationFlags::all(), Capabilities::all())

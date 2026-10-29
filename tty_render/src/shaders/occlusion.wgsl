@@ -31,6 +31,10 @@ fn rounded_box_sdf(p: vec2<f32>, half: vec2<f32>, r: f32) -> f32 {
 // Callers discard at -0.5 rather than 0, which leaves the outer half-pixel ring
 // standing so the box's own anti-aliased edge blends over the chrome beneath it
 // instead of over a hard hole.
+//
+// The box's rows are placed by `bottom_row_y` and `last_row`, the pair the
+// calling pass places its own rows with, so a box on the last row hides what
+// that pass draws there.
 fn occluder_sdf(
     frag: vec2<f32>,
     cell: vec2<f32>,
@@ -38,9 +42,12 @@ fn occluder_sdf(
     cell_size: vec2<f32>,
     corner_radius: f32,
     inset_x: f32,
+    bottom_row_y: f32,
+    last_row: u32,
 ) -> f32 {
-    let box_min = cell * cell_size + vec2<f32>(inset_x, 0.0);
-    let box_max = (cell + size) * cell_size - vec2<f32>(inset_x, 0.0);
+    let placed = place_box(cell, size, cell_size, bottom_row_y, last_row);
+    let box_min = placed.lo + vec2<f32>(inset_x, 0.0);
+    let box_max = placed.hi - vec2<f32>(inset_x, 0.0);
     let center = (box_min + box_max) * 0.5;
     let half = (box_max - box_min) * 0.5;
     let radius = min(corner_radius, min(half.x, half.y));

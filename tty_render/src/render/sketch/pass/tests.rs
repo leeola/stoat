@@ -26,9 +26,9 @@ use wgpu::{
 /// everywhere.
 #[test]
 fn shader_is_valid_wgsl() {
-    let module = wgsl::parse_str(&render::with_occlusion(include_str!(
+    let module = wgsl::parse_str(&render::with_rows(&render::with_occlusion(include_str!(
         "../../../shaders/sketch.wgsl"
-    )))
+    ))))
     .expect("parse sketch");
     Validator::new(ValidationFlags::all(), Capabilities::all())
         .validate(&module)
@@ -1165,6 +1165,7 @@ fn render_red(
         anchored,
         occluders,
         [TARGET as f32, TARGET as f32],
+        RowAnchor::UNIFORM,
     );
 
     let size = Extent3d {

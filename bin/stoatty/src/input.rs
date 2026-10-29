@@ -7,6 +7,7 @@
 
 use alacritty_terminal::term::TermMode;
 use stoatty_protocol::window_ipc::MouseButton as IpcMouseButton;
+use stoatty_render::render::GridLayout;
 use winit::{
     event::{MouseButton, MouseScrollDelta},
     keyboard::{Key, KeyLocation, ModifiersState, NamedKey},
@@ -931,17 +932,18 @@ pub(crate) fn sgr_motion_bytes(button: Option<u8>, col: usize, row: usize, mods:
     format!("\x1b[<{code};{};{}M", col + 1, row + 1).into_bytes()
 }
 
-/// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to the
-/// `rows` x `cols` grid, for a `cell_size` of `[width, height]` physical pixels.
-pub(crate) fn cell_at(
-    x: f64,
-    y: f64,
-    cell_size: [f32; 2],
-    rows: usize,
-    cols: usize,
-) -> (usize, usize) {
-    let col = ((x / f64::from(cell_size[0])) as usize).min(cols.saturating_sub(1));
-    let row = ((y / f64::from(cell_size[1])) as usize).min(rows.saturating_sub(1));
+/// The grid cell `(col, row)` under physical pixel (`x`, `y`), clamped to
+/// `layout`'s grid, for a `cell_size` of `[width, height]` physical pixels.
+///
+/// A pixel at or below the last row's top is on the last row, including one
+/// in the band where that row covers the bottom of the row above it.
+pub(crate) fn cell_at(x: f64, y: f64, cell_size: [f32; 2], layout: GridLayout) -> (usize, usize) {
+    let col = ((x / f64::from(cell_size[0])) as usize).min(layout.cols.saturating_sub(1));
+    let last = layout.rows.saturating_sub(1);
+    if y >= f64::from(layout.bottom_row_y) {
+        return (col, last);
+    }
+    let row = ((y / f64::from(cell_size[1])) as usize).min(last);
     (col, row)
 }
 
@@ -1771,20 +1773,30 @@ mod tests {
     #[test]
     fn cell_at_maps_pixels_to_a_clamped_cell() {
         let cell = [10.0, 20.0];
+        let layout = |bottom_row_y| GridLayout {
+            rows: 5,
+            cols: 8,
+            bottom_row_y,
+        };
         assert_eq!(
-            cell_at(25.0, 50.0, cell, 5, 8),
+            cell_at(25.0, 50.0, cell, layout(80.0)),
             (2, 2),
             "x 25/10 is col 2, y 50/20 is row 2"
         );
         assert_eq!(
-            cell_at(1000.0, 1000.0, cell, 5, 8),
+            cell_at(1000.0, 1000.0, cell, layout(80.0)),
             (7, 4),
             "a pointer past the grid clamps to the last cell"
         );
         assert_eq!(
-            cell_at(-5.0, -5.0, cell, 5, 8),
+            cell_at(-5.0, -5.0, cell, layout(80.0)),
             (0, 0),
             "a negative position saturates to the origin"
+        );
+        assert_eq!(
+            [69.0, 70.0, 79.0].map(|y| cell_at(25.0, y, cell, layout(70.0))),
+            [(2, 3), (2, 4), (2, 4)],
+            "the band the last row covers is on the last row"
         );
     }
 }

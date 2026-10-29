@@ -28,7 +28,7 @@ use crate::{
         polyline::PolylinePass,
         sketch::SketchPass,
         text::{self, TextPass},
-        CellMetrics, Occluder, PoolOccluders, MAX_COVERED,
+        CellMetrics, GridLayout, Occluder, PoolOccluders, MAX_COVERED,
     },
 };
 pub use cosmic_text::fontdb;
@@ -428,6 +428,13 @@ impl Renderer {
     /// Divides the pixel size by the cell metrics, flooring with a one-cell
     /// minimum so a sliver still yields a usable grid.
     pub fn grid_size(&self) -> (usize, usize) {
+        let layout = self.grid_layout();
+        (layout.rows, layout.cols)
+    }
+
+    /// The [`GridLayout`] the target holds at the current size, which places
+    /// the rows of every live-grid draw.
+    pub fn grid_layout(&self) -> GridLayout {
         grid_dims(self.width, self.height, self.metrics)
     }
 
@@ -648,6 +655,8 @@ impl Renderer {
         );
 
         let resolution = [self.width as f32, self.height as f32];
+        let layout = self.grid_layout();
+        let anchor = layout.row_anchor();
         self.background.prepare(
             device,
             queue,
@@ -664,6 +673,7 @@ impl Renderer {
             frame.scrolled_rows,
             &self.occluders,
             covered,
+            anchor,
         );
         self.decoration.prepare(
             device,
@@ -673,6 +683,7 @@ impl Renderer {
             frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback,
             frame.decoration_damage,
             frame.scrolled_rows,
+            anchor,
         );
 
         self.text.prepare(
@@ -684,10 +695,12 @@ impl Renderer {
             &self.occluders,
             &self.clamped_rides,
             covered,
+            anchor,
         );
         self.panel
-            .prepare(device, queue, grid, &self.clamped_rides, resolution);
-        self.overlay.prepare(device, queue, grid, resolution);
+            .prepare(device, queue, grid, &self.clamped_rides, resolution, anchor);
+        self.overlay
+            .prepare(device, queue, grid, resolution, anchor);
         self.icon.prepare(
             device,
             queue,
@@ -695,11 +708,18 @@ impl Renderer {
             &self.occluders,
             resolution,
             self.text.text_band(),
+            anchor,
         );
-        self.bar
-            .prepare(device, queue, grid.bars(), &self.occluders, resolution);
+        self.bar.prepare(
+            device,
+            queue,
+            grid.bars(),
+            &self.occluders,
+            resolution,
+            anchor,
+        );
         self.polyline
-            .prepare(device, queue, grid, &self.occluders, resolution);
+            .prepare(device, queue, grid, &self.occluders, resolution, anchor);
         self.sketch.prepare(
             device,
             queue,
@@ -708,10 +728,11 @@ impl Renderer {
             &self.clamped_rides,
             &self.occluders,
             resolution,
+            anchor,
         );
         self.minimap
-            .prepare(device, queue, grid, &self.occluders, resolution);
-        self.image.prepare(device, queue, grid, resolution);
+            .prepare(device, queue, grid, &self.occluders, resolution, layout);
+        self.image.prepare(device, queue, grid, resolution, layout);
     }
 
     /// Open the frame's render pass on `encoder`, clearing `view` to the theme
@@ -1237,6 +1258,7 @@ impl Renderer {
         corners: Option<[[f32; 2]; 4]>,
         grid_scroll: f32,
     ) {
+        let anchor = self.grid_layout().row_anchor();
         self.background.prepare_cursor(
             queue,
             resolution,
@@ -1246,6 +1268,7 @@ impl Renderer {
                 fill: self.cursor_fill,
             },
             grid_scroll,
+            anchor,
         );
     }
 
@@ -1971,6 +1994,15 @@ impl GpuContext {
     /// what the renderer draws.
     pub fn grid_size(&self) -> (usize, usize) {
         self.renderer.grid_size()
+    }
+
+    /// The [`GridLayout`] the current surface holds, which places the rows the
+    /// renderer draws.
+    ///
+    /// A caller that maps between pixels and cells, or that clips a pool to its
+    /// region, places rows by this so it agrees with what the renderer draws.
+    pub fn grid_layout(&self) -> GridLayout {
+        self.renderer.grid_layout()
     }
 
     /// Re-derive the renderer's cell metrics from the logical `font_size` and

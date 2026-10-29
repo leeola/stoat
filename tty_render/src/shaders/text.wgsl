@@ -44,6 +44,11 @@ struct Globals {
     // when the pane loses focus. Zero on every other draw, which leaves each
     // color as it is.
     dim: vec4<f32>,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the slot rows and the occluder rows by. The screen-anchored and
+    // pool draws carry a last_row that no row reaches.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -94,7 +99,9 @@ fn occluded(frag: vec2<f32>, seq: u32) -> bool {
                 o.size,
                 globals.occluder_cell,
                 o.corner_radius,
-                o.inset_x
+                o.inset_x,
+                globals.bottom_row_y,
+                globals.last_row
             );
             if sdf < -0.5 {
                 return true;
@@ -133,6 +140,9 @@ struct VsOut {
     @location(3) @interpolate(flat) seq: u32,
     // The mark this glyph follows, biased by one, or zero for none.
     @location(4) @interpolate(flat) follow: u32,
+    // The pixel y at and below which the glyph paints nothing, so a glyph above
+    // the last row never paints under it.
+    @location(5) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -168,13 +178,14 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     let quad = vec2<f32>(dim) / DIM_UNITS;
-    let row_y = f32(slot_row(slot & FOLLOW_MASK)) * globals.cell_size.y;
+    let row = f32(slot_row(slot & FOLLOW_MASK));
+    let row_top = row_y(row);
 
     // A glyph inside a pool region draws under that pool's opaque composite, so
     // its quad goes outside clip space and rasterizes nothing. The rect comes
     // from the instance alone, so the six vertices agree on the test.
     let lo = pos + globals.origin_cells * globals.cell_size
-        + vec2<f32>(0.0, row_y + globals.scroll_y);
+        + vec2<f32>(0.0, row_top + globals.scroll_y);
     if under_pool(lo, lo + quad) {
         var culled: VsOut;
         culled.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
@@ -182,7 +193,7 @@ fn vs_main(
     }
 
     let pixel = pos + corner * quad + globals.origin_cells * globals.cell_size
-        + vec2<f32>(0.0, row_y + globals.scroll_y);
+        + vec2<f32>(0.0, row_top + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -205,6 +216,7 @@ fn vs_main(
     out.kind = kind;
     out.seq = seq;
     out.follow = slot >> FOLLOW_SHIFT;
+    out.clip_y = row_clip_y(row + 1.0) + globals.scroll_y;
     return out;
 }
 
@@ -220,6 +232,10 @@ fn follow_alpha(follow: u32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if in.clip.y >= in.clip_y {
+        discard;
+    }
+
     // A text-run glyph beneath a later box is discarded so it cannot show
     // through the box body. Grid, region, overlay, and pool glyphs carry a
     // sentinel seq and a zero panel count, so this never fires for them.
@@ -263,6 +279,9 @@ struct UnderlineVsOut {
     @location(0) local: vec2<f32>,
     @location(1) @interpolate(flat) color: vec3<f32>,
     @location(2) @interpolate(flat) style: u32,
+    // As in VsOut. The quad keeps a whole cell's height, which the underline
+    // shapes are measured against, so the clip is what ends it at the last row.
+    @location(3) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -285,12 +304,13 @@ fn vs_underline(
     );
     let corner = corners[vertex_index];
 
-    let row_y = f32(slot_row(slot)) * globals.cell_size.y;
+    let row = f32(slot_row(slot));
+    let row_top = row_y(row);
 
     // An underline inside a pool region draws under that pool's composite, as a
     // glyph does in vs_main.
     let lo = cell_pos + globals.origin_cells * globals.cell_size
-        + vec2<f32>(0.0, row_y + globals.scroll_y);
+        + vec2<f32>(0.0, row_top + globals.scroll_y);
     if under_pool(lo, lo + globals.cell_size) {
         var culled: UnderlineVsOut;
         culled.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
@@ -299,7 +319,7 @@ fn vs_underline(
 
     let pixel = cell_pos + corner * globals.cell_size
         + globals.origin_cells * globals.cell_size
-        + vec2<f32>(0.0, row_y + globals.scroll_y);
+        + vec2<f32>(0.0, row_top + globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -310,6 +330,7 @@ fn vs_underline(
     out.local = corner;
     out.color = mix(color, globals.dim.rgb, globals.dim.a);
     out.style = style;
+    out.clip_y = row_clip_y(row + 1.0) + globals.scroll_y;
     return out;
 }
 
@@ -341,6 +362,10 @@ fn underline_coverage(style: u32, pos: vec2<f32>, cell: vec2<f32>) -> f32 {
 
 @fragment
 fn fs_underline(in: UnderlineVsOut) -> @location(0) vec4<f32> {
+    if in.clip.y >= in.clip_y {
+        discard;
+    }
+
     // A composited pool's underline sits under a box like its glyphs, so
     // occlude_all discards it inside any panel rect. Live underlines leave
     // panel_count at zero, so this never fires for them.

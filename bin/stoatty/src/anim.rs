@@ -12,7 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 use stoatty_protocol::command::{SketchEasing, SketchPhase, SketchTiming};
-use stoatty_render::gpu::{HostRide, SketchReveal};
+use stoatty_render::{
+    gpu::{HostRide, SketchReveal},
+    render::GridLayout,
+};
 use stoatty_term::{
     grid::{self, Cell, Grid, Overlay, PoolKind, PoolRegion, Rgb, Sketch},
     term::{Cursor, CursorShape, Damage, PoolView, Terminal},
@@ -543,6 +546,7 @@ pub(crate) fn host_rides(
     glided: &[u32],
     pools: &[PoolView],
     anims: &BTreeMap<u32, PoolAnim>,
+    layout: GridLayout,
     cw: f32,
     ch: f32,
 ) -> Vec<HostRide> {
@@ -554,7 +558,7 @@ pub(crate) fn host_rides(
             Some(HostRide {
                 host: id,
                 top_rows: anim.scroll * (view.region.height as f32).max(1.0),
-                scissor: region_scissor(view.region, cw, ch),
+                scissor: region_scissor(view.region, layout, cw, ch),
             })
         })
         .collect()
@@ -586,12 +590,16 @@ pub(crate) fn intersect_scissor(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
 }
 
 /// The pixel scissor rect [x, y, width, height] covering pool `region`, laid out
-/// on a `cw` by `ch` cell grid.
-pub(crate) fn region_scissor(region: PoolRegion, cw: f32, ch: f32) -> [u32; 4] {
+/// on a `cw` by `ch` cell grid whose rows `layout` places.
+///
+/// A region that ends at the top of the last row ends where that row paints,
+/// so a pool composite never covers it.
+pub(crate) fn region_scissor(region: PoolRegion, layout: GridLayout, cw: f32, ch: f32) -> [u32; 4] {
+    let top = usize::from(region.top);
     let x0 = (region.left as f32 * cw) as u32;
-    let y0 = (region.top as f32 * ch) as u32;
+    let y0 = layout.row_y(top, ch) as u32;
     let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
-    let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+    let y1 = layout.row_y(top + usize::from(region.height), ch) as u32;
     [x0, y0, x1 - x0, y1 - y0]
 }
 
@@ -621,8 +629,14 @@ pub(crate) struct PoolFrame {
 
 impl PoolFrame {
     /// [`host_rides`] over the pool snapshot of the last projection.
-    pub(crate) fn host_rides(&self, glided: &[u32], cw: f32, ch: f32) -> Vec<HostRide> {
-        host_rides(glided, &self.pools, &self.anims, cw, ch)
+    pub(crate) fn host_rides(
+        &self,
+        glided: &[u32],
+        layout: GridLayout,
+        cw: f32,
+        ch: f32,
+    ) -> Vec<HostRide> {
+        host_rides(glided, &self.pools, &self.anims, layout, cw, ch)
     }
 
     /// Take back the buffers that a projection lent out, so the next frame
@@ -2111,13 +2125,18 @@ mod tests {
         };
         let (glided, still) = (view(1, 0), view(2, 20));
         let anims = BTreeMap::from([(1, PoolAnim::new(0.25)), (2, PoolAnim::new(0.5))]);
+        let layout = GridLayout {
+            rows: 60,
+            cols: 20,
+            bottom_row_y: 944.0,
+        };
 
         assert_eq!(
-            host_rides(&[1], &[glided, still], &anims, 8.0, 16.0),
+            host_rides(&[1], &[glided, still], &anims, layout, 8.0, 16.0),
             [HostRide {
                 host: 1,
                 top_rows: 10.0,
-                scissor: region_scissor(glided.region, 8.0, 16.0),
+                scissor: region_scissor(glided.region, layout, 8.0, 16.0),
             }],
             "the glided pool a quarter page down its 40 rows, and no ride for the still one",
         );

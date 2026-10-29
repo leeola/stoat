@@ -12,7 +12,7 @@
 //! edge would break the line around it. The stroke records after the text, and
 //! in a frame compositing pools after those composites too.
 
-use crate::render::{rgb_f32, CellMetrics, HostRide};
+use crate::render::{rgb_f32, CellMetrics, HostRide, RowAnchor};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow};
@@ -75,7 +75,7 @@ struct PanelInstance {
 
 /// The uniform shared by every instance. Carries the surface resolution, the
 /// cell size the vertex shader maps cell coordinates through, and the panel
-/// count the fragment shader loops over for self-occlusion. Padded to 32 bytes
+/// count the fragment shader loops over for self-occlusion. Sized to 32 bytes
 /// so the layout matches the WGSL uniform.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -85,7 +85,9 @@ struct Globals {
     count: u32,
     /// Physical pixels per logical pixel, which the stroke weights scale by.
     scale_factor: f32,
-    _pad: [u32; 2],
+    /// The [`RowAnchor`] the box edges are placed by.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 /// The instanced panel pipeline and its per-frame buffers.
@@ -124,9 +126,9 @@ impl PanelPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("panel"),
             source: ShaderSource::Wgsl(
-                crate::render::with_shadow(&crate::render::with_occlusion(include_str!(
-                    "../shaders/panel.wgsl"
-                )))
+                crate::render::with_shadow(&crate::render::with_rows(
+                    &crate::render::with_occlusion(include_str!("../shaders/panel.wgsl")),
+                ))
                 .into(),
             ),
         });
@@ -247,15 +249,17 @@ impl PanelPass {
 
     /// Upload the frame's uniform and one instance per grid panel.
     ///
-    /// `resolution` is the surface size in physical pixels. Reallocates the
-    /// instance buffer only when the panel count outgrows the current capacity.
-    pub fn prepare(
+    /// `resolution` is the surface size in physical pixels. `anchor` places the
+    /// box edges. Reallocates the instance buffer only when the panel count
+    /// outgrows the current capacity.
+    pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
         anchored: &[HostRide],
         resolution: [f32; 2],
+        anchor: RowAnchor,
     ) {
         // With no panel to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
@@ -291,7 +295,8 @@ impl PanelPass {
             cell_size: [self.metrics.width, self.metrics.height],
             count: self.count,
             scale_factor: self.metrics.scale_factor,
-            _pad: [0; 2],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -495,7 +500,7 @@ mod tests {
         build_panel_instances, build_panel_instances_into, style_code, PanelInstance, PanelPass,
     };
     use crate::{
-        render::CellMetrics,
+        render::{CellMetrics, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
     use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
@@ -526,8 +531,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_occlusion(
-            include_str!("../shaders/panel.wgsl"),
+        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_rows(
+            &crate::render::with_occlusion(include_str!("../shaders/panel.wgsl")),
         )))
         .expect("parse panel");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -546,7 +551,14 @@ mod tests {
         halves: Halves,
     ) -> Vec<u8> {
         let mut pass = PanelPass::new(device, TextureFormat::Rgba8Unorm, metrics);
-        pass.prepare(device, queue, grid, &[], [TARGET as f32, TARGET as f32]);
+        pass.prepare(
+            device,
+            queue,
+            grid,
+            &[],
+            [TARGET as f32, TARGET as f32],
+            RowAnchor::UNIFORM,
+        );
 
         let size = Extent3d {
             width: TARGET,

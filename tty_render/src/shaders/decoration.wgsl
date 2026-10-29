@@ -12,8 +12,10 @@ struct Globals {
     // logical pixels, so a 2x display draws them twice as wide and the border
     // keeps its weight against the cell it edges.
     scale_factor: f32,
-    pad0: f32,
-    pad1: f32,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the bordered cells' rows by.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -39,6 +41,10 @@ struct VsOut {
     @location(4) @interpolate(flat) left_color: vec3<f32>,
     @location(5) @interpolate(flat) edges: u32,
     @location(6) @interpolate(flat) styles: u32,
+    // The pixel y at and below which the border paints nothing. The quad keeps
+    // a whole cell's height, which the edge bands are measured against, so the
+    // clip is what ends a cell above the last row where that row starts.
+    @location(7) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -62,7 +68,10 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let pixel = (cell_pos + corner) * globals.cell_size + vec2<f32>(0.0, globals.scroll_y);
+    let pixel = vec2<f32>(
+        (cell_pos.x + corner.x) * globals.cell_size.x,
+        row_y(cell_pos.y) + corner.y * globals.cell_size.y + globals.scroll_y
+    );
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -77,6 +86,7 @@ fn vs_main(
     out.left_color = left_color;
     out.edges = edges;
     out.styles = styles;
+    out.clip_y = row_clip_y(cell_pos.y + 1.0) + globals.scroll_y;
     return out;
 }
 
@@ -129,6 +139,10 @@ fn arc_coverage(pos: vec2<f32>, center: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if in.clip.y >= in.clip_y {
+        discard;
+    }
+
     let cell = globals.cell_size;
     let pos = in.local * cell;
     let r = min(cell.x, cell.y) * 0.5;

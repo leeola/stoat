@@ -5,7 +5,7 @@
 //! z-order. Icons are not cell attributes: like overlays they float over the
 //! grid, so this pass runs after the overlays and alpha-blends its shapes on top.
 
-use crate::render::{rgb_f32, CellMetrics, Occluder};
+use crate::render::{rgb_f32, CellMetrics, Occluder, RowAnchor};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{Icon, IconKind};
@@ -44,7 +44,7 @@ struct IconInstance {
 /// The uniform shared by every instance. Carries the surface resolution and
 /// cell size the vertex shader maps cell coordinates through, the
 /// panel-occluder count the fragment shader loops over, and the text band an
-/// icon is placed against. Padded to 32 bytes to match the WGSL uniform layout.
+/// icon is placed against. Padded to 48 bytes to match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
@@ -56,6 +56,10 @@ struct Globals {
     /// Height of a capital above that baseline, in physical pixels.
     cap_height: f32,
     _pad: u32,
+    /// The [`RowAnchor`] the icon rows and the occluder rows are placed by.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad1: [u32; 2],
 }
 
 /// The instanced icon pipeline and its per-frame buffers.
@@ -94,7 +98,10 @@ impl IconPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("icon"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/icon.wgsl")).into(),
+                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
+                    "../shaders/icon.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -207,9 +214,12 @@ impl IconPass {
     ///
     /// `resolution` is the surface size in physical pixels. `occluders` are the
     /// live panels' rects, built once per frame and shared with the bar pass.
+    /// `anchor` places the icon rows.
+    ///
     /// Reallocates the instance or occluder buffer only when its count outgrows
     /// the current capacity, and skips the instance upload when they match what
     /// was last sent.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -218,6 +228,7 @@ impl IconPass {
         occluders: &[Occluder],
         resolution: [f32; 2],
         band: [f32; 2],
+        anchor: RowAnchor,
     ) {
         // With no icon to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
@@ -236,6 +247,9 @@ impl IconPass {
             baseline: band[0],
             cap_height: band[1],
             _pad: 0,
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad1: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -389,8 +403,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/icon.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+            include_str!("../shaders/icon.wgsl"),
         )))
         .expect("parse icon");
         Validator::new(ValidationFlags::all(), Capabilities::all())

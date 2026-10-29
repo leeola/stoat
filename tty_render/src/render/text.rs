@@ -13,7 +13,7 @@ use crate::{
     render::{
         exposed_rows, globals_offset, globals_slot_index, rgb_f32, row_len, row_uploads,
         CellMetrics, CompositeSlot, CompositeSlots, Cover, Frame, GridVersion, HostRide, Occluder,
-        OccluderBuffer, PoolOccluders, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        OccluderBuffer, PoolOccluders, RowAnchor, SketchReveal, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
         MAX_COMPOSITE_POOLS,
     },
 };
@@ -300,6 +300,12 @@ struct TextGlobals {
     /// focus move rewrites this uniform and reshapes nothing. Zero on every
     /// other draw, which leaves each color as it is.
     dim: [f32; 4],
+    /// The [`RowAnchor`] the grid, region, and underline rows and the occluder
+    /// rows are placed by. The padding rounds the struct up to the 16-byte
+    /// multiple WGSL sizes it to.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad1: [u32; 2],
 }
 
 const _: () = assert!(size_of::<TextGlobals>() as u64 <= GLOBALS_SLOT_STRIDE);
@@ -882,9 +888,9 @@ impl TextPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("text"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(&crate::render::with_cover(include_str!(
-                    "../shaders/text.wgsl"
-                )))
+                crate::render::with_rows(&crate::render::with_occlusion(
+                    &crate::render::with_cover(include_str!("../shaders/text.wgsl")),
+                ))
                 .into(),
             ),
         });
@@ -1447,6 +1453,10 @@ impl TextPass {
     /// inside one draws nothing, since the pool repaints it, unless it meets one
     /// of `occluders`.
     ///
+    /// `anchor` places the rows of the grid, region, and underline draws. The
+    /// screen-anchored draws keep the uniform pitch, because their builders place
+    /// them in pixels.
+    ///
     /// Runs in two phases: every visible glyph is rasterized first (which may
     /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
     /// has reached its final size, so normalized coordinates stay valid.
@@ -1463,6 +1473,7 @@ impl TextPass {
         occluders: &[Occluder],
         anchored: &[HostRide],
         covered: &[[u32; 4]],
+        anchor: RowAnchor,
     ) {
         let cursor = frame.cursor;
         let scroll = frame.scroll;
@@ -1887,42 +1898,57 @@ impl TextPass {
         // The grid and region draws are the live grid a pool composites over,
         // so they carry the cover. The screen-anchored draws carry none.
         let (mask_size, color_size) = self.atlas.texture_dims();
-        let globals_with =
-            |scroll_y: f32, panel_count: u32, rotation: RowRotation, cover: Cover| TextGlobals {
-                resolution,
-                cell_size,
-                atlas_size: [mask_size as f32, color_size as f32],
-                scroll_y,
-                panel_count,
-                occlude_all: 0,
-                row_offset: rotation.offset,
-                rows: rotation.rows as u32,
-                _pad0: 0,
-                origin_cells: [0.0; 2],
-                occluder_cell: cell_size,
-                cover,
-                dim: [0.0; 4],
-            };
+        let globals_with = |scroll_y: f32,
+                            panel_count: u32,
+                            rotation: RowRotation,
+                            cover: Cover,
+                            anchor: RowAnchor| TextGlobals {
+            resolution,
+            cell_size,
+            atlas_size: [mask_size as f32, color_size as f32],
+            scroll_y,
+            panel_count,
+            occlude_all: 0,
+            row_offset: rotation.offset,
+            rows: rotation.rows as u32,
+            _pad0: 0,
+            origin_cells: [0.0; 2],
+            occluder_cell: cell_size,
+            cover,
+            dim: [0.0; 4],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad1: [0; 2],
+        };
         let cover = Cover::new(covered, occluders.len());
         crate::render::upload_globals(
             queue,
             &self.globals,
             0,
-            globals_with(grid_scroll_y, 0, grid_rotation, cover),
+            globals_with(grid_scroll_y, 0, grid_rotation, cover, anchor),
             &mut self.last_globals,
         );
         crate::render::upload_globals(
             queue,
             &self.region_globals,
             0,
-            globals_with(region_scroll_y, 0, grid_rotation, cover),
+            globals_with(region_scroll_y, 0, grid_rotation, cover, anchor),
             &mut self.last_region_globals,
         );
+        // The screen-anchored draws keep the uniform pitch, as their builders and
+        // their scissors do. A text run carries slot zero rather than its row, so
+        // a row clip reads it as row zero and cuts it below the last row's top.
         crate::render::upload_globals(
             queue,
             &self.static_globals,
             0,
-            globals_with(0.0, panel_count, RowRotation::unrotated(), Cover::NONE),
+            globals_with(
+                0.0,
+                panel_count,
+                RowRotation::unrotated(),
+                Cover::NONE,
+                RowAnchor::UNIFORM,
+            ),
             &mut self.last_static_globals,
         );
     }
@@ -2129,6 +2155,9 @@ impl TextPass {
             occluder_cell,
             cover: Cover::NONE,
             dim,
+            bottom_row_y: RowAnchor::UNIFORM.bottom_row_y,
+            last_row: RowAnchor::UNIFORM.last_row,
+            _pad1: [0; 2],
         };
 
         // Ahead of the reuse return below, because a slot is the pool's position

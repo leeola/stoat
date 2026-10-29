@@ -11,7 +11,7 @@
 
 use crate::render::{
     sketch::rough::{self, ComponentBox, Rounding},
-    CellMetrics, GridVersion, HostRide, Occluder, OccluderBuffer, SketchReveal,
+    CellMetrics, GridVersion, HostRide, Occluder, OccluderBuffer, RowAnchor, SketchReveal,
     GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
@@ -171,7 +171,10 @@ struct Globals {
     /// the live cell rectangle even though nothing else in this pass does.
     cell_size: [f32; 2],
     panel_count: u32,
-    _pad: [u32; 3],
+    /// The [`RowAnchor`] the occluder rows are placed by.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad: u32,
 }
 
 /// One generated stroke's span in the shared point buffer, with the arc lengths
@@ -292,7 +295,10 @@ impl SketchPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("sketch"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../../shaders/sketch.wgsl")).into(),
+                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
+                    "../../shaders/sketch.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -425,7 +431,8 @@ impl SketchPass {
     /// commands declare, so a caller with no clock passes `&[]`.
     ///
     /// `anchored` names the pools compositing this frame, so a mark anchored to
-    /// one is shifted and held back for [`Self::draw_riding`].
+    /// one is shifted and held back for [`Self::draw_riding`]. `anchor` places
+    /// the occluder rows.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -435,6 +442,7 @@ impl SketchPass {
         anchored: &[HostRide],
         occluders: &[Occluder],
         resolution: [f32; 2],
+        anchor: RowAnchor,
     ) {
         // With no mark to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The
@@ -450,7 +458,9 @@ impl SketchPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
-            _pad: [0; 3],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad: 0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 

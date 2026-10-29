@@ -18,7 +18,7 @@
 //! Pools and aux windows draw no images. A client places against the live grid,
 //! and an aux window owns a separate device whose textures are not these.
 
-use crate::render::CellMetrics;
+use crate::render::{CellMetrics, GridLayout};
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
 use stoatty_term::grid::{Grid, PlacedImage};
@@ -64,6 +64,12 @@ struct ImageInstance {
     size: [f32; 2],
     uv_min: [f32; 2],
     uv_max: [f32; 2],
+    /// The pixel y at and below which the quad paints nothing.
+    ///
+    /// The quad keeps the height of the cell box it names, since the image
+    /// scales into that box, so the clip is what ends a placement above the
+    /// last row where that row starts.
+    clip_y: f32,
 }
 
 /// The uniform shared by every instance.
@@ -187,6 +193,7 @@ impl ImagePass {
                         1 => Float32x2,
                         2 => Float32x2,
                         3 => Float32x2,
+                        4 => Float32,
                     ],
                 })],
             },
@@ -302,13 +309,15 @@ impl ImagePass {
     }
 
     /// Build this frame's instances from the grid's placements, uploading any
-    /// image the cache does not already hold.
+    /// image the cache does not already hold. `layout` places the placements'
+    /// rows.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
+        layout: GridLayout,
     ) {
         queue.write_buffer(
             &self.globals,
@@ -347,7 +356,7 @@ impl ImagePass {
             self.ensure_texture(device, queue, key, placed);
 
             let start = self.scratch.len() as u32;
-            self.scratch.push(self.instance_for(placed));
+            self.scratch.push(self.instance_for(placed, layout));
 
             let bucket = match placed.z < 0 {
                 true => &mut self.under,
@@ -380,12 +389,12 @@ impl ImagePass {
     }
 
     /// The quad for one placement, in pixels, with the source rectangle it
-    /// samples.
-    fn instance_for(&self, placed: &PlacedImage) -> ImageInstance {
+    /// samples. Its top row is placed by `layout`.
+    fn instance_for(&self, placed: &PlacedImage, layout: GridLayout) -> ImageInstance {
         let (cell_w, cell_h) = (self.metrics.width, self.metrics.height);
         let origin = [
             placed.col as f32 * cell_w + placed.offset_x as f32,
-            placed.row as f32 * cell_h + placed.offset_y as f32,
+            layout.row_y(placed.row, cell_h) + placed.offset_y as f32,
         ];
         let size = [placed.cols as f32 * cell_w, placed.rows as f32 * cell_h];
         let (uv_min, uv_max) = crop_uv(placed);
@@ -395,6 +404,9 @@ impl ImagePass {
             size,
             uv_min,
             uv_max,
+            clip_y: layout
+                .clip_y(placed.row + placed.rows, cell_h)
+                .unwrap_or(f32::MAX),
         }
     }
 
@@ -635,7 +647,10 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
 #[cfg(test)]
 mod tests {
     use super::{crop_uv, ImagePass, TextureKey};
-    use crate::{render::CellMetrics, test_support::require_headless_device};
+    use crate::{
+        render::{grid_dims, CellMetrics},
+        test_support::require_headless_device,
+    };
     use futures::executor;
     use std::sync::Arc;
     use stoatty_term::grid::{Grid, ImageCrop, PlacedImage};
@@ -685,7 +700,13 @@ mod tests {
         grid.set_images(vec![placed(side, 1, ImageCrop::default())]);
 
         let scope = device.push_error_scope(ErrorFilter::Validation);
-        pass.prepare(&device, &queue, &grid, [60.0, 48.0]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            [60.0, 48.0],
+            grid_dims(60, 48, metrics),
+        );
         let error_future = scope.pop();
         device.poll(PollType::wait_indefinitely()).expect("poll");
         let error = executor::block_on(error_future);

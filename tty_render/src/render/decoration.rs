@@ -9,7 +9,7 @@
 //! after the grid text. Glyph ink that reaches a cell edge would otherwise break
 //! the APC line it sits inside.
 
-use crate::render::{rgb_f32, row_len, row_uploads, CellMetrics};
+use crate::render::{rgb_f32, row_len, row_uploads, CellMetrics, RowAnchor};
 use bytemuck::{Pod, Zeroable};
 use std::{mem, ops::Range};
 use stoatty_term::{
@@ -65,8 +65,6 @@ struct BorderInstance {
 /// Uniform shared by every instance: the screen resolution and cell size the
 /// vertex shader maps cell coordinates through, plus the grid's eased vertical
 /// scroll offset in pixels.
-///
-/// `pad` rounds the uniform up to a 16-byte multiple.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
@@ -75,7 +73,9 @@ struct Globals {
     scroll_y: f32,
     /// Physical pixels per logical pixel, which the stroke weights scale by.
     scale_factor: f32,
-    pad: [f32; 2],
+    /// The [`RowAnchor`] the bordered cells' rows are placed by.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 /// The instanced cell-edge border pipeline and its per-frame buffers.
@@ -111,7 +111,9 @@ impl DecorationPass {
     ) -> DecorationPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("decoration"),
-            source: ShaderSource::Wgsl(include_str!("../shaders/decoration.wgsl").into()),
+            source: ShaderSource::Wgsl(
+                crate::render::with_rows(include_str!("../shaders/decoration.wgsl")).into(),
+            ),
         });
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
@@ -216,7 +218,8 @@ impl DecorationPass {
     ///
     /// `resolution` is the surface size in physical pixels. `grid_scroll` shifts
     /// the borders up by that many rows with the rest of the grid, via the
-    /// uniform, so the per-row instance cache is unaffected by scroll.
+    /// uniform, so the per-row instance cache is unaffected by scroll. `anchor`
+    /// places the bordered cells' rows.
     ///
     /// `decoration_damage` marks the rows an APC border changed since the last
     /// frame. Only those rows rebuild, every row when the cache is stale or the
@@ -227,7 +230,7 @@ impl DecorationPass {
     /// every later row's place in the buffer, so from there on the rest is
     /// rewritten as one span.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare(
+    pub(crate) fn prepare(
         &mut self,
         device: &Device,
         queue: &Queue,
@@ -236,13 +239,15 @@ impl DecorationPass {
         grid_scroll: f32,
         decoration_damage: &Damage,
         scrolled_rows: isize,
+        anchor: RowAnchor,
     ) {
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             scroll_y: grid_scroll * self.metrics.height,
             scale_factor: self.metrics.scale_factor,
-            pad: [0.0, 0.0],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -460,8 +465,10 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module =
-            wgsl::parse_str(include_str!("../shaders/decoration.wgsl")).expect("parse decoration");
+        let module = wgsl::parse_str(&crate::render::with_rows(include_str!(
+            "../shaders/decoration.wgsl"
+        )))
+        .expect("parse decoration");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate decoration");

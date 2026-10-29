@@ -19,6 +19,10 @@ struct Globals {
     baseline: f32,
     cap_height: f32,
     pad0: u32,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the icon rows and the occluder rows by.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -40,6 +44,10 @@ struct VsOut {
     @location(2) @interpolate(flat) color: vec3<f32>,
     @location(3) @interpolate(flat) kind: u32,
     @location(4) @interpolate(flat) seq: u32,
+    // The pixel y at and below which the icon paints nothing. The quad keeps its
+    // block's height, which the shapes are measured against, so the clip is what
+    // ends an icon above the last row where that row starts.
+    @location(5) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -63,7 +71,7 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     let extent = vec2<f32>(size, size) * globals.cell_size;
-    let pixel = cell * globals.cell_size + offset + corner * extent;
+    let pixel = cell_px(cell) + offset + corner * extent;
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -76,6 +84,7 @@ fn vs_main(
     out.color = color;
     out.kind = kind;
     out.seq = seq;
+    out.clip_y = row_clip_y(cell.y + size);
     return out;
 }
 
@@ -115,6 +124,10 @@ fn triangle_sdf(q: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if in.clip.y >= in.clip_y {
+        discard;
+    }
+
     // Discard where a box declared later (higher seq) covers this icon, so a
     // lower box's status icon cannot show through an upper box.
     let frag = in.clip.xy;
@@ -127,7 +140,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.cell_size,
                 o.corner_radius,
-                o.inset_x
+                o.inset_x,
+                globals.bottom_row_y,
+                globals.last_row
             );
             if sdf < -0.5 {
                 discard;

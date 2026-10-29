@@ -38,6 +38,11 @@ struct Globals {
     // pool composited at its own font size lays its paths out at cell_size, but
     // the boxes over it are cells of the live grid.
     occluder_cell: vec2<f32>,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the endpoint rows and the occluder rows by. A pool composite
+    // carries a last_row that no row reaches.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -76,6 +81,9 @@ struct VsOut {
     // normals in pixels, and which of its two ends carries one.
     @location(10) @interpolate(flat) cuts_px: vec4<f32>,
     @location(11) @interpolate(flat) cut_flags: u32,
+    // The pixel y at and below which the path paints nothing, so a stroke that
+    // ends above the last row never paints under it.
+    @location(12) @interpolate(flat) clip_y: f32,
 }
 
 // A chunk that starts on a joint shared with the chunk before it.
@@ -87,10 +95,7 @@ const CUT_END: u32 = 2u;
 // A point pair moved to pixels, which is how each packed vec4 of the instance
 // reaches the fragment stage.
 fn pair_px(pair: vec4<f32>, shift: vec2<f32>) -> vec4<f32> {
-    return vec4<f32>(
-        (pair.xy + shift) * globals.cell_size,
-        (pair.zw + shift) * globals.cell_size
-    );
+    return vec4<f32>(cell_px(pair.xy + shift), cell_px(pair.zw + shift));
 }
 
 @vertex
@@ -125,8 +130,8 @@ fn vs_main(
     // aligned. A path of several segments has no single direction to orient to,
     // and the SDF clips the corners the box adds anyway.
     let reach = vec2<f32>(half_width_px + AA_MARGIN, half_width_px + AA_MARGIN);
-    let min_px = (bounds.xy + shift) * globals.cell_size - reach;
-    let max_px = (bounds.zw + shift) * globals.cell_size + reach;
+    let min_px = cell_px(bounds.xy + shift) - reach;
+    let max_px = cell_px(bounds.zw + shift) + reach;
     let pixel = mix(min_px, max_px, corner);
 
     let ndc = vec2<f32>(
@@ -149,6 +154,7 @@ fn vs_main(
     // Already unit normals in pixels, so they carry no cell size and no shift.
     out.cuts_px = cuts_px;
     out.cut_flags = cut_flags;
+    out.clip_y = row_clip_y(bounds.w + shift.y);
     return out;
 }
 
@@ -169,6 +175,10 @@ fn capsule_sdf(q: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if in.clip.y >= in.clip_y {
+        discard;
+    }
+
     // Discard where a box declared later (higher seq) covers this path, so a
     // line beneath a modal cannot show through it.
     let frag = in.clip.xy;
@@ -181,7 +191,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.occluder_cell,
                 o.corner_radius,
-                o.inset_x
+                o.inset_x,
+                globals.bottom_row_y,
+                globals.last_row
             );
             if sdf < -0.5 {
                 discard;

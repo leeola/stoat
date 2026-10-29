@@ -10,7 +10,7 @@
 //! ([`minimap_top`], [`thumb_geometry`], [`build_strip`]) is unit-tested without a
 //! GPU.
 
-use crate::render::{rgb_f32, CellMetrics, GridVersion, Occluder};
+use crate::render::{rgb_f32, CellMetrics, GridLayout, GridVersion, Occluder};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Grid, LineSummary, Minimap, MinimapStrip, MinimapView, Rgb, Rgba};
 use wgpu::{
@@ -50,7 +50,9 @@ struct Globals {
     cell_size: [f32; 2],
     panel_count: u32,
     occlude_all: u32,
-    _pad: [u32; 2],
+    /// The [`crate::render::RowAnchor`] the occluder rows are placed by.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 /// A strip's pixel geometry, derived fresh from its declaration and the live cell
@@ -145,7 +147,10 @@ impl MinimapPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("minimap"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/minimap.wgsl")).into(),
+                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
+                    "../shaders/minimap.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -290,6 +295,7 @@ impl MinimapPass {
         grid: &Grid,
         occluders: &[Occluder],
         resolution: [f32; 2],
+        layout: GridLayout,
     ) {
         // With no strip to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
@@ -302,12 +308,14 @@ impl MinimapPass {
 
         self.upload_occluders(device, queue, occluders);
 
+        let anchor = layout.row_anchor();
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
             occlude_all: 0,
-            _pad: [0; 2],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -342,7 +350,7 @@ impl MinimapPass {
             }
 
             let content = grid.minimap_content(strip.strip.content_id);
-            let (instances, rect) = build_strip(strip, content, self.metrics);
+            let (instances, rect) = build_strip(strip, content, self.metrics, layout);
             #[cfg(test)]
             {
                 self.builds += 1;
@@ -494,10 +502,15 @@ fn make_bind_group(
     })
 }
 
-/// The pixel geometry of `strip` under `metrics`.
-fn strip_layout(strip: &MinimapStrip, metrics: CellMetrics) -> StripLayout {
+/// The pixel geometry of `strip` under `metrics`, with its rows placed by
+/// `layout`.
+fn strip_layout(strip: &MinimapStrip, metrics: CellMetrics, layout: GridLayout) -> StripLayout {
     let strip_w = strip.width as f32 * metrics.width;
-    let strip_h = strip.height as f32 * metrics.height;
+    // Both edges go through the layout, so a strip that ends at the top of the
+    // last row ends where that row paints rather than under it.
+    let top = usize::from(strip.top);
+    let strip_y = layout.row_y(top, metrics.height);
+    let strip_h = layout.row_y(top + usize::from(strip.height), metrics.height) - strip_y;
     // Whole pixels. A fractional pitch puts consecutive lines on different
     // sub-pixel phases, and the coverage math is exact, so one line lands whole
     // while the next splits across two rows at half strength: the strip beats
@@ -507,7 +520,7 @@ fn strip_layout(strip: &MinimapStrip, metrics: CellMetrics) -> StripLayout {
         .max(1.0);
     StripLayout {
         strip_x: strip.left as f32 * metrics.width,
-        strip_y: strip.top as f32 * metrics.height,
+        strip_y,
         strip_w,
         strip_h,
         line_h,
@@ -571,8 +584,9 @@ fn build_strip(
     strip: &Minimap,
     content: &[LineSummary],
     metrics: CellMetrics,
+    grid_layout: GridLayout,
 ) -> (Vec<MinimapInstance>, [f32; 4]) {
-    let layout = strip_layout(&strip.strip, metrics);
+    let layout = strip_layout(&strip.strip, metrics, grid_layout);
     let seq = strip.seq;
     let rect = [
         layout.strip_x,
@@ -702,7 +716,7 @@ fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
 mod tests {
     use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
     use crate::{
-        render::{panel_occluder, CellMetrics, Occluder},
+        render::{panel_occluder, CellMetrics, GridLayout, Occluder},
         test_support::{read_back, require_headless_device},
     };
     use std::collections::HashMap;
@@ -740,6 +754,16 @@ mod tests {
         }
     }
 
+    /// A layout whose last row no strip reaches, so every row keeps the uniform
+    /// pitch.
+    fn uniform_layout() -> GridLayout {
+        GridLayout {
+            rows: usize::MAX,
+            cols: usize::MAX,
+            bottom_row_y: f32::MAX,
+        }
+    }
+
     fn command() -> MinimapStrip {
         MinimapStrip {
             top: 0,
@@ -771,8 +795,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/minimap.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+            include_str!("../shaders/minimap.wgsl"),
         )))
         .expect("parse minimap");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -849,7 +873,7 @@ mod tests {
         });
         let content = summaries(vec![Vec::new(); 100]);
         let thumb_height = |metrics| {
-            let (instances, _) = build_strip(&strip(view), &content, metrics);
+            let (instances, _) = build_strip(&strip(view), &content, metrics, uniform_layout());
             instances[1].size[1]
         };
 
@@ -876,7 +900,12 @@ mod tests {
                 weight: 255,
             },
         ]];
-        let (instances, rect) = build_strip(&strip(None), &summaries(content), metrics());
+        let (instances, rect) = build_strip(
+            &strip(None),
+            &summaries(content),
+            metrics(),
+            uniform_layout(),
+        );
 
         // strip: left 10 * width 6 = x 60; width 8 * 6 = 48; col_w = 48 / 120 = 0.4;
         // height 10 * 12 = 120.
@@ -912,7 +941,12 @@ mod tests {
             top_256: 0,
             visible: 30,
         });
-        let (instances, _) = build_strip(&strip(view), &summaries(content), metrics());
+        let (instances, _) = build_strip(
+            &strip(view),
+            &summaries(content),
+            metrics(),
+            uniform_layout(),
+        );
 
         // Background + one run (the single line) + thumb + its four border
         // edges, nothing for the missing lines the strip window covers.
@@ -937,13 +971,13 @@ mod tests {
         )]));
 
         let resolution = [640.0, 480.0];
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         assert_eq!(pass.strips.len(), 1, "the declared strip builds one draw");
 
         // A change to something the epoch does not cover leaves the strips as
         // they were, which is the skip this pass exists for.
         grid.set_text_runs(Vec::new());
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         assert_eq!(
             pass.strips.len(),
             1,
@@ -953,14 +987,21 @@ mod tests {
         // The grid bumps the epoch itself, so emptying the list outside a
         // projection is a change this sees.
         grid.set_minimaps(Vec::new());
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         assert!(
             pass.strips.is_empty(),
             "a moved epoch rebuilds against the current grid"
         );
 
         grid.set_minimaps(vec![strip(None)]);
-        pass.prepare(&device, &queue, &grid, &[], [800.0, 600.0]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [800.0, 600.0],
+            uniform_layout(),
+        );
         assert_eq!(
             pass.strips.len(),
             1,
@@ -990,8 +1031,8 @@ mod tests {
         );
 
         let resolution = [640.0, 480.0];
-        pass.prepare(&device, &queue, &first, &[], resolution);
-        pass.prepare(&device, &queue, &second, &[], resolution);
+        pass.prepare(&device, &queue, &first, &[], resolution, uniform_layout());
+        pass.prepare(&device, &queue, &second, &[], resolution, uniform_layout());
         assert_eq!(
             pass.strips.len(),
             2,
@@ -1014,7 +1055,7 @@ mod tests {
         grid.set_minimap_contents(HashMap::from([(1, summaries(lines(4)))]));
 
         let resolution = [640.0, 480.0];
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         assert_eq!(pass.strips.len(), 1, "the declared strip builds one draw");
 
         pass.set_metrics(CellMetrics {
@@ -1024,7 +1065,7 @@ mod tests {
             scale_factor: 1.0,
         });
         grid.set_minimaps(Vec::new());
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
 
         assert!(
             pass.strips.is_empty(),
@@ -1046,7 +1087,7 @@ mod tests {
         grid.set_minimap_contents(HashMap::from([(1, summaries(lines(4)))]));
 
         let resolution = [640.0, 480.0];
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         let before = pass.built[0].scissor;
 
         // Twice the cell box, so the strip's own box doubles with it.
@@ -1056,7 +1097,7 @@ mod tests {
             height: 24.0,
             scale_factor: 1.0,
         });
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
 
         assert_eq!(
             (pass.builds, before, pass.built[0].scissor),
@@ -1099,9 +1140,9 @@ mod tests {
         );
 
         let resolution = [640.0, 480.0];
-        pass.prepare(&device, &queue, &first, &[], resolution);
+        pass.prepare(&device, &queue, &first, &[], resolution, uniform_layout());
         let two_lines = pass.built[0].instances.len();
-        pass.prepare(&device, &queue, &second, &[], resolution);
+        pass.prepare(&device, &queue, &second, &[], resolution, uniform_layout());
 
         // A strip's instances are its lines plus its background, its thumb, and
         // the thumb's four border edges.
@@ -1162,7 +1203,7 @@ mod tests {
         let mut grid = two_strip_grid(4, 7);
         let resolution = [640.0, 480.0];
 
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         let untouched = pass.built[1].instances.clone();
         let (built_once, uploaded_once) = (pass.builds, pass.uploads);
 
@@ -1173,7 +1214,7 @@ mod tests {
             })),
             second_strip(None),
         ]);
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
 
         assert_ne!(
             pass.built[0].declared.view, None,
@@ -1200,13 +1241,13 @@ mod tests {
         let mut grid = two_strip_grid(4, 7);
         let resolution = [640.0, 480.0];
 
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         let (built, uploaded) = (pass.builds, pass.uploads);
         let drawn = pass.strips.len();
 
         // The same two strips again, which moves the epoch and nothing else.
         grid.set_minimaps(vec![strip(None), second_strip(None)]);
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
 
         assert_eq!(
             (pass.builds, pass.uploads, pass.strips.len()),
@@ -1225,7 +1266,7 @@ mod tests {
         let mut grid = two_strip_grid(4, 7);
         let resolution = [640.0, 480.0];
 
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
         let before = pass.built[0].instances.clone();
         let untouched = pass.built[1].instances.clone();
         let (built_once, uploaded_once) = (pass.builds, pass.uploads);
@@ -1243,7 +1284,7 @@ mod tests {
                 weight: 255,
             }]]),
         );
-        pass.prepare(&device, &queue, &grid, &[], resolution);
+        pass.prepare(&device, &queue, &grid, &[], resolution, uniform_layout());
 
         assert!(
             pass.built[0].instances != before,
@@ -1279,6 +1320,7 @@ mod tests {
             grid,
             occluders,
             [TARGET as f32, TARGET as f32],
+            uniform_layout(),
         );
 
         let size = Extent3d {

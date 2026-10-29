@@ -43,6 +43,11 @@ struct Globals {
     // a. A terminal pane's pool fades when the pane loses focus. Zero on every
     // other draw, which leaves each color as it is.
     dim: vec4<f32>,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the cell rows, the cursor corners, and the occluder rows by. A pool
+    // composite carries a last_row that no row reaches.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -68,7 +73,9 @@ fn occluded(frag: vec2<f32>) -> bool {
                 o.size,
                 globals.occluder_cell,
                 o.corner_radius,
-                o.inset_x
+                o.inset_x,
+                globals.bottom_row_y,
+                globals.last_row
             );
             if sdf < -0.5 {
                 return true;
@@ -125,8 +132,8 @@ fn vs_main(
     // its quad goes outside clip space too. The rect is the one the corners
     // below snap to.
     let scroll = vec2<f32>(0.0, globals.scroll_y);
-    let lo = round((cell + globals.origin_cells) * globals.cell_size) + scroll;
-    let hi = round((cell + globals.origin_cells + vec2<f32>(1.0, 1.0)) * globals.cell_size) + scroll;
+    let lo = round(cell_px(cell + globals.origin_cells)) + scroll;
+    let hi = round(cell_px(cell + globals.origin_cells + vec2<f32>(1.0, 1.0))) + scroll;
     if under_pool(lo, hi) {
         out.clip = vec4<f32>(2.0, 2.0, 0.0, 1.0);
         return out;
@@ -136,7 +143,10 @@ fn vs_main(
     // integer boundary and each spans whole pixels, leaving no fractional sliver
     // (the dark seam) between same-color cells. Scroll is added after the snap so
     // smooth scrolling stays fractional and the grid only snaps once it settles.
-    let pixel = round((cell + globals.origin_cells + corners[vertex_index]) * globals.cell_size)
+    //
+    // Both edges go through row_y, so a cell above the last row ends where the
+    // last row starts and never paints under it.
+    let pixel = round(cell_px(cell + globals.origin_cells + corners[vertex_index]))
         + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -196,7 +206,7 @@ fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
 
     let corner = indices[vertex_index];
     let cell = corners[corner];
-    let pixel = cell * globals.cell_size + vec2<f32>(0.0, globals.scroll_y);
+    let pixel = cell_px(cell) + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -205,11 +215,13 @@ fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
     var out: CursorVsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.uv = uvs[corner];
-    // Each side scales to pixels before its length is taken, since a warped
-    // block's sides lean across both axes.
+    // Each side moves to pixels before its length is taken, since a warped
+    // block's sides lean across both axes. A block above the last row ends where
+    // that row starts, and its outline follows the edge it ends on.
+    let top_left = cell_px(corners[0]);
     out.extent = vec2<f32>(
-        length((corners[1] - corners[0]) * globals.cell_size),
-        length((corners[2] - corners[0]) * globals.cell_size)
+        length(cell_px(corners[1]) - top_left),
+        length(cell_px(corners[2]) - top_left)
     );
     return out;
 }

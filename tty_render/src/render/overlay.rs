@@ -8,7 +8,7 @@
 //! This is the compositing layer for popovers and completion menus; the region
 //! is the box itself, with any text inside it drawn separately.
 
-use crate::render::{rgb_f32, CellMetrics};
+use crate::render::{rgb_f32, CellMetrics, RowAnchor};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
 use stoatty_term::grid::{Grid, Overlay};
@@ -62,7 +62,10 @@ struct Globals {
     cell_size: [f32; 2],
     /// Physical pixels per logical pixel, which the border weight scales by.
     scale_factor: f32,
-    _pad: f32,
+    /// The [`RowAnchor`] the box edges are placed by.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad: u32,
 }
 
 /// The instanced overlay pipeline and its per-frame buffers.
@@ -91,7 +94,10 @@ impl OverlayPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("overlay"),
             source: ShaderSource::Wgsl(
-                crate::render::with_shadow(include_str!("../shaders/overlay.wgsl")).into(),
+                crate::render::with_shadow(&crate::render::with_rows(include_str!(
+                    "../shaders/overlay.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -193,10 +199,17 @@ impl OverlayPass {
 
     /// Upload the frame's uniform and one instance per grid overlay.
     ///
-    /// `resolution` is the surface size in physical pixels. Reallocates the
-    /// instance buffer only when the overlay count outgrows the current
-    /// capacity.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+    /// `resolution` is the surface size in physical pixels. `anchor` places the
+    /// box edges. Reallocates the instance buffer only when the overlay count
+    /// outgrows the current capacity.
+    pub(crate) fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        resolution: [f32; 2],
+        anchor: RowAnchor,
+    ) {
         // With no overlay to draw now and none drawn last frame, nothing reads this
         // pass's buffers, so the frame skips it without touching the GPU. The frame
         // that empties the list still runs, which is what drops the count to zero
@@ -209,7 +222,9 @@ impl OverlayPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             scale_factor: self.metrics.scale_factor,
-            _pad: 0.0,
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad: 0,
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -311,8 +326,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_shadow(include_str!(
-            "../shaders/overlay.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_rows(
+            include_str!("../shaders/overlay.wgsl"),
         )))
         .expect("parse overlay");
         Validator::new(ValidationFlags::all(), Capabilities::all())

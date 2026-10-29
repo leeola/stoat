@@ -171,6 +171,79 @@ impl CellMetrics {
     }
 }
 
+/// The cell grid a surface holds, and the pixel y its last row paints at.
+///
+/// A surface whose height is not a whole number of cells leaves a strip under
+/// the uniform pitch. The last row hangs from `bottom_row_y` rather than from
+/// that pitch, which lets a layout anchor it to the bottom edge. Every other row
+/// keeps the uniform pitch, and where the last row overlaps the row above it,
+/// the last row covers it.
+///
+/// See also:
+/// - [`grid_layout`] for the layout a surface holds.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct GridLayout {
+    pub rows: usize,
+    pub cols: usize,
+    pub bottom_row_y: f32,
+}
+
+impl GridLayout {
+    /// Returns the pixel y of the top of `row` for cells `cell_h` pixels tall.
+    ///
+    /// A row past the last hangs from `bottom_row_y` too, so `row_y(rows)` is
+    /// the bottom edge of the last row.
+    pub fn row_y(&self, row: usize, cell_h: f32) -> f32 {
+        let last = self.rows.saturating_sub(1);
+        if row < last {
+            return row as f32 * cell_h;
+        }
+        self.bottom_row_y + (row - last) as f32 * cell_h
+    }
+
+    /// Returns the pixel y at and below which an element whose rows end at
+    /// `end_row` paints nothing, or `None` when it draws whole.
+    ///
+    /// The last row covers the bottom of the row above it, so an element that
+    /// ends before the last row stops where the last row starts. While
+    /// `bottom_row_y` sits on the uniform pitch, the last row overlaps no row
+    /// and nothing is cut. The shaders apply the same rule in `rows.wgsl`.
+    pub(crate) fn clip_y(&self, end_row: usize, cell_h: f32) -> Option<f32> {
+        let last = self.rows.saturating_sub(1);
+        let overlapped = self.bottom_row_y < last as f32 * cell_h;
+        (overlapped && end_row <= last).then_some(self.bottom_row_y)
+    }
+
+    /// The pair the live grid's shaders place rows with.
+    pub(crate) fn row_anchor(&self) -> RowAnchor {
+        RowAnchor {
+            bottom_row_y: self.bottom_row_y,
+            last_row: self.rows.saturating_sub(1) as u32,
+        }
+    }
+}
+
+/// The two numbers a pass's globals carry so its shader places rows the way
+/// [`GridLayout::row_y`] does.
+///
+/// The live grid's draws carry their layout's pair. A pool composite carries
+/// [`Self::UNIFORM`]. Its rows keep the uniform pitch, and its scissor alone
+/// clips it where the last row covers it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) struct RowAnchor {
+    pub(crate) bottom_row_y: f32,
+    pub(crate) last_row: u32,
+}
+
+impl RowAnchor {
+    /// A last row that no draw reaches, which keeps every row on the uniform
+    /// pitch.
+    pub(crate) const UNIFORM: Self = Self {
+        bottom_row_y: 1e9,
+        last_row: u32::MAX,
+    };
+}
+
 /// A panel's cell rectangle plus its declaration-order seq, uploaded to a
 /// storage buffer the bar, text-run, and icon fragment shaders read to occlude
 /// what a box covers.
@@ -936,6 +1009,19 @@ pub(crate) fn with_cover(body: &str) -> String {
 
 const COVER_WGSL: &str = include_str!("shaders/cover.wgsl");
 
+/// Prepend the shared row placement to a pass's own WGSL.
+///
+/// Every pass that turns a cell row into a pixel y has to agree with
+/// [`GridLayout::row_y`] on where the last row paints, or the chrome on that
+/// row parts from the cells it marks. The functions read `globals.cell_size`,
+/// `globals.bottom_row_y`, and `globals.last_row`, which each such pass
+/// declares.
+pub(crate) fn with_rows(body: &str) -> String {
+    format!("{ROWS_WGSL}\n{body}")
+}
+
+const ROWS_WGSL: &str = include_str!("shaders/rows.wgsl");
+
 /// The `[width, height]` of one cell, in pixels, for `font_size` at
 /// `scale_factor`.
 ///
@@ -960,6 +1046,16 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 /// [`crate::gpu::GpuContext::grid_size`] gives once the surface exists. Sizing a
 /// terminal and spawning its child before GPU setup rests on that.
 pub fn grid_size(width: u32, height: u32, font_size: u32, scale_factor: f32) -> (usize, usize) {
+    let layout = grid_layout(width, height, font_size, scale_factor);
+    (layout.rows, layout.cols)
+}
+
+/// The [`GridLayout`] a `width` by `height` physical-pixel surface holds at
+/// `font_size` and `scale_factor`.
+///
+/// It holds the grid [`grid_size`] reports, with the last row on the uniform
+/// pitch.
+pub fn grid_layout(width: u32, height: u32, font_size: u32, scale_factor: f32) -> GridLayout {
     grid_dims(
         width,
         height,
@@ -967,21 +1063,25 @@ pub fn grid_size(width: u32, height: u32, font_size: u32, scale_factor: f32) -> 
     )
 }
 
-/// The `(rows, cols)` a surface of `width` by `height` physical pixels holds at
+/// The layout a surface of `width` by `height` physical pixels holds at
 /// `metrics`, for callers that already have the cell rectangle.
-pub(crate) fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> (usize, usize) {
+pub(crate) fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> GridLayout {
     let rows = (height as f32 / metrics.height).floor().max(1.0) as usize;
     let cols = (width as f32 / metrics.width).floor().max(1.0) as usize;
-    (rows, cols)
+    GridLayout {
+        rows,
+        cols,
+        bottom_row_y: (rows - 1) as f32 * metrics.height,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         build_occluders_into, exposed_rows, globals_offset, globals_upload_needed, grid_dims,
-        grid_size, pool_occluders_into, rotate_row_cache, row_runs, row_uploads, upload_needed,
-        CellMetrics, CompositeSlots, Occluder, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
-        MAX_COMPOSITE_POOLS,
+        grid_layout, grid_size, pool_occluders_into, rotate_row_cache, row_runs, row_uploads,
+        upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder, PoolOccluders,
+        GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
 
     /// A bigger font means bigger cells, so the same surface holds fewer of
@@ -989,23 +1089,41 @@ mod tests {
     #[test]
     fn grid_dims_shrink_as_font_grows() {
         let dims = |font| grid_dims(800, 600, CellMetrics::from_font_size(font, 1.0));
-        assert_eq!(dims(15), (33, 88));
-        assert_eq!(dims(30), (16, 44));
-        assert_eq!(dims(60), (8, 22));
+        let layout = |rows, cols, bottom_row_y| GridLayout {
+            rows,
+            cols,
+            bottom_row_y,
+        };
+        assert_eq!(dims(15), layout(33, 88, 576.0));
+        assert_eq!(dims(30), layout(16, 44, 540.0));
+        assert_eq!(dims(60), layout(8, 22, 504.0));
     }
 
     /// The whole point of the public form is that a caller without a GPU
     /// resolves the grid the GPU would report, so it must resolve through the
     /// same rule rather than beside it.
     #[test]
-    fn grid_size_answers_what_the_metrics_rule_answers() {
+    fn grid_layout_answers_what_the_metrics_rule_answers() {
         for (font, scale) in [(15u32, 1.0f32), (15, 2.0), (30, 1.0), (11, 1.5)] {
             assert_eq!(
-                grid_size(800, 600, font, scale),
+                grid_layout(800, 600, font, scale),
                 grid_dims(800, 600, CellMetrics::from_font_size(font, scale)),
                 "font {font} at scale {scale}"
             );
         }
+    }
+
+    /// The rows above the last keep the uniform pitch, while the last row and
+    /// the edge under it hang from the anchor, wherever the anchor sits.
+    #[test]
+    fn rows_from_the_last_on_hang_from_the_anchor() {
+        let layout = GridLayout {
+            rows: 51,
+            cols: 80,
+            bottom_row_y: 993.0,
+        };
+        let ys = [0, 49, 50, 51].map(|row| layout.row_y(row, 20.0));
+        assert_eq!(ys, [0.0, 980.0, 993.0, 1013.0]);
     }
 
     /// A surface too small for one cell still reports a grid, because a

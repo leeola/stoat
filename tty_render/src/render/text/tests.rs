@@ -9,7 +9,9 @@ use super::{
 };
 use crate::{
     atlas::{AtlasKind, GlyphInfo},
-    render::{row_uploads, CellMetrics, Frame, HostRide, PoolOccluders, Scroll, SketchReveal},
+    render::{
+        row_uploads, CellMetrics, Frame, HostRide, PoolOccluders, RowAnchor, Scroll, SketchReveal,
+    },
     test_support::{require_headless_device, still_frame},
 };
 use stoatty_protocol::command::{
@@ -182,8 +184,8 @@ fn an_unrotated_draw_leaves_a_row_past_the_bottom_alone() {
 
 #[test]
 fn text_shader_is_valid_wgsl() {
-    let module = wgsl::parse_str(&crate::render::with_occlusion(&crate::render::with_cover(
-        include_str!("../../shaders/text.wgsl"),
+    let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+        &crate::render::with_cover(include_str!("../../shaders/text.wgsl")),
     )))
     .expect("parse text.wgsl");
     Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -704,8 +706,8 @@ fn cell_rect_scissor_clamps_to_surface() {
 
 #[test]
 fn shader_is_valid_wgsl() {
-    let module = wgsl::parse_str(&crate::render::with_occlusion(&crate::render::with_cover(
-        include_str!("../../shaders/text.wgsl"),
+    let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+        &crate::render::with_cover(include_str!("../../shaders/text.wgsl")),
     )))
     .expect("parse text.wgsl");
     Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -715,8 +717,8 @@ fn shader_is_valid_wgsl() {
 
 #[test]
 fn bg_shader_is_valid_wgsl() {
-    let module = wgsl::parse_str(&crate::render::with_occlusion(&crate::render::with_cover(
-        include_str!("../../shaders/bg.wgsl"),
+    let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+        &crate::render::with_cover(include_str!("../../shaders/bg.wgsl")),
     )))
     .expect("parse bg.wgsl");
     Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -1754,6 +1756,7 @@ fn a_patched_region_frame_matches_one_built_from_scratch() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     let mut second = build("aaaaaaaaaa");
@@ -1769,6 +1772,7 @@ fn a_patched_region_frame_matches_one_built_from_scratch() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let patched = (
         pass.count,
@@ -1788,6 +1792,7 @@ fn a_patched_region_frame_matches_one_built_from_scratch() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     assert_eq!(
@@ -2050,6 +2055,7 @@ fn only_the_grid_rows_buffers_carry_a_rotation() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     let rows_of = |globals: Option<TextGlobals>| globals.expect("globals written").rows;
@@ -2115,6 +2121,7 @@ fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let mut last_row_only = vec![None; rows];
     last_row_only[rows - 1] = whole_row(20);
@@ -2127,6 +2134,7 @@ fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     pass.prepare(
         &device,
@@ -2137,6 +2145,7 @@ fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     fresh.prepare(
@@ -2148,6 +2157,7 @@ fn a_scroll_then_a_moved_region_splits_like_a_build_that_never_scrolled() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     assert_eq!(
@@ -2219,8 +2229,28 @@ fn an_unchanged_grid_rebuilds_neither_the_runs_nor_the_popovers() {
     let frame = chrome_frame();
     let grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
 
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(
         (pass.run_builds, pass.overlay_builds),
         (1, 1),
@@ -2228,7 +2258,17 @@ fn an_unchanged_grid_rebuilds_neither_the_runs_nor_the_popovers() {
     );
 
     let moved = chrome_grid(vec![chrome_run("xx")], vec![chrome_overlay("xx")]);
-    pass.prepare(&device, &queue, &moved, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &moved,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(
         (pass.run_builds, pass.overlay_builds),
         (2, 2),
@@ -2253,7 +2293,17 @@ fn an_anchored_run_leaves_the_base_draw_and_rides_shifted() {
     let grid = chrome_grid(vec![anchored_run, fixed_run], Vec::new());
 
     // Nothing composites, so both runs draw with the rest.
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     let settled = pass.text_run_count;
     assert!(settled > 0, "both runs build glyphs");
     assert!(pass.riding_runs.is_empty(), "and nothing rides");
@@ -2279,6 +2329,7 @@ fn an_anchored_run_leaves_the_base_draw_and_rides_shifted() {
         &[],
         &anchored,
         &[],
+        RowAnchor::UNIFORM,
     );
 
     assert!(
@@ -2348,6 +2399,7 @@ fn a_second_glide_frame_rebuilds_no_riding_run() {
         &[],
         &ride(3, 10.5),
         &[],
+        RowAnchor::UNIFORM,
     );
     let first = pass.riding_glyph_scratch[0].pos[1];
     pass.prepare(
@@ -2359,6 +2411,7 @@ fn a_second_glide_frame_rebuilds_no_riding_run() {
         &[],
         &ride(3, 10.25),
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         (
@@ -2378,6 +2431,7 @@ fn a_second_glide_frame_rebuilds_no_riding_run() {
         &[],
         &ride(3, 10.25),
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(pass.riding_builds, 2, "new runs build again");
 
@@ -2390,6 +2444,7 @@ fn a_second_glide_frame_rebuilds_no_riding_run() {
         &[],
         &ride(9, 0.5),
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         (pass.riding_builds, pass.riding_runs.len()),
@@ -2422,7 +2477,17 @@ fn each_riding_run_shifts_by_its_own_host_and_top_row() {
         Vec::new(),
     );
 
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     let unshifted: Vec<f32> = pass
         .text_run_build_scratch
         .iter()
@@ -2433,7 +2498,17 @@ fn each_riding_run_shifts_by_its_own_host_and_top_row() {
         top_rows,
         scissor: [left, 0, 40, 40],
     });
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &rides, &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &rides,
+        &[],
+        RowAnchor::UNIFORM,
+    );
 
     let shifts: Vec<f32> = pass
         .riding_glyph_scratch
@@ -2477,6 +2552,7 @@ fn a_run_whose_host_is_still_does_not_ride() {
         &[],
         &elsewhere,
         &[],
+        RowAnchor::UNIFORM,
     );
 
     assert!(pass.riding_runs.is_empty(), "nothing rides");
@@ -2500,8 +2576,28 @@ fn a_host_starting_to_glide_rebuilds_the_base_runs() {
         scissor: [0, 0, 40, 40],
     }];
 
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(pass.run_builds, 1, "a still frame reuses");
 
     pass.prepare(
@@ -2513,6 +2609,7 @@ fn a_host_starting_to_glide_rebuilds_the_base_runs() {
         &[],
         &anchored,
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(pass.run_builds, 2, "the glide starting rebuilds");
 
@@ -2525,10 +2622,21 @@ fn a_host_starting_to_glide_rebuilds_the_base_runs() {
         &[],
         &anchored,
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(pass.run_builds, 2, "and mid-glide frames reuse again");
 
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(pass.run_builds, 3, "the glide ending rebuilds too");
 }
 
@@ -2555,7 +2663,17 @@ fn a_label_fades_in_over_the_tail_of_its_mark_s_reveal() {
             sketch_reveals: &reveals,
             ..chrome_frame()
         };
-        pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame,
+            &[],
+            &[],
+            &[],
+            RowAnchor::UNIFORM,
+        );
         pass.last_sketch_alpha.clone()
     };
 
@@ -2605,12 +2723,42 @@ fn a_changed_mark_list_rebuilds_the_runs_it_renumbers() {
     let mut grid = chrome_grid(vec![chrome_run("x")], vec![chrome_overlay("x")]);
     grid.set_sketches(vec![test_sketch(7), test_sketch(5)]);
 
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(pass.run_builds, 1, "an unchanged mark list reuses");
 
     grid.set_sketches(vec![test_sketch(5)]);
-    pass.prepare(&device, &queue, &grid, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &grid,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(
         pass.run_builds, 2,
         "dropping the mark ahead of it moved every later slot",
@@ -2637,8 +2785,28 @@ fn a_second_grid_holding_the_same_run_count_is_not_the_first() {
         "the fixture needs two grids that agree on their count",
     );
 
-    pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[], &[]);
-    pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &first,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
+    pass.prepare(
+        &device,
+        &queue,
+        &second,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(
         pass.text_run_count, 8,
         "the second grid's runs are the ones drawn",
@@ -2664,9 +2832,29 @@ fn a_second_grid_holding_the_same_popover_count_is_not_the_first() {
         "the fixture needs two grids that agree on their count",
     );
 
-    pass.prepare(&device, &queue, &first, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &first,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     let one_glyph = pass.overlay_count;
-    pass.prepare(&device, &queue, &second, resolution, &frame, &[], &[], &[]);
+    pass.prepare(
+        &device,
+        &queue,
+        &second,
+        resolution,
+        &frame,
+        &[],
+        &[],
+        &[],
+        RowAnchor::UNIFORM,
+    );
     assert_eq!(
         (one_glyph, pass.overlay_count),
         (1, 8),
@@ -2710,6 +2898,7 @@ fn only_a_moved_region_rectangle_resplits_the_rows() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let split = (
         row_len(&pass.plain_row_instances),
@@ -2727,6 +2916,7 @@ fn only_a_moved_region_rectangle_resplits_the_rows() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         (
@@ -2748,6 +2938,7 @@ fn only_a_moved_region_rectangle_resplits_the_rows() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let resplit = (
         row_len(&pass.plain_row_instances),
@@ -2794,6 +2985,7 @@ fn a_rotated_frame_matches_one_built_from_scratch() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     let mut scrolled = Grid::new(rows, 20);
@@ -2809,6 +3001,7 @@ fn a_rotated_frame_matches_one_built_from_scratch() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let rotated = pass.collect_grid_glyphs();
 
@@ -2823,6 +3016,7 @@ fn a_rotated_frame_matches_one_built_from_scratch() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let fresh = fresh_pass.collect_grid_glyphs();
 
@@ -3793,6 +3987,7 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         pass.overlay_count, 2,
@@ -3814,6 +4009,7 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         pass.overlay_count, 2,
@@ -3830,6 +4026,7 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         pass.overlay_count, 2,
@@ -3851,6 +4048,7 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     assert_eq!(
         pass.overlay_count, 4,
@@ -3921,6 +4119,7 @@ fn an_overlay_taller_than_its_box_builds_only_the_visible_window() {
             &[],
             &[],
             &[],
+            RowAnchor::UNIFORM,
         );
         pass.overlay_instance_scratch
             .iter()
@@ -4003,6 +4202,7 @@ fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
     let unscrolled = tops(&pass);
     assert_eq!(
@@ -4025,6 +4225,7 @@ fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
             &[],
             &[],
             &[],
+            RowAnchor::UNIFORM,
         );
     }
 
@@ -4144,6 +4345,7 @@ fn prepare_skips_unchanged_grid() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     let iterations = 50;
@@ -4158,6 +4360,7 @@ fn prepare_skips_unchanged_grid() {
             &[],
             &[],
             &[],
+            RowAnchor::UNIFORM,
         );
     }
     let full = full_start.elapsed();
@@ -4173,6 +4376,7 @@ fn prepare_skips_unchanged_grid() {
             &[],
             &[],
             &[],
+            RowAnchor::UNIFORM,
         );
     }
     let idle = idle_start.elapsed();
@@ -4225,6 +4429,7 @@ fn cache_lookup_cost() {
         &[],
         &[],
         &[],
+        RowAnchor::UNIFORM,
     );
 
     // A changing scroll forces the full grid-glyph build -- every glyph's atlas
@@ -4249,6 +4454,7 @@ fn cache_lookup_cost() {
             &[],
             &[],
             &[],
+            RowAnchor::UNIFORM,
         );
     }
     let per_call = start.elapsed() / iterations;

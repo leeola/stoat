@@ -63,7 +63,7 @@ use stoatty_render::{
         fontdb::Database as FontDatabase, FontConfig, FontLoad, Frame, FrameOutcome, GpuContext,
         PoolComposite, Scroll, SharedFonts, SharedGpu, SketchReveal,
     },
-    render::{self, background::CursorFill},
+    render::{self, background::CursorFill, GridLayout},
 };
 use stoatty_term::{
     grid::{Grid, PoolKind, Rgb},
@@ -1561,9 +1561,9 @@ impl ApplicationHandler<PtyEvent> for App {
                         .iter_mut()
                         .find(|aux| aux.window.id() == id)
                         .and_then(|aux| {
-                            let (rows, cols) = aux.gpu.as_ref()?.grid_size();
+                            let layout = aux.gpu.as_ref()?.grid_layout();
                             let cell_size = render::cell_size(aux.font_size, aux.scale_factor);
-                            let (col, row) = cell_at(position.x, position.y, cell_size, rows, cols);
+                            let (col, row) = cell_at(position.x, position.y, cell_size, layout);
                             let cell = (col as u16, row as u16);
                             let event =
                                 aux_drag_event(aux.id, aux.pointer_cell, cell, aux.pressed, mods);
@@ -1910,10 +1910,10 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             WindowEvent::CursorMoved { position, .. } => {
                 let cell_size = render::cell_size(state.font_size, state.scale_factor as f32);
-                let (rows, cols) = state.gpu.grid_size();
+                let layout = state.gpu.grid_layout();
                 let previous = state.pointer_cell;
                 let previous_side = state.pointer_side_right;
-                state.pointer_cell = cell_at(position.x, position.y, cell_size, rows, cols);
+                state.pointer_cell = cell_at(position.x, position.y, cell_size, layout);
                 state.pointer_pixels = (position.x, position.y);
                 state.pointer_side_right = position.x
                     - state.pointer_cell.0 as f64 * cell_size[0] as f64
@@ -3202,6 +3202,7 @@ fn redraw(state: &mut State) {
         // after the app exits appears at once instead of under a frozen
         // pool.
         let [cw, ch] = render::cell_size(state.font_size, state.scale_factor as f32);
+        let layout = state.gpu.grid_layout();
 
         // Unlike the pool, active, and overflow buffers, this one holds
         // borrows into the pool animations. A reused state field needs a
@@ -3217,6 +3218,7 @@ fn redraw(state: &mut State) {
                         .then_some(anim.changed_rows.as_slice()),
                     rides.iter().find(|ride| ride.pool == pool.id),
                     [cw, ch],
+                    layout,
                     state.terminal_font_size,
                 )
             })
@@ -3225,7 +3227,7 @@ fn redraw(state: &mut State) {
         // The component half of a ride. The renderer matches these against each
         // panel's, mark's, and text run's own anchor, so a component rides its
         // host whether or not a popup pool rides the same host.
-        let riding_hosts = state.pool_frame.host_rides(&glided, cw, ch);
+        let riding_hosts = state.pool_frame.host_rides(&glided, layout, cw, ch);
 
         let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
             Some(anchor) => {
@@ -3271,12 +3273,12 @@ fn redraw(state: &mut State) {
         // that pane. An anchored cursor rides a known pool, so clip to
         // that region rather than the stale VT cell.
         let cursor_scissor = match cursor_anchor {
-            Some(anchor) => Some(region_scissor(anchor.region, cw, ch)),
+            Some(anchor) => Some(region_scissor(anchor.region, layout, cw, ch)),
             None => active
                 .iter()
                 .rev()
                 .find(|pool| cursor_in_region(cursor, pool.region))
-                .map(|pool| region_scissor(pool.region, cw, ch)),
+                .map(|pool| region_scissor(pool.region, layout, cw, ch)),
         };
 
         let outcome = state.gpu.render_with_pools(
@@ -3341,7 +3343,8 @@ fn redraw(state: &mut State) {
 }
 
 /// The composite that draws `pool` over the live grid this frame, from `grid`,
-/// the rows the pool composed, on a live grid of `cell`-sized cells.
+/// the rows the pool composed, on a live grid of `cell`-sized cells whose rows
+/// `layout` places.
 ///
 /// An anchored pool carries the `ride` of its host's ease. The shift moves both
 /// the drawn origin and the scissor, and the host's own scissor then clips it,
@@ -3364,17 +3367,16 @@ fn pool_composite<'a>(
     changed_rows: Option<&'a [usize]>,
     ride: Option<&AnchorRide>,
     [cw, ch]: [f32; 2],
+    layout: GridLayout,
     terminal_font_size: u32,
 ) -> PoolComposite<'a> {
-    // Floor each edge to the grid-row boundary the renderer lays cells on, then
-    // take the span, so each scissor covers exactly its region's rows. Flooring
-    // width and height on their own rounds the far edge to a different pixel
-    // than the adjacent row, which leaks a sliver of one surface into the next.
+    // region_scissor floors each edge to the grid-row boundary the renderer lays
+    // cells on, then takes the span, so each scissor covers exactly its region's
+    // rows. Flooring width and height on their own rounds the far edge to a
+    // different pixel than the adjacent row, which leaks a sliver of one surface
+    // into the next.
     let region = pool.region;
-    let x0 = (region.left as f32 * cw) as u32;
-    let y0 = (region.top as f32 * ch) as u32;
-    let x1 = ((region.left as f32 + region.width as f32) * cw) as u32;
-    let y1 = ((region.top as f32 + region.height as f32) * ch) as u32;
+    let region_rect = region_scissor(region, layout, cw, ch);
 
     let (ride_rows, scissor) = match ride {
         Some(ride) => {
@@ -3387,12 +3389,12 @@ fn pool_composite<'a>(
             (
                 dy_px / ch,
                 intersect_scissor(
-                    shift_scissor([x0, y0, x1 - x0, y1 - y0], dy_px),
-                    region_scissor(ride.host_region, cw, ch),
+                    shift_scissor(region_rect, dy_px),
+                    region_scissor(ride.host_region, layout, cw, ch),
                 ),
             )
         },
-        None => (0.0, [x0, y0, x1 - x0, y1 - y0]),
+        None => (0.0, region_rect),
     };
 
     PoolComposite {
@@ -3447,6 +3449,7 @@ fn redraw_aux(
         return false;
     };
     let (rows, cols) = gpu.grid_size();
+    let layout = gpu.grid_layout();
     let [cw, ch] = render::cell_size(font_size, scale);
 
     // Taken before the lock, since the latch names no terminal state.
@@ -3548,7 +3551,7 @@ fn redraw_aux(
             grid: &aux.pool_anims[&pool.id].document_grid,
             font_size: None,
             origin_cells: [pool.region.left as f32, pool.region.top as f32],
-            scissor: region_scissor(pool.region, cw, ch),
+            scissor: region_scissor(pool.region, layout, cw, ch),
             shift_rows: -snap_shift_to_pixels(pool.frac, ch),
             content_changed: pool.content_changed,
             scrolled_rows: pool.scrolled_rows,
@@ -4317,12 +4320,21 @@ mod tests {
         encode_scroll, FillCommand, PoolAnchorCommand, PoolDropCommand, PoolKind,
         PoolRegionCommand, ScrollCommand,
     };
+    use stoatty_render::render::GridLayout;
     use stoatty_term::{
         grid::{Damage, DocumentOffset, Grid, PoolRegion},
         term::Terminal,
         theme::Theme,
     };
     use winit::keyboard::ModifiersState;
+
+    /// A grid of 24-pixel rows whose last row sits on the uniform pitch, so a
+    /// composite's scissor covers its region's rows at that pitch.
+    const FLOORED: GridLayout = GridLayout {
+        rows: 10,
+        cols: 10,
+        bottom_row_y: 216.0,
+    };
 
     /// A frame that never reached the screen took its rows with it: the
     /// projection reported them and the terminal forgot them, so nothing names
@@ -5064,7 +5076,7 @@ mod tests {
         let dims: Vec<f32> = projection
             .active
             .iter()
-            .map(|pool| pool_composite(pool, grid, None, None, [12.0, 24.0], 10).dim)
+            .map(|pool| pool_composite(pool, grid, None, None, [12.0, 24.0], FLOORED, 10).dim)
             .collect();
 
         assert_eq!(
@@ -5210,7 +5222,7 @@ mod tests {
                 content_changed: true,
                 scrolled_rows: None,
             };
-            let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], 10);
+            let composite = pool_composite(&tile, &grid, None, None, [12.0, 24.0], FLOORED, 10);
             (
                 composite.font_size,
                 composite.origin_cells,

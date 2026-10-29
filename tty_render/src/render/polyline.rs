@@ -8,7 +8,7 @@
 
 use crate::render::{
     globals_offset, rgb_f32, CellMetrics, CompositeSlot, CompositeSlots, GridVersion, Occluder,
-    OccluderBuffer, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    OccluderBuffer, PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::mem;
@@ -93,7 +93,7 @@ const CUT_END: u32 = 2;
 /// cell size the vertex shader maps cell-fraction coordinates through, the
 /// panel-occluder count the fragment shader loops over, and the `occlude_all`
 /// flag that bypasses the seq test for a pool composite beneath every box.
-/// Padded to 48 bytes to match the WGSL uniform layout.
+/// Padded to 64 bytes to match the WGSL uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct Globals {
@@ -120,9 +120,13 @@ struct Globals {
     ///
     /// A pool composited at its own font size lays its paths out at
     /// [`Self::cell_size`], but the boxes over it are cells of the live grid.
-    /// Also rounds the struct to the 48 bytes a uniform's 16-byte alignment
-    /// wants.
     occluder_cell: [f32; 2],
+    /// The [`RowAnchor`] the endpoint rows and the occluder rows are placed
+    /// by. The padding rounds the struct up to the 16-byte multiple WGSL sizes
+    /// it to.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad1: [u32; 2],
 }
 
 /// The instanced stroked-path pipeline and its per-frame buffers.
@@ -195,7 +199,10 @@ impl PolylinePass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("polyline"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(include_str!("../shaders/polyline.wgsl")).into(),
+                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
+                    "../shaders/polyline.wgsl"
+                )))
+                .into(),
             ),
         });
 
@@ -332,7 +339,7 @@ impl PolylinePass {
     /// live panels' rects, built once per frame and shared with the other
     /// off-grid passes. Reallocates the instance or occluder buffer only when
     /// its count outgrows the current capacity, and skips the instance upload
-    /// when they match what was last sent.
+    /// when they match what was last sent. `anchor` places the endpoint rows.
     ///
     /// A frame whose paths are unchanged rebuilds none of them, so the uniform
     /// and the occluders are the whole cost of a graph that is only being
@@ -346,6 +353,7 @@ impl PolylinePass {
         grid: &Grid,
         occluders: &[Occluder],
         resolution: [f32; 2],
+        anchor: RowAnchor,
     ) {
         let polylines = grid.polylines();
         // With no path to draw now and none drawn last frame, nothing reads this
@@ -368,6 +376,9 @@ impl PolylinePass {
             _pad0: 0,
             origin_cells: [0.0; 2],
             occluder_cell: [self.metrics.width, self.metrics.height],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad1: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -488,6 +499,9 @@ impl PolylinePass {
             _pad0: 0,
             origin_cells,
             occluder_cell: [self.metrics.width, self.metrics.height],
+            bottom_row_y: RowAnchor::UNIFORM.bottom_row_y,
+            last_row: RowAnchor::UNIFORM.last_row,
+            _pad1: [0; 2],
         };
         queue.write_buffer(
             &self.globals,
@@ -749,7 +763,7 @@ fn joint_normal(points: &[[f32; 2]], joint: usize, cell: [f32; 2]) -> [f32; 2] {
 mod tests {
     use super::{build_polyline_instances_into, PolylineInstance, PolylinePass};
     use crate::{
-        render::{CellMetrics, PoolOccluders},
+        render::{CellMetrics, PoolOccluders, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
     use stoatty_term::grid::{Grid, Polyline, Rgb};
@@ -803,8 +817,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
-            "../shaders/polyline.wgsl"
+        let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
+            include_str!("../shaders/polyline.wgsl"),
         )))
         .expect("parse polyline");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -876,7 +890,14 @@ mod tests {
 
         let declared = [path(&[[0, 16], [0, 32]])];
         let mut grid = grid_of(&declared);
-        pass.prepare(&device, &queue, &grid, &[], [64.0, 64.0]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [64.0, 64.0],
+            RowAnchor::UNIFORM,
+        );
         assert_eq!(
             uploaded(&pass),
             segments(&declared, 1),
@@ -887,7 +908,14 @@ mod tests {
         // build buffer is empty after a frame that uploaded. Filling it again is
         // the one thing only a rebuild does, since the second frame's paths are
         // the same bytes and reach no further than the comparison.
-        pass.prepare(&device, &queue, &grid, &[], [64.0, 64.0]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [64.0, 64.0],
+            RowAnchor::UNIFORM,
+        );
         assert_eq!(
             (pass.built.len(), uploaded(&pass)),
             (0, segments(&declared, 1)),
@@ -899,7 +927,14 @@ mod tests {
         let split: Vec<[i16; 2]> = (0..16).map(|step| [0, step * 16]).collect();
         let moved = [path(&split)];
         grid.set_polylines(moved.to_vec());
-        pass.prepare(&device, &queue, &grid, &[], [64.0, 64.0]);
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            &[],
+            [64.0, 64.0],
+            RowAnchor::UNIFORM,
+        );
         assert_eq!(
             uploaded(&pass),
             segments(&moved, 2),
@@ -928,8 +963,22 @@ mod tests {
             "the fixture needs two grids that agree on their count",
         );
 
-        pass.prepare(&device, &queue, &first, &[], [64.0, 64.0]);
-        pass.prepare(&device, &queue, &second, &[], [64.0, 64.0]);
+        pass.prepare(
+            &device,
+            &queue,
+            &first,
+            &[],
+            [64.0, 64.0],
+            RowAnchor::UNIFORM,
+        );
+        pass.prepare(
+            &device,
+            &queue,
+            &second,
+            &[],
+            [64.0, 64.0],
+            RowAnchor::UNIFORM,
+        );
         assert_eq!(
             uploaded(&pass),
             segments(&other, 1),

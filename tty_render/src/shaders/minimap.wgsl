@@ -20,8 +20,10 @@ struct Globals {
     // 1 discards a fragment inside any occluder regardless of seq; 0 keeps the
     // seq test. The minimap never composites under a pool, so it always passes 0.
     occlude_all: u32,
-    pad0: u32,
-    pad1: u32,
+    // The pixel y the last row's top paints at, and that row, which rows.wgsl
+    // places the occluder rows by.
+    bottom_row_y: f32,
+    last_row: u32,
 }
 
 @group(0) @binding(0)
@@ -97,7 +99,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.cell_size,
                 o.corner_radius,
-                o.inset_x
+                o.inset_x,
+                globals.bottom_row_y,
+                globals.last_row
             );
             if sdf < -0.5 {
                 discard;

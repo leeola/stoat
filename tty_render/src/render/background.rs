@@ -12,7 +12,7 @@
 
 use crate::render::{
     exposed_rows, globals_offset, CellMetrics, CompositeSlot, CompositeSlots, Cover, Occluder,
-    OccluderBuffer, PoolOccluders, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+    OccluderBuffer, PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
 };
 use bytemuck::{Pod, Zeroable};
 use std::{
@@ -146,6 +146,12 @@ struct Globals {
     /// focus move rewrites this uniform and none of the pool's cells. Zero on
     /// every other draw, which leaves each color as it is.
     dim: [f32; 4],
+    /// The [`RowAnchor`] the cell rows, the cursor corners, and the occluder
+    /// rows are placed by. The padding rounds the struct up to the 16-byte
+    /// multiple WGSL sizes it to.
+    bottom_row_y: f32,
+    last_row: u32,
+    _pad: [u32; 2],
 }
 
 const _: () = assert!(size_of::<Globals>() as u64 <= GLOBALS_SLOT_STRIDE);
@@ -237,9 +243,9 @@ impl BackgroundPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("background"),
             source: ShaderSource::Wgsl(
-                crate::render::with_occlusion(&crate::render::with_cover(include_str!(
-                    "../shaders/bg.wgsl"
-                )))
+                crate::render::with_rows(&crate::render::with_occlusion(
+                    &crate::render::with_cover(include_str!("../shaders/bg.wgsl")),
+                ))
                 .into(),
             ),
         });
@@ -374,6 +380,8 @@ impl BackgroundPass {
     /// the pool repaints it, unless it meets one of `occluders`, the frame's live
     /// list.
     ///
+    /// `anchor` places the grid's rows and the cursor's corners.
+    ///
     /// Reallocates the instance buffer only when the grid outgrows the current
     /// capacity. With partial `damage`, only the damaged rows' cells are rewritten.
     /// Adjacent damaged rows share a write.
@@ -391,6 +399,7 @@ impl BackgroundPass {
         scrolled_rows: isize,
         occluders: &[Occluder],
         covered: &[[u32; 4]],
+        anchor: RowAnchor,
     ) {
         let cols = grid.cols();
         let rows = grid.rows();
@@ -442,6 +451,9 @@ impl BackgroundPass {
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::new(covered, occluders.len()),
             dim: [0.0; 4],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
         // The cursor reads its own slot, so a live frame seeds it here with the same
@@ -628,6 +640,9 @@ impl BackgroundPass {
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
             dim,
+            bottom_row_y: RowAnchor::UNIFORM.bottom_row_y,
+            last_row: RowAnchor::UNIFORM.last_row,
+            _pad: [0; 2],
         };
         queue.write_buffer(
             &self.globals,
@@ -693,13 +708,15 @@ impl BackgroundPass {
     ///
     /// Draws the cursor over content another pass already composited, where the
     /// cell instances must not be rebuilt. `grid_scroll` shifts the cursor up by
-    /// that many rows to match the cell passes.
+    /// that many rows to match the cell passes, and `anchor` places its corners
+    /// as the live grid's rows are placed.
     pub(crate) fn prepare_cursor(
         &mut self,
         queue: &Queue,
         resolution: [f32; 2],
         cursor: CursorState,
         grid_scroll: f32,
+        anchor: RowAnchor,
     ) {
         let c = cursor.corners.unwrap_or([[0.0; 2]; 4]);
         let globals = Globals {
@@ -726,6 +743,9 @@ impl BackgroundPass {
             occluder_cell: [self.metrics.width, self.metrics.height],
             cover: Cover::NONE,
             dim: [0.0; 4],
+            bottom_row_y: anchor.bottom_row_y,
+            last_row: anchor.last_row,
+            _pad: [0; 2],
         };
         // The cursor's own slot, so this can run after the cell globals are placed
         // without disturbing them.
@@ -993,7 +1013,7 @@ mod tests {
         BgInstance, CursorFill, CursorState,
     };
     use crate::{
-        render::{self, CellMetrics, Occluder, PoolOccluders},
+        render::{self, CellMetrics, Occluder, PoolOccluders, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
     use std::ops::Range;
@@ -1074,9 +1094,9 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&render::with_occlusion(&render::with_cover(include_str!(
-            "../shaders/bg.wgsl"
-        ))))
+        let module = wgsl::parse_str(&render::with_rows(&render::with_occlusion(
+            &render::with_cover(include_str!("../shaders/bg.wgsl")),
+        )))
         .expect("parse bg.wgsl");
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
@@ -1268,6 +1288,7 @@ mod tests {
                 scrolled_rows,
                 &[],
                 &[],
+                RowAnchor::UNIFORM,
             );
         };
 
@@ -1762,6 +1783,7 @@ mod tests {
             0,
             occluders,
             covered,
+            RowAnchor::UNIFORM,
         );
     }
 

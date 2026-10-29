@@ -27,6 +27,10 @@ var image_sampler: sampler;
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // The pixel y at and below which the placement paints nothing. The quad
+    // keeps the height of the cell box the image scales into, so the clip is
+    // what ends a placement above the last row where that row starts.
+    @location(1) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -36,6 +40,7 @@ fn vs_main(
     @location(1) size: vec2<f32>,
     @location(2) uv_min: vec2<f32>,
     @location(3) uv_max: vec2<f32>,
+    @location(4) clip_y: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -56,11 +61,16 @@ fn vs_main(
         1.0
     );
     out.uv = mix(uv_min, uv_max, corner);
+    out.clip_y = clip_y;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if in.clip.y >= in.clip_y {
+        discard;
+    }
+
     // Premultiplied on the way into the texture, because the sampler filters
     // linearly and a filter has to average color the alpha is already folded
     // into. Multiplying here instead would halve the color of every sample that
