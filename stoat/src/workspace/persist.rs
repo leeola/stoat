@@ -17,6 +17,7 @@
 //! by design.
 
 use crate::{
+    action_handlers::search::{LastSearch, SearchDirection},
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     buffer::{BufferId, BufferOp, TextBuffer},
     buffer_registry::{BufferRegistry, BufferRegistrySnapshot},
@@ -55,6 +56,16 @@ use stoat_text::{Anchor, Bias, LineEnding, Point};
 pub(crate) enum FocusTargetSnap {
     SplitPane(PaneId),
     Dock(DockId),
+}
+
+/// On-disk shape of [`LastSearch`], the pattern `n` and `N` repeat.
+///
+/// The compiled regex stays out. A restore compiles it on the first repeat,
+/// under the smart-case setting of the restored session.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct LastSearchSnap {
+    pub query: String,
+    pub direction: SearchDirection,
 }
 
 /// Versioned on-disk representation of a [`Workspace`]. Fields not covered
@@ -106,6 +117,10 @@ pub(crate) struct WorkspaceStateV1 {
     /// files that predate the field.
     #[serde(default)]
     pub code_search_history: Vec<String>,
+    /// The pattern `n` and `N` repeat, so a repeat after a restart searches for
+    /// the same pattern. `None` on legacy files that predate the field.
+    #[serde(default)]
+    pub last_search: Option<LastSearchSnap>,
     /// One entry per tab in display order, mirroring the in-memory shape: the
     /// entry at [`Self::active_tab`] is `None` because that tree is saved in
     /// [`Self::panes`]. Empty on legacy files, which restore as a single tab.
@@ -385,6 +400,10 @@ impl Workspace {
             palette_history: self.palette_history.entries().to_vec(),
             search_history: self.search_history.entries().to_vec(),
             code_search_history: self.code_search_history.entries().to_vec(),
+            last_search: self.last_search.as_ref().map(|last| LastSearchSnap {
+                query: last.query.clone(),
+                direction: last.direction,
+            }),
             tabs: self
                 .tabs
                 .iter()
@@ -575,6 +594,9 @@ impl Workspace {
         self.palette_history = InputHistory::from_entries(state.palette_history);
         self.search_history = InputHistory::from_entries(state.search_history);
         self.code_search_history = InputHistory::from_entries(state.code_search_history);
+        self.last_search = state
+            .last_search
+            .map(|snap| LastSearch::uncompiled(snap.query, snap.direction));
 
         // A covered editor comes back under a fresh id, as a pane's editor does.
         self.restored_commit_lists = state
@@ -3223,6 +3245,51 @@ mod tests {
         let state: WorkspaceStateV1 =
             ron::from_str(&legacy).expect("a file without search_history still loads");
         assert!(state.search_history.is_empty());
+    }
+
+    #[test]
+    fn the_active_search_round_trips_through_save_and_restore() {
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        ws.last_search = Some(LastSearch::new(
+            "fn main".into(),
+            SearchDirection::Reverse,
+            true,
+        ));
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec, crate::test_notify());
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+        assert_eq!(
+            fresh
+                .last_search
+                .as_ref()
+                .map(|last| (last.query.as_str(), last.direction)),
+            Some(("fn main", SearchDirection::Reverse)),
+            "the restored session repeats the same pattern the same way",
+        );
+    }
+
+    #[test]
+    fn legacy_state_without_last_search_loads_none() {
+        let exec = executor();
+        let ws = new_laid_out_workspace(PathBuf::from("/test"), &exec);
+
+        let body =
+            ron::ser::to_string_pretty(&ws.to_state(), ron::ser::PrettyConfig::default()).unwrap();
+        let legacy: String = body
+            .lines()
+            .filter(|line| !line.contains("last_search"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let state: WorkspaceStateV1 =
+            ron::from_str(&legacy).expect("a file without last_search still loads");
+        assert!(state.last_search.is_none());
     }
     #[test]
     fn legacy_empty_name_regenerates_default_from_uid() {

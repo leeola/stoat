@@ -8,6 +8,7 @@ use crate::{
     pane::View,
 };
 use regex_cursor::{engines::meta, regex_automata::util::syntax};
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, ops::Range, sync::Arc};
 use stoat_text::{char_is_word, Anchor, Rope, Selection};
 
@@ -18,7 +19,7 @@ pub(crate) type CursorRegex = meta::Regex;
 /// or after the cursor; Reverse (`?`) finds matches before the cursor.
 /// `SearchNext` repeats in this direction; `SearchPrev` repeats in the
 /// opposite direction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum SearchDirection {
     Forward,
     Reverse,
@@ -126,6 +127,18 @@ impl LastSearch {
             regex: compile_cursor_regex(&query, smart_case),
             query,
             direction,
+        }
+    }
+
+    /// A pattern with no compiled regex, as a state file restores it.
+    ///
+    /// The first repeat compiles it, under the smart-case setting of the
+    /// session it runs in.
+    pub(crate) fn uncompiled(query: String, direction: SearchDirection) -> Self {
+        Self {
+            query,
+            direction,
+            regex: None,
         }
     }
 }
@@ -596,7 +609,8 @@ fn is_at_word_end(rope: &Rope, index: usize) -> bool {
 /// nothing has been searched for or the stored pattern does not compile.
 ///
 /// A stored pattern with no compiled regex compiles here, under the current
-/// smart-case setting, and keeps the result for the presses after it.
+/// smart-case setting, and keeps the result for the presses after it. A
+/// pattern that a state file restored arrives that way.
 ///
 /// Reports the stored pattern that does not compile, and stays silent when no
 /// search has happened at all. The user typed a pattern in the first case and
@@ -1715,17 +1729,16 @@ mod tests {
         assert_eq!(h.stoat.focused_mode(), "normal");
     }
 
-    /// A stored pattern with no compiled regex compiles on its first repeat,
-    /// and the repeat keeps the result.
+    /// A pattern a state file restored carries no compiled regex, so the first
+    /// repeat compiles it and keeps the result.
     #[test]
     fn a_restored_pattern_compiles_on_its_first_repeat() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "foo bar foo\n");
-        h.stoat.active_workspace_mut().last_search = Some(LastSearch {
-            query: "foo".into(),
-            direction: SearchDirection::Forward,
-            regex: None,
-        });
+        h.stoat.active_workspace_mut().last_search = Some(LastSearch::uncompiled(
+            "foo".into(),
+            SearchDirection::Forward,
+        ));
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
 

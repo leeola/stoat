@@ -237,7 +237,8 @@ pub struct Workspace {
     pub(crate) code_search_history: InputHistory,
     /// The pattern `n` and `N` repeat, with the direction it was opened in.
     /// Each session keeps its own, so a repeat never searches for a pattern
-    /// typed in another session.
+    /// typed in another session. The state file carries it, so a repeat after a
+    /// restart searches for the same pattern.
     pub(crate) last_search: Option<LastSearch>,
     /// The active tab's pane layout. Every render, focus, and navigation site
     /// reads this and never sees the parked tabs.
