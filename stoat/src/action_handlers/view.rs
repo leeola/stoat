@@ -447,18 +447,20 @@ pub(crate) fn ensure_cursor_in_view(editor: &mut EditorState, scrolloff: u32) ->
 /// The cursor's content anchor is only sent to the terminal while a glide is
 /// armed, so a jump that moved the view bare leaves the terminal easing the
 /// cursor from wherever it sat on screen. Seeding `scroll_offset` with the
-/// pre-jump row makes the cursor ride the eased content and arrive from the
-/// direction it came from in the document.
+/// pre-jump rest makes the cursor ride the eased content and arrive from the
+/// direction it came from in the document. That rest is the row plus its wheel
+/// fraction, the position the terminal shows before the jump.
 ///
 /// A single-row follow stays a snap, so plain motion at the viewport margin
 /// keeps its immediate feel. The snap is the editor's own view state. A
 /// stoatty pool eases every target move by itself.
 pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     let prev = editor.scroll_row;
+    let rest = prev as f32 + editor.scroll_frac;
     let scrolled = ensure_cursor_in_view(editor, scrolloff);
 
     if scrolled && prev.abs_diff(editor.scroll_row) > 1 {
-        editor.scroll_offset = prev as f32;
+        editor.scroll_offset = rest;
         editor.scroll_glide = ScrollGlide::Page;
     }
 
@@ -474,7 +476,7 @@ pub(crate) fn follow_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
 /// bottom padding above the view's bottom edge, with that many blank rows
 /// under it.
 ///
-/// A move over one row glides from the row before the jump, as
+/// A move over one row glides from the rest before the jump, as
 /// [`follow_jump`] does.
 ///
 /// See also:
@@ -487,6 +489,7 @@ pub(crate) fn land_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     let bottom = scrolloff.min(viewport / 2);
 
     let prev = editor.scroll_row;
+    let rest = prev as f32 + editor.scroll_frac;
     if cursor_row >= prev + top && cursor_row + bottom < prev + viewport {
         return false;
     }
@@ -497,7 +500,7 @@ pub(crate) fn land_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
     editor.scroll_frac = 0.0;
 
     if prev.abs_diff(editor.scroll_row) > 1 {
-        editor.scroll_offset = prev as f32;
+        editor.scroll_offset = rest;
         editor.scroll_glide = ScrollGlide::Page;
     }
     editor.scroll_row != prev
@@ -510,7 +513,7 @@ pub(crate) fn land_jump(editor: &mut EditorState, scrolloff: u32) -> bool {
 /// leaves the view where the reader sees it. Otherwise the view moves to the
 /// scroll [`block_frame_scroll`] picks.
 ///
-/// With `glide` a move over one row glides from the pre-jump row, as
+/// With `glide` a move over one row glides from the pre-jump rest, as
 /// [`follow_jump`] does. A jump into another file passes no glide, because its
 /// freshly shown editor has no view to glide from.
 ///
@@ -548,6 +551,7 @@ pub(crate) fn frame_jump_on_block(
     let top = scrolloff.min(viewport.saturating_sub(1) / 2);
     let bottom = scrolloff.min(viewport / 2);
     let prev = editor.scroll_row;
+    let rest = prev as f32 + editor.scroll_frac;
     let on_screen = rows.start >= prev && rows.end <= prev + viewport;
     let in_band = cursor_row >= prev + top && cursor_row + bottom < prev + viewport;
     if on_screen && in_band {
@@ -558,7 +562,7 @@ pub(crate) fn frame_jump_on_block(
     // A jump lands on the row grid, whatever fraction the wheel last rested on.
     editor.scroll_frac = 0.0;
     if glide && prev.abs_diff(editor.scroll_row) > 1 {
-        editor.scroll_offset = prev as f32;
+        editor.scroll_offset = rest;
         editor.scroll_glide = ScrollGlide::Page;
     }
     editor.scroll_row != prev
@@ -622,7 +626,7 @@ fn block_frame_scroll(
 /// `center_off` is capped at half the viewport, and the result is clamped to
 /// `max_scroll`, so a landing near the document end pins to the bottom rather
 /// than scrolling blank space into view. A move over one row seeds the glide
-/// from the pre-jump row, exactly as [`follow_jump`] does.
+/// from the pre-jump rest, exactly as [`follow_jump`] does.
 pub(crate) fn center_jump_on_cursor(editor: &mut EditorState, down: bool, center_off: u32) -> bool {
     let cursor_row = {
         let snapshot = editor.display_map.snapshot();
@@ -672,7 +676,7 @@ pub(crate) fn center_jump_on_span(
 /// jump arrived from, and report whether the view moved.
 ///
 /// The scroll row is [`centered_scroll`]'s. A move over one row seeds the
-/// glide from the pre-jump row.
+/// glide from the pre-jump rest.
 fn center_jump_on_rows(
     editor: &mut EditorState,
     rows: Range<u32>,
@@ -682,6 +686,7 @@ fn center_jump_on_rows(
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
     let max_scroll = max_scroll_row(editor.display_map.snapshot().line_count(), viewport);
     let prev = editor.scroll_row;
+    let rest = prev as f32 + editor.scroll_frac;
     let Some(scroll_row) = centered_scroll(rows, viewport, prev, max_scroll, down, center_off)
     else {
         return false;
@@ -691,7 +696,7 @@ fn center_jump_on_rows(
     editor.scroll_frac = 0.0;
 
     if prev.abs_diff(editor.scroll_row) > 1 {
-        editor.scroll_offset = prev as f32;
+        editor.scroll_offset = rest;
         editor.scroll_glide = ScrollGlide::Page;
     }
     editor.scroll_row != prev
@@ -1089,6 +1094,38 @@ mod tests {
             (glide_start(0, 0.0, 0.4), glide_start(10, 0.4, 10.4)),
             (0.0, 10.4),
             "a stale sub-row reseeds to the row, and a wheel rest glides from its fraction"
+        );
+    }
+
+    /// A far jump from a wheel rest glides from the rest, fraction included,
+    /// so its first frame does not jump back to the row.
+    #[test]
+    fn far_jumps_glide_from_a_wheel_rest_fraction() {
+        let jumps: [fn(&mut EditorState) -> bool; 4] = [
+            |editor| follow_jump(editor, 3),
+            |editor| land_jump(editor, 3),
+            |editor| frame_jump_on_block(editor, 900..954, 3, true),
+            |editor| center_jump_on_cursor(editor, true, 2),
+        ];
+        let starts = jumps.map(|jump| {
+            let mut h = framing_harness();
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = 0;
+            editor.scroll_frac = 0.4;
+            editor.scroll_offset = 0.4;
+            editor.scroll_glide = ScrollGlide::None;
+            let moved = jump(editor);
+            (
+                moved,
+                editor.scroll_frac,
+                editor.scroll_offset,
+                editor.scroll_glide,
+            )
+        });
+        assert_eq!(
+            starts,
+            [(true, 0.0, 0.4, ScrollGlide::Page); 4],
+            "every far jump lands on the row grid and glides from the wheel rest",
         );
     }
 
