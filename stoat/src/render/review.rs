@@ -876,6 +876,7 @@ pub(crate) fn paint_diff_rows(
                     buf,
                     row_fallback,
                     gap_fallback,
+                    moved_style,
                     inlay_style,
                     changes,
                     tints.as_ref(),
@@ -2019,9 +2020,15 @@ fn mirror_window(
 /// the span instead, per [`mark_span`]. Columns, not byte offsets, are used
 /// because the chunks expand tabs, so the counter tracks display cells.
 ///
-/// A cell with no token color takes `fallback_style` inside a change span and
-/// `gap_fallback` outside every span. A refined row passes the text style as
-/// `gap_fallback`, so its unchanged cells read as unchanged text.
+/// A cell with no token color takes `moved_fallback` inside a moved span,
+/// `fallback_style` inside any other change span, and `gap_fallback` outside
+/// every span. A refined row passes the text style as `gap_fallback`, so its
+/// unchanged cells read as unchanged text.
+///
+/// An added hunk the tree pass relocated in part keeps its status while its
+/// moved spans say moved. Without token colors, the span's own color is then
+/// the only mark of the move at tint level 0. Above that level,
+/// [`span_tint_color`] paints it.
 ///
 /// `soften_row` recedes the whole row behind the changed rows around it, by
 /// blending every foreground toward the given background per [`soften_style`].
@@ -2058,6 +2065,7 @@ pub(crate) fn paint_highlighted_row(
     buf: &mut Buffer,
     fallback_style: Style,
     gap_fallback: Style,
+    moved_fallback: Style,
     inlay_style: Style,
     change_spans: &[(std::ops::Range<usize>, ChangeKind, ProseChange)],
     tints: Option<&DiffTints>,
@@ -2104,6 +2112,7 @@ pub(crate) fn paint_highlighted_row(
                 .map(|hs| hs.to_ratatui_style()),
         };
         let style = recede(token.unwrap_or(fallback_style));
+        let moved_style = recede(token.unwrap_or(moved_fallback));
         // Resolved per chunk rather than per cell, because a chunk's cells
         // differ only in which side of a change span they fall on.
         let gap_style = gap_style(
@@ -2133,8 +2142,12 @@ pub(crate) fn paint_highlighted_row(
                 Some((range, kind, prose)) if range.start <= col => {
                     let tint =
                         span_tints.map(|t| (span_tint_color(t, kind, false), dials.tint_amount));
+                    let span_style = match kind {
+                        ChangeKind::Moved => moved_style,
+                        _ => style,
+                    };
                     let marked = mark_span(
-                        style,
+                        span_style,
                         kind,
                         *prose,
                         dials.bold,
@@ -3883,6 +3896,50 @@ mod tests {
             [Some(Color::Rgb(0, 0, 255)), Some(Color::Rgb(1, 2, 3))],
             "the moved row takes the moved color, and the unchanged row keeps \
              the pane color",
+        );
+    }
+
+    /// A moved span inside an added row keeps its own color, so with no token
+    /// color the relocated chars read as a move inside the new line.
+    #[test]
+    fn a_moved_span_in_an_added_row_falls_back_to_the_moved_color() {
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Added,
+                unstaged_lines: Vec::new(),
+                marked_rows: Vec::new(),
+                buffer_start_line: 1,
+                buffer_line_range: 1..2,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: vec![ChangeSpan {
+                        byte_range: 3..5,
+                        kind: ChangeKind::Moved,
+                        move_metadata: None,
+                        prose: ProseChange::None,
+                    }],
+                    base_spans: Vec::new(),
+                })),
+            }],
+            None,
+        );
+        let mut editor = diff_editor_with_map("aa\nbbxx\ncc\n", dm);
+        let buf = render_over_fallback(&mut editor, Style::default().fg(Color::Rgb(1, 2, 3)));
+        let rx = right_text_x(buf.area);
+        let y = row_holding(&buf, rx..buf.area.width, "bbxx");
+        assert_eq!(
+            (rx..rx + 4)
+                .map(|x| buf[(x, y)].style().fg)
+                .collect::<Vec<_>>(),
+            [
+                Some(Color::Rgb(0, 0, 255)),
+                Some(Color::Rgb(0, 0, 255)),
+                Some(Color::Rgb(0, 255, 0)),
+                Some(Color::Rgb(0, 255, 0)),
+            ],
+            "the moved chars take the moved color and the rest of the added row \
+             keeps the added color",
         );
     }
 
