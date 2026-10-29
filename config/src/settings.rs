@@ -189,6 +189,11 @@ pub struct Settings {
     /// `ui.inactive_dim_follows_focus = false;` in stcfg to keep the fade
     /// through an alt-tab.
     pub ui_inactive_dim_follows_focus: Option<bool>,
+    /// Whether relative line numbers paint as absolute while the terminal
+    /// window has no OS focus. `None` falls back to on. Set
+    /// `ui.relative_numbers_follow_focus = false;` in stcfg to keep relative
+    /// numbers through an alt-tab.
+    pub ui_relative_numbers_follow_focus: Option<bool>,
     /// Whether a pinned chord mode hides the key-hints overlay it would
     /// otherwise auto-show. `None` falls back to enabled. Set
     /// `ui.pin_hides_hints = false;` in stcfg to keep the box through a pinned
@@ -358,6 +363,9 @@ impl Settings {
             ui_inactive_dim_follows_focus: other
                 .ui_inactive_dim_follows_focus
                 .or(self.ui_inactive_dim_follows_focus),
+            ui_relative_numbers_follow_focus: other
+                .ui_relative_numbers_follow_focus
+                .or(self.ui_relative_numbers_follow_focus),
             ui_pin_hides_hints: other.ui_pin_hides_hints.or(self.ui_pin_hides_hints),
             highlight_retention: other.highlight_retention.or(self.highlight_retention),
             session_retention_days: other.session_retention_days.or(self.session_retention_days),
@@ -580,6 +588,11 @@ impl Settings {
                     self.ui_inactive_dim_follows_focus = Some(b);
                 }
             },
+            ["ui", "relative_numbers_follow_focus"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_relative_numbers_follow_focus = Some(b);
+                }
+            },
             ["terminal", "shell"] => {
                 if let Value::Ident(s) | Value::String(s) = &setting.value.node {
                     self.terminal_shell = Some(s.clone());
@@ -731,6 +744,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -883,6 +897,21 @@ mod tests {
             [
                 follows("on init { ui.inactive_dim_follows_focus = false; }"),
                 follows("on init { ui.inactive_dim_follows_focus = true; }"),
+                follows("on init { }"),
+            ],
+            [Some(false), Some(true), None],
+            "absent falls back at the consumer",
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_ui_relative_numbers_follow_focus() {
+        let follows =
+            |src: &str| Settings::from_config(&parse_ok(src)).ui_relative_numbers_follow_focus;
+        assert_eq!(
+            [
+                follows("on init { ui.relative_numbers_follow_focus = false; }"),
+                follows("on init { ui.relative_numbers_follow_focus = true; }"),
                 follows("on init { }"),
             ],
             [Some(false), Some(true), None],
@@ -1119,6 +1148,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1170,6 +1200,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1230,6 +1261,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1273,6 +1305,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1318,6 +1351,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1366,6 +1400,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1412,6 +1447,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1471,6 +1507,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1522,6 +1559,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
                 session_retention_days: None,
@@ -1570,6 +1608,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,
@@ -1613,6 +1652,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
             session_retention_days: None,

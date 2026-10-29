@@ -200,6 +200,14 @@ on init {
     # fraction itself is ui.inactive_dim.
     ui.inactive_dim_follows_focus = true;
 
+    # Number the gutter absolute while the stoatty window is in the
+    # background. Relative numbers count from the cursor a keystroke moves,
+    # and with the window in the background no keystroke reaches it, so the
+    # gutter shows each line's own number until focus returns. Set false to
+    # keep relative numbers through an alt-tab. The mode itself is
+    # editor.line_numbers.
+    ui.relative_numbers_follow_focus = true;
+
     # Gutter line numbering: relative (distance from the cursor line),
     # absolute (each line's own number), or off (diagnostic marks only).
     editor.line_numbers = relative;

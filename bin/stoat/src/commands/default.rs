@@ -441,6 +441,7 @@ fn run_tui(
         ui_tab_bar: None,
         ui_inactive_dim: None,
         ui_inactive_dim_follows_focus: None,
+        ui_relative_numbers_follow_focus: None,
         ui_pin_hides_hints: None,
         highlight_retention: None,
         session_retention_days: None,

@@ -236,6 +236,15 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "true",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("relative_numbers_follow_focus")],
+            shape: ValueShape::Bool,
+            doc: "Whether relative line numbers paint as absolute while the \
+                  terminal window has no OS focus. Relative numbers count from a \
+                  cursor that no keystroke reaches while the window is in the \
+                  background, so they come back with the focus.",
+            default: "true",
+        },
+        SettingDef {
             path: &[Lit("terminal"), Lit("shell")],
             shape: ValueShape::String,
             doc: "Program a terminal pane spawns as its subshell.",
