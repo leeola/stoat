@@ -27,7 +27,7 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     buffer_lifecycle,
     buffer_registry::{AutoReloadMode, OpenOrigin},
-    debounce::FS_WATCH_DEBOUNCE,
+    debounce::{self, FS_WATCH_DEBOUNCE},
     diff_changes::{DiffChangesId, Landing},
     editor_state::{EditorId, EditorState},
     keymap_state,
@@ -1101,11 +1101,61 @@ pub(crate) fn toggle_live_reload(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Set the workspace live reload to `on`, dropping the held writes when off.
+///
+/// Turning the mode on holds every open file that moved on disk since its last
+/// read, so a write that landed while the mode was off still reloads.
 fn set_live_reload(stoat: &mut Stoat, on: bool) {
     stoat.live_reload = on;
-    if !on {
+    if on {
+        catch_up_live_reload(stoat);
+    } else {
         stoat.live_reload_pending.clear();
         stoat.live_reload_timer = None;
+    }
+}
+
+/// Hold every open file whose mtime moved since its last read, as the watcher
+/// drain holds a write.
+///
+/// Each moved file feeds the live-reload window. With follow on, the newest one
+/// that the follow mode lands on also feeds the follow window. That is a
+/// working-tree file under the repo root, outside the git directory and any
+/// ignored directory, as the drain decides for a write. A log outside the
+/// working tree moves on every line, and the rule keeps the follow off it.
+fn catch_up_live_reload(stoat: &mut Stoat) {
+    let (repo_root, moved) = {
+        let ws = stoat.active_workspace();
+        let repo_root = ws.repo_root.clone().unwrap_or_else(|| ws.git_root.clone());
+        let moved: Vec<(PathBuf, SystemTime)> = ws
+            .buffers
+            .open_paths()
+            .into_iter()
+            .filter_map(|path| {
+                let id = ws.buffers.id_for_path(&path)?;
+                let mtime = file_mtime(stoat, &path)?;
+                (ws.buffers.disk_mtime(id) != Some(mtime)).then_some((path, mtime))
+            })
+            .collect();
+        (repo_root, moved)
+    };
+
+    let git_dir = repo_root.join(".git");
+    let mut repo = None;
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for (path, mtime) in moved {
+        if stoat.follow_changes
+            && newest.as_ref().is_none_or(|(newest, _)| mtime > *newest)
+            && path.starts_with(&repo_root)
+            && !path.starts_with(&git_dir)
+            && !debounce::parent_dir_ignored(stoat, &path, &repo_root, &mut repo)
+        {
+            newest = Some((mtime, path.clone()));
+        }
+        note_live_reload(stoat, path);
+    }
+
+    if let Some((_, path)) = newest {
+        note_followed_change(stoat, path);
     }
 }
 
@@ -2424,6 +2474,103 @@ mod tests {
                 ((false, false), (false, false), (false, false)),
             ),
             "on holds the write in both windows, and off drops both",
+        );
+    }
+
+    #[test]
+    fn turning_live_reload_on_reads_a_file_that_moved_while_it_was_off() {
+        let (mut h, a, _) = live_reload_harness();
+        h.stoat.live_reload = false;
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+
+        toggle_live_reload(&mut h.stoat);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            h.buffer_text(a),
+            "a\nB\nC\n",
+            "a write from before the toggle reloads"
+        );
+    }
+
+    #[test]
+    fn turning_follow_reload_on_lands_on_the_newest_file_that_moved() {
+        let (mut h, a, _) = live_reload_harness();
+        h.stoat.live_reload = false;
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        h.fake_fs().insert_file("/repo/b.rs", b"x\nY\nZ\n");
+
+        toggle_follow_reload(&mut h.stoat);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            (landing(&mut h), h.buffer_text(a)),
+            (
+                (PathBuf::from("/repo/b.rs"), true, 2),
+                "a\nB\nC\n".to_string()
+            ),
+            "the newest write is followed, and the older one still reloads",
+        );
+    }
+
+    /// A log moves on every line it gains, so an open log outside the repo, one
+    /// under an ignored directory, and a file in the git directory are each
+    /// newer than the moved working-tree file. None of them is followed, and
+    /// each still reloads.
+    #[test]
+    fn turning_follow_reload_on_follows_only_a_working_tree_file() {
+        let (mut h, _, _) = live_reload_harness();
+        h.stoat.live_reload = false;
+        h.fake_fs().insert_file("/repo/.stoatignore", b".logs/\n");
+        let others = [
+            "/logs/stoat.log",
+            "/repo/.logs/stoat.log",
+            "/repo/.git/COMMIT_EDITMSG",
+        ];
+        let ids = others.map(|path| {
+            h.fake_fs().insert_file(path, b"one\n");
+            h.open_file(Path::new(path));
+            h.stoat
+                .active_workspace()
+                .buffers
+                .id_for_path(Path::new(path))
+                .expect("open buffer")
+        });
+        h.open_file(Path::new("/repo/a.rs"));
+        h.fake_fs().insert_file("/repo/a.rs", b"a\nB\nC\n");
+        for path in others {
+            h.fake_fs().insert_file(path, b"one\ntwo\n");
+        }
+
+        toggle_follow_reload(&mut h.stoat);
+        h.advance_clock(FS_WATCH_DEBOUNCE);
+
+        assert_eq!(
+            (landing(&mut h), ids.map(|id| h.buffer_text(id))),
+            (
+                (PathBuf::from("/repo/a.rs"), true, 2),
+                ["one\ntwo\n", "one\ntwo\n", "one\ntwo\n"].map(String::from)
+            ),
+            "only the working-tree write is followed, and every moved buffer reloads",
+        );
+    }
+
+    #[test]
+    fn turning_live_reload_on_with_nothing_moved_holds_no_path() {
+        let (mut h, _, _) = live_reload_harness();
+        h.stoat.live_reload = false;
+
+        toggle_follow_reload(&mut h.stoat);
+
+        assert_eq!(
+            (
+                h.stoat.live_reload_pending.is_empty(),
+                h.stoat.live_reload_timer.is_some(),
+                h.stoat.follow_pending.clone(),
+                h.stoat.follow_timer.is_some()
+            ),
+            (true, false, None, false),
+            "a toggle over files that did not move holds nothing",
         );
     }
 

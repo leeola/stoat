@@ -580,7 +580,7 @@ fn plan_path_edit(paths: &[PathBuf], changes: Vec<(PathBuf, bool)>) -> PathEdit 
 /// check.
 ///
 /// Paths outside `repo_root` have no verdict and report false.
-fn parent_dir_ignored(
+pub(crate) fn parent_dir_ignored(
     stoat: &mut Stoat,
     path: &Path,
     repo_root: &Path,
