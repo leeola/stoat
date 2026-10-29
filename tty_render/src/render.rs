@@ -1061,9 +1061,11 @@ pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
 /// The cell grid a `width` by `height` physical-pixel surface holds at
 /// `font_size` and `scale_factor`, as `(rows, cols)`.
 ///
-/// A partial cell at the right or bottom edge is not a cell, so both counts
-/// floor, and a surface too small for even one still reports one rather than
-/// zero. A zero-row terminal has nowhere to put the cursor.
+/// A partial cell at the right edge is not a cell, so the column count floors.
+/// At the bottom edge, a strip of at least a third of a cell is one more row,
+/// which the layout anchors to that edge, and a thinner strip is no row. A
+/// surface too small for even one row still reports one rather than zero. A
+/// zero-row terminal has nowhere to put the cursor.
 ///
 /// The cell rectangle comes from the font size and the scale factor alone, so a
 /// caller holding a window but no GPU yet gets the same answer
@@ -1077,7 +1079,8 @@ pub fn grid_size(width: u32, height: u32, font_size: u32, scale_factor: f32) -> 
 /// The [`GridLayout`] a `width` by `height` physical-pixel surface holds at
 /// `font_size` and `scale_factor`.
 ///
-/// It holds the grid [`grid_size`] reports, with the last row on the uniform
+/// It holds the grid [`grid_size`] reports. When the bottom strip makes a row,
+/// the last row hangs from the bottom edge. Otherwise it sits on the uniform
 /// pitch.
 pub fn grid_layout(width: u32, height: u32, font_size: u32, scale_factor: f32) -> GridLayout {
     grid_dims(
@@ -1090,14 +1093,34 @@ pub fn grid_layout(width: u32, height: u32, font_size: u32, scale_factor: f32) -
 /// The layout a surface of `width` by `height` physical pixels holds at
 /// `metrics`, for callers that already have the cell rectangle.
 pub(crate) fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> GridLayout {
-    let rows = (height as f32 / metrics.height).floor().max(1.0) as usize;
     let cols = (width as f32 / metrics.width).floor().max(1.0) as usize;
+    let height = height as f32;
+    let full = (height / metrics.height).floor();
+    let leftover = height - full * metrics.height;
+    if full >= 1.0 && leftover >= PARTIAL_ROW_MIN * metrics.height {
+        return GridLayout {
+            rows: full as usize + 1,
+            cols,
+            bottom_row_y: height - metrics.height,
+        };
+    }
+
+    // A surface under one cell keeps its one row at the top, since anchoring it
+    // to the bottom edge puts its top above the surface.
+    let rows = full.max(1.0) as usize;
     GridLayout {
         rows,
         cols,
         bottom_row_y: (rows - 1) as f32 * metrics.height,
     }
 }
+
+/// The least strip under the full rows, as a fraction of a cell, that makes one
+/// more row.
+///
+/// A thinner strip shows only a sliver of a line's ascenders, which reads as a
+/// stray line rather than as a line of text, so it stays blank.
+const PARTIAL_ROW_MIN: f32 = 1.0 / 3.0;
 
 #[cfg(test)]
 mod tests {
@@ -1118,9 +1141,36 @@ mod tests {
             cols,
             bottom_row_y,
         };
-        assert_eq!(dims(15), layout(33, 88, 576.0));
-        assert_eq!(dims(30), layout(16, 44, 540.0));
-        assert_eq!(dims(60), layout(8, 22, 504.0));
+        assert_eq!(dims(15), layout(34, 88, 582.0));
+        assert_eq!(dims(30), layout(17, 44, 564.0));
+        assert_eq!(dims(60), layout(9, 22, 528.0));
+    }
+
+    /// A strip under the full rows of at least a third of a cell is one more
+    /// row, hung from the bottom edge, and a thinner strip is no row.
+    #[test]
+    fn a_third_of_a_cell_left_over_makes_a_partial_row() {
+        let cell = CellMetrics {
+            font_size: 16.0,
+            width: 10.0,
+            height: 20.0,
+            scale_factor: 1.0,
+        };
+        let layout = |height| {
+            let layout = grid_dims(800, height, cell);
+            (layout.rows, layout.bottom_row_y)
+        };
+        assert_eq!(
+            [layout(1013), layout(1005), layout(1000)],
+            [(51, 993.0), (50, 980.0), (50, 980.0)],
+        );
+
+        let partial = grid_dims(800, 1013, cell);
+        assert_eq!(
+            [49, 50, 51].map(|row| partial.row_y(row, 20.0)),
+            [980.0, 993.0, 1013.0],
+            "the full rows keep the pitch, and the partial row ends at the bottom edge",
+        );
     }
 
     /// The whole point of the public form is that a caller without a GPU
@@ -1179,6 +1229,15 @@ mod tests {
     #[test]
     fn a_surface_under_one_cell_still_holds_one() {
         assert_eq!(grid_size(1, 1, 15, 1.0), (1, 1));
+        assert_eq!(
+            grid_dims(1, 10, CellMetrics::from_font_size(15, 1.0)),
+            GridLayout {
+                rows: 1,
+                cols: 1,
+                bottom_row_y: 0.0,
+            },
+            "a surface under one cell keeps its row at the top, even past a third of one",
+        );
     }
 
     /// The panel box, the border quad and the icon quad all multiply the cell

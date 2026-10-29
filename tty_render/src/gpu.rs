@@ -425,8 +425,8 @@ impl Renderer {
 
     /// The (rows, cols) cell grid that fills the target at the current size.
     ///
-    /// Divides the pixel size by the cell metrics, flooring with a one-cell
-    /// minimum so a sliver still yields a usable grid.
+    /// The rows and the columns round as [`crate::render::grid_size`] rounds
+    /// them, with a one-cell minimum, so a sliver still yields a usable grid.
     pub fn grid_size(&self) -> (usize, usize) {
         let layout = self.grid_layout();
         (layout.rows, layout.cols)
@@ -2553,7 +2553,7 @@ mod tests {
         PoolComposite, Renderer, SharedFonts, SurfaceColorSpace, SurfaceConfiguration,
         TextureFormat, MAX_COVERED,
     };
-    use crate::test_support::{pixel, read_back, require_headless_device, still_frame};
+    use crate::test_support::{self, pixel, read_back, require_headless_device, still_frame};
     use std::iter;
     use stoatty_term::{
         grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
@@ -2750,6 +2750,73 @@ mod tests {
             near(bands.0, live_bg) && near(bands.1, gray) && near(bands.2, white),
             "one pass must leave the live grid where no pool covers it and each pool \
              inside its own scissor: got {bands:?}"
+        );
+    }
+
+    /// A strip of half a cell under three full rows makes a fourth row, hung
+    /// from the bottom edge. It covers the band where it overlaps the third
+    /// row, and that row keeps its top. A height of three rows leaves no band.
+    #[test]
+    fn a_partial_row_hangs_from_the_bottom_edge_over_the_row_above() {
+        let (device, queue) = require_headless_device();
+        let [_, cell_h] = CELL;
+        let (red, blue) = (Rgb::new(255, 0, 0), Rgb::new(0, 0, 255));
+        let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+        let draw = |height: u32| {
+            let (target, view) = test_support::offscreen_target(&device, TARGET_WIDTH, height);
+            let mut renderer =
+                test_support::renderer(&device, [TARGET_WIDTH, height], 30, 1.0, Rgb::new(0, 0, 0));
+            let layout = renderer.grid_layout();
+            let mut grid = filled_grid(layout.rows, layout.cols, Rgb::new(0, 0, 0));
+            for (row, color) in [(2, red), (3, blue)] {
+                if row >= layout.rows {
+                    continue;
+                }
+                for col in 0..layout.cols {
+                    grid.get_mut(row, col).bg = color;
+                }
+            }
+            renderer.render_pools_into(
+                &device,
+                &queue,
+                &view,
+                &grid,
+                still_frame(&full, &none),
+                &[],
+                &[],
+            );
+            let shot = read_back(&device, &queue, &target, TARGET_WIDTH, height);
+            let at = move |y: u32| pixel(&shot, TARGET_WIDTH, TARGET_WIDTH / 2, y);
+            (layout, at)
+        };
+
+        let height = 3 * cell_h + cell_h / 2;
+        let (partial, at) = draw(height);
+        let bottom = partial.bottom_row_y as u32;
+        assert_eq!(
+            (
+                partial.rows,
+                bottom,
+                [
+                    at(2 * cell_h + 1),
+                    at(bottom - 1),
+                    at(bottom + 1),
+                    at(height - 1)
+                ],
+            ),
+            (
+                4,
+                height - cell_h,
+                [[255, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]],
+            ),
+            "the third row keeps its top and shows down to the fourth, which ends at the edge",
+        );
+
+        let (whole, at) = draw(3 * cell_h);
+        assert_eq!(
+            (whole.rows, at(3 * cell_h - 1)),
+            (3, [255, 0, 0]),
+            "three rows' height holds three rows, the last of them down to the edge",
         );
     }
 
