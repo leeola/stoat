@@ -2206,12 +2206,16 @@ pub(crate) fn merge_structural_detail(
         for &i in reaching.into_iter().flatten() {
             let (change, prose) = (&tree_changes[i], prose_by_change[i]);
             let moved = change.kind == LangChangeKind::Moved;
-            // A relocation is not a content change, and inside a Modified hunk
-            // it is noise: the tree differ reports every token of a reindented
-            // block as moved, so washing those would mark a run of untouched
-            // statements more heavily than the line differ did -- the clutter
-            // this pass exists to remove.
-            if moved && refining {
+            // A relocation that stays inside a Modified hunk is noise. The tree
+            // differ reports every token of a block reindented under a new
+            // parent as moved, and a wash of those marks a run of untouched
+            // statements more heavily than the line differ does. A move whose
+            // counterpart lies outside the hunk is a token that left this line
+            // or arrived on it, which the reader sees here.
+            if moved
+                && refining
+                && counterpart_in_hunk(change, &hunk.base_byte_range, &buffer_bytes)
+            {
                 continue;
             }
             let (bounds, out) = match change.side {
@@ -2284,6 +2288,33 @@ fn changes_reaching<'a>(
     let first = side.partition_point(|&i| changes[i].byte_range.end <= bounds.start);
     let len = side[first..].partition_point(|&i| changes[i].byte_range.start < bounds.end);
     &side[first..first + len]
+}
+
+/// Whether the moved `change` has a counterpart inside the hunk whose base side
+/// spans `base_bytes` and whose buffer side spans `buffer_bytes`.
+///
+/// The move pass lists each side's counterparts on that side's own metadata. A
+/// buffer-side target names its base-side sources, and a base-side source names
+/// its buffer-side targets. A counterpart in another file is never in the hunk,
+/// and a change with no metadata has none to find.
+fn counterpart_in_hunk(
+    change: &stoat_language::structural_diff::DiffChange,
+    base_bytes: &Range<usize>,
+    buffer_bytes: &Range<usize>,
+) -> bool {
+    use stoat_language::structural_diff::Side;
+
+    change.move_metadata.as_ref().is_some_and(|meta| {
+        meta.sources.iter().any(|source| {
+            let bounds = match source.side {
+                Side::Lhs => base_bytes,
+                Side::Rhs => buffer_bytes,
+            };
+            source.buffer.is_none()
+                && source.byte_range.start < bounds.end
+                && bounds.start < source.byte_range.end
+        })
+    })
 }
 
 /// Whether every line of `lines` carrying content is touched by one of
@@ -5114,6 +5145,65 @@ mod tests {
             )),
             "the first hunk marks the removed modifier on the left and nothing on the right",
         );
+    }
+
+    /// A call that left one modified line for another keeps its moved span on
+    /// both lines, because its counterpart lies outside each line's hunk.
+    #[test]
+    fn a_token_that_left_the_hunk_keeps_a_moved_span() {
+        let base = "fn a() {\n    let v = work(a, b, c) + 1;\n}\nfn b() {\n    let w = 2;\n}\n";
+        let buffer = "fn a() {\n    let v = 1;\n}\nfn b() {\n    let w = work(a, b, c) + 2;\n}\n";
+        let call = |text: &str| {
+            let at = text.find("work(a, b, c)").expect("call");
+            at..at + "work(a, b, c)".len()
+        };
+        assert_eq!(
+            rust_hunks(base, buffer)
+                .iter()
+                .map(moved_extents)
+                .collect::<Vec<_>>(),
+            [(Some(call(base)), None), (None, Some(call(buffer)))],
+            "the call marks moved where it left and where it arrived",
+        );
+    }
+
+    /// A statement reordered under a new block inside the same hunk is the
+    /// reindent noise the tree pass drops, so the hunk carries no moved span.
+    #[test]
+    fn a_move_inside_its_own_hunk_keeps_no_moved_span() {
+        let base = "fn f() {\n    keep();\n    one(a, b);\n    two(c, d);\n}\n";
+        let buffer =
+            "fn f() {\n    keep();\n    loop {\n        two(c, d);\n        one(a, x);\n    }\n}\n";
+        assert_eq!(
+            rust_hunks(base, buffer)
+                .iter()
+                .map(moved_extents)
+                .collect::<Vec<_>>(),
+            [(None, None)],
+            "one hunk, and the statement it relocated marks no move",
+        );
+    }
+
+    /// The byte extents of `hunk`'s moved spans on its base and buffer sides,
+    /// each from the first moved byte to the last.
+    fn moved_extents(
+        hunk: &DiffHunk,
+    ) -> (
+        Option<std::ops::Range<usize>>,
+        Option<std::ops::Range<usize>>,
+    ) {
+        let extent = |spans: &[ChangeSpan]| {
+            let mut moved = spans.iter().filter(|span| span.kind == ChangeKind::Moved);
+            let first = moved.next()?.byte_range.clone();
+            Some(moved.fold(first, |extent, span| {
+                extent.start.min(span.byte_range.start)..extent.end.max(span.byte_range.end)
+            }))
+        };
+        let detail = hunk.token_detail.as_ref();
+        (
+            detail.and_then(|detail| extent(&detail.base_spans)),
+            detail.and_then(|detail| extent(&detail.buffer_spans)),
+        )
     }
 
     /// One string change reaches the two hunks its first and third lines
