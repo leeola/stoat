@@ -12,12 +12,13 @@
 use crate::signals;
 use crate::{
     anim::{
-        advance_pool_glide, advance_sketches, anchored_shift, block_corners, cell_in_region,
-        cursor_in_region, cursor_position, forced_damage, intersect_scissor, project_frame,
-        refresh_popover_overflows, region_scissor, seed_settle_flight, shift_scissor, step_cursor,
-        step_grid_scroll, step_popover_scroll, step_region_scroll, step_scrollback_scroll,
-        ActivePool, AnchorRide, FrameProjection, PoolAnim, PoolFrame, PoolStep, PopoverScroll,
-        SketchClocks, EASE_BASELINE_FRAME, MAX_EASE_DT,
+        advance_pool_glide, advance_sketches, anchored_shift, cell_in_region, cursor_in_region,
+        cursor_position, forced_damage, intersect_scissor, project_frame,
+        refresh_popover_overflows, region_scissor, seed_settle_flight, shift_scissor,
+        step_anchored_cursor, step_cursor, step_grid_scroll, step_popover_scroll,
+        step_region_scroll, step_scrollback_scroll, ActivePool, AnchorRide, FrameProjection,
+        PoolAnim, PoolFrame, PoolStep, PopoverScroll, SketchClocks, EASE_BASELINE_FRAME,
+        MAX_EASE_DT,
     },
     config::{self, Config, CursorAnimation},
     input::{
@@ -742,13 +743,20 @@ struct State {
     /// after a frame that drew the cursor at a glide anchor, where the cursor
     /// is off its cell and the move that follows is the settle flight.
     cursor_target: Option<[f32; 2]>,
-    /// Whether last frame drew the cursor at a glide anchor rather than easing it.
+    /// Whether last frame drew the cursor against a glide anchor, flying to it or
+    /// riding it, rather than easing it toward its terminal cell.
     ///
     /// Set while a pool glides and the cursor rides its content. On the first
     /// frame after the glide releases it seeds the settle flight, so the cursor
     /// eases from its last anchored position to the landing cell instead of
     /// teleporting there.
     cursor_was_anchored: bool,
+    /// The anchored document cell the drawn cursor rides frame-locked.
+    ///
+    /// `None` while the cursor flies toward a glide anchor and while no anchor
+    /// is in effect. The lock ends when the anchor names another cell, so a jump
+    /// or a wheel re-home travels on screen before the ride starts again.
+    cursor_locked: Option<(u64, u16)>,
     /// Each overlay's ping-pong scroll, indexed by overlay order, so several
     /// popovers scroll independently.
     popover_scrolls: Vec<PopoverScroll>,
@@ -1197,6 +1205,7 @@ impl ApplicationHandler<PtyEvent> for App {
             cursor_corner_anim: [[0.0, 0.0]; 4],
             cursor_target: None,
             cursor_was_anchored: false,
+            cursor_locked: None,
             popover_scrolls: Vec::new(),
             popover_offsets: Vec::new(),
             popover_wake: None,
@@ -3143,6 +3152,7 @@ fn redraw(state: &mut State) {
             state.last_scrollback_offset = None;
             seed_settle_flight(
                 &mut state.cursor_was_anchored,
+                &mut state.cursor_locked,
                 &mut state.cursor_anim,
                 &mut state.cursor_corner_anim,
                 state.grid.rows(),
@@ -3219,27 +3229,27 @@ fn redraw(state: &mut State) {
 
         let (base_cursor, base_corners, cursor_easing) = match cursor_anchor {
             Some(anchor) => {
-                // The anchor is frame-locked to the pool's eased
-                // content offset, so the cursor is placed directly
-                // rather than eased toward the VT cell. Once its line
-                // has scrolled off the pool it leaves the region and
-                // hides. Keep the anim in sync for a clean settle. The
-                // cursor draws off its terminal cell here, so the recorded
-                // target goes and the settle flight is not measured as a
-                // hop.
-                state.cursor_anim = anchor.pos;
-                state.cursor_corner_anim = block_corners(anchor.pos);
+                // The cursor flies to the anchor, then rides it frame-locked
+                // to the pool's eased content offset rather than easing toward
+                // the VT cell. Once its line has scrolled off the pool it
+                // hides. The cursor draws off its terminal cell here, so the
+                // recorded target goes and the settle flight is not measured
+                // as a hop.
                 state.cursor_was_anchored = true;
                 state.cursor_target = None;
-                if anchor.in_region {
-                    (Some(anchor.pos), Some(block_corners(anchor.pos)), false)
-                } else {
-                    (None, None, false)
-                }
+                step_anchored_cursor(
+                    state.cursor_animation,
+                    &mut state.cursor_anim,
+                    &mut state.cursor_corner_anim,
+                    &mut state.cursor_locked,
+                    anchor,
+                    dt,
+                )
             },
             None => {
                 seed_settle_flight(
                     &mut state.cursor_was_anchored,
+                    &mut state.cursor_locked,
                     &mut state.cursor_anim,
                     &mut state.cursor_corner_anim,
                     state.grid.rows(),

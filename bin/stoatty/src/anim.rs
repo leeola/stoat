@@ -455,19 +455,25 @@ pub(crate) fn block_corners(origin: [f32; 2]) -> [[f32; 2]; 4] {
     [[x, y], [x + 1.0, y], [x, y + 1.0], [x + 1.0, y + 1.0]]
 }
 
-/// The primary cursor's placement while it rides a gliding pool.
+/// The document cell the primary cursor rides while its pool glides.
 ///
-/// Frame-locked to the pool's eased content offset rather than eased toward the
-/// VT cursor cell, so the cursor slides with the text under it.
+/// The cursor flies from where it was drawn to the anchor's position, then rides
+/// it frame-locked to the pool's eased content offset rather than eased toward
+/// the VT cursor cell, so it slides with the text under it.
 #[derive(Clone, Copy)]
 pub(crate) struct AnchoredCursor {
-    /// Fractional cell position [col, row] the cursor draws at this frame.
+    /// Fractional cell position [col, row] the anchor sits at this frame.
     pub(crate) pos: [f32; 2],
     /// Whether [`Self::pos`] sits within the pool. The cursor hides once its line
     /// has scrolled off either edge.
     pub(crate) in_region: bool,
     /// The gliding pool's region, used to clip the drawn cursor to the pane.
     pub(crate) region: PoolRegion,
+    /// The document display row and grid column the anchor names.
+    ///
+    /// A ride locks onto this cell. An anchor that names another cell, such as
+    /// a jump's landing or a wheel glide's re-home, starts a new flight.
+    pub(crate) cell: (u64, u16),
 }
 
 /// The screen position a cursor anchored to a document row draws at while its
@@ -784,6 +790,7 @@ pub(crate) fn project_frame(
                 pos,
                 in_region,
                 region: pool.region,
+                cell: (row, col),
             });
         }
 
@@ -904,8 +911,12 @@ pub(crate) fn forced_damage(force_full: bool, projected: Damage) -> Damage {
 /// off the viewport during the glide, it is pulled to just beyond the edge it
 /// exited (`rows` is the viewport height), so the flight is a consistent length
 /// regardless of how far the content scrolled.
+///
+/// It also releases the anchor lock in `locked`, so the next glide starts with
+/// a flight to its anchor.
 pub(crate) fn seed_settle_flight(
     was_anchored: &mut bool,
+    locked: &mut Option<(u64, u16)>,
     point: &mut [f32; 2],
     corners: &mut [[f32; 2]; 4],
     rows: usize,
@@ -914,8 +925,91 @@ pub(crate) fn seed_settle_flight(
         return;
     }
     *was_anchored = false;
+    *locked = None;
     point[1] = point[1].clamp(-1.0, rows as f32);
     *corners = block_corners(*point);
+}
+
+/// How near a flying cursor must come to its anchor, in cells on each axis,
+/// before it locks on and rides it.
+const ANCHOR_LOCK_CELLS: f32 = 0.25;
+
+/// Advance the primary cursor one frame against its glide anchor, returning the
+/// same render inputs as [`step_cursor`].
+///
+/// The cursor flies from where it was drawn to the anchor with its own ease.
+/// Once every corner of its block is within [`ANCHOR_LOCK_CELLS`] of the
+/// anchor's block, it locks on and rides the anchor frame-locked, which keeps a
+/// wheel glide's ride stable. `locked` names the cell of the lock, so the lock
+/// ends when the anchor names another cell, and the cursor flies to the new one.
+///
+/// The flight target stays within one row of the pool region, so a line still
+/// outside the pane draws the cursor flying to the edge the line enters by. A
+/// flight frame reports motion while its ease moves. A glide that moves the
+/// anchor asks for frames by itself.
+pub(crate) fn step_anchored_cursor(
+    animation: CursorAnimation,
+    point: &mut [f32; 2],
+    corners: &mut [[f32; 2]; 4],
+    locked: &mut Option<(u64, u16)>,
+    anchor: AnchoredCursor,
+    dt: Duration,
+) -> CursorStep {
+    if *locked != Some(anchor.cell) {
+        *locked = None;
+        if let Some(flight) = fly_to_anchor(animation, point, corners, anchor, dt) {
+            return flight;
+        }
+        *locked = Some(anchor.cell);
+    }
+
+    *point = anchor.pos;
+    *corners = block_corners(anchor.pos);
+    match anchor.in_region {
+        true => (Some(anchor.pos), Some(*corners), false),
+        false => (None, None, false),
+    }
+}
+
+/// One frame of [`step_anchored_cursor`]'s flight, or `None` once the cursor's
+/// block has come within [`ANCHOR_LOCK_CELLS`] of the anchor's block.
+///
+/// The target is the anchor's position held within one row of the pool region,
+/// as [`seed_settle_flight`] holds a settle's start.
+fn fly_to_anchor(
+    animation: CursorAnimation,
+    point: &mut [f32; 2],
+    corners: &mut [[f32; 2]; 4],
+    anchor: AnchoredCursor,
+    dt: Duration,
+) -> Option<CursorStep> {
+    let top = anchor.region.top as f32;
+    let bottom = top + (anchor.region.height as f32).max(1.0);
+    let target = [anchor.pos[0], anchor.pos[1].clamp(top - 1.0, bottom)];
+    let (cell, quad, moving) = step_cursor(animation, point, corners, &mut None, Some(target), dt);
+    let (Some(cell), Some(quad)) = (cell, quad) else {
+        return Some((None, None, moving));
+    };
+
+    // The corners decide the arrival, because a warp cursor reports its block's
+    // centroid as the cell, half a cell off the anchor's origin.
+    let arrived = quad
+        .iter()
+        .zip(block_corners(anchor.pos))
+        .all(|(corner, home)| {
+            (corner[0] - home[0]).abs() <= ANCHOR_LOCK_CELLS
+                && (corner[1] - home[1]).abs() <= ANCHOR_LOCK_CELLS
+        });
+    if arrived {
+        return None;
+    }
+
+    // The scissor clips the quad, but the ligature-break cell must not reach
+    // another pane's row.
+    match cell[1] >= top && cell[1] < bottom {
+        true => Some((Some(cell), Some(quad), moving)),
+        false => Some((None, None, moving)),
+    }
 }
 
 /// The centroid of a quad's four corners.
@@ -2123,21 +2217,26 @@ mod tests {
         // A cursor that slid far below the viewport starts the flight from just
         // beyond the bottom edge, not from ninety rows down.
         let mut anchored = true;
+        let mut locked = Some((20, 5));
         let mut point = [5.0, 90.0];
         let mut corners = block_corners(point);
-        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        seed_settle_flight(&mut anchored, &mut locked, &mut point, &mut corners, rows);
         assert_eq!(
             point,
             [5.0, 40.0],
             "off the bottom clamps to just past the edge"
         );
-        assert!(!anchored, "the anchor flag is cleared");
+        assert_eq!(
+            (anchored, locked),
+            (false, None),
+            "the anchor flag and the lock are cleared"
+        );
 
         // Above the top clamps to just above it.
         let mut anchored = true;
         let mut point = [5.0, -20.0];
         let mut corners = block_corners(point);
-        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        seed_settle_flight(&mut anchored, &mut None, &mut point, &mut corners, rows);
         assert_eq!(
             point,
             [5.0, -1.0],
@@ -2148,7 +2247,7 @@ mod tests {
         let mut anchored = true;
         let mut point = [5.0, 12.0];
         let mut corners = block_corners(point);
-        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        seed_settle_flight(&mut anchored, &mut None, &mut point, &mut corners, rows);
         assert_eq!(
             point,
             [5.0, 12.0],
@@ -2159,7 +2258,7 @@ mod tests {
         let mut anchored = false;
         let mut point = [5.0, 90.0];
         let mut corners = block_corners(point);
-        seed_settle_flight(&mut anchored, &mut point, &mut corners, rows);
+        seed_settle_flight(&mut anchored, &mut None, &mut point, &mut corners, rows);
         assert_eq!(
             point,
             [5.0, 90.0],
@@ -2174,7 +2273,7 @@ mod tests {
         let mut anchored = true;
         let mut point = [5.0, 90.0];
         let mut corners = block_corners(point);
-        seed_settle_flight(&mut anchored, &mut point, &mut corners, 40);
+        seed_settle_flight(&mut anchored, &mut None, &mut point, &mut corners, 40);
 
         let landing = [5.0, 22.0];
         let (_, _, easing) = step_cursor(
@@ -2189,6 +2288,147 @@ mod tests {
         assert!(
             point[1] < 40.0 && point[1] > landing[1],
             "it advanced from the edge toward the landing: {point:?}",
+        );
+    }
+
+    /// An anchor naming document cell `(20, 5)` at screen position `pos`, in a
+    /// 40-row pool at the top of the grid.
+    fn anchor_at(pos: [f32; 2], in_region: bool) -> AnchoredCursor {
+        AnchoredCursor {
+            pos,
+            in_region,
+            region: PoolRegion {
+                pool: 1,
+                window: 0,
+                top: 0,
+                left: 0,
+                width: 80,
+                height: 40,
+                kind: PoolKind::Grid,
+                dim: 0,
+                resident: false,
+            },
+            cell: (20, 5),
+        }
+    }
+
+    /// One [`step_anchored_cursor`] frame from `point` with the lock `locked`.
+    /// Returns the step, the point it leaves, and the lock it leaves.
+    fn anchored_step(
+        animation: CursorAnimation,
+        point: [f32; 2],
+        locked: Option<(u64, u16)>,
+        anchor: AnchoredCursor,
+    ) -> (CursorStep, [f32; 2], Option<(u64, u16)>) {
+        let mut point = point;
+        let mut corners = block_corners(point);
+        let mut locked = locked;
+        let step = step_anchored_cursor(
+            animation,
+            &mut point,
+            &mut corners,
+            &mut locked,
+            anchor,
+            EASE_BASELINE_FRAME,
+        );
+        (step, point, locked)
+    }
+
+    #[test]
+    fn an_anchored_cursor_flies_from_its_cell_to_a_line_entering_the_pane() {
+        let ((cell, _, _), _, locked) = anchored_step(
+            CursorAnimation::Block,
+            [5.0, 30.0],
+            None,
+            anchor_at([5.0, -2.0], false),
+        );
+        let row = cell.expect("the flight draws inside the pane")[1];
+        assert!(
+            row > -1.0 && row < 30.0,
+            "the cursor flies up from its cell toward the line above the pane: {row}",
+        );
+        assert_eq!(locked, None, "a cursor in flight holds no lock");
+
+        let landing = anchor_at([5.0, 3.0], true);
+        let locks = [CursorAnimation::Block, CursorAnimation::Warp].map(|animation| {
+            let (step, _, locked) = anchored_step(animation, [5.0, 3.1], None, landing);
+            (step, locked)
+        });
+        assert_eq!(
+            locks,
+            [(
+                (Some([5.0, 3.0]), Some(block_corners([5.0, 3.0])), false),
+                Some((20, 5))
+            ); 2],
+            "a block or warp cursor within a quarter cell of its anchor locks onto it",
+        );
+    }
+
+    #[test]
+    fn a_locked_cursor_rides_its_anchor_and_hides_off_the_pane() {
+        let ride = anchored_step(
+            CursorAnimation::Block,
+            [5.0, 30.0],
+            Some((20, 5)),
+            anchor_at([5.0, 14.0], true),
+        );
+        assert_eq!(
+            ride,
+            (
+                (Some([5.0, 14.0]), Some(block_corners([5.0, 14.0])), false),
+                [5.0, 14.0],
+                Some((20, 5)),
+            ),
+            "a locked cursor sits on its anchor in one frame, with no ease",
+        );
+
+        let hidden = anchored_step(
+            CursorAnimation::Block,
+            [5.0, 30.0],
+            Some((20, 5)),
+            anchor_at([5.0, 14.0], false),
+        );
+        assert_eq!(
+            hidden.0,
+            (None, None, false),
+            "a locked cursor whose line left the pane hides",
+        );
+    }
+
+    #[test]
+    fn a_lock_ends_when_the_anchor_names_another_cell() {
+        let moved = AnchoredCursor {
+            cell: (24, 5),
+            ..anchor_at([5.0, 14.0], true)
+        };
+        let (_, point, locked) =
+            anchored_step(CursorAnimation::Block, [5.0, 10.0], Some((20, 5)), moved);
+        assert!(
+            point[1] > 10.0 && point[1] < 14.0,
+            "the cursor eases toward the new cell rather than jumping: {point:?}",
+        );
+        assert_eq!(locked, None, "the lock on the old cell ends");
+    }
+
+    #[test]
+    fn a_flight_to_a_line_past_the_edge_stops_one_row_outside() {
+        let above = anchor_at([5.0, -9.0], false);
+        let ((cell, quad, _), point, locked) =
+            anchored_step(CursorAnimation::Block, [5.0, -0.9], None, above);
+        assert!(
+            point[1] >= -1.0,
+            "the flight stops one row above the pane: {point:?}",
+        );
+        assert_eq!(
+            (cell, quad, locked),
+            (None, None, None),
+            "a cursor above the pane draws nothing and holds no lock",
+        );
+
+        assert_eq!(
+            anchored_step(CursorAnimation::Block, [5.0, -1.0], None, above).0,
+            (None, None, false),
+            "a flight that rests at the edge asks for no frames of its own",
         );
     }
 
