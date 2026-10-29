@@ -1113,19 +1113,16 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             .as_ref()
             .filter(|(lit, _)| lit == editor_id)
             .map(|(_, spotlight)| spotlight);
-        // scroll_row is the source of truth for the pool page. The wheel
-        // glide refines it sub-row through scroll_offset, but cursor-follow
-        // and jumps move scroll_row without the fraction, so trust the offset
-        // only while it still floors to scroll_row. A page glide is the
-        // exception. scroll_row jumped to the target and the offset lags
-        // behind easing up to it, so trust the fraction throughout the glide
-        // and let the pool ease from the lagging offset to the target.
-        let scroll_offset = if editor.scroll_glide != ScrollGlide::None
-            || editor.scroll_offset.floor() as u32 == editor.scroll_row
-        {
-            editor.scroll_offset
-        } else {
-            editor.scroll_row as f32
+        // At rest the pool target is the declared rest, scroll_row plus the
+        // wheel fraction. A follow or a jump moves scroll_row and resets
+        // scroll_frac, but it leaves the eased scroll_offset behind. A target
+        // from that stale offset rests between rows, and the terminal then
+        // holds its composite over the live grid. The eased offset is the
+        // target only while a glide is in flight, so the pool eases with it
+        // from the old rest to the new one.
+        let scroll_offset = match editor.scroll_glide {
+            ScrollGlide::None => editor.scroll_row as f32 + editor.scroll_frac,
+            ScrollGlide::Page | ScrollGlide::Wheel => editor.scroll_offset,
         };
         // Review rows regenerate on accept/reject and their gutter glyphs
         // change on stage/unstage, so the session version is the pool's
@@ -1695,15 +1692,12 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         };
         let active_idx = stoat.active_workspace;
         if let Some(editor) = stoat.workspaces[active_idx].editors.get_mut(editor_id) {
-            // Same rule the pane loop follows: the sub-row offset is the truth
-            // while it still floors to scroll_row, and throughout a glide where
-            // scroll_row has already jumped to the target.
-            let scroll_offset = if editor.scroll_glide != ScrollGlide::None
-                || editor.scroll_offset.floor() as u32 == editor.scroll_row
-            {
-                editor.scroll_offset
-            } else {
-                editor.scroll_row as f32
+            // The pane loop uses the same rule. At rest the target is
+            // scroll_row plus the wheel fraction, and the eased offset is the
+            // target only while a glide is in flight.
+            let scroll_offset = match editor.scroll_glide {
+                ScrollGlide::None => editor.scroll_row as f32 + editor.scroll_frac,
+                ScrollGlide::Page | ScrollGlide::Wheel => editor.scroll_offset,
             };
             let content_version = editor_page_content_version(
                 editor_syntax(editor.diff_view),

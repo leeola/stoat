@@ -5173,6 +5173,62 @@ fn emit_smooth_scroll_anchors_the_cursor_during_a_wheel_glide() {
     );
 }
 
+/// A follow or a jump clears the wheel fraction and leaves the eased offset on
+/// its old sub-row. At rest the pool scrolls to the row plus the fraction, so a
+/// stale offset never holds the composite between rows.
+#[test]
+fn a_resting_pane_emits_its_row_and_fraction_not_a_stale_eased_offset() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/pool");
+    let path = root.join("a.txt");
+    let body: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    h.fake_fs().insert_file(&path, body.as_bytes());
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let rows = focused_content(&h).height as f32;
+    let split = |offset: f32| {
+        let page = (offset / rows).floor();
+        let fraction = ((offset - page * rows) / rows * 65536.0).round() as u16;
+        (page as u64, fraction)
+    };
+
+    let mut rest_scroll = |frac: f32| {
+        {
+            let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+            editor.scroll_row = 10;
+            editor.scroll_frac = frac;
+            editor.scroll_offset = 10.4;
+            editor.scroll_glide = ScrollGlide::None;
+        }
+        command::decode_stream(&emit_raw(&mut h, &mut rx))
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                Command::Scroll(scroll) if scroll.pool == pool => {
+                    Some((scroll.page, scroll.fraction))
+                },
+                _ => None,
+            })
+    };
+    assert_eq!(
+        (rest_scroll(0.0), rest_scroll(0.4)),
+        (Some(split(10.0)), Some(split(10.4))),
+        "a rest scrolls the pool to the row plus the wheel fraction, not to the eased offset"
+    );
+}
+
 #[test]
 fn a_pane_that_loses_focus_releases_its_cursor_anchor() {
     let (mut h, mut rx) = split_pool_harness();
