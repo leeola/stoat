@@ -1124,6 +1124,9 @@ pub(crate) fn frame(
     // Resolved here for the same reason. It reads the terminal's pools and the
     // protocol off the whole &Stoat.
     let composited_stacks = apc_emit::composited_stacks(stoat);
+    // Resolved here for the same reason. It reads the window focus beside the
+    // numbering settings off the whole &Stoat.
+    let line_numbers = stoat.painted_line_numbers();
 
     let ws = &mut stoat.workspaces[stoat.active_workspace];
 
@@ -1222,10 +1225,7 @@ pub(crate) fn frame(
         status_prompt: status_prompt.as_ref(),
         terminal_cursor_editor,
         composited_stacks: &composited_stacks,
-        line_numbers: stoat
-            .settings
-            .editor_line_numbers
-            .unwrap_or(LineNumbers::Relative),
+        line_numbers,
         wrap_mode: stoat.settings.editor_wrap.unwrap_or(WrapMode::EditorWidth),
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         scrolloff: stoat.settings.scrolloff.unwrap_or(3),

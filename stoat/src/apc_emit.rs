@@ -1064,10 +1064,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     // What each editor actually paints with, which is what a page's hash has to
     // carry. The diff toggle only subtracts, and only from a diff view.
     let editor_syntax = |diff_view: bool| syntax_highlight && (stoat.diff_syntax || !diff_view);
-    let line_numbers = stoat
-        .settings
-        .editor_line_numbers
-        .unwrap_or(LineNumbers::Relative);
+    let line_numbers = stoat.painted_line_numbers();
     let diff_dials = DiffDials::from_stoat(stoat);
     // Relative numbering follows the same pane the live render calls focused:
     // the focused split editor outside insert mode. Resolved before the ws

@@ -78,7 +78,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 use stoat_action::{Conflict, DiffFiles, OpenFile};
-use stoat_config::{MinimapMode, Settings, TabBarMode, WrapMode};
+use stoat_config::{LineNumbers, MinimapMode, Settings, TabBarMode, WrapMode};
 use stoat_language::{self as language, LanguageRegistry};
 use stoat_scheduler::Executor;
 use stoat_text::{
@@ -4042,6 +4042,28 @@ impl Stoat {
             return 0.0;
         }
         self.inactive_dim()
+    }
+
+    /// The line numbering a frame paints the gutter with.
+    ///
+    /// The configured mode, except that relative numbers paint as absolute
+    /// while the terminal window is in the background with
+    /// `ui.relative_numbers_follow_focus` on. Relative numbers count from a
+    /// cursor that no keystroke reaches while the window has no focus, so only
+    /// they change. `off` and `absolute` never do.
+    pub(crate) fn painted_line_numbers(&self) -> LineNumbers {
+        let configured = self
+            .settings
+            .editor_line_numbers
+            .unwrap_or(LineNumbers::Relative);
+        let follows_focus = self
+            .settings
+            .ui_relative_numbers_follow_focus
+            .unwrap_or(true);
+        if configured == LineNumbers::Relative && !self.window_focused && follows_focus {
+            return LineNumbers::Absolute;
+        }
+        configured
     }
 
     /// Convenience wrapper that dispatches the [`OpenFile`] action with `path`.

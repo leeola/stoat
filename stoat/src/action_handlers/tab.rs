@@ -227,7 +227,7 @@ mod tests {
     };
     use crossterm::event::Event;
     use stoat_action::registry;
-    use stoat_config::TabBarMode;
+    use stoat_config::{LineNumbers, TabBarMode};
 
     fn dispatch(h: &mut TestHarness, action: &dyn stoat_action::Action) {
         crate::action_handlers::dispatch(&mut h.stoat, action);
@@ -528,6 +528,43 @@ mod tests {
         h.stoat.settings.ui_inactive_dim_follows_focus = Some(false);
         h.stoat.update(Event::FocusLost);
         assert_eq!(h.stoat.painted_inactive_dim(), 0.25);
+    }
+
+    /// Relative numbers count from a cursor no keystroke reaches while the
+    /// window is in the background, so they paint as absolute until focus
+    /// returns.
+    #[test]
+    fn relative_numbers_paint_absolute_while_the_window_is_in_the_background() {
+        let mut h = Stoat::test();
+        h.stoat.update(Event::FocusLost);
+        let in_background = h.stoat.painted_line_numbers();
+        h.stoat.update(Event::FocusGained);
+        assert_eq!(
+            (in_background, h.stoat.painted_line_numbers()),
+            (LineNumbers::Absolute, LineNumbers::Relative),
+            "absolute in the background, relative again with the focus",
+        );
+    }
+
+    #[test]
+    fn relative_numbers_stay_when_the_setting_is_off() {
+        let mut h = Stoat::test();
+        h.stoat.settings.ui_relative_numbers_follow_focus = Some(false);
+        h.stoat.update(Event::FocusLost);
+        assert_eq!(h.stoat.painted_line_numbers(), LineNumbers::Relative);
+    }
+
+    #[test]
+    fn absolute_numbers_ignore_the_window_focus() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+        let focused = h.stoat.painted_line_numbers();
+        h.stoat.update(Event::FocusLost);
+        assert_eq!(
+            (focused, h.stoat.painted_line_numbers()),
+            (LineNumbers::Absolute, LineNumbers::Absolute),
+            "absolute numbering paints the same with or without the focus",
+        );
     }
 
     /// The row has to carry both numbered labels and distinguish the active tab
