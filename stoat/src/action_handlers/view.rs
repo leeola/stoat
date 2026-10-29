@@ -128,6 +128,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     };
     let target_offset = rope.point_to_offset(target_buffer_pt);
 
+    let rest = prev as f32 + editor.scroll_frac;
     editor.scroll_row = new_scroll;
     editor.scroll_frac = 0.0;
     // In select mode the page motion grows the selection by holding the anchor
@@ -137,11 +138,13 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
     });
 
     // Ease scroll_offset from the visible position up to the scroll_row target
-    // the jump set, so a page motion glides instead of teleporting. The cursor
-    // moved with scroll_row by the same delta, so it stays pinned to its screen
-    // row and the post-key view-follow is a no-op.
-    if editor.scroll_offset.floor() as u32 != prev {
-        editor.scroll_offset = prev as f32;
+    // the jump set, so a page motion glides instead of teleporting. At rest the
+    // visible position is the declared rest before the move, the old row plus
+    // its wheel fraction. A follow or a jump leaves the offset behind it. The
+    // cursor moved with scroll_row by the same delta, so it stays pinned to its
+    // screen row and the post-key view-follow is a no-op.
+    if editor.scroll_offset != rest {
+        editor.scroll_offset = rest;
     }
     editor.scroll_glide = ScrollGlide::Page;
     UpdateEffect::Redraw
@@ -266,9 +269,11 @@ pub(crate) fn wheel_scroll(editor: &mut EditorState, down: bool) {
 /// `scroll_row` and the remainder to `scroll_frac`, so the rest can sit between
 /// two rows rather than snapping to one.
 ///
-/// Reseeds `scroll_offset` from `scroll_row` only when no glide is in flight and
-/// another path moved the integer row out from under the fraction. Mid-glide the
-/// offset legitimately lags the target, so it must not be reseeded.
+/// Reseeds `scroll_offset` from the declared rest, `scroll_row` plus
+/// `scroll_frac`, only when no glide is in flight and the offset drifted from
+/// that rest. A follow or a jump moves the row and resets the fraction, but it
+/// leaves the offset behind. Mid-glide the offset legitimately lags the target,
+/// so it must not be reseeded.
 pub(crate) fn wheel_scroll_by(editor: &mut EditorState, lines: f32) {
     const STEP: f32 = 3.0;
 
@@ -279,10 +284,8 @@ pub(crate) fn wheel_scroll_by(editor: &mut EditorState, lines: f32) {
         return;
     }
 
-    if editor.scroll_glide == ScrollGlide::None
-        && editor.scroll_offset.floor() as u32 != editor.scroll_row
-    {
-        editor.scroll_offset = editor.scroll_row as f32;
+    if editor.scroll_glide == ScrollGlide::None && editor.scroll_offset != from {
+        editor.scroll_offset = from;
     }
     editor.scroll_row = target.floor() as u32;
     editor.scroll_frac = target.fract();
@@ -1062,6 +1065,30 @@ mod tests {
             editor.scroll_glide,
             ScrollGlide::Page,
             "a far jump arms the glide that ships the cursor anchor"
+        );
+    }
+
+    #[test]
+    fn page_motion_glides_from_the_declared_rest() {
+        let mut h = harness_with_long_buffer();
+        let mut glide_start = |row: u32, frac: f32, offset: f32| {
+            {
+                let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+                editor.viewport_rows = Some(10);
+                editor.scroll_row = row;
+                editor.scroll_frac = frac;
+                editor.scroll_offset = offset;
+                editor.scroll_glide = ScrollGlide::None;
+            }
+            dispatch(&mut h.stoat, &PageDown);
+            focused_editor_mut(&mut h.stoat)
+                .expect("focused editor")
+                .scroll_offset
+        };
+        assert_eq!(
+            (glide_start(0, 0.0, 0.4), glide_start(10, 0.4, 10.4)),
+            (0.0, 10.4),
+            "a stale sub-row reseeds to the row, and a wheel rest glides from its fraction"
         );
     }
 
@@ -2244,6 +2271,17 @@ mod tests {
         assert_eq!(
             editor.scroll_offset, 0.0,
             "mid-glide the lagging offset is left alone"
+        );
+
+        editor.scroll_row = 10;
+        editor.scroll_frac = 0.0;
+        editor.scroll_offset = 10.4;
+        editor.scroll_glide = ScrollGlide::None;
+        wheel_scroll(editor, true);
+        assert_eq!(
+            (editor.scroll_offset, editor.scroll_glide),
+            (10.0, ScrollGlide::Wheel),
+            "a stale sub-row offset reseeds from the row before gliding"
         );
     }
 
