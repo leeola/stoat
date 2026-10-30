@@ -125,13 +125,13 @@ impl Gutter<'_> {
             .div_ceil(16)
     }
 
-    /// The change-kind bar's left edge, a gap right of the line number.
-    fn git_x(&self) -> u16 {
+    /// The change-kind bar's left edge, in sixteenths from the gutter's left edge.
+    pub fn git_x(&self) -> u16 {
         self.number_right_edge() + NUMBER_GAP
     }
 
-    /// The staged-state bar's left edge, a pad right of the change-kind bar.
-    fn staged_x(&self) -> u16 {
+    /// The staged-state bar's left edge, in sixteenths from the gutter's left edge.
+    pub fn staged_x(&self) -> u16 {
         self.git_x() + self.bar_width + self.pad
     }
 
@@ -140,11 +140,13 @@ impl Gutter<'_> {
         text_run::advance_sixteenths(digits, self.number_scale)
     }
 
-    fn number_right_edge(&self) -> u16 {
+    /// Where a right-aligned line number ends, in sixteenths from the gutter's left edge.
+    pub fn number_right_edge(&self) -> u16 {
         self.separator_x() - 2 * NUMBER_GAP - 2 * self.bar_width - self.pad
     }
 
-    fn separator_x(&self) -> u16 {
+    /// The separator hairline's left edge, in sixteenths from the gutter's left edge.
+    pub fn separator_x(&self) -> u16 {
         self.cell_width() * 16 - 1 - TEXT_GAP
     }
 
@@ -336,6 +338,23 @@ mod tests {
         // (3*bar + pad + number + 2*NUMBER_GAP + separator + TEXT_GAP);
         // cell_width = ceil(50/16) = 4.
         assert_eq!(config(&[]).cell_width(), 4);
+    }
+
+    #[test]
+    fn the_offsets_derive_backward_from_the_cell_width() {
+        // separator_x = 4*16 - 1 - TEXT_GAP = 59;
+        // number_right_edge = 59 - 2*NUMBER_GAP - 2*bar - pad = 59 - 8 - 10 - 2 = 39;
+        // git_x = 39 + NUMBER_GAP = 43; staged_x = 43 + bar + pad = 50.
+        let gutter = config(&[]);
+        assert_eq!(
+            (
+                gutter.number_right_edge(),
+                gutter.git_x(),
+                gutter.staged_x(),
+                gutter.separator_x(),
+            ),
+            (39, 43, 50, 59),
+        );
     }
 
     #[test]
