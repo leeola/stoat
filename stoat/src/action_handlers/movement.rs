@@ -5733,14 +5733,11 @@ fn goto_line_row(editor: &mut EditorState, count: u32, extend: bool) -> UpdateEf
     UpdateEffect::Redraw
 }
 
-/// Land on the line a count names, or on the last line without one.
-///
-/// `extend` decides whether the selections grow to the target or collapse onto
-/// it. Select mode binds `G` to the extending flavor, which is stoat's own
-/// scheme rather than a key Helix rebinds there, and a count reaching the
-/// target is what makes the two flavors agree on what `G` means.
 /// The handler behind `GotoLineNumber` and `ExtendGotoLineNumber`, which move
 /// or extend to the start of the line the pending count names.
+///
+/// `extend` decides whether the selections grow to the target or collapse
+/// onto it.
 ///
 /// A bare press does nothing. The last line has its own actions,
 /// `GotoLastLine` and `ExtendGotoLastLine`, and a jump the reader did not ask

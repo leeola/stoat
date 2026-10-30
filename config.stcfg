@@ -966,7 +966,8 @@ on key {
         Home -> ExtendToLineStart();
         0 -> ExtendToLineStart();
         End -> ExtendToLineEnd();
-        G -> ExtendGotoLineNumber();
+        # Helix's select mode has no G of its own, so G moves and n g g extends.
+        G -> GotoLineNumber();
         g -> SetMode(select_goto);
         m -> SetMode(select_match);
         z -> SetMode(select_z);

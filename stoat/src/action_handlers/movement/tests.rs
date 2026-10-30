@@ -9006,6 +9006,28 @@ fn goto_line_number_with_many_cursors_leaves_one() {
     assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
 }
 
+/// `<n>G` from select mode collapses onto the line and stays in select mode,
+/// as Helix's select mode runs the normal `goto_line`. Only `<n>gg` extends.
+#[test]
+fn count_prefix_goto_line_number_from_select_mode_collapses_onto_the_line() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "abc\ndef\nghi\njkl\n");
+    h.open_file(&path);
+    h.type_keys("v l l");
+    assert_eq!(h.selection_spans(), vec![(0, 3, false)], "test setup: abc");
+
+    h.type_keys("3 G");
+    let mode = h.stoat.focused_mode().to_string();
+    assert_eq!(
+        (
+            mode.as_str(),
+            h.selection_spans(),
+            h.cursor_display_positions()
+        ),
+        ("select", vec![(8, 9, false)], vec![(2, 0)]),
+    );
+}
+
 /// A count turns the top-of-file key into the numbered-line jump `G` makes.
 #[test]
 fn count_prefix_goto_file_start_jumps_to_line() {
