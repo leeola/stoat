@@ -50,9 +50,7 @@ struct Globals {
     cell_size: [f32; 2],
     panel_count: u32,
     occlude_all: u32,
-    /// The [`crate::render::RowAnchor`] the occluder rows are placed by.
-    bottom_row_y: f32,
-    last_row: u32,
+    _pad: [u32; 2],
 }
 
 /// A strip's pixel geometry, derived fresh from its declaration and the live cell
@@ -147,10 +145,7 @@ impl MinimapPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("minimap"),
             source: ShaderSource::Wgsl(
-                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
-                    "../shaders/minimap.wgsl"
-                )))
-                .into(),
+                crate::render::with_occlusion(include_str!("../shaders/minimap.wgsl")).into(),
             ),
         });
 
@@ -308,14 +303,12 @@ impl MinimapPass {
 
         self.upload_occluders(device, queue, occluders);
 
-        let anchor = layout.row_anchor();
         let globals = Globals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
             occlude_all: 0,
-            bottom_row_y: anchor.bottom_row_y,
-            last_row: anchor.last_row,
+            _pad: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -795,8 +788,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_rows(&crate::render::with_occlusion(
-            include_str!("../shaders/minimap.wgsl"),
+        let module = wgsl::parse_str(&crate::render::with_occlusion(include_str!(
+            "../shaders/minimap.wgsl"
         )))
         .expect("parse minimap");
         Validator::new(ValidationFlags::all(), Capabilities::all())

@@ -646,6 +646,8 @@ impl Renderer {
                 scissor: clamp_scissor(ride.scissor, self.width, self.height).unwrap_or([0; 4]),
                 ..*ride
             }));
+        let layout = self.grid_layout();
+        let anchor = layout.row_anchor();
         crate::render::build_occluders_into(
             grid.panels(),
             grid.sketches(),
@@ -653,10 +655,9 @@ impl Renderer {
             self.metrics.width,
             &mut self.occluders,
         );
+        crate::render::place_occluder_rows(&mut self.occluders, anchor, self.metrics.height);
 
         let resolution = [self.width as f32, self.height as f32];
-        let layout = self.grid_layout();
-        let anchor = layout.row_anchor();
         self.background.prepare(
             device,
             queue,
@@ -1091,6 +1092,10 @@ impl Renderer {
         // its own occludability names, so a second pool leaves the first one's
         // bytes alone and the upload dedup recognizes them.
         let above = crate::render::pool_occluders_into(panels, riding, &mut self.pool_occluders);
+        // The boxes sit on the live grid, so the live layout places their rows,
+        // though the pool under them keeps the uniform pitch.
+        let anchor = self.grid_layout().row_anchor();
+        crate::render::place_occluder_rows(&mut self.pool_occluders, anchor, self.metrics.height);
         let occluders = PoolOccluders::new(&self.pool_occluders, above, occludable);
 
         self.background.prepare_composite(
@@ -2776,6 +2781,8 @@ mod tests {
                     grid.get_mut(row, col).bg = color;
                 }
             }
+            // A glyph that fills its cell, on the third row's second column.
+            grid.get_mut(2, 1).ch = '█';
             renderer.render_pools_into(
                 &device,
                 &queue,
@@ -2786,9 +2793,11 @@ mod tests {
                 &[],
             );
             let shot = read_back(&device, &queue, &target, TARGET_WIDTH, height);
-            let at = move |y: u32| pixel(&shot, TARGET_WIDTH, TARGET_WIDTH / 2, y);
+            let at = move |x: u32, y: u32| pixel(&shot, TARGET_WIDTH, x, y);
             (layout, at)
         };
+        let [cell_w, _] = CELL;
+        let (mid, block) = (TARGET_WIDTH / 2, cell_w + cell_w / 2);
 
         let height = 3 * cell_h + cell_h / 2;
         let (partial, at) = draw(height);
@@ -2798,23 +2807,26 @@ mod tests {
                 partial.rows,
                 bottom,
                 [
-                    at(2 * cell_h + 1),
-                    at(bottom - 1),
-                    at(bottom + 1),
-                    at(height - 1)
+                    at(mid, 2 * cell_h + 1),
+                    at(mid, bottom - 1),
+                    at(mid, bottom + 1),
+                    at(mid, height - 1)
                 ],
+                [at(block, bottom - 1), at(block, bottom + 1)],
             ),
             (
                 4,
                 height - cell_h,
                 [[255, 0, 0], [255, 0, 0], [0, 0, 255], [0, 0, 255]],
+                [[255, 255, 255], [0, 0, 255]],
             ),
-            "the third row keeps its top and shows down to the fourth, which ends at the edge",
+            "the third row keeps its top and shows down to the fourth, which ends at the \
+             edge, and the third row's glyph stops where the fourth starts",
         );
 
         let (whole, at) = draw(3 * cell_h);
         assert_eq!(
-            (whole.rows, at(3 * cell_h - 1)),
+            (whole.rows, at(mid, 3 * cell_h - 1)),
             (3, [255, 0, 0]),
             "three rows' height holds three rows, the last of them down to the edge",
         );

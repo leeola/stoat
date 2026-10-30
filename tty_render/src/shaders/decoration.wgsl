@@ -41,10 +41,6 @@ struct VsOut {
     @location(4) @interpolate(flat) left_color: vec3<f32>,
     @location(5) @interpolate(flat) edges: u32,
     @location(6) @interpolate(flat) styles: u32,
-    // The pixel y at and below which the border paints nothing. The quad keeps
-    // a whole cell's height, which the edge bands are measured against, so the
-    // clip is what ends a cell above the last row where that row starts.
-    @location(7) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -68,9 +64,14 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
+    // A cell above the last row ends where that row starts. The local coordinate
+    // scales with the cut, so the edge bands stay measured against a whole cell.
+    let top = row_y(cell_pos.y) + globals.scroll_y;
+    let clip_y = row_clip_y(cell_pos.y + 1.0) + globals.scroll_y;
+    let cut = clamp_bottom(top, globals.cell_size.y, clip_y);
     let pixel = vec2<f32>(
         (cell_pos.x + corner.x) * globals.cell_size.x,
-        row_y(cell_pos.y) + corner.y * globals.cell_size.y + globals.scroll_y
+        select(top, cut.x, corner.y > 0.5)
     );
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -79,14 +80,13 @@ fn vs_main(
 
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.local = corner;
+    out.local = vec2<f32>(corner.x, corner.y * cut.y);
     out.top_color = top_color;
     out.right_color = right_color;
     out.bottom_color = bottom_color;
     out.left_color = left_color;
     out.edges = edges;
     out.styles = styles;
-    out.clip_y = row_clip_y(cell_pos.y + 1.0) + globals.scroll_y;
     return out;
 }
 
@@ -139,10 +139,6 @@ fn arc_coverage(pos: vec2<f32>, center: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if in.clip.y >= in.clip_y {
-        discard;
-    }
-
     let cell = globals.cell_size;
     let pos = in.local * cell;
     let r = min(cell.x, cell.y) * 0.5;

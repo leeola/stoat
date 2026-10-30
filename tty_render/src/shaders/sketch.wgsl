@@ -27,12 +27,11 @@ struct Globals {
     // the live cell rectangle even though nothing else in this pass does.
     cell_size: vec2<f32>,
     panel_count: u32,
-    // The pixel y the last row's top paints at, and that row, which rows.wgsl
-    // places the occluder rows by. With the scalar after them they fill the
-    // slot a vec3 pad would push to 48 bytes where the Rust side is 32.
-    bottom_row_y: f32,
-    last_row: u32,
+    // Three scalars rather than a vec3, whose 16-byte alignment would push the
+    // struct to 48 bytes where the Rust side is 32.
     pad0: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 @group(0) @binding(0)
@@ -264,9 +263,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.cell_size,
                 o.corner_radius,
-                o.inset_x,
-                globals.bottom_row_y,
-                globals.last_row
+                o.inset_x
             );
             if box_sdf < -0.5 {
                 discard;

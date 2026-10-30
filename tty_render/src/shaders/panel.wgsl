@@ -14,10 +14,8 @@ struct Globals {
     // logical pixels, so a 2x display draws them twice as wide and the frame
     // keeps its weight against the box it frames.
     scale_factor: f32,
-    // The pixel y the last row's top paints at, and that row, which rows.wgsl
-    // places the box edges and the self-occluding boxes by.
-    bottom_row_y: f32,
-    last_row: u32,
+    pad0: u32,
+    pad1: u32,
 }
 
 @group(0) @binding(0)
@@ -128,28 +126,11 @@ fn vs_stroke(
 // The corner radius the box draws with, held to its shorter half side, as
 // box_radius reads it back in the fragment stages.
 fn panel_radius(panel: PanelIn) -> f32 {
-    let size_px = panel_size_px(panel);
-    let half = vec2<f32>(size_px.x - 2.0 * panel.inset_x, size_px.y) * 0.5;
+    let half = vec2<f32>(
+        panel.size.x * globals.cell_size.x - 2.0 * panel.inset_x,
+        panel.size.y * globals.cell_size.y
+    ) * 0.5;
     return min(panel.corner_radius, min(half.x, half.y));
-}
-
-// The panel's cell rect in pixels. Both edges go through row_y, so a box that
-// ends at the top of the last row ends where that row paints, and a box that
-// reaches the last row ends at its bottom.
-fn panel_box(panel: PanelIn) -> PixelBox {
-    return place_box(
-        panel.cell_pos,
-        panel.size,
-        globals.cell_size,
-        globals.bottom_row_y,
-        globals.last_row
-    );
-}
-
-// The width and height of panel_box.
-fn panel_size_px(panel: PanelIn) -> vec2<f32> {
-    let placed = panel_box(panel);
-    return placed.hi - placed.lo;
 }
 
 // Vertex `vertex_index` of the five regions that tile a panel's
@@ -184,8 +165,8 @@ fn panel_vertex(
     let corner = corners[vertex_index % 6u];
     let region = vertex_index / 6u;
 
-    let box_min_px = panel_box(panel).lo;
-    let box_size_px = panel_size_px(panel);
+    let box_min_px = panel.cell_pos * globals.cell_size;
+    let box_size_px = panel.size * globals.cell_size;
 
     // Expand the quad so the offset, blurred shadow is fully contained on every
     // side. The down-right edge must reach box + offset + margin, so pad by the
@@ -325,9 +306,7 @@ fn occluded(frag: vec2<f32>, instance: u32) -> bool {
             size_j,
             globals.cell_size,
             instances[base + 13u],
-            instances[base + 16u],
-            globals.bottom_row_y,
-            globals.last_row
+            instances[base + 16u]
         );
         if sdf < -0.5 {
             return true;

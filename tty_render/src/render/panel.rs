@@ -75,7 +75,7 @@ struct PanelInstance {
 
 /// The uniform shared by every instance. Carries the surface resolution, the
 /// cell size the vertex shader maps cell coordinates through, and the panel
-/// count the fragment shader loops over for self-occlusion. Sized to 32 bytes
+/// count the fragment shader loops over for self-occlusion. Padded to 32 bytes
 /// so the layout matches the WGSL uniform.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -85,9 +85,7 @@ struct Globals {
     count: u32,
     /// Physical pixels per logical pixel, which the stroke weights scale by.
     scale_factor: f32,
-    /// The [`RowAnchor`] the box edges are placed by.
-    bottom_row_y: f32,
-    last_row: u32,
+    _pad: [u32; 2],
 }
 
 /// The instanced panel pipeline and its per-frame buffers.
@@ -126,9 +124,9 @@ impl PanelPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("panel"),
             source: ShaderSource::Wgsl(
-                crate::render::with_shadow(&crate::render::with_rows(
-                    &crate::render::with_occlusion(include_str!("../shaders/panel.wgsl")),
-                ))
+                crate::render::with_shadow(&crate::render::with_occlusion(include_str!(
+                    "../shaders/panel.wgsl"
+                )))
                 .into(),
             ),
         });
@@ -250,8 +248,9 @@ impl PanelPass {
     /// Upload the frame's uniform and one instance per grid panel.
     ///
     /// `resolution` is the surface size in physical pixels. `anchor` places the
-    /// box edges. Reallocates the instance buffer only when the panel count
-    /// outgrows the current capacity.
+    /// boxes' rows, which the shader scales by the uniform pitch. Reallocates
+    /// the instance buffer only when the panel count outgrows the current
+    /// capacity.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -270,6 +269,12 @@ impl PanelPass {
         }
 
         build_panel_instances_into(grid.panels(), self.metrics.scale_factor, &mut self.built);
+        for instance in &mut self.built {
+            let (top, height) =
+                anchor.place_span(instance.cell[1], instance.size[1], self.metrics.height);
+            instance.cell[1] = top;
+            instance.size[1] = height;
+        }
 
         // A ridden panel keeps its slot in the buffer, because the fragment
         // shader self-occludes against every later instance, so a reorder changes
@@ -295,8 +300,7 @@ impl PanelPass {
             cell_size: [self.metrics.width, self.metrics.height],
             count: self.count,
             scale_factor: self.metrics.scale_factor,
-            bottom_row_y: anchor.bottom_row_y,
-            last_row: anchor.last_row,
+            _pad: [0; 2],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 
@@ -500,7 +504,7 @@ mod tests {
         build_panel_instances, build_panel_instances_into, style_code, PanelInstance, PanelPass,
     };
     use crate::{
-        render::{CellMetrics, RowAnchor},
+        render::{CellMetrics, GridLayout, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
     use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
@@ -531,8 +535,8 @@ mod tests {
 
     #[test]
     fn shader_is_valid_wgsl() {
-        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_rows(
-            &crate::render::with_occlusion(include_str!("../shaders/panel.wgsl")),
+        let module = wgsl::parse_str(&crate::render::with_shadow(&crate::render::with_occlusion(
+            include_str!("../shaders/panel.wgsl"),
         )))
         .expect("parse panel");
         Validator::new(ValidationFlags::all(), Capabilities::all())
@@ -1072,5 +1076,49 @@ mod tests {
         assert_eq!(instances[0].shadow_offset, [0.0, 0.0], "no displacement");
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN_TUCKED);
         assert_eq!(instances[0].shadow_mode, 1.0, "clipped below the box");
+    }
+
+    /// A panel that reaches the last row arrives with that row's place in its
+    /// cells, which the shader scales by the uniform pitch, and a panel above
+    /// it keeps its own.
+    #[test]
+    fn a_panel_reaching_the_last_row_is_placed_on_it() {
+        let (device, queue) = require_headless_device();
+        let metrics = CellMetrics::from_font_size(17, 1.0);
+        let mut pass = PanelPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        let panel = |top, height| Panel {
+            top,
+            left: 1,
+            width: 4,
+            height,
+            style: BorderStyle::Light,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            anchor: None,
+            seq: 0,
+        };
+        let mut grid = Grid::new(10, 40);
+        grid.set_panels(vec![panel(7, 3), panel(2, 3)]);
+        // Ten 20-pixel rows whose last row rose 6 pixels.
+        let anchor = GridLayout {
+            rows: 10,
+            cols: 40,
+            bottom_row_y: 174.0,
+        }
+        .row_anchor();
+
+        pass.prepare(&device, &queue, &grid, &[], [800.0, 194.0], anchor);
+        assert_eq!(
+            pass.last_instances
+                .iter()
+                .map(|instance| (instance.cell[1], instance.size[1]))
+                .collect::<Vec<_>>(),
+            [(7.0, 2.7), (2.0, 3.0)],
+            "the box over rows 7 to 9 ends at the bottom edge, 54 pixels down",
+        );
     }
 }

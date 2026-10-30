@@ -171,10 +171,7 @@ struct Globals {
     /// the live cell rectangle even though nothing else in this pass does.
     cell_size: [f32; 2],
     panel_count: u32,
-    /// The [`RowAnchor`] the occluder rows are placed by.
-    bottom_row_y: f32,
-    last_row: u32,
-    _pad: u32,
+    _pad: [u32; 3],
 }
 
 /// One generated stroke's span in the shared point buffer, with the arc lengths
@@ -298,10 +295,7 @@ impl SketchPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("sketch"),
             source: ShaderSource::Wgsl(
-                crate::render::with_rows(&crate::render::with_occlusion(include_str!(
-                    "../../shaders/sketch.wgsl"
-                )))
-                .into(),
+                crate::render::with_occlusion(include_str!("../../shaders/sketch.wgsl")).into(),
             ),
         });
 
@@ -435,7 +429,7 @@ impl SketchPass {
     ///
     /// `anchored` names the pools compositing this frame, so a mark anchored to
     /// one is shifted and held back for [`Self::draw_riding`]. `anchor` places
-    /// the marks' rows and the occluder rows.
+    /// the marks' rows.
     pub(crate) fn prepare(
         &mut self,
         device: &Device,
@@ -461,9 +455,7 @@ impl SketchPass {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
             panel_count: occluders.len() as u32,
-            bottom_row_y: anchor.bottom_row_y,
-            last_row: anchor.last_row,
-            _pad: 0,
+            _pad: [0; 3],
         };
         crate::render::upload_globals(queue, &self.globals, 0, globals, &mut self.last_globals);
 

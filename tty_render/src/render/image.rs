@@ -66,9 +66,9 @@ struct ImageInstance {
     uv_max: [f32; 2],
     /// The pixel y at and below which the quad paints nothing.
     ///
-    /// The quad keeps the height of the cell box it names, since the image
-    /// scales into that box, so the clip is what ends a placement above the
-    /// last row where that row starts.
+    /// The image scales into the cell box the placement names, so the vertex
+    /// stage cuts the quad and its texture span at this y together. A placement
+    /// above the last row then ends where that row starts and keeps its scale.
     clip_y: f32,
 }
 

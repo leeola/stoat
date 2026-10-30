@@ -11,13 +11,6 @@
 // The clip y that cuts nothing.
 const NO_CLIP_Y: f32 = 1e9;
 
-// The pixel corners of a cell box, lo at the top left and hi at the bottom
-// right.
-struct PixelBox {
-    lo: vec2<f32>,
-    hi: vec2<f32>,
-}
-
 // The pixel y of row coordinate `row` in a grid of rows `cell_h` pixels tall
 // whose last row, `last_row`, paints at `bottom_row_y`. A row past last_row
 // hangs from bottom_row_y too.
@@ -27,22 +20,6 @@ fn place_row(row: f32, cell_h: f32, bottom_row_y: f32, last_row: u32) -> f32 {
         return row * cell_h;
     }
     return bottom_row_y + (row - last) * cell_h;
-}
-
-// The pixel corners of the box `size` cells across at `cell`, with both of its
-// edges placed as place_row places a row.
-fn place_box(
-    cell: vec2<f32>,
-    size: vec2<f32>,
-    cell_size: vec2<f32>,
-    bottom_row_y: f32,
-    last_row: u32,
-) -> PixelBox {
-    let far = cell + size;
-    return PixelBox(
-        vec2<f32>(cell.x * cell_size.x, place_row(cell.y, cell_size.y, bottom_row_y, last_row)),
-        vec2<f32>(far.x * cell_size.x, place_row(far.y, cell_size.y, bottom_row_y, last_row)),
-    );
 }
 
 // The pixel y of row coordinate `row` in this draw.
@@ -70,4 +47,16 @@ fn row_clip_y(end_row: f32) -> f32 {
         return globals.bottom_row_y;
     }
     return NO_CLIP_Y;
+}
+
+// The bottom edge of a quad from `top` down `height` pixels, held at `clip_y`
+// and never above the top, and the fraction of the height that edge keeps.
+//
+// A quad of one row ends at the last row this way in its vertex stage, with its
+// texture or local coordinate scaled by the fraction, so no fragment pays for
+// the cut.
+fn clamp_bottom(top: f32, height: f32, clip_y: f32) -> vec2<f32> {
+    let bottom = max(top, min(top + height, clip_y));
+    let kept = select(1.0, (bottom - top) / height, height > 0.0);
+    return vec2<f32>(bottom, kept);
 }

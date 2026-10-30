@@ -81,9 +81,6 @@ struct VsOut {
     // normals in pixels, and which of its two ends carries one.
     @location(10) @interpolate(flat) cuts_px: vec4<f32>,
     @location(11) @interpolate(flat) cut_flags: u32,
-    // The pixel y at and below which the path paints nothing, so a stroke that
-    // ends above the last row never paints under it.
-    @location(12) @interpolate(flat) clip_y: f32,
 }
 
 // A chunk that starts on a joint shared with the chunk before it.
@@ -132,7 +129,11 @@ fn vs_main(
     let reach = vec2<f32>(half_width_px + AA_MARGIN, half_width_px + AA_MARGIN);
     let min_px = cell_px(bounds.xy + shift) - reach;
     let max_px = cell_px(bounds.zw + shift) + reach;
-    let pixel = mix(min_px, max_px, corner);
+    // A path that ends above the last row ends where that row starts. The
+    // fragment stage measures the stroke from the pixel it shades, so the quad
+    // alone takes the cut.
+    let bottom = max(min_px.y, min(max_px.y, row_clip_y(bounds.w + shift.y)));
+    let pixel = mix(min_px, vec2<f32>(max_px.x, bottom), corner);
 
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
@@ -154,7 +155,6 @@ fn vs_main(
     // Already unit normals in pixels, so they carry no cell size and no shift.
     out.cuts_px = cuts_px;
     out.cut_flags = cut_flags;
-    out.clip_y = row_clip_y(bounds.w + shift.y);
     return out;
 }
 
@@ -175,10 +175,6 @@ fn capsule_sdf(q: vec2<f32>, a: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if in.clip.y >= in.clip_y {
-        discard;
-    }
-
     // Discard where a box declared later (higher seq) covers this path, so a
     // line beneath a modal cannot show through it.
     let frag = in.clip.xy;
@@ -191,9 +187,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.occluder_cell,
                 o.corner_radius,
-                o.inset_x,
-                globals.bottom_row_y,
-                globals.last_row
+                o.inset_x
             );
             if sdf < -0.5 {
                 discard;

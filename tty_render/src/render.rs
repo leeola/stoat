@@ -266,6 +266,18 @@ impl RowAnchor {
         }
         self.bottom_row_y - last * cell_h
     }
+
+    /// Returns the rows from `top` down `height` rows as `(top, height)` in
+    /// cells of `cell_h` pixels, which land at the uniform pitch where the
+    /// anchor places both edges.
+    ///
+    /// A shader that scales cells by the uniform pitch then draws the box where
+    /// the rows it covers paint, with no row placement of its own.
+    pub(crate) fn place_span(&self, top: f32, height: f32, cell_h: f32) -> (f32, f32) {
+        let start = self.row_y(top, cell_h);
+        let end = self.row_y(top + height, cell_h);
+        (start / cell_h, (end - start) / cell_h)
+    }
 }
 
 /// A panel's cell rectangle plus its declaration-order seq, uploaded to a
@@ -282,6 +294,10 @@ impl RowAnchor {
 /// The radius and inset ride along because a panel does not fill the rect it
 /// declares. Occluding by the bare rect notches a square hole out of the chrome
 /// beneath each rounded corner.
+///
+/// A box that reaches the last row holds fractional rows once
+/// [`place_occluder_rows`] has placed it, so the shader's plain scaling lands it
+/// where that row paints.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug)]
 pub(crate) struct Occluder {
@@ -845,6 +861,21 @@ pub(crate) fn build_occluders_into(
     );
 }
 
+/// Moves each of `occluders`' rows to where `anchor` places them, for rows
+/// `cell_h` pixels tall.
+///
+/// The shaders scale an occluder's cells by the uniform pitch, so a box that
+/// reaches the last row arrives with that row's place in its cells. A frame
+/// holds a handful of boxes, and placing them here keeps the row placement out
+/// of every fragment loop that tests them.
+pub(crate) fn place_occluder_rows(occluders: &mut [Occluder], anchor: RowAnchor, cell_h: f32) {
+    for occluder in occluders {
+        let (top, height) = anchor.place_span(occluder.cell[1], occluder.size[1], cell_h);
+        occluder.cell[1] = top;
+        occluder.size[1] = height;
+    }
+}
+
 /// Whether `sketch` is anchored to one of the pools in `riding`.
 ///
 /// Such a mark draws shifted, after the composites, so its rect on the live grid
@@ -1126,9 +1157,9 @@ const PARTIAL_ROW_MIN: f32 = 1.0 / 3.0;
 mod tests {
     use super::{
         build_occluders_into, exposed_rows, globals_offset, globals_upload_needed, grid_dims,
-        grid_layout, grid_size, pool_occluders_into, rotate_row_cache, row_runs, row_uploads,
-        upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder, PoolOccluders, RowAnchor,
-        GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        grid_layout, grid_size, place_occluder_rows, pool_occluders_into, rotate_row_cache,
+        row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder,
+        PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
 
     /// A bigger font means bigger cells, so the same surface holds fewer of
@@ -1222,6 +1253,33 @@ mod tests {
             [0.0, 0.0, -7.0, -7.0],
         );
         assert_eq!(RowAnchor::UNIFORM.last_row_shift(1e6, 20.0), 0.0);
+    }
+
+    /// An occluder on the last row moves onto it, one that ends at the top of it
+    /// ends where that row paints, and one above keeps its cells.
+    #[test]
+    fn occluder_rows_land_where_the_layout_places_them() {
+        // Ten 20-pixel rows whose last row rose 6 pixels.
+        let anchor = GridLayout {
+            rows: 10,
+            cols: 40,
+            bottom_row_y: 174.0,
+        }
+        .row_anchor();
+        let mut occluders = [(9.0, 1.0), (7.0, 2.0), (2.0, 3.0)].map(|(top, height)| Occluder {
+            cell: [1.0, top],
+            size: [4.0, height],
+            seq: 0,
+            corner_radius: 0.0,
+            inset_x: 0.0,
+            _pad: 0,
+        });
+
+        place_occluder_rows(&mut occluders, anchor, 20.0);
+        assert_eq!(
+            occluders.map(|occluder| (occluder.cell[1], occluder.size[1])),
+            [(8.7, 1.0), (7.0, 1.7), (2.0, 3.0)],
+        );
     }
 
     /// A surface too small for one cell still reports a grid, because a

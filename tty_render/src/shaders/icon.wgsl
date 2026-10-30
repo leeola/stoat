@@ -44,10 +44,6 @@ struct VsOut {
     @location(2) @interpolate(flat) color: vec3<f32>,
     @location(3) @interpolate(flat) kind: u32,
     @location(4) @interpolate(flat) seq: u32,
-    // The pixel y at and below which the icon paints nothing. The quad keeps its
-    // block's height, which the shapes are measured against, so the clip is what
-    // ends an icon above the last row where that row starts.
-    @location(5) @interpolate(flat) clip_y: f32,
 }
 
 @vertex
@@ -71,7 +67,14 @@ fn vs_main(
     let corner = corners[vertex_index];
 
     let extent = vec2<f32>(size, size) * globals.cell_size;
-    let pixel = cell_px(cell) + offset + corner * extent;
+    // An icon above the last row ends where that row starts. The local coordinate
+    // scales with the cut, so the shapes stay measured against the whole block.
+    let origin = cell_px(cell) + offset;
+    let cut = clamp_bottom(origin.y, extent.y, row_clip_y(cell.y + size));
+    let pixel = vec2<f32>(
+        origin.x + corner.x * extent.x,
+        select(origin.y, cut.x, corner.y > 0.5)
+    );
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -79,12 +82,11 @@ fn vs_main(
 
     var out: VsOut;
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
-    out.local = corner;
+    out.local = vec2<f32>(corner.x, corner.y * cut.y);
     out.extent = extent;
     out.color = color;
     out.kind = kind;
     out.seq = seq;
-    out.clip_y = row_clip_y(cell.y + size);
     return out;
 }
 
@@ -124,10 +126,6 @@ fn triangle_sdf(q: vec2<f32>, r: f32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    if in.clip.y >= in.clip_y {
-        discard;
-    }
-
     // Discard where a box declared later (higher seq) covers this icon, so a
     // lower box's status icon cannot show through an upper box.
     let frag = in.clip.xy;
@@ -140,9 +138,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.cell_size,
                 o.corner_radius,
-                o.inset_x,
-                globals.bottom_row_y,
-                globals.last_row
+                o.inset_x
             );
             if sdf < -0.5 {
                 discard;
