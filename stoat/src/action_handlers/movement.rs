@@ -3387,15 +3387,13 @@ pub(crate) enum SiblingDir {
     Prev,
 }
 
+/// Select the next or previous named sibling of each selection's node, one
+/// sibling per press.
+///
+/// A count before the key is not read, for the reason [`expand_selection`]
+/// gives.
 pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    select_sibling_impl(stoat, dir, count)
-}
-
-/// [`select_sibling`] with its count supplied rather than read from the pending
-/// keypress, so a replay repeats the count the motion was made with.
-pub(crate) fn select_sibling_impl(stoat: &mut Stoat, dir: SiblingDir, count: u32) -> UpdateEffect {
-    stoat.last_motion = Some(LastMotion::TsSibling { dir, count });
+    stoat.last_motion = Some(LastMotion::TsSibling { dir });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3418,7 +3416,7 @@ pub(crate) fn select_sibling_impl(stoat: &mut Stoat, dir: SiblingDir, count: u32
         .selections
         .transform_resolved(buffer_snapshot, |sel, head_offset, tail_offset| {
             let (from, to) = (head_offset.min(tail_offset), head_offset.max(tail_offset));
-            let Some(target) = sibling_range(snapshot, from, to, dir, count) else {
+            let Some(target) = sibling_range(snapshot, from, to, dir) else {
                 return sel.clone();
             };
             moved = true;
@@ -3440,29 +3438,17 @@ pub(crate) fn select_sibling_impl(stoat: &mut Stoat, dir: SiblingDir, count: u32
     UpdateEffect::Redraw
 }
 
-/// Byte range of the sibling `count` steps from the node covering `from..to`,
-/// or `None` when the walk takes no step at all.
+/// Byte range of the sibling one step from the node covering `from..to`, or
+/// `None` when no sibling lies that way.
 fn sibling_range(
     snapshot: &stoat_language::SyntaxSnapshot,
     from: usize,
     to: usize,
     dir: SiblingDir,
-    count: u32,
 ) -> Option<Range<usize>> {
     let layer = deepest_containing_layer(snapshot, from, to)?;
-    let mut current = layer.tree.root_node().descendant_for_byte_range(from, to)?;
-
-    let mut moved = false;
-    for _ in 0..count {
-        match sibling_of_self_or_ancestor(current, dir) {
-            Some(s) => {
-                current = s;
-                moved = true;
-            },
-            None => break,
-        }
-    }
-    moved.then(|| current.byte_range())
+    let node = layer.tree.root_node().descendant_for_byte_range(from, to)?;
+    sibling_of_self_or_ancestor(node, dir).map(|sibling| sibling.byte_range())
 }
 
 /// The next named sibling of `node`, or of the nearest ancestor that has one.

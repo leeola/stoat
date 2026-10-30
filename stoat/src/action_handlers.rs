@@ -116,7 +116,6 @@ pub(crate) enum LastMotion {
     },
     TsSibling {
         dir: movement::SiblingDir,
-        count: u32,
     },
     TsObject {
         kind: textobject_nav::NavKind,
@@ -184,9 +183,7 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             },
             LastMotion::Change { dir, count } => movement::goto_change_impl(stoat, dir, count),
             LastMotion::Diagnostic { dir } => lsp::goto_diagnostic(stoat, dir),
-            LastMotion::TsSibling { dir, count } => {
-                movement::select_sibling_impl(stoat, dir, count)
-            },
+            LastMotion::TsSibling { dir } => movement::select_sibling(stoat, dir),
             LastMotion::TsObject { kind, dir, count } => {
                 textobject_nav::goto_textobject_impl(stoat, kind, dir, count)
             },
