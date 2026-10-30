@@ -12,7 +12,7 @@ use crate::{
 };
 use std::sync::Arc;
 use stoat_action::{
-    AddSelectionBelow, CollapseSelection, ExtendDown, ExtendGotoLineNumber, ExtendLeft,
+    Action, AddSelectionBelow, CollapseSelection, ExtendDown, ExtendGotoLineNumber, ExtendLeft,
     ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
     ExtendToFileStart, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections, MoveDown,
     MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight,
@@ -80,17 +80,17 @@ fn shrink_containment_refuses_interleaved_ranges() {
     );
 }
 
-/// A deletion holds no rows, so it lands on its seam row, the first row after
-/// the removed lines. The step forward reads that row as occupied and passes
-/// over the deletion, and the step back from the row below reads it as behind
-/// and lands on it, which is the pair a split of the list has to answer the
-/// same way a scan of every stop did.
+/// A deletion holds no rows, so a plain walk lands it on its seam row, the
+/// first row after the removed lines. The step forward reads that row as
+/// occupied and passes over the deletion, and the step back from the row below
+/// reads it as behind and lands on it, which is the pair a split of the list
+/// has to answer the same way a scan of every stop did.
 #[test]
 fn a_change_step_lands_the_stop_the_count_reaches() {
     let stops = [2..5, 7..7, 9..12, 15..16, 20..24];
     let rope = text_rows();
-    let next = |row, count| nth_hunk_rows(&rope, &stops, row, ChangeDir::Next, count);
-    let prev = |row, count| nth_hunk_rows(&rope, &stops, row, ChangeDir::Prev, count);
+    let next = |row, count| nth_hunk_rows(&rope, &stops, row, ChangeDir::Next, count, false);
+    let prev = |row, count| nth_hunk_rows(&rope, &stops, row, ChangeDir::Prev, count, false);
 
     assert_eq!(next(0, 1), Some(2..5), "a step from above lands the first");
     assert_eq!(
@@ -133,7 +133,8 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
             std::slice::from_ref(&top_deletion),
             0,
             ChangeDir::Prev,
-            1
+            1,
+            false,
         ),
         None,
         "a deletion at the top is not behind a cursor on its own row",
@@ -146,7 +147,7 @@ fn a_change_step_lands_the_stop_the_count_reaches() {
 fn nearest_hunk_rows_picks_by_row_distance() {
     let stops = [2..3, 10..12, 20..20];
     let rope = text_rows();
-    let nearest = |row| nearest_hunk_rows(&rope, &stops, row);
+    let nearest = |row| nearest_hunk_rows(&rope, &stops, row, false);
 
     assert_eq!(
         [0, 2, 5, 6, 7, 11, 16, 20, 40].map(nearest),
@@ -163,9 +164,28 @@ fn nearest_hunk_rows_picks_by_row_distance() {
         ],
     );
     assert_eq!(
-        nearest_hunk_rows(&rope, &[], 4),
+        nearest_hunk_rows(&rope, &[], 4, false),
         None,
         "no stop, no landing"
+    );
+
+    let diff_nearest = |row| nearest_hunk_rows(&rope, &stops, row, true);
+    assert_eq!(
+        [18, 19, 20].map(diff_nearest),
+        [
+            Some((20..20, false)),
+            Some((20..20, true)),
+            Some((20..20, false)),
+        ],
+        "the diff walk holds the deletion on the row above its seam",
+    );
+
+    let stops = [2..3, 9..9, 12..12, 17..18];
+    assert_eq!(
+        [5, 14].map(|row| nearest_hunk_rows(&rope, &stops, row, true)),
+        [Some((9..9, false)), Some((17..18, false))],
+        "a deletion's distance counts from the row above its seam, so each row ties \
+         and goes below",
     );
 }
 
@@ -175,7 +195,7 @@ fn nearest_hunk_rows_picks_by_row_distance() {
 fn nearest_hunk_rows_holds_a_cursor_on_a_blank_leading_row() {
     let rope = Rope::from("x\n\n\nx\n");
     let stop = 1..4;
-    let nearest = |row| nearest_hunk_rows(&rope, std::slice::from_ref(&stop), row);
+    let nearest = |row| nearest_hunk_rows(&rope, std::slice::from_ref(&stop), row, false);
 
     assert_eq!(
         [0, 1, 2].map(nearest),
@@ -7206,6 +7226,65 @@ fn the_change_walk_reads_a_deletion_as_the_row_it_lands_on() {
         "a step forward off the seam row reaches the next hunk, and a step back \
          from the row below the seam reaches the removal",
     );
+}
+
+/// A diff view over `/repo/s.txt`, whose base is `base` and whose text on disk
+/// is `working`.
+fn diff_view_over(base: &str, working: &str) -> TestHarness {
+    let mut h = TestHarness::with_size(40, 20);
+    h.stage_review_scenario("/repo", &[("s.txt", base, working)]);
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&PathBuf::from("/repo/s.txt"));
+    h.settle_diff_jobs();
+    review::enter_diff_view(&mut h.stoat);
+    h.settle_diff_jobs();
+    h
+}
+
+/// A diff view over two deletions, with seams at live rows 3 and 6.
+fn two_deletions_in_the_diff_view() -> TestHarness {
+    diff_view_over(
+        "a\nb\nc\nGONE\nd\ne\nf\nGONE2\ng\nh\n",
+        "a\nb\nc\nd\ne\nf\ng\nh\n",
+    )
+}
+
+/// The focused cursor's row after `action` runs from `row`.
+fn row_after(h: &mut TestHarness, row: u32, action: &dyn Action) -> u32 {
+    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), row);
+    dispatch(&mut h.stoat, action);
+    focused_cursor_point(&mut h.stoat).row
+}
+
+/// The diff view splices a deletion's removed block below the live row above
+/// its seam and ticks the block there, so the walk lands on that row, and a
+/// step off it reaches the next deletion's row.
+#[test]
+fn in_the_diff_view_a_deletion_lands_on_the_row_above_its_block() {
+    let mut h = two_deletions_in_the_diff_view();
+    let first = row_after(&mut h, 0, &stoat_action::GotoNextChange);
+    dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+    assert_eq!((first, focused_cursor_point(&mut h.stoat).row), (2, 5));
+}
+
+/// The diff walk reads a deletion as the row above its seam, so a step back
+/// from the seam row reaches the deletion, as a step back from a row further
+/// down does.
+#[test]
+fn the_diff_view_walk_reads_a_deletion_as_the_row_above_its_seam() {
+    let mut h = two_deletions_in_the_diff_view();
+    assert_eq!(
+        [5, 3].map(|row| row_after(&mut h, row, &stoat_action::GotoPrevChange)),
+        [2, 2],
+    );
+}
+
+/// A deletion at the top of the file has no row above its seam, so the diff
+/// walk lands it on row 0.
+#[test]
+fn the_diff_view_lands_a_top_of_file_deletion_on_row_zero() {
+    let mut h = diff_view_over("GONE\na\nb\n", "a\nb\n");
+    assert_eq!(row_after(&mut h, 1, &stoat_action::GotoPrevChange), 0);
 }
 
 /// The backward step leaves the hunk the cursor is inside rather than

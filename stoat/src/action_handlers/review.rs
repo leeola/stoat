@@ -589,6 +589,7 @@ pub(super) fn toggle_diff_view(stoat: &mut Stoat) {
 /// status row says so, and the view crosses into the next changed file in path
 /// order and lands on its first hunk.
 pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
+    let diff_walk = super::movement::walks_diff_view(stoat);
     // `Some(true)` when the cursor moved onto a change, `Some(false)` when it
     // already sat on one, and `None` when the buffer has no change at all.
     let landing = super::focused_editor_mut(stoat).and_then(|editor| {
@@ -607,12 +608,17 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
             .diff_map()?
             .live_hunks(buffer_snapshot)
             .hunk_stops();
-        let (rows, holds) =
-            super::movement::nearest_hunk_rows(buffer_snapshot.rope(), &hunk_stops, cursor_row)?;
+        let (rows, holds) = super::movement::nearest_hunk_rows(
+            buffer_snapshot.rope(),
+            &hunk_stops,
+            cursor_row,
+            diff_walk,
+        )?;
         if holds {
             return Some(false);
         }
-        let target_offset = super::movement::stop_landing_cell(buffer_snapshot.rope(), rows).start;
+        let target_offset =
+            super::movement::stop_landing_cell(buffer_snapshot.rope(), rows, diff_walk).start;
         editor.selections.transform(buffer_snapshot, |sel| {
             crate::selection::land_block_cursor(
                 sel.id,
@@ -2206,6 +2212,39 @@ mod tests {
             (review_cursor_row(&mut h), jump_count(&h)),
             (1, jumps_before + 1),
             "the cursor lands on the change, and the jump goes on the jumplist",
+        );
+    }
+
+    /// The diff view lands a deletion on the live row above its seam. A toggle
+    /// from a row further down jumps there, and a toggle from that row holds
+    /// with no jump.
+    #[test]
+    fn a_diff_toggle_lands_a_deletion_on_the_row_above_its_seam() {
+        let toggle_from = |row: u32| {
+            let mut h = TestHarness::with_size(80, 14);
+            h.stage_review_scenario(
+                "/repo",
+                &[("a.rs", "a\nb\nGONE\nc\nd\ne\n", "a\nb\nc\nd\ne\n")],
+            );
+            h.open_file(Path::new("/repo/a.rs"));
+            {
+                let editor =
+                    crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+                crate::action_handlers::movement::set_cursor_row(editor, row);
+            }
+            let jumps_before = jump_count(&h);
+
+            h.stoat.toggle_diff_view();
+            h.settle();
+            (
+                crate::test_harness::editor::focused_cursor_point(&mut h.stoat).row,
+                jump_count(&h) - jumps_before,
+            )
+        };
+        assert_eq!(
+            [toggle_from(1), toggle_from(4)],
+            [(1, 0), (1, 1)],
+            "the row above the seam holds, and a row below jumps to it",
         );
     }
 

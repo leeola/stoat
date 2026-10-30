@@ -362,7 +362,8 @@ impl<'a> LiveHunks<'a> {
     /// walk crosses both hunks in one press.
     ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
-    /// what a caller turns into a single-cell landing at the seam row.
+    /// what a caller turns into a single-cell landing at the row the walk gives
+    /// a seam.
     pub fn hunk_stops(&self) -> Vec<Range<u32>> {
         let mut stops: Vec<Range<u32>> = Vec::with_capacity(self.hunks.len());
         for live in &self.hunks {
