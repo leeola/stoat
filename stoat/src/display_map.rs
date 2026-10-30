@@ -93,13 +93,26 @@ fn buffer_row_patch(
 /// Counted to the next line's first wrap row rather than from this line's end,
 /// so rows that trailing inlay hints wrap onto count too. `buffer_rows` is the
 /// buffer's line count.
+///
+/// A row a fold hides answers `u32::MAX`. Its paired base line hides with it,
+/// so no segment of that line overflows into a block below the placeholder.
 fn live_line_rows(wrap_snapshot: &WrapSnapshot, row: u32, buffer_rows: u32) -> u32 {
-    let first_wrap_row = |row: u32| {
-        let tabs = wrap_snapshot.tab_snapshot();
-        let folds = tabs.fold_snapshot();
+    let tabs = wrap_snapshot.tab_snapshot();
+    let folds = tabs.fold_snapshot();
+    let fold_point = |row: u32| {
         let inlay = folds.inlay_snapshot().to_inlay_point(Point::new(row, 0));
-        let tab = tabs.to_tab_point(folds.to_fold_point(inlay, Bias::Right));
-        wrap_snapshot.to_wrap_point(tab).row()
+        folds.to_fold_point(inlay, Bias::Right)
+    };
+    // A fold collapses the rows it hides into the fold row of its first row,
+    // which keeps a row of its own with the placeholder.
+    if row > 0 && fold_point(row).row() == fold_point(row - 1).row() {
+        return u32::MAX;
+    }
+
+    let first_wrap_row = |row: u32| {
+        wrap_snapshot
+            .to_wrap_point(tabs.to_tab_point(fold_point(row)))
+            .row()
     };
     let end = match row + 1 < buffer_rows {
         true => first_wrap_row(row + 1),

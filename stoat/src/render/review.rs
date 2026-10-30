@@ -10,8 +10,8 @@ use crate::{
     diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
-        BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot, RowHighlightCursor,
-        WrapPoint,
+        BlockPlacement, BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot,
+        RowHighlightCursor, WrapPoint,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -277,15 +277,22 @@ pub(crate) const DIFF_TWO_COLUMN_MIN: u16 = 100;
 /// [`BlockRowKind`] holds a reference to the block a row belongs to, which ties
 /// it to one snapshot and keeps it out of a cache that spans frames. Neither the
 /// diff body nor the conflict body reads that block, so only the discriminant,
-/// the block row's offset, and the buffer row survive here.
+/// the block row's offset, the row the block follows, and the buffer row survive
+/// here.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DiffRowKind {
     /// A row of a spliced block. A deleted base line is a block of its own, so
     /// `segment` is which of its wrapped rows this is, zero for the first. A
     /// paired base line's overflow block carries on past the segments its live
     /// line showed, so its rows start past zero.
+    ///
+    /// `after_row` is the buffer row a `Below` block sits below, and `None` for
+    /// any other placement, which no base-line block takes. When a fold hides
+    /// that row, the block paints after the fold's placeholder, so the walk
+    /// counts the hidden rows up to it before the block's own base lines.
     Block {
         segment: u32,
+        after_row: Option<u32>,
     },
     BufferRow {
         buffer_row: u32,
@@ -411,8 +418,12 @@ fn build_diff_row_states(
             BlockRowKind::BufferRow { buffer_row } => buffer_row,
             BlockRowKind::Block { block, line_index } => {
                 let segment = block.0.first_segment + line_index;
+                let after_row = match block.0.placement {
+                    BlockPlacement::Below(row) => Some(row),
+                    _ => None,
+                };
                 return DiffRowState {
-                    kind: DiffRowKind::Block { segment },
+                    kind: DiffRowKind::Block { segment, after_row },
                     status: DiffStatus::Unchanged,
                     staged: None,
                     paired: false,
@@ -779,7 +790,16 @@ pub(crate) fn paint_diff_rows(
 
         let row_state = &row_states[(display_row - scroll_row) as usize];
         match row_state.kind {
-            DiffRowKind::Block { segment } => {
+            DiffRowKind::Block { segment, after_row } => {
+                // A fold that hid the block's row puts the block after the
+                // placeholder, so the lines it hid up to that row count first.
+                if let Some(row) = after_row
+                    && row >= next_buffer_row
+                {
+                    base_line += hidden_base_lines(snapshot, next_buffer_row..row + 1)
+                        + seam_lines_through(&seams, &mut seam_cursor, next_buffer_row, row);
+                    next_buffer_row = row + 1;
+                }
                 // A block holds one base line, a row per wrapped segment of it.
                 // The line's first row already stepped past it, so a
                 // continuation reads the line before the counter.
@@ -825,15 +845,8 @@ pub(crate) fn paint_diff_rows(
                     // A fold hides unchanged lines or the unmarked rows of a
                     // refined hunk, so a row below a fold counts the base lines
                     // of the rows it hid.
-                    base_line += hidden_base_lines(snapshot, next_buffer_row..buffer_row);
-                    while let Some(&(row, lines)) = seams.get(seam_cursor)
-                        && row <= buffer_row
-                    {
-                        if row >= next_buffer_row {
-                            base_line += lines;
-                        }
-                        seam_cursor += 1;
-                    }
+                    base_line += hidden_base_lines(snapshot, next_buffer_row..buffer_row)
+                        + seam_lines_through(&seams, &mut seam_cursor, next_buffer_row, buffer_row);
                     next_buffer_row = buffer_row + 1;
                     draw_diff_num(
                         &mut rich,
@@ -2021,6 +2034,24 @@ fn hidden_base_lines(snapshot: &DisplaySnapshot, rows: std::ops::Range<u32>) -> 
     }
 }
 
+/// Base lines of the moved-away seams in `seams` at buffer rows `from..=through`.
+///
+/// `seams` is sorted by row, and `cursor` steps past every seam at a row up to
+/// `through`. A seam above `from` was counted already, by an earlier step of
+/// the walk of [`paint_diff_rows`] or by [`base_line_at`], so it adds nothing.
+fn seam_lines_through(seams: &[(u32, u32)], cursor: &mut usize, from: u32, through: u32) -> u32 {
+    let mut lines = 0;
+    while let Some(&(row, seam_lines)) = seams.get(*cursor)
+        && row <= through
+    {
+        if row >= from {
+            lines += seam_lines;
+        }
+        *cursor += 1;
+    }
+    lines
+}
+
 /// Byte span of its buffer line that `display_row` shows.
 ///
 /// An unchanged row's base line and live line are the same bytes, so the left
@@ -2624,7 +2655,7 @@ mod tests {
         workspace::diff::WorktreeBase,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_config::LineNumbers;
+    use stoat_config::{LineNumbers, WrapMode};
     use stoat_language::structural_diff;
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::Bias;
@@ -3074,6 +3105,113 @@ mod tests {
             ),
             "the paired rows count their base lines, and the unified block and \
              the mirror row past the fold count none for the hidden rows",
+        );
+    }
+
+    /// A fold that hides a paired row hides its base line whole, so the wrapped
+    /// segments of that line take no rows after the fold's placeholder.
+    #[test]
+    fn a_hidden_paired_row_leaves_no_base_segments_past_the_fold() {
+        let head = "keep\n";
+        let removed = format!("A\n{}\nB\n", "x".repeat(120));
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(1..4).collect(),
+                marked_rows: Vec::new(),
+                buffer_start_line: 1,
+                buffer_line_range: 1..4,
+                base_byte_range: head.len()..head.len() + removed.len() - 1,
+                anchor_range: None,
+                token_detail: None,
+            }],
+            Some(Arc::new(format!("{head}{removed}tail\n"))),
+        );
+        let mut editor = diff_editor_with_map("keep\nA2\nshort\nB2\ntail\n", dm);
+        editor
+            .display_map
+            .fold(vec![Point::new(1, 2)..Point::new(2, 5)]);
+        let area = Rect::new(0, 0, 120, 6);
+        editor::fit_diff_view(&mut editor, area, WrapMode::EditorWidth, 80);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let x = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        assert_eq!(
+            (0..4)
+                .map(|y| line_text(&buf, y, x..x + 4).trim().to_string())
+                .collect::<Vec<_>>(),
+            ["keep", "A", "B", "tail"],
+            "the base column runs from the placeholder row to the row below the fold",
+        );
+    }
+
+    /// A block whose row a fold hid paints after the fold's placeholder, and
+    /// it shows its own base lines, because the walk counts the hidden rows up
+    /// to the block's row first.
+    #[test]
+    fn a_block_below_a_hidden_row_paints_its_own_base_lines() {
+        let head = "1\n2\n3\n4\n5\n6\n";
+        let removed = "b7\nb8\n";
+        let tail = "9\n10\n11\n12\n";
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(6..8).collect(),
+                marked_rows: Vec::new(),
+                buffer_start_line: 6,
+                buffer_line_range: 6..8,
+                base_byte_range: head.len()..head.len() + removed.len() - 1,
+                anchor_range: None,
+                token_detail: None,
+            }],
+            Some(Arc::new(format!("{head}{removed}{tail}"))),
+        );
+        let mut editor = diff_editor_with_map(&format!("{head}s7\ns8\n{tail}"), dm);
+        editor
+            .display_map
+            .fold(vec![Point::new(2, 1)..Point::new(6, 2)]);
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let row = |y: u16| {
+            [
+                cols.left_num_x..cols.left_num_x + 4,
+                cols.left_text_x..cols.left_text_x + 4,
+            ]
+            .map(|cells| line_text(&buf, y, cells).trim().to_string())
+        };
+        assert_eq!(
+            [3, 4, 5].map(row),
+            [["7", "b7"], ["8", "b8"], ["8", "s8"]].map(|cells| cells.map(String::from)),
+            "the unified block below the hidden row above the hunk, then the hunk's \
+             live row past the fold",
         );
     }
 
