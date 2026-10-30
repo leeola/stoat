@@ -477,9 +477,13 @@ mod tests {
     /// Each excerpt paints under a header row that names its file in the middle
     /// of the row, with its rows numbered in the per-file diff's gutters, and
     /// only the focused excerpt paints a cursor.
+    ///
+    /// The numbers are absolute, so each pair names its own base and buffer
+    /// line.
     #[test]
     fn a_changes_view_paints_its_excerpts_under_their_file_headers() {
         let mut h = two_files(16);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
         let buf = h.render_composited();
         let inner = {
             let ws = h.stoat.active_workspace();
@@ -581,10 +585,12 @@ mod tests {
 
     /// An excerpt whose header scrolled above the view paints from its own
     /// scroll row, so the top row shows the excerpt's row under the scroll.
+    /// The numbers are absolute, so that row's number names its line.
     #[test]
     fn an_excerpt_cut_at_the_top_paints_from_its_scroll_row() {
         let mut h = TestHarness::with_size(120, 6);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
         let base: String = (1..=8).map(|n| format!("{n}\n")).collect();
         let text: String = (1..=8).map(|n| format!("{n}!\n")).collect();
         h.stage_review_scenario("/repo", &[("a.txt", &base, &text)]);
@@ -746,6 +752,45 @@ mod tests {
         assert_eq!(
             (rows(&run, 0, 0), expected[2].as_str()),
             (expected.clone(), "b.txt"),
+        );
+    }
+
+    /// The focused excerpt numbers its live column from its cursor line, and
+    /// the other excerpt numbers its own lines. The frame before the keys
+    /// leaves a capture that the frames after them do not replay.
+    ///
+    /// Each file changes its second line, so the context rows cover the whole
+    /// file and no fold row joins the numbers.
+    #[test]
+    fn the_focused_excerpt_counts_from_its_cursor_and_the_other_excerpt_does_not() {
+        let (base, text) = ("1\n2\n3\n4\n", "1\nTWO\n3\n4\n");
+        let mut h = changes_view(120, 24, &[("a.txt", base, text), ("b.txt", base, text)]);
+        {
+            let (state, editors) = stack(&mut h);
+            diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(0, 0));
+        }
+        h.render_composited();
+        h.type_keys("j j");
+
+        let buf = h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+        let x = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW).right_num_x;
+        let (state, _) = stack(&mut h);
+        let numbers: Vec<Vec<String>> = state
+            .excerpts
+            .iter()
+            .map(|excerpt| {
+                (1..=5)
+                    .map(|row| cells(&buf, x, 4, inner.y + (excerpt.top + row) as u16))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            numbers,
+            [["2", "1", "3", "1", "2"], ["1", "2", "3", "4", "5"]]
         );
     }
 

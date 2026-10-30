@@ -171,6 +171,9 @@ impl DiffDials {
 /// style for its changed chars alone. Added and modified new lines leave it
 /// blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
+/// With `current_line` set, the right column counts from that 1-based buffer
+/// line, as a relative gutter does. The left column always numbers the base
+/// file, because the cursor never sits on a base row.
 ///
 /// Both columns soft-wrap at the narrower one's width, which the caller sets on
 /// the display map. A continuation row carries text alone, with no number, no
@@ -197,6 +200,7 @@ pub(crate) fn render_diff_view(
     scene: Option<&mut ApcScene>,
     delegates_cursor: bool,
     dials: DiffDials,
+    current_line: Option<u32>,
 ) {
     let stoatty = scene.is_some();
     let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
@@ -223,6 +227,7 @@ pub(crate) fn render_diff_view(
         scene,
         0.0,
         dials,
+        current_line,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
     );
@@ -655,6 +660,10 @@ impl DiffColumns {
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
 ///
+/// `current_line` is the 1-based buffer line that relative numbering counts
+/// the buffer column from, as [`render_diff_view`] describes. `None` paints
+/// absolute numbers.
+///
 /// `endpoint_cache` and `row_cache` are the editor's, when this paint has one
 /// behind it. A pooled page has no editor at all and passes `None` for both,
 /// resolving its endpoints and row state fresh.
@@ -669,6 +678,7 @@ pub(crate) fn paint_diff_rows(
     scene: Option<&mut ApcScene>,
     dim: f32,
     dials: DiffDials,
+    current_line: Option<u32>,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
 ) {
@@ -832,7 +842,7 @@ pub(crate) fn paint_diff_rows(
                         inner,
                         right_num_x,
                         y,
-                        buffer_row + 1,
+                        editor::gutter_display_number(buffer_row + 1, current_line),
                         dim_style,
                     );
                 }
@@ -2581,6 +2591,7 @@ mod tests {
         workspace::diff::WorktreeBase,
     };
     use std::sync::{Arc, RwLock};
+    use stoat_config::LineNumbers;
     use stoat_language::structural_diff;
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::Bias;
@@ -2944,8 +2955,48 @@ mod tests {
             None,
             false,
             DiffDials::shipped(),
+            None,
         );
 
+        let expected: Vec<(String, String)> = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+            .map(|n| (n.to_string(), n.to_string()))
+            .to_vec();
+        assert_eq!(number_pairs(&buf, area), expected);
+    }
+
+    /// With a cursor line, the right column counts each buffer line's distance
+    /// from it and the cursor line keeps its own number. The left column still
+    /// numbers the base file.
+    #[test]
+    fn the_diff_view_numbers_the_buffer_column_from_the_cursor_line() {
+        let text: String = (1..=10).map(|n| format!("{n}\n")).collect();
+        let mut editor = diff_editor(&text, &text);
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            Some(5),
+        );
+
+        let expected: Vec<(String, String)> = (1..=10)
+            .zip([4, 3, 2, 1, 5, 1, 2, 3, 4, 5])
+            .map(|(left, right)| (left.to_string(), right.to_string()))
+            .collect();
+        assert_eq!(number_pairs(&buf, area), expected);
+    }
+
+    /// The `(left, right)` line numbers on each row of a diff view painted over
+    /// `area` of `buf`.
+    fn number_pairs(buf: &Buffer, area: Rect) -> Vec<(String, String)> {
         let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
         let num = |x: u16, y: u16| {
             (x..x + 4)
@@ -2954,13 +3005,9 @@ mod tests {
                 .trim()
                 .to_string()
         };
-        let numbers: Vec<(String, String)> = (0..area.height)
+        (area.y..area.y + area.height)
             .map(|y| (num(cols.left_num_x, y), num(cols.right_num_x, y)))
-            .collect();
-        let expected: Vec<(String, String)> = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21]
-            .map(|n| (n.to_string(), n.to_string()))
-            .to_vec();
-        assert_eq!(numbers, expected);
+            .collect()
     }
 
     /// A diff-view editor over `text`, diffed against `base`, with the view and
@@ -3083,6 +3130,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         // The right buffer status column follows its five-cell number gutter, so
@@ -3143,6 +3191,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let columns = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
@@ -3251,6 +3300,7 @@ mod tests {
             Some(&mut scene),
             true,
             DiffDials::shipped(),
+            None,
         );
         let columns = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
         let bytes = scene.buffer();
@@ -3383,6 +3433,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
@@ -3424,6 +3475,7 @@ mod tests {
             Some(&mut scene),
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert!(
@@ -3493,6 +3545,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
@@ -3534,6 +3587,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         // Width 120 is wide enough for the two-column layout. Left text spans
@@ -3601,6 +3655,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let left_of = |right: &str| {
@@ -3639,6 +3694,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let left = |y| line_text(&buf, y, 8..59);
@@ -3704,6 +3760,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let left = |y| line_text(&buf, y, 8..59);
@@ -3751,6 +3808,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         // The gutter/code separator is painted at col 7, but a unified view has
@@ -3863,6 +3921,7 @@ mod tests {
                 soften_scale: 0.0,
                 ..DiffDials::shipped()
             },
+            None,
         );
         buf
     }
@@ -4056,6 +4115,9 @@ mod tests {
         // span the full width. The single-minimap strip would reserve the right
         // edge and shift the columns.
         h.stoat.minimap_override = Some(false);
+        // The row checks below read each live number as the row's own line.
+        // Relative numbering counts the numbers from the cursor instead.
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
         h.stage_review_scenario("/repo", &[("a.rs", base, buffer)]);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(std::path::Path::new("/repo/a.rs"));
@@ -4256,6 +4318,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert_eq!(
@@ -4285,6 +4348,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert_eq!(
@@ -4312,6 +4376,7 @@ mod tests {
             Some(&mut ApcScene::new()),
             true,
             DiffDials::shipped(),
+            None,
         );
         assert_eq!(
             editor.cursor_screen_cell,
@@ -4338,6 +4403,7 @@ mod tests {
             Some(&mut ApcScene::new()),
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert!(
@@ -4693,6 +4759,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert_eq!(
@@ -4726,6 +4793,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let column = |cols: std::ops::Range<u16>| {
@@ -5013,7 +5081,7 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            editor, area, fallback, &theme, &mut buf, true, None, None, true, dials,
+            editor, area, fallback, &theme, &mut buf, true, None, None, true, dials, None,
         );
         row_cells_with(&buf, "beta", modifier)
     }
@@ -5273,6 +5341,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert_eq!(
@@ -5331,6 +5400,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         // At this sub-threshold width the diff is unified, so the moved buffer
@@ -5448,6 +5518,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let row = buffer_text(&buf, 1);
@@ -5480,6 +5551,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         let row = buffer_text(&buf, 1);
@@ -5515,6 +5587,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
+            None,
         );
 
         assert_eq!(
@@ -6115,6 +6188,7 @@ mod tests {
                 tint_amount: 1.0,
                 ..DiffDials::shipped()
             },
+            None,
         );
 
         let rx = right_text_x(area);
@@ -6145,6 +6219,7 @@ mod tests {
                 tint_amount: 1.0,
                 ..DiffDials::shipped()
             },
+            None,
         );
 
         let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
@@ -6189,6 +6264,7 @@ mod tests {
                 tint_amount: 1.0,
                 ..DiffDials::shipped()
             },
+            None,
         );
 
         let row = (0..area.height)
@@ -6241,6 +6317,7 @@ mod tests {
                 soften_scale: 0.0,
                 ..DiffDials::shipped()
             },
+            None,
         );
 
         let row = (0..area.height)

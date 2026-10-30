@@ -7041,10 +7041,15 @@ fn a_collapsed_selection_repaints_the_focused_pane() {
 /// Each file opens with a comment, so a character typed at the comment's end
 /// restyles that row once the file's parse lands. `minimap` decides whether
 /// the changes strip shows the stack.
+///
+/// The view numbers its lines absolutely, so a bare cursor's step paints no
+/// cell. Relative numbers count from the cursor's line, and a step to another
+/// line moves every one of them.
 fn changes_view(count: usize, minimap: bool) -> crate::test_harness::TestHarness {
     let mut h = crate::test_harness::TestHarness::with_size(100, 12);
     h.stoat.stoatty = true;
     h.stoat.minimap_override = Some(minimap);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
     h.stoat.set_diff_warm_auto(true);
     let files: Vec<(String, String, String)> = (0..count)
         .map(|i| {

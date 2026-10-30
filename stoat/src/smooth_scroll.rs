@@ -242,6 +242,9 @@ pub(crate) fn render_page_from_snapshot(
     // gutters, so it bypasses the single-column page gutter. Inside stoatty its
     // rich sub-cell components ride as APC frames appended after the serialized
     // cells, faded to match the dimmed grid.
+    //
+    // Its numbers stay absolute and ignore `gutter.current_line`. A diff page's
+    // versions do not hold the cursor line, so no refill follows a cursor move.
     if diff_view {
         let mut scene = gutter.rich.is_some().then(ApcScene::new);
         paint_diff_rows(
@@ -254,6 +257,7 @@ pub(crate) fn render_page_from_snapshot(
             scene.as_mut(),
             dim,
             dials,
+            None,
             None,
             None,
         );
@@ -1419,6 +1423,7 @@ mod tests {
             None,
             0.0,
             DiffDials::shipped(),
+            None,
             None,
             None,
         );

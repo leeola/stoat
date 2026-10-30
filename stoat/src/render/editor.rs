@@ -170,6 +170,11 @@ pub(crate) fn render_editor_with_overlay(
         fit_diff_view(editor, inner, wrap, wrap_column);
         view::apply_held_screen_row(editor);
         view::clamp_scroll_to_display(editor, scrolloff);
+        // The buffer column counts from the cursor line on the same condition
+        // the plain gutter below counts from it.
+        let current_line = (line_numbers == LineNumbers::Relative && is_focused && !insert_mode)
+            .then(|| editor_cursor_position(editor).map(|(line, _)| line))
+            .flatten();
         render_diff_view(
             editor,
             inner,
@@ -181,6 +186,7 @@ pub(crate) fn render_editor_with_overlay(
             scene,
             delegates_cursor,
             dials,
+            current_line,
         );
         return;
     }
@@ -2683,7 +2689,7 @@ mod tests {
     use crate::{
         action_handlers::{self, dispatch},
         diff_map::{DiffHunkStatus, DiffMap, MarkKind, MarkState, StagedMark},
-        render::review::DiffDials,
+        render::review::{DiffColumns, DiffDials, DiffLayout},
         theme::scope as s,
         Stoat,
     };
@@ -4413,11 +4419,56 @@ mod tests {
         line_numbers: LineNumbers,
         rows: u16,
     ) -> Vec<String> {
+        let area = Rect::new(0, 0, 12, rows);
+        let buf = render_without_scene(stoat, area, is_focused, insert_mode, line_numbers);
+        let gutter_w = action_handlers::focused_editor_mut(stoat)
+            .expect("focused editor")
+            .gutter_width;
+        (0..rows)
+            .map(|y| {
+                (0..gutter_w)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Render the focused editor's diff view 120 columns wide and return the
+    /// trimmed number its live column paints on each visible row.
+    fn rendered_diff_numbers(
+        stoat: &mut Stoat,
+        is_focused: bool,
+        insert_mode: bool,
+        rows: u16,
+    ) -> Vec<String> {
+        let area = Rect::new(0, 0, 120, rows);
+        let buf = render_without_scene(stoat, area, is_focused, insert_mode, LineNumbers::Relative);
+        let x = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).right_num_x;
+        (0..rows)
+            .map(|y| {
+                (x..x + 4)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// Render the focused editor into `area` with no scene and no minimap.
+    fn render_without_scene(
+        stoat: &mut Stoat,
+        area: Rect,
+        is_focused: bool,
+        insert_mode: bool,
+        line_numbers: LineNumbers,
+    ) -> Buffer {
         let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let editor = action_handlers::focused_editor_mut(stoat).expect("focused editor");
-        let area = Rect::new(0, 0, 12, rows);
         let mut buf = Buffer::empty(area);
         super::render_editor_with_overlay(
             editor,
@@ -4442,16 +4493,7 @@ mod tests {
             80,
             0,
         );
-        let gutter_w = editor.gutter_width;
-        (0..rows)
-            .map(|y| {
-                (0..gutter_w)
-                    .map(|x| buf[(x, y)].symbol())
-                    .collect::<String>()
-                    .trim()
-                    .to_string()
-            })
-            .collect()
+        buf
     }
 
     /// Render the focused editor at `width` x `rows` under the given minimap
@@ -4972,6 +5014,36 @@ mod tests {
             rendered_gutter(&mut h.stoat, true, false, LineNumbers::Absolute, 5),
             absolute,
             "the Absolute setting paints absolute"
+        );
+    }
+
+    /// The diff view's live column counts from the cursor line only for the
+    /// focused pane outside insert mode, as the plain gutter does.
+    #[test]
+    fn the_diff_view_counts_from_the_cursor_only_when_focused_outside_insert() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/relnum-diff");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"one\ntwo\nthree\nfour\nfive");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .set_diff_view(true);
+        dispatch(&mut h.stoat, &MoveDown);
+        dispatch(&mut h.stoat, &MoveDown);
+
+        let absolute = ["1", "2", "3", "4", "5"];
+        assert_eq!(
+            [
+                rendered_diff_numbers(&mut h.stoat, true, false, 5),
+                rendered_diff_numbers(&mut h.stoat, true, true, 5),
+                rendered_diff_numbers(&mut h.stoat, false, false, 5),
+            ],
+            [["2", "1", "3", "1", "2"], absolute, absolute],
+            "focused in normal mode, focused in insert mode, unfocused"
         );
     }
 

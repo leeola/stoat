@@ -41,7 +41,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Pane, PaneId, View},
     render::{
-        diff_changes::stack_composited, pane::diff_sides_for, review::DiffDials,
+        diff_changes::stack_composited, editor, pane::diff_sides_for, review::DiffDials,
         undercurl::UndercurlBatch, FrameCtx, Hold,
     },
     workspace::WorkspaceId,
@@ -490,6 +490,10 @@ pub(crate) fn pane_cache_key(
 /// selections out, and a move of it inside the window replays the pane. The
 /// replay then records the cursor where the paint records it, through
 /// [`replay_cursor`](crate::render::diff_changes::replay_cursor).
+///
+/// Under relative numbering, each number of the focused excerpt counts from
+/// the cursor's line, so the key holds that line too. Then only a move along
+/// the line replays the pane.
 #[allow(clippy::too_many_arguments)]
 fn stack_cache_key(
     pane: &Pane,
@@ -521,11 +525,17 @@ fn stack_cache_key(
         return None;
     }
 
+    let counted_line =
+        match frame.line_numbers == LineNumbers::Relative && is_focused && frame.mode != "insert" {
+            true => editor::editor_cursor_position(editors.get(editor_id)?).map(|(line, _)| line),
+            false => None,
+        };
     let mut stack = DefaultHasher::new();
     (
         state.focused,
         state.viewport_rows,
         stack_composited(pane, frame),
+        counted_line,
     )
         .hash(&mut stack);
     let ends = state
