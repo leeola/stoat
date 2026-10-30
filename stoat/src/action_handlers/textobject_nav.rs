@@ -88,7 +88,10 @@ pub(crate) fn goto_textobject_impl(
     };
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
-    let has_syntax = ws.buffers.syntax_map(buffer_id).is_some();
+    if ws.buffers.syntax_map(buffer_id).is_none() {
+        stoat.set_status("Syntax-tree is not available in current buffer");
+        return UpdateEffect::Redraw;
+    }
     let cursors: Vec<(usize, usize)> = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let snapshot = editor.display_map.snapshot();
@@ -112,12 +115,10 @@ pub(crate) fn goto_textobject_impl(
     let landings = object_ranges(ws, buffer_id, cursors, kind, direction, count);
 
     // The origin goes on the jumplist before the motion lands, so the jump back
-    // returns to the reading position rather than to the object. A buffer with
-    // a syntax tree records it even when no object lies ahead, as Helix's
-    // motion pushes on every press in such a buffer.
-    if has_syntax {
-        crate::action_handlers::jump::push_jump(stoat);
-    }
+    // returns to the reading position rather than to the object. It goes on
+    // even when no object lies ahead, as Helix's motion pushes on every press
+    // in a buffer with a syntax tree.
+    crate::action_handlers::jump::push_jump(stoat);
 
     if landings.is_empty() {
         return UpdateEffect::None;
@@ -350,7 +351,7 @@ fn press_entry<T>(
 #[cfg(test)]
 mod tests {
     use crate::{
-        action_handlers::focused_editor_mut, test_fixture::open_scratch_at,
+        action_handlers::focused_editor_mut, app::UpdateEffect, test_fixture::open_scratch_at,
         test_harness::TestHarness,
     };
     use std::path::PathBuf;
@@ -450,6 +451,26 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
         assert_eq!(h.jumplist_len(), before);
+    }
+
+    /// A buffer with no syntax tree says so on the status row, as Helix's
+    /// motion does, and asks for the frame that paints the row.
+    #[test]
+    fn next_function_without_a_syntax_tree_reports_on_the_status_row() {
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "notes.txt", "fn alpha() {}\n");
+        h.settle();
+
+        assert_eq!(
+            (
+                crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction),
+                h.stoat.pending_message.as_deref(),
+            ),
+            (
+                UpdateEffect::Redraw,
+                Some("Syntax-tree is not available in current buffer"),
+            ),
+        );
     }
 
     /// In select mode the motion grows the selection out to the object rather
