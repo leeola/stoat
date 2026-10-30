@@ -812,13 +812,14 @@ pub(crate) fn show_buffer_in_pane(
     let carried_mode = old
         .and_then(|eid| ws.editors.get(eid))
         .filter(|editor| editor.pinned || app::is_pinned_mode(&editor.mode))
-        .map(|editor| (editor.mode.clone(), editor.pinned));
+        .map(|editor| (editor.mode.clone(), editor.pinned, editor.chord_origin));
 
     stash_commits_list(ws, target, &executor);
     let mut editor = ws.seeded_editor(buffer_id, buffer, executor);
-    if let Some((mode, pinned)) = carried_mode {
+    if let Some((mode, pinned, chord_origin)) = carried_mode {
         editor.mode = mode;
         editor.pinned = pinned;
+        editor.chord_origin = chord_origin;
     }
     let new_editor_id = ws.editors.insert(editor);
 

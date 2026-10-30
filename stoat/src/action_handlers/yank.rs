@@ -533,11 +533,12 @@ struct PasteEntry {
 /// selection ends as a range over the text it inserted, facing the way it faced
 /// before.
 ///
-/// From select mode each selection instead keeps the text it held, as Helix's
-/// paste does. Its bounds move through the insertions the way Helix maps a
-/// range through an edit. The lower end moves past an insertion at its own
-/// offset, and the upper end stays before one. An empty selection moves both
-/// ends the way of the lower end, so it never inverts.
+/// From select mode, or from a chord menu that select mode opened, each
+/// selection instead keeps the text it held, as Helix's paste does. Its bounds
+/// move through the insertions the way Helix maps a range through an edit. The
+/// lower end moves past an insertion at its own offset, and the upper end stays
+/// before one. An empty selection moves both ends the way of the lower end, so
+/// it never inverts.
 ///
 /// No-op when every fragment is empty or no editor takes input.
 fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> UpdateEffect {
@@ -553,7 +554,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     let linewise = fragments.iter().any(|f| f.ends_with('\n'));
 
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
-    let keep_original = stoat.in_select_mode();
+    let keep_original = stoat.in_select_mode() || stoat.in_chord_from_select();
 
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
@@ -1042,11 +1043,43 @@ mod tests {
         );
     }
 
-    /// Yank `abc` in select mode, select it again, and paste it with `key`.
-    /// Returns the text, the selection, and the mode the paste leaves.
+    /// The space menu that select mode opens remembers it, so its clipboard
+    /// pastes keep the original text selected too.
+    #[test]
+    fn space_clipboard_paste_after_from_select_mode_keeps_the_original_text_selected() {
+        assert_eq!(
+            select_mode_paste("space \" p"),
+            ("abcabcdef\n".into(), vec![(0, 3, false)], "normal".into()),
+        );
+    }
+
+    #[test]
+    fn space_clipboard_paste_before_from_select_mode_keeps_the_original_text_selected() {
+        assert_eq!(
+            select_mode_paste("space \" P"),
+            ("abcabcdef\n".into(), vec![(3, 6, false)], "normal".into()),
+        );
+    }
+
+    /// Leaving the menu ends what it remembered, so the menu opened again from
+    /// normal mode selects the pasted text.
+    #[test]
+    fn a_space_menu_reopened_in_normal_mode_selects_the_paste() {
+        assert_eq!(
+            select_mode_paste("space escape space \" p"),
+            ("abcabcdef\n".into(), vec![(3, 6, false)], "normal".into()),
+        );
+    }
+
+    /// Yank `abc` in select mode and put it on the clipboard, select it again,
+    /// and paste it with `key`. Returns the text, the selection, and the mode
+    /// the paste leaves.
     fn select_mode_paste(key: &str) -> (String, Vec<(usize, usize, bool)>, String) {
         let mut h = TestHarness::with_size(40, 10);
         let path = seed(&mut h, "abcdef\n");
+        h.fake_clipboard()
+            .set(ClipboardKind::System, "abc")
+            .unwrap();
         h.type_keys("v l l y");
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 0);
         h.type_keys("v l l");

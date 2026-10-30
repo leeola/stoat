@@ -7044,6 +7044,22 @@ impl Stoat {
         mode == "select" || mode.starts_with("select_")
     }
 
+    /// Whether the focused editor sits in a chord menu that select mode opened.
+    ///
+    /// The one space menu serves every primary mode under one mode name, so
+    /// [`Self::in_select_mode`] answers no inside it even when select mode
+    /// opened it. Only a chord counts, so a stale record under a primary mode
+    /// answers no.
+    pub(crate) fn in_chord_from_select(&self) -> bool {
+        let ws = self.active_workspace();
+        self.focused_editor_ids()
+            .and_then(|(editor_id, _)| ws.editors.get(editor_id))
+            .is_some_and(|editor| {
+                !PRIMARY_MODES.contains(&editor.mode.as_str())
+                    && editor.chord_origin == Some("select")
+            })
+    }
+
     /// Settle [`Self::frame_mode`] onto what [`Self::focused_mode`] answers now.
     ///
     /// Separate from reading it, the way [`Self::refresh_chrome`] is, so a
@@ -7067,6 +7083,7 @@ impl Stoat {
         if let Some((editor_id, _)) = self.focused_editor_ids()
             && let Some(editor) = self.active_workspace_mut().editors.get_mut(editor_id)
         {
+            editor.chord_origin = chord_origin_after(&editor.mode, &mode, editor.chord_origin);
             editor.mode = mode;
             return;
         }
@@ -9601,6 +9618,27 @@ fn is_insert_run_mode(mode: &str) -> bool {
 /// the behavior by being named for it.
 pub(crate) fn is_pinned_mode(mode: &str) -> bool {
     mode.ends_with("_pin")
+}
+
+/// The primary mode a chord opened from, once an editor in `current` switches
+/// to `next` with `origin` on record.
+///
+/// A switch into a primary mode ends the chord. A switch out of a primary mode
+/// records that mode, and a switch from one chord to another keeps the record,
+/// so the nested `space "` menu still knows which mode opened `space`.
+fn chord_origin_after(
+    current: &str,
+    next: &str,
+    origin: Option<&'static str>,
+) -> Option<&'static str> {
+    if PRIMARY_MODES.contains(&next) {
+        return None;
+    }
+    PRIMARY_MODES
+        .iter()
+        .copied()
+        .find(|mode| *mode == current)
+        .or(origin)
 }
 
 /// Visual columns a tab advances, for the column math in [`backspace_range`].

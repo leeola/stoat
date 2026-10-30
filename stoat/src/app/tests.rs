@@ -5614,6 +5614,39 @@ fn a_click_away_in_the_middle_of_a_chord_leaves_the_terminal_at_rest() {
     );
 }
 
+/// A click that moves focus ends an editor's chord by resetting its mode in
+/// place, which leaves the chord's select origin behind. A paste back in that
+/// editor runs from normal mode, so it selects the pasted text.
+#[test]
+fn a_paste_after_a_click_ended_the_chord_selects_the_pasted_text() {
+    let mut h = Stoat::test();
+    h.seed_focused_buffer("abcdef\n");
+    {
+        let ws = h.stoat.active_workspace_mut();
+        let editor_pane = ws.panes.focus();
+        let term_pane = ws.panes.split(crate::pane::Axis::Vertical);
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(term_pane).view = View::Terminal(term_id);
+        ws.panes.set_focus(editor_pane);
+        ws.panes.pane_mut(editor_pane).area = Rect::new(0, 0, 40, 24);
+        ws.panes.pane_mut(term_pane).area = Rect::new(40, 0, 40, 24);
+    }
+    h.type_keys("v l l y v space");
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 5));
+    h.stoat
+        .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5));
+    assert_eq!(
+        h.stoat.focused_mode(),
+        "normal",
+        "the click away ended the chord"
+    );
+
+    action_handlers::movement::jump_to_offset(&mut h.stoat, 0);
+    h.type_keys("p");
+    assert_eq!(h.selection_spans(), vec![(1, 4, false)]);
+}
+
 fn focused_terminal_pane(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
     let term_id = {
         let ws = h.stoat.active_workspace_mut();

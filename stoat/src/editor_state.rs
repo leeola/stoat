@@ -57,6 +57,15 @@ pub(crate) struct EditorState {
     /// segment reads as the unpinned chord does, and the bottom-right `pinned`
     /// badge is what marks the hold.
     pub(crate) pinned: bool,
+    /// The primary mode the chord in [`Self::mode`] opened from, or `None`
+    /// outside a chord.
+    ///
+    /// One chord menu, such as space, serves every primary mode under one mode
+    /// name, so the name does not tell an arm which mode opened it. An arm with
+    /// select-mode behavior, such as the space clipboard paste, reads this
+    /// instead. A direct write of a primary mode to [`Self::mode`] leaves it
+    /// stale, so a reader checks that the mode is a chord first.
+    pub(crate) chord_origin: Option<&'static str>,
     pub(crate) display_map: DisplayMap,
     pub(crate) scroll_row: u32,
     /// Sub-row part of the wheel scroll target, which the glide eases
@@ -256,6 +265,7 @@ impl EditorState {
             buffer_id,
             mode: "normal".into(),
             pinned: false,
+            chord_origin: None,
             display_map: DisplayMap::new(multi_buffer, executor, redraw),
             scroll_row: 0,
             scroll_frac: 0.0,
