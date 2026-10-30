@@ -161,6 +161,11 @@ pub(crate) fn render_page_fill(
 /// batch replaces everything [`render_page_fill`] put there for the gutter.
 /// Empty when `gutter` has no rich colors, since the fallback gutter paints its
 /// numbers into the cells.
+///
+/// A diff page's decorations are its whole gutter: the numbers, the bars, and
+/// the separators of both columns. They repaint together, because the terminal
+/// replaces a page's decorations as one set and keeps its cells.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_page_decorations(
     snapshot: &DisplaySnapshot,
     pool: u32,
@@ -168,6 +173,10 @@ pub(crate) fn render_page_decorations(
     region_width: u16,
     region_height: u16,
     gutter: &PageGutter,
+    diff_view: bool,
+    fallback_style: Style,
+    dim: f32,
+    dials: DiffDials,
     live: Option<&crate::diff_map::LiveHunks<'_>>,
 ) -> Vec<u8> {
     if gutter.rich.is_none() {
@@ -175,10 +184,35 @@ pub(crate) fn render_page_decorations(
     }
 
     let top_row = page_top_row(index, region_height);
+    let area = Rect::new(0, 0, region_width, region_height);
+    if diff_view {
+        // The terminal keeps the cells this paint writes, so they go to a
+        // buffer nothing reads.
+        let mut scene = ApcScene::new();
+        paint_diff_rows(
+            snapshot,
+            top_row,
+            area,
+            fallback_style,
+            gutter.theme(),
+            &mut page_buffer(area, gutter.theme()),
+            Some(&mut scene),
+            dim,
+            dials,
+            gutter.current_line,
+            None,
+            None,
+        );
+        let mut frame = Vec::with_capacity(scene.bytes().len() + 32);
+        encode_fill_decorations_scope(&mut frame, pool, index, |out| {
+            out.extend_from_slice(scene.bytes())
+        });
+        return frame;
+    }
+
     let end_row = top_row
         .saturating_add(region_height as u32)
         .min(snapshot.line_count());
-    let area = Rect::new(0, 0, region_width, region_height);
     // The rich gutter draws into a scene rather than cells, so nothing writes
     // this buffer.
     let mut cells = Buffer::empty(Rect::default());
@@ -242,9 +276,6 @@ pub(crate) fn render_page_from_snapshot(
     // gutters, so it bypasses the single-column page gutter. Inside stoatty its
     // rich sub-cell components ride as APC frames appended after the serialized
     // cells, faded to match the dimmed grid.
-    //
-    // Its numbers stay absolute and ignore `gutter.current_line`. A diff page's
-    // versions do not hold the cursor line, so no refill follows a cursor move.
     if diff_view {
         let mut scene = gutter.rich.is_some().then(ApcScene::new);
         paint_diff_rows(
@@ -257,7 +288,7 @@ pub(crate) fn render_page_from_snapshot(
             scene.as_mut(),
             dim,
             dials,
-            None,
+            gutter.current_line,
             None,
             None,
         );
@@ -2014,7 +2045,19 @@ mod tests {
             None,
             None,
         );
-        let decorations = render_page_decorations(&snapshot, 3, 1, 12, 4, &gutter, None);
+        let decorations = render_page_decorations(
+            &snapshot,
+            3,
+            1,
+            12,
+            4,
+            &gutter,
+            false,
+            fallback,
+            0.0,
+            DiffDials::shipped(),
+            None,
+        );
 
         let mut open = Vec::new();
         encode_fill_decorations_into(&mut open, 3, 1);

@@ -2396,7 +2396,7 @@ struct DiffRichGutter<'a> {
 /// the dim, background, and four mark-state colors used directly. `dim_amount`
 /// fades every bar toward the background on a pooled unfocused page.
 #[derive(Clone, Copy)]
-struct DiffRichColors {
+pub(crate) struct DiffRichColors {
     dim: [u8; 3],
     bg: [u8; 3],
     staged: [u8; 3],
@@ -2419,7 +2419,10 @@ impl DiffRichColors {
 ///
 /// An approval scope the theme leaves unstyled takes its staged counterpart
 /// through [`editor::mark_state_scope`], so it never disables rich mode alone.
-fn resolve_diff_rich_colors(
+///
+/// The smooth-scroll emit asks it too, because a pooled diff page lays its
+/// numbers out as runs only when these colors resolve.
+pub(crate) fn resolve_diff_rich_colors(
     theme: &crate::theme::Theme,
     fallback_style: Style,
     dim_amount: f32,

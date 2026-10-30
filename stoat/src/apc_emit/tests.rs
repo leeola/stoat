@@ -38,6 +38,32 @@ fn rgb_diagnostic_theme() -> crate::theme::Theme {
         .expect("rgb theme builds")
 }
 
+/// [`rgb_diagnostic_theme`] with the diff scopes, so both the page gutter colors
+/// and the diff gutter colors resolve and a diff page lays its numbers out as
+/// runs.
+fn rgb_relative_diff_theme() -> crate::theme::Theme {
+    let src = r##"theme rgbreldiff {
+            ui.diagnostic.error.fg = "#ff0000";
+            ui.diagnostic.warning.fg = "#ffff00";
+            ui.diagnostic.info.fg = "#00ffff";
+            ui.diagnostic.hint.fg = "#808080";
+            ui.text.muted.fg = "#606060";
+            ui.background.bg = "#282c34";
+            diff.context.fg = "#808080";
+            diff.added.fg = "#00ff00";
+            diff.modified.fg = "#ffff00";
+            diff.deleted.fg = "#ff0000";
+            diff.moved.fg = "#0000ff";
+            diff.staged.fg = "#00ffff";
+            diff.unstaged.fg = "#ff00ff";
+            diff.approved.fg = "#ff8000";
+            diff.unapproved.fg = "#8000ff";
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbreldiff")
+        .expect("rgb theme builds")
+}
+
 /// modal_frame's rich arm engages only when the border fg and the mask bg
 /// both resolve to RGB, so the modal APC tests need a hex theme. The default
 /// theme uses named colors and would fall back to glyphs.
@@ -4746,8 +4772,11 @@ fn conflict_pane_of(
 /// page.
 #[test]
 fn a_frame_waits_for_the_pool_jobs_its_emits_start() {
-    let (mut editor, mut editor_rx) =
-        buffered_relative_pool(stoatty_protocol::PROTOCOL_VERSION, false);
+    let (mut editor, mut editor_rx) = buffered_relative_pool(
+        stoatty_protocol::PROTOCOL_VERSION,
+        false,
+        rgb_diagnostic_theme(),
+    );
     let redecorated = frame_through_held_jobs(&mut editor, &mut editor_rx, move_one_line_down);
     let (mut conflict, mut conflict_rx) = conflict_pane();
     let filled = frame_through_held_jobs(&mut conflict, &mut conflict_rx, |h| {
@@ -5483,13 +5512,17 @@ fn wheel_glide_defers_the_relative_line_refill_to_settle() {
 }
 
 /// Buffer the pool window of a 400-line file for a terminal at `protocol`,
-/// with the rich gutter on and the editor in the diff view when `diff_view`
-/// is set, then move the cursor and the scroll row one line down and report
-/// the pages each kind of fill in that move named.
-fn relative_line_scroll_fills(protocol: u32, diff_view: bool) -> (Vec<u64>, Vec<u64>) {
+/// under `theme` and with the editor in the diff view when `diff_view` is set,
+/// then move the cursor and the scroll row one line down and report the pages
+/// each kind of fill in that move named.
+fn relative_line_scroll_fills(
+    protocol: u32,
+    diff_view: bool,
+    theme: crate::theme::Theme,
+) -> (Vec<u64>, Vec<u64>) {
     use stoatty_protocol::command::{Command, FillCommand};
 
-    let (mut h, mut rx) = buffered_relative_pool(protocol, diff_view);
+    let (mut h, mut rx) = buffered_relative_pool(protocol, diff_view, theme);
     move_one_line_down(&mut h);
 
     let (mut fills, mut decorations) = (Vec::new(), Vec::new());
@@ -5505,15 +5538,20 @@ fn relative_line_scroll_fills(protocol: u32, diff_view: bool) -> (Vec<u64>, Vec<
 
 /// The harness of [`relative_line_scroll_fills`], with the pool window of its
 /// 400-line file buffered and the receiver drained.
+///
+/// [`rgb_diagnostic_theme`] resolves the page gutter colors alone, so a diff
+/// page under it numbers its rows in cells. [`rgb_relative_diff_theme`] adds
+/// the diff colors, so a diff page under it numbers its rows with runs.
 fn buffered_relative_pool(
     protocol: u32,
     diff_view: bool,
+    theme: crate::theme::Theme,
 ) -> (
     crate::test_harness::TestHarness,
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = Stoat::test();
-    h.stoat.theme = Arc::new(rgb_diagnostic_theme());
+    h.stoat.theme = Arc::new(theme);
     h.stoat.stoatty_protocol = protocol;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
@@ -5553,20 +5591,76 @@ fn move_one_line_down(h: &mut crate::test_harness::TestHarness) {
 #[test]
 fn a_relative_line_scroll_redecorates_the_window_instead_of_refilling_it() {
     assert_eq!(
-        relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION, false),
+        relative_line_scroll_fills(
+            stoatty_protocol::PROTOCOL_VERSION,
+            false,
+            rgb_diagnostic_theme()
+        ),
         (Vec::new(), vec![0, 1, 2, 3, 4]),
         "the buffered pages keep their cells and take the new gutter runs"
     );
 }
 
-/// A diff page draws absolute line numbers, so the cursor's line is in
-/// neither of its versions and the move refills none of its held pages.
+/// A diff page whose diff colors resolve numbers its buffer column with runs,
+/// so a move of the cursor's line redecorates the window as a plain page does.
 #[test]
-fn a_relative_line_scroll_in_the_diff_view_refills_no_page() {
+fn a_relative_line_scroll_in_a_rich_diff_view_redecorates_the_window() {
     assert_eq!(
-        relative_line_scroll_fills(stoatty_protocol::PROTOCOL_VERSION, true),
-        (Vec::new(), Vec::new()),
-        "the diff pages keep their cells and their decorations"
+        relative_line_scroll_fills(
+            stoatty_protocol::PROTOCOL_VERSION,
+            true,
+            rgb_relative_diff_theme()
+        ),
+        (Vec::new(), vec![0, 1, 2, 3, 4]),
+        "the diff pages keep their cells and take new gutter runs"
+    );
+}
+
+/// A diff page whose diff colors do not resolve numbers its buffer column in
+/// cells, so a move of the cursor's line refills the pages the move composites.
+#[test]
+fn a_relative_line_scroll_in_an_ascii_diff_view_refills_its_pages() {
+    assert_eq!(
+        relative_line_scroll_fills(
+            stoatty_protocol::PROTOCOL_VERSION,
+            true,
+            rgb_diagnostic_theme()
+        ),
+        (vec![0, 1], Vec::new()),
+        "the composited diff pages refill whole and take no decorations batch"
+    );
+}
+
+/// A rich diff page's decorations batch numbers the buffer column from the
+/// cursor line, beside the base column's own numbers. Each row paints its
+/// buffer number first and then its base number.
+#[test]
+fn a_diff_page_decoration_carries_the_new_numbers() {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    let (mut h, mut rx) = buffered_relative_pool(
+        stoatty_protocol::PROTOCOL_VERSION,
+        true,
+        rgb_relative_diff_theme(),
+    );
+    move_one_line_down(&mut h);
+
+    let texts: Vec<String> = drain_apc(&mut rx)
+        .into_iter()
+        .skip_while(|c| !matches!(c, Command::FillDecorations(FillCommand { index: 0, .. })))
+        .take_while(|c| !matches!(c, Command::FillEnd))
+        .filter_map(|c| match c {
+            Command::TextRun(run) => Some(run.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (
+            texts.iter().take(6).map(String::as_str).collect::<Vec<_>>(),
+            texts.iter().any(|text| text == "0"),
+        ),
+        (vec!["1", "1", "2", "2", "1", "3"], false),
+        "page 0 with the cursor on line 2: (buffer, base) per row is (1, 1), (2, 2), (1, 3)"
     );
 }
 
@@ -5786,7 +5880,7 @@ fn a_page_glide_redecorates_no_page_above_its_start() {
 #[test]
 fn an_older_terminal_refills_the_composited_pages_whole() {
     assert_eq!(
-        relative_line_scroll_fills(4, false),
+        relative_line_scroll_fills(4, false, rgb_diagnostic_theme()),
         (vec![0, 1], Vec::new()),
         "a terminal without decorations-only fills repaints the pages the move \
          composites"

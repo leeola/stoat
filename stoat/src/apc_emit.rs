@@ -1091,6 +1091,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .chrome
         .as_ref()
         .and_then(|(_, chrome)| chrome.rich_gutter.clone());
+    // A diff page draws its gutter as runs only when the page gutter colors and
+    // the diff colors both resolve. The dim only fades the colors, so one answer
+    // holds for every pane.
+    let diff_rich =
+        crate::render::review::resolve_diff_rich_colors(theme, fallback_style, 0.0).is_some();
     let decorate_pages = stoat.stoatty_protocol >= FILL_DECORATIONS_PROTOCOL;
     for (_, editor_id, region) in &panes {
         let region = *region;
@@ -1154,12 +1159,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // terminal that reads decorations-only fills takes a cursor line change
         // as new runs over cells it keeps. The fallback gutter paints numbers
         // into cells, so it keeps the line in the cell version. A diff page's
-        // gutters and a conflict page's stage gutters number rows absolutely,
-        // so the line reaches neither of their versions.
+        // buffer column takes the line as a plain gutter does, as runs when its
+        // diff colors resolve too and as cells when they do not. Only a
+        // conflict page's stage gutters number rows absolutely, so the line
+        // reaches neither of its versions.
         let split_gutter = decorate_pages
             && base_rich.is_some()
-            && !editor.diff_view
-            && editor.conflict_view.is_none();
+            && editor.conflict_view.is_none()
+            && (!editor.diff_view || diff_rich);
         let decoration_version = match split_gutter {
             true => {
                 let mut hasher = DefaultHasher::new();
@@ -1177,8 +1184,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             editor_syntax(editor.diff_view),
             editor.gutter_width,
             editor.display_map.wrap_width(),
-            current_line
-                .filter(|_| !split_gutter && !editor.diff_view && editor.conflict_view.is_none()),
+            current_line.filter(|_| !split_gutter && editor.conflict_view.is_none()),
             editor
                 .gutter_severity_cache
                 .as_ref()
@@ -2464,6 +2470,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                                 width,
                                 height,
                                 &gutter,
+                                diff_view,
+                                fallback_style,
+                                dim,
+                                dials,
                                 live.as_ref(),
                             );
                             if decorations.is_empty() {
@@ -3225,8 +3235,9 @@ pub(crate) fn display_map_stamp(buffer_version: u64, paint_version: PaintVersion
 /// every color on the page, or the walkthrough spotlight's dim comes on, goes
 /// out, or changes.
 ///
-/// A diff page and a conflict page draw absolute line numbers, so neither takes
-/// a `current_line`.
+/// A conflict page draws absolute line numbers, so it takes no `current_line`.
+/// A diff page takes one when its buffer column paints its numbers into cells,
+/// as a plain page with the fallback gutter does.
 ///
 /// Where the spotlight lights is no part of this. It recolors only the rows it
 /// lights, so [`spotlight_page_version`] carries it in each page's own
