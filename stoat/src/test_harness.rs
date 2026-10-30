@@ -973,6 +973,12 @@ impl TestHarness {
         editor::selection_spans(&mut self.stoat)
     }
 
+    /// The number of entries on the focused pane's jumplist.
+    pub(crate) fn jumplist_len(&self) -> usize {
+        let ws = self.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
+    }
+
     /// Byte offset of the primary selection's head in the focused editor.
     pub(crate) fn primary_head_offset(&mut self) -> usize {
         editor::primary_head_offset(&mut self.stoat)

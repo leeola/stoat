@@ -818,12 +818,6 @@ mod tests {
         assert_eq!(spans, vec![(0, 4, false), (7, 11, false)]);
     }
 
-    /// The number of entries on the focused pane's jumplist.
-    fn jumplist_len(h: &TestHarness) -> usize {
-        let ws = h.stoat.active_workspace();
-        ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
-    }
-
     /// The selections after `pattern` goes through the prompt `opener` opens
     /// over the whole of `abc 123 def`, and a jump back follows.
     fn submit_then_jump_back(opener: &dyn Action, pattern: &str) -> Vec<(usize, usize, bool)> {
@@ -862,11 +856,11 @@ mod tests {
         let mut h = Stoat::test();
         h.seed_focused_buffer("abc 123 def");
         select_range(&mut h, 0, 11);
-        let before = jumplist_len(&h);
+        let before = h.jumplist_len();
         dispatch(&mut h.stoat, &action::SelectRegex);
         h.type_text("zzz");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(jumplist_len(&h), before + 1);
+        assert_eq!(h.jumplist_len(), before + 1);
     }
 
     /// Splitting on adjacent separators leaves a cursor between them.

@@ -158,12 +158,6 @@ mod tests {
         assert_eq!(spans, vec![(4, 7, false)]);
     }
 
-    /// The number of entries on the focused pane's jumplist.
-    fn jumplist_len(h: &TestHarness) -> usize {
-        let ws = h.stoat.active_workspace();
-        ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
-    }
-
     /// Enter records the selections the prompt opened over, so a jump back
     /// returns to them, as Helix's regex prompt does.
     #[test]
@@ -189,11 +183,11 @@ mod tests {
         let mut h = Stoat::test();
         h.seed_focused_buffer("abc 123 def");
         select_two_ranges(&mut h, (0, 3), (4, 7));
-        let before = jumplist_len(&h);
+        let before = h.jumplist_len();
         dispatch(&mut h.stoat, &action::KeepSelections);
         h.type_text("zzz");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
-        assert_eq!(jumplist_len(&h), before + 1);
+        assert_eq!(h.jumplist_len(), before + 1);
     }
 
     /// A filter answers in document order, so the primary goes to the first

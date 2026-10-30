@@ -68,9 +68,10 @@ pub(crate) struct SearchInputState {
     /// The jumplist entry for the origin, captured before the prompt took
     /// focus. `None` when no editor was focused.
     ///
-    /// [`search_submit`] pushes this rather than reading the position at submit
-    /// time, which by then is the preview's landing rather than the origin
-    /// `C-o` must return to.
+    /// [`search_submit`] pushes this once the query compiles, hit or miss, as
+    /// the Helix regex prompt does. It pushes this rather than reading the
+    /// position at submit time, which by then is the preview's landing rather
+    /// than the origin `C-o` must return to.
     origin_jump: Option<JumpEntry>,
     /// The query the live preview last ran for.
     ///
@@ -347,6 +348,10 @@ pub(crate) fn sync_search_preview(stoat: &mut Stoat) {
 ///
 /// The view stays where the preview left it. It glides back to the origin only
 /// when the query names no match.
+///
+/// A query that compiles records the origin on the jumplist, so a jump back
+/// returns to where the search started, even after a query that matched
+/// nothing.
 pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.search_input.take() else {
         return false;
@@ -378,7 +383,9 @@ pub(crate) fn search_submit(stoat: &mut Stoat) -> bool {
     if !moved {
         restore_origin_view(stoat, state.origin_view);
     }
-    if moved && let Some(entry) = state.origin_jump {
+    if last.regex.is_some()
+        && let Some(entry) = state.origin_jump
+    {
         super::jump::push_entry(stoat, entry);
     }
     if last.regex.is_none() {
@@ -2155,6 +2162,38 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &action::JumpBackward);
         assert_eq!(pane_spans(&mut h), origin, "C-o returns to the origin");
+    }
+
+    /// Enter on a query that matches nothing still records the origin, as the
+    /// Helix prompt pushes on every pattern that compiles, so a jump back after
+    /// moving on returns there.
+    #[test]
+    fn enter_with_no_match_still_records_the_origin() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        h.type_keys("l l");
+        let origin = pane_spans(&mut h);
+        h.type_keys("/");
+
+        preview(&mut h, "zzz");
+        h.type_keys("enter");
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::JumpBackward);
+        assert_eq!(pane_spans(&mut h), origin, "C-o returns to the origin");
+    }
+
+    /// A query that fails to compile records nothing, as the Helix prompt skips
+    /// the push for a compile error.
+    #[test]
+    fn enter_with_an_invalid_query_records_nothing() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        let before = h.jumplist_len();
+        h.type_keys("/");
+
+        preview(&mut h, "(");
+        h.type_keys("enter");
+        assert_eq!(h.jumplist_len(), before);
     }
 
     /// An extend-mode preview holds origin-plus-one range however many
