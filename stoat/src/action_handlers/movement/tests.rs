@@ -5454,6 +5454,21 @@ fn toggle_block_comments_wraps_selection() {
     );
 }
 
+/// `space C` is Helix's block comment key.
+#[test]
+fn space_shift_c_wraps_the_selection_in_block_comments() {
+    let mut h = TestHarness::with_size(40, 6);
+    let path = h.write_file("s.rs", "let x = 1;\nlet y = 2;\n");
+    h.open_file(&path);
+
+    h.type_keys("v j");
+    h.type_keys("space C");
+    assert_eq!(
+        h.focused_buffer_text(),
+        "/* let x = 1; */\n/* let y = 2; */\n",
+    );
+}
+
 /// A rust file already carrying a block comment gives it up to the plain
 /// comment key, since the key that makes a comment is the key that undoes it.
 /// Without that step the ladder adds line comments on top instead.
@@ -5515,6 +5530,17 @@ fn toggle_line_comments_ignores_a_block_commented_row() {
         "// /* let x = 1; */\n",
         "the block comment is text like any other to the line key",
     );
+}
+
+/// `space Alt-c` is Helix's line comment key.
+#[test]
+fn space_alt_c_toggles_line_comments() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "/* let x = 1; */\n");
+    h.open_file(&path);
+
+    h.type_keys("space Alt-c");
+    assert_eq!(h.focused_buffer_text(), "// /* let x = 1; */\n");
 }
 
 /// A shell script comments a row with its own `#` token, in bash and in fish.
