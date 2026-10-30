@@ -4,7 +4,9 @@
 //! Each changed file gets one editor in the per-file diff view, over the
 //! workspace's own buffer of the file. The editor folds every unchanged run
 //! that lies more than three rows from a hunk, so the excerpt shows the file's
-//! hunks with their context. The stack paints the excerpts in path order, each
+//! hunks with their context. A refined hunk shows only the rows the tree pass
+//! marked and its last row, so the unmarked rows of a block the formatter
+//! re-indented fold too. The stack paints the excerpts in path order, each
 //! under a header row that names its file. The focused excerpt's editor is the
 //! focused editor, so every editor key acts on the real file at the real line
 //! and column.
@@ -19,7 +21,7 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
-    diff_map::DiffMap,
+    diff_map::{DiffHunkStatus, DiffMap},
     display_map::{FoldSnapshot, InlayPoint},
     editor_state::{EditorId, EditorState},
     pane::View,
@@ -36,7 +38,8 @@ use std::{
 };
 use stoat_text::{Point, Rope};
 
-/// Rows of unchanged context an excerpt shows on each side of a hunk.
+/// Rows of context an excerpt shows on each side of a hunk, and on each side
+/// of a marked run of a refined hunk.
 const CONTEXT_ROWS: u32 = 3;
 
 new_key_type! {
@@ -1021,9 +1024,9 @@ fn land(
     true
 }
 
-/// Fold every unchanged run of `editor`'s buffer that lies more than
-/// [`CONTEXT_ROWS`] rows from a hunk, and answer the diff map version the folds
-/// were cut from with the rows left showing.
+/// Fold every run of `editor`'s buffer that [`kept_runs`] leaves out, and
+/// answer the diff map version the folds were cut from with the rows left
+/// showing.
 ///
 /// A fold that already hides a wanted gap stays. Only the gaps that opened or
 /// closed since the last cut change the display map, so a landing that moves no
@@ -1091,21 +1094,36 @@ fn holds(ranges: &[Range<Point>], range: &Range<Point>) -> bool {
 /// Each hunk's rows widen by [`CONTEXT_ROWS`] on each side, stay inside the
 /// buffer's `line_count` rows, and merge with a run they touch. A deletion's
 /// rows are empty, so it keeps the row it sits on.
+///
+/// A refined modified hunk keeps only each run the tree pass marked and its
+/// last live row, each widened the same way. Its unmarked rows, such as the
+/// body of a block the formatter re-indented, fold away. The last live row
+/// stays because, where the layout pairs base rows with live rows, the base
+/// lines left over hang below it.
 fn kept_runs(map: &DiffMap, line_count: u32) -> Vec<Range<u32>> {
     let mut runs: Vec<Range<u32>> = Vec::new();
-    for hunk in map.hunks() {
-        let rows = match hunk.buffer_line_range.is_empty() {
-            true => hunk.buffer_start_line..hunk.buffer_start_line + 1,
-            false => hunk.buffer_line_range.clone(),
-        };
+    let mut keep = |rows: Range<u32>| {
         let run =
             rows.start.saturating_sub(CONTEXT_ROWS)..(rows.end + CONTEXT_ROWS).min(line_count);
         if run.is_empty() {
-            continue;
+            return;
         }
         match runs.last_mut() {
             Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
             _ => runs.push(run),
+        }
+    };
+    for hunk in map.hunks() {
+        let rows = &hunk.buffer_line_range;
+        if rows.is_empty() {
+            keep(hunk.buffer_start_line..hunk.buffer_start_line + 1);
+        } else if hunk.status == DiffHunkStatus::Modified && hunk.refined() {
+            for marked in &hunk.marked_rows {
+                keep(marked.clone());
+            }
+            keep(rows.end - 1..rows.end);
+        } else {
+            keep(rows.clone());
         }
     }
     runs
@@ -1157,7 +1175,7 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         buffer::BufferId,
-        diff_map::DiffMap,
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, InlayPoint},
         host::FakeRepoBuilder,
         test_harness::TestHarness,
@@ -1205,6 +1223,37 @@ mod tests {
         assert_eq!(
             kept_runs(&map_of(&base, &text), 30),
             [0..12, 16..23, 25..30],
+        );
+    }
+
+    /// A refined modified hunk keeps each marked run and its last live row,
+    /// each with its context, and leaves out the unmarked rows between them.
+    #[test]
+    fn a_refined_modified_hunk_keeps_its_marked_runs_and_its_last_row() {
+        let map = |marked_rows: Vec<Range<u32>>| {
+            DiffMap::from_hunks(
+                [DiffHunk {
+                    status: DiffHunkStatus::Modified,
+                    unstaged_lines: Vec::new(),
+                    marked_rows,
+                    buffer_start_line: 10,
+                    buffer_line_range: 10..60,
+                    base_byte_range: 0..0,
+                    anchor_range: None,
+                    token_detail: Some(Arc::new(TokenDetail {
+                        buffer_spans: Vec::new(),
+                        base_spans: Vec::new(),
+                    })),
+                }],
+                None,
+            )
+        };
+        assert_eq!(
+            [
+                kept_runs(&map(vec![10..12, 58..60]), 80),
+                kept_runs(&map(std::iter::once(10..12).collect()), 80),
+            ],
+            [vec![7..15, 55..63], vec![7..15, 56..63]],
         );
     }
 

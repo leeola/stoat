@@ -822,10 +822,10 @@ pub(crate) fn paint_diff_rows(
                 let last_row = display_row + 1 >= total_rows
                     || !snapshot.is_wrap_continuation(display_row + 1);
                 if !continuation {
-                    // A fold hides unchanged lines, each with one base line, so
-                    // a row below a fold counts the base lines of the lines it
-                    // hid.
-                    base_line += buffer_row.saturating_sub(next_buffer_row);
+                    // A fold hides unchanged lines or the unmarked rows of a
+                    // refined hunk, so a row below a fold counts the base lines
+                    // of the rows it hid.
+                    base_line += hidden_base_lines(snapshot, next_buffer_row..buffer_row);
                     while let Some(&(row, lines)) = seams.get(seam_cursor)
                         && row <= buffer_row
                     {
@@ -1969,8 +1969,10 @@ fn paint_base_side(
 /// A moved-away seam removed base lines that take no row at all, so the
 /// seams above the top add their lines on top of that count.
 ///
-/// A fold hides whole lines, and the diff view folds only unchanged ones, so
-/// each hidden line still counts one base line, as [`lines_above`] counts it.
+/// A fold hides whole lines. It hides unchanged lines, or the unmarked rows of
+/// a refined hunk in a changes view excerpt. [`lines_above`] counts each hidden
+/// line, and the rows with no base line come off that count as the shown ones
+/// do, so a hidden line counts the base line the diff map gives it.
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
     let lines_above = lines_above(snapshot, scroll_row);
     let (changed, seams) = snapshot.diff_map().map_or((0, 0), |dm| {
@@ -1996,6 +1998,26 @@ fn lines_above(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             let end = WrapPoint::new(row, snapshot.wrap_snapshot().line_len(row));
             snapshot.wrap_to_buffer(end).row + 1
         },
+    }
+}
+
+/// Base lines beside the buffer rows `rows`, which a fold hid from the walk of
+/// [`paint_diff_rows`].
+///
+/// A row counts one when the left column paints a base line beside it, as
+/// [`rows_without_base_before`](crate::diff_map::DiffMap::rows_without_base_before)
+/// decides. A hidden row of a modified hunk past the hunk's paired base rows
+/// counts none, and so does every hidden modified row in the unified layout.
+fn hidden_base_lines(snapshot: &DisplaySnapshot, rows: std::ops::Range<u32>) -> u32 {
+    let hidden = rows.end.saturating_sub(rows.start);
+    match snapshot.diff_map() {
+        Some(dm) if hidden > 0 => {
+            let paired = snapshot.pairs_modified_hunks();
+            let without = dm.rows_without_base_before(rows.end, paired)
+                - dm.rows_without_base_before(rows.start, paired);
+            hidden - without
+        },
+        _ => hidden,
     }
 }
 
@@ -2973,6 +2995,86 @@ mod tests {
             .map(|n| (n.to_string(), n.to_string()))
             .to_vec();
         assert_eq!(number_pairs(&buf, area), expected);
+    }
+
+    /// A fold inside a modified hunk hides live rows, and the rows below it
+    /// count only the base lines beside the rows it hid. The two-column layout
+    /// pairs each hidden row with a base line, so each one counts. The unified
+    /// layout gives a modified row no base line, so none do.
+    #[test]
+    fn a_fold_inside_a_modified_hunk_counts_the_base_lines_it_hid() {
+        let text: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let head = "1\n2\n3\n4\n";
+        let removed: String = (5..=14).map(|n| format!("b{n}\n")).collect();
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(4..16).collect(),
+                marked_rows: vec![4..5, 15..16],
+                buffer_start_line: 4,
+                buffer_line_range: 4..16,
+                base_byte_range: head.len()..head.len() + removed.len() - 1,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: Vec::new(),
+                })),
+            }],
+            Some(Arc::new(format!("{head}{removed}17\n18\n19\n20\n"))),
+        );
+        let mut editor = diff_editor_with_map(&text, dm);
+        editor
+            .display_map
+            .fold(vec![Point::new(5, 1)..Point::new(13, 2)]);
+        let mut render = |area: Rect| {
+            let mut buf = Buffer::empty(area);
+            render_diff_view(
+                &mut editor,
+                area,
+                Style::default(),
+                &rgb_diff_theme(),
+                &mut buf,
+                false,
+                None,
+                None,
+                false,
+                DiffDials::shipped(),
+                None,
+            );
+            buf
+        };
+
+        let paired_area = Rect::new(0, 0, 120, 12);
+        let paired: Vec<String> = number_pairs(&render(paired_area), paired_area)
+            .into_iter()
+            .map(|(left, _)| left)
+            .collect();
+        let unified_area = Rect::new(0, 0, 60, 24);
+        let unified = render(unified_area);
+        let cols = DiffColumns::compute(unified_area, DiffLayout::DIFF_VIEW);
+        let number_beside = |needle: &str| {
+            let y = (0..unified_area.height)
+                .find(|&y| {
+                    line_text(&unified, y, cols.right_text_x..cols.right_text_x + 3).trim()
+                        == needle
+                })
+                .expect("a row shows the needle");
+            line_text(&unified, y, cols.left_num_x..cols.left_num_x + 4)
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            (paired, number_beside("b5"), number_beside("17")),
+            (
+                ["1", "2", "3", "4", "5", "6", "", "", "15", "16", "17", "18"]
+                    .map(String::from)
+                    .to_vec(),
+                "5".to_string(),
+                "15".to_string(),
+            ),
+            "the paired rows count their base lines, and the unified block and \
+             the mirror row past the fold count none for the hidden rows",
+        );
     }
 
     /// With a cursor line, the right column counts each buffer line's distance
