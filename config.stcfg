@@ -1303,6 +1303,8 @@ on key {
         Tab -> SmartTab();
         BackTab -> InsertTab();
         Ctrl-Space -> TriggerCompletion();
+        # Ctrl-x is the Helix spelling of the same key.
+        Ctrl-x -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();
     }

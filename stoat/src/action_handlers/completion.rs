@@ -327,6 +327,31 @@ mod tests {
         assert_ne!(h.stoat.last_completion_signature, Some((buf_id, 999)));
     }
 
+    /// `Ctrl-x` is Helix's spelling of the completion key, beside `Ctrl-Space`.
+    ///
+    /// Every key in insert mode runs the trigger, which asks nothing over a
+    /// buffer it has already answered. So with the buffer answered, a request
+    /// after the key comes from the forced trigger alone.
+    #[test]
+    fn ctrl_x_triggers_completion_in_insert_mode() {
+        let mut h = Stoat::test();
+        let path = h.write_file("a.rs", "abc\n");
+        h.open_file(&path);
+        h.type_keys("A");
+        h.stoat.pending_completion_request.clear();
+        crate::completion::request::record_dismiss(&mut h.stoat);
+
+        h.type_keys("Ctrl-x");
+        assert_eq!(
+            (
+                h.stoat.pending_completion_request.is_pending(),
+                h.buffer_text_at(&path),
+            ),
+            (true, "abc\n".to_string()),
+            "the key asks for completions and types nothing",
+        );
+    }
+
     fn enable_resolve(h: &crate::test_harness::TestHarness) {
         use lsp_types::{CompletionOptions, ServerCapabilities};
         h.fake_lsp().set_capabilities(ServerCapabilities {
