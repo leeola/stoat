@@ -88,6 +88,7 @@ pub(crate) fn goto_textobject_impl(
     };
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let has_syntax = ws.buffers.syntax_map(buffer_id).is_some();
     let cursors: Vec<(usize, usize)> = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let snapshot = editor.display_map.snapshot();
@@ -110,13 +111,17 @@ pub(crate) fn goto_textobject_impl(
     // newest.
     let landings = object_ranges(ws, buffer_id, cursors, kind, direction, count);
 
+    // The origin goes on the jumplist before the motion lands, so the jump back
+    // returns to the reading position rather than to the object. A buffer with
+    // a syntax tree records it even when no object lies ahead, as Helix's
+    // motion pushes on every press in such a buffer.
+    if has_syntax {
+        crate::action_handlers::jump::push_jump(stoat);
+    }
+
     if landings.is_empty() {
         return UpdateEffect::None;
     }
-
-    // The origin goes on the jumplist before the motion lands, so the jump back
-    // returns to where the reader was reading rather than to the object.
-    crate::action_handlers::jump::push_jump(stoat);
 
     let editor = crate::action_handlers::focused_editor_mut(stoat).expect("editor still exists");
     let snapshot = editor.display_map.snapshot();
@@ -412,6 +417,39 @@ mod tests {
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
         assert_eq!(h.primary_head_offset(), origin);
+    }
+
+    /// A press with nothing ahead records the origin too, as Helix's motion
+    /// pushes on every press in a buffer with a syntax tree.
+    #[test]
+    fn next_function_with_nothing_ahead_still_records_the_origin() {
+        let src = "fn alpha() {}\nfn beta() {}\n";
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "main.rs", src);
+        h.settle();
+        jump(&mut h, src.find("fn beta").expect("beta"));
+        let origin = h.primary_head_offset();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(h.primary_head_offset(), origin, "nothing lies ahead");
+
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(h.primary_head_offset(), origin);
+    }
+
+    /// A buffer with no syntax tree records nothing, as Helix's motion pushes
+    /// only when the buffer has one.
+    #[test]
+    fn next_function_without_a_syntax_tree_records_nothing() {
+        let mut h = TestHarness::with_size(60, 20);
+        seed(&mut h, "notes.txt", "fn alpha() {}\nfn beta() {}\n");
+        h.settle();
+        jump(&mut h, 3);
+        let before = h.jumplist_len();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &GotoNextFunction);
+        assert_eq!(h.jumplist_len(), before);
     }
 
     /// In select mode the motion grows the selection out to the object rather
