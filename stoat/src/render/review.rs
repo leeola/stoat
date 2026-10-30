@@ -1985,7 +1985,9 @@ fn paint_base_side(
 /// A fold hides whole lines. It hides unchanged lines, or the unmarked rows of
 /// a refined hunk in a changes view excerpt. [`lines_above`] counts each hidden
 /// line, and the rows with no base line come off that count as the shown ones
-/// do, so a hidden line counts the base line the diff map gives it.
+/// do. A hidden modified row counts its index-paired base line in both
+/// layouts, because no block shows that line, so the unified layout adds those
+/// lines back through [`hidden_paired_base_lines`].
 fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
     let lines_above = lines_above(snapshot, scroll_row);
     let (changed, seams) = snapshot.diff_map().map_or((0, 0), |dm| {
@@ -1994,7 +1996,11 @@ fn base_line_at(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
             dm.seam_base_lines_in(0..lines_above),
         )
     });
-    snapshot.blocks_above(scroll_row) + lines_above.saturating_sub(changed) + seams
+    let hidden_paired = match snapshot.pairs_modified_hunks() {
+        true => 0,
+        false => hidden_paired_base_lines(snapshot, 0..lines_above),
+    };
+    snapshot.blocks_above(scroll_row) + lines_above.saturating_sub(changed) + seams + hidden_paired
 }
 
 /// Buffer lines whose first row is above `scroll_row`.
@@ -2017,21 +2023,61 @@ fn lines_above(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
 /// Base lines beside the buffer rows `rows`, which a fold hid from the walk of
 /// [`paint_diff_rows`].
 ///
-/// A row counts one when the left column paints a base line beside it, as
+/// A row counts one when a base line index-pairs with it, as
 /// [`rows_without_base_before`](crate::diff_map::DiffMap::rows_without_base_before)
-/// decides. A hidden row of a modified hunk past the hunk's paired base rows
-/// counts none, and so does every hidden modified row in the unified layout.
+/// decides under pairing. That holds in both layouts: a hidden modified row
+/// hides its index-paired base line, since no block shows that line. A hidden
+/// row of a modified hunk past the hunk's base rows counts none.
 fn hidden_base_lines(snapshot: &DisplaySnapshot, rows: std::ops::Range<u32>) -> u32 {
     let hidden = rows.end.saturating_sub(rows.start);
     match snapshot.diff_map() {
         Some(dm) if hidden > 0 => {
-            let paired = snapshot.pairs_modified_hunks();
-            let without = dm.rows_without_base_before(rows.end, paired)
-                - dm.rows_without_base_before(rows.start, paired);
+            let without = dm.rows_without_base_before(rows.end, true)
+                - dm.rows_without_base_before(rows.start, true);
             hidden - without
         },
         _ => hidden,
     }
+}
+
+/// Base lines index-paired with the modified rows a fold hides among the
+/// buffer rows `rows`.
+///
+/// The unified layout counts every modified row as a row with no base line
+/// beside it, because its hunk's base lines sit in blocks. A hidden row's
+/// index-paired line sits in no block, so [`base_line_at`] adds these back in
+/// that layout.
+fn hidden_paired_base_lines(snapshot: &DisplaySnapshot, rows: std::ops::Range<u32>) -> u32 {
+    let Some(dm) = snapshot.diff_map() else {
+        return 0;
+    };
+    if rows.is_empty() {
+        return 0;
+    }
+
+    let inlays = snapshot.inlay_snapshot();
+    let max = snapshot.buffer_snapshot().rope().max_point();
+    let span = inlays.to_inlay_point(Point::new(rows.start, 0))
+        ..inlays.to_inlay_point(Point::new(rows.end, 0).min(max));
+    snapshot
+        .fold_snapshot()
+        .folds_in_range(span)
+        .into_iter()
+        .map(|fold| {
+            // A fold's first row stays shown with the placeholder, and every
+            // row after it through the fold's end row hides.
+            let start = (inlays.to_buffer_point(fold.range.start).row + 1).max(rows.start);
+            let end = (inlays.to_buffer_point(fold.range.end).row + 1).min(rows.end);
+            if start >= end {
+                return 0;
+            }
+            let unified =
+                dm.rows_without_base_before(end, false) - dm.rows_without_base_before(start, false);
+            let paired =
+                dm.rows_without_base_before(end, true) - dm.rows_without_base_before(start, true);
+            unified - paired
+        })
+        .sum()
 }
 
 /// Base lines of the moved-away seams in `seams` at buffer rows `from..=through`.
@@ -2820,34 +2866,64 @@ mod tests {
         // their own. A soft-wrap continuation, of a block or of a live line, and
         // a paired line's overflow block belong to the line its first row
         // counted.
+        //
+        // The rows a fold hides count once the walk passes the last row of the
+        // line the fold starts on, where the placeholder sits: each unchanged
+        // row, and in both layouts each modified row still inside its hunk's
+        // base text, whose line hides with it.
         fn reference(snapshot: &DisplaySnapshot, scroll_row: u32) -> u32 {
+            let seams = |rows: std::ops::Range<u32>| {
+                snapshot
+                    .diff_map()
+                    .map_or(0, |dm| dm.seam_base_lines_in(rows))
+            };
+            let in_base = |buffer_row: u32| {
+                snapshot.diff_map().is_some_and(|dm| {
+                    dm.hunks_in_range(buffer_row..buffer_row + 1)
+                        .iter()
+                        .any(|hunk| {
+                            hunk.status == DiffHunkStatus::Modified
+                                && buffer_row.saturating_sub(hunk.buffer_start_line)
+                                    < dm.base_line_count(hunk)
+                        })
+                })
+            };
+            let carries = |buffer_row: u32, shown: bool| match snapshot.line_diff_status(buffer_row)
+            {
+                DiffStatus::Unchanged => true,
+                DiffStatus::Modified => {
+                    (!shown || snapshot.pairs_modified_hunks()) && in_base(buffer_row)
+                },
+                _ => false,
+            };
+            let next_shown = |row: u32| {
+                (row + 1..snapshot.line_count())
+                    .find_map(|row| match snapshot.classify_row(row) {
+                        BlockRowKind::BufferRow { buffer_row } => Some(buffer_row),
+                        BlockRowKind::Block { .. } => None,
+                    })
+                    .unwrap_or(snapshot.buffer_line_count())
+            };
+
             let mut base_line = 0;
             for row in 0..scroll_row {
-                if snapshot.is_wrap_continuation(row) {
-                    continue;
-                }
+                let continuation = snapshot.is_wrap_continuation(row);
                 match snapshot.classify_row(row) {
                     BlockRowKind::Block { block, line_index } => {
-                        base_line += u32::from(block.0.first_segment + line_index == 0)
+                        base_line +=
+                            u32::from(!continuation && block.0.first_segment + line_index == 0)
                     },
                     BlockRowKind::BufferRow { buffer_row } => {
-                        base_line += snapshot
-                            .diff_map()
-                            .map_or(0, |dm| dm.seam_base_lines_in(buffer_row..buffer_row + 1));
-                        let status = snapshot.line_diff_status(buffer_row);
-                        let paired = snapshot.pairs_modified_hunks()
-                            && status == DiffStatus::Modified
-                            && snapshot.diff_map().is_some_and(|dm| {
-                                dm.hunks_in_range(buffer_row..buffer_row + 1)
-                                    .iter()
-                                    .any(|hunk| {
-                                        hunk.status == DiffHunkStatus::Modified
-                                            && buffer_row.saturating_sub(hunk.buffer_start_line)
-                                                < dm.base_line_count(hunk)
-                                    })
-                            });
-                        if status == DiffStatus::Unchanged || paired {
-                            base_line += 1;
+                        if !continuation {
+                            base_line += seams(buffer_row..buffer_row + 1)
+                                + u32::from(carries(buffer_row, true));
+                        }
+                        let last_row = row + 1 >= snapshot.line_count()
+                            || !snapshot.is_wrap_continuation(row + 1);
+                        if last_row {
+                            let hidden = buffer_row + 1..next_shown(row);
+                            base_line += seams(hidden.clone())
+                                + hidden.filter(|&hidden| carries(hidden, false)).count() as u32;
                         }
                     },
                 }
@@ -2951,6 +3027,34 @@ mod tests {
                 &format!("the moved line, paired={pair}"),
             );
         }
+
+        // A fold inside a modified hunk hides rows whose index-paired base lines
+        // hide with them. The hunks are hand-built, one with a base shorter than
+        // its live side and one with a longer base.
+        for (live, removed, fold) in [
+            (4..16, 10, Point::new(5, 1)..Point::new(13, 2)),
+            (4..14, 12, Point::new(5, 1)..Point::new(11, 2)),
+        ] {
+            for pair in [false, true] {
+                let mut editor = folded_hunk_editor(live.clone(), removed, fold.clone());
+                editor.display_map.set_pair_modified_hunks(pair);
+                let snapshot = editor.display_map.snapshot();
+                let shown_lines = (0..snapshot.line_count())
+                    .filter(|&row| {
+                        !snapshot.is_wrap_continuation(row)
+                            && matches!(snapshot.classify_row(row), BlockRowKind::BufferRow { .. })
+                    })
+                    .count() as u32;
+                assert!(
+                    shown_lines < snapshot.buffer_line_count(),
+                    "the fold hides rows of the hunk"
+                );
+                assert_agrees(
+                    &snapshot,
+                    &format!("a fold in {live:?} over {removed} base lines, paired={pair}"),
+                );
+            }
+        }
     }
 
     /// A fold hides unchanged lines alone, so each row it keeps starts on the
@@ -3032,34 +3136,13 @@ mod tests {
     }
 
     /// A fold inside a modified hunk hides live rows, and the rows below it
-    /// count only the base lines beside the rows it hid. The two-column layout
-    /// pairs each hidden row with a base line, so each one counts. The unified
-    /// layout gives a modified row no base line, so none do.
+    /// count the base lines index-paired with the rows it hid. The two-column
+    /// layout paints those lines beside the hidden rows, and the unified layout
+    /// hides them with the rows, so each one counts in both. The unified block
+    /// of the run above the fold holds the lines of that run alone.
     #[test]
     fn a_fold_inside_a_modified_hunk_counts_the_base_lines_it_hid() {
-        let text: String = (1..=20).map(|n| format!("{n}\n")).collect();
-        let head = "1\n2\n3\n4\n";
-        let removed: String = (5..=14).map(|n| format!("b{n}\n")).collect();
-        let dm = DiffMap::from_hunks(
-            [DiffHunk {
-                status: DiffHunkStatus::Modified,
-                unstaged_lines: std::iter::once(4..16).collect(),
-                marked_rows: vec![4..5, 15..16],
-                buffer_start_line: 4,
-                buffer_line_range: 4..16,
-                base_byte_range: head.len()..head.len() + removed.len() - 1,
-                anchor_range: None,
-                token_detail: Some(Arc::new(TokenDetail {
-                    buffer_spans: Vec::new(),
-                    base_spans: Vec::new(),
-                })),
-            }],
-            Some(Arc::new(format!("{head}{removed}17\n18\n19\n20\n"))),
-        );
-        let mut editor = diff_editor_with_map(&text, dm);
-        editor
-            .display_map
-            .fold(vec![Point::new(5, 1)..Point::new(13, 2)]);
+        let mut editor = folded_hunk_editor(4..16, 10, Point::new(5, 1)..Point::new(13, 2));
         let mut render = |area: Rect| {
             let mut buf = Buffer::empty(area);
             render_diff_view(
@@ -3106,8 +3189,67 @@ mod tests {
                 "5".to_string(),
                 "15".to_string(),
             ),
-            "the paired rows count their base lines, and the unified block and \
-             the mirror row past the fold count none for the hidden rows",
+            "the paired rows count their base lines, and in the unified layout \
+             the first run's block starts at b5 and the mirror row past the fold \
+             counts the lines hidden with the rows",
+        );
+    }
+
+    /// In the unified layout a fold inside a modified hunk hides the base lines
+    /// index-paired with the rows it hides, and each kept run shows its own
+    /// base lines in a block above it. The base lines past the live side join
+    /// the run that holds the last live row.
+    #[test]
+    fn a_fold_in_the_unified_layout_shows_each_kept_runs_base_lines_above_it() {
+        let mut editor = folded_hunk_editor(4..14, 12, Point::new(5, 1)..Point::new(11, 2));
+        let area = Rect::new(0, 0, 60, 24);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let text_at = |y: u16| {
+            line_text(&buf, y, cols.right_text_x..cols.right_text_x + 4)
+                .trim()
+                .to_string()
+        };
+        let number_beside = |needle: &str| {
+            let y = (0..area.height)
+                .find(|&y| text_at(y) == needle)
+                .expect("a row shows the needle");
+            line_text(&buf, y, cols.left_num_x..cols.left_num_x + 4)
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            (
+                (0..16).map(text_at).collect::<Vec<_>>(),
+                number_beside("b13"),
+                number_beside("15"),
+            ),
+            (
+                [
+                    "1", "2", "3", "4", "b5", "b6", "5", "6...", "b13", "b14", "b15", "b16", "13",
+                    "14", "15", "16",
+                ]
+                .map(String::from)
+                .to_vec(),
+                "13".to_string(),
+                "17".to_string(),
+            ),
+            "the first run's lines above it, the fold, then the last run's lines \
+             and the excess above it",
         );
     }
 
@@ -3163,7 +3305,8 @@ mod tests {
 
     /// A block whose row a fold hid paints after the fold's placeholder, and
     /// it shows its own base lines, because the walk counts the hidden rows up
-    /// to the block's row first.
+    /// to the block's row first. The fold hides the hunk's first row too, so
+    /// that row's index-paired `b7` hides with it and the block holds `b8`.
     #[test]
     fn a_block_below_a_hidden_row_paints_its_own_base_lines() {
         let head = "1\n2\n3\n4\n5\n6\n";
@@ -3212,9 +3355,9 @@ mod tests {
         };
         assert_eq!(
             [3, 4, 5].map(row),
-            [["7", "b7"], ["8", "b8"], ["8", "s8"]].map(|cells| cells.map(String::from)),
-            "the unified block below the hidden row above the hunk, then the hunk's \
-             live row past the fold",
+            [["8", "b8"], ["8", "s8"], ["9", "9"]].map(|cells| cells.map(String::from)),
+            "the shown run's block past the placeholder, its live row, then the \
+             mirror row below the hunk",
         );
     }
 
@@ -3289,6 +3432,44 @@ mod tests {
         let shared = Arc::new(RwLock::new(tb));
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
         editor.set_diff_view(true);
+        editor
+    }
+
+    /// A diff-view editor over the lines `1` to `20`, with one refined
+    /// `Modified` hunk over the rows `live` and folded over `fold`.
+    ///
+    /// The hunk's base holds `removed` lines named `b<n>` from the hunk's first
+    /// line on, and its first and last rows are the marked runs. The rows above
+    /// and below the hunk match the base.
+    fn folded_hunk_editor(
+        live: std::ops::Range<u32>,
+        removed: u32,
+        fold: std::ops::Range<Point>,
+    ) -> EditorState {
+        let text: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let head: String = (1..=live.start).map(|n| format!("{n}\n")).collect();
+        let lines: String = (live.start + 1..=live.start + removed)
+            .map(|n| format!("b{n}\n"))
+            .collect();
+        let tail: String = (live.end + 1..=20).map(|n| format!("{n}\n")).collect();
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(live.clone()).collect(),
+                marked_rows: vec![live.start..live.start + 1, live.end - 1..live.end],
+                buffer_start_line: live.start,
+                buffer_line_range: live,
+                base_byte_range: head.len()..head.len() + lines.len() - 1,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: Vec::new(),
+                })),
+            }],
+            Some(Arc::new(format!("{head}{lines}{tail}"))),
+        );
+        let mut editor = diff_editor_with_map(&text, dm);
+        editor.display_map.fold(vec![fold]);
         editor
     }
 

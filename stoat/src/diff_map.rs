@@ -32,8 +32,10 @@ pub(crate) struct DeletedBlockKey {
     base_bytes: Range<usize>,
     /// The geometry the hunk's base lines broke under.
     wrap: Option<WrapGeometry>,
-    /// Rows each paired live line takes, empty without a geometry. A paired
-    /// base line's overflow block starts past them.
+    /// Rows each index-paired live line takes. In the two-column layout a
+    /// paired base line's overflow block starts past them, so they stay empty
+    /// without a geometry. In the unified layout they say which index-paired
+    /// rows a fold hides, so they fill under any geometry.
     live_rows: Vec<u32>,
 }
 
@@ -1260,8 +1262,9 @@ impl DiffMap {
     /// base rows against its live ones, so a hunk that kept its start and its
     /// base bytes still blocks differently once its live row count moves. The
     /// wrap geometry is among them because it decides how many rows each base
-    /// line breaks into, and the rows each paired live line takes because they
-    /// decide where its base line overflows.
+    /// line breaks into, and the rows each index-paired live line takes
+    /// because they decide where its base line overflows, or, in the unified
+    /// layout, which base lines a fold hides.
     ///
     /// `live_rows` answers how many display rows a live buffer row takes.
     pub(crate) fn deleted_block_signature(
@@ -1280,12 +1283,9 @@ impl DiffMap {
                 buffer_end: hunk.buffer_line_range.end,
                 base_bytes: hunk.base_byte_range.clone(),
                 wrap,
-                live_rows: match wrap {
-                    Some(_) => self
-                        .paired_lines(hunk, pair_modified)
-                        .map(live_rows)
-                        .collect(),
-                    None => Vec::new(),
+                live_rows: match (wrap, pair_modified) {
+                    (None, true) => Vec::new(),
+                    _ => self.index_paired_lines(hunk).map(live_rows).collect(),
                 },
             })
             .collect()
@@ -1314,11 +1314,19 @@ impl DiffMap {
         })
     }
 
-    /// The live rows of `hunk` that have a base line beside them.
-    fn paired_lines(&self, hunk: &DiffHunk, pair_modified: bool) -> Range<u32> {
-        let count = self
-            .paired_rows(hunk, pair_modified)
-            .min(self.base_line_count(hunk));
+    /// The live rows of a Modified `hunk` that index-pair with a base line, as
+    /// far as the shorter side reaches. Empty for any other hunk.
+    ///
+    /// The two-column layout paints each of those base lines beside its row.
+    /// The unified layout blocks them, and a fold that hides a row hides its
+    /// line too.
+    fn index_paired_lines(&self, hunk: &DiffHunk) -> Range<u32> {
+        let count = match hunk.status {
+            DiffHunkStatus::Modified => self
+                .base_line_count(hunk)
+                .min(hunk.buffer_line_range.len() as u32),
+            _ => 0,
+        };
         hunk.buffer_start_line..hunk.buffer_start_line + count
     }
 
@@ -1350,6 +1358,12 @@ impl DiffMap {
     /// A Deleted hunk has no live rows to pair with, so all of it blocks, above
     /// the row it was deleted before.
     ///
+    /// In the unified layout a Modified hunk's base line index-pairs with a live
+    /// row. A fold over live rows hides the base lines index-paired with them,
+    /// each run of shown rows blocks its lines above its first row, and the
+    /// excess follows the last live row. A row a fold hides answers `u32::MAX`
+    /// from `live_rows`.
+    ///
     /// Each base line is a block of its own, and the blocks come grouped by
     /// hunk in the order [`Self::deleted_block_signature`] lists the hunks.
     /// Under `wrap`, a line wider than the width takes a row per segment,
@@ -1375,6 +1389,10 @@ impl DiffMap {
         self.deleted_block_hunks(pair_modified, wrap)
             .map(|hunk| {
                 let paired = self.paired_rows(hunk, pair_modified);
+                if hunk.status == DiffHunkStatus::Modified && paired == 0 {
+                    let lines = self.removed_base_lines(hunk, base_text);
+                    return unified_modified_blocks(hunk, lines, wrap, live_rows);
+                }
                 let placement_line = match hunk.status {
                     DiffHunkStatus::Modified if paired > 0 => hunk.buffer_line_range.end - 1,
                     _ => hunk.buffer_start_line.saturating_sub(1),
@@ -1602,6 +1620,48 @@ fn line_segments(line: &str, wrap: Option<WrapGeometry>) -> Vec<String> {
             _ => format!("{}{}", " ".repeat(indent as usize), &line[window]),
         })
         .collect()
+}
+
+/// The blocks of a Modified `hunk`'s base `lines` in the unified layout, which
+/// index-pairs each base line with a live row.
+///
+/// A base line hides with its live row when a fold hides that row, the way a
+/// paired base line in the two-column layout hides with the row it paints
+/// beside. Each run of shown rows blocks its lines above its first row, so
+/// every kept run reads as removed lines over added lines. The lines past the
+/// live side join the run that holds the last live row, or hang below that row
+/// when a fold hides it, and the block map moves them past the placeholder.
+///
+/// `live_rows` answers `u32::MAX` for a row a fold hides, per
+/// [`DiffMap::deleted_blocks`].
+fn unified_modified_blocks(
+    hunk: &DiffHunk,
+    mut lines: Lines<'_>,
+    wrap: Option<WrapGeometry>,
+    live_rows: &dyn Fn(u32) -> u32,
+) -> Vec<BlockProperties> {
+    let rows = hunk.buffer_line_range.clone();
+    let mut blocks = Vec::new();
+    let mut run = None;
+    for (row, line) in rows.clone().zip(lines.by_ref()) {
+        if live_rows(row) == u32::MAX {
+            run = None;
+            continue;
+        }
+        let placement = *run.get_or_insert(BlockPlacement::Below(row.saturating_sub(1)));
+        blocks.push(base_line_block(
+            placement,
+            line_segments(line, wrap),
+            0,
+            hunk.status,
+        ));
+    }
+
+    let excess = run.unwrap_or(BlockPlacement::Below(rows.end.saturating_sub(1)));
+    blocks.extend(
+        lines.map(|line| base_line_block(excess, line_segments(line, wrap), 0, hunk.status)),
+    );
+    blocks
 }
 
 /// A block of `rows` from one base line, the first of them its segment
@@ -3980,6 +4040,38 @@ mod tests {
 
         assert!(dm.has_deletion_after(3, true), "the block sits below row 3");
         assert!(!dm.has_deletion_after(2, true), "not above the hunk");
+    }
+
+    /// In the unified layout a fold over live rows hides the base lines they
+    /// index-pair with. Each run of shown rows blocks its lines above its first
+    /// row, and the excess follows the last live row, below it when a fold
+    /// hides it.
+    #[test]
+    fn a_fold_in_the_unified_layout_blocks_each_shown_run_above_itself() {
+        let dm = DiffMap::from_hunks(
+            [modified_hunk(2..8, 0..14)],
+            Some(Arc::new("a\nb\nc\nd\ne\nf\ng\n".to_string())),
+        );
+        let placements = |hidden: std::ops::Range<u32>| {
+            dm.deleted_blocks(false, None, &|row| match hidden.contains(&row) {
+                true => u32::MAX,
+                false => 1,
+            })
+            .into_iter()
+            .flatten()
+            .map(|block| block.placement)
+            .collect::<Vec<_>>()
+        };
+        let below = BlockPlacement::Below;
+        assert_eq!(
+            [placements(4..6), placements(6..8)],
+            [
+                vec![below(1), below(1), below(5), below(5), below(5)],
+                vec![below(1), below(1), below(1), below(1), below(7)],
+            ],
+            "rows 2 and 3 take a and b, rows 6 and 7 take e and f with the excess g; \
+             then rows 2 to 5 take a to d, and g hangs below the hidden last row",
+        );
     }
 
     /// The count the diff view maps a viewport top through. A row is
