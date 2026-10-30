@@ -3546,7 +3546,7 @@ fn fan_selections_to_children(stoat: &mut Stoat, walk_to_multichild_parent: bool
 }
 
 #[derive(Copy, Clone, Debug)]
-pub(super) enum NodeBound {
+pub(crate) enum NodeBound {
     Start,
     End,
 }
@@ -3561,6 +3561,7 @@ pub(super) fn move_to_parent_bound(
     bound: NodeBound,
     extend: bool,
 ) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::ParentBound { bound, extend });
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {

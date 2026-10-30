@@ -80,9 +80,10 @@ pub(crate) use terminal::respawn_terminal_panes;
 /// repeats the motion the user made. That is the count for the motions that
 /// take one, since the count does not outlive the keypress.
 ///
-/// A find also keeps the extend flag it ran with, as a Helix find does. The
-/// other motions that extend in select mode read the mode when they replay, so
-/// a replay in select mode extends where the first press moved.
+/// A find and a parent-node step also keep the extend flag they ran with, as
+/// their Helix counterparts do. The other motions that extend in select mode
+/// read the mode when they replay, so a replay in select mode extends where the
+/// first press moved.
 ///
 /// Only motions worth stepping through repeatedly are recorded. A motion that
 /// records nothing leaves the previous one in place, which is what makes Alt-.
@@ -116,6 +117,10 @@ pub(crate) enum LastMotion {
     },
     TsSibling {
         dir: movement::SiblingDir,
+    },
+    ParentBound {
+        bound: movement::NodeBound,
+        extend: bool,
     },
     TsObject {
         kind: textobject_nav::NavKind,
@@ -184,6 +189,9 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             LastMotion::Change { dir, count } => movement::goto_change_impl(stoat, dir, count),
             LastMotion::Diagnostic { dir } => lsp::goto_diagnostic(stoat, dir),
             LastMotion::TsSibling { dir } => movement::select_sibling(stoat, dir),
+            LastMotion::ParentBound { bound, extend } => {
+                movement::move_to_parent_bound(stoat, bound, extend)
+            },
             LastMotion::TsObject { kind, dir, count } => {
                 textobject_nav::goto_textobject_impl(stoat, kind, dir, count)
             },

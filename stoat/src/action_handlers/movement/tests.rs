@@ -8701,6 +8701,26 @@ fn repeat_last_motion_keeps_the_finds_own_extend_flag() {
     );
 }
 
+/// A replay keeps the extend flag of the parent-node step it repeats, as the
+/// find replay does, because a Helix node step captures its movement too.
+#[test]
+fn repeat_last_motion_keeps_the_parent_node_extend_flag() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(21, 22)]);
+    h.type_keys("alt-e");
+    assert_eq!(h.selection_spans(), vec![(22, 23, false)]);
+
+    h.type_keys("v");
+    h.type_keys("alt-.");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(26, 27, false)],
+        "the replay moves to the new bound, the way the normal-mode step did",
+    );
+}
+
 #[test]
 fn repeat_last_motion_with_no_history_is_noop() {
     let mut h = TestHarness::with_size(20, 5);
@@ -9330,6 +9350,21 @@ fn repeat_last_motion_replays_a_sibling_jump() {
         on_third[0].0 >= on_second[0].1,
         "the replay steps to the next sibling ({on_second:?} -> {on_third:?})",
     );
+}
+
+/// Alt-. after a parent-node jump repeats the jump, so it steps out one more
+/// node.
+#[test]
+fn repeat_last_motion_replays_a_parent_node_jump() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
+    h.open_file(&path);
+    set_selections(&mut h, &[(21, 22)]);
+
+    dispatch(&mut h.stoat, &stoat_action::MoveParentNodeEnd);
+    assert_eq!(h.selection_spans(), vec![(22, 23, false)], "past the 1");
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
+    assert_eq!(h.selection_spans(), vec![(26, 27, false)], "past the sum");
 }
 
 /// Running it again starts from where the last one left off, rather than
