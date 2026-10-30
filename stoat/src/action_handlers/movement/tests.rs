@@ -8855,6 +8855,28 @@ fn count_prefix_g_g_extends_in_select() {
     assert_eq!(h.selection_spans(), vec![(0, 5, false)]);
 }
 
+/// `g e` is Helix's spelling of the last-line key, beside the overlay's `g j`.
+#[test]
+fn g_e_reaches_the_last_line() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+
+    h.type_keys("g e");
+    assert_eq!(h.cursor_display_positions(), vec![(3, 0)]);
+}
+
+#[test]
+fn g_e_extends_to_the_last_line_in_select() {
+    let mut h = TestHarness::with_size(20, 10);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+    h.open_file(&path);
+    h.type_keys("v");
+
+    h.type_keys("g e");
+    assert_eq!(h.selection_spans(), vec![(0, 7, false)]);
+}
+
 #[test]
 fn goto_file_start_without_count_still_reaches_the_top() {
     let mut h = TestHarness::with_size(20, 10);

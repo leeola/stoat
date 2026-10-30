@@ -701,6 +701,8 @@ on key {
             s -> [GotoImplementation(), SetMode(normal)];
         }
 
+        # Both g e, the Helix spelling, and g j go to the last line.
+        e -> [GotoLastLine(), SetMode(normal)];
         j -> [GotoLastLine(), SetMode(normal)];
         # Both g g, the Helix spelling, and g k go to the file start.
         g -> [GotoFileStart(), SetMode(normal)];
@@ -1034,6 +1036,7 @@ on key {
         # Switch first, for the reason the normal-mode twin gives.
         ? -> [SetMode(select), OpenReverseSearchInput()];
         i -> [ExtendGotoFirstNonwhitespace(), SetMode(select)];
+        e -> [ExtendGotoLastLine(), SetMode(select)];
         j -> [ExtendGotoLastLine(), SetMode(select)];
         g -> [ExtendGotoFileStart(), SetMode(select)];
         k -> [ExtendGotoFileStart(), SetMode(select)];
