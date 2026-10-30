@@ -425,14 +425,13 @@ impl<'a> LiveHunks<'a> {
     /// reaches the next one. A position that blanks out between changes
     /// flickers as the reader moves.
     ///
-    /// A zero-width hunk past the last row counts from the last row, which is
-    /// where the change walk lands it. `rope` is the text of the snapshot that
-    /// [`DiffMap::live_hunks`] read.
-    pub fn hunk_index_at(&self, rope: &Rope, row: u32) -> Option<usize> {
-        let last_row = rope.max_point().row;
+    /// A zero-width hunk counts from the live row above its seam, where the
+    /// diff view's walk lands it, so a seam past the last row counts from the
+    /// last row.
+    pub fn hunk_index_at(&self, row: u32) -> Option<usize> {
         let hunks = self.hunks.partition_point(|live| {
             let landing = match live.rows.is_empty() {
-                true => live.rows.start.min(last_row),
+                true => live.rows.start.saturating_sub(1),
                 false => live.rows.start,
             };
             landing <= row
@@ -3294,7 +3293,7 @@ mod tests {
         let live = dm.live_hunks(&snapshot);
         assert_eq!(
             (0..4)
-                .map(|row| live.hunk_index_at(snapshot.rope(), row))
+                .map(|row| live.hunk_index_at(row))
                 .collect::<Vec<_>>(),
             [None, None, None, Some(1)],
             "the mark on row 1 is no position, and the hunk on row 3 is the first",
@@ -3334,7 +3333,7 @@ mod tests {
 
         let snapshot = buffer_holding(&"x\n".repeat(10)).snapshot();
         let live = dm.live_hunks(&snapshot);
-        let at = |row| live.hunk_index_at(snapshot.rope(), row);
+        let at = |row| live.hunk_index_at(row);
         assert_eq!(at(0), None, "above the first hunk nothing is behind it");
         assert_eq!(at(1), None, "and still nothing on the row before it");
         assert_eq!(at(2), Some(1), "the first hunk's own start");
@@ -3346,7 +3345,7 @@ mod tests {
         assert_eq!(
             DiffMap::from_hunks([], None)
                 .live_hunks(&snapshot)
-                .hunk_index_at(snapshot.rope(), 0),
+                .hunk_index_at(0),
             None,
             "an empty map has no position to report"
         );
@@ -3368,7 +3367,7 @@ mod tests {
         let live = dm.live_hunks(&snapshot);
         assert_eq!(
             (0..4)
-                .map(|row| live.hunk_index_at(snapshot.rope(), row))
+                .map(|row| live.hunk_index_at(row))
                 .collect::<Vec<_>>(),
             [None, None, Some(1), Some(1)],
             "the row deleted above moves the hunk from row 3 to row 2",
@@ -3385,9 +3384,25 @@ mod tests {
         let live = dm.live_hunks(&snapshot);
         assert_eq!(
             (0..3)
-                .map(|row| live.hunk_index_at(snapshot.rope(), row))
+                .map(|row| live.hunk_index_at(row))
                 .collect::<Vec<_>>(),
             [None, None, Some(1)],
+        );
+    }
+
+    /// A removal inside the file counts from the live row above its seam, where
+    /// the diff view's walk lands it, so the position names the removal as soon
+    /// as the walk arrives.
+    #[test]
+    fn a_seam_inside_the_file_counts_from_the_row_above_it() {
+        let dm = DiffMap::from_hunks([deleted_hunk(1, 0..0)], None);
+        let snapshot = buffer_holding("a\nb\nc\nd").snapshot();
+        let live = dm.live_hunks(&snapshot);
+        assert_eq!(
+            (0..4)
+                .map(|row| live.hunk_index_at(row))
+                .collect::<Vec<_>>(),
+            [None, Some(1), Some(1), Some(1)],
         );
     }
 
@@ -4468,7 +4483,7 @@ mod tests {
         let live = map.live_hunks(&snapshot);
         (
             live.hunk_stops(),
-            live.hunk_index_at(snapshot.rope(), row),
+            live.hunk_index_at(row),
             live.change_count(),
         )
     }

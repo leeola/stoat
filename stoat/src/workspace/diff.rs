@@ -1505,9 +1505,7 @@ pub(crate) fn repo_hunk_position(ws: &Workspace) -> Option<HunkPosition> {
     Some(HunkPosition {
         file_at: files_before + 1,
         file_total: files_other + 1,
-        hunk_at: live
-            .hunk_index_at(snapshot.rope(), cursor_row)
-            .map(|k| before + k),
+        hunk_at: live.hunk_index_at(cursor_row).map(|k| before + k),
         hunk_total: total,
     })
 }
