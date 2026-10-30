@@ -1478,6 +1478,21 @@ mod tests {
         );
     }
 
+    /// Select mode hops by function on the Alt wheel, as normal mode does.
+    #[test]
+    fn the_select_block_binds_the_wheel_to_the_object_hops() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let select = TestState::new()
+            .set("mode", StateValue::String("select".into()))
+            .set("pane", StateValue::String("editor".into()));
+        let notch = |dir| action_names(keymap.lookup_wheel(&select, dir, KeyModifiers::ALT));
+
+        assert_eq!(
+            [notch(WheelDirection::Down), notch(WheelDirection::Up)],
+            [only("GotoNextFunction"), only("GotoPrevFunction")],
+        );
+    }
+
     #[test]
     fn lookup_wheel_ranks_the_more_specific_predicate_first() {
         let config = parse_config(
@@ -2683,6 +2698,31 @@ mod tests {
                 "{mode} drops the server gotos and keeps references",
             );
         }
+    }
+
+    /// Ctrl-a opens the tab prefix from select mode, as it does from normal and
+    /// insert mode, so a tab chord needs no Escape first.
+    #[test]
+    fn ctrl_a_opens_the_tab_prefix_from_select_mode() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let ctrl_a = |mode: &str| {
+            let state = TestState::new().set("mode", StateValue::String(mode.into()));
+            keymap
+                .lookup(
+                    &state,
+                    &KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+                )
+                .map(|actions| action_calls(&actions))
+        };
+        let to_prefix = Some(vec![(
+            "SetMode".to_string(),
+            vec![Value::Ident("prefix".into())],
+        )]);
+
+        assert_eq!(
+            [ctrl_a("normal"), ctrl_a("insert"), ctrl_a("select")],
+            [to_prefix.clone(), to_prefix.clone(), to_prefix],
+        );
     }
 
     /// Reading a tour is a run of steps, so the mode `space W` reaches has to
