@@ -7858,30 +7858,24 @@ fn alt_dot_with_a_large_count_stops_at_the_chain_end() {
     );
 }
 
+/// A count before Alt-b steps out one node, as in Helix.
 #[test]
-fn count_prefix_move_to_parent_walks_higher_than_single_step() {
-    let mut h_single = TestHarness::with_size(40, 5);
-    let p1 = h_single.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
-    h_single.open_file(&p1);
-    h_single.type_keys("l l l l l l l l l l l l l l l l l l l l l l");
-    let starting = h_single.primary_head_offset();
-    dispatch(&mut h_single.stoat, &stoat_action::MoveParentNodeStart);
-    let single_offset = h_single.primary_head_offset();
-    assert!(
-        single_offset < starting,
-        "1 Alt-b should move backward from {starting} (got {single_offset})"
-    );
+fn a_count_before_move_parent_node_start_steps_once() {
+    let in_the_sum = || {
+        let mut h = TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l l l l l l l l l l l");
+        h
+    };
+    let mut counted = in_the_sum();
+    counted.type_keys("3 alt-b");
 
-    let mut h_count = TestHarness::with_size(40, 5);
-    let p2 = h_count.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
-    h_count.open_file(&p2);
-    h_count.type_keys("l l l l l l l l l l l l l l l l l l l l l l");
-    h_count.type_keys("3 alt-b");
-    let count_offset = h_count.primary_head_offset();
-    assert!(
-        count_offset < single_offset,
-        "3 Alt-b should walk further up than 1 Alt-b ({single_offset} -> {count_offset})"
-    );
+    let mut once = in_the_sum();
+    let starting = once.selection_spans();
+    dispatch(&mut once.stoat, &stoat_action::MoveParentNodeStart);
+    assert_ne!(once.selection_spans(), starting, "one step moves");
+    assert_eq!(counted.selection_spans(), once.selection_spans());
 }
 
 #[test]
@@ -7964,16 +7958,16 @@ fn move_parent_node_start_climbs_off_a_node_start() {
     );
 }
 
-/// A count repeats the step rather than widening one, so each repeat starts
-/// from where the last one landed.
+/// Each press starts from where the last one landed, so two presses step out
+/// one node each.
 #[test]
-fn a_counted_parent_node_end_steps_out_one_node_at_a_time() {
+fn two_parent_node_end_presses_step_out_one_node_each() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "let a = foo(1);\n");
     h.open_file(&path);
     set_selections(&mut h, &[(8, 9)]);
 
-    h.stoat.pending_count = Some(2);
+    dispatch(&mut h.stoat, &stoat_action::MoveParentNodeEnd);
     dispatch(&mut h.stoat, &stoat_action::MoveParentNodeEnd);
 
     assert_eq!(

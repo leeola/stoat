@@ -3551,12 +3551,16 @@ pub(super) enum NodeBound {
     End,
 }
 
+/// Move each cursor to the start or end of the syntax node it sits in, one
+/// node per press.
+///
+/// A count before the key is not read, for the reason [`expand_selection`]
+/// gives.
 pub(super) fn move_to_parent_bound(
     stoat: &mut Stoat,
     bound: NodeBound,
     extend: bool,
 ) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1).max(1);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3593,7 +3597,7 @@ pub(super) fn move_to_parent_bound(
                 let cursor = cursor_offset(rope, read.tail, read.head);
                 let start = read.head.min(read.tail);
                 let end = read.head.max(read.tail);
-                let landing = walk_to_node_bound(snapshot, start, end, cursor, bound, count)?;
+                let landing = walk_to_node_bound(snapshot, start, end, cursor, bound)?;
                 Some((read.id, landing))
             })
             .collect()
@@ -3611,48 +3615,34 @@ pub(super) fn move_to_parent_bound(
     UpdateEffect::Redraw
 }
 
-/// The offset `count` node-bound steps from the selection covering
-/// `start..end`, whose block cursor covers the cell at `cursor`.
+/// The offset one node-bound step from the selection covering `start..end`,
+/// whose block cursor covers the cell at `cursor`.
 ///
-/// One step takes the innermost named node covering the selection and answers
+/// The step takes the innermost named node covering the selection and answers
 /// with the bound `bound` names. Going forward that is the cell just past the
-/// node, so a run of steps walks out through the enclosing constructs one at a
-/// time. Going backward it is the node's own first cell, except where the
+/// node, so repeated presses walk out through the enclosing constructs one at
+/// a time. Going backward it is the node's own first cell, except where the
 /// cursor already stands there and the step climbs instead, since a node offers
 /// nowhere further back to go.
-///
-/// Each step feeds its landing back as the next collapsed cursor, so a count
-/// repeats the motion rather than widening any single step's reach.
 fn walk_to_node_bound(
     snapshot: &stoat_language::SyntaxSnapshot,
     start: usize,
     end: usize,
     cursor: usize,
     bound: NodeBound,
-    count: u32,
 ) -> Option<usize> {
-    let (mut start, mut end, mut cursor) = (start, end, cursor);
-    let mut landing = None;
-
-    for _ in 0..count {
-        let layer = deepest_containing_layer(snapshot, start, end)?;
-        let node = layer
-            .tree
-            .root_node()
-            .named_descendant_for_byte_range(start, end)?;
-        let next = match bound {
-            NodeBound::End => node.end_byte(),
-            NodeBound::Start if node.start_byte() == cursor => {
-                find_parent_start(node).unwrap_or(node).start_byte()
-            },
-            NodeBound::Start => node.start_byte(),
-        };
-
-        landing = Some(next);
-        (start, end, cursor) = (next, next, next);
-    }
-
-    landing
+    let layer = deepest_containing_layer(snapshot, start, end)?;
+    let node = layer
+        .tree
+        .root_node()
+        .named_descendant_for_byte_range(start, end)?;
+    Some(match bound {
+        NodeBound::End => node.end_byte(),
+        NodeBound::Start if node.start_byte() == cursor => {
+            find_parent_start(node).unwrap_or(node).start_byte()
+        },
+        NodeBound::Start => node.start_byte(),
+    })
 }
 
 /// The nearest named ancestor of `node` that starts before `node` does.
