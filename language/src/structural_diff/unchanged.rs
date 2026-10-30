@@ -168,6 +168,13 @@ pub struct PreprocessResult {
     /// The change maps say which nodes are unchanged but not what each one
     /// matched, which a consumer aligning the two sides by content needs.
     pub pairs: Vec<(SyntaxId, SyntaxId)>,
+    /// The `(lhs, rhs)` list pairs the pass recursed into, each two lists of
+    /// one kind that differ, whose children it paired against each other.
+    ///
+    /// They stay apart from [`Self::pairs`], because only a pair matched whole
+    /// pairs its children one for one. A consumer that climbs from a matched
+    /// token through the structure around it reads both.
+    pub entered: Vec<(SyntaxId, SyntaxId)>,
 }
 
 /// How many times each content id occurs in one arena.
@@ -230,6 +237,7 @@ pub fn mark_unchanged(
         rhs_changes: ChangeMap::with_len(rhs_arena.len()),
         sections: Vec::new(),
         pairs: Vec::new(),
+        entered: Vec::new(),
     };
 
     // Top-level: roots are always lists in practice (they wrap the
@@ -707,6 +715,7 @@ fn recurse_singleton_lists(
     {
         let lhs_grand = lhs_list.children.clone();
         let rhs_grand = rhs_list.children.clone();
+        out.entered.push((lhs_id, rhs_id));
         pair_children(lhs_arena, rhs_arena, &lhs_grand, &rhs_grand, facts, out);
         true
     } else {

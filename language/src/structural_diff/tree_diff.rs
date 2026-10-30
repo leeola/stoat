@@ -18,7 +18,8 @@
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
-    dijkstra::{populate_change_map, shortest_path, SearchOutcome, DEFAULT_GRAPH_LIMIT},
+    dijkstra::{populate_change_map, shortest_path, PathPairs, SearchOutcome, DEFAULT_GRAPH_LIMIT},
+    fx::FxBuildHasher,
     graph::{is_comment_atom, is_string_atom},
     line_diff,
     lower::lower_tree,
@@ -542,6 +543,10 @@ struct PreparedFile<'a> {
     /// subtree equal on both sides. [`matched_atom_pairs`] expands them into
     /// the token pairs of the result.
     matched_nodes: Vec<(SyntaxId, SyntaxId)>,
+    /// The list pairs the preprocessing and the search entered together, whose
+    /// children differ. [`matched_atom_pairs`] climbs through them from a token
+    /// pair.
+    entered_lists: Vec<(SyntaxId, SyntaxId)>,
     /// The byte spans, lhs then rhs, of the sections whose search passed the
     /// vertex cap or was cancelled, which [`DiffResult::unsearched`] reports.
     unsearched: Vec<(Range<usize>, Range<usize>)>,
@@ -651,8 +656,11 @@ fn prepare_per_file<'a>(
     // can hit the graph cap. Take the sections out so the loop is free to
     // mutate the change maps in place.
     let sections = std::mem::take(&mut preprocess.sections);
-    let mut replaced_atoms = Vec::new();
-    let mut matched_nodes = std::mem::take(&mut preprocess.pairs);
+    let mut pairs = PathPairs {
+        unchanged: std::mem::take(&mut preprocess.pairs),
+        entered: std::mem::take(&mut preprocess.entered),
+        ..PathPairs::default()
+    };
     let mut unsearched = Vec::new();
     for (lhs_run, rhs_run) in &sections {
         // A section empty on one side is a pure insertion or deletion. Its
@@ -680,8 +688,7 @@ fn prepare_per_file<'a>(
                     &path,
                     &mut preprocess.lhs_changes,
                     &mut preprocess.rhs_changes,
-                    &mut replaced_atoms,
-                    &mut matched_nodes,
+                    &mut pairs,
                 );
             },
             // A cancelled search lands here too, and its section is just as
@@ -696,14 +703,14 @@ fn prepare_per_file<'a>(
         &lhs_arena,
         lhs_root,
         &mut preprocess.lhs_changes,
-        &mut matched_nodes,
+        &mut pairs.unchanged,
         Side::Lhs,
     );
     fix_all_sliders(
         &rhs_arena,
         rhs_root,
         &mut preprocess.rhs_changes,
-        &mut matched_nodes,
+        &mut pairs.unchanged,
         Side::Rhs,
     );
 
@@ -718,8 +725,9 @@ fn prepare_per_file<'a>(
         rhs_lines: LineIndex::new(rhs),
         lhs_text: lhs,
         rhs_text: rhs,
-        replaced_atoms,
-        matched_nodes,
+        replaced_atoms: pairs.replaced,
+        matched_nodes: pairs.unchanged,
+        entered_lists: pairs.entered,
         unsearched,
         base_slot,
     })
@@ -793,12 +801,26 @@ fn finalize_per_file(
 }
 
 /// Expand each node pair matched whole into the atom pairs beneath it, in lhs
-/// order.
+/// order, keeping only the pairs whose paired structure starts their lines.
 ///
 /// Two matched nodes share one content id, so their subtrees share one shape,
 /// and a lockstep walk pairs each atom with its counterpart. A bracket is an
 /// atom child of its list, so the walk pairs delimiters too. An atom pair also
 /// needs equal text, so a content id collision never pairs unequal tokens.
+///
+/// A pair then climbs through the list pairs around it, each entered together
+/// or equal in content, to the outermost one. The walk keeps the pair only when
+/// that list pair starts at or before the first non-blank byte of the token's
+/// line on both sides. With no list pair around it, the token itself must start
+/// there.
+///
+/// Line alignment pins rows by these pairs. Without the climb, a token kept
+/// inside a statement that is novel on both sides pins its line. A removed line
+/// then lands in the middle of the block that replaced it.
+///
+/// Two lists equal in content count even when the diff matched only their
+/// parts. The preprocessing pairs a statement with the statement whose new `if`
+/// holds its copy, and the search then matches the copy's tokens one by one.
 ///
 /// The slider and move passes retag atoms after the pairs were recorded, so a
 /// pair is dropped when either atom is no longer `Unchanged`. A zero-width atom
@@ -808,7 +830,7 @@ fn matched_atom_pairs(
     lhs_changes: &ChangeMap,
     rhs_changes: &ChangeMap,
 ) -> Vec<MatchedPair> {
-    let mut matched = Vec::new();
+    let mut atoms = Vec::new();
     let mut stack = Vec::new();
     for &pair in &prepared.matched_nodes {
         stack.push(pair);
@@ -823,10 +845,7 @@ fn matched_atom_pairs(
                         && lhs_changes.get(lhs_id) == ChangeKind::Unchanged
                         && rhs_changes.get(rhs_id) == ChangeKind::Unchanged
                     {
-                        matched.push(MatchedPair {
-                            lhs: lhs.byte_range.clone(),
-                            rhs: rhs.byte_range.clone(),
-                        });
+                        atoms.push((lhs_id, rhs_id));
                     }
                 },
                 (Syntax::List(lhs), Syntax::List(rhs))
@@ -843,6 +862,36 @@ fn matched_atom_pairs(
             }
         }
     }
+
+    let entered: HashMap<SyntaxId, SyntaxId, FxBuildHasher> =
+        prepared.entered_lists.iter().copied().collect();
+    let paired = |lhs: SyntaxId, rhs: SyntaxId| {
+        entered.get(&lhs) == Some(&rhs)
+            || prepared.lhs_arena.get(lhs).content_id() == prepared.rhs_arena.get(rhs).content_id()
+    };
+
+    let lhs_parents = prepared.lhs_arena.parents();
+    let rhs_parents = prepared.rhs_arena.parents();
+    let mut matched: Vec<MatchedPair> = atoms
+        .into_iter()
+        .filter_map(|(lhs_id, rhs_id)| {
+            let (mut lhs_top, mut rhs_top) = (lhs_id, rhs_id);
+            while let (Some(lhs_parent), Some(rhs_parent)) =
+                (lhs_parents[lhs_top.0], rhs_parents[rhs_top.0])
+                && paired(lhs_parent, rhs_parent)
+            {
+                (lhs_top, rhs_top) = (lhs_parent, rhs_parent);
+            }
+
+            let lhs = full_byte_range(&prepared.lhs_arena, lhs_id);
+            let rhs = full_byte_range(&prepared.rhs_arena, rhs_id);
+            let lhs_starts = full_byte_range(&prepared.lhs_arena, lhs_top).start
+                <= line_head(prepared.lhs_text, &prepared.lhs_lines, lhs.start);
+            let rhs_starts = full_byte_range(&prepared.rhs_arena, rhs_top).start
+                <= line_head(prepared.rhs_text, &prepared.rhs_lines, rhs.start);
+            (lhs_starts && rhs_starts).then_some(MatchedPair { lhs, rhs })
+        })
+        .collect();
 
     matched.sort_by_key(|pair| pair.lhs.start);
     matched
@@ -1237,6 +1286,17 @@ impl LineIndex {
     }
 }
 
+/// The first byte of the line holding `byte` that is not ASCII whitespace, or
+/// the line's start when the line is blank.
+fn line_head(text: &str, lines: &LineIndex, byte: usize) -> usize {
+    let start = lines.line_starts[lines.line_of(byte) as usize];
+    text.as_bytes()[start..]
+        .iter()
+        .take_while(|&&b| b != b'\n')
+        .position(|b| !b.is_ascii_whitespace())
+        .map_or(start, |offset| start + offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1406,6 +1466,57 @@ mod tests {
                 token("}", 3, 5),
             ],
             "the wrapped call pairs on the line it moved to",
+        );
+    }
+
+    /// An identifier kept from two statements into the arguments of a new call
+    /// sits in structure that is novel on both sides, so it pins no line, and
+    /// the removed statements do not thread into the call.
+    #[test]
+    fn a_token_kept_inside_a_novel_statement_pairs_nothing() {
+        let lhs = "fn f() {\n    let a = bar;\n    let b = baz;\n}\n";
+        let rhs = "fn f() {\n    foo(\n        bar,\n        baz,\n    );\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
+        assert_eq!(
+            matched_lines(&result, lhs, rhs),
+            [
+                token("fn", 0, 0),
+                token("f", 0, 0),
+                token("()", 0, 0),
+                token("{", 0, 0),
+                token("}", 3, 5),
+            ],
+            "bar and baz stay unchanged but pair nothing",
+        );
+    }
+
+    /// A renamed call keeps its argument pairs beside an inserted line, because
+    /// the search enters the two calls together.
+    #[test]
+    fn a_renamed_call_beside_an_insertion_keeps_its_argument_pairs() {
+        let lhs = "fn f() {\n    old_name(a, b);\n}\n";
+        let rhs = "fn f() {\n    let t = 1;\n    new_name(a, b);\n}\n";
+        let result = diff_with_language(&rust_lang(), lhs, rhs).unwrap();
+
+        let token = |text, lhs_line, rhs_line| (text, text, lhs_line, rhs_line);
+        assert_eq!(
+            matched_lines(&result, lhs, rhs),
+            [
+                token("fn", 0, 0),
+                token("f", 0, 0),
+                token("()", 0, 0),
+                token("{", 0, 0),
+                token("(", 1, 2),
+                token("a", 1, 2),
+                token(",", 1, 2),
+                token("b", 1, 2),
+                token(")", 1, 2),
+                token(";", 1, 2),
+                token("}", 2, 3),
+            ],
+            "the arguments pair the old call with the renamed one",
         );
     }
 

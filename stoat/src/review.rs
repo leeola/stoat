@@ -885,6 +885,12 @@ mod tests {
             .collect()
     }
 
+    /// A row side holding `text` with one change span per `(start, end)` byte
+    /// pair of `spans`.
+    fn spanned<'a>(text: &'a str, spans: &[(usize, usize)]) -> SideShape<'a> {
+        Some((text, spans.iter().map(|&(start, end)| start..end).collect()))
+    }
+
     /// A call reformatted across lines with one added argument pairs its old
     /// line with the new first line, and each line holding only new tokens
     /// stands alone. Pairing by line text puts `}` beside `bar,` instead, since
@@ -911,6 +917,63 @@ mod tests {
                 (side("}", None), side("}", None), false),
             ]],
             "the old call pairs with its first new line, and the new lines stand alone",
+        );
+    }
+
+    /// Two statements replaced by one call across lines pair with the call
+    /// from its first line down. The identifiers the call kept do not pull
+    /// each removed statement beside the argument line that holds it.
+    #[test]
+    fn a_block_replaced_by_a_call_pairs_from_the_call_s_first_line() {
+        let base = "fn f() {\n    let a = bar;\n    let b = baz;\n}\n";
+        let buffer = "fn f() {\n    foo(\n        bar,\n        baz,\n    );\n}\n";
+
+        assert_eq!(
+            shapes(&hunks_rust(base, buffer, 1)),
+            [[
+                (spanned("fn f() {", &[]), spanned("fn f() {", &[]), false),
+                (
+                    spanned("    let a = bar;", &[(4, 7), (8, 9), (10, 11), (15, 16)]),
+                    spanned("    foo(", &[(4, 8)]),
+                    true
+                ),
+                (
+                    spanned("    let b = baz;", &[(4, 7), (8, 9), (10, 11)]),
+                    spanned("        bar,", &[(11, 12)]),
+                    true
+                ),
+                (None, spanned("        baz,", &[(11, 12)]), true),
+                (None, spanned("    );", &[(4, 5)]), true),
+                (spanned("}", &[]), spanned("}", &[]), false),
+            ]],
+            "the removed statements pair with the call by position",
+        );
+    }
+
+    /// A renamed call keeps its row beside a line inserted above it, because
+    /// its argument list pairs it with the old call.
+    #[test]
+    fn a_renamed_call_beside_an_inserted_line_keeps_its_row() {
+        let base = "fn f() {\n    old_name(a, b);\n}\n";
+        let buffer = "fn f() {\n    let t = 1;\n    new_name(a, b);\n}\n";
+
+        assert_eq!(
+            shapes(&hunks_rust(base, buffer, 1)),
+            [[
+                (spanned("fn f() {", &[]), spanned("fn f() {", &[]), false),
+                (
+                    None,
+                    spanned("    let t = 1;", &[(4, 7), (8, 9), (10, 11), (12, 14)]),
+                    true
+                ),
+                (
+                    spanned("    old_name(a, b);", &[(4, 12)]),
+                    spanned("    new_name(a, b);", &[(4, 12)]),
+                    true
+                ),
+                (spanned("}", &[]), spanned("}", &[]), false),
+            ]],
+            "the renamed call stays beside the old one",
         );
     }
 

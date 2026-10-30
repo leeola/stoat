@@ -78,6 +78,28 @@ pub struct PathStep {
     pub rhs: Option<SyntaxId>,
 }
 
+/// The node pairs behind the edges of resolved paths, each an lhs node and its
+/// rhs counterpart, which [`populate_change_map`] appends in path order.
+///
+/// The change maps say which nodes are unchanged but not what each one
+/// matched, which a consumer aligning the two sides needs.
+#[derive(Default)]
+pub struct PathPairs {
+    /// The atom pair behind every replacement edge.
+    ///
+    /// Those two atoms are counterparts only because the search chose them, so
+    /// the path is the one chance to learn the pairing.
+    pub replaced: Vec<(SyntaxId, SyntaxId)>,
+    /// The node pair behind every `UnchangedNode` edge, each a subtree equal on
+    /// both sides.
+    pub unchanged: Vec<(SyntaxId, SyntaxId)>,
+    /// The list pair behind every `EnterUnchangedDelimiter` edge.
+    ///
+    /// The two lists differ, so they stay apart from `unchanged`, and their
+    /// children pair through their own steps.
+    pub entered: Vec<(SyntaxId, SyntaxId)>,
+}
+
 /// Shallow dedup key formed from the syntax-position pair plus the top of
 /// the parents stack. Vertices sharing a key are the "same" graph position
 /// up to deeper nesting. The seen map keeps up to [`MAX_VARIANTS_PER_KEY`]
@@ -481,15 +503,8 @@ fn reconstruct_path(va: &VertexArena, end: u32) -> Vec<PathStep> {
 /// Nodes touched by Novel edges are left as `Pending`. The caller's
 /// downstream pass converts them into `DiffChange` byte ranges.
 ///
-/// Appends to `replaced` the `(lhs, rhs)` atom pair behind every
-/// replacement edge, in path order. Those two atoms are counterparts
-/// only because the search chose them, so this is the caller's one
-/// chance to learn the pairing.
-///
-/// Appends to `pairs` the `(lhs, rhs)` node pair behind every
-/// `UnchangedNode` edge, each a subtree equal on both sides. An entered
-/// delimiter adds no pair, because its list differs and its bracket atoms
-/// are children the path pairs through their own steps.
+/// Appends to `pairs` the node pair behind each pairing edge of the path, in
+/// path order, grouped by edge as [`PathPairs`] describes.
 ///
 /// Mirrors `references/difftastic/src/diff/graph.rs:796-847`
 /// `populate_change_map`.
@@ -499,8 +514,7 @@ pub fn populate_change_map(
     path: &[PathStep],
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
-    replaced: &mut Vec<(SyntaxId, SyntaxId)>,
-    pairs: &mut Vec<(SyntaxId, SyntaxId)>,
+    pairs: &mut PathPairs,
 ) {
     for step in path {
         match step.edge {
@@ -512,7 +526,7 @@ pub fn populate_change_map(
                     mark_subtree(rhs_arena, rhs_id, rhs_changes, ChangeKind::Unchanged);
                 }
                 if let (Some(lhs_id), Some(rhs_id)) = (step.lhs, step.rhs) {
-                    pairs.push((lhs_id, rhs_id));
+                    pairs.unchanged.push((lhs_id, rhs_id));
                 }
             },
             Edge::EnterUnchangedDelimiter { .. } => {
@@ -521,6 +535,9 @@ pub fn populate_change_map(
                 }
                 if let Some(rhs_id) = step.rhs {
                     rhs_changes.mark(rhs_id, ChangeKind::Unchanged);
+                }
+                if let (Some(lhs_id), Some(rhs_id)) = (step.lhs, step.rhs) {
+                    pairs.entered.push((lhs_id, rhs_id));
                 }
             },
             // A replacement edge pairs two similar atoms structurally, which is
@@ -535,7 +552,7 @@ pub fn populate_change_map(
             // from position, which pairs atoms the search never matched.
             Edge::ReplacedComment { .. } | Edge::ReplacedString { .. } => {
                 if let (Some(lhs_id), Some(rhs_id)) = (step.lhs, step.rhs) {
-                    replaced.push((lhs_id, rhs_id));
+                    pairs.replaced.push((lhs_id, rhs_id));
                 }
             },
 
@@ -727,8 +744,7 @@ mod tests {
             &path,
             &mut lhs_changes,
             &mut rhs_changes,
-            &mut Vec::new(),
-            &mut Vec::new(),
+            &mut PathPairs::default(),
         );
         assert_eq!(lhs_changes.get(lhs_root), ChangeKind::Unchanged);
         assert_eq!(rhs_changes.get(rhs_root), ChangeKind::Unchanged);

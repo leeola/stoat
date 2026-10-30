@@ -192,6 +192,21 @@ impl SyntaxArena {
         counts
     }
 
+    /// The list that holds each node as a child, indexed by [`SyntaxId`].
+    ///
+    /// The root keeps `None`.
+    pub fn parents(&self) -> Vec<Option<SyntaxId>> {
+        let mut parents = vec![None; self.nodes.len()];
+        for (i, node) in self.nodes.iter().enumerate() {
+            if let Syntax::List(list) = node {
+                for child in &list.children {
+                    parents[child.0] = Some(SyntaxId(i));
+                }
+            }
+        }
+        parents
+    }
+
     /// Walk every [`Syntax::List`] in the arena and set the
     /// `next_sibling` pointer of each child to its successor in the
     /// parent's `children` Vec. The last child's `next_sibling` is

@@ -142,6 +142,12 @@ pub struct DiffChange {
 /// pairs nothing, though every token in it survived. A pair names one surviving
 /// token on both sides, so a consumer aligns lines by the tokens they share.
 ///
+/// A token makes a pair only when the structure paired around it starts at or
+/// before the first token of its line, on both sides. A token kept inside a
+/// statement novel on both sides makes none, such as an identifier moved into
+/// a new call. The lines of a replaced block then do not thread into the block
+/// that replaced it.
+///
 /// [`DiffResult::unchanged_lines`] holds the same shape for the lines that a
 /// prose pair's refine found equal.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -221,7 +227,11 @@ pub struct FileDiffInput<'a> {
 pub struct DiffResult {
     pub changes: Vec<DiffChange>,
     pub fell_back_to_line_diff: bool,
-    /// Every token pair the tree diff holds unchanged, in lhs order.
+    /// The token pairs the tree diff holds unchanged inside structure that
+    /// starts both lines, in lhs order.
+    ///
+    /// A consumer aligns lines by them without threading a replaced block into
+    /// the block that replaced it, as [`MatchedPair`] describes.
     ///
     /// The two ranges of a pair hold equal text. The line fallback pairs no
     /// tokens, so its result leaves this empty, and so does a diff run under
