@@ -186,7 +186,8 @@ pub(crate) fn apply_jump_entry(stoat: &mut Stoat, entry: JumpEntry) {
 
 pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
     push_jump(stoat);
-    UpdateEffect::None
+    stoat.set_status("Selection saved to jumplist");
+    UpdateEffect::Redraw
 }
 
 pub(crate) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {

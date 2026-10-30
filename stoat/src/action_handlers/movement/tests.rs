@@ -8176,6 +8176,27 @@ fn jump_backward_restores_saved_position() {
     assert_eq!(h.primary_head_offset(), saved);
 }
 
+/// `space s` reports the save on the status row, as Helix's `save_selection`
+/// does. `Ctrl-s` switches no mode, so the save itself asks for the frame that
+/// paints the row.
+#[test]
+fn save_selection_reports_on_the_status_row() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("space s");
+    assert_eq!(
+        h.stoat.pending_message.as_deref(),
+        Some("Selection saved to jumplist"),
+    );
+
+    assert_eq!(
+        dispatch(&mut h.stoat, &stoat_action::SaveSelection),
+        UpdateEffect::Redraw,
+        "the save asks for the frame that paints the row",
+    );
+}
+
 /// Outside insert mode `Ctrl-s` saves the selection, as Helix's
 /// `save_selection` does, so a jump back returns to it.
 #[test]
