@@ -8129,6 +8129,65 @@ fn jump_backward_restores_saved_position() {
     assert_eq!(h.primary_head_offset(), saved);
 }
 
+/// `Ctrl-o` is Helix's jumplist key, beside the overlay's `space j`.
+#[test]
+fn ctrl_o_walks_the_jumplist_back() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+    let saved = h.primary_head_offset();
+    dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+    h.type_keys("l l l");
+    assert_ne!(h.primary_head_offset(), saved);
+
+    h.type_keys("Ctrl-o");
+    assert_eq!(h.primary_head_offset(), saved);
+}
+
+/// A terminal with the kitty flags reports `Ctrl-i` apart from `Tab`, and a
+/// legacy one sends `Tab` for both, so each walks forward.
+#[test]
+fn ctrl_i_and_tab_walk_the_jumplist_forward() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("l l");
+    dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+    h.type_keys("l l l");
+    let b = h.primary_head_offset();
+    dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+    h.type_keys("l l");
+
+    h.type_keys("Ctrl-o Ctrl-o Ctrl-i");
+    assert_eq!(h.primary_head_offset(), b);
+    h.type_keys("Ctrl-o Tab");
+    assert_eq!(h.primary_head_offset(), b);
+}
+
+#[test]
+fn jumplist_keys_walk_both_ways_in_select_mode() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("v l l l");
+    let saved = h.primary_head_offset();
+    dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+    h.type_keys("l l l");
+    let live = h.primary_head_offset();
+    assert_ne!(live, saved);
+
+    h.type_keys("Ctrl-o");
+    assert_eq!(
+        (h.primary_head_offset(), h.stoat.focused_mode()),
+        (saved, "select"),
+    );
+    h.type_keys("Ctrl-i");
+    assert_eq!(h.primary_head_offset(), live);
+    h.type_keys("Ctrl-o Tab");
+    assert_eq!(h.primary_head_offset(), live);
+}
+
 #[test]
 fn jump_forward_walks_back_after_jump_backward() {
     let mut h = TestHarness::with_size(40, 5);

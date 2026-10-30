@@ -674,6 +674,17 @@ on key {
         Alt-u -> Earlier();
         Alt-U -> Later();
         Ctrl-s -> CommitUndoCheckpoint();
+
+        jump_back {
+            Ctrl-o -> JumpBackward();
+        }
+
+        # A legacy terminal sends Ctrl-i as Tab, so both spellings walk forward.
+        jump_forward {
+            Ctrl-i -> JumpForward();
+            Tab -> JumpForward();
+        }
+
         G -> GotoLineNumber();
         > -> IndentSelection();
         < -> UnindentSelection();
@@ -985,6 +996,17 @@ on key {
         q -> ReplayMacro();
         " -> SelectRegister();
         Ctrl-s -> CommitUndoCheckpoint();
+
+        jump_back {
+            Ctrl-o -> JumpBackward();
+        }
+
+        # Both spellings, for the reason the normal-mode twin gives.
+        jump_forward {
+            Ctrl-i -> JumpForward();
+            Tab -> JumpForward();
+        }
+
         # The shell ops leave the mode alone, unlike the indent pair below.
         # Each runs over the selections it is given and hands back selections,
         # so there is more to do with them afterward.
