@@ -2632,6 +2632,59 @@ mod tests {
         );
     }
 
+    /// The goto chord and its select flavor carry Helix's LSP gotos and `g a`.
+    ///
+    /// Every arm hands back normal mode, the select flavor's too, because a
+    /// Helix goto lands through a buffer switch that enters normal mode. The
+    /// references arm needs no server, since the code index answers it too.
+    #[test]
+    fn the_goto_chords_carry_the_lsp_gotos() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        let state = |mode: &str, lsp: bool| {
+            TestState::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("pane", StateValue::String("editor".into()))
+                .set("lsp", StateValue::Bool(lsp))
+                .set("token_known", StateValue::Bool(true))
+                .set("token", StateValue::String("function".into()))
+                .set("prev_buffer", StateValue::Bool(true))
+        };
+        let pressed = |state: &TestState, key| {
+            keymap
+                .lookup(state, &key_event(KeyCode::Char(key), KeyModifiers::NONE))
+                .map(|actions| action_calls(&actions))
+        };
+        let then_normal = |action: &str| {
+            Some(vec![
+                (action.to_string(), Vec::new()),
+                ("SetMode".to_string(), vec![Value::Ident("normal".into())]),
+            ])
+        };
+
+        for mode in ["goto", "select_goto"] {
+            let with_lsp = state(mode, true);
+            assert_eq!(
+                ['d', 'D', 'y', 'r', 's', 'a'].map(|key| pressed(&with_lsp, key)),
+                [
+                    then_normal("GotoDefinition"),
+                    then_normal("GotoDeclaration"),
+                    then_normal("GotoTypeDefinition"),
+                    then_normal("GotoReferences"),
+                    then_normal("GotoImplementation"),
+                    then_normal("GotoLastAccessed"),
+                ],
+                "{mode} carries every goto",
+            );
+
+            let without_lsp = state(mode, false);
+            assert_eq!(
+                [pressed(&without_lsp, 'd'), pressed(&without_lsp, 'r')],
+                [None, then_normal("GotoReferences")],
+                "{mode} drops the server gotos and keeps references",
+            );
+        }
+    }
+
     /// Reading a tour is a run of steps, so the mode `space W` reaches has to
     /// outlast the key that runs a step.
     #[test]

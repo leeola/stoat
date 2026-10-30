@@ -1822,6 +1822,22 @@ mod tests {
         );
     }
 
+    /// `g a` from select mode switches buffers and lands in normal mode, as a
+    /// Helix buffer switch does.
+    #[test]
+    fn g_a_from_select_mode_switches_and_lands_in_normal_mode() {
+        let mut h = Stoat::test();
+        let (a, _) = open_two(&mut h);
+
+        h.type_keys("v");
+        h.type_keys("g a");
+        h.settle();
+        assert_eq!(
+            (focused_buffer_id(&mut h.stoat), h.stoat.focused_mode()),
+            (a, "normal"),
+        );
+    }
+
     /// The pane's only earlier buffer is the scratch it started on, which the
     /// open dropped.
     #[test]

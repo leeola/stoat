@@ -710,6 +710,9 @@ on key {
 
         lsp && (!token_known || token) {
             s -> [GotoImplementation(), SetMode(normal)];
+            d -> [GotoDefinition(), SetMode(normal)];
+            D -> [GotoDeclaration(), SetMode(normal)];
+            y -> [GotoTypeDefinition(), SetMode(normal)];
         }
 
         # Both g e, the Helix spelling, and g j go to the last line.
@@ -729,6 +732,13 @@ on key {
 
         prev_buffer {
             a -> [GotoLastAccessed(), SetMode(normal)];
+        }
+
+        # References fall back to the code index, so they need no server.
+        pane == editor {
+            !token_known || token {
+                r -> [GotoReferences(), SetMode(normal)];
+            }
         }
     }
     mode == z {
@@ -1071,6 +1081,24 @@ on key {
         w -> [ExtendToWord(), SetMode(select)];
         # The handler reads the mode itself, so the same action extends here.
         . -> [GotoLastModification(), SetMode(select)];
+
+        # A Helix buffer switch lands in normal mode, so these arms leave select.
+        lsp && (!token_known || token) {
+            s -> [GotoImplementation(), SetMode(normal)];
+            d -> [GotoDefinition(), SetMode(normal)];
+            D -> [GotoDeclaration(), SetMode(normal)];
+            y -> [GotoTypeDefinition(), SetMode(normal)];
+        }
+
+        pane == editor {
+            !token_known || token {
+                r -> [GotoReferences(), SetMode(normal)];
+            }
+        }
+
+        prev_buffer {
+            a -> [GotoLastAccessed(), SetMode(normal)];
+        }
     }
     # The diff styling dials, which the diff view binds again below with the
     # reason for Cmd. The commits screen shares them, because its preview
