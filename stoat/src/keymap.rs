@@ -2606,6 +2606,32 @@ mod tests {
         );
     }
 
+    /// Ctrl-s saves the selection to the jumplist in normal and select mode, as
+    /// in Helix, and splits an insert run into two undo steps in insert mode.
+    #[test]
+    fn ctrl_s_saves_a_selection_outside_insert_mode() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let ctrl_s = |mode: &str| {
+            let state = TestState::new().set("mode", StateValue::String(mode.into()));
+            keymap
+                .lookup(
+                    &state,
+                    &KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+                )
+                .map(|actions| actions[0].name.clone())
+        };
+
+        assert_eq!(
+            [ctrl_s("normal"), ctrl_s("select"), ctrl_s("insert")],
+            [
+                Some("SaveSelection".to_string()),
+                Some("SaveSelection".to_string()),
+                Some("CommitUndoCheckpoint".to_string()),
+            ],
+        );
+    }
+
     /// Reading a tour is a run of steps, so the mode `space W` reaches has to
     /// outlast the key that runs a step.
     #[test]

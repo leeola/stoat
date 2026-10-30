@@ -13449,18 +13449,18 @@ fn ctrl_s_splits_the_insert_session_into_two_undo_steps() {
 
 /// A checkpoint taken in normal mode does not swallow later edits.
 ///
-/// Ctrl-s exists to split an insert session in two, so outside one there is
-/// nothing to split and it is a plain checkpoint. It runs without the
-/// action-group wrapper, so a group it opened in normal mode is one nothing
-/// would close, and every later edit would keep joining it -- including
-/// across an undo, which is what makes those edits reachable only as part of
-/// a step they do not belong to.
+/// The checkpoint exists to split an insert session in two. The palette reaches
+/// it outside one too, where there is nothing to split and it is a plain
+/// checkpoint. It runs without the action-group wrapper. If it opened a group
+/// in normal mode, nothing closes that group, and every later edit joins it,
+/// across an undo too. Those edits are then reachable only as part of a step
+/// they do not belong to.
 #[test]
 fn a_normal_mode_checkpoint_leaves_later_edits_undoable() {
     let mut h = Stoat::test();
     let path = open_scratch_file(&mut h, "abcdef\n");
 
-    h.type_keys("ctrl-s");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitUndoCheckpoint);
     h.type_keys("d");
     assert_eq!(
         h.buffer_text_at(&path),
@@ -13489,7 +13489,7 @@ fn a_normal_mode_checkpoint_leaves_later_edits_undoable() {
 /// Edits after a normal-mode checkpoint stay separate undo steps.
 ///
 /// The action-group wrapper leaves an already-open group alone so a
-/// mid-session action joins the insert step it sits in. A group Ctrl-s
+/// mid-session action joins the insert step it sits in. A group the checkpoint
 /// opened in normal mode has no session to belong to and nothing to seal it,
 /// so every later action would keep joining it and the whole run would
 /// collapse into one step.
@@ -13498,7 +13498,7 @@ fn edits_after_a_normal_mode_checkpoint_undo_separately() {
     let mut h = Stoat::test();
     let path = open_scratch_file(&mut h, "abcdef\n");
 
-    h.type_keys("ctrl-s");
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitUndoCheckpoint);
     h.type_keys("d");
     h.type_keys("d");
     assert_eq!(h.buffer_text_at(&path), "cdef\n", "two characters deleted");

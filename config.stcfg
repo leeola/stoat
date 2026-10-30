@@ -673,7 +673,7 @@ on key {
         # undo alone cannot return to.
         Alt-u -> Earlier();
         Alt-U -> Later();
-        Ctrl-s -> CommitUndoCheckpoint();
+        Ctrl-s -> SaveSelection();
 
         jump_back {
             Ctrl-o -> JumpBackward();
@@ -995,7 +995,7 @@ on key {
         Q -> RecordMacro();
         q -> ReplayMacro();
         " -> SelectRegister();
-        Ctrl-s -> CommitUndoCheckpoint();
+        Ctrl-s -> SaveSelection();
 
         jump_back {
             Ctrl-o -> JumpBackward();

@@ -8129,6 +8129,41 @@ fn jump_backward_restores_saved_position() {
     assert_eq!(h.primary_head_offset(), saved);
 }
 
+/// Outside insert mode `Ctrl-s` saves the selection, as Helix's
+/// `save_selection` does, so a jump back returns to it.
+#[test]
+fn ctrl_s_saves_the_selection_for_the_jump_back() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("l l l");
+    let saved = h.primary_head_offset();
+    h.type_keys("Ctrl-s");
+    h.type_keys("l l l");
+    assert_ne!(h.primary_head_offset(), saved);
+
+    dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+    assert_eq!(h.primary_head_offset(), saved);
+}
+
+#[test]
+fn ctrl_s_saves_the_selection_in_select_mode() {
+    let mut h = TestHarness::with_size(40, 5);
+    let path = h.write_file("s.txt", "abcdefghij\n");
+    h.open_file(&path);
+    h.type_keys("v l l l");
+    let saved = h.primary_head_offset();
+    h.type_keys("Ctrl-s");
+    h.type_keys("l l l");
+    assert_ne!(h.primary_head_offset(), saved);
+
+    dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+    assert_eq!(
+        (h.primary_head_offset(), h.stoat.focused_mode()),
+        (saved, "select"),
+    );
+}
+
 /// `Ctrl-o` is Helix's jumplist key, beside the overlay's `space j`.
 #[test]
 fn ctrl_o_walks_the_jumplist_back() {
