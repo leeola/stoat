@@ -66,6 +66,8 @@ fn cursor_row_at_edge(current: u32, scroll_row: u32, viewport: u32, dir: PageDir
 
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
     let extend = stoat.in_select_mode();
+    // Only the terminal history pages by the count. An editor page reads none,
+    // as in Helix, where z j and z k are the scrolls that take one.
     let count = stoat.take_pending_count().unwrap_or(1);
     if let Some((term_id, _)) = mouse::focused_term_target(stoat) {
         return page_term_history(stoat, term_id, dir, half, count);
@@ -75,8 +77,7 @@ pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> Update
         return UpdateEffect::None;
     };
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
-    let base_delta = if half { viewport / 2 } else { viewport };
-    let delta = base_delta.saturating_mul(count);
+    let delta = if half { viewport / 2 } else { viewport };
 
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
@@ -968,7 +969,7 @@ mod tests {
     };
     use crossterm::event::Event;
     use std::sync::Arc;
-    use stoat_action::{AddSelectionBelow, HalfPageDown, PageDown, PageUp};
+    use stoat_action::{Action, AddSelectionBelow, HalfPageDown, PageDown, PageUp};
     use stoat_text::Point;
 
     #[test]
@@ -2493,18 +2494,38 @@ mod tests {
         assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(13, 0)]);
     }
 
-    #[test]
-    fn count_prefix_page_down_moves_n_pages() {
+    /// A stoat on a hundred numbered lines, with a ten-row viewport.
+    fn on_a_hundred_lines() -> Stoat {
         let mut stoat = stoat();
         let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
         editor::seed_focused_buffer(&mut stoat, &text);
         set_focused_viewport_rows(&mut stoat, Some(10));
-        stoat.pending_count = Some(3);
-        dispatch(&mut stoat, &PageDown);
+        stoat
+    }
+
+    /// The cursor after `action` with `count` pending, on a fresh stoat that
+    /// first runs `before`.
+    fn cursor_after(
+        before: &[&dyn Action],
+        count: Option<u32>,
+        action: &dyn Action,
+    ) -> Vec<(u32, u32)> {
+        let mut stoat = on_a_hundred_lines();
+        for step in before {
+            dispatch(&mut stoat, *step);
+        }
+        stoat.pending_count = count;
+        dispatch(&mut stoat, action);
+        editor::cursor_display_positions(&mut stoat)
+    }
+
+    /// A count before PageDown scrolls one page, as in Helix, where only z j
+    /// and z k read a count.
+    #[test]
+    fn a_count_before_page_down_scrolls_one_page() {
         assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(33, 0)],
-            "three pages of scroll to row 30, and the cursor pulled to the edge at 33"
+            cursor_after(&[], Some(3), &PageDown),
+            cursor_after(&[], None, &PageDown),
         );
     }
 
@@ -2534,56 +2555,19 @@ mod tests {
     }
 
     #[test]
-    fn count_prefix_half_page_down_moves_n_half_pages() {
-        let mut stoat = stoat();
-        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        stoat.pending_count = Some(3);
-        dispatch(&mut stoat, &HalfPageDown);
+    fn a_count_before_half_page_down_scrolls_one_half_page() {
         assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(15, 0)],
-            "3 Ctrl-d with viewport=10 (half-page=5) should land at row 15"
+            cursor_after(&[], Some(3), &HalfPageDown),
+            cursor_after(&[], None, &HalfPageDown),
         );
     }
 
     #[test]
-    fn count_prefix_page_up_moves_n_pages() {
-        let mut stoat = stoat();
-        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        dispatch(&mut stoat, &PageDown);
-        dispatch(&mut stoat, &PageDown);
-        dispatch(&mut stoat, &PageDown);
-        dispatch(&mut stoat, &PageDown);
+    fn a_count_before_page_up_scrolls_one_page() {
+        let four_pages: [&dyn Action; 4] = [&PageDown, &PageDown, &PageDown, &PageDown];
         assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(43, 0)],
-            "test setup: four pages of scroll to row 40, cursor at the top edge"
-        );
-        stoat.pending_count = Some(3);
-        dispatch(&mut stoat, &PageUp);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(16, 0)],
-            "three pages back to row 10, and the cursor pulled to the bottom edge"
-        );
-    }
-
-    #[test]
-    fn count_prefix_page_down_clamps_at_buffer_end() {
-        let mut stoat = stoat();
-        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
-        editor::seed_focused_buffer(&mut stoat, &text);
-        set_focused_viewport_rows(&mut stoat, Some(10));
-        stoat.pending_count = Some(99);
-        dispatch(&mut stoat, &PageDown);
-        assert_eq!(
-            editor::cursor_display_positions(&mut stoat),
-            vec![(24, 0)],
-            "a huge count clamps the scroll to the last page, the cursor to its edge"
+            cursor_after(&four_pages, Some(3), &PageUp),
+            cursor_after(&four_pages, None, &PageUp),
         );
     }
 
