@@ -52,6 +52,7 @@ action_kinds! {
     ToggleTab,
     ToggleTabBar,
     TogglePaneFade,
+    ToggleRelativeNumbers,
     ClosePane,
     CloseOtherPanes,
     TogglePaneWiden,

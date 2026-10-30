@@ -3,7 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
 };
-use stoat_config::TabBarMode;
+use stoat_config::{LineNumbers, TabBarMode};
 
 /// Switch to the 1-based tab `index`, reporting a miss in the status line.
 pub(crate) fn goto_tab(stoat: &mut Stoat, index: usize) -> UpdateEffect {
@@ -177,6 +177,24 @@ pub(super) fn toggle_pane_fade(stoat: &mut Stoat) -> UpdateEffect {
         (true, "pane fade on")
     };
     stoat.pane_fade_override = Some(fade);
+    stoat.set_status(status);
+    UpdateEffect::Redraw
+}
+
+/// Turn relative line numbers off when they are on, and on when they are off.
+///
+/// The flip sets an explicit override from the configured mode, so a later
+/// config reload that changes `editor.line_numbers` does not invert what the
+/// user asked for this session. Off paints each line's own number. A toggle
+/// on over `editor.line_numbers = off` shows relative numbers, as
+/// `:pane-fade` fades the panes over a zero setting.
+pub(super) fn toggle_relative_numbers(stoat: &mut Stoat) -> UpdateEffect {
+    let (mode, status) = if stoat.relative_numbers_enabled() {
+        (LineNumbers::Absolute, "relative numbers off")
+    } else {
+        (LineNumbers::Relative, "relative numbers on")
+    };
+    stoat.line_numbers_override = Some(mode);
     stoat.set_status(status);
     UpdateEffect::Redraw
 }
@@ -564,6 +582,66 @@ mod tests {
             (focused, h.stoat.painted_line_numbers()),
             (LineNumbers::Absolute, LineNumbers::Absolute),
             "absolute numbering paints the same with or without the focus",
+        );
+    }
+
+    #[test]
+    fn toggling_relative_numbers_flips_them_and_reports() {
+        let mut h = Stoat::test();
+        let flip = |h: &mut TestHarness| {
+            dispatch(h, &stoat_action::ToggleRelativeNumbers);
+            (
+                h.stoat.painted_line_numbers(),
+                h.stoat.pending_message.clone(),
+            )
+        };
+        let off = flip(&mut h);
+        let on = flip(&mut h);
+        assert_eq!(
+            [off, on],
+            [
+                (
+                    LineNumbers::Absolute,
+                    Some("relative numbers off".to_string())
+                ),
+                (
+                    LineNumbers::Relative,
+                    Some("relative numbers on".to_string())
+                ),
+            ],
+        );
+    }
+
+    /// The `off` setting hides the numbers, and `:relative-numbers` turns
+    /// relative numbers on over it.
+    #[test]
+    fn relative_numbers_turn_on_over_an_off_setting() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Off);
+        dispatch(&mut h, &stoat_action::ToggleRelativeNumbers);
+        assert_eq!(
+            (
+                h.stoat.painted_line_numbers(),
+                h.stoat.pending_message.as_deref()
+            ),
+            (LineNumbers::Relative, Some("relative numbers on")),
+        );
+    }
+
+    /// Relative numbers turned on over an absolute setting still paint as
+    /// absolute while the window is in the background.
+    #[test]
+    fn the_relative_numbers_override_follows_the_window_focus() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+        dispatch(&mut h, &stoat_action::ToggleRelativeNumbers);
+        h.stoat.update(Event::FocusLost);
+        let in_background = h.stoat.painted_line_numbers();
+        h.stoat.update(Event::FocusGained);
+        assert_eq!(
+            (in_background, h.stoat.painted_line_numbers()),
+            (LineNumbers::Absolute, LineNumbers::Relative),
+            "absolute in the background, relative again with the focus",
         );
     }
 

@@ -200,6 +200,20 @@ define_action!(
     command_name = "pane-fade"
 );
 
+define_action!(
+    ToggleRelativeNumbersDef,
+    ToggleRelativeNumbers,
+    "ToggleRelativeNumbers",
+    ActionKind::ToggleRelativeNumbers,
+    "count line numbers from the cursor or from the top",
+    "Turn relative line numbers off when they are on, or on when they are \
+     off, for this session only. Off paints each line's own number. The \
+     `editor.line_numbers` setting decides the numbering by default, and a \
+     restart returns to it.",
+    ActionPriority::Common,
+    command_name = "relative-numbers"
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

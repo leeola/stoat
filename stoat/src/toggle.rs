@@ -34,11 +34,12 @@ pub(crate) enum Toggle {
     Minimap,
     TabBar,
     PaneFade,
+    RelativeNumbers,
 }
 
 impl Toggle {
     /// Every toggle, in declaration order.
-    pub(crate) const ALL: [Toggle; 19] = [
+    pub(crate) const ALL: [Toggle; 20] = [
         Toggle::FollowChanges,
         Toggle::LiveReload,
         Toggle::FollowReload,
@@ -58,6 +59,7 @@ impl Toggle {
         Toggle::Minimap,
         Toggle::TabBar,
         Toggle::PaneFade,
+        Toggle::RelativeNumbers,
     ];
 
     /// The toggle an action of `kind` flips, or `None` for an action that flips
@@ -83,6 +85,7 @@ impl Toggle {
             ActionKind::ToggleMinimap => Toggle::Minimap,
             ActionKind::ToggleTabBar => Toggle::TabBar,
             ActionKind::TogglePaneFade => Toggle::PaneFade,
+            ActionKind::ToggleRelativeNumbers => Toggle::RelativeNumbers,
             _ => return None,
         })
     }
@@ -122,6 +125,7 @@ impl Toggle {
             Toggle::Minimap => stoat.minimap_enabled(),
             Toggle::TabBar => stoat.tab_bar_visible(),
             Toggle::PaneFade => stoat.pane_fade_enabled(),
+            Toggle::RelativeNumbers => stoat.relative_numbers_enabled(),
         }
     }
 }
@@ -260,6 +264,16 @@ mod tests {
         );
     }
 
+    /// A binding a user gives `:relative-numbers` reads as its toggle, so the
+    /// hint row carries the mark.
+    #[test]
+    fn a_relative_numbers_binding_reads_as_its_toggle() {
+        assert_eq!(
+            binding_toggle(&[action("ToggleRelativeNumbers")]),
+            Some(Toggle::RelativeNumbers)
+        );
+    }
+
     #[test]
     fn toggle_states_read_the_session_flags() {
         let mut h = Stoat::test();
@@ -272,6 +286,7 @@ mod tests {
                 Toggle::Wrap,
                 Toggle::Minimap,
                 Toggle::PaneFade,
+                Toggle::RelativeNumbers,
             ],
             "the flags a lone scratch pane starts with",
         );
@@ -296,6 +311,7 @@ mod tests {
                 Toggle::Wrap,
                 Toggle::Minimap,
                 Toggle::PaneFade,
+                Toggle::RelativeNumbers,
             ],
         );
     }
@@ -333,6 +349,7 @@ mod tests {
                 Toggle::PaneWiden,
                 Toggle::TabBar,
                 Toggle::PaneFade,
+                Toggle::RelativeNumbers,
             ],
             "each view toggle reads the state its action flipped",
         );

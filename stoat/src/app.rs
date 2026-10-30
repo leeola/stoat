@@ -1331,6 +1331,9 @@ pub struct Stoat {
     /// Session-only override of the `ui.inactive_dim` setting, set by
     /// `:pane-fade`. `None` leaves the configured fade in force.
     pub(crate) pane_fade_override: Option<bool>,
+    /// Session-only override of the `editor.line_numbers` setting, set by
+    /// `:relative-numbers`. `None` leaves the configured mode in force.
+    pub(crate) line_numbers_override: Option<LineNumbers>,
     /// Whether the terminal window holds OS focus, as its focus reports last
     /// said.
     ///
@@ -2742,6 +2745,7 @@ impl Stoat {
             minimap_override: None,
             tab_bar_override: None,
             pane_fade_override: None,
+            line_numbers_override: None,
             window_focused: true,
             tab_bar_spans: Vec::new(),
             single_minimap_rect: None,
@@ -4044,18 +4048,36 @@ impl Stoat {
         self.inactive_dim()
     }
 
+    /// The line numbering the gutter takes, resolving `:relative-numbers`
+    /// against the `editor.line_numbers` setting.
+    ///
+    /// [`Self::line_numbers_override`] answers when it is set. Otherwise the
+    /// setting answers, and relative numbering when it is unset.
+    pub(crate) fn line_numbers(&self) -> LineNumbers {
+        self.line_numbers_override
+            .or(self.settings.editor_line_numbers)
+            .unwrap_or(LineNumbers::Relative)
+    }
+
+    /// Whether the gutter counts from the cursor line, as `:relative-numbers`
+    /// reads it.
+    pub(crate) fn relative_numbers_enabled(&self) -> bool {
+        self.line_numbers() == LineNumbers::Relative
+    }
+
     /// The line numbering a frame paints the gutter with.
     ///
-    /// The configured mode, except that relative numbers paint as absolute
-    /// while the terminal window is in the background with
+    /// The mode [`Self::line_numbers`] resolves, except that relative numbers
+    /// paint as absolute while the terminal window is in the background with
     /// `ui.relative_numbers_follow_focus` on. Relative numbers count from a
     /// cursor that no keystroke reaches while the window has no focus, so only
     /// they change. `off` and `absolute` never do.
+    ///
+    /// The `:relative-numbers` override and the setting both pass through this
+    /// rule. [`Self::relative_numbers_enabled`] and `:relative-numbers` read
+    /// the mode before the rule, so a toggle in the background still flips it.
     pub(crate) fn painted_line_numbers(&self) -> LineNumbers {
-        let configured = self
-            .settings
-            .editor_line_numbers
-            .unwrap_or(LineNumbers::Relative);
+        let configured = self.line_numbers();
         let follows_focus = self
             .settings
             .ui_relative_numbers_follow_focus

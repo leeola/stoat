@@ -326,6 +326,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ToggleTab => tab::toggle_tab(stoat),
         ActionKind::ToggleTabBar => tab::toggle_tab_bar(stoat),
         ActionKind::TogglePaneFade => tab::toggle_pane_fade(stoat),
+        ActionKind::ToggleRelativeNumbers => tab::toggle_relative_numbers(stoat),
         ActionKind::RenameTab => {
             let name = action
                 .as_any()
