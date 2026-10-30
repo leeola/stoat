@@ -13771,6 +13771,70 @@ fn shift_a_jumps_to_line_end_then_inserts() {
     assert_eq!(h.buffer_text_at(&path), "abcZ\nxyz\n");
 }
 
+/// `A` from select mode keeps the anchor and grows the selection to the line
+/// end, as Helix's `insert_with_indent` does when select mode ran it.
+#[test]
+fn shift_a_from_select_mode_keeps_the_anchor() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "abcdef\n");
+    h.type_keys("v l A");
+    let mode = h.stoat.focused_mode().to_string();
+    assert_eq!(
+        (
+            mode.as_str(),
+            h.cursor_display_positions(),
+            h.selection_spans()
+        ),
+        ("insert", vec![(0, 6)], vec![(0, 7, false)]),
+    );
+
+    h.type_text("Z");
+    assert_eq!(h.buffer_text_at(&path), "abcdefZ\n");
+}
+
+/// `I` from select mode keeps the anchor too. A head that crosses it flips the
+/// anchor one cell, so the cell the anchor held stays covered.
+#[test]
+fn shift_i_from_select_mode_keeps_the_anchor() {
+    let mut h = Stoat::test();
+    let path = open_scratch_file(&mut h, "    code\n");
+    h.type_keys("l l l l l l v l");
+    assert_eq!(h.selection_spans(), vec![(6, 8, false)], "test setup: de");
+
+    h.type_keys("I");
+    let mode = h.stoat.focused_mode().to_string();
+    assert_eq!(
+        (
+            mode.as_str(),
+            h.cursor_display_positions(),
+            h.selection_spans()
+        ),
+        ("insert", vec![(0, 4)], vec![(4, 7, true)]),
+    );
+
+    h.type_text("X");
+    assert_eq!(h.buffer_text_at(&path), "    Xcode\n");
+}
+
+/// An empty line lands a cursor past its indent from select mode as well, as
+/// Helix's point does, rather than growing the selection from its anchor.
+#[test]
+fn shift_i_from_select_mode_on_an_empty_line_lands_a_cursor() {
+    let mut h = Stoat::test();
+    open_indent_buffer(&mut h, "a.rs", b"fn a() {\n\n}\n");
+    h.type_keys("v j");
+    assert_eq!(
+        h.selection_spans(),
+        vec![(0, 10, false)],
+        "test setup: the empty line"
+    );
+
+    h.type_keys("I");
+    assert_eq!(h.selection_spans(), vec![(10, 11, false)]);
+    h.type_text("x");
+    assert_eq!(h.focused_buffer_text(), "fn a() {\n\tx\n}\n");
+}
+
 #[test]
 fn shift_i_on_empty_line_auto_indents() {
     let mut h = Stoat::test();

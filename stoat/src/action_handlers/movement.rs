@@ -793,6 +793,18 @@ struct IndentInsert {
     indent: String,
 }
 
+/// Where [`insert_with_indent`] puts one selection once the indents land.
+enum IndentLanding {
+    /// A forward block cursor on the offset, the insert cursor that `A` and an
+    /// indented empty line leave.
+    Forward(usize),
+    /// A block cursor on the offset, the cursor that `I` leaves.
+    Block(usize),
+    /// The selection grown from its anchor until its cursor sits on the
+    /// offset, which select mode asks for on a line with text.
+    Extend(usize),
+}
+
 /// Position each cursor to insert at its line, auto-indenting empty lines.
 ///
 /// Backs `I` ([`IndentFallback::LineStart`]) and `A`
@@ -800,7 +812,12 @@ struct IndentInsert {
 /// the surrounding syntax is inserted and the cursor lands after it, so entering
 /// insert on a blank line inside a block starts at the block's indent. A
 /// non-empty line inserts nothing and moves the cursor to the fallback position.
+///
+/// From select mode a line with text keeps each selection's anchor and grows
+/// the selection until its cursor sits on the fallback position, as Helix's
+/// does. An empty line lands a cursor in either mode.
 fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffect {
+    let extend = stoat.in_select_mode();
     let editor_id = {
         let ws = stoat.active_workspace();
         match ws.panes.pane(ws.panes.focus()).view {
@@ -895,17 +912,23 @@ fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffe
     let shift_before =
         |off: usize| -> usize { inserted_before[inserts.partition_point(|ins| ins.at < off)] };
 
-    let mut landings: std::collections::HashMap<usize, (usize, bool)> =
+    let mut landings: std::collections::HashMap<usize, IndentLanding> =
         std::collections::HashMap::new();
     for ins in &inserts {
         let landed = ins.at + shift_before(ins.at) + ins.indent.len();
-        landings.insert(ins.id, (landed, true));
+        landings.insert(ins.id, IndentLanding::Forward(landed));
     }
     for plan in &plans {
         if plan.blank.is_none() {
             let landed = plan.target + shift_before(plan.target);
-            let forward = matches!(fallback, IndentFallback::LineEnd);
-            landings.insert(plan.id, (landed, forward));
+            let landing = if extend {
+                IndentLanding::Extend(landed)
+            } else if matches!(fallback, IndentFallback::LineEnd) {
+                IndentLanding::Forward(landed)
+            } else {
+                IndentLanding::Block(landed)
+            };
+            landings.insert(plan.id, landing);
         }
     }
 
@@ -913,16 +936,39 @@ fn insert_with_indent(stoat: &mut Stoat, fallback: IndentFallback) -> UpdateEffe
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
+    let rope = new_buf.rope();
     editor
         .selections
-        .transform(new_buf, |sel| match landings.get(&sel.id) {
-            Some(&(off, true)) => {
-                forward_block_cursor(sel.id, off, SelectionGoal::None, new_buf.rope(), new_buf)
-            },
-            Some(&(off, false)) => {
-                land_block_cursor(sel.id, off, SelectionGoal::None, new_buf.rope(), new_buf)
-            },
-            None => sel.clone(),
+        .transform_resolved(new_buf, |sel, head_offset, tail_offset| {
+            match landings.get(&sel.id) {
+                Some(&IndentLanding::Forward(off)) => {
+                    forward_block_cursor(sel.id, off, SelectionGoal::None, rope, new_buf)
+                },
+                Some(&IndentLanding::Block(off)) => {
+                    land_block_cursor(sel.id, off, SelectionGoal::None, rope, new_buf)
+                },
+                Some(&IndentLanding::Extend(off)) => {
+                    let landed = extend_head_to_cursor(
+                        sel.id,
+                        sel.reversed,
+                        off,
+                        head_offset,
+                        tail_offset,
+                        SelectionGoal::None,
+                        rope,
+                    );
+                    // A span gets the biases that `replace_from_offsets` gives one, so
+                    // the selection rides later edits as a select-mode motion's does.
+                    Selection {
+                        id: landed.id,
+                        start: new_buf.anchor_at(landed.start, Bias::Left),
+                        end: new_buf.anchor_at(landed.end, Bias::Right),
+                        reversed: landed.reversed,
+                        goal: landed.goal,
+                    }
+                },
+                None => sel.clone(),
+            }
         });
 
     stoat.auto_indent_cursors = inserts.iter().map(|ins| ins.id).collect();
