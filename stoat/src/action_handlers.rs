@@ -123,12 +123,8 @@ pub(crate) enum LastMotion {
         dir: textobject_nav::NavDirection,
         count: u32,
     },
-    ExpandSelection {
-        count: u32,
-    },
-    ShrinkSelection {
-        count: u32,
-    },
+    ExpandSelection,
+    ShrinkSelection,
     SelectAllSiblings,
     SelectAllChildren,
     /// The `mi`/`ma` chord, whose mode and type char come from two keypresses.
@@ -194,8 +190,8 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             LastMotion::TsObject { kind, dir, count } => {
                 textobject_nav::goto_textobject_impl(stoat, kind, dir, count)
             },
-            LastMotion::ExpandSelection { count } => movement::expand_selection_impl(stoat, count),
-            LastMotion::ShrinkSelection { count } => movement::shrink_selection_impl(stoat, count),
+            LastMotion::ExpandSelection => movement::expand_selection(stoat),
+            LastMotion::ShrinkSelection => movement::shrink_selection(stoat),
             LastMotion::SelectAllSiblings => movement::select_all_siblings(stoat),
             LastMotion::SelectAllChildren => movement::select_all_children(stoat),
             LastMotion::TextObject { mode, ch, count } => {

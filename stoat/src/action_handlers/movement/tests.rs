@@ -7508,62 +7508,61 @@ fn shrink_after_moving_away_clears_history_and_dives() {
     );
 }
 
-#[test]
-fn count_prefix_expand_selection_walks_n_levels() {
-    let mut h_count = TestHarness::with_size(40, 5);
-    let path1 = h_count.write_file("s.rs", "fn main() {}\n");
-    h_count.open_file(&path1);
-    h_count.type_keys("l l l");
-    h_count.type_keys("3 alt-o");
-    let count_result = h_count.selection_spans();
-
-    let mut h_loop = TestHarness::with_size(40, 5);
-    let path2 = h_loop.write_file("s.rs", "fn main() {}\n");
-    h_loop.open_file(&path2);
-    h_loop.type_keys("l l l");
-    for _ in 0..3 {
-        dispatch(&mut h_loop.stoat, &stoat_action::ExpandSelection);
-    }
-    let loop_result = h_loop.selection_spans();
-
-    assert_eq!(
-        count_result, loop_result,
-        "count-prefix expand should match repeated single expand"
-    );
-}
-
-#[test]
-fn count_prefix_shrink_selection_walks_back_n_levels() {
+/// A harness on `fn main() {}` with the cursor on the `m` of `main`.
+fn on_main() -> TestHarness {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "fn main() {}\n");
     h.open_file(&path);
     h.type_keys("l l l");
-    let before = h.selection_spans();
-    for _ in 0..3 {
-        dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
-    }
-    assert_ne!(h.selection_spans(), before);
-    h.type_keys("3 alt-i");
-    assert_eq!(
-        h.selection_spans(),
-        before,
-        "3 alt-i should rewind 3 expansions to the original selection"
-    );
+    h
+}
+
+/// A count before Alt-o expands one level, as in Helix, where a count reaches
+/// further only through Alt-.
+#[test]
+fn a_count_before_expand_selection_expands_one_level() {
+    let mut counted = on_main();
+    counted.type_keys("3 alt-o");
+
+    let mut once = on_main();
+    dispatch(&mut once.stoat, &stoat_action::ExpandSelection);
+    assert_eq!(counted.selection_spans(), once.selection_spans());
 }
 
 #[test]
-fn count_prefix_expand_selection_clamps_at_root() {
+fn a_count_before_shrink_selection_shrinks_one_level() {
+    let expanded = || {
+        let mut h = on_main();
+        for _ in 0..3 {
+            dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        }
+        h
+    };
+    let mut counted = expanded();
+    counted.type_keys("3 alt-i");
+
+    let mut once = expanded();
+    dispatch(&mut once.stoat, &stoat_action::ShrinkSelection);
+    assert_eq!(counted.selection_spans(), once.selection_spans());
+}
+
+/// A large count on Alt-. stops at the root, where one more expansion changes
+/// nothing.
+#[test]
+fn alt_dot_with_a_large_count_stops_at_the_root() {
     let mut h = TestHarness::with_size(40, 5);
     let path = h.write_file("s.rs", "fn x() {}\n");
     h.open_file(&path);
     h.type_keys("l");
-    h.type_keys("9 9 alt-o");
+    h.type_keys("alt-o");
+    h.type_keys("9 9 alt-.");
     let after_huge = h.selection_spans();
+
     dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
     assert_eq!(
         h.selection_spans(),
         after_huge,
-        "additional expand at root should be a no-op"
+        "an expansion at the root changes nothing"
     );
 }
 
@@ -8786,6 +8785,21 @@ fn count_prefix_repeat_last_motion_advances_n_matches() {
     assert_eq!(h.primary_head_offset(), 2);
     h.type_keys("3 alt-.");
     assert_eq!(h.primary_head_offset(), 11);
+}
+
+/// Alt-. with a count repeats one expansion that many times, which is how a
+/// count reaches several levels.
+#[test]
+fn alt_dot_with_a_count_expands_that_many_levels() {
+    let mut replayed = on_main();
+    replayed.type_keys("alt-o");
+    replayed.type_keys("2 alt-.");
+
+    let mut stepped = on_main();
+    for _ in 0..3 {
+        dispatch(&mut stepped.stoat, &stoat_action::ExpandSelection);
+    }
+    assert_eq!(replayed.selection_spans(), stepped.selection_spans());
 }
 
 #[test]

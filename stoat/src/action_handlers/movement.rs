@@ -3132,24 +3132,13 @@ pub(crate) enum ChangeDir {
     Prev,
 }
 
+/// Expand each selection to the next syntax node out, one level per press.
+///
+/// A count before the key is not read, as in Helix. Alt-. with a count is what
+/// repeats the expansion, since its replay runs the motion that many times.
 pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    expand_selection_impl(stoat, count)
-}
-
-/// [`expand_selection`] with its count supplied rather than read from the
-/// pending keypress, so a replay repeats the count the motion was made with.
-pub(crate) fn expand_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffect {
-    stoat.last_motion = Some(LastMotion::ExpandSelection { count });
-    let mut effect = UpdateEffect::None;
-    for _ in 0..count {
-        match expand_selection_step(stoat) {
-            UpdateEffect::Redraw => effect = UpdateEffect::Redraw,
-            UpdateEffect::None => break,
-            UpdateEffect::Quit => return UpdateEffect::Quit,
-        }
-    }
-    effect
+    stoat.last_motion = Some(LastMotion::ExpandSelection);
+    expand_selection_step(stoat)
 }
 
 fn expand_selection_step(stoat: &mut Stoat) -> UpdateEffect {
@@ -3256,15 +3245,12 @@ fn deepest_containing_layer(
     })
 }
 
+/// Shrink each selection one syntax level, one level per press.
+///
+/// A count before the key is not read, for the reason [`expand_selection`]
+/// gives.
 pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
-    let count = stoat.take_pending_count().unwrap_or(1);
-    shrink_selection_impl(stoat, count)
-}
-
-/// [`shrink_selection`] with its count supplied rather than read from the
-/// pending keypress, so a replay repeats the count the motion was made with.
-pub(crate) fn shrink_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffect {
-    stoat.last_motion = Some(LastMotion::ShrinkSelection { count });
+    stoat.last_motion = Some(LastMotion::ShrinkSelection);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -3276,14 +3262,7 @@ pub(crate) fn shrink_selection_impl(stoat: &mut Stoat, count: u32) -> UpdateEffe
     let syntax = ws.buffers.syntax_map(buffer_id).map(|sm| sm.snapshot());
     let editor = ws.editors.get_mut(editor_id).expect("editor");
 
-    let mut changed = false;
-    for _ in 0..count {
-        if !shrink_one_step(editor, syntax) {
-            break;
-        }
-        changed = true;
-    }
-    if !changed {
+    if !shrink_one_step(editor, syntax) {
         return UpdateEffect::None;
     }
 
