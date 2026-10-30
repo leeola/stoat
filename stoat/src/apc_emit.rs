@@ -138,7 +138,9 @@ pub(crate) struct WindowPage {
 ///
 /// The focused excerpt's selections stay out of the page version, so a step
 /// of a selection refills no page. The step paints the pages it touches again,
-/// and a row compare against the held page finds the rows that changed.
+/// and a row compare against the held page finds the rows that changed. Under
+/// relative numbering the stamp carries the cursor line too, so a step to
+/// another line repaints the page and its numbers.
 pub(crate) struct HeldStackPage {
     /// The page stoatty holds.
     page: Buffer,
@@ -1500,6 +1502,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             // A selection that changed paints again the pages the composite
             // reads and the page its cursor left, and sends the rows that
             // differ from what the terminal holds.
+            let relative = frame.line_numbers == LineNumbers::Relative && frame.mode != "insert";
             let cursor_row = diff_changes::cursor_stack_row(state, &mut ws.editors);
             let left = state
                 .last_cursor_row
@@ -1514,7 +1517,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 if held.selection == selection {
                     continue;
                 }
-                let (page, _) = paint_pool_page(
+                let (page, scene) = paint_pool_page(
                     state,
                     &mut ws.editors,
                     &ws.buffers,
@@ -1525,6 +1528,19 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     index,
                 );
                 stack_patches.extend(row_patches(region.pool, index, &held.page, &page));
+                // The terminal replaces a page's decorations as one set and
+                // keeps its cells, so the gutter runs that count from the
+                // cursor line ride beside the row patches.
+                if relative && decorate_pages && !scene.bytes().is_empty() {
+                    let mut batch = Vec::with_capacity(scene.bytes().len() + 32);
+                    stoatty_protocol::command::encode_fill_decorations_scope(
+                        &mut batch,
+                        region.pool,
+                        index,
+                        |out| out.extend_from_slice(scene.bytes()),
+                    );
+                    stack_patches.push(batch);
+                }
                 *held = HeldStackPage { page, selection };
             }
 
@@ -3336,6 +3352,11 @@ fn stack_page_version(
 /// selection is a bare cursor that the terminal draws, while no goto label
 /// shows. Otherwise the stamp moves with the focused excerpt, its selections,
 /// whether the terminal draws its cursor, and the labels.
+///
+/// Under relative numbering every numbered row of the focused excerpt counts
+/// from the cursor's line, so the stamp also carries that line, even for a
+/// cursor that paints no cell. The selections of such a cursor stay out of the
+/// stamp, so a move along its line repaints no page.
 fn painted_selection(
     state: &DiffChangesState,
     editors: &SlotMap<EditorId, EditorState>,
@@ -3348,21 +3369,24 @@ fn painted_selection(
     let excerpt = state.focused_excerpt()?;
     let editor = editors.get(excerpt.editor_id)?;
     let delegated = frame.terminal_cursor_editor == Some(excerpt.editor_id);
-    if delegated
+    let paints_cells = !(delegated
         && frame.goto_word_labels.is_none()
-        && crate::render::pane_cache::bare_cursor(editor)
-    {
+        && crate::render::pane_cache::bare_cursor(editor));
+    let relative = frame.line_numbers == LineNumbers::Relative && frame.mode != "insert";
+    if !paints_cells && !relative {
         return None;
     }
 
     let mut hasher = DefaultHasher::new();
-    (
-        state.focused,
-        delegated,
-        editor.selections.identity(),
-        frame.goto_word_labels,
-    )
-        .hash(&mut hasher);
+    (state.focused, delegated, frame.goto_word_labels).hash(&mut hasher);
+    if paints_cells {
+        editor.selections.identity().hash(&mut hasher);
+    }
+    if relative {
+        crate::render::editor::editor_cursor_position(editor)
+            .map(|(line, _)| line)
+            .hash(&mut hasher);
+    }
     Some(hasher.finish())
 }
 

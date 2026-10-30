@@ -2686,6 +2686,10 @@ const TWO_FILES: &[(&str, &str, &str)] = &[("a.txt", "a\nx\n", "A\nx\n"), ("b.tx
 /// A focused changes view over `files` staged in /repo, at 120 by 24 under a
 /// stoatty that keeps resident pools composited, painted once. Answers the
 /// pool id its pane takes.
+///
+/// It numbers lines absolutely, so a step sends what its selection changed
+/// alone. The selection tests count those rows, and relative numbers move every
+/// numbered row with the cursor.
 fn resident_stack(
     files: &[(&str, &str, &str)],
     minimap: MinimapMode,
@@ -2699,6 +2703,7 @@ fn resident_stack(
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
     h.stoat.settings.editor_minimap = Some(minimap);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
     h.stage_review_scenario("/repo", files);
     h.open_file(&PathBuf::from("/repo/a.txt"));
     h.cover_with_diff_changes(false);
@@ -3391,6 +3396,114 @@ fn selecting_stack(
     h.stoat.render();
     emit_raw(&mut h, &mut rx);
     (h, rx, pool)
+}
+
+/// [`resident_stack`] over `lines` changed lines under `theme` and relative
+/// numbering, painted and emitted, so the pool holds pages that count from the
+/// cursor.
+///
+/// The shipped theme and [`rgb_diff_gutter_theme`] resolve the diff gutter
+/// colors, so the stack numbers its rows with runs. [`rgb_diagnostic_theme`]
+/// leaves them out, so it numbers its rows in cells.
+fn relative_stack(
+    lines: usize,
+    theme: crate::theme::Theme,
+) -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    u32,
+) {
+    let (head, working) = changed_lines(lines);
+    let (mut h, mut rx, pool) = resident_stack(&[("a.txt", &head, &working)], MinimapMode::Off);
+    h.stoat.theme = Arc::new(theme);
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Relative);
+    h.stoat.paint_generation += 1;
+    h.stoat.render();
+    emit_raw(&mut h, &mut rx);
+    (h, rx, pool)
+}
+
+/// A cursor step to another line under relative numbering moves every number
+/// of the focused excerpt, so in an ASCII gutter the live rows that change are
+/// more than the cursor's two. The pool patches exactly those rows of page 0,
+/// the window's page, and the numbered rows of page 1, the held page below the
+/// window. The live change also proves the stack pane's cache key carries the
+/// line, since a bare cursor that the terminal draws paints no cell.
+#[test]
+fn a_cursor_step_under_relative_numbering_patches_the_numbered_rows() {
+    let (mut h, mut rx, pool) = relative_stack(30, rgb_diagnostic_theme());
+    let before = h.stoat.render();
+    h.type_keys("j");
+    let after = h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let content = focused_content(&h);
+    let row = |buf: &Buffer, row: u16| {
+        let rect = Rect {
+            y: content.y + row,
+            height: 1,
+            ..content
+        };
+        buffer_cells(buf, rect)
+    };
+    let changed: Vec<u16> = (0..content.height)
+        .filter(|&r| row(&before, r) != row(&after, r))
+        .collect();
+    let pages = pool_patches_by_page(&bytes, pool);
+    let window_rows: Vec<u16> = pages
+        .iter()
+        .zip(pool_patches(&bytes, pool))
+        .filter(|(page, _)| **page == 0)
+        .flat_map(|(_, (first, rows))| first..first + rows)
+        .collect();
+    assert_eq!(
+        (
+            changed.len() > 2,
+            window_rows == changed,
+            pages,
+            pool_fills(&bytes, pool)
+        ),
+        (true, true, vec![0, 1], vec![]),
+        "the live rows the step changed {changed:?}, page 0's patched rows {window_rows:?}",
+    );
+}
+
+/// A cursor step to another line under relative numbering sends a rich stack
+/// page's runs again as a decorations-only fill, with the numbers counted from
+/// the new line, and fills no page whole. Page 0 starts with the header row,
+/// then each row's buffer number and base number.
+#[test]
+fn a_cursor_step_under_relative_numbering_redecorates_a_rich_stack_page() {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    let (mut h, mut rx, pool) = relative_stack(30, rgb_diff_gutter_theme());
+    h.type_keys("j");
+    h.stoat.render();
+    let commands = command::decode_stream(&emit_raw(&mut h, &mut rx));
+
+    let texts: Vec<String> = commands
+        .iter()
+        .skip_while(|c| {
+            !matches!(c, Command::FillDecorations(FillCommand { pool: p, index: 0, .. }) if *p == pool)
+        })
+        .take_while(|c| !matches!(c, Command::FillEnd))
+        .filter_map(|c| match c {
+            Command::TextRun(run) => Some(run.text.clone()),
+            _ => None,
+        })
+        .collect();
+    let fills = commands
+        .iter()
+        .filter(|c| matches!(c, Command::Fill(fill) if fill.pool == pool))
+        .count();
+    assert_eq!(
+        (
+            texts.iter().take(6).map(String::as_str).collect::<Vec<_>>(),
+            fills
+        ),
+        (vec!["1", "1", "2", "2", "1", "3"], 0),
+        "the cursor on line 2: (buffer, base) per row is (1, 1), (2, 2), (1, 3)",
+    );
 }
 
 /// A select-mode step inside the window patches the two rows whose cells the
