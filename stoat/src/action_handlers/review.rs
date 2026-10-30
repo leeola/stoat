@@ -926,7 +926,8 @@ pub(super) enum StageOutcome {
 /// The action works in any editor view on a file in the repo's workdir. A press
 /// on an untracked file's hunk adds the file to the index. A missing repo, an
 /// ignored file, or a cursor on a row no hunk covers sets a status message and
-/// changes nothing.
+/// changes nothing. In the diff view the row above a removed block counts as
+/// the deletion's row, since the view draws the block below it.
 ///
 /// The press captures the cursor row, the text, and the review base. The diff
 /// and the write run as a queued git job, and the status and the gutter follow
@@ -962,7 +963,8 @@ pub(super) fn stage_line(stoat: &mut Stoat) -> UpdateEffect {
 /// Capture a staging press and queue its git work.
 ///
 /// The row is the block cursor's cell, so a cursor resting on a line's last
-/// cell stages that line, not the next.
+/// cell stages that line, not the next. In the diff view the row above a
+/// zero-width hunk stands for that hunk, as [`pressed_row`] gives it.
 ///
 /// The text is a rope handle, so the press copies nothing that grows with the
 /// file. The review base is read now and again at the job's turn. A walk step
@@ -973,6 +975,7 @@ fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
+    let diff_walk = super::movement::walks_diff_view(stoat);
     let (cursor_row, text, unit, drawn) = {
         let Some(editor) = super::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -984,6 +987,7 @@ fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
         let head = buffer_snapshot.resolve_anchor(&sel.head());
         let cursor = stoat_text::cursor_offset(buffer_snapshot.rope(), tail, head);
         let cursor_row = buffer_snapshot.rope().offset_to_point(cursor).row;
+        let cursor_row = pressed_row(&snapshot, buffer_snapshot, cursor_row, diff_walk);
 
         let unit = match unit {
             AmendUnit::Hunk => change_stop_at(&snapshot, buffer_snapshot, cursor_row)
@@ -1134,6 +1138,35 @@ fn queue_stage(stoat: &mut Stoat, unit: AmendUnit) -> UpdateEffect {
     });
     git_jobs::enqueue(stoat, job);
     UpdateEffect::Redraw
+}
+
+/// The buffer row a staging press on `cursor_row` acts on.
+///
+/// The diff view splices a zero-width hunk's removed block below the live row
+/// above its seam and ticks the block there, so with `diff_walk` set a press on
+/// that row reads the seam. A row inside a hunk answers itself, and so does
+/// every row of a plain pane, whose gutter marks the seam row.
+fn pressed_row(
+    snapshot: &DisplaySnapshot,
+    buffer_snapshot: &MultiBufferSnapshot,
+    cursor_row: u32,
+    diff_walk: bool,
+) -> u32 {
+    let Some(map) = snapshot.diff_map().filter(|_| diff_walk) else {
+        return cursor_row;
+    };
+    let live = map.live_hunks(buffer_snapshot);
+    let on_hunk = live
+        .in_range(cursor_row..cursor_row + 1)
+        .any(|(_, rows)| rows.contains(&cursor_row));
+    let seam_below = live
+        .in_range(cursor_row + 1..cursor_row + 2)
+        .any(|(_, rows)| rows.is_empty() && rows.start == cursor_row + 1);
+    if !on_hunk && seam_below {
+        cursor_row + 1
+    } else {
+        cursor_row
+    }
 }
 
 /// Mark the change under the cursor approved under a range review, or take the
@@ -1898,11 +1931,11 @@ pub(crate) fn populate_diff_cache_from(
 mod tests {
     use super::{
         attach_preview_highlights, build_document_from_changes, editor_shows_changes, hunks_around,
-        stage_rows_patch, unstage_rows_patch, StagingTexts,
+        pressed_row, stage_rows_patch, unstage_rows_patch, StagingTexts,
     };
     use crate::{
         badge::BadgeSource,
-        diff_map::{MarkKind, MarkState},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, MarkKind, MarkState},
         display_map::syntax_theme::SyntaxStyles,
         review_session::DiffDocument,
         test_harness::TestHarness,
@@ -1910,6 +1943,8 @@ mod tests {
         workspace::diff::{self, BaseHighlightCache, BaseHighlightMemo, DiffBase},
     };
     use std::{
+        iter,
+        ops::Range,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
     };
@@ -3794,6 +3829,108 @@ mod tests {
             patches[0].contains("-GONE\n"),
             "removes the base line: {}",
             patches[0]
+        );
+    }
+
+    /// The diff view draws a deletion's removed block below the live row above
+    /// its seam, so a press on that row stages what a press on the seam row
+    /// stages. The plain pane marks the seam row itself, and a press above it
+    /// stages nothing.
+    #[test]
+    fn a_diff_view_press_on_the_row_above_a_deletion_stages_it() {
+        let press = |diff_view: bool, row: u32| {
+            let mut h = TestHarness::with_size(80, 14);
+            let workdir = PathBuf::from("/work");
+            h.stage_review_scenario(&workdir, &[("a.rs", "a\nb\nGONE\nc\nd\n", "a\nb\nc\nd\n")]);
+            h.stoat.set_diff_warm_auto(true);
+            h.open_file(&workdir.join("a.rs"));
+            h.settle_diff_jobs();
+            if diff_view {
+                super::enter_diff_view(&mut h.stoat);
+                h.settle_diff_jobs();
+            }
+            {
+                let editor =
+                    crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+                crate::action_handlers::movement::set_cursor_row(editor, row);
+            }
+
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleStageHunk);
+            h.settle();
+            (
+                h.fake_git().applied_patches(&workdir),
+                h.stoat.pending_message.clone(),
+            )
+        };
+
+        let at_seam = press(false, 2);
+        assert_eq!(
+            (
+                at_seam.0.len(),
+                at_seam.0.iter().all(|patch| patch.contains("-GONE\n")),
+                at_seam.1.as_deref(),
+            ),
+            (1, true, Some("staged hunk")),
+            "a press on the seam row removes the base line: {at_seam:?}",
+        );
+        assert_eq!(
+            [press(true, 1), press(false, 1)],
+            [
+                at_seam,
+                (Vec::new(), Some("no hunk under the cursor".to_string()))
+            ],
+            "the diff view press above the seam stages the deletion, the plain one nothing",
+        );
+    }
+
+    /// The diff view moves a press onto a seam only from a row no hunk covers,
+    /// so the last row of a hunk above a move seam presses that hunk. A plain
+    /// pane keeps every row.
+    #[test]
+    fn a_press_moves_onto_a_seam_only_from_a_row_no_hunk_covers() {
+        let mut h = TestHarness::with_size(80, 14);
+        let path = h.write_file("a.rs", "a\nb\nc\nd\ne\nf\n");
+        h.open_file(&path);
+        let hunk = |status, rows: Range<u32>| DiffHunk {
+            status,
+            unstaged_lines: iter::once(rows.clone()).collect(),
+            marked_rows: Vec::new(),
+            buffer_start_line: rows.start,
+            buffer_line_range: rows,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        };
+        let mut map = DiffMap::from_hunks(
+            [
+                hunk(DiffHunkStatus::Added, 1..3),
+                hunk(DiffHunkStatus::Moved, 3..3),
+                hunk(DiffHunkStatus::Deleted, 5..5),
+            ],
+            None,
+        );
+        let (_, buffer_id) = h
+            .stoat
+            .focused_editor_ids()
+            .expect("an editor has the focus");
+        {
+            let ws = h.stoat.active_workspace();
+            let buffer = ws.buffers.get(buffer_id).expect("the focused buffer");
+            let mut guard = buffer.write().expect("buffer poisoned");
+            map.anchor_hunks(&guard.snapshot);
+            guard.diff_map = Some(map);
+        }
+
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let pressed = |diff_walk| {
+            (0..6)
+                .map(|row| pressed_row(&snapshot, snapshot.buffer_snapshot(), row, diff_walk))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            [pressed(true), pressed(false)],
+            [vec![0, 1, 2, 3, 5, 5], vec![0, 1, 2, 3, 4, 5]],
         );
     }
 

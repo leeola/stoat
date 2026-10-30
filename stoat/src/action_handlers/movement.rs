@@ -4480,7 +4480,7 @@ pub(super) fn live_hunk_rows(
 ///
 /// True in the diff view, and in a latched pane that shows a clean file plain,
 /// since both compare against the workspace's base.
-fn walks_diff_view(stoat: &mut Stoat) -> bool {
+pub(super) fn walks_diff_view(stoat: &mut Stoat) -> bool {
     let latched = {
         let panes = &stoat.active_workspace().panes;
         panes.pane(panes.focus()).diff_mode
