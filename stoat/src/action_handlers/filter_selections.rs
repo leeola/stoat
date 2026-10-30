@@ -1,6 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
+    jumplist::JumpEntry,
 };
 use stoat_text::{Anchor, Selection};
 
@@ -10,6 +11,12 @@ use stoat_text::{Anchor, Selection};
 pub(crate) struct FilterSelectionsInputState {
     pub(crate) input: InputView,
     pub(crate) remove: bool,
+    /// The jumplist entry for the origin, captured before the prompt took
+    /// focus. `None` when no editor was focused.
+    ///
+    /// [`submit`] pushes this once the pattern compiles, whether or not any
+    /// selection survives, as the Helix regex prompt does.
+    origin_jump: Option<JumpEntry>,
 }
 
 pub(super) fn open_keep(stoat: &mut Stoat) -> UpdateEffect {
@@ -24,6 +31,9 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
     if stoat.filter_selections_input.is_some() {
         return UpdateEffect::None;
     }
+    // Captured before InputView::create moves focus onto the prompt's own
+    // editor.
+    let origin_jump = super::focused_editor_mut(stoat).map(super::jump::live_entry);
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let input = InputView::create(
@@ -33,7 +43,11 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
         "",
         "insert",
     );
-    stoat.filter_selections_input = Some(FilterSelectionsInputState { input, remove });
+    stoat.filter_selections_input = Some(FilterSelectionsInputState {
+        input,
+        remove,
+        origin_jump,
+    });
     UpdateEffect::Redraw
 }
 
@@ -41,6 +55,10 @@ fn open_with(stoat: &mut Stoat, remove: bool) -> UpdateEffect {
 /// `regex.is_match(selection_text) XOR remove`. A filter that keeps nothing
 /// leaves the selections unchanged and reports it. An invalid regex leaves
 /// them unchanged in silence. Returns `true` when the input modal was open.
+///
+/// A pattern that compiles records the origin on the jumplist, so a jump back
+/// returns to the selections the prompt opened over, even after a filter that
+/// kept nothing.
 pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.filter_selections_input.take() else {
         return false;
@@ -57,6 +75,9 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         stoat.set_status(format!("invalid regex: {query}"));
         return true;
     };
+    if let Some(entry) = state.origin_jump {
+        super::jump::push_entry(stoat, entry);
+    }
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return true;
     };
@@ -135,6 +156,44 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(4, 7, false)]);
+    }
+
+    /// The number of entries on the focused pane's jumplist.
+    fn jumplist_len(h: &TestHarness) -> usize {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
+    }
+
+    /// Enter records the selections the prompt opened over, so a jump back
+    /// returns to them, as Helix's regex prompt does.
+    #[test]
+    fn keep_submit_records_the_origin_on_the_jumplist() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc 123 def");
+        select_two_ranges(&mut h, (0, 3), (4, 7));
+        dispatch(&mut h.stoat, &action::KeepSelections);
+        h.type_text("\\d+");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+
+        dispatch(&mut h.stoat, &action::JumpBackward);
+        assert_eq!(
+            editor::selection_spans(&mut h.stoat),
+            vec![(0, 3, false), (4, 7, false)],
+        );
+    }
+
+    /// A keep that leaves nothing still records the origin, since the push
+    /// rides on the pattern compiling rather than on a match.
+    #[test]
+    fn keep_with_no_match_still_records_the_origin() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc 123 def");
+        select_two_ranges(&mut h, (0, 3), (4, 7));
+        let before = jumplist_len(&h);
+        dispatch(&mut h.stoat, &action::KeepSelections);
+        h.type_text("zzz");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(jumplist_len(&h), before + 1);
     }
 
     /// A filter answers in document order, so the primary goes to the first

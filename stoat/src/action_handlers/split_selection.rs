@@ -6,6 +6,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     editor_state::EditorState,
     input_view::{InputView, SubmitTarget},
+    jumplist::JumpEntry,
 };
 use std::{collections::VecDeque, sync::Arc};
 use stoat_text::{next_char_boundary, Anchor, Bias, Rope, Selection};
@@ -42,6 +43,12 @@ pub(crate) struct SplitSelectionInputState {
     /// does not compile, when a select finds no match, and on cancel. Any other
     /// pattern leaves the view to follow its landing from where it stands.
     origin_view: (u32, f32),
+    /// The jumplist entry for the origin, captured before the prompt took
+    /// focus. `None` when no editor was focused.
+    ///
+    /// [`submit`] pushes this once the pattern compiles, whether or not it
+    /// matches, as the Helix regex prompt does.
+    origin_jump: Option<JumpEntry>,
     /// The pattern the live preview last ran for.
     ///
     /// The preview syncs once per frame, so without this every idle frame
@@ -78,6 +85,9 @@ pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
             )
         })
         .unwrap_or((Arc::from([]), (0, 0.0)));
+    // Captured before InputView::create moves focus onto the prompt's own
+    // editor.
+    let origin_jump = super::focused_editor_mut(stoat).map(super::jump::live_entry);
 
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
@@ -87,6 +97,7 @@ pub(super) fn open(stoat: &mut Stoat, kind: RegexSelectKind) -> UpdateEffect {
         kind,
         origin_selections,
         origin_view,
+        origin_jump,
         previewed: None,
         shown: VecDeque::new(),
     });
@@ -207,6 +218,10 @@ fn preview_from_origin(
 ///
 /// The view stays where the preview left it. An empty or invalid pattern, or a
 /// select that finds nothing, glides it back to the origin.
+///
+/// A pattern that compiles records the origin on the jumplist, so a jump back
+/// returns to the selections the prompt opened over, even after a select that
+/// found nothing.
 pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     let Some(state) = stoat.split_selection_input.take() else {
         return false;
@@ -227,6 +242,9 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         stoat.set_status(format!("invalid regex: {query}"));
         return true;
     };
+    if let Some(entry) = state.origin_jump {
+        super::jump::push_entry(stoat, entry);
+    }
     let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
     if let Some(editor) = search::pane_editor(stoat)
         && !apply_kind(editor, state.kind, &regex, scrolloff)
@@ -798,6 +816,57 @@ mod tests {
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         let spans = editor::selection_spans(&mut h.stoat);
         assert_eq!(spans, vec![(0, 4, false), (7, 11, false)]);
+    }
+
+    /// The number of entries on the focused pane's jumplist.
+    fn jumplist_len(h: &TestHarness) -> usize {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).jumplist.entries().len()
+    }
+
+    /// The selections after `pattern` goes through the prompt `opener` opens
+    /// over the whole of `abc 123 def`, and a jump back follows.
+    fn submit_then_jump_back(opener: &dyn Action, pattern: &str) -> Vec<(usize, usize, bool)> {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc 123 def");
+        select_range(&mut h, 0, 11);
+        dispatch(&mut h.stoat, opener);
+        h.type_text(pattern);
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        dispatch(&mut h.stoat, &action::JumpBackward);
+        editor::selection_spans(&mut h.stoat)
+    }
+
+    /// Enter records the selection the prompt opened over, so a jump back
+    /// returns to it, as Helix's regex prompt does.
+    #[test]
+    fn split_submit_records_the_origin_on_the_jumplist() {
+        assert_eq!(
+            submit_then_jump_back(&action::SplitSelection, "\\d+"),
+            vec![(0, 11, false)],
+        );
+    }
+
+    #[test]
+    fn select_regex_submit_records_the_origin_on_the_jumplist() {
+        assert_eq!(
+            submit_then_jump_back(&action::SelectRegex, "\\d+"),
+            vec![(0, 11, false)],
+        );
+    }
+
+    /// A select that finds nothing still records the origin, since the push
+    /// rides on the pattern compiling rather than on a match.
+    #[test]
+    fn select_regex_with_no_match_still_records_the_origin() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("abc 123 def");
+        select_range(&mut h, 0, 11);
+        let before = jumplist_len(&h);
+        dispatch(&mut h.stoat, &action::SelectRegex);
+        h.type_text("zzz");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(jumplist_len(&h), before + 1);
     }
 
     /// Splitting on adjacent separators leaves a cursor between them.
