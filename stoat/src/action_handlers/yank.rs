@@ -513,12 +513,18 @@ struct PasteEntry {
     /// The selection this came from, which is how the pasted span finds its way
     /// back to a selection after the sort.
     id: usize,
+    /// The low end of the selection before the paste. A paste from select mode
+    /// moves it and [`Self::hi`] through the insertions to keep the text the
+    /// selection held.
+    lo: usize,
+    /// The high end of the selection before the paste.
+    hi: usize,
     insert_at: usize,
     payload: String,
 }
 
 /// Insert each fragment at every selection and leave the inserted text
-/// selected.
+/// selected, or from select mode the original text.
 ///
 /// Each fragment lands at its selection's `start` (Before) or `end` (After),
 /// repeated by the pending count. Fragments distribute across selections in
@@ -526,6 +532,12 @@ struct PasteEntry {
 /// outnumber them, so a single fragment lands at every selection. Each affected
 /// selection ends as a range over the text it inserted, facing the way it faced
 /// before.
+///
+/// From select mode each selection instead keeps the text it held, as Helix's
+/// paste does. Its bounds move through the insertions the way Helix maps a
+/// range through an edit. The lower end moves past an insertion at its own
+/// offset, and the upper end stays before one. An empty selection moves both
+/// ends the way of the lower end, so it never inverts.
 ///
 /// No-op when every fragment is empty or no editor takes input.
 fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> UpdateEffect {
@@ -541,6 +553,7 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
     let linewise = fragments.iter().any(|f| f.ends_with('\n'));
 
     let count = stoat.take_pending_count().unwrap_or(1).max(1) as usize;
+    let keep_original = stoat.in_select_mode();
 
     let Some((editor_id, _)) = stoat.focused_editor_ids() else {
         return UpdateEffect::None;
@@ -607,6 +620,8 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
                 };
                 PasteEntry {
                     id: sel.id,
+                    lo,
+                    hi,
                     insert_at,
                     payload: fragments[idx.min(fragments.len() - 1)].repeat(count),
                 }
@@ -632,15 +647,11 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         guard.edit_batch(&batch);
     }
 
-    let mut id_to_range: std::collections::HashMap<usize, (usize, usize)> =
-        std::collections::HashMap::with_capacity(entries.len());
-    let mut shift: i64 = 0;
-    for entry in &entries {
-        let payload_len = entry.payload.len();
-        let start = (entry.insert_at as i64 + shift) as usize;
-        id_to_range.insert(entry.id, (start, start + payload_len));
-        shift += payload_len as i64;
-    }
+    let id_to_range = if keep_original {
+        original_spans(&entries)
+    } else {
+        pasted_spans(&entries)
+    };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
@@ -657,6 +668,52 @@ fn paste_text(stoat: &mut Stoat, fragments: &[String], side: PasteSide) -> Updat
         new
     });
     UpdateEffect::Redraw
+}
+
+/// The span over the text each entry inserted, keyed by selection id, for
+/// `entries` sorted by [`PasteEntry::insert_at`].
+fn pasted_spans(entries: &[PasteEntry]) -> std::collections::HashMap<usize, (usize, usize)> {
+    let mut id_to_range: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::with_capacity(entries.len());
+    let mut shift: i64 = 0;
+    for entry in entries {
+        let payload_len = entry.payload.len();
+        let start = (entry.insert_at as i64 + shift) as usize;
+        id_to_range.insert(entry.id, (start, start + payload_len));
+        shift += payload_len as i64;
+    }
+    id_to_range
+}
+
+/// The span each entry's selection keeps over its original text once every
+/// insertion lands, keyed by selection id, for `entries` sorted by
+/// [`PasteEntry::insert_at`].
+///
+/// See [`paste_text`] for the rule that moves each end.
+fn original_spans(entries: &[PasteEntry]) -> std::collections::HashMap<usize, (usize, usize)> {
+    // The entries are in offset order, so the count of those ahead of an
+    // offset indexes the running payload total directly.
+    let running: Vec<usize> = std::iter::once(0)
+        .chain(entries.iter().scan(0, |total, entry| {
+            *total += entry.payload.len();
+            Some(*total)
+        }))
+        .collect();
+    let before = |offset: usize| running[entries.partition_point(|e| e.insert_at < offset)];
+    let up_to = |offset: usize| running[entries.partition_point(|e| e.insert_at <= offset)];
+
+    entries
+        .iter()
+        .map(|entry| {
+            let lo = entry.lo + up_to(entry.lo);
+            let hi = if entry.lo == entry.hi {
+                lo
+            } else {
+                entry.hi + before(entry.hi)
+            };
+            (entry.id, (lo, hi))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -965,6 +1022,81 @@ mod tests {
             "the yanked text lands after the selection"
         );
         assert_eq!(h.stoat.focused_mode(), "normal");
+    }
+
+    /// A paste from select mode keeps the original text selected, as Helix's
+    /// does, rather than the text it inserted.
+    #[test]
+    fn paste_after_from_select_mode_keeps_the_original_text_selected() {
+        assert_eq!(
+            select_mode_paste("p"),
+            ("abcabcdef\n".into(), vec![(0, 3, false)], "normal".into()),
+        );
+    }
+
+    #[test]
+    fn paste_before_from_select_mode_keeps_the_original_text_selected() {
+        assert_eq!(
+            select_mode_paste("P"),
+            ("abcabcdef\n".into(), vec![(3, 6, false)], "normal".into()),
+        );
+    }
+
+    /// Yank `abc` in select mode, select it again, and paste it with `key`.
+    /// Returns the text, the selection, and the mode the paste leaves.
+    fn select_mode_paste(key: &str) -> (String, Vec<(usize, usize, bool)>, String) {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abcdef\n");
+        h.type_keys("v l l y");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 0);
+        h.type_keys("v l l");
+        h.type_keys(key);
+        (
+            h.buffer_text_at(&path),
+            h.selection_spans(),
+            h.stoat.focused_mode().into(),
+        )
+    }
+
+    /// Each selection moves past every insertion ahead of it, so each keeps
+    /// its own text when two paste at once.
+    #[test]
+    fn paste_before_from_select_mode_keeps_each_selection_on_its_text() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc def\n");
+        set_selections(&mut h, &[(0, 3, false), (4, 7, false)]);
+        h.type_keys("y v");
+        set_selections(&mut h, &[(0, 3, false), (4, 7, false)]);
+        h.type_keys("P");
+        assert_eq!(
+            (h.buffer_text_at(&path), h.selection_spans()),
+            (
+                "abcabc defdef\n".into(),
+                vec![(3, 6, false), (10, 13, false)]
+            ),
+        );
+    }
+
+    /// An empty selection moves both ends past an insertion at its offset, so
+    /// it stays empty after the pasted text rather than inverting.
+    #[test]
+    fn paste_before_an_empty_selection_from_select_mode_keeps_it_empty() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l y");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 4);
+        h.type_keys("v");
+        assert_eq!(
+            h.selection_spans(),
+            vec![(4, 4, false)],
+            "test setup: empty"
+        );
+
+        h.type_keys("P");
+        assert_eq!(
+            (h.buffer_text_at(&path), h.selection_spans()),
+            ("abc\nabc".into(), vec![(7, 7, false)]),
+        );
     }
 
     #[test]
