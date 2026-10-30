@@ -15645,6 +15645,19 @@ fn enter_in_a_burst_jumps_to_the_entry_the_query_selects() {
     );
 }
 
+/// A pick records the position it leaves, so a jump back returns to where the
+/// picker opened, as a Helix pick does.
+#[test]
+fn picking_an_entry_records_the_position_it_leaves() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    open_jumplist_picker(&mut h, 12);
+    let opened_at = focused_cursor_row(&mut h.stoat);
+
+    burst(&mut h, "jump-7", KeyCode::Enter);
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+    assert_eq!(focused_cursor_row(&mut h.stoat), opened_at);
+}
+
 /// The preview shows the selected jump's buffer, scrolled to the line it
 /// points at, so a reader sees the target before committing to the jump.
 #[test]

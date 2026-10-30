@@ -202,9 +202,10 @@ pub(super) fn jumplist_picker_close(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Jump to the location under the jumplist picker's selection, positioning the
-/// walk cursor at the chosen entry so a later backward/forward resumes from it.
-/// An empty picker just closes.
+/// Jump to the location under the jumplist picker's selection.
+///
+/// The pick records the position it leaves, so a jump back returns to it. An
+/// empty picker just closes.
 pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     let Some(mut picker) = stoat.jumplist_picker.take() else {
         return UpdateEffect::None;
@@ -221,10 +222,8 @@ pub(super) fn jumplist_picker_select(stoat: &mut Stoat) -> UpdateEffect {
     else {
         return UpdateEffect::Redraw;
     };
+    super::jump::push_jump(stoat);
     super::jump::apply_jump_entry(stoat, entry);
-    if let Some(jumplist) = focused_pane_jumplist(stoat) {
-        jumplist.set_cursor(idx);
-    }
     UpdateEffect::Redraw
 }
 

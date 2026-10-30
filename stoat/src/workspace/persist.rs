@@ -2006,7 +2006,11 @@ mod tests {
             let entry = jump_at(&ws.buffers, id, offset);
             ws.panes.pane_mut(root).jumplist.push(entry, &ws.buffers);
         }
-        ws.panes.pane_mut(root).jumplist.set_cursor(1);
+        let live = jump_at(&ws.buffers, id, 9);
+        ws.panes
+            .pane_mut(root)
+            .jumplist
+            .backward(live, &ws.buffers, 1);
 
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();

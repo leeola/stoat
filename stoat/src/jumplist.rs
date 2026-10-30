@@ -66,13 +66,6 @@ impl JumpList {
         self.generation
     }
 
-    /// Position the walk cursor at `cursor` (clamped to the tip), so the next
-    /// [`Self::backward`] walks from there. Used by the picker to resume the
-    /// walk from a chosen entry.
-    pub(crate) fn set_cursor(&mut self, cursor: usize) {
-        self.list.set_cursor(cursor);
-    }
-
     /// Rewrite the endpoints of the entry at `index` through `remap`, start
     /// then end of each selection in selection order.
     ///
