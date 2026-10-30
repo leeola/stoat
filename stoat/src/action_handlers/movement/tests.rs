@@ -6942,6 +6942,17 @@ fn count_prefix_goto_next_change_clamps_at_last() {
 }
 
 #[test]
+fn count_prefix_goto_prev_change_clamps_at_first() {
+    let mut h = TestHarness::with_size(20, 15);
+    let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+    h.open_file(&path);
+    install_diff_hunks(&mut h, &[2, 5, 8]);
+    h.type_keys("g j");
+    h.type_keys("9 [ g");
+    assert_eq!(h.selection_spans(), vec![(4, 5, false)]);
+}
+
+#[test]
 fn goto_next_change_lands_on_the_first_row_of_a_multi_line_hunk() {
     let mut h = TestHarness::with_size(20, 10);
     let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");

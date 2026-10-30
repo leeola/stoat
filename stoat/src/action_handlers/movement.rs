@@ -4326,8 +4326,10 @@ pub(super) fn stop_display_span(snapshot: &DisplaySnapshot, rows: &Range<u32>) -
     }
 }
 
-/// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when the
-/// walk runs out of hunks before its first step.
+/// Buffer rows of the hunk `count` steps from `cursor_row`, or `None` when no
+/// hunk lies in the walk's direction.
+///
+/// A count past the far end clamps on the last hunk that way.
 fn nth_hunk_rows(
     rope: &Rope,
     hunk_rows: &[Range<u32>],
@@ -4342,7 +4344,10 @@ fn nth_hunk_rows(
             let idx = (split + count.saturating_sub(1)).min(last);
             (idx >= split).then(|| hunk_rows[idx].clone())
         },
-        ChangeDir::Prev => Some(hunk_rows[split.checked_sub(count.max(1))?].clone()),
+        ChangeDir::Prev => {
+            let prev = split.checked_sub(1)?;
+            Some(hunk_rows[prev.saturating_sub(count.saturating_sub(1))].clone())
+        },
     }
 }
 
