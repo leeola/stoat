@@ -9259,6 +9259,34 @@ fn repeat_last_motion_replays_a_paragraph_motion() {
     );
 }
 
+/// The selections after `keys` in a fresh harness over four paragraphs.
+fn paragraph_spans_after(keys: &str) -> Vec<(usize, usize, bool)> {
+    let mut h = TestHarness::with_size(30, 20);
+    let path = h.write_file("s.txt", "a\n\nb\n\nc\n\nd\n");
+    h.open_file(&path);
+    h.type_keys(keys);
+    h.selection_spans()
+}
+
+/// Alt-. after a paragraph motion extends when select mode is on at the
+/// replay, as a Helix paragraph motion reads the mode when it runs.
+#[test]
+fn repeat_last_motion_paragraph_extends_by_the_mode_at_replay() {
+    assert_eq!(
+        paragraph_spans_after("] p v alt-."),
+        paragraph_spans_after("] p v ] p"),
+    );
+}
+
+/// Alt-. after a select-mode paragraph motion moves once select mode is off.
+#[test]
+fn repeat_last_motion_paragraph_moves_after_leaving_select_mode() {
+    assert_eq!(
+        paragraph_spans_after("v ] p escape alt-."),
+        paragraph_spans_after("] p ] p"),
+    );
+}
+
 /// Alt-. after a sibling jump repeats the jump rather than the find before it.
 #[test]
 fn repeat_last_motion_replays_a_sibling_jump() {

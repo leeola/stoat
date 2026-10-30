@@ -5243,7 +5243,7 @@ pub(crate) fn goto_paragraph_impl(
     extend: bool,
     count: u32,
 ) -> UpdateEffect {
-    stoat.last_motion = Some(LastMotion::Paragraph { dir, count, extend });
+    stoat.last_motion = Some(LastMotion::Paragraph { dir, count });
     with_focused_editor(stoat, |editor| {
         move_to_motion_range(editor, extend, |rope, cursor| {
             let mut blanks = BlankRows::new(rope);

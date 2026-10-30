@@ -76,11 +76,13 @@ pub(crate) use terminal::respawn_terminal_panes;
 
 /// A motion `RepeatLastMotion` (Alt-.) plays back.
 ///
-/// Each variant carries everything its handler reads from outside its
-/// arguments, so a replay runs the motion the user made rather than a fresh
-/// one shaped by whatever state it lands in. That means the count for the
-/// motions that take one, and the extend flag for the motions that have one,
-/// since both come from the keypress and neither survives it.
+/// Each variant carries what its handler reads from the keypress, so a replay
+/// repeats the motion the user made. That is the count for the motions that
+/// take one, since the count does not outlive the keypress.
+///
+/// A find also keeps the extend flag it ran with, as a Helix find does. The
+/// other motions that extend in select mode read the mode when they replay, so
+/// a replay in select mode extends where the first press moved.
 ///
 /// Only motions worth stepping through repeatedly are recorded. A motion that
 /// records nothing leaves the previous one in place, which is what makes Alt-.
@@ -104,7 +106,6 @@ pub(crate) enum LastMotion {
     Paragraph {
         dir: movement::ParaDir,
         count: u32,
-        extend: bool,
     },
     Change {
         dir: movement::ChangeDir,
@@ -182,8 +183,8 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
                 count,
                 extend,
             } => movement::execute_find_line_ending(stoat, kind, extend, count),
-            LastMotion::Paragraph { dir, count, extend } => {
-                movement::goto_paragraph_impl(stoat, dir, extend, count)
+            LastMotion::Paragraph { dir, count } => {
+                movement::goto_paragraph_impl(stoat, dir, stoat.in_select_mode(), count)
             },
             LastMotion::Change { dir, count } => movement::goto_change_impl(stoat, dir, count),
             LastMotion::Diagnostic { dir } => lsp::goto_diagnostic(stoat, dir),
