@@ -1414,7 +1414,8 @@ fn gap_style(
 /// span fall back to `fallback`, the deletion or context color, so the gaps
 /// between tokens still read as part of the diff. This function uses
 /// `fallback` inside and outside the change spans. The diff view gives the
-/// unchanged bytes of a refined base line the text color instead.
+/// unchanged bytes of a refined base line the text color instead, and a
+/// refined line that no change span reaches the context color.
 ///
 /// `change_spans` mark the changed chars of a modified or moved base line, as
 /// line-local base byte ranges tagged by [`ChangeKind`]. On a theme that can
@@ -1505,9 +1506,10 @@ pub(crate) fn paint_base_row(
 /// `gap_fallback` takes the place of `fallback` for a byte outside every token
 /// span and every change span. A refined line passes the text style there, so
 /// its unchanged bytes read as unchanged text and its changed bytes keep the
-/// removed color. `moved_fallback` takes the place of `fallback` inside a moved
-/// span. A removed line that the tree pass relocated in part then shows the
-/// move without token colors.
+/// removed color. A refined line with no change span passes the context style,
+/// as the mirror of an unchanged line does. `moved_fallback` takes the place of
+/// `fallback` inside a moved span. A removed line that the tree pass relocated
+/// in part then shows the move without token colors.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_segment(
     buf: &mut Buffer,
@@ -1802,6 +1804,10 @@ impl<'a> BaseRow<'a> {
 /// line reads in it only inside its change spans. The line's first row also
 /// takes the line number and the staged status.
 ///
+/// A refined line that no change span reaches paints as the mirror of an
+/// unchanged line, dimmed and softened. A block the formatter re-indented then
+/// reads as context, and only the lines with real changes stand out.
+///
 /// Both sides of the diff reach here. A block row is a base line with no live
 /// row beside it, and a paired modified row is one that has both, so the two
 /// paint the left column identically and differ only in where the text comes
@@ -1866,9 +1872,14 @@ fn paint_base_side(
         (false, true) => tints.map(|t| t.moved),
         (false, false) => tints.map(|t| t.deleted),
     };
-    let gap_fallback = match refined {
-        true => text_style,
-        false => del_style,
+    // The tree pass left this base line unmarked, so the row is context that
+    // re-indented or moved with its block. It takes the mirror arm's dim
+    // fallback and row soften.
+    let quiet = refined && changes.is_empty();
+    let gap_fallback = match (quiet, refined) {
+        (true, _) => dim_style,
+        (false, true) => text_style,
+        (false, false) => del_style,
     };
     paint_base_segment(
         buf,
@@ -1886,7 +1897,7 @@ fn paint_base_side(
         moved_style,
         changes,
         tints,
-        None,
+        tints.filter(|_| quiet).map(|t| t.bg),
         tints.map(|t| t.bg),
         dials,
         tint_row,
@@ -3449,6 +3460,65 @@ mod tests {
             barred,
             [marked_screen_row],
             "only the marked row bars, not every row the hunk spans"
+        );
+    }
+
+    /// A base row of a refined hunk that no change span reaches paints as the
+    /// mirror of an unchanged row, so a re-indented block's left column reads
+    /// as context and only its marked row stands out.
+    #[test]
+    fn a_quiet_base_row_of_a_refined_hunk_paints_as_context() {
+        let span = |byte_range| ChangeSpan {
+            byte_range,
+            kind: ChangeKind::Replaced,
+            move_metadata: None,
+            prose: ProseChange::None,
+        };
+        let dm = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: std::iter::once(0..4).collect(),
+                marked_rows: std::iter::once(2..3).collect(),
+                buffer_start_line: 0,
+                buffer_line_range: 0..4,
+                base_byte_range: 0..15,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: vec![span(4..5)],
+                    base_spans: vec![span(8..11)],
+                })),
+            }],
+            Some(Arc::new("  a\n  b\n  c\n  d\ne\n".to_string())),
+        );
+        let mut editor = diff_editor_with_map("a\nb\nc\nd\ne\n", dm);
+        let area = Rect::new(0, 0, 120, 8);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let text_x = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let letter = |y: u16| {
+            let x = (text_x..area.width)
+                .find(|&x| buf[(x, y)].symbol() != " ")
+                .expect("the row shows its base line");
+            (buf[(x, y)].symbol(), buf[(x, y)].style())
+        };
+        let [a, b, c, d, e] = [0, 1, 2, 3, 4].map(letter);
+        assert_eq!(
+            ([a.0, b.0, c.0, d.0, e.0], [a.1, b.1, d.1], c.1 == e.1),
+            (["a", "b", "c", "d", "e"], [e.1; 3], false),
+            "the quiet rows paint as the mirror of e, and the marked row does not",
         );
     }
 
