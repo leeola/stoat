@@ -1592,7 +1592,7 @@ define_action!(
     "GotoNextChange",
     ActionKind::GotoNextChange,
     "goto next change",
-    "Move the primary cursor to the start line of the next diff hunk strictly after the cursor's row. Past the file's last hunk it crosses into the next changed file, and past the last changed file it wraps to the first while ChangeWalkWrap is on. Primary-cursor only.",
+    "Move the primary cursor to the start line of the next diff hunk strictly after the cursor's row. A hunk the tree pass refined offers one stop per run of changed rows, and a hunk it found nothing in offers none. Past the file's last hunk it crosses into the next changed file, and past the last changed file it wraps to the first while ChangeWalkWrap is on. Primary-cursor only.",
     ActionPriority::Rare
 );
 
@@ -1602,7 +1602,27 @@ define_action!(
     "GotoPrevChange",
     ActionKind::GotoPrevChange,
     "goto previous change",
-    "Move the primary cursor to the start line of the previous diff hunk strictly before the cursor's row. Past the file's first hunk it crosses into the previous changed file, and past the first changed file it wraps to the last while ChangeWalkWrap is on. Primary-cursor only.",
+    "Move the primary cursor to the start line of the previous diff hunk strictly before the cursor's row. A hunk the tree pass refined offers one stop per run of changed rows, and a hunk it found nothing in offers none. Past the file's first hunk it crosses into the previous changed file, and past the first changed file it wraps to the last while ChangeWalkWrap is on. Primary-cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextGitChangeDef,
+    GotoNextGitChange,
+    "GotoNextGitChange",
+    ActionKind::GotoNextGitChange,
+    "goto next git change",
+    "Move the primary cursor to the start line of the next hunk of the line diff strictly after the cursor's row, one stop per hunk however the tree pass refined it. Crosses files and wraps as GotoNextChange does.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevGitChangeDef,
+    GotoPrevGitChange,
+    "GotoPrevGitChange",
+    ActionKind::GotoPrevGitChange,
+    "goto previous git change",
+    "Move the primary cursor to the start line of the previous hunk of the line diff strictly before the cursor's row, one stop per hunk however the tree pass refined it. Crosses files and wraps as GotoPrevChange does.",
     ActionPriority::Rare
 );
 

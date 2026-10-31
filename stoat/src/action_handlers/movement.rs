@@ -3178,6 +3178,16 @@ pub(crate) enum ChangeDir {
     Prev,
 }
 
+/// Which differ's stops a change walk reads.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ChangeUnit {
+    /// The changes the tree pass marked. A refined hunk offers a stop per run,
+    /// and a hunk the tree pass found nothing in offers none.
+    Tree,
+    /// The line pass's hunks, one stop per hunk.
+    Git,
+}
+
 /// Expand each selection to the next syntax node out, one level per press.
 ///
 /// A count before the key is not read, as in Helix. Alt-. with a count is what
@@ -4050,9 +4060,9 @@ fn find_target(rope: &Rope, cursor: usize, kind: FindKind, ch: char, count: u32)
     }
 }
 
-pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir, unit: ChangeUnit) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1).max(1);
-    goto_change_impl(stoat, dir, count)
+    goto_change_impl(stoat, dir, count, unit)
 }
 
 /// Flip the change walk's wrap past the ends, backing the `ChangeWalkWrap`
@@ -4073,8 +4083,13 @@ pub(crate) fn toggle_change_wrap(stoat: &mut Stoat) -> UpdateEffect {
 
 /// [`goto_change`] with its count supplied rather than read from the pending
 /// keypress, so a replay repeats the count the motion was made with.
-pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) -> UpdateEffect {
-    stoat.last_motion = Some(LastMotion::Change { dir, count });
+pub(crate) fn goto_change_impl(
+    stoat: &mut Stoat,
+    dir: ChangeDir,
+    count: u32,
+    unit: ChangeUnit,
+) -> UpdateEffect {
+    stoat.last_motion = Some(LastMotion::Change { dir, count, unit });
 
     // In the conflict view the standard change-navigation chords step between
     // conflict chunks. The center is a pathless scratch buffer with no diff map,
@@ -4103,7 +4118,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
     if let Some((_, buffer_id)) = stoat.focused_editor_ids()
         && stoat
             .active_workspace_mut()
-            .add_diff_landing(buffer_id, DiffLanding::ChangeWalk { dir, count })
+            .add_diff_landing(buffer_id, DiffLanding::ChangeWalk { dir, count, unit })
     {
         tracing::debug!(
             target: "stoat::change_walk",
@@ -4163,7 +4178,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
 
     // One walk over them feeds every selection, since each one picks its own
     // target out of the same sorted list.
-    let hunk_rows = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
+    let hunk_rows = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk, unit);
 
     // Every selection steps from its own cursor, so a multi-cursor set walks to
     // one hunk each rather than sharing whichever cursor happened to be newest.
@@ -4199,6 +4214,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
             target: "stoat::change_walk",
             ?dir,
             count,
+            ?unit,
             path = ?current_path,
             stops = hunk_rows.len(),
             diff_walk,
@@ -4214,7 +4230,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
         // goes on into the next excerpt rather than opening the next file.
         if stoat.active_workspace().focused_diff_changes_id().is_some() {
             log_route("excerpt hop");
-            return super::diff_changes::hop_excerpt(stoat, dir);
+            return super::diff_changes::hop_excerpt(stoat, dir, unit);
         }
         // The repository's changed files are no part of a comparison of two
         // files, so the walk ends where the file's differences end.
@@ -4230,6 +4246,7 @@ pub(crate) fn goto_change_impl(stoat: &mut Stoat, dir: ChangeDir, count: u32) ->
         return goto_change_across_files(
             stoat,
             dir,
+            unit,
             current_path,
             source_diff_view,
             diff_walk,
@@ -4481,9 +4498,10 @@ fn landing_row(rope: &Rope, rows: &Range<u32>, diff_walk: bool) -> u32 {
 /// Row ranges change navigation stops on, in document order.
 ///
 /// Where the changes sit now, not where the last diff job left them, so a jump
-/// reaches the row the gutter paints its mark on. A refined hunk offers one
-/// stop per marked run, so a walk crosses the rows that changed rather than
-/// the block that holds them. A buffer with no diff map at all answers empty.
+/// reaches the row the gutter paints its mark on. Under [`ChangeUnit::Tree`] a
+/// refined hunk offers one stop per marked run, so a walk crosses the rows that
+/// changed rather than the block that holds them. Under [`ChangeUnit::Git`]
+/// every hunk is one stop. A buffer with no diff map at all answers empty.
 ///
 /// A walk in the diff view takes the hunks alone, and a plain pane's walk takes
 /// the staged marks too.
@@ -4491,14 +4509,17 @@ pub(super) fn live_hunk_rows(
     display_snapshot: &DisplaySnapshot,
     buffer_snapshot: &MultiBufferSnapshot,
     diff_walk: bool,
+    unit: ChangeUnit,
 ) -> Vec<Range<u32>> {
     display_snapshot
         .diff_map()
         .map(|diff_map| {
             let live = diff_map.live_hunks(buffer_snapshot);
-            match diff_walk {
-                true => live.hunk_stops(),
-                false => live.change_stops(),
+            match (diff_walk, unit) {
+                (true, ChangeUnit::Tree) => live.hunk_stops(),
+                (false, ChangeUnit::Tree) => live.change_stops(),
+                (true, ChangeUnit::Git) => live.git_hunk_stops(),
+                (false, ChangeUnit::Git) => live.git_change_stops(),
             }
         })
         .unwrap_or_default()
@@ -4551,7 +4572,12 @@ pub(crate) fn goto_edge_change(stoat: &mut Stoat, last: bool) -> UpdateEffect {
         };
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let rows = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
+        let rows = live_hunk_rows(
+            &display_snapshot,
+            buffer_snapshot,
+            diff_walk,
+            ChangeUnit::Tree,
+        );
         let rows = match last {
             true => rows.last().cloned(),
             false => rows.first().cloned(),
@@ -4610,6 +4636,9 @@ pub(crate) struct PendingChangedFileJump {
     /// toward the file the reader came from. The scan lands long after the
     /// keypress that knew this.
     dir: ChangeDir,
+    /// The stops the walk that armed the hop reads, which the landing in the
+    /// target file reads too.
+    unit: ChangeUnit,
     /// The workspace whose key armed the hop. The hop lands only while this
     /// workspace is active.
     workspace: WorkspaceId,
@@ -4671,6 +4700,7 @@ struct HopStep {
 fn goto_change_across_files(
     stoat: &mut Stoat,
     dir: ChangeDir,
+    unit: ChangeUnit,
     current_path: Option<PathBuf>,
     source_diff_view: bool,
     diff_walk: bool,
@@ -4720,6 +4750,7 @@ fn goto_change_across_files(
         source_diff_view,
         origin,
         dir,
+        unit,
         workspace: stoat.active_workspace,
         pane: stoat.active_workspace().panes.focus(),
     });
@@ -5100,6 +5131,7 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
             buffer_id,
             Some(DiffLanding::FileHop {
                 dir: pending.dir,
+                unit: pending.unit,
                 origin: pending.origin,
                 wrapped,
                 fallback: (line, rows),
@@ -5112,16 +5144,17 @@ pub(crate) fn pump_changed_file_jump(stoat: &mut Stoat) -> bool {
 /// Land a changed-file hop on the stop the landed file's own walk offers.
 ///
 /// A Next hop lands on the file's first stop and a Prev hop on its last, read
-/// from the live diff map. A hunk the tree pass split into runs therefore lands
-/// on its first or last run, and the next press in the other direction leaves
-/// the file. `fallback` is the scan's row and rows, for a map that offers no
-/// stop.
+/// from the live diff map under `unit`. Under [`ChangeUnit::Tree`] a hunk the
+/// tree pass split into runs therefore lands on its first or last run, and the
+/// next press in the other direction leaves the file. `fallback` is the scan's
+/// row and rows, for a map that offers no stop.
 ///
 /// Pushes `origin` to the jumplist and records the landing. A `wrapped` hop
 /// says so in the status line.
 pub(super) fn land_file_hop(
     stoat: &mut Stoat,
     dir: ChangeDir,
+    unit: ChangeUnit,
     origin: Option<JumpEntry>,
     wrapped: bool,
     fallback: (u32, Range<u32>),
@@ -5132,7 +5165,7 @@ pub(super) fn land_file_hop(
     let landed = if let Some(editor) = focused_editor_mut(stoat) {
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let stops = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk);
+        let stops = live_hunk_rows(&display_snapshot, buffer_snapshot, diff_walk, unit);
         let stop = match dir {
             ChangeDir::Next => stops.first(),
             ChangeDir::Prev => stops.last(),

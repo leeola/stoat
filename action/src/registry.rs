@@ -41,22 +41,23 @@ use crate::{
             GotoFirstNonwhitespace, GotoImplementors, GotoLastAccessed, GotoLastChange,
             GotoLastDiagnostic, GotoLastLine, GotoLastModification, GotoLineEnd, GotoLineNumber,
             GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass, GotoNextComment,
-            GotoNextEntry, GotoNextFunction, GotoNextParagraph, GotoNextParameter, GotoNextTest,
-            GotoNextXmlElement, GotoPrevChange, GotoPrevClass, GotoPrevComment, GotoPrevEntry,
-            GotoPrevFunction, GotoPrevParagraph, GotoPrevParameter, GotoPrevTest,
-            GotoPrevXmlElement, GotoReferences, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertAtLineEnd,
-            InsertAtLineStart, InsertRegister, InsertTab, JoinSelections, JoinSelectionsSpace,
-            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, Later, MarkTrailEnd,
-            MarkTrailStart, MatchBrackets, MergeConsecutiveSelections, MergeSelections, MoveDown,
-            MoveLeft, MoveLineDown, MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, OpenAbove, OpenBelow, OpenCodeSearch, OpenJumplistPicker,
-            OpenLastPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter,
-            PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
-            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar,
-            ReplaceWithClipboard, ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
+            GotoNextEntry, GotoNextFunction, GotoNextGitChange, GotoNextParagraph,
+            GotoNextParameter, GotoNextTest, GotoNextXmlElement, GotoPrevChange, GotoPrevClass,
+            GotoPrevComment, GotoPrevEntry, GotoPrevFunction, GotoPrevGitChange, GotoPrevParagraph,
+            GotoPrevParameter, GotoPrevTest, GotoPrevXmlElement, GotoReferences, GotoWindowBottom,
+            GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
+            IndentSelection, InsertAtLineEnd, InsertAtLineStart, InsertRegister, InsertTab,
+            JoinSelections, JoinSelectionsSpace, JumpBackward, JumpForward, KeepPrimarySelection,
+            KeepSelections, Later, MarkTrailEnd, MarkTrailStart, MatchBrackets,
+            MergeConsecutiveSelections, MergeSelections, MoveDown, MoveLeft, MoveLineDown,
+            MoveLineUp, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
+            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
+            OpenAbove, OpenBelow, OpenCodeSearch, OpenJumplistPicker, OpenLastPicker,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
+            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
+            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplaceWithClipboard,
+            ReplaceWithYanked, ReplayMacro, RotateSelectionContentsBackward,
             RotateSelectionContentsForward, RotateSelectionsBackward, RotateSelectionsForward,
             SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
             SearchSelection, SearchSelectionDetectWordBoundaries, SelectAll, SelectAllChildren,
@@ -745,6 +746,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
+    add(GotoNextGitChange::DEF, |_| Ok(Box::new(GotoNextGitChange)));
+    add(GotoPrevGitChange::DEF, |_| Ok(Box::new(GotoPrevGitChange)));
     add(GotoNextParagraph::DEF, |_| Ok(Box::new(GotoNextParagraph)));
     add(GotoPrevParagraph::DEF, |_| Ok(Box::new(GotoPrevParagraph)));
     add(ExtendGotoNextParagraph::DEF, |_| {
@@ -1878,6 +1881,7 @@ mod tests {
         // + 1 Undo.
         // + 1 Redo.
         // + 2 GotoNextChange/GotoPrevChange.
+        // + 2 GotoNextGitChange / GotoPrevGitChange.
         // + 1 ExpandSelection.
         // + 1 ShrinkSelection.
         // + 2 SelectNextSibling/SelectPrevSibling.
@@ -2066,7 +2070,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 464);
+        assert_eq!(all().count(), 466);
     }
 
     #[test]

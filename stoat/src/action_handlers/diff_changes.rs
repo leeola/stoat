@@ -6,7 +6,7 @@
 
 use super::{
     jump,
-    movement::{self, ChangeDir},
+    movement::{self, ChangeDir, ChangeUnit},
     pane, review,
     view::{self, PageDir},
 };
@@ -382,7 +382,7 @@ pub(super) fn diff_changes_jump(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
 /// `DiffForward` go on walking changes. An excerpt whose diff map holds no hunk
 /// is passed over. At either end of the stack the cursor stays, and the status
 /// row says that no more changes lie that way.
-pub(super) fn hop_excerpt(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+pub(super) fn hop_excerpt(stoat: &mut Stoat, dir: ChangeDir, unit: ChangeUnit) -> UpdateEffect {
     let origin = super::focused_editor_mut(stoat).map(jump::live_entry);
     let ws = stoat.active_workspace_mut();
     let Some(id) = ws.focused_diff_changes_id() else {
@@ -428,7 +428,7 @@ pub(super) fn hop_excerpt(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     );
     state.focused = index;
 
-    movement::land_file_hop(stoat, dir, origin, false, (start, start..start + 1));
+    movement::land_file_hop(stoat, dir, unit, origin, false, (start, start..start + 1));
     UpdateEffect::Redraw
 }
 
@@ -1043,6 +1043,7 @@ mod tests {
         buffer::BufferId,
         buffer_lifecycle,
         diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
+        diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::pty::PtyNotification,
@@ -1050,7 +1051,10 @@ mod tests {
         test_harness::{editor, TestHarness},
         workspace::Workspace,
     };
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use stoat_action::Action;
     use stoat_config::MinimapMode;
     use stoat_text::Point;
@@ -2427,6 +2431,64 @@ mod tests {
                 ],
                 Some("no more changes"),
             ),
+        );
+    }
+
+    /// A walk back into the excerpt above lands on the last stop of its unit.
+    /// That excerpt's one hunk holds runs on rows 1 and 3, so the structured
+    /// walk lands on row 3 and the git walk on the top of the hunk.
+    #[test]
+    fn a_walk_back_into_an_excerpt_lands_on_the_last_stop_of_its_unit() {
+        let walk = |back: &dyn Action| {
+            let mut h = TestHarness::with_size(100, 24);
+            h.stage_review_scenario(
+                "/repo",
+                &[
+                    ("a.txt", "a\nb\nc\nd\ne\n", "a\nB\nC\nD\ne\n"),
+                    ("b.txt", "b\n", "B\n"),
+                ],
+            );
+            h.cover_with_diff_changes(false);
+            h.settle();
+
+            let ws = h.stoat.active_workspace_mut();
+            let buffer_id = ws
+                .buffers
+                .id_for_path(Path::new("/repo/a.txt"))
+                .expect("a.txt");
+            let split = DiffHunk {
+                status: DiffHunkStatus::Modified,
+                buffer_start_line: 1,
+                buffer_line_range: 1..4,
+                base_byte_range: 2..8,
+                anchor_range: None,
+                token_detail: Some(Arc::new(TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: Vec::new(),
+                    tree: true,
+                })),
+                unstaged_lines: std::iter::once(1..4).collect(),
+                marked_rows: vec![1..2, 3..4],
+            };
+            ws.install_test_diff_map(buffer_id, DiffMap::from_hunks([split], None));
+
+            let presses: [&dyn Action; 3] = [
+                &stoat_action::GotoNextGitChange,
+                &stoat_action::GotoNextGitChange,
+                back,
+            ];
+            for action in presses {
+                dispatch(&mut h.stoat, action);
+            }
+            place(&mut h)
+        };
+
+        assert_eq!(
+            [
+                walk(&stoat_action::GotoPrevChange),
+                walk(&stoat_action::GotoPrevGitChange),
+            ],
+            [at("a.txt", 3), at("a.txt", 1)],
         );
     }
 

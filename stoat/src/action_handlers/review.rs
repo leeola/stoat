@@ -1,6 +1,6 @@
 use super::{
     amend::{self, AmendRoute, AmendUnit},
-    movement::ChangeDir,
+    movement::{ChangeDir, ChangeUnit},
 };
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -671,7 +671,7 @@ pub(super) fn land_toggle_jump(stoat: &mut Stoat, origin: Option<JumpEntry>) {
                 |name| name.to_string_lossy().into_owned(),
             );
         stoat.set_status(format!("{name} has no changes"));
-        let _ = super::movement::goto_change(stoat, ChangeDir::Next);
+        let _ = super::movement::goto_change(stoat, ChangeDir::Next, ChangeUnit::Tree);
     }
 }
 
@@ -813,9 +813,9 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
                 stoat.set_status("the two files do not differ");
             }
         },
-        DiffLanding::ChangeWalk { dir, count } => {
+        DiffLanding::ChangeWalk { dir, count, unit } => {
             if focused.is_some_and(|(_, id)| id == buffer_id) {
-                super::movement::goto_change_impl(stoat, dir, count);
+                super::movement::goto_change_impl(stoat, dir, count, unit);
             } else {
                 log_dropped_landing(stoat, buffer_id, name);
             }
@@ -829,12 +829,13 @@ fn land_diff_want(stoat: &mut Stoat, buffer_id: BufferId, landing: DiffLanding) 
         },
         DiffLanding::FileHop {
             dir,
+            unit,
             origin,
             wrapped,
             fallback,
         } => {
             if focused.is_some_and(|(_, id)| id == buffer_id) {
-                super::movement::land_file_hop(stoat, dir, origin, wrapped, fallback);
+                super::movement::land_file_hop(stoat, dir, unit, origin, wrapped, fallback);
             } else {
                 log_dropped_landing(stoat, buffer_id, name);
             }

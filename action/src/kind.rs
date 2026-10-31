@@ -277,6 +277,8 @@ action_kinds! {
     ExtendGotoColumn,
     GotoNextChange,
     GotoPrevChange,
+    GotoNextGitChange,
+    GotoPrevGitChange,
     GotoNextParagraph,
     GotoPrevParagraph,
     ExtendGotoNextParagraph,

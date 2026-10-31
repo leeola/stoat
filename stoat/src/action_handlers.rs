@@ -111,6 +111,7 @@ pub(crate) enum LastMotion {
     Change {
         dir: movement::ChangeDir,
         count: u32,
+        unit: movement::ChangeUnit,
     },
     Diagnostic {
         dir: lsp::DiagnosticDirection,
@@ -186,7 +187,9 @@ pub(crate) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
             LastMotion::Paragraph { dir, count } => {
                 movement::goto_paragraph_impl(stoat, dir, stoat.in_select_mode(), count)
             },
-            LastMotion::Change { dir, count } => movement::goto_change_impl(stoat, dir, count),
+            LastMotion::Change { dir, count, unit } => {
+                movement::goto_change_impl(stoat, dir, count, unit)
+            },
             LastMotion::Diagnostic { dir } => lsp::goto_diagnostic(stoat, dir),
             LastMotion::TsSibling { dir } => movement::select_sibling(stoat, dir),
             LastMotion::ParentBound { bound, extend } => {
@@ -693,8 +696,18 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoLineNumber => movement::goto_line_number(stoat, false),
         ActionKind::GotoColumn => movement::goto_column(stoat, false),
         ActionKind::ExtendGotoColumn => movement::goto_column(stoat, true),
-        ActionKind::GotoNextChange => movement::goto_change(stoat, movement::ChangeDir::Next),
-        ActionKind::GotoPrevChange => movement::goto_change(stoat, movement::ChangeDir::Prev),
+        ActionKind::GotoNextChange => {
+            movement::goto_change(stoat, movement::ChangeDir::Next, movement::ChangeUnit::Tree)
+        },
+        ActionKind::GotoPrevChange => {
+            movement::goto_change(stoat, movement::ChangeDir::Prev, movement::ChangeUnit::Tree)
+        },
+        ActionKind::GotoNextGitChange => {
+            movement::goto_change(stoat, movement::ChangeDir::Next, movement::ChangeUnit::Git)
+        },
+        ActionKind::GotoPrevGitChange => {
+            movement::goto_change(stoat, movement::ChangeDir::Prev, movement::ChangeUnit::Git)
+        },
         ActionKind::ChangeWalkWrap => movement::toggle_change_wrap(stoat),
         ActionKind::DiffUnderline => stoat.handle_diff_underline_toggle(),
         ActionKind::DiffBold => stoat.handle_diff_bold_toggle(),

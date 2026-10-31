@@ -10,7 +10,7 @@
 
 use super::{
     focused_editor_mut, jump,
-    movement::{self, ChangeDir},
+    movement::{self, ChangeDir, ChangeUnit},
 };
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -41,7 +41,7 @@ pub(crate) fn back(stoat: &mut Stoat) -> UpdateEffect {
     if retrace && matches!(jump::jump_backward(stoat), UpdateEffect::Redraw) {
         return UpdateEffect::Redraw;
     }
-    movement::goto_change_impl(stoat, ChangeDir::Next, 1)
+    movement::goto_change_impl(stoat, ChangeDir::Next, 1, ChangeUnit::Tree)
 }
 
 /// The handler behind `DiffForward`.
@@ -64,7 +64,7 @@ pub(crate) fn forward(stoat: &mut Stoat) -> UpdateEffect {
     if left && matches!(jump::jump_forward(stoat), UpdateEffect::Redraw) {
         return UpdateEffect::Redraw;
     }
-    movement::goto_change_impl(stoat, ChangeDir::Prev, 1)
+    movement::goto_change_impl(stoat, ChangeDir::Prev, 1, ChangeUnit::Tree)
 }
 
 /// The focused split pane's last change landing, with the pane's jumplist push
@@ -139,7 +139,7 @@ mod tests {
     use crate::{
         action_handlers::{
             focused_editor_mut, jump,
-            movement::{self, ChangeDir},
+            movement::{self, ChangeDir, ChangeUnit},
         },
         app::{Stoat, UpdateEffect},
         test_fixture::open_scratch_file,
@@ -170,7 +170,7 @@ mod tests {
         editor.set_diff_view(true);
         editor.viewport_rows = Some(20);
         if walk_first {
-            movement::goto_change_impl(&mut h.stoat, ChangeDir::Next, 1);
+            movement::goto_change_impl(&mut h.stoat, ChangeDir::Next, 1, ChangeUnit::Tree);
         }
         h
     }

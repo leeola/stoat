@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     action_handlers::{dispatch, review},
+    diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
     keymap::{ResolvedAction, ResolvedArg},
     pane::{DockPanel, DockSide, DockVisibility, View},
     test_harness::{
@@ -223,7 +224,7 @@ fn next_change_visits_a_mixed_changeset_in_path_order() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -289,7 +290,7 @@ fn next_change_reports_no_more_changes_rather_than_open_a_landing_free_file() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -319,7 +320,7 @@ fn next_change_walks_past_a_landing_free_file_to_the_one_beyond_it() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -359,7 +360,7 @@ fn next_change_lands_a_working_tree_deletion_at_its_removal_row() {
         h.settle_diff_jobs();
         set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-        goto_change(&mut h.stoat, ChangeDir::Next);
+        goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
         h.settle();
 
         assert_eq!(
@@ -389,7 +390,7 @@ fn next_change_past_the_end_of_a_symlinked_file_reports_no_more_changes() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -420,7 +421,7 @@ fn next_change_from_a_symlinked_file_crosses_to_the_other_file() {
         set_cursor_row(editor, 1);
     }
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -442,7 +443,7 @@ fn next_change_crosses_to_next_file_first_hunk() {
         set_cursor_row(editor, 1);
     }
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -538,7 +539,7 @@ fn armed_file_hop(h: &mut TestHarness) -> PathBuf {
     h.open_file(&workdir.join("a.rs"));
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     assert!(
         h.stoat.pending_changed_file_jump.is_some(),
         "the press armed a hop"
@@ -580,7 +581,7 @@ fn a_file_with_only_staged_changes_stops_a_plain_walk_alone() {
             set_cursor_row(editor, 1);
         }
 
-        goto_change(&mut h.stoat, ChangeDir::Next);
+        goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
         h.settle();
 
         (
@@ -627,7 +628,7 @@ fn a_latched_pane_hops_past_a_file_with_only_staged_changes() {
         ws.panes.pane_mut(focus).diff_mode = true;
     }
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -659,17 +660,26 @@ fn half_staged(diff_view: bool) -> TestHarness {
     h
 }
 
-/// The staged mark at row 1 is a stop in a plain pane, and the diff view walks
-/// past it to the unstaged hunk at row 3.
+/// The staged mark at row 1 is a stop of both walks in a plain pane, and the
+/// diff view walks past it to the unstaged hunk at row 3.
 #[test]
 fn the_in_file_walk_stops_on_a_staged_mark_in_a_plain_pane_alone() {
-    let walk = |diff_view: bool| {
+    let walk = |(diff_view, unit): (bool, ChangeUnit)| {
         let mut h = half_staged(diff_view);
-        goto_change(&mut h.stoat, ChangeDir::Next);
+        goto_change(&mut h.stoat, ChangeDir::Next, unit);
         focused_head_row(&mut h.stoat)
     };
 
-    assert_eq!([false, true].map(walk), [1, 3]);
+    assert_eq!(
+        [
+            (false, ChangeUnit::Tree),
+            (true, ChangeUnit::Tree),
+            (false, ChangeUnit::Git),
+            (true, ChangeUnit::Git),
+        ]
+        .map(walk),
+        [1, 3, 1, 3],
+    );
 }
 
 /// The first-change jump reads the walk's stops, so the diff view lands on the
@@ -704,10 +714,10 @@ fn next_change_after_a_hop_walks_the_landed_file_rather_than_cross_out() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -750,7 +760,7 @@ fn next_change_across_files_centers_the_landed_chunk() {
     set_cursor_row(editor, 1);
     editor.viewport_rows = Some(10);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     // The open has not been laid out when the hop centers, so the landed editor
@@ -782,7 +792,7 @@ fn next_change_across_files_holds_the_goto_pin() {
     }
     h.stoat.set_focused_mode("goto_pin".into());
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -881,7 +891,7 @@ fn next_change_across_files_carries_the_pin_flag() {
     h.stoat.set_focused_mode("goto".into());
     dispatch(&mut h.stoat, &PinMode);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -911,7 +921,7 @@ fn next_change_across_files_leaves_a_plain_mode_on_the_new_editor() {
     }
     h.stoat.set_focused_mode("space_goto".into());
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -941,7 +951,7 @@ fn crossing_files_waits_for_the_scan_before_it_opens_anything() {
         set_cursor_row(editor, 1);
     }
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     assert_eq!(
         focused_buffer_path(&h.stoat),
         workdir.join("a.rs"),
@@ -996,7 +1006,7 @@ fn next_change_crosses_into_a_file_changed_only_against_the_base() {
     }
 
     // Against HEAD the hop has nowhere to go: `a.rs` is the only changed file.
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
     assert_eq!(
         focused_buffer_path(&h.stoat),
@@ -1013,7 +1023,7 @@ fn next_change_crosses_into_a_file_changed_only_against_the_base() {
         set_cursor_row(editor, 1);
     }
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
     assert_eq!(
         focused_buffer_path(&h.stoat),
@@ -1040,7 +1050,7 @@ fn next_change_crosses_into_a_lone_changed_file_from_an_unchanged_buffer() {
         .expect("editor")
         .set_diff_view(true);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1085,7 +1095,7 @@ fn prev_change_crosses_to_previous_file_last_hunk() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Prev);
+    goto_change(&mut h.stoat, ChangeDir::Prev, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1109,9 +1119,16 @@ fn a_hop_landing_takes_the_live_map_s_last_run() {
     h.open_file(&workdir.join("a.rs"));
     install_refined_hunk(&mut h, 0..3, &[0..1, 2..3]);
 
-    land_file_hop(&mut h.stoat, ChangeDir::Prev, None, false, (0, 0..3));
+    land_file_hop(
+        &mut h.stoat,
+        ChangeDir::Prev,
+        ChangeUnit::Tree,
+        None,
+        false,
+        (0, 0..3),
+    );
     let landed = focused_head_row(&mut h.stoat);
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1132,18 +1149,21 @@ fn a_next_hop_landing_takes_the_live_map_s_first_stop() {
     let run = 1..2;
     install_refined_hunk(&mut h, 0..3, std::slice::from_ref(&run));
 
-    land_file_hop(&mut h.stoat, ChangeDir::Next, None, false, (2, 2..3));
+    land_file_hop(
+        &mut h.stoat,
+        ChangeDir::Next,
+        ChangeUnit::Tree,
+        None,
+        false,
+        (2, 2..3),
+    );
 
     assert_eq!(focused_head_row(&mut h.stoat), 0);
 }
 
-/// The scan diffs a file it has not opened with the line pass alone, so its
-/// row is the top of a hunk that the tree pass splits into runs. Here the runs
-/// are `if x` on row 1 and the changed literal on row 3. The hop lands on the
-/// last run the opened file's own map offers.
-#[test]
-fn a_backward_hop_into_an_unopened_file_lands_on_its_last_run() {
-    let mut h = TestHarness::with_size(40, 20);
+/// Stage `a.rs`, whose one hunk the tree pass splits into runs on `if x` at row
+/// 1 and the changed literal at row 3, and `b.rs`, changed on row 1.
+fn stage_split_hunk(h: &mut TestHarness) -> PathBuf {
     let workdir = PathBuf::from("/repo");
     h.stage_review_scenario(
         &workdir,
@@ -1156,24 +1176,74 @@ fn a_backward_hop_into_an_unopened_file_lands_on_its_last_run() {
             ("b.rs", "d\ne\nf\n", "d\nY\nf\n"),
         ],
     );
-    h.stoat.set_diff_warm_auto(true);
-    h.open_file(&workdir.join("b.rs"));
-    h.settle_diff_jobs();
-    set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+    workdir
+}
 
-    goto_change(&mut h.stoat, ChangeDir::Prev);
-    h.settle();
-    let landed = (
-        focused_buffer_path(&h.stoat),
-        focused_head_row(&mut h.stoat),
+/// The scan diffs a file it has not opened with the line pass alone, so its
+/// row is the top of a hunk that the tree pass splits into runs. The hop lands
+/// on the last stop the opened file's own map offers under the walk's unit.
+/// That is the changed literal's run for the structured walk and the top of
+/// the hunk for the git walk.
+#[test]
+fn a_backward_hop_into_an_unopened_file_lands_on_its_last_stop() {
+    let hop = |unit: ChangeUnit| {
+        let mut h = TestHarness::with_size(40, 20);
+        let workdir = stage_split_hunk(&mut h);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(&workdir.join("b.rs"));
+        h.settle_diff_jobs();
+        set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
+
+        goto_change(&mut h.stoat, ChangeDir::Prev, unit);
+        h.settle();
+        let landed = (
+            focused_buffer_path(&h.stoat),
+            focused_head_row(&mut h.stoat),
+        );
+        goto_change(&mut h.stoat, ChangeDir::Next, unit);
+        h.settle();
+        (landed, focused_buffer_path(&h.stoat))
+    };
+
+    let (a, b) = (PathBuf::from("/repo/a.rs"), PathBuf::from("/repo/b.rs"));
+    assert_eq!(
+        [ChangeUnit::Tree, ChangeUnit::Git].map(hop),
+        [((a.clone(), 3), b.clone()), ((a, 1), b)],
+        "the hop lands on the last stop, and one press forward leaves a.rs",
     );
-    goto_change(&mut h.stoat, ChangeDir::Next);
+}
+
+/// A git press made before the hunks land replays as a git press. Its repeat
+/// after the warm diff's tree pass splits the hunk leaves the file rather than
+/// stop on the hunk's second run.
+#[test]
+fn a_git_press_before_the_hunks_land_keeps_its_unit() {
+    let mut h = TestHarness::with_size(40, 20);
+    let workdir = stage_split_hunk(&mut h);
+    h.open_file(&workdir.join("b.rs"));
+    h.stoat.toggle_diff_view();
+    h.settle();
+
+    h.stoat.open_file(&workdir.join("a.rs"));
+    dispatch(&mut h.stoat, &stoat_action::GotoNextGitChange);
+    let waited = (
+        focused_head_row(&mut h.stoat),
+        h.stoat.pending_changed_file_jump.is_none(),
+    );
+    h.settle();
+    h.stoat.set_diff_warm_auto(true);
+    h.settle_diff_jobs();
+    dispatch(&mut h.stoat, &stoat_action::RepeatLastMotion);
     h.settle();
 
     assert_eq!(
-        (landed, focused_buffer_path(&h.stoat)),
-        ((workdir.join("a.rs"), 3), workdir.join("b.rs")),
-        "the hop lands on the changed literal's run, and one press forward leaves a.rs",
+        (
+            waited,
+            focused_buffer_path(&h.stoat),
+            focused_head_row(&mut h.stoat),
+        ),
+        ((0, true), workdir.join("b.rs"), 1),
+        "the press waits for the hunks, and its repeat crosses into b.rs",
     );
 }
 
@@ -1185,7 +1255,7 @@ fn next_change_wraps_from_the_last_file_with_a_message() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1235,7 +1305,7 @@ fn step_past_the_end_with_the_wrap_off(
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), row);
     dispatch(&mut h.stoat, &stoat_action::ChangeWalkWrap);
 
-    goto_change(&mut h.stoat, dir);
+    goto_change(&mut h.stoat, dir, ChangeUnit::Tree);
     h.settle();
 
     (
@@ -1274,7 +1344,7 @@ fn next_change_with_one_changed_file_reports_no_more_changes() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1307,7 +1377,7 @@ fn next_change_lands_on_an_untracked_file() {
     let workdir = untracked_beside_a_change(&mut h);
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1328,7 +1398,7 @@ fn next_change_from_the_diff_view_lands_on_an_untracked_file_in_the_diff_view() 
     h.stoat.toggle_diff_view();
     h.settle_diff_jobs();
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1356,7 +1426,7 @@ fn next_change_skips_a_changeless_renamed_file() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1385,7 +1455,7 @@ fn next_change_crosses_into_a_renamed_file_that_was_also_edited() {
     h.settle_diff_jobs();
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -1412,7 +1482,7 @@ fn a_hop_reads_the_stored_tally_instead_of_walking_the_repo() {
     set_cursor_row(focused_editor_mut(&mut h.stoat).expect("editor"), 1);
 
     let before = h.fake_git().tally_calls(&workdir);
-    goto_change(&mut h.stoat, ChangeDir::Next);
+    goto_change(&mut h.stoat, ChangeDir::Next, ChangeUnit::Tree);
     h.settle();
 
     assert_eq!(
@@ -6532,58 +6602,59 @@ fn install_diff_hunks(h: &mut TestHarness, line_starts: &[u32]) {
 /// reader who types between the diff and the keypress looks the same as one who
 /// does not.
 fn install_diff_hunk_rows(h: &mut TestHarness, rows: &[Range<u32>]) {
-    use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
-    let hunks: Vec<DiffHunk> = rows
-        .iter()
-        .map(|range| DiffHunk {
-            status: if range.is_empty() {
-                DiffHunkStatus::Deleted
-            } else {
-                DiffHunkStatus::Added
-            },
-            unstaged_lines: std::iter::once(range.clone()).collect(),
-            marked_rows: Vec::new(),
-            buffer_start_line: range.start,
-            buffer_line_range: range.clone(),
-            base_byte_range: 0..0,
-            anchor_range: None,
-            token_detail: None,
-        })
-        .collect();
-    let mut dm = DiffMap::from_hunks(hunks, None);
-    let ws = h.stoat.active_workspace();
-    let focused = ws.panes.focus();
-    let editor_id = match ws.panes.pane(focused).view {
-        crate::pane::View::Editor(id) => id,
-        _ => panic!("focused pane is not an editor"),
-    };
-    let buffer_id = ws.editors[editor_id].buffer_id;
-    let buffer = ws.buffers.get(buffer_id).expect("buffer");
-    let mut guard = buffer.write().expect("poisoned");
-    dm.anchor_hunks(&guard.snapshot);
-    guard.diff_map = Some(dm);
+    let hunks = rows.iter().map(|range| DiffHunk {
+        status: if range.is_empty() {
+            DiffHunkStatus::Deleted
+        } else {
+            DiffHunkStatus::Added
+        },
+        unstaged_lines: std::iter::once(range.clone()).collect(),
+        marked_rows: Vec::new(),
+        buffer_start_line: range.start,
+        buffer_line_range: range.clone(),
+        base_byte_range: 0..0,
+        anchor_range: None,
+        token_detail: None,
+    });
+    install_hunks(h, hunks);
 }
 
 /// Install one hunk over `rows`, refined to `marked`, anchored as a diff job
 /// leaves it.
 fn install_refined_hunk(h: &mut TestHarness, rows: Range<u32>, marked: &[Range<u32>]) {
-    use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
-    let mut dm = DiffMap::from_hunks(
-        [DiffHunk {
-            status: DiffHunkStatus::Modified,
-            unstaged_lines: std::iter::once(rows.clone()).collect(),
-            marked_rows: marked.to_vec(),
-            buffer_start_line: rows.start,
-            buffer_line_range: rows,
-            base_byte_range: 0..0,
-            anchor_range: None,
-            token_detail: None,
-        }],
-        None,
-    );
+    install_hunks(h, [modified_hunk(rows, marked, false)]);
+}
+
+/// A `Modified` hunk over `rows`, refined to `marked`.
+///
+/// With `tree` set the tree pass reached the hunk, so an empty `marked` makes a
+/// hunk the tree pass found nothing in.
+fn modified_hunk(rows: Range<u32>, marked: &[Range<u32>], tree: bool) -> DiffHunk {
+    DiffHunk {
+        status: DiffHunkStatus::Modified,
+        unstaged_lines: std::iter::once(rows.clone()).collect(),
+        marked_rows: marked.to_vec(),
+        buffer_start_line: rows.start,
+        buffer_line_range: rows,
+        base_byte_range: 0..0,
+        anchor_range: None,
+        token_detail: tree.then(|| {
+            Arc::new(TokenDetail {
+                buffer_spans: Vec::new(),
+                base_spans: Vec::new(),
+                tree: true,
+            })
+        }),
+    }
+}
+
+/// Install `hunks` as the focused buffer's map, anchored as a diff job leaves
+/// them.
+fn install_hunks(h: &mut TestHarness, hunks: impl IntoIterator<Item = DiffHunk>) {
+    let mut dm = DiffMap::from_hunks(hunks, None);
     let ws = h.stoat.active_workspace();
     let focused = ws.panes.focus();
-    let crate::pane::View::Editor(editor_id) = ws.panes.pane(focused).view else {
+    let View::Editor(editor_id) = ws.panes.pane(focused).view else {
         panic!("focused pane is not an editor");
     };
     let buffer_id = ws.editors[editor_id].buffer_id;
@@ -6779,6 +6850,103 @@ fn goto_next_change_jumps_forward() {
         h.selection_spans(),
         vec![(10, 11, false)],
         "the last hunk holds when there is no next one",
+    );
+}
+
+/// A hunk over rows 2 to 19 the tree pass split into runs on rows 2 and 18, and
+/// a one-row hunk on row 22, open on row 0.
+fn split_hunk_then_a_row() -> TestHarness {
+    let mut h = TestHarness::with_size(20, 30);
+    let text: String = (0..24).map(|i| format!("line {i}\n")).collect();
+    let path = h.write_file("s.txt", &text);
+    h.open_file(&path);
+    install_hunks(
+        &mut h,
+        [
+            modified_hunk(2..20, &[2..3, 18..19], true),
+            modified_hunk(22..23, &[], false),
+        ],
+    );
+    h
+}
+
+/// The row `presses` leave the cursor on in [`split_hunk_then_a_row`].
+fn split_walk_row(presses: &[&dyn Action]) -> u32 {
+    let mut h = split_hunk_then_a_row();
+    for action in presses {
+        dispatch(&mut h.stoat, *action);
+    }
+    focused_cursor_point(&mut h.stoat).row
+}
+
+/// The git walk takes a hunk the tree pass split into runs as one stop. Its
+/// second press leaves the hunk, where the structured walk's second press
+/// reaches the second run.
+#[test]
+fn goto_next_git_change_stops_once_per_hunk() {
+    let (tree, git) = (
+        &stoat_action::GotoNextChange,
+        &stoat_action::GotoNextGitChange,
+    );
+    assert_eq!(
+        [split_walk_row(&[tree, tree]), split_walk_row(&[git, git])],
+        [18, 22],
+    );
+}
+
+/// A hunk the tree pass found nothing in, such as a reindent, offers the
+/// structured walk no stop, and the git walk stops on it.
+#[test]
+fn goto_next_change_passes_a_hunk_the_tree_pass_emptied() {
+    let landing = |action: &dyn Action| {
+        let mut h = TestHarness::with_size(20, 12);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\n");
+        h.open_file(&path);
+        install_hunks(
+            &mut h,
+            [
+                modified_hunk(2..3, &[], true),
+                modified_hunk(5..6, &[], false),
+            ],
+        );
+        dispatch(&mut h.stoat, action);
+        focused_cursor_point(&mut h.stoat).row
+    };
+
+    assert_eq!(
+        [
+            landing(&stoat_action::GotoNextChange),
+            landing(&stoat_action::GotoNextGitChange),
+        ],
+        [5, 2],
+    );
+}
+
+/// Alt-. repeats a walk under the unit the walk was made with, so a repeat after
+/// a git press leaves the split hunk rather than stop on its second run.
+#[test]
+fn the_change_walk_replays_its_unit() {
+    let repeat = &stoat_action::RepeatLastMotion;
+    assert_eq!(
+        [
+            split_walk_row(&[&stoat_action::GotoNextChange, repeat]),
+            split_walk_row(&[&stoat_action::GotoNextGitChange, repeat]),
+        ],
+        [18, 22],
+    );
+}
+
+/// The diff view's back and forward hops walk the structured stops, so each
+/// run of the split hunk is a stop of theirs.
+#[test]
+fn the_diff_hops_walk_the_structured_stops() {
+    let (back, forward) = (&stoat_action::DiffBack, &stoat_action::DiffForward);
+    assert_eq!(
+        [
+            split_walk_row(&[back, back]),
+            split_walk_row(&[back, back, back, forward]),
+        ],
+        [18, 18],
     );
 }
 

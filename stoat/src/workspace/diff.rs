@@ -13,7 +13,7 @@
 
 use super::Workspace;
 use crate::{
-    action_handlers::movement::ChangeDir,
+    action_handlers::movement::{ChangeDir, ChangeUnit},
     buffer::{BufferId, TextBufferSnapshot},
     buffer_registry::{self, BufferRegistry},
     code_index::build::file_id,
@@ -1221,7 +1221,11 @@ pub(crate) enum DiffLanding {
         origin: Option<JumpEntry>,
     },
     /// A change-walk press that arrived before the hunks.
-    ChangeWalk { dir: ChangeDir, count: u32 },
+    ChangeWalk {
+        dir: ChangeDir,
+        count: u32,
+        unit: ChangeUnit,
+    },
     /// A first-change or last-change press that arrived before the hunks.
     EdgeChange { last: bool },
     /// Report two equal files once a pair press's hunks are in, when `editor`
@@ -1235,9 +1239,11 @@ pub(crate) enum DiffLanding {
     ///
     /// `origin` is the jumplist entry for where the hop started, and `wrapped`
     /// says the walk went past an end. `fallback` is the scan's row and the
-    /// rows its hunk covers, for a map that offers no stop.
+    /// rows its hunk covers, for a map that offers no stop. `unit` names the
+    /// walk that armed the hop, whose stops the landing reads.
     FileHop {
         dir: ChangeDir,
+        unit: ChangeUnit,
         origin: Option<JumpEntry>,
         wrapped: bool,
         fallback: (u32, Range<u32>),
@@ -2517,7 +2523,12 @@ mod tests {
             .active_workspace_mut()
             .install_test_diff_map(buffer_id, DiffMap::from_hunks([deleted_hunk(3)], None));
 
-        movement::goto_change_impl(&mut h.stoat, movement::ChangeDir::Next, 1);
+        movement::goto_change_impl(
+            &mut h.stoat,
+            movement::ChangeDir::Next,
+            1,
+            movement::ChangeUnit::Tree,
+        );
         assert_eq!(
             repo_hunk_position(h.stoat.active_workspace()),
             Some(HunkPosition {
@@ -3552,6 +3563,7 @@ mod tests {
     fn file_hop() -> DiffLanding {
         DiffLanding::FileHop {
             dir: movement::ChangeDir::Next,
+            unit: movement::ChangeUnit::Tree,
             origin: None,
             wrapped: false,
             fallback: (0, 0..1),
