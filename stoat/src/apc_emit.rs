@@ -411,6 +411,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             .as_ref()
             .map(|rec| rec.register.name()),
         held_buffers: &held_buffers,
+        reload_flashes: &[],
         lsp_status_open: false,
         lsp_progress_entries: &[],
         spinner_phase: 0,
@@ -1412,6 +1413,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             pending_count: None,
             recording_register: None,
             held_buffers: &[],
+            reload_flashes: &[],
             lsp_status_open: false,
             lsp_progress_entries: &[],
             spinner_phase: 0,

@@ -55,6 +55,7 @@ use crate::{
     },
     apc_emit,
     app::{self, modal_split_percent, modal_zoom_steps, ModalKind, Stoat},
+    auto_reload::ReloadFlash,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     commit_list::{CommitListId, CommitListState},
@@ -299,6 +300,11 @@ pub(crate) struct FrameCtx<'a> {
     /// A quit over such a buffer returns to the shell and ends the command, so
     /// the reader has to see the tie before the quit, not after it.
     pub(crate) held_buffers: &'a [(BufferId, String)],
+    /// The active workspace's reload flashes, which every editor of a listed
+    /// buffer washes over its changed text.
+    ///
+    /// Empty for a pooled page, since the wash paints on the live grid alone.
+    pub(crate) reload_flashes: &'a [ReloadFlash],
     /// Whether the detailed LSP status popout is open (pinned) above the focused
     /// pane's status bar. Drives whether the multi-row status card paints.
     pub(crate) lsp_status_open: bool,
@@ -1203,6 +1209,7 @@ pub(crate) fn frame(
             .as_ref()
             .map(|rec| rec.register.name()),
         held_buffers: &held_buffers,
+        reload_flashes: &ws.reload_flashes,
         lsp_status_open,
         lsp_progress_entries: &lsp_progress_entries,
         spinner_phase: app::spinner_phase(stoat.spinner_clock),

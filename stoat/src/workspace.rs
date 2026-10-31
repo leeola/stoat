@@ -9,6 +9,7 @@ use crate::{
     action_handlers::search::LastSearch,
     agent_ipc::BridgeOutcome,
     agent_status::AgentStatus,
+    auto_reload::ReloadFlash,
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer, TextBufferSnapshot},
     buffer_registry::BufferRegistry,
@@ -256,6 +257,12 @@ pub struct Workspace {
     pub(crate) focus: FocusTarget,
     pub(crate) buffers: BufferRegistry,
     pub(crate) editors: SlotMap<EditorId, EditorState>,
+    /// The reloads of this workspace's buffers whose wash still fades, at most
+    /// one per buffer.
+    ///
+    /// The frame timer ages them and drops each one once its fade ends, and
+    /// every editor of a buffer listed here paints the wash.
+    pub(crate) reload_flashes: Vec<ReloadFlash>,
     pub(crate) runs: SlotMap<RunId, RunState>,
     pub(crate) terms: SlotMap<TermId, TermSession>,
     /// The grid stoatty reported for each terminal pane it draws as a pool at
@@ -553,6 +560,7 @@ impl Workspace {
             focus: FocusTarget::SplitPane,
             buffers,
             editors,
+            reload_flashes: Vec::new(),
             runs: SlotMap::with_key(),
             terms: SlotMap::with_key(),
             term_pool_grids: HashMap::new(),

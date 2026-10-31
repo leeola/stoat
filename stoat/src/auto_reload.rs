@@ -45,11 +45,22 @@ use std::{
 };
 use stoat_language::structural_diff;
 use stoat_scheduler::Task;
-use stoat_text::{Bias, LineEnding, Rope, SelectionGoal};
+use stoat_text::{Anchor, Bias, LineEnding, Point, Rope, SelectionGoal};
 
 /// Environment variable stoatty exports to its children, carrying the log id
 /// its own log file is named after.
 const STOATTY_LOG_ID: &str = "STOATTY_LOG_ID";
+
+/// Seconds a [`ReloadFlash`] holds its full wash before it fades.
+pub(crate) const FLASH_HOLD: f32 = 0.15;
+
+/// Seconds a [`ReloadFlash`] takes to fade from its full wash to none, after
+/// its hold.
+pub(crate) const FLASH_FADE: f32 = 0.45;
+
+/// The share of the wash color a [`ReloadFlash`] blends into a cell's
+/// background through its hold.
+const FLASH_PEAK: f32 = 0.35;
 
 /// A followed file read on the blocking pool, awaiting the edit it describes.
 ///
@@ -114,6 +125,43 @@ enum Installed {
     Status,
     /// The buffer took the file's change.
     Edited,
+}
+
+/// The text a reload changed, washed in a color that fades out.
+///
+/// A reload that edits a buffer records the new text's ranges here, so the
+/// reader sees what the file changed under them. The ranges are anchors, so an
+/// edit made while the flash fades moves them with the text. Every editor of
+/// the buffer paints the wash, focused or not.
+///
+/// A flash lives on the workspace that holds its buffer, since a [`BufferId`]
+/// names a buffer only within one. The frame timer ages it and drops it once
+/// its fade ends, at [`FLASH_HOLD`] plus [`FLASH_FADE`].
+pub(crate) struct ReloadFlash {
+    pub(crate) buffer: BufferId,
+    /// The new text's ranges, each as its start and end anchor.
+    pub(crate) spans: Vec<(Anchor, Anchor)>,
+    /// Seconds since the reload.
+    pub(crate) age: f32,
+}
+
+impl ReloadFlash {
+    /// The share of the wash color the flash blends into a cell's background
+    /// at its age.
+    ///
+    /// The full share holds through [`FLASH_HOLD`], so the eye finds the
+    /// change. It then eases out over [`FLASH_FADE`] on a quadratic curve that
+    /// slows into zero, so the wash leaves no hard edge as it ends.
+    pub(crate) fn strength(&self) -> f32 {
+        let fading = self.age - FLASH_HOLD;
+        if fading <= 0.0 {
+            return FLASH_PEAK;
+        }
+        if fading >= FLASH_FADE {
+            return 0.0;
+        }
+        FLASH_PEAK * (1.0 - fading / FLASH_FADE).powi(2)
+    }
 }
 
 /// Arm the auto-reload poll if it is not already running.
@@ -472,11 +520,13 @@ fn install_reload(
         Vec::new()
     };
 
+    let flashed = old_span.start..old_span.start + text.len();
     {
         let mut guard = buffer.write().expect("buffer poisoned");
         guard.edit(old_span, &text);
         guard.mark_clean();
     }
+    note_reload_flash(stoat, &buffer, id, [flashed]);
     stoat
         .active_workspace_mut()
         .buffers
@@ -830,6 +880,7 @@ fn reload_from_disk(
             }
             guard.mark_clean();
         }
+        note_reload_flash(stoat, &buffer, id, hunks.iter().map(|(_, new)| new.clone()));
 
         let scrolloff = stoat.settings.scrolloff.unwrap_or(3);
         let ws = stoat.active_workspace_mut();
@@ -854,6 +905,61 @@ fn reload_from_disk(
         ReloadOutcome::Unchanged
     } else {
         ReloadOutcome::Reloaded
+    }
+}
+
+/// Record a [`ReloadFlash`] over `spans`, ranges of buffer `id`'s new text, in
+/// the active workspace, restarting any flash the buffer still shows.
+///
+/// A span with no text is a pure deletion. It widens to the line that holds
+/// the offset where the text was removed, so the reader still sees where the
+/// text went.
+fn note_reload_flash(
+    stoat: &mut Stoat,
+    buffer: &SharedBuffer,
+    id: BufferId,
+    spans: impl IntoIterator<Item = Range<usize>>,
+) {
+    let spans = {
+        let guard = buffer.read().expect("buffer poisoned");
+        let snapshot = &guard.snapshot;
+        spans
+            .into_iter()
+            .map(|span| {
+                let span = match span.is_empty() {
+                    true => deletion_line(&snapshot.visible_text, span.start),
+                    false => span,
+                };
+                (
+                    snapshot.anchor_at(span.start, Bias::Right),
+                    snapshot.anchor_at(span.end, Bias::Left),
+                )
+            })
+            .collect()
+    };
+
+    let flashes = &mut stoat.active_workspace_mut().reload_flashes;
+    flashes.retain(|flash| flash.buffer != id);
+    flashes.push(ReloadFlash {
+        buffer: id,
+        spans,
+        age: 0.0,
+    });
+}
+
+/// The line of `rope` that holds `offset`, where a pure deletion removed text.
+///
+/// A deletion at the end of the file leaves `offset` on the empty row past the
+/// last newline. That row holds no text to wash, so the line above it stands
+/// in.
+fn deletion_line(rope: &Rope, offset: usize) -> Range<usize> {
+    let line = |row: u32| {
+        rope.point_to_offset(Point::new(row, 0))..rope.point_to_offset(Point::new(row + 1, 0))
+    };
+    let row = rope.offset_to_point(offset).row;
+    match line(row) {
+        empty if empty.is_empty() && row > 0 => line(row - 1),
+        span => span,
     }
 }
 
@@ -1608,11 +1714,11 @@ mod tests {
         follow_change_now, open_log_buffer, open_logs, pump_auto_reload, pump_auto_reload_install,
         reload_all, reload_focused, set_auto_reload_config, set_buffer_auto_reload,
         stat_and_read_buffer, target_log_path, toggle_follow_changes, toggle_follow_reload,
-        toggle_live_reload,
+        toggle_live_reload, ReloadFlash,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
-        app::UpdateEffect,
+        app::{self, UpdateEffect},
         buffer::BufferId,
         buffer_lifecycle,
         buffer_registry::AutoReloadMode,
@@ -1630,6 +1736,9 @@ mod tests {
 
     /// Latin-1 bytes, which are not valid UTF-8.
     const NOT_UTF8: &[u8] = b"caf\xe9 au lait\n";
+
+    /// Reload flashes by buffer, each span as its `(start, end)` offsets.
+    type Flashes = Vec<(BufferId, Vec<(usize, usize)>)>;
 
     /// mtime baseline the save guard checks against.
     fn open_edited(h: &mut TestHarness, root: &Path, name: &str, seed: &[u8]) -> PathBuf {
@@ -2066,6 +2175,144 @@ mod tests {
 
         assert_eq!(h.buffer_text(id), "NEW\nl0\nl1\nl2\nl3\nl4\nCHANGED\n");
         assert_eq!(anchored_rows(&mut h, id), (4, 4, 4));
+    }
+
+    /// The ranges each of the active workspace's reload flashes covers, by
+    /// buffer, resolved through the buffer's snapshot.
+    fn flashed(h: &TestHarness) -> Flashes {
+        let ws = h.stoat.active_workspace();
+        ws.reload_flashes
+            .iter()
+            .map(|flash| {
+                let buffer = ws.buffers.get(flash.buffer).expect("buffer");
+                let guard = buffer.read().expect("buffer poisoned");
+                let spans = flash
+                    .spans
+                    .iter()
+                    .map(|(start, end)| {
+                        (
+                            guard.snapshot.resolve_anchor(start),
+                            guard.snapshot.resolve_anchor(end),
+                        )
+                    })
+                    .collect();
+                (flash.buffer, spans)
+            })
+            .collect()
+    }
+
+    /// The reloaded buffer, and the reload flashes of `new` written over `old` and
+    /// reloaded, as [`flashed`] reads them.
+    fn reload_flashed(old: &[u8], new: &[u8]) -> (BufferId, Flashes) {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-flash");
+        let id = open_plain(&mut h, root, "a.txt", old);
+        h.fake_fs().insert_file(root.join("a.txt"), new);
+        reload_focused(&mut h.stoat, false);
+        (id, flashed(&h))
+    }
+
+    /// Each range of new text a reload inserted or replaced flashes.
+    #[test]
+    fn a_reload_flashes_its_changed_ranges() {
+        let (id, flashes) = reload_flashed(b"l0\nl1\nl2\n", b"NEW\nl0\nl1\nl2\nCHANGED\n");
+        assert_eq!(flashes, [(id, vec![(0, 4), (13, 21)])]);
+    }
+
+    /// A followed file's appended text flashes.
+    #[test]
+    fn a_pump_append_flashes_the_appended_text() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/reload-flash-append");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"line1\n");
+
+        h.fake_fs().insert_file(&path, b"line1\nline2\n");
+        pump_poll(&mut h);
+
+        assert_eq!(flashed(&h), [(id, vec![(6, 12)])]);
+    }
+
+    /// A pure deletion leaves no new text, so the line that took its place
+    /// flashes.
+    #[test]
+    fn a_deletion_reload_flashes_its_seam_line() {
+        let (id, flashes) = reload_flashed(b"l0\nl1\nl2\n", b"l0\nl2\n");
+        assert_eq!(flashes, [(id, vec![(3, 6)])]);
+    }
+
+    /// A deletion at the end of the file leaves only the empty last row, so the
+    /// line above it flashes.
+    #[test]
+    fn a_tail_deletion_flashes_the_line_above_the_empty_last_row() {
+        let (id, flashes) = reload_flashed(b"l0\nl1\n", b"l0\n");
+        assert_eq!(flashes, [(id, vec![(0, 3)])]);
+    }
+
+    /// A second reload of a buffer whose flash still fades replaces that flash
+    /// with its own, at the start of its fade.
+    #[test]
+    fn a_second_reload_restarts_the_flash() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-flash-again");
+        let id = open_plain(&mut h, root, "a.txt", b"l0\n");
+        h.fake_fs().insert_file(root.join("a.txt"), b"l0\nl1\n");
+        reload_focused(&mut h.stoat, false);
+        app::tick_animation(&mut h.stoat, 0.3);
+        h.fake_fs().insert_file(root.join("a.txt"), b"l0\nl1\nl2\n");
+        reload_focused(&mut h.stoat, false);
+
+        let ages: Vec<f32> = h
+            .stoat
+            .active_workspace()
+            .reload_flashes
+            .iter()
+            .map(|flash| flash.age)
+            .collect();
+        assert_eq!((flashed(&h), ages), (vec![(id, vec![(6, 9)])], vec![0.0]));
+    }
+
+    /// A reload that finds the file as the buffer holds it flashes nothing.
+    #[test]
+    fn an_unchanged_reload_flashes_nothing() {
+        assert_eq!(reload_flashed(b"l0\nl1\n", b"l0\nl1\n").1, []);
+    }
+
+    /// A flash keeps the frame timer running through its fade, and the tick
+    /// past its end drops it and stops the timer.
+    #[test]
+    fn a_flash_ages_out_at_its_total() {
+        let mut h = Stoat::test();
+        let root = Path::new("/reload-flash-age");
+        open_plain(&mut h, root, "a.txt", b"l0\n");
+        h.fake_fs().insert_file(root.join("a.txt"), b"l0\nl1\n");
+        reload_focused(&mut h.stoat, false);
+
+        let mut ages = vec![(flashed(&h).len(), app::animating(&h.stoat))];
+        for dt in [0.3, 0.4] {
+            app::tick_animation(&mut h.stoat, dt);
+            ages.push((flashed(&h).len(), app::animating(&h.stoat)));
+        }
+
+        assert_eq!(ages, [(1, true), (1, true), (0, false)]);
+    }
+
+    /// The wash holds its full share through the hold, then eases out on a
+    /// quadratic curve to none at the end of the fade, in ten-thousandths.
+    #[test]
+    fn a_flash_holds_then_eases_out() {
+        let strength = |age| {
+            let flash = ReloadFlash {
+                buffer: BufferId::new(0),
+                spans: Vec::new(),
+                age,
+            };
+            (flash.strength() * 1e4).round() as i32
+        };
+
+        assert_eq!(
+            [0.0, 0.1, 0.375, 0.6, 1.0].map(strength),
+            [3500, 3500, 875, 0, 0]
+        );
     }
 
     /// A reload that changes two separate regions undoes in one step.

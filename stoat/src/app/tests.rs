@@ -6,6 +6,7 @@ use crate::{
     apc_emit::{
         display_map_stamp, editor_page_content_version, osc_default_colors, window_content_version,
     },
+    auto_reload::ReloadFlash,
     badge::{Anchor as BadgeAnchor, Badge, BadgeSource, BadgeState},
     commit_list::CommitListState,
     debounce::{FS_WATCH_DEBOUNCE, INDEX_EDIT_DEBOUNCE},
@@ -4519,6 +4520,30 @@ fn an_idle_frame_tick_repaints_nothing() {
         h.stoat.frame_tick(0.016),
         UpdateEffect::None,
         "a tick with no glide, build, or pty output repaints nothing",
+    );
+}
+
+/// A fading reload flash repaints on every frame tick, the tick that drops it
+/// included, so the wash clears. The tick after it repaints nothing.
+#[test]
+fn a_reload_flash_repaints_each_tick_until_it_clears() {
+    let mut h = Stoat::test();
+    h.stoat
+        .active_workspace_mut()
+        .reload_flashes
+        .push(ReloadFlash {
+            buffer: BufferId::new(0),
+            spans: Vec::new(),
+            age: 0.0,
+        });
+
+    assert_eq!(
+        [0.3, 0.4, 0.1].map(|dt| h.stoat.frame_tick(dt)),
+        [
+            UpdateEffect::Redraw,
+            UpdateEffect::Redraw,
+            UpdateEffect::None
+        ],
     );
 }
 

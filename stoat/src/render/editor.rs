@@ -1,6 +1,8 @@
 use super::TEXT_SCALE_COMPACT;
 use crate::{
     action_handlers::view,
+    auto_reload::ReloadFlash,
+    buffer::BufferId,
     diagnostic_spans::{
         build_diagnostic_span_cache, diagnostic_at_offset, severity_rank, DiagnosticSpanCache,
         ResolvedDiag,
@@ -127,6 +129,7 @@ pub(crate) fn render_editor(
         WrapMode::None,
         80,
         0,
+        &[],
     );
 }
 
@@ -136,6 +139,9 @@ pub(crate) fn render_editor(
 /// `delegates_cursor` names whether the terminal draws the primary cursor over
 /// this editor. With it and a live `scene`, the paint leaves the primary cell
 /// to the terminal. Otherwise the paint draws the block itself.
+///
+/// The editor washes its buffer's entries of `reload_flashes` over the text
+/// they changed, focused or not, under its selections and its cursor.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -159,6 +165,7 @@ pub(crate) fn render_editor_with_overlay(
     wrap: WrapMode,
     wrap_column: u32,
     scrolloff: u32,
+    reload_flashes: &[ReloadFlash],
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -189,6 +196,7 @@ pub(crate) fn render_editor_with_overlay(
             delegates_cursor,
             dials,
             current_line,
+            reload_flashes,
         );
         return;
     }
@@ -445,6 +453,19 @@ pub(crate) fn render_editor_with_overlay(
             );
         }
     }
+
+    paint_reload_flash(
+        reload_flashes,
+        editor.buffer_id,
+        &snapshot,
+        inner,
+        editor.scroll_row,
+        end_row,
+        &visible,
+        theme,
+        fallback_style,
+        buf,
+    );
 
     if !is_focused {
         return;
@@ -785,6 +806,77 @@ pub(crate) fn paint_selections(
     }
 
     editor.cursor_screen_cell = primary_cell;
+}
+
+/// Wash the text each of `buffer`'s reload flashes changed, on the display rows
+/// `scroll_row..end_row` of `inner`.
+///
+/// Each cell's background blends toward the theme's `diff.modified` color by
+/// the flash's [`ReloadFlash::strength`], so the wash fades as the flash ages
+/// and leaves the cell as it was once the fade ends. A cell with no background
+/// of its own blends against `fallback_style`'s. A theme whose modified color is
+/// not RGB, or a cell with no RGB background to blend against, takes no wash.
+/// `visible` is the byte range of the rows, as [`visible_byte_range`] answers
+/// it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn paint_reload_flash(
+    flashes: &[ReloadFlash],
+    buffer: BufferId,
+    snapshot: &DisplaySnapshot,
+    inner: Rect,
+    scroll_row: u32,
+    end_row: u32,
+    visible: &Range<usize>,
+    theme: &Theme,
+    fallback_style: Style,
+    buf: &mut Buffer,
+) {
+    let Some(flash_rgb) = style_rgb(theme.get(crate::theme::scope::DIFF_MODIFIED).fg) else {
+        return;
+    };
+    let editor_bg = style_rgb(fallback_style.bg);
+    let right = inner.x + inner.width;
+    let bottom = inner.y + inner.height;
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    for flash in flashes.iter().filter(|flash| flash.buffer == buffer) {
+        let keep = 1.0 - flash.strength();
+        let ends = {
+            let anchors: Vec<Anchor> = flash
+                .spans
+                .iter()
+                .flat_map(|&(start, end)| [start, end])
+                .collect();
+            buffer_snapshot.resolve_anchors_batch(&anchors)
+        };
+        for &[start, end] in ends.as_chunks::<2>().0 {
+            let lo = start.max(visible.start);
+            let hi = end.min(visible.end);
+            if lo >= hi {
+                continue;
+            }
+            paint_offset_range(
+                rope,
+                snapshot,
+                lo..hi,
+                None,
+                &mut |_, _, cell| {
+                    if let Some(bg) = style_rgb(cell.style().bg).or(editor_bg) {
+                        let [r, g, b] = dim_rgb(flash_rgb, bg, keep);
+                        cell.set_bg(Color::Rgb(r, g, b));
+                    }
+                },
+                scroll_row,
+                end_row,
+                inner,
+                right,
+                bottom,
+                buf,
+                None,
+            );
+        }
+    }
 }
 
 /// The screen cell of display point `display` in an editor painted from display
@@ -2734,6 +2826,8 @@ mod tests {
     use super::RowSeverity;
     use crate::{
         action_handlers::{self, dispatch},
+        auto_reload::ReloadFlash,
+        buffer::BufferId,
         diff_map::{
             DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, StagedMark, TokenDetail,
             TreeMark,
@@ -3071,6 +3165,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
 
         let italic: String = (0..area.width)
@@ -3147,6 +3242,7 @@ mod tests {
                 WrapMode::None,
                 80,
                 0,
+                &[],
             );
             (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
         }
@@ -3241,6 +3337,7 @@ mod tests {
                 WrapMode::None,
                 80,
                 0,
+                &[],
             );
             buf
         }
@@ -3647,6 +3744,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
         (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
@@ -3762,6 +3860,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
 
         let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
@@ -3802,6 +3901,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
 
         assert!(
@@ -3939,6 +4039,7 @@ mod tests {
             wrap,
             wrap_column,
             0,
+            &[],
         );
         let snapshot = editor.display_map.snapshot();
         (
@@ -4111,6 +4212,7 @@ mod tests {
                 WrapMode::EditorWidth,
                 80,
                 0,
+                &[],
             );
         }
 
@@ -4157,6 +4259,7 @@ mod tests {
             wrap,
             80,
             0,
+            &[],
         );
         editor
             .gutter_geometry_cache
@@ -4319,6 +4422,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
         editor
             .gutter_geometry_cache
@@ -4400,6 +4504,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
         String::from_utf8_lossy(scene.bytes()).into_owned()
     }
@@ -4554,6 +4659,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
         buf
     }
@@ -4595,6 +4701,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
         let rect = editor.minimap_rect;
         let strip = (0..rows)
@@ -4738,6 +4845,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
         let tree_x = editor.gutter_width - 2;
         (0..rows)
@@ -5210,6 +5318,7 @@ mod tests {
             WrapMode::None,
             80,
             0,
+            &[],
         );
 
         // Row 1 is the line the trailing newline opens, and the gutter takes
@@ -5271,6 +5380,7 @@ mod tests {
             WrapMode::EditorWidth,
             80,
             0,
+            &[],
         );
 
         assert!(
@@ -5617,6 +5727,165 @@ mod tests {
         let first = h.render_composited();
         let second = h.render_composited();
         assert_eq!(first, second, "nothing moved, so the paint repeats exactly");
+    }
+
+    /// A harness over the open file `abc\nxyz\n`, with its second line washed by
+    /// a reload flash, and the diff view on when `diff_view` says so.
+    fn flashing_file(diff_view: bool) -> crate::test_harness::TestHarness {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/reload-flash");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"abc\nxyz\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        if diff_view {
+            action_handlers::review::enter_diff_view(&mut h.stoat);
+            h.settle();
+        }
+
+        let buffer = h.stoat.focused_editor_ids().expect("editor").1;
+        flash_over(&mut h, buffer, (4, 7));
+        h
+    }
+
+    /// Make the active workspace's one reload flash the bytes `start..end` of
+    /// `buffer`.
+    fn flash_over(
+        h: &mut crate::test_harness::TestHarness,
+        buffer: BufferId,
+        (start, end): (usize, usize),
+    ) {
+        let ws = h.stoat.active_workspace_mut();
+        let spans = {
+            let shared = ws.buffers.get(buffer).expect("buffer");
+            let guard = shared.read().expect("buffer poisoned");
+            vec![(
+                guard.snapshot.anchor_at(start, Bias::Right),
+                guard.snapshot.anchor_at(end, Bias::Left),
+            )]
+        };
+        ws.reload_flashes = vec![ReloadFlash {
+            buffer,
+            spans,
+            age: 0.0,
+        }];
+    }
+
+    /// The backgrounds of the rightmost cells on screen that spell `text`.
+    fn backgrounds_of(buf: &Buffer, text: &str) -> Vec<Color> {
+        let wanted: Vec<String> = text.chars().map(String::from).collect();
+        (0..buf.area.height)
+            .find_map(|y| {
+                let row: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+                let x = row
+                    .windows(wanted.len())
+                    .rposition(|cells| cells.iter().zip(&wanted).all(|(cell, ch)| cell == ch))?;
+                Some(
+                    (x..x + wanted.len())
+                        .map(|x| buf[(x as u16, y)].bg)
+                        .collect(),
+                )
+            })
+            .expect("the text is on screen")
+    }
+
+    /// A flash washes the cells of its text, the wash fades as the flash ages,
+    /// and the cells read as unwashed once the fade ends.
+    ///
+    /// The ages advance with nothing else moving, so each paint is a fresh one
+    /// rather than a replay of the frame before.
+    #[test]
+    fn a_reload_flash_washes_its_cells_and_fades_out() {
+        let mut h = flashing_file(false);
+        let mut paint = |age: f32| {
+            h.stoat.active_workspace_mut().reload_flashes[0].age = age;
+            let buf = h.render_composited();
+            (backgrounds_of(&buf, "abc"), backgrounds_of(&buf, "xyz"))
+        };
+        let (plain, washed) = paint(0.0);
+        let (_, fading) = paint(0.4);
+        let (_, faded) = paint(0.6);
+
+        let distance = |a: Color, b: Color| match (a, b) {
+            (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) => {
+                r1.abs_diff(r2) as u32 + g1.abs_diff(g2) as u32 + b1.abs_diff(b2) as u32
+            },
+            _ => panic!("the theme paints RGB backgrounds"),
+        };
+        assert_eq!(
+            (
+                washed.iter().all(|&bg| bg == washed[0]),
+                fading.iter().all(|&bg| bg == fading[0]),
+                distance(fading[0], plain[0]) < distance(washed[0], plain[0]),
+                fading[0] != plain[0],
+                faded,
+            ),
+            (true, true, true, true, plain),
+            "a full wash, a weaker one, then none",
+        );
+    }
+
+    /// The diff view washes the right column, where the buffer's own text
+    /// paints.
+    #[test]
+    fn a_reload_flash_washes_the_diff_view_right_column() {
+        let mut h = flashing_file(true);
+        let buf = h.render_composited();
+        let (plain, washed) = (backgrounds_of(&buf, "abc"), backgrounds_of(&buf, "xyz"));
+
+        assert_eq!(
+            (
+                washed.iter().all(|&bg| bg == washed[0]),
+                washed[0] != plain[0]
+            ),
+            (true, true),
+            "the flashed line's cells share one wash that the line above lacks",
+        );
+    }
+
+    /// A flash names its buffer, so an editor of another buffer paints none of
+    /// it.
+    #[test]
+    fn a_reload_flash_washes_only_its_own_buffer() {
+        let mut h = flashing_file(false);
+        h.stoat.active_workspace_mut().reload_flashes[0].buffer = BufferId::new(999);
+        let buf = h.render_composited();
+
+        assert_eq!(backgrounds_of(&buf, "xyz"), backgrounds_of(&buf, "abc"));
+    }
+
+    /// A changes view washes the excerpt of a flashing buffer, and the wash
+    /// fades across paints of a stack that nothing else moves.
+    ///
+    /// The paint before the flash is the stack's capture. A paint under the
+    /// flash that replays it shows the line unwashed.
+    #[test]
+    fn a_reload_flash_fades_in_a_changes_view_excerpt() {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 24);
+        h.stage_review_scenario("/repo", &[("a.txt", "abc\nkeep\n", "xyz\nkeep\n")]);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(std::path::Path::new("/repo/a.txt"))
+            .expect("the excerpt's buffer");
+        let tinted = backgrounds_of(&h.render_composited(), "xyz");
+        flash_over(&mut h, buffer, (0, 3));
+
+        let mut paint = |age: f32| {
+            h.stoat.active_workspace_mut().reload_flashes[0].age = age;
+            backgrounds_of(&h.render_composited(), "xyz")
+        };
+        let (washed, fading, faded) = (paint(0.0), paint(0.4), paint(0.6));
+
+        assert_eq!(
+            (washed != tinted, fading != washed, fading != tinted, faded),
+            (true, true, true, tinted),
+            "a full wash, a weaker one, then none",
+        );
     }
 
     #[test]

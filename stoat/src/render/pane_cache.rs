@@ -381,6 +381,9 @@ impl PaneCacheEntry {
 /// scroll, so a key read before the paint names a scroll that the paint left.
 /// A capture under that key replays the moved rows on a later frame back at
 /// that scroll.
+///
+/// So does an editor whose buffer a reload flash washes. The wash fades on
+/// every frame tick, and no part of the key moves with it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_cache_key(
     pane: &Pane,
@@ -425,6 +428,9 @@ pub(crate) fn pane_cache_key(
     }
 
     let buffer = editor.buffer_id;
+    if flashing(frame, buffer) {
+        return None;
+    }
     let diff_version = diff_version(buffers, buffer)?;
 
     let (diff_dials, diff_sides) = match editor.diff_view {
@@ -485,6 +491,8 @@ pub(crate) fn pane_cache_key(
 /// scroll inside the paint, so a key read before it names a scroll that the
 /// paint leaves. An empty stack paints one line of text, and goto-word labels
 /// over the focused excerpt last a jump's few frames, so neither gets a key.
+/// Nor does a window that shows an excerpt a reload flash washes, as in
+/// [`pane_cache_key`].
 ///
 /// A bare cursor that the terminal draws paints no cell, so its key leaves the
 /// selections out, and a move of it inside the window replays the pane. The
@@ -547,6 +555,9 @@ fn stack_cache_key(
     for (excerpt, end) in state.excerpts.iter().zip(ends) {
         if end <= window.start || excerpt.top >= window.end {
             continue;
+        }
+        if flashing(frame, excerpt.buffer_id) {
+            return None;
         }
         let shown = editors.get_mut(excerpt.editor_id)?;
         (
@@ -623,6 +634,14 @@ pub(crate) fn bare_cursor(editor: &EditorState) -> bool {
     .map(|anchor| buffer.resolve_anchor(&anchor));
     let cursor = stoat_text::cursor_offset(rope, tail, head);
     start == cursor && end <= rope.next_grapheme_boundary(cursor)
+}
+
+/// Whether a reload flash still washes `buffer` in this frame.
+fn flashing(frame: FrameCtx<'_>, buffer: BufferId) -> bool {
+    frame
+        .reload_flashes
+        .iter()
+        .any(|flash| flash.buffer == buffer)
 }
 
 /// The version of `buffer`'s diff map, zero while it has none, or `None` when

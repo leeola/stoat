@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{
     app::Stoat,
+    auto_reload::ReloadFlash,
     diff_map::{
         ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange, TreeMark,
     },
@@ -191,6 +192,9 @@ impl DiffDials {
 /// [`editor::paint_goto_word_labels`]. An unfocused pane paints no selection,
 /// cursor, or label. With a `scene` and `delegates_cursor` the terminal draws
 /// the primary cursor, so the paint leaves that cell to it.
+///
+/// Focused or not, the right column washes the buffer's entries of
+/// `reload_flashes` over the text they changed, under the selections.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
@@ -204,6 +208,7 @@ pub(crate) fn render_diff_view(
     delegates_cursor: bool,
     dials: DiffDials,
     current_line: Option<u32>,
+    reload_flashes: &[ReloadFlash],
 ) {
     let stoatty = scene.is_some();
     // The base rows pair with the live ones only where there are two columns to
@@ -244,16 +249,28 @@ pub(crate) fn render_diff_view(
 
     let end_row = (editor.scroll_row + inner.height as u32).min(snapshot.line_count());
     let text = editor.text_rect.expect("set above");
-    if !is_focused {
-        return;
-    }
-
     let visible = editor::visible_byte_range(
         &snapshot,
         snapshot.buffer_snapshot().rope(),
         editor.scroll_row,
         end_row,
     );
+    editor::paint_reload_flash(
+        reload_flashes,
+        editor.buffer_id,
+        &snapshot,
+        text,
+        editor.scroll_row,
+        end_row,
+        &visible,
+        theme,
+        fallback_style,
+        buf,
+    );
+    if !is_focused {
+        return;
+    }
+
     editor::paint_selections(
         editor,
         &snapshot,
@@ -3369,6 +3386,7 @@ mod tests {
             false,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let expected: Vec<(String, String)> = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21]
@@ -3399,6 +3417,7 @@ mod tests {
                 false,
                 DiffDials::shipped(),
                 None,
+                &[],
             );
             buf
         };
@@ -3458,6 +3477,7 @@ mod tests {
             false,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let cols = two_digit_columns(area);
@@ -3534,6 +3554,7 @@ mod tests {
             false,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let x = two_digit_columns(area).left_text_x;
@@ -3586,6 +3607,7 @@ mod tests {
             false,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let cols = two_digit_columns(area);
@@ -3625,6 +3647,7 @@ mod tests {
             false,
             DiffDials::shipped(),
             Some(5),
+            &[],
         );
 
         let expected: Vec<(String, String)> = (1..=10)
@@ -3868,6 +3891,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         // The right status column follows the right number field, with its change
@@ -3930,6 +3954,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, false));
@@ -4062,6 +4087,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, true));
@@ -4211,6 +4237,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let barred = |x: u16| {
@@ -4378,6 +4405,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         (
@@ -4438,6 +4466,7 @@ mod tests {
             false,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let text_x = two_digit_columns(area).left_text_x;
@@ -4479,6 +4508,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert!(
@@ -4560,6 +4590,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
@@ -4603,6 +4634,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         // Width 120 is wide enough for the two-column layout, with the left text
@@ -4674,6 +4706,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let left_of = |right: &str| {
@@ -4714,6 +4747,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let left = |y| line_text(&buf, y, left_text(&cols));
@@ -4781,6 +4815,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let left = |y| line_text(&buf, y, left_text(&cols));
@@ -4829,6 +4864,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         // The gutter/code separator is painted at col 6, past the blank mark
@@ -4947,6 +4983,7 @@ mod tests {
                 ..DiffDials::shipped()
             },
             None,
+            &[],
         );
         buf
     }
@@ -5376,6 +5413,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert_eq!(
@@ -5408,6 +5446,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert_eq!(
@@ -5438,6 +5477,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
         assert_eq!(
             editor.cursor_screen_cell,
@@ -5465,6 +5505,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert!(
@@ -5897,6 +5938,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert_eq!(
@@ -5932,6 +5974,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let column = |cols: std::ops::Range<u16>| {
@@ -6228,7 +6271,18 @@ mod tests {
         let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            editor, area, fallback, &theme, &mut buf, true, None, None, true, dials, None,
+            editor,
+            area,
+            fallback,
+            &theme,
+            &mut buf,
+            true,
+            None,
+            None,
+            true,
+            dials,
+            None,
+            &[],
         );
         row_cells_with(&buf, &wide_columns(), "beta", modifier)
     }
@@ -6505,6 +6559,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert_eq!(
@@ -6565,6 +6620,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         // At this sub-threshold width the diff is unified, so the moved buffer
@@ -6688,6 +6744,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let row = buffer_text(&buf, 1);
@@ -6721,6 +6778,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         let row = buffer_text(&buf, 1);
@@ -6757,6 +6815,7 @@ mod tests {
             true,
             DiffDials::shipped(),
             None,
+            &[],
         );
 
         assert_eq!(
@@ -7358,6 +7417,7 @@ mod tests {
                 ..DiffDials::shipped()
             },
             None,
+            &[],
         );
 
         let rx = editor
@@ -7392,6 +7452,7 @@ mod tests {
                 ..DiffDials::shipped()
             },
             None,
+            &[],
         );
 
         let lx = two_digit_columns(area).left_text_x;
@@ -7437,6 +7498,7 @@ mod tests {
                 ..DiffDials::shipped()
             },
             None,
+            &[],
         );
 
         let row = (0..area.height)
@@ -7493,6 +7555,7 @@ mod tests {
                 ..DiffDials::shipped()
             },
             None,
+            &[],
         );
 
         let row = (0..area.height)

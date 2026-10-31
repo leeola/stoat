@@ -286,6 +286,7 @@ pub(crate) fn paint_stack_rows(
             frame.wrap_mode,
             frame.wrap_column,
             frame.scrolloff,
+            frame.reload_flashes,
         );
         editor.viewport_rows = Some(rows as u32);
     }
@@ -730,6 +731,7 @@ mod tests {
             pending_count: None,
             recording_register: None,
             held_buffers: &[],
+            reload_flashes: &stoat.active_workspace().reload_flashes,
             lsp_status_open: false,
             lsp_progress_entries: &[],
             spinner_phase: 0,
