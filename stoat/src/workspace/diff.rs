@@ -2259,7 +2259,8 @@ mod tests {
         app,
         buffer::BufferId,
         diff_map::{
-            BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, MarkState, StagedMark,
+            BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
+            StagedMark, TreeMark,
         },
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
@@ -4431,7 +4432,11 @@ mod tests {
         );
         assert_eq!(
             dm.staged_mark_at_base_line(1),
-            Some((DiffHunkStatus::Modified, MarkState::Staged)),
+            Some(GutterMark {
+                status: DiffHunkStatus::Modified,
+                tree: TreeMark::Unrefined,
+                state: MarkState::Staged,
+            }),
             "b->B is a staged mark on base line 1",
         );
         assert_eq!(dm.staged_counts(), (1, 1), "the mark and the hunk");

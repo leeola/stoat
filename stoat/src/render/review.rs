@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::Stoat,
-    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, MarkState, ProseChange},
+    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
         BlockPlacement, BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot,
@@ -1107,7 +1107,7 @@ pub(crate) fn paint_diff_rows(
                             dim_style,
                             digits,
                         );
-                        if let Some((status, state)) = snapshot
+                        if let Some(GutterMark { status, state, .. }) = snapshot
                             .diff_map()
                             .and_then(|dm| dm.staged_mark_at_base_line(line_base))
                         {
@@ -2004,7 +2004,8 @@ fn paint_base_side(
         .unwrap_or(&[]);
     let staged = snapshot
         .diff_map()
-        .and_then(|dm| dm.base_line_staged(base_line));
+        .and_then(|dm| dm.base_line_mark(base_line))
+        .map(|(state, _)| state);
     let refined = snapshot
         .diff_map()
         .is_some_and(|dm| dm.base_line_refined(base_line));
@@ -2080,7 +2081,7 @@ fn paint_base_side(
             );
         },
         None => {
-            if let Some((status, state)) = snapshot
+            if let Some(GutterMark { status, state, .. }) = snapshot
                 .diff_map()
                 .and_then(|dm| dm.staged_mark_at_base_line(base_line))
             {
@@ -3744,6 +3745,7 @@ mod tests {
                 token_detail: Some(Arc::new(TokenDetail {
                     buffer_spans: Vec::new(),
                     base_spans: Vec::new(),
+                    tree: false,
                 })),
             }],
             Some(Arc::new(format!("{head}{lines}{tail}"))),
@@ -4194,6 +4196,7 @@ mod tests {
                 token_detail: Some(Arc::new(TokenDetail {
                     buffer_spans: vec![span(4..5)],
                     base_spans: vec![span(8..11)],
+                    tree: false,
                 })),
             }],
             Some(Arc::new("  a\n  b\n  c\n  d\ne\n".to_string())),
@@ -4789,6 +4792,7 @@ mod tests {
                         prose: ProseChange::None,
                     }],
                     base_spans: Vec::new(),
+                    tree: false,
                 })),
             }],
             None,
@@ -4836,6 +4840,7 @@ mod tests {
                         move_metadata: None,
                         prose: ProseChange::None,
                     }],
+                    tree: false,
                 })),
             }],
             Some(Arc::new("aa\nbbxx\ncc\n".to_string())),
@@ -6305,6 +6310,7 @@ mod tests {
                     prose: ProseChange::None,
                 }],
                 base_spans: Vec::new(),
+                tree: false,
             });
             DiffMap::from_hunks(
                 [DiffHunk {
@@ -6366,6 +6372,7 @@ mod tests {
                 prose: ProseChange::None,
             }],
             base_spans: Vec::new(),
+            tree: false,
         });
         let dm = DiffMap::from_hunks(
             [DiffHunk {
@@ -6414,6 +6421,7 @@ mod tests {
                 prose: ProseChange::None,
             }],
             base_spans: Vec::new(),
+            tree: false,
         });
         let dm = DiffMap::from_hunks(
             [DiffHunk {

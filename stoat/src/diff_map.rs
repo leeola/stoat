@@ -98,6 +98,9 @@ pub struct ChangeSpan {
 pub struct TokenDetail {
     pub buffer_spans: Vec<ChangeSpan>,
     pub base_spans: Vec<ChangeSpan>,
+    /// Whether the tree pass wrote this detail. False for the line pass's char
+    /// refinement, which a hunk keeps until the tree pass reaches it.
+    pub tree: bool,
 }
 
 /// The buffer rows a refined hunk's spans actually touch, as merged runs.
@@ -207,6 +210,34 @@ impl DiffHunk {
         !self.marked_rows.is_empty()
     }
 
+    /// Whether the tree pass wrote this hunk's detail.
+    ///
+    /// False for a move the line pass found, which the tree pass leaves alone,
+    /// for a hunk in a section the tree search gave up on, and for every hunk
+    /// until the tree pass lands.
+    pub(crate) fn tree_reached(&self) -> bool {
+        self.token_detail.as_ref().is_some_and(|detail| detail.tree)
+    }
+
+    /// How the tree pass reads stored row `stored_row` of this hunk.
+    ///
+    /// A `Modified` hunk the tree pass reached marks the rows its runs name.
+    /// An addition, a deletion and a move it reached mark every row, since each
+    /// of their rows changed whole.
+    fn tree_mark(&self, stored_row: u32) -> TreeMark {
+        let marked = match self.status {
+            DiffHunkStatus::Modified => {
+                self.marked_rows.iter().any(|run| run.contains(&stored_row))
+            },
+            DiffHunkStatus::Added | DiffHunkStatus::Deleted | DiffHunkStatus::Moved => true,
+        };
+        match (self.tree_reached(), marked) {
+            (false, _) => TreeMark::Unrefined,
+            (true, true) => TreeMark::Marked,
+            (true, false) => TreeMark::Unmarked,
+        }
+    }
+
     /// Whether buffer `row` is applied to the git index.
     ///
     /// Staged when no [`Self::unstaged_lines`] range covers `row`. A zero-width
@@ -256,25 +287,30 @@ impl<'a> LiveHunks<'a> {
     /// [`DiffMap::gutter_mark_for_line`], reading live rows rather than stored
     /// ones.
     ///
-    /// A refined hunk marks only the rows its spans touch, so a reindent whose
-    /// real change is two tokens paints two marks rather than a hundred. A hunk
-    /// with no refinement marks its whole range. A row no hunk marks answers
-    /// the staged mark on it, if any.
+    /// Every row a hunk covers answers the hunk's line-pass status, with the
+    /// [`TreeMark`] the tree pass gives the row. So a reindent whose real
+    /// change is two tokens marks two rows for the tree pass. A row no hunk
+    /// marks answers the staged mark on it, if any, which reads `Unrefined`.
     ///
     /// A row in the gap between two hunks that only whitespace-only rows
     /// separate takes the mark and the staged flag of the hunk above it, so the
-    /// two read as one change.
+    /// two read as one change. The row lies in no hunk, so the tree pass never
+    /// marks it, and it reads `Unmarked`.
     ///
     /// The map's [`MarkKind`] decides whether the state is a git state or an
     /// approval state.
-    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, MarkState)> {
+    pub fn gutter_mark_for_line(&self, line: u32) -> Option<GutterMark> {
         self.hunk_mark_for_line(line)
             .or_else(|| staged_row_mark(&self.staged, line))
-            .map(|(status, marked)| (status, MarkState::of(self.kind, marked)))
+            .map(|(status, tree, marked)| GutterMark {
+                status,
+                tree,
+                state: MarkState::of(self.kind, marked),
+            })
     }
 
     /// The mark a hunk paints at buffer `line`, before the staged marks.
-    fn hunk_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+    fn hunk_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, TreeMark, bool)> {
         let index = self
             .hunks
             .partition_point(|live| live.rows.start <= line)
@@ -287,7 +323,7 @@ impl<'a> LiveHunks<'a> {
             self.hunks
                 .get(index + 1)
                 .filter(|next| next.joined_above)
-                .map(|_| (hunk.status, hunk.staged()))
+                .map(|_| (hunk.status, TreeMark::Unmarked, hunk.staged()))
         };
 
         if live.rows.contains(&line) {
@@ -297,23 +333,29 @@ impl<'a> LiveHunks<'a> {
             let stored = (line + hunk.buffer_line_range.start).saturating_sub(live.rows.start);
             if hunk.refined() && !hunk.marked_rows.iter().any(|run| run.contains(&stored)) {
                 let marked = marked_span(hunk, &live.rows);
-                if line >= marked.end {
-                    return gap_below();
+                if line >= marked.end
+                    && let Some(gap) = gap_below()
+                {
+                    return Some(gap);
                 }
                 // The first hunk never joins, so a joined one has a hunk above.
                 if line < marked.start && live.joined_above {
                     let above = self.hunks[index - 1].hunk;
-                    return Some((above.status, above.staged()));
+                    return Some((above.status, TreeMark::Unmarked, above.staged()));
                 }
-                return None;
             }
-            return Some((hunk.status, hunk.line_staged(stored)));
+            return Some((
+                hunk.status,
+                hunk.tree_mark(stored),
+                hunk.line_staged(stored),
+            ));
         }
+        let seam = hunk.buffer_line_range.start;
         if hunk.status == DiffHunkStatus::Deleted && live.rows.start == line {
-            return Some((DiffHunkStatus::Deleted, hunk.staged()));
+            return Some((DiffHunkStatus::Deleted, hunk.tree_mark(seam), hunk.staged()));
         }
         if hunk.status == DiffHunkStatus::Moved && live.rows.is_empty() && live.rows.start == line {
-            return Some((DiffHunkStatus::Moved, hunk.staged()));
+            return Some((DiffHunkStatus::Moved, hunk.tree_mark(seam), hunk.staged()));
         }
         gap_below()
     }
@@ -533,6 +575,9 @@ struct BaseLineMark {
     /// Whether the hunk names the line's changed chars, which leaves the chars
     /// outside its spans as unchanged text.
     refined: bool,
+    /// The tree pass's reading of the hunk's first buffer row, which a base
+    /// line takes as its own.
+    tree: TreeMark,
 }
 
 type BaseStaged = BTreeMap<u32, BaseLineMark>;
@@ -591,6 +636,33 @@ impl MarkState {
             (MarkKind::Approved, false) => Self::Unapproved,
         }
     }
+}
+
+/// How the tree pass reads one row the line pass changed.
+///
+/// The line pass marks every row it changed, and the tree pass then narrows a
+/// modified hunk to the rows whose tokens changed. The two answers differ on a
+/// row the line pass changed and the tree pass did not, such as a reindented
+/// line, so a [`GutterMark`] carries both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TreeMark {
+    /// A tree span touches the row, or the hunk is an addition, a deletion or
+    /// a move the tree pass reached.
+    Marked,
+    /// The tree pass reached the hunk and found no change on the row.
+    Unmarked,
+    /// The tree pass never reached the hunk, or the row comes from a staged
+    /// mark, which only a line diff produces.
+    Unrefined,
+}
+
+/// The line pass's change kind, the tree pass's reading, and the staged state
+/// a gutter paints for one row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct GutterMark {
+    pub status: DiffHunkStatus,
+    pub tree: TreeMark,
+    pub state: MarkState,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1058,33 +1130,37 @@ impl DiffMap {
     /// it, if any. The map's [`MarkKind`] decides whether the state is a git
     /// state or an approval state.
     ///
-    /// Reports whole hunk ranges. The live counterpart
-    /// [`LiveHunks::gutter_mark_for_line`] narrows a refined hunk to the rows
-    /// its runs name, which is what the render paths read.
-    pub fn gutter_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, MarkState)> {
+    /// Reports whole hunk ranges in stored rows, each row with the tree pass's
+    /// reading of it. The live counterpart [`LiveHunks::gutter_mark_for_line`]
+    /// reads the rows the hunks cover now, which is what the render paths read.
+    pub fn gutter_mark_for_line(&self, line: u32) -> Option<GutterMark> {
         self.hunk_mark_for_line(line)
             .or_else(|| staged_row_mark(&self.staged_rows, line))
-            .map(|(status, marked)| (status, MarkState::of(self.mark_kind, marked)))
+            .map(|(status, tree, marked)| GutterMark {
+                status,
+                tree,
+                state: MarkState::of(self.mark_kind, marked),
+            })
     }
 
     /// The mark a hunk paints at buffer `line`, before the staged marks.
-    fn hunk_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, bool)> {
+    fn hunk_mark_for_line(&self, line: u32) -> Option<(DiffHunkStatus, TreeMark, bool)> {
         let target = HunkKeyRef(Some(&line));
         let mut cursor = self.hunks.cursor::<HunkKeyRef<'_>>(());
         cursor.seek(&target, Bias::Right);
         cursor.prev();
         let hunk = cursor.item()?;
         if hunk.buffer_line_range.contains(&line) {
-            return Some((hunk.status, hunk.line_staged(line)));
+            return Some((hunk.status, hunk.tree_mark(line), hunk.line_staged(line)));
         }
         if hunk.status == DiffHunkStatus::Deleted && hunk.buffer_start_line == line {
-            return Some((DiffHunkStatus::Deleted, hunk.staged()));
+            return Some((DiffHunkStatus::Deleted, hunk.tree_mark(line), hunk.staged()));
         }
         if hunk.status == DiffHunkStatus::Moved
             && hunk.buffer_line_range.is_empty()
             && hunk.buffer_start_line == line
         {
-            return Some((DiffHunkStatus::Moved, hunk.staged()));
+            return Some((DiffHunkStatus::Moved, hunk.tree_mark(line), hunk.staged()));
         }
         None
     }
@@ -1527,18 +1603,19 @@ impl DiffMap {
         self.base_changes.clone()
     }
 
-    /// The staged state of the hunk that removed content at base `line`, or
-    /// `None` when no hunk did.
+    /// The staged state of the hunk that removed content at base `line`, and
+    /// the tree pass's reading of that hunk's first buffer row, or `None` when
+    /// no hunk did.
     ///
     /// Serves the diff view's removed left-column rows, whose base lines have no
     /// buffer counterpart for [`Self::staged_for_line`] to resolve.
     ///
     /// The map's [`MarkKind`] decides whether the state is a git state or an
     /// approval state.
-    pub(crate) fn base_line_staged(&self, line: u32) -> Option<MarkState> {
+    pub(crate) fn base_line_mark(&self, line: u32) -> Option<(MarkState, TreeMark)> {
         self.base_staged
             .get(&line)
-            .map(|mark| MarkState::of(self.mark_kind, mark.staged))
+            .map(|mark| (MarkState::of(self.mark_kind, mark.staged), mark.tree))
     }
 
     /// Whether the hunk that replaced base `line` names the line's changed
@@ -1550,17 +1627,15 @@ impl DiffMap {
         self.base_staged.get(&line).is_some_and(|mark| mark.refined)
     }
 
-    /// The status of the staged mark at base `line` and the staged state it
-    /// paints, or `None` when no mark covers it.
+    /// The mark the staged mark at base `line` paints, or `None` when no mark
+    /// covers it.
     ///
     /// What the diff view's left column marks at `line` beyond the removed rows
-    /// [`Self::base_line_staged`] covers. A deletion's empty mark answers at
-    /// the line it sits at, the line that followed the removed text. A mark
-    /// reads staged under the map's [`MarkKind`], as a staged gutter row does.
-    pub(crate) fn staged_mark_at_base_line(
-        &self,
-        line: u32,
-    ) -> Option<(DiffHunkStatus, MarkState)> {
+    /// [`Self::base_line_mark`] covers. A deletion's empty mark answers at the
+    /// line it sits at, the line that followed the removed text. A mark reads
+    /// staged under the map's [`MarkKind`], as a staged gutter row does, and
+    /// reads [`TreeMark::Unrefined`], because only a line diff produces it.
+    pub(crate) fn staged_mark_at_base_line(&self, line: u32) -> Option<GutterMark> {
         let end = self
             .staged_marks
             .partition_point(|mark| mark.base_lines.start <= line);
@@ -1572,7 +1647,11 @@ impl DiffMap {
                 mark.base_lines.contains(&line)
                     || (mark.base_lines.is_empty() && mark.base_lines.start == line)
             })
-            .map(|mark| (mark.status, MarkState::of(self.mark_kind, true)))
+            .map(|mark| GutterMark {
+                status: mark.status,
+                tree: TreeMark::Unrefined,
+                state: MarkState::of(self.mark_kind, true),
+            })
     }
 
     pub fn total_deleted_lines(&self) -> u32 {
@@ -1898,16 +1977,21 @@ fn shift(line: u32, delta: i64) -> u32 {
 ///
 /// A range that holds `line` answers its status, and an empty range at `line`
 /// answers [`DiffHunkStatus::Deleted`], where a staged removal took its text.
-/// Both read staged.
+/// Both read staged, and both read [`TreeMark::Unrefined`], because only a
+/// line diff produces a staged mark.
 fn staged_row_mark(
     rows: &[(Range<u32>, DiffHunkStatus)],
     line: u32,
-) -> Option<(DiffHunkStatus, bool)> {
+) -> Option<(DiffHunkStatus, TreeMark, bool)> {
     let (range, status) = rows[..rows.partition_point(|(range, _)| range.start <= line)].last()?;
     if range.contains(&line) {
-        return Some((*status, true));
+        return Some((*status, TreeMark::Unrefined, true));
     }
-    (range.is_empty() && range.start == line).then_some((DiffHunkStatus::Deleted, true))
+    (range.is_empty() && range.start == line).then_some((
+        DiffHunkStatus::Deleted,
+        TreeMark::Unrefined,
+        true,
+    ))
 }
 
 /// The live rows from `hunk`'s first marked row to its last, where `rows` are
@@ -2052,6 +2136,7 @@ pub(crate) fn changes_to_hunks(
                 token_detail: Some(Arc::new(TokenDetail {
                     buffer_spans,
                     base_spans,
+                    tree: false,
                 })),
             });
             for i in &rhs_indices {
@@ -2092,6 +2177,7 @@ pub(crate) fn changes_to_hunks(
                 token_detail: Some(Arc::new(TokenDetail {
                     buffer_spans: Vec::new(),
                     base_spans,
+                    tree: false,
                 })),
             });
             for i in &lhs_indices {
@@ -2134,6 +2220,7 @@ pub(crate) fn changes_to_hunks(
             token_detail: Some(Arc::new(TokenDetail {
                 buffer_spans: replaced_change_spans(rhs_change, rhs_text),
                 base_spans: replaced_change_spans(lhs_change, lhs_text),
+                tree: false,
             })),
         });
         consumed[lhs_idx] = true;
@@ -2338,6 +2425,7 @@ pub(crate) fn merge_structural_detail(
         hunk.token_detail = Some(Arc::new(TokenDetail {
             buffer_spans,
             base_spans,
+            tree: true,
         }));
     }
 }
@@ -2543,6 +2631,7 @@ fn compute_base_staged(hunks: &SumTree<DiffHunk>, base_text: Option<&Arc<String>
         let mark = BaseLineMark {
             staged: hunk.staged(),
             refined: hunk.status == DiffHunkStatus::Modified && hunk.token_detail.is_some(),
+            tree: hunk.tree_mark(hunk.buffer_line_range.start),
         };
         for line in hunk_base_lines(hunk, &starts, base_text) {
             out.insert(line, mark);
@@ -2703,8 +2792,8 @@ fn line_of(line_starts: &[usize], byte: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, MarkState,
-        ProseChange, StagedMark, TokenDetail,
+        ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
+        ProseChange, StagedMark, TokenDetail, TreeMark,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -2935,7 +3024,7 @@ mod tests {
         let live = dm.live_hunks(&multi.snapshot());
         assert_eq!(
             live.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Added, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Added, MarkState::Unstaged)),
             "the added last line is marked with no newline after it",
         );
         assert_eq!(
@@ -2984,12 +3073,12 @@ mod tests {
         );
         assert_eq!(
             live.gutter_mark_for_line(3),
-            Some((DiffHunkStatus::Deleted, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Deleted, MarkState::Unstaged)),
             "and the deletion seam keeps its mark",
         );
         assert_eq!(
             live.gutter_mark_for_line(5),
-            Some((DiffHunkStatus::Moved, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Moved, MarkState::Unstaged)),
             "as does the move seam",
         );
     }
@@ -3023,7 +3112,7 @@ mod tests {
         );
         assert_eq!(
             live.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Deleted, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Deleted, MarkState::Unstaged)),
             "and paints the deletion mark there",
         );
     }
@@ -3098,7 +3187,7 @@ mod tests {
         dm: &DiffMap,
         text: &str,
         rows: std::ops::Range<u32>,
-    ) -> Vec<Option<(DiffHunkStatus, MarkState)>> {
+    ) -> Vec<Option<GutterMark>> {
         let multi = buffer_holding(text);
         let snapshot = multi.snapshot();
         let live = dm.live_hunks(&snapshot);
@@ -3112,6 +3201,16 @@ mod tests {
             mark
         })
         .collect()
+    }
+
+    /// The mark of a row in a hunk the tree pass never reached, or in a staged
+    /// mark.
+    fn unrefined(status: DiffHunkStatus, state: MarkState) -> GutterMark {
+        GutterMark {
+            status,
+            tree: TreeMark::Unrefined,
+            state,
+        }
     }
 
     /// A deletion's mark holds no base line, so it answers at the one line it
@@ -3132,9 +3231,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 None,
-                Some((DiffHunkStatus::Modified, MarkState::Staged)),
-                Some((DiffHunkStatus::Modified, MarkState::Staged)),
-                Some((DiffHunkStatus::Deleted, MarkState::Staged)),
+                Some(unrefined(DiffHunkStatus::Modified, MarkState::Staged)),
+                Some(unrefined(DiffHunkStatus::Modified, MarkState::Staged)),
+                Some(unrefined(DiffHunkStatus::Deleted, MarkState::Staged)),
                 None,
             ],
             "marks set out of order answer by base line",
@@ -3180,7 +3279,7 @@ mod tests {
         );
         let text = "b0\nn1\nn2\nb1\nb2\nb3\nb4\n";
 
-        let unstaged_add = Some((DiffHunkStatus::Added, MarkState::Unstaged));
+        let unstaged_add = Some(unrefined(DiffHunkStatus::Added, MarkState::Unstaged));
         assert_eq!(
             staged_gutter(&dm, text, 0..7),
             [
@@ -3189,7 +3288,7 @@ mod tests {
                 unstaged_add,
                 None,
                 None,
-                Some((DiffHunkStatus::Modified, MarkState::Staged)),
+                Some(unrefined(DiffHunkStatus::Modified, MarkState::Staged)),
                 None,
             ],
             "the mark lands two rows below its base line",
@@ -3225,8 +3324,8 @@ mod tests {
             staged_gutter(&dm, text, 0..4),
             [
                 None,
-                Some((DiffHunkStatus::Modified, MarkState::Unstaged)),
-                Some((DiffHunkStatus::Modified, MarkState::Staged)),
+                Some(unrefined(DiffHunkStatus::Modified, MarkState::Unstaged)),
+                Some(unrefined(DiffHunkStatus::Modified, MarkState::Staged)),
                 None,
             ],
             "the hunk holds row 1 and the mark keeps row 2",
@@ -3236,6 +3335,36 @@ mod tests {
                 .change_stops(),
             [1..2, 2..3],
             "and the walk stops on the hunk, then on the rest of the mark",
+        );
+    }
+
+    /// Only a line diff makes a staged mark, so its rows read `Unrefined` while
+    /// the hunk beside it reads the tree pass. A base line the hunk replaced
+    /// takes the hunk's reading.
+    #[test]
+    fn a_staged_mark_reads_unrefined_beside_a_reached_hunk() {
+        let hunk = DiffHunk {
+            token_detail: Some(empty_detail(true)),
+            marked_rows: std::iter::once(1..2).collect(),
+            ..modified_hunk(1..2, 3..5)
+        };
+        let dm = staged_map(
+            "b0\nb1\nb2\nb3\n",
+            vec![hunk],
+            vec![mark(DiffHunkStatus::Modified, 3..4)],
+        );
+        let staged = Some(unrefined(DiffHunkStatus::Modified, MarkState::Staged));
+        assert_eq!(
+            (
+                staged_gutter(&dm, "b0\nX1\nb2\nb3\n", 0..4),
+                dm.base_line_mark(1),
+                dm.staged_mark_at_base_line(3),
+            ),
+            (
+                vec![None, modified(TreeMark::Marked), None, staged],
+                Some((MarkState::Unstaged, TreeMark::Marked)),
+                staged,
+            ),
         );
     }
 
@@ -3256,8 +3385,8 @@ mod tests {
             [1, 2].map(|row| live.gutter_mark_for_line(row))
         };
         let approval = [
-            Some((DiffHunkStatus::Modified, MarkState::Unapproved)),
-            Some((DiffHunkStatus::Modified, MarkState::Approved)),
+            Some(unrefined(DiffHunkStatus::Modified, MarkState::Unapproved)),
+            Some(unrefined(DiffHunkStatus::Modified, MarkState::Approved)),
         ];
 
         assert_eq!(
@@ -3278,7 +3407,7 @@ mod tests {
             [
                 None,
                 None,
-                Some((DiffHunkStatus::Deleted, MarkState::Staged)),
+                Some(unrefined(DiffHunkStatus::Deleted, MarkState::Staged)),
                 None
             ],
             "the deletion marks row 2",
@@ -3455,11 +3584,11 @@ mod tests {
 
         assert_eq!(
             dm.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Added, MarkState::Staged)),
+            Some(unrefined(DiffHunkStatus::Added, MarkState::Staged)),
         );
         assert_eq!(
             dm.gutter_mark_for_line(2),
-            Some((DiffHunkStatus::Added, MarkState::Staged)),
+            Some(unrefined(DiffHunkStatus::Added, MarkState::Staged)),
         );
         assert_eq!(
             dm.gutter_mark_for_line(3),
@@ -3468,11 +3597,11 @@ mod tests {
         );
         assert_eq!(
             dm.gutter_mark_for_line(5),
-            Some((DiffHunkStatus::Modified, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Modified, MarkState::Unstaged)),
         );
         assert_eq!(
             dm.gutter_mark_for_line(9),
-            Some((DiffHunkStatus::Deleted, MarkState::Staged)),
+            Some(unrefined(DiffHunkStatus::Deleted, MarkState::Staged)),
             "the deletion seam anchors on the row below the removed lines",
         );
         assert_eq!(dm.gutter_mark_for_line(0), None);
@@ -3496,7 +3625,7 @@ mod tests {
 
         assert_eq!(
             dm.gutter_mark_for_line(3),
-            Some((DiffHunkStatus::Moved, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Moved, MarkState::Unstaged)),
             "the moved-away seam anchors a Moved gutter mark",
         );
         assert_eq!(dm.gutter_mark_for_line(2), None);
@@ -3806,6 +3935,7 @@ mod tests {
         let empty = TokenDetail {
             buffer_spans: Vec::new(),
             base_spans: Vec::new(),
+            tree: false,
         };
 
         assert_eq!(
@@ -4220,6 +4350,7 @@ mod tests {
                 prose: ProseChange::None,
             }],
             base_spans: vec![],
+            tree: false,
         });
         let mut hunk = modified_hunk(3..5, 0..10);
         hunk.token_detail = Some(detail.clone());
@@ -4326,6 +4457,7 @@ mod tests {
         let tree_detail = Arc::new(TokenDetail {
             buffer_spans: vec![span.clone()],
             base_spans: vec![span],
+            tree: true,
         });
 
         // A span on either side alone keeps the first hunk's detail. The empty
@@ -4371,12 +4503,13 @@ mod tests {
         );
     }
 
-    /// Marks for every row of `hunks`' combined range, `None` where unmarked.
+    /// Marks for every row of `hunks`' combined range, `None` where no hunk
+    /// marks.
     fn marks_over(
         hunks: Vec<DiffHunk>,
         rows: std::ops::Range<u32>,
         text: &str,
-    ) -> Vec<Option<DiffHunkStatus>> {
+    ) -> Vec<Option<GutterMark>> {
         use crate::{
             buffer::{BufferId, TextBuffer},
             multi_buffer::MultiBuffer,
@@ -4386,11 +4519,11 @@ mod tests {
         let multi = MultiBuffer::singleton(Arc::new(std::sync::RwLock::new(tb)));
         let snapshot = multi.snapshot();
         let live = map.live_hunks(&snapshot);
-        rows.map(|row| live.gutter_mark_for_line(row).map(|(status, _)| status))
-            .collect()
+        rows.map(|row| live.gutter_mark_for_line(row)).collect()
     }
 
-    /// A hunk over `rows`, refined to `marked` when non-empty.
+    /// A hunk over `rows`, which the tree pass refined to `marked` when
+    /// `marked` is non-empty and never reached otherwise.
     fn refined_hunk(rows: std::ops::Range<u32>, marked: Vec<std::ops::Range<u32>>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Modified,
@@ -4398,10 +4531,29 @@ mod tests {
             buffer_line_range: rows.clone(),
             base_byte_range: 0..1,
             anchor_range: None,
-            token_detail: None,
+            token_detail: (!marked.is_empty()).then(|| empty_detail(true)),
             unstaged_lines: std::iter::once(rows).collect(),
             marked_rows: marked,
         }
+    }
+
+    /// A detail with no spans, written by the tree pass when `tree` is set.
+    fn empty_detail(tree: bool) -> Arc<TokenDetail> {
+        Arc::new(TokenDetail {
+            buffer_spans: Vec::new(),
+            base_spans: Vec::new(),
+            tree,
+        })
+    }
+
+    /// The mark of an unstaged row in a `Modified` hunk the tree pass reads as
+    /// `tree`.
+    fn modified(tree: TreeMark) -> Option<GutterMark> {
+        Some(GutterMark {
+            status: DiffHunkStatus::Modified,
+            tree,
+            state: MarkState::Unstaged,
+        })
     }
 
     /// The stops a map offers over `text`.
@@ -4497,7 +4649,9 @@ mod tests {
     }
 
     /// Two hunks with only a blank row between them are one change. The walk
-    /// stops once over both, the position counts one, and the blank row marks.
+    /// stops once over both, the position counts one, and the blank row takes
+    /// the change's mark. The blank row lies in no hunk, so the tree pass never
+    /// marks it, and it reads `Unmarked`.
     #[test]
     fn hunks_a_blank_row_apart_are_one_change() {
         let text = "0\n1\n\n3\n4\n";
@@ -4507,7 +4661,7 @@ mod tests {
                 refined_hunk(3..4, Vec::new()),
             ]
         };
-        let modified = Some(DiffHunkStatus::Modified);
+        let unreached = modified(TreeMark::Unrefined);
         assert_eq!(
             (
                 live_answer(hunks(), text, 3),
@@ -4515,9 +4669,15 @@ mod tests {
             ),
             (
                 (std::iter::once(1..4).collect(), Some(1), 1),
-                vec![None, modified, modified, modified, None],
+                vec![
+                    None,
+                    unreached,
+                    modified(TreeMark::Unmarked),
+                    unreached,
+                    None
+                ],
             ),
-            "one stop, position one of one, and the blank row marked",
+            "one stop, position one of one, and the blank row takes the change's mark",
         );
     }
 
@@ -4554,7 +4714,7 @@ mod tests {
 
     /// A gap that reaches into the hunks marks too. The rows past the upper
     /// hunk's last run and before the lower hunk's first run belong to the one
-    /// change.
+    /// change, which the tree pass found on the runs alone.
     #[test]
     fn refined_hunks_a_blank_gap_apart_mark_across_it() {
         let text = "a\n\n\n\nb\n";
@@ -4564,6 +4724,7 @@ mod tests {
                 refined_hunk(3..5, std::iter::once(4..5).collect()),
             ]
         };
+        let (marked, unmarked) = (modified(TreeMark::Marked), modified(TreeMark::Unmarked));
         assert_eq!(
             (
                 live_answer(hunks(), text, 4),
@@ -4571,30 +4732,57 @@ mod tests {
             ),
             (
                 (std::iter::once(0..5).collect(), Some(1), 1),
-                vec![Some(DiffHunkStatus::Modified); 5],
+                vec![marked, unmarked, unmarked, unmarked, marked],
             ),
-            "one stop, one change, and every row of the gap marked",
+            "one stop, one change, and every row of the gap takes the change's mark",
         );
     }
-    /// The whole point: a hunk whose real change is two tokens marks two rows,
-    /// not the hundred its extents cover.
+    /// A hunk whose real change is two tokens marks two rows for the tree pass,
+    /// not the hundred its extents cover. Every row keeps the line pass's mark.
     #[test]
     fn a_refined_hunk_marks_only_the_rows_its_spans_touch() {
         let text = "0\n1\n2\n3\n4\n5\n";
         let hunk = refined_hunk(0..6, vec![1..2, 4..5]);
+        let (marked, unmarked) = (modified(TreeMark::Marked), modified(TreeMark::Unmarked));
 
         assert_eq!(
             marks_over(vec![hunk], 0..6, text),
+            [unmarked, marked, unmarked, unmarked, marked, unmarked],
+            "only the marked runs read marked"
+        );
+    }
+
+    /// The tree pass reads a row it found a change on as `Marked`, and the
+    /// hunk's other row as `Unmarked`.
+    #[test]
+    fn a_reached_hunk_reads_marked_and_unmarked_rows() {
+        assert_eq!(
+            reindent_marks(true),
             [
                 None,
-                Some(DiffHunkStatus::Modified),
-                None,
-                None,
-                Some(DiffHunkStatus::Modified),
-                None,
+                modified(TreeMark::Marked),
+                modified(TreeMark::Unmarked),
+                None
             ],
-            "only the marked runs paint"
         );
+    }
+
+    /// A detail the line pass wrote leaves every row of the hunk `Unrefined`,
+    /// whatever runs the hunk holds.
+    #[test]
+    fn a_hunk_the_tree_pass_never_reached_reads_unrefined() {
+        let unreached = modified(TreeMark::Unrefined);
+        assert_eq!(reindent_marks(false), [None, unreached, unreached, None]);
+    }
+
+    /// The marks over a reindent of rows 1 and 2, as one `Modified` hunk with a
+    /// run on row 1 alone and a detail whose tree flag is `tree`.
+    fn reindent_marks(tree: bool) -> Vec<Option<GutterMark>> {
+        let hunk = DiffHunk {
+            token_detail: Some(empty_detail(tree)),
+            ..refined_hunk(1..3, std::iter::once(1..2).collect())
+        };
+        marks_over(vec![hunk], 0..4, "a\n    b\n    c\nd\n")
     }
 
     /// The runs [`super::marked_row_runs`] makes of spans over `ranges` in
@@ -4663,37 +4851,53 @@ mod tests {
             marks_over(vec![hunk], 0..4, text),
             [
                 None,
-                Some(DiffHunkStatus::Modified),
-                Some(DiffHunkStatus::Modified),
+                modified(TreeMark::Unrefined),
+                modified(TreeMark::Unrefined),
                 None,
             ],
             "every row of the range marks"
         );
     }
 
-    /// An added run never gets structural detail, so it marks whole the way it
-    /// always did.
+    /// An addition marks every row it added. Once the tree pass reaches it,
+    /// every row reads `Marked`, a row its spans miss included.
     #[test]
     fn an_added_hunk_marks_its_whole_range() {
         let text = "0\n1\n2\n3\n";
-        let hunk = DiffHunk {
-            status: DiffHunkStatus::Added,
-            buffer_start_line: 1,
-            buffer_line_range: 1..3,
-            base_byte_range: 0..0,
-            anchor_range: None,
-            token_detail: None,
-            unstaged_lines: std::iter::once(1..3).collect(),
-            marked_rows: Vec::new(),
+        let marks = |token_detail, marked_rows| {
+            let hunk = DiffHunk {
+                status: DiffHunkStatus::Added,
+                buffer_start_line: 1,
+                buffer_line_range: 1..3,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail,
+                unstaged_lines: std::iter::once(1..3).collect(),
+                marked_rows,
+            };
+            marks_over(vec![hunk], 0..4, text)
+        };
+        let added = |tree| {
+            Some(GutterMark {
+                status: DiffHunkStatus::Added,
+                tree,
+                state: MarkState::Unstaged,
+            })
         };
 
         assert_eq!(
-            marks_over(vec![hunk], 0..4, text),
             [
-                None,
-                Some(DiffHunkStatus::Added),
-                Some(DiffHunkStatus::Added),
-                None,
+                marks(None, Vec::new()),
+                marks(Some(empty_detail(true)), std::iter::once(1..2).collect()),
+            ],
+            [
+                [
+                    None,
+                    added(TreeMark::Unrefined),
+                    added(TreeMark::Unrefined),
+                    None
+                ],
+                [None, added(TreeMark::Marked), added(TreeMark::Marked), None],
             ],
             "an addition marks every row it added"
         );
@@ -4713,6 +4917,7 @@ mod tests {
             token_detail: Some(Arc::new(TokenDetail {
                 buffer_spans: spans,
                 base_spans: Vec::new(),
+                tree: false,
             })),
             unstaged_lines: std::iter::once(1..2).collect(),
             marked_rows: Vec::new(),
@@ -5017,12 +5222,12 @@ mod tests {
         let dm = DiffMap::from_hunks([hunk], None);
         assert_eq!(
             dm.gutter_mark_for_line(1),
-            Some((DiffHunkStatus::Modified, MarkState::Staged)),
+            Some(unrefined(DiffHunkStatus::Modified, MarkState::Staged)),
             "row one is staged within the hunk"
         );
         assert_eq!(
             dm.gutter_mark_for_line(2),
-            Some((DiffHunkStatus::Modified, MarkState::Unstaged)),
+            Some(unrefined(DiffHunkStatus::Modified, MarkState::Unstaged)),
             "row two is still unstaged"
         );
         assert_eq!(dm.staged_for_line(1), Some(MarkState::Staged));
@@ -5230,6 +5435,7 @@ mod tests {
             Some(Arc::new(TokenDetail {
                 buffer_spans: vec![span(at)],
                 base_spans: vec![span(at)],
+                tree: true,
             }))
         };
 
@@ -5336,6 +5542,7 @@ mod tests {
             Some(Arc::new(TokenDetail {
                 buffer_spans: vec![span(at)],
                 base_spans: vec![span(at)],
+                tree: true,
             }))
         };
 

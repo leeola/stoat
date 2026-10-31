@@ -1243,6 +1243,7 @@ mod tests {
                     token_detail: Some(Arc::new(TokenDetail {
                         buffer_spans: Vec::new(),
                         base_spans: Vec::new(),
+                        tree: false,
                     })),
                 }],
                 None,

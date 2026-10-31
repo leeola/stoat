@@ -257,6 +257,7 @@ mod tests {
                 prose: ProseChange::None,
             }],
             base_spans: Vec::new(),
+            tree: false,
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
@@ -326,6 +327,7 @@ mod tests {
             token_detail: Some(Arc::new(TokenDetail {
                 buffer_spans,
                 base_spans,
+                tree: false,
             })),
         }
     }
@@ -393,6 +395,7 @@ mod tests {
                 prose: ProseChange::None,
             }],
             base_spans: Vec::new(),
+            tree: false,
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
@@ -511,6 +514,7 @@ mod tests {
                     prose: ProseChange::None,
                 }],
                 base_spans: Vec::new(),
+                tree: false,
             })),
             ..moved_hunk(2..3, true, intra_source(0))
         };

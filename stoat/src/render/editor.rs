@@ -5,7 +5,7 @@ use crate::{
         build_diagnostic_span_cache, diagnostic_at_offset, severity_rank, DiagnosticSpanCache,
         ResolvedDiag,
     },
-    diff_map::{DiffHunkStatus, MarkState},
+    diff_map::{DiffHunkStatus, GutterMark, MarkState, TreeMark},
     display_map::{
         display_width, tab_map, BlockChunks, BlockRowKind, DisplayPoint, DisplaySnapshot,
         PaintVersion, TabPoint,
@@ -1014,7 +1014,7 @@ pub(crate) struct GutterGeometryCache {
     geometry_key: u64,
     folded: Vec<(u32, u16)>,
     width_digits: u16,
-    marks: BTreeMap<u32, (DiffHunkStatus, MarkState)>,
+    marks: BTreeMap<u32, GutterMark>,
     lines_key: Option<u64>,
     lines: Vec<GutterLine>,
     scene_key: Option<u64>,
@@ -1611,12 +1611,13 @@ pub(crate) fn gutter_display_number(absolute: u32, current_line: Option<u32>) ->
 ///
 /// `current_line` selects relative numbering per [`gutter_display_number`]. The
 /// diagnostic mark stays keyed to the absolute buffer line.
-/// Map each folded row a diff hunk marks to its `(status, state)` pair, for the
-/// gutter's git bar. Rows outside any hunk are absent from the result.
+/// Map each folded row a diff hunk marks to its [`GutterMark`], for the
+/// gutter's git bar. Rows outside any hunk are absent from the result, and so
+/// are the rows the tree pass reached and found no change on.
 pub(crate) fn gutter_diff_marks(
     snapshot: &DisplaySnapshot,
     folded: &[(u32, u16)],
-) -> BTreeMap<u32, (DiffHunkStatus, MarkState)> {
+) -> BTreeMap<u32, GutterMark> {
     let Some(diff_map) = snapshot.diff_map() else {
         return BTreeMap::new();
     };
@@ -1635,12 +1636,16 @@ pub(crate) fn gutter_diff_marks(
 pub(crate) fn gutter_diff_marks_from(
     live: &crate::diff_map::LiveHunks<'_>,
     folded: &[(u32, u16)],
-) -> BTreeMap<u32, (DiffHunkStatus, MarkState)> {
+) -> BTreeMap<u32, GutterMark> {
     folded
         .iter()
         .filter_map(|&(number, _)| {
             let row = number - 1;
-            live.gutter_mark_for_line(row).map(|mark| (row, mark))
+            // The plain gutter marks the rows the tree pass changed, and every
+            // row of a hunk that the tree pass did not reach.
+            live.gutter_mark_for_line(row)
+                .filter(|mark| mark.tree != TreeMark::Unmarked)
+                .map(|mark| (row, mark))
         })
         .collect()
 }
@@ -1648,7 +1653,7 @@ pub(crate) fn gutter_diff_marks_from(
 pub(crate) fn gutter_component_lines(
     folded: &[(u32, u16)],
     row_severity: &RowSeverity,
-    diff_marks: &BTreeMap<u32, (DiffHunkStatus, MarkState)>,
+    diff_marks: &BTreeMap<u32, GutterMark>,
     diff_colors: &DiffMarkColors,
     colors: &SeverityColors,
     current_line: Option<u32>,
@@ -1658,13 +1663,11 @@ pub(crate) fn gutter_component_lines(
         .map(|&(number, height)| GutterLine {
             number: gutter_display_number(number, current_line),
             height,
-            git: diff_marks
-                .get(&(number - 1))
-                .map(|&(status, state)| GitMark {
-                    color: diff_colors.for_status(status),
-                    staged_color: diff_colors.for_state(state),
-                    seam: status == DiffHunkStatus::Deleted,
-                }),
+            git: diff_marks.get(&(number - 1)).map(|mark| GitMark {
+                color: diff_colors.for_status(mark.status),
+                staged_color: diff_colors.for_state(mark.state),
+                seam: mark.status == DiffHunkStatus::Deleted,
+            }),
             diagnostic: row_severity.at(number - 1).map(|sev| Diagnostic {
                 color: severity_color(sev, colors),
                 mark: severity_mark(sev),
@@ -1925,7 +1928,7 @@ pub(crate) fn draw_fallback_line_numbers(
     folded: &[(u32, u16)],
     width_digits: u16,
     row_severity: &RowSeverity,
-    diff_marks: &BTreeMap<u32, (DiffHunkStatus, MarkState)>,
+    diff_marks: &BTreeMap<u32, GutterMark>,
     current_line: Option<u32>,
     inner: Rect,
     theme: &Theme,
@@ -1990,7 +1993,7 @@ pub(crate) fn draw_fallback_line_numbers(
             buf.set_stringn(start, y, &number, max_width, number_style);
         }
 
-        if let Some(&(status, state)) = diff_marks.get(&(line - 1)) {
+        if let Some(&GutterMark { status, state, .. }) = diff_marks.get(&(line - 1)) {
             let (mark, scope) = match status {
                 DiffHunkStatus::Deleted => ('▔', s::DIFF_DELETED),
                 DiffHunkStatus::Added => ('▎', s::DIFF_ADDED),
@@ -2694,7 +2697,10 @@ mod tests {
     use super::RowSeverity;
     use crate::{
         action_handlers::{self, dispatch},
-        diff_map::{DiffHunkStatus, DiffMap, MarkKind, MarkState, StagedMark},
+        diff_map::{
+            DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState, StagedMark,
+            TokenDetail, TreeMark,
+        },
         render::review::{self, DiffColumns, DiffDials, DiffLayout},
         theme::scope as s,
         Stoat,
@@ -3322,7 +3328,10 @@ mod tests {
         let theme = crate::theme::Theme::empty();
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
+        diff_marks.insert(
+            0u32,
+            unrefined(DiffHunkStatus::Modified, MarkState::Unstaged),
+        );
         let area = Rect::new(0, 0, 12, 2);
         let mut buf = Buffer::empty(area);
 
@@ -3360,6 +3369,15 @@ mod tests {
         );
     }
 
+    /// The gutter mark of a row in a hunk the tree pass never reached.
+    fn unrefined(status: DiffHunkStatus, state: MarkState) -> GutterMark {
+        GutterMark {
+            status,
+            tree: TreeMark::Unrefined,
+            state,
+        }
+    }
+
     /// A pane 3 columns wide at the screen's right edge holds the mark and the
     /// number, and its glyph cells fall past the edge.
     #[test]
@@ -3368,7 +3386,10 @@ mod tests {
         let theme = crate::theme::Theme::empty();
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
+        diff_marks.insert(
+            0u32,
+            unrefined(DiffHunkStatus::Modified, MarkState::Unstaged),
+        );
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
 
         let width = super::draw_fallback_line_numbers(
@@ -3406,8 +3427,14 @@ mod tests {
 
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
-        diff_marks.insert(1u32, (DiffHunkStatus::Modified, MarkState::Unstaged));
+        diff_marks.insert(
+            0u32,
+            unrefined(DiffHunkStatus::Modified, MarkState::Unstaged),
+        );
+        diff_marks.insert(
+            1u32,
+            unrefined(DiffHunkStatus::Modified, MarkState::Unstaged),
+        );
         let area = Rect::new(0, 0, 12, 2);
         let mut buf = Buffer::empty(area);
 
@@ -4823,6 +4850,51 @@ mod tests {
         );
     }
 
+    /// The plain gutter marks a row the tree pass changed and every row of a
+    /// hunk the tree pass did not reach. A row the tree pass reached and found
+    /// no change on takes no mark.
+    #[test]
+    fn gutter_leaves_out_a_row_the_tree_pass_found_unchanged() {
+        let mut h = open_outside_a_repo("a\n    b\n    c\nd\ne\n");
+        let reached = DiffHunk {
+            status: DiffHunkStatus::Modified,
+            buffer_start_line: 1,
+            buffer_line_range: 1..3,
+            base_byte_range: 2..6,
+            anchor_range: None,
+            token_detail: Some(std::sync::Arc::new(TokenDetail {
+                buffer_spans: Vec::new(),
+                base_spans: Vec::new(),
+                tree: true,
+            })),
+            unstaged_lines: std::iter::once(1..3).collect(),
+            marked_rows: std::iter::once(1..2).collect(),
+        };
+        let unreached = DiffHunk {
+            buffer_start_line: 4,
+            buffer_line_range: 4..5,
+            base_byte_range: 8..9,
+            token_detail: None,
+            unstaged_lines: std::iter::once(4..5).collect(),
+            marked_rows: Vec::new(),
+            ..reached.clone()
+        };
+        let base = String::from("a\nb\nc\nd\nE\n");
+        install_diff_map(
+            &mut h.stoat,
+            DiffMap::from_hunks([reached, unreached], Some(base.into())),
+        );
+
+        assert_eq!(
+            gutter_mark_cells(&mut h.stoat, 6)
+                .iter()
+                .map(|(glyph, ..)| glyph.as_str())
+                .collect::<Vec<_>>(),
+            [" ", "▎", " ", " ", "▎", " "],
+            "the changed row and the unreached hunk's row take a mark",
+        );
+    }
+
     /// Mark colors with a different value per field, so a bar's color names
     /// the field it took.
     fn distinct_mark_colors() -> super::DiffMarkColors {
@@ -4853,9 +4925,9 @@ mod tests {
         use crate::diff_map::DiffHunkStatus;
         let folded = [(1u32, 1u16), (2, 1), (3, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0, (DiffHunkStatus::Modified, MarkState::Unstaged));
-        diff_marks.insert(1, (DiffHunkStatus::Modified, MarkState::Staged));
-        diff_marks.insert(2, (DiffHunkStatus::Deleted, MarkState::Unstaged));
+        diff_marks.insert(0, unrefined(DiffHunkStatus::Modified, MarkState::Unstaged));
+        diff_marks.insert(1, unrefined(DiffHunkStatus::Modified, MarkState::Staged));
+        diff_marks.insert(2, unrefined(DiffHunkStatus::Deleted, MarkState::Unstaged));
 
         let lines = super::gutter_component_lines(
             &folded,
