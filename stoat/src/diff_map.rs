@@ -100,6 +100,9 @@ pub struct TokenDetail {
     pub base_spans: Vec<ChangeSpan>,
     /// Whether the tree pass wrote this detail. False for the line pass's char
     /// refinement, which a hunk keeps until the tree pass reaches it.
+    ///
+    /// Only the merge of the tree pass into the line pass's hunks writes true.
+    /// A hunk folded straight from a tree diff's changes reads false.
     pub tree: bool,
 }
 
@@ -212,9 +215,8 @@ impl DiffHunk {
 
     /// Whether the tree pass wrote this hunk's detail.
     ///
-    /// False for a move the line pass found, which the tree pass leaves alone,
-    /// for a hunk in a section the tree search gave up on, and for every hunk
-    /// until the tree pass lands.
+    /// False for a hunk in a section the tree search gave up on, and for every
+    /// hunk until the tree pass lands.
     pub(crate) fn tree_reached(&self) -> bool {
         self.token_detail.as_ref().is_some_and(|detail| detail.tree)
     }
@@ -2292,8 +2294,9 @@ pub(crate) fn changes_to_hunks(
 /// A `Modified` hunk the tree pass finds nothing in takes an empty
 /// [`TokenDetail`] rather than `None`. The renderer washes nothing and softens
 /// nothing for an empty span list, which is the intended reading of a
-/// whitespace-only row: gutter-marked, full strength, wash-free. `None` would
-/// instead mean "no detail resolved" and leave the row to the caller's default.
+/// whitespace-only row: full strength, wash-free, and [`TreeMark::Unmarked`],
+/// so the plain gutter leaves the row out. `None` means "no detail resolved"
+/// instead, and leaves the row to the caller's default.
 ///
 /// `Added` and `Deleted` hunks keep `None` unless the tree pass found the lines
 /// relocated, which is the one thing the line pass cannot see. A hunk the tree
@@ -4773,6 +4776,65 @@ mod tests {
     fn a_hunk_the_tree_pass_never_reached_reads_unrefined() {
         let unreached = modified(TreeMark::Unrefined);
         assert_eq!(reindent_marks(false), [None, unreached, unreached, None]);
+    }
+
+    /// The line pass reports no move. A moved line's deletion and addition read
+    /// `Unrefined` until the tree pass finds the line relocated, and then both
+    /// read as a `Marked` move.
+    #[test]
+    fn a_moved_line_reads_marked_once_the_tree_pass_lands() {
+        let (base, buffer) = ("a\nb\nc\nd\n", "a\nc\nd\nb\n");
+        let moved = |side, byte_range| DiffChange {
+            side,
+            byte_range,
+            kind: LangChangeKind::Moved,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+            refined_spans: None,
+            prose: false,
+        };
+        let mut hunks = super::changes_to_hunks(
+            &stoat_language::structural_diff::diff(base, buffer).changes,
+            base,
+            buffer,
+        );
+        let line_pass = marks_over(hunks.clone(), 0..5, buffer);
+        super::merge_structural_detail(
+            &mut hunks,
+            &[moved(Side::Lhs, 2..3), moved(Side::Rhs, 6..7)],
+            &[],
+            base,
+            buffer,
+        );
+        let mark = |status, tree| {
+            Some(GutterMark {
+                status,
+                tree,
+                state: MarkState::Unstaged,
+            })
+        };
+
+        assert_eq!(
+            [line_pass, marks_over(hunks, 0..5, buffer)],
+            [
+                [
+                    None,
+                    mark(DiffHunkStatus::Deleted, TreeMark::Unrefined),
+                    None,
+                    mark(DiffHunkStatus::Added, TreeMark::Unrefined),
+                    None,
+                ],
+                [
+                    None,
+                    mark(DiffHunkStatus::Moved, TreeMark::Marked),
+                    None,
+                    mark(DiffHunkStatus::Moved, TreeMark::Marked),
+                    None,
+                ],
+            ],
+            "the removal's seam on row 1 and the addition on row 3",
+        );
     }
 
     /// The marks over a reindent of rows 1 and 2, as one `Modified` hunk with a
