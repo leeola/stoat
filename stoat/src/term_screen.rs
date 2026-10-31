@@ -23,7 +23,7 @@ use alacritty_terminal::{
     selection::{Selection, SelectionRange, SelectionType},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
-        Config, TermMode,
+        Config, TermDamage, TermMode,
     },
     vte::ansi::{Color as AnsiColor, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
@@ -31,9 +31,16 @@ use alacritty_terminal::{
 use ratatui::style::{Color, Modifier};
 use smallvec::SmallVec;
 use std::{
+    collections::VecDeque,
     ops::Range,
     sync::{Arc, Mutex},
 };
+
+/// The most generation steps whose damaged rows a [`TermScreen`] keeps.
+///
+/// A painter that last painted further back repaints the whole screen. Each
+/// step holds one flag per row, so the cap bounds the memory per pane.
+const MAX_DAMAGE_STEPS: usize = 16;
 
 /// One projected grid cell, carrying a character and the ratatui style the
 /// renderer paints it with.
@@ -148,6 +155,10 @@ pub struct TermScreen {
     /// Whether the title changed since [`Self::take_retitled`] last ran.
     retitled: bool,
     generation: u64,
+    /// The viewport rows each of the last generation steps damaged, oldest
+    /// first, as [`Self::damaged_rows_since`] reads them. `None` marks a step
+    /// that damaged the whole screen.
+    damage: VecDeque<(u64, Option<Vec<bool>>)>,
 }
 
 impl TermScreen {
@@ -193,6 +204,7 @@ impl TermScreen {
             title: None,
             retitled: false,
             generation: 0,
+            damage: VecDeque::with_capacity(MAX_DAMAGE_STEPS),
         }
     }
 
@@ -218,6 +230,39 @@ impl TermScreen {
         self.generation
     }
 
+    /// The viewport rows that changed since the screen stood at `generation`,
+    /// one flag per row, or `None` where the rows are not known.
+    ///
+    /// A painter that painted the screen at `generation` repaints the rows
+    /// flagged true and keeps the rest. `None` asks for a whole repaint. A
+    /// resize, a view scroll, and a step the parser damaged whole give it, and
+    /// so does a generation more than [`MAX_DAMAGE_STEPS`] steps back or newer
+    /// than the current one. The current generation flags no row.
+    ///
+    /// A selection moves no generation and no damage, so a painter compares
+    /// [`Self::selection_range`] on its own.
+    pub fn damaged_rows_since(&self, generation: u64) -> Option<Vec<bool>> {
+        if generation > self.generation {
+            return None;
+        }
+
+        let mut rows = vec![false; self.rows()];
+        let mut next = generation + 1;
+        for (step, damaged) in &self.damage {
+            if *step <= generation {
+                continue;
+            }
+            if *step != next {
+                return None;
+            }
+            for (row, hit) in rows.iter_mut().zip(damaged.as_ref()?) {
+                *row |= *hit;
+            }
+            next += 1;
+        }
+        (next == self.generation + 1).then_some(rows)
+    }
+
     /// Feed `bytes` of the VT stream into the parser, mutating the screen, and
     /// return any reply the terminal produced for host queries.
     ///
@@ -240,6 +285,7 @@ impl TermScreen {
         }
 
         self.apply_title_event();
+        self.record_damage(false);
         self.drain_replies()
     }
 
@@ -268,6 +314,7 @@ impl TermScreen {
 
         self.generation += 1;
         self.term.resize(dimensions);
+        self.record_damage(true);
         self.drain_replies()
     }
 
@@ -275,6 +322,33 @@ impl TermScreen {
     /// drain, leaving the buffer empty.
     fn drain_replies(&self) -> Vec<u8> {
         std::mem::take(&mut *self.replies.lock().expect("term reply buffer poisoned"))
+    }
+
+    /// Record the rows the step to the current generation damaged, and reset
+    /// the terminal's damage so the next step reports its own rows alone.
+    ///
+    /// `whole` marks a step that moves every row, a resize or a view scroll,
+    /// whatever the terminal reports for it.
+    fn record_damage(&mut self, whole: bool) {
+        let row_count = self.rows();
+        let damaged = match self.term.damage() {
+            TermDamage::Partial(lines) if !whole => {
+                let mut rows = vec![false; row_count];
+                for line in lines {
+                    if let Some(row) = rows.get_mut(line.line) {
+                        *row = true;
+                    }
+                }
+                Some(rows)
+            },
+            _ => None,
+        };
+        self.term.reset_damage();
+
+        if self.damage.len() == MAX_DAMAGE_STEPS {
+            self.damage.pop_front();
+        }
+        self.damage.push_back((self.generation, damaged));
     }
 
     /// Apply the title event the [`EventProxy`] holds, if any.
@@ -417,6 +491,7 @@ impl TermScreen {
         let moved = self.display_offset() != before;
         if moved {
             self.generation += 1;
+            self.record_damage(true);
         }
         moved
     }
@@ -1258,6 +1333,72 @@ mod tests {
         assert!(
             scrolled,
             "the view one row back shows the selection a row lower"
+        );
+    }
+
+    /// A line feed then a character damages the row the cursor left and the
+    /// row it wrote, and no other.
+    #[test]
+    fn a_character_after_a_line_feed_damages_two_rows() {
+        let mut term = TermScreen::new(4, 10);
+        term.feed(b"ab\r\ncd");
+        let painted = term.generation();
+        term.feed(b"\r\ne");
+        assert_eq!(
+            term.damaged_rows_since(painted),
+            Some(vec![false, true, true, false])
+        );
+    }
+
+    /// A view scroll moves every row.
+    #[test]
+    fn a_view_scroll_damages_the_whole_screen() {
+        let mut term = TermScreen::new(2, 10);
+        term.feed(b"1\r\n2\r\n3\r\n4");
+        let painted = term.generation();
+        assert_eq!(
+            (term.scroll_lines(1), term.damaged_rows_since(painted)),
+            (true, None)
+        );
+    }
+
+    /// A resize damages every row, and the feed after it reports its own rows
+    /// again.
+    #[test]
+    fn a_resize_damages_the_whole_screen_once() {
+        let mut term = TermScreen::new(4, 10);
+        term.feed(b"ab");
+        let before_resize = term.generation();
+        term.resize(4, 12);
+        let after_resize = term.generation();
+        term.feed(b"c");
+        assert_eq!(
+            (
+                term.damaged_rows_since(before_resize),
+                term.damaged_rows_since(after_resize)
+            ),
+            (None, Some(vec![true, false, false, false]))
+        );
+    }
+
+    /// The damage of the last [`MAX_DAMAGE_STEPS`] steps answers, and one step
+    /// further back does not. The current generation flags no row.
+    #[test]
+    fn damage_answers_for_the_last_steps_only() {
+        let mut term = TermScreen::new(2, 40);
+        term.feed(b"a");
+        let oldest = term.generation();
+        for _ in 0..MAX_DAMAGE_STEPS {
+            term.feed(b"b");
+        }
+        let current = term.generation();
+        assert_eq!(
+            (
+                term.damaged_rows_since(oldest - 1),
+                term.damaged_rows_since(oldest),
+                term.damaged_rows_since(current)
+            ),
+            (None, Some(vec![true, false]), Some(vec![false, false]))
         );
     }
 }
