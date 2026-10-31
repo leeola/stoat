@@ -779,15 +779,32 @@ pub struct HighlightVersions {
 /// line that does not wrap makes it.
 const MAX_PAD: usize = 16 * 1024;
 
+/// The most bytes that the ranges answered since a build and a requested range
+/// span together when a miss builds over all of them.
+///
+/// Past this span, a miss builds near the requested range alone, so a jump far
+/// from the window does not build every byte between the two.
+const MAX_UNION: usize = 4 * MAX_PAD;
+
 /// Visible-range highlight endpoints memoized across repaints.
 #[derive(Clone, Debug)]
 pub struct CachedHighlightEndpoints {
     pub(super) versions: HighlightVersions,
     text_ptr: usize,
     lsp_ptr: Option<usize>,
-    /// The bytes the endpoints cover. They hold the range the endpoints were
-    /// built for and, when a scroll built them, a pad past each end.
+    /// The bytes the endpoints cover.
+    ///
+    /// They hold at least the range the endpoints were built for. See
+    /// [`create_highlight_endpoints_cached`] for the pad and the asked ranges
+    /// that a miss adds.
     range: Range<usize>,
+    /// The hull of the ranges answered from these endpoints since their build.
+    ///
+    /// A miss on current versions builds over these ranges beside its own, so
+    /// the paints of one frame share a build. That build does not keep the
+    /// bytes that no paint asked for, such as the pad behind a scroll. The
+    /// window of a scroll then does not grow.
+    asked: Range<usize>,
     endpoints: Arc<HighlightEndpoints>,
     /// Whether the window holds a highlight whose range an edit emptied, which
     /// a build skips and a carry drops.
@@ -851,14 +868,23 @@ pub struct AnchorResolver<'a> {
 /// character builds no endpoints. The carry declines when a highlight set
 /// moved or an edit reaches the window's edge, and the miss builds as below.
 ///
-/// A padded window costs a few exact builds, so only a scroll builds one. A
-/// scroll is a miss on current versions whose range overlaps the window. Its
-/// window reaches half the range's length past each end, up to [`MAX_PAD`], so
-/// the scrolls after it stay inside the window until the viewport moves half
-/// its length.
+/// The cache keeps the hull of the ranges it answered since its build. While
+/// that hull and `range` span at most [`MAX_UNION`] (64 KiB), a miss on current
+/// versions builds over both. One editor painted at several ranges in a frame
+/// then builds once. The changes view paints an excerpt editor that way, at
+/// two pages and at the live window.
 ///
-/// Any other miss builds the exact range. A jump gives no sign that a scroll
-/// follows, and a change to the highlights arrives on every key.
+/// The build does not keep the rest of the old window, such as the pad behind
+/// a scroll. The window of a long scroll then stays near the viewport.
+///
+/// That build also pads `range` by half its length past each end, up to
+/// [`MAX_PAD`]. The scrolls after it then stay inside the window until the
+/// viewport moves half its length.
+///
+/// Past [`MAX_UNION`], only a scroll pads, because a padded window costs a few
+/// exact builds. A scroll is a miss on current versions whose range overlaps
+/// the window. Any other miss builds the exact range. A jump gives no sign that
+/// a scroll follows, and a change to the highlights arrives on every key.
 #[allow(clippy::too_many_arguments)]
 pub fn create_highlight_endpoints_cached(
     versions: HighlightVersions,
@@ -882,24 +908,28 @@ pub fn create_highlight_endpoints_cached(
         );
     }
 
-    let current = cache
-        .as_ref()
+    let mut current = cache
+        .as_mut()
         .filter(|cached| cached.current(versions, highlights, lsp_highlights));
-    if let Some(cached) = current
+    if let Some(cached) = current.as_mut()
         && cached.range.start <= range.start
         && range.end <= cached.range.end
     {
+        cached.asked = cached.asked.start.min(range.start)..cached.asked.end.max(range.end);
         return cached.endpoints.clone();
     }
 
-    let scroll = current
-        .is_some_and(|cached| range.start < cached.range.end && cached.range.start < range.end);
-    let window = match scroll {
-        true => {
-            let pad = (range.len() / 2).min(MAX_PAD);
-            range.start.saturating_sub(pad)..range.end.saturating_add(pad)
+    let pad = (range.len() / 2).min(MAX_PAD);
+    let padded = range.start.saturating_sub(pad)..range.end.saturating_add(pad);
+    let window = match current.as_deref() {
+        Some(cached)
+            if cached.asked.end.max(range.end) - cached.asked.start.min(range.start)
+                <= MAX_UNION =>
+        {
+            cached.asked.start.min(padded.start)..cached.asked.end.max(padded.end)
         },
-        false => range.clone(),
+        Some(cached) if range.start < cached.range.end && cached.range.start < range.end => padded,
+        _ => range.clone(),
     };
     let (endpoints, collapsed) = build_highlight_endpoints(
         &window,
@@ -914,6 +944,7 @@ pub fn create_highlight_endpoints_cached(
         text_ptr: Arc::as_ptr(highlights) as usize,
         lsp_ptr: lsp_highlights.map(|s| Arc::as_ptr(s) as usize),
         range: window,
+        asked: range.clone(),
         endpoints: arc.clone(),
         collapsed,
     });
@@ -976,10 +1007,16 @@ fn carry_cache(
         return;
     };
 
-    let mut bounds = [window.start, window.end];
-    fold_map::carry_offsets(&mut bounds, &mut [false; 2], edits);
+    let mut bounds = [
+        window.start,
+        cached.asked.start,
+        cached.asked.end,
+        window.end,
+    ];
+    fold_map::carry_offsets(&mut bounds, &mut [false; 4], edits);
     cached.versions = versions;
-    cached.range = bounds[0]..bounds[1];
+    cached.range = bounds[0]..bounds[3];
+    cached.asked = bounds[1]..bounds[2];
     cached.endpoints = HighlightEndpoints::shared(endpoints);
     cached.collapsed |= emptied;
 }
@@ -1885,13 +1922,63 @@ mod tests {
         let past = cached(42_500..46_500, VERSIONS, &highlights, &mut cache);
         assert_eq!(
             offsets(&past),
-            spaced_offsets(40_500..48_500),
-            "a scroll past the window",
+            spaced_offsets(38_500..48_500),
+            "a scroll past the window, over the ranges it asked for",
         );
     }
 
-    /// A jump or a change to the text or the highlights builds the viewport
-    /// alone, even where the window holds the viewport.
+    /// A long scroll drops the pad it leaves behind, so its window stays near
+    /// the viewport and does not grow toward [`MAX_UNION`].
+    #[test]
+    fn a_long_scroll_keeps_its_window_near_the_viewport() {
+        let highlights = spaced_highlights();
+        let mut cache = None;
+        for start in (0..39_500).step_by(500) {
+            cached(start..start + 4_000, VERSIONS, &highlights, &mut cache);
+        }
+
+        let last = cached(39_500..43_500, VERSIONS, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&last),
+            spaced_offsets(35_500..44_000),
+            "the window after a long scroll",
+        );
+    }
+
+    /// The ranges of one frame's paints, such as two pages and the live
+    /// viewport between them, share one build.
+    #[test]
+    fn paints_at_several_ranges_share_one_build() {
+        let highlights = spaced_highlights();
+        let mut cache = None;
+        cached(0..16_000, VERSIONS, &highlights, &mut cache);
+
+        let both = cached(16_000..32_000, VERSIONS, &highlights, &mut cache);
+        assert_eq!(offsets(&both), spaced_offsets(0..40_000), "the second page");
+        for range in [0..16_000, 1_500..16_500, 16_000..32_000] {
+            let again = cached(range.clone(), VERSIONS, &highlights, &mut cache);
+            assert!(Arc::ptr_eq(&both, &again), "a paint at {range:?} rebuilt");
+        }
+    }
+
+    /// A scroll whose range spans more than [`MAX_UNION`] with the ranges asked
+    /// since the build pads its range alone.
+    #[test]
+    fn a_scroll_past_the_union_bound_pads_its_range_alone() {
+        let highlights = spaced_highlights();
+        let mut cache = None;
+        cached(0..40_000, VERSIONS, &highlights, &mut cache);
+
+        let scrolled = cached(30_000..70_000, VERSIONS, &highlights, &mut cache);
+        assert_eq!(
+            offsets(&scrolled),
+            spaced_offsets(30_000 - MAX_PAD..70_000 + MAX_PAD),
+            "a scroll past the bound",
+        );
+    }
+
+    /// A jump past [`MAX_UNION`] or a change to the text or the highlights
+    /// builds the viewport alone, even where the window holds the viewport.
     ///
     /// A padded build costs a few exact ones, and an edit makes its change on
     /// every key.
@@ -1899,8 +1986,8 @@ mod tests {
     fn a_jump_or_a_change_builds_the_viewport_alone() {
         let highlights = spaced_highlights();
         let mut cache = None;
-        cached(40_000..44_000, VERSIONS, &highlights, &mut cache);
-        cached(40_100..44_100, VERSIONS, &highlights, &mut cache);
+        cached(0..4_000, VERSIONS, &highlights, &mut cache);
+        cached(100..4_100, VERSIONS, &highlights, &mut cache);
 
         let jumped = cached(70_000..74_000, VERSIONS, &highlights, &mut cache);
         assert_eq!(offsets(&jumped), spaced_offsets(70_000..74_000), "a jump");
