@@ -31,7 +31,8 @@ use crate::{
         conflict_view::render_conflict_rows,
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity,
+            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity, PLAIN_DIFF_BARS,
+            PLAIN_DIFF_BAR_WIDTH,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -491,6 +492,8 @@ fn paint_page_gutter(
                 rich.number_fg,
                 rich.separator,
                 rich.bg,
+                PLAIN_DIFF_BARS,
+                PLAIN_DIFF_BAR_WIDTH,
             );
             let mut scene = ApcScene::new();
             // The components write only the scene, so `buf` keeps its cells.
@@ -2073,6 +2076,101 @@ mod tests {
         assert!(
             fill.ends_with(&[components, close.as_slice()].concat()),
             "the whole fill of page 1 closes with the same components"
+        );
+    }
+
+    /// A pooled page's rich gutter draws the plain editor's one diff bar at the
+    /// first slot, where the live gutter draws it, and no state bar.
+    #[test]
+    fn a_pooled_page_gutter_draws_one_diff_bar() {
+        use super::{render_page_decorations, PageGutter};
+        use crate::{
+            action_handlers::{self, dispatch},
+            diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
+            minimap::color_to_rgb,
+            render::editor::{resolve_rich_gutter, RowSeverity},
+            theme::scope,
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::command::{encode_bar, BarCommand};
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/pooled-bar");
+        let path = root.join("doc.txt");
+        h.fake_fs().insert_file(&path, b"a\nB\nc\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Modified,
+            buffer_start_line: 1,
+            buffer_line_range: 1..2,
+            base_byte_range: 2..4,
+            anchor_range: None,
+            token_detail: None,
+            unstaged_lines: std::iter::once(1..2).collect(),
+            marked_rows: Vec::new(),
+        };
+        let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .buffer_id;
+        h.stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer")
+            .write()
+            .expect("poisoned")
+            .diff_map = Some(DiffMap::from_hunks(
+            [hunk],
+            Some(Arc::new("a\nb\nc\n".to_string())),
+        ));
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            Some(rich),
+            None,
+        );
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let decorations = render_page_decorations(
+            &editor.display_map.snapshot(),
+            3,
+            0,
+            12,
+            3,
+            &gutter,
+            false,
+            fallback,
+            0.0,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let bar = |x, scope: &str| {
+            let command = encode_bar(&BarCommand {
+                x,
+                y: 16,
+                width: 5,
+                height: 16,
+                color: color_to_rgb(theme.get(scope).fg.expect("the theme sets it")),
+            });
+            decorations
+                .windows(command.len())
+                .any(|window| window == command.as_slice())
+        };
+        assert_eq!(
+            [bar(50, scope::DIFF_MODIFIED), bar(57, scope::DIFF_UNSTAGED)],
+            [true, false],
+            "the change bar at the first slot of row 1, and no state bar",
         );
     }
 

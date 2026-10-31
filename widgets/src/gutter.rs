@@ -36,8 +36,12 @@ const TEXT_GAP: u16 = 4;
 pub struct Gutter<'a> {
     /// The lines to draw, top to bottom.
     pub lines: &'a [GutterLine],
-    /// Color-bar width, in sixteenths.
+    /// Diagnostic bar width, in sixteenths.
     pub bar_width: u16,
+    /// How many diff bar slots sit right of the number, one to three.
+    pub diff_bars: u16,
+    /// Each diff bar's width, in sixteenths.
+    pub diff_bar_width: u16,
     /// Inter-element padding, in sixteenths.
     pub pad: u16,
     /// Line-number glyph size, in 256ths of a cell.
@@ -63,18 +67,19 @@ pub struct Gutter<'a> {
     pub bound_to_line_layout: bool,
 }
 
-/// A line's git-diff marks: the change-kind bar color, the staged-state bar
-/// color, and whether the change is a deletion seam.
+/// A line's diff marks, one bar color per slot right of the line number, and
+/// whether the change is a deletion seam.
 ///
-/// Two bars sit right of the line number. The change-kind bar takes [`Self::color`];
-/// a seam renders it as a short top-aligned bar, since a deletion occupies no
-/// line of its own and marks the row that now sits below the removed content,
-/// while a normal change fills the row height. The staged-state bar takes
-/// [`Self::staged_color`] and always fills the row height.
+/// The gutter reads the first [`Gutter::diff_bars`] slots. Slots 0 and 2 carry
+/// change kinds. A seam draws each of those as a short top-aligned bar, since a
+/// deletion occupies no line of its own and marks the row that now sits below
+/// the removed content, while a normal change fills the code row. Slot 1
+/// carries a state and always spans the line height.
 #[derive(Clone, Copy)]
 pub struct GitMark {
-    pub color: [u8; 3],
-    pub staged_color: [u8; 3],
+    /// The bar color per slot, left to right, `None` for a slot that paints
+    /// nothing on this row.
+    pub slots: [Option<[u8; 3]>; 3],
     pub seam: bool,
 }
 
@@ -110,14 +115,14 @@ impl StatefulWidget for Gutter<'_> {
 impl Gutter<'_> {
     /// The whole-cell columns the gutter reserves, from its sixteenth layout.
     ///
-    /// Sized to fit the diagnostic bar, the number column, the change-kind and
-    /// staged-state bars right of the number, and a quarter-cell gap on each
-    /// side of the hairline. [`Self::separator_x`] and [`Self::number_right_edge`]
-    /// derive backward from this, so the rounding slack lands in the blank field
-    /// left of the right-aligned numbers rather than around the bars.
+    /// Sized to fit the diagnostic bar, the number column, the diff bars right
+    /// of the number, and a quarter-cell gap on each side of the hairline.
+    /// [`Self::separator_x`] and [`Self::number_right_edge`] derive backward
+    /// from this, so the rounding slack lands in the blank field left of the
+    /// right-aligned numbers rather than around the bars.
     pub fn cell_width(&self) -> u16 {
-        (3 * self.bar_width
-            + self.pad
+        (self.bar_width
+            + self.diff_bars_span()
             + self.number_advance(usize::from(self.width_digits))
             + 2 * NUMBER_GAP
             + 1
@@ -125,14 +130,14 @@ impl Gutter<'_> {
             .div_ceil(16)
     }
 
-    /// The change-kind bar's left edge, in sixteenths from the gutter's left edge.
-    pub fn git_x(&self) -> u16 {
-        self.number_right_edge() + NUMBER_GAP
+    /// Diff bar `slot`'s left edge, in sixteenths from the gutter's left edge.
+    pub fn bar_x(&self, slot: u16) -> u16 {
+        self.number_right_edge() + NUMBER_GAP + slot * (self.diff_bar_width + self.pad)
     }
 
-    /// The staged-state bar's left edge, in sixteenths from the gutter's left edge.
-    pub fn staged_x(&self) -> u16 {
-        self.git_x() + self.bar_width + self.pad
+    /// Sixteenths the diff bars and the pads between them span.
+    fn diff_bars_span(&self) -> u16 {
+        self.diff_bars * self.diff_bar_width + self.diff_bars.saturating_sub(1) * self.pad
     }
 
     /// Sixteenths a run of `digits` numerals advances at [`Self::number_scale`].
@@ -142,7 +147,7 @@ impl Gutter<'_> {
 
     /// Where a right-aligned line number ends, in sixteenths from the gutter's left edge.
     pub fn number_right_edge(&self) -> u16 {
-        self.separator_x() - 2 * NUMBER_GAP - 2 * self.bar_width - self.pad
+        self.separator_x() - 2 * NUMBER_GAP - self.diff_bars_span()
     }
 
     /// The separator hairline's left edge, in sixteenths from the gutter's left edge.
@@ -161,8 +166,6 @@ impl Gutter<'_> {
     /// and would double under the components inside a rich terminal.
     pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
-        let git_x = cells::signed_sixteenths(self.git_x());
-        let staged_x = cells::signed_sixteenths(self.staged_x());
 
         let limit = cells::span_sixteenths(area.height);
 
@@ -210,22 +213,25 @@ impl Gutter<'_> {
                 .render(area, buf, scene);
             }
             if let Some(git) = line.git {
-                Bar {
-                    x: git_x,
-                    y: row,
-                    width: self.bar_width,
-                    height: (if git.seam { 6 } else { 16 }).min(remaining),
-                    color: git.color,
+                let slots = (0u16..).zip(git.slots).take(usize::from(self.diff_bars));
+                for (slot, color) in slots {
+                    let Some(color) = color else {
+                        continue;
+                    };
+                    let height = match slot {
+                        1 => cells::span_sixteenths(line.height),
+                        _ if git.seam => 6,
+                        _ => 16,
+                    };
+                    Bar {
+                        x: cells::signed_sixteenths(self.bar_x(slot)),
+                        y: row,
+                        width: self.diff_bar_width,
+                        height: height.min(remaining),
+                        color,
+                    }
+                    .render(area, buf, scene);
                 }
-                .render(area, buf, scene);
-                Bar {
-                    x: staged_x,
-                    y: row,
-                    width: self.bar_width,
-                    height: cells::span_sixteenths(line.height).min(remaining),
-                    color: git.staged_color,
-                }
-                .render(area, buf, scene);
             }
 
             top += line.height;
@@ -316,6 +322,8 @@ mod tests {
         Gutter {
             lines,
             bar_width: 5,
+            diff_bars: 3,
+            diff_bar_width: 3,
             pad: 2,
             number_scale: 160,
             width_digits: 2,
@@ -334,26 +342,70 @@ mod tests {
 
     #[test]
     fn cell_width_derives_from_the_sixteenth_layout() {
-        // number_advance(2) = 2*160/16 = 20; content = 15 + 2 + 20 + 8 + 1 + 4 = 50
-        // (3*bar + pad + number + 2*NUMBER_GAP + separator + TEXT_GAP);
-        // cell_width = ceil(50/16) = 4.
+        // number_advance(2) = 2*160/16 = 20; content = 5 + 9 + 4 + 20 + 8 + 1 + 4 = 51
+        // (bar + 3 diff bars + 2 pads + number + 2*NUMBER_GAP + separator + TEXT_GAP);
+        // cell_width = ceil(51/16) = 4.
         assert_eq!(config(&[]).cell_width(), 4);
     }
 
     #[test]
     fn the_offsets_derive_backward_from_the_cell_width() {
         // separator_x = 4*16 - 1 - TEXT_GAP = 59;
-        // number_right_edge = 59 - 2*NUMBER_GAP - 2*bar - pad = 59 - 8 - 10 - 2 = 39;
-        // git_x = 39 + NUMBER_GAP = 43; staged_x = 43 + bar + pad = 50.
+        // number_right_edge = 59 - 2*NUMBER_GAP - (3 diff bars + 2 pads) = 59 - 8 - 13 = 38;
+        // bar_x(slot) = 38 + NUMBER_GAP + slot * (diff bar + pad) = 42, 47, 52.
         let gutter = config(&[]);
         assert_eq!(
             (
                 gutter.number_right_edge(),
-                gutter.git_x(),
-                gutter.staged_x(),
+                [0, 1, 2].map(|slot| gutter.bar_x(slot)),
                 gutter.separator_x(),
             ),
-            (39, 43, 50, 59),
+            (38, [42, 47, 52], 59),
+        );
+    }
+
+    /// The plain editor's gutter draws one diff bar, so the number moves right
+    /// to sit a gap from it, and a slot past the bar count paints nothing.
+    #[test]
+    fn a_one_bar_gutter_packs_the_number_against_its_single_slot() {
+        // content = 5 + 5 + 20 + 8 + 1 + 4 = 43, so cell_width = ceil(43/16) = 3;
+        // separator_x = 3*16 - 1 - TEXT_GAP = 43; bar_x(0) = 43 - 8 - 5 + NUMBER_GAP = 34.
+        let lines = [GutterLine {
+            number: 1,
+            height: 1,
+            git: Some(GitMark {
+                slots: [Some([152, 195, 121]), Some([80, 90, 100]), None],
+                seam: false,
+            }),
+            diagnostic: None,
+        }];
+        let gutter = Gutter {
+            diff_bars: 1,
+            diff_bar_width: 5,
+            ..config(&lines)
+        };
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        gutter.draw_components(area, &mut buf, &mut scene);
+
+        let bar_at = |x, color| {
+            encode_bar(&BarCommand {
+                x,
+                y: 0,
+                width: 5,
+                height: 16,
+                color,
+            })
+        };
+        assert_eq!(
+            (
+                (gutter.cell_width(), gutter.separator_x(), gutter.bar_x(0)),
+                contains(scene.buffer(), &bar_at(34, [152, 195, 121])),
+                contains(scene.buffer(), &bar_at(41, [80, 90, 100])),
+            ),
+            ((3, 43, 34), true, false),
+            "the width, the hairline and the bar, then slot 0 drawn and slot 1 not",
         );
     }
 
@@ -421,8 +473,7 @@ mod tests {
             number: 1,
             height: 2,
             git: Some(GitMark {
-                color: [152, 195, 121],
-                staged_color: [80, 90, 100],
+                slots: [Some([152, 195, 121]), Some([80, 90, 100]), None],
                 seam: false,
             }),
             diagnostic: Some(Diagnostic {
@@ -445,16 +496,16 @@ mod tests {
             color: [224, 108, 117],
         });
         let git_bar = encode_bar(&BarCommand {
-            x: 43,
+            x: 42,
             y: 0,
-            width: 5,
+            width: 3,
             height: 16,
             color: [152, 195, 121],
         });
         let staged_bar = encode_bar(&BarCommand {
-            x: 50,
+            x: 47,
             y: 0,
-            width: 5,
+            width: 3,
             height: 32,
             color: [80, 90, 100],
         });
@@ -543,7 +594,7 @@ mod tests {
         gutter.render(area, &mut buf, &mut scene);
 
         let third_number = encode_text_run(&TextRunCommand {
-            col: 29,
+            col: 28,
             row: 32,
             scale: 160,
             color: [99, 109, 131],
@@ -553,7 +604,7 @@ mod tests {
             text: "3".to_owned(),
         });
         let second_number = encode_text_run(&TextRunCommand {
-            col: 29,
+            col: 28,
             row: 16,
             scale: 160,
             color: [99, 109, 131],
@@ -599,8 +650,7 @@ mod tests {
                 number: 2,
                 height: 2,
                 git: Some(GitMark {
-                    color: [152, 195, 121],
-                    staged_color: [80, 90, 100],
+                    slots: [Some([152, 195, 121]), Some([80, 90, 100]), None],
                     seam: false,
                 }),
                 diagnostic: Some(Diagnostic {
@@ -624,9 +674,9 @@ mod tests {
             color: [224, 108, 117],
         });
         let staged_bar = encode_bar(&BarCommand {
-            x: 50,
+            x: 47,
             y: 16,
-            width: 5,
+            width: 3,
             height: 16,
             color: [80, 90, 100],
         });
@@ -640,14 +690,19 @@ mod tests {
         );
     }
 
+    /// The two change-kind slots draw a seam short, and the state slot between
+    /// them keeps its full height.
     #[test]
     fn seam_git_mark_draws_a_short_top_aligned_bar() {
         let lines = [GutterLine {
             number: 4,
             height: 1,
             git: Some(GitMark {
-                color: [224, 108, 117],
-                staged_color: [80, 90, 100],
+                slots: [
+                    Some([224, 108, 117]),
+                    Some([80, 90, 100]),
+                    Some([97, 175, 239]),
+                ],
                 seam: true,
             }),
             diagnostic: None,
@@ -659,16 +714,26 @@ mod tests {
 
         gutter.render(area, &mut buf, &mut scene);
 
-        let seam_bar = encode_bar(&BarCommand {
-            x: 43,
-            y: 0,
-            width: 5,
-            height: 6,
-            color: [224, 108, 117],
-        });
-        assert!(
-            contains(scene.buffer(), &seam_bar),
-            "a deletion seam is a short top-aligned bar"
+        let bar = |x, height, color| {
+            contains(
+                scene.bytes(),
+                &encode_bar(&BarCommand {
+                    x,
+                    y: 0,
+                    width: 3,
+                    height,
+                    color,
+                }),
+            )
+        };
+        assert_eq!(
+            [
+                bar(42, 6, [224, 108, 117]),
+                bar(47, 16, [80, 90, 100]),
+                bar(52, 6, [97, 175, 239]),
+            ],
+            [true; 3],
+            "slots 0 and 2 draw the short seam bar, and slot 1 fills the row"
         );
     }
 }

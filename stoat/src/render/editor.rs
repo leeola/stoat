@@ -1216,7 +1216,7 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
 /// theme omitting `diff.modified` or `diff.moved` still yields a color that
 /// agrees with the minimap lane.
 ///
-/// The four mark-state colors paint the state bar beside the change bar, in
+/// The four mark-state colors fill the state slot beside the change slot, in
 /// the scopes [`mark_state_scope`] picks.
 #[derive(Clone, Copy, Hash)]
 pub(crate) struct DiffMarkColors {
@@ -1587,7 +1587,16 @@ pub(crate) fn gutter_digits(line_count: u32) -> u16 {
 /// the wrap width can be resolved before the wrapped snapshot exists.
 pub(crate) fn measure_gutter_width(width_digits: u16, rich: bool) -> u16 {
     if rich {
-        rich_gutter(&[], width_digits, [0; 3], [0; 3], [0; 3]).cell_width()
+        rich_gutter(
+            &[],
+            width_digits,
+            [0; 3],
+            [0; 3],
+            [0; 3],
+            PLAIN_DIFF_BARS,
+            PLAIN_DIFF_BAR_WIDTH,
+        )
+        .cell_width()
     } else {
         width_digits + 4
     }
@@ -1664,8 +1673,11 @@ pub(crate) fn gutter_component_lines(
             number: gutter_display_number(number, current_line),
             height,
             git: diff_marks.get(&(number - 1)).map(|mark| GitMark {
-                color: diff_colors.for_status(mark.status),
-                staged_color: diff_colors.for_state(mark.state),
+                slots: [
+                    Some(diff_colors.for_status(mark.status)),
+                    Some(diff_colors.for_state(mark.state)),
+                    None,
+                ],
                 seam: mark.status == DiffHunkStatus::Deleted,
             }),
             diagnostic: row_severity.at(number - 1).map(|sev| Diagnostic {
@@ -1676,18 +1688,36 @@ pub(crate) fn gutter_component_lines(
         .collect()
 }
 
+/// How many diff bars the plain editor's gutter draws right of the number.
+///
+/// The measure, the live paint and the pooled pages all read this and
+/// [`PLAIN_DIFF_BAR_WIDTH`], so the width the measure reserves is the width the
+/// paint fills.
+pub(crate) const PLAIN_DIFF_BARS: u16 = 1;
+
+/// The width of each of the plain editor's diff bars, in sixteenths.
+pub(crate) const PLAIN_DIFF_BAR_WIDTH: u16 = 5;
+
 /// The sub-cell [`Gutter`] widget for `lines`, carrying the geometry the live
 /// and pooled-page renders share.
+///
+/// `diff_bars` bars of `diff_bar_width` sixteenths sit right of the number. The
+/// plain editor passes [`PLAIN_DIFF_BARS`] and [`PLAIN_DIFF_BAR_WIDTH`], and the
+/// diff view sizes its sides from its own count.
 pub(crate) fn rich_gutter(
     lines: &[GutterLine],
     width_digits: u16,
     number_fg: [u8; 3],
     separator: [u8; 3],
     bg: [u8; 3],
+    diff_bars: u16,
+    diff_bar_width: u16,
 ) -> Gutter<'_> {
     Gutter {
         lines,
         bar_width: 5,
+        diff_bars,
+        diff_bar_width,
         pad: 2,
         number_scale: TEXT_SCALE_COMPACT,
         width_digits,
@@ -1895,6 +1925,8 @@ fn draw_rich_gutter(
         number_fg,
         separator,
         bg,
+        PLAIN_DIFF_BARS,
+        PLAIN_DIFF_BAR_WIDTH,
     );
     let cell_width = gutter.cell_width();
 
@@ -4895,6 +4927,49 @@ mod tests {
         );
     }
 
+    /// The plain editor's rich gutter draws one diff bar per marked row, in the
+    /// change kind's color at the first slot, and no state bar beside it.
+    #[test]
+    fn the_rich_gutter_draws_one_diff_bar() {
+        use stoatty_protocol::command::{encode_bar, BarCommand};
+
+        let mut h = open_outside_a_repo("a\nB\nc\n");
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Modified,
+            buffer_start_line: 1,
+            buffer_line_range: 1..2,
+            base_byte_range: 2..4,
+            anchor_range: None,
+            token_detail: None,
+            unstaged_lines: std::iter::once(1..2).collect(),
+            marked_rows: Vec::new(),
+        };
+        let base = String::from("a\nb\nc\n");
+        install_diff_map(&mut h.stoat, DiffMap::from_hunks([hunk], Some(base.into())));
+
+        let theme = h.stoat.theme.clone();
+        let color =
+            |scope: &str| super::color_to_rgb(theme.get(scope).fg.expect("the theme sets it"));
+        let frame = gutter_scene_frame(&mut h.stoat, Rect::new(0, 0, 12, 3));
+        let bar = |x, scope| {
+            let command = encode_bar(&BarCommand {
+                x,
+                y: 16,
+                width: 5,
+                height: 16,
+                color: color(scope),
+            });
+            frame.contains(String::from_utf8_lossy(&command).as_ref())
+        };
+        // Two digits at the test scale end at sixteenth 46, so slot 0 sits at
+        // 50 and slot 1 at 57.
+        assert_eq!(
+            [bar(50, s::DIFF_MODIFIED), bar(57, s::DIFF_UNSTAGED)],
+            [true, false],
+            "the change bar at the first slot and no state bar: {frame:?}",
+        );
+    }
+
     /// Mark colors with a different value per field, so a bar's color names
     /// the field it took.
     fn distinct_mark_colors() -> super::DiffMarkColors {
@@ -4940,20 +5015,24 @@ mod tests {
 
         let git = |i: usize| lines[i].git.expect("a marked row has a git mark");
         assert_eq!(
-            git(0).color,
-            git(1).color,
-            "the change bar keeps the status color whether staged or not",
-        );
-        assert_eq!(git(0).color, [40, 50, 60], "modified takes diff.modified");
-        assert_eq!(
-            git(0).staged_color,
-            [4, 5, 6],
-            "an unstaged row's staged bar takes diff.unstaged",
+            git(0).slots[0],
+            git(1).slots[0],
+            "the change slot keeps the status color whether staged or not",
         );
         assert_eq!(
-            git(1).staged_color,
-            [1, 2, 3],
-            "a staged row's staged bar takes diff.staged",
+            git(0).slots[0],
+            Some([40, 50, 60]),
+            "modified takes diff.modified"
+        );
+        assert_eq!(
+            git(0).slots[1],
+            Some([4, 5, 6]),
+            "an unstaged row's state slot takes diff.unstaged",
+        );
+        assert_eq!(
+            git(1).slots[1],
+            Some([1, 2, 3]),
+            "a staged row's state slot takes diff.staged",
         );
         assert!(git(2).seam, "a deletion is a seam mark");
     }
@@ -4980,7 +5059,7 @@ mod tests {
         assert_eq!(
             lines
                 .iter()
-                .map(|line| line.git.map(|git| git.staged_color))
+                .map(|line| line.git.and_then(|git| git.slots[1]))
                 .collect::<Vec<_>>(),
             [None, Some([7, 8, 9]), None, Some([11, 12, 13])],
             "row 1 reads approved and row 3 unapproved",

@@ -587,9 +587,9 @@ pub(crate) struct DiffLayout {
 /// Where a rich diff gutter places its parts, in sixteenths from the side's
 /// first cell.
 ///
-/// The plain editor's sub-cell gutter answers each offset for the same digit
-/// count, so a diff side and a plain pane put the number, the bars and the
-/// hairline at the same place.
+/// The sub-cell gutter widget answers each offset for the digit count and the
+/// diff view's bars, so a diff side puts the number, the bars and the hairline
+/// where that widget does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RichGutterOffsets {
     /// Where a right-aligned line number ends.
@@ -604,22 +604,23 @@ pub(crate) struct RichGutterOffsets {
 
 impl DiffLayout {
     /// The diff view's gutter for `digits`-wide numbers: line number,
-    /// change and staged status, then a rule, as wide as the plain editor's
-    /// gutter.
+    /// change and staged status, then a rule.
     ///
     /// A cell gutter leaves its first cell blank, where the plain gutter
     /// draws its mark column, right-aligns the number in the next `digits`
     /// cells, puts the two status glyphs after it, and draws the rule in the
-    /// plain gutter's gap cell. A `rich` gutter spans the sub-cell gutter's
-    /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) and
+    /// plain gutter's gap cell, so it is as wide as the plain editor's cell
+    /// gutter. A `rich` gutter spans the sub-cell gutter's
+    /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) with
+    /// two bars of five sixteenths, the bars [`draw_diff_status`] paints, and
     /// places its parts at that gutter's sixteenth offsets.
     pub(crate) fn diff_view(digits: u16, rich: bool) -> Self {
         let rich = rich.then(|| {
-            let gutter = editor::rich_gutter(&[], digits, [0; 3], [0; 3], [0; 3]);
+            let gutter = editor::rich_gutter(&[], digits, [0; 3], [0; 3], [0; 3], 2, 5);
             let offsets = RichGutterOffsets {
                 number_right: gutter.number_right_edge(),
-                git_x: gutter.git_x(),
-                staged_x: gutter.staged_x(),
+                git_x: gutter.bar_x(0),
+                staged_x: gutter.bar_x(1),
                 separator_x: gutter.separator_x(),
             };
             (gutter.cell_width(), offsets)
@@ -3003,9 +3004,11 @@ mod tests {
         assert_eq!([digits(&base, "a\nb\n"), digits("a\n", "a\nb\n")], [3, 2]);
     }
 
-    /// A diff side reserves exactly the plain editor's gutter for the same
-    /// digit count, cell and rich alike, so toggling the view leaves the live
-    /// text column where the plain pane had it.
+    /// A diff side reserves as many cells as the plain editor's gutter for the
+    /// same digit count, cell and rich alike, at the test scale, where one digit
+    /// spans a cell. The harness tests find the live text column at one place in
+    /// both views. At the shipped scale a rich plain gutter under 100 lines is a
+    /// cell narrower, because it draws one bar.
     #[test]
     fn a_diff_side_reserves_the_plain_gutters_width() {
         let widths = [50, 1500].map(|lines| {
