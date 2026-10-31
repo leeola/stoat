@@ -3004,13 +3004,14 @@ mod tests {
         assert_eq!([digits(&base, "a\nb\n"), digits("a\n", "a\nb\n")], [3, 2]);
     }
 
-    /// A diff side reserves as many cells as the plain editor's gutter for the
-    /// same digit count, cell and rich alike, at the test scale, where one digit
-    /// spans a cell. The harness tests find the live text column at one place in
-    /// both views. At the shipped scale a rich plain gutter under 100 lines is a
-    /// cell narrower, because it draws one bar.
+    /// A diff side's cell gutter keeps two status glyphs where the plain
+    /// editor's keeps one tree glyph, so it is a cell wider for the same digit
+    /// count. At the test scale, where one digit spans a cell, the rich gutters
+    /// reserve the same cells, so the harness tests find the live text column at
+    /// one place in both views. At the shipped scale a rich plain gutter under
+    /// 100 lines is a cell narrower, because it draws one bar.
     #[test]
-    fn a_diff_side_reserves_the_plain_gutters_width() {
+    fn a_diff_sides_cell_gutter_is_a_cell_wider_than_the_plain_one() {
         let widths = [50, 1500].map(|lines| {
             let digits = editor::gutter_digits(lines);
             [false, true].map(|rich| {
@@ -3022,7 +3023,7 @@ mod tests {
         });
         assert_eq!(
             widths,
-            [[(6, 6), (4, 4)], [(8, 8), (6, 6)]],
+            [[(6, 5), (4, 4)], [(8, 7), (6, 6)]],
             "each pair is the diff side's width beside the plain gutter's"
         );
     }

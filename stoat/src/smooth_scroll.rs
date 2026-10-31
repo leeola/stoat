@@ -483,6 +483,7 @@ fn paint_page_gutter(
                 &gutter.severity,
                 &diff_marks,
                 &rich.diff,
+                rich.bg,
                 &rich.colors,
                 gutter.current_line,
             );
@@ -2080,15 +2081,19 @@ mod tests {
     }
 
     /// A pooled page's rich gutter draws the plain editor's one diff bar at the
-    /// first slot, where the live gutter draws it, and no state bar.
+    /// first slot, where the live gutter draws it, and no state bar. A row the
+    /// tree pass has not reached takes the bar faded toward the gutter background.
     #[test]
     fn a_pooled_page_gutter_draws_one_diff_bar() {
         use super::{render_page_decorations, PageGutter};
         use crate::{
             action_handlers::{self, dispatch},
-            diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
+            diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
             minimap::color_to_rgb,
-            render::editor::{resolve_rich_gutter, RowSeverity},
+            render::{
+                editor::{resolve_rich_gutter, RowSeverity, TREE_FADE},
+                paint::dim_rgb,
+            },
             theme::scope,
             Stoat,
         };
@@ -2099,20 +2104,33 @@ mod tests {
         let mut h = Stoat::test();
         let root = PathBuf::from("/pooled-bar");
         let path = root.join("doc.txt");
-        h.fake_fs().insert_file(&path, b"a\nB\nc\n");
+        h.fake_fs().insert_file(&path, b"a\nB\nC\n");
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
 
-        let hunk = DiffHunk {
+        let reached = DiffHunk {
             status: DiffHunkStatus::Modified,
             buffer_start_line: 1,
             buffer_line_range: 1..2,
             base_byte_range: 2..4,
             anchor_range: None,
-            token_detail: None,
+            token_detail: Some(Arc::new(TokenDetail {
+                buffer_spans: Vec::new(),
+                base_spans: Vec::new(),
+                tree: true,
+            })),
             unstaged_lines: std::iter::once(1..2).collect(),
+            marked_rows: std::iter::once(1..2).collect(),
+        };
+        let unreached = DiffHunk {
+            buffer_start_line: 2,
+            buffer_line_range: 2..3,
+            base_byte_range: 4..6,
+            token_detail: None,
+            unstaged_lines: std::iter::once(2..3).collect(),
             marked_rows: Vec::new(),
+            ..reached.clone()
         };
         let buffer_id = action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("focused editor")
@@ -2125,7 +2143,7 @@ mod tests {
             .write()
             .expect("poisoned")
             .diff_map = Some(DiffMap::from_hunks(
-            [hunk],
+            [reached, unreached],
             Some(Arc::new("a\nb\nc\n".to_string())),
         ));
 
@@ -2133,6 +2151,7 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let rich = resolve_rich_gutter(&theme, fallback)
             .expect("the shipped theme resolves the rich gutter colors");
+        let bg = rich.bg;
         let gutter = PageGutter::new(
             true,
             Arc::new(RowSeverity::default()),
@@ -2146,7 +2165,7 @@ mod tests {
             3,
             0,
             12,
-            3,
+            4,
             &gutter,
             false,
             fallback,
@@ -2155,22 +2174,28 @@ mod tests {
             None,
         );
 
-        let bar = |x, scope: &str| {
+        let color = |scope: &str| color_to_rgb(theme.get(scope).fg.expect("the theme sets it"));
+        let bar = |x, y, color| {
             let command = encode_bar(&BarCommand {
                 x,
-                y: 16,
+                y,
                 width: 5,
                 height: 16,
-                color: color_to_rgb(theme.get(scope).fg.expect("the theme sets it")),
+                color,
             });
             decorations
                 .windows(command.len())
                 .any(|window| window == command.as_slice())
         };
+        let modified = color(scope::DIFF_MODIFIED);
         assert_eq!(
-            [bar(50, scope::DIFF_MODIFIED), bar(57, scope::DIFF_UNSTAGED)],
-            [true, false],
-            "the change bar at the first slot of row 1, and no state bar",
+            [
+                bar(50, 16, modified),
+                bar(57, 16, color(scope::DIFF_UNSTAGED)),
+                bar(50, 32, dim_rgb(modified, bg, TREE_FADE)),
+            ],
+            [true, false, true],
+            "the change bar at the first slot of row 1, no state bar, and row 2's bar faded",
         );
     }
 
