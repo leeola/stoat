@@ -634,18 +634,22 @@ impl Dimensions for GridSize {
 fn convert_cell(cell: &TermCell) -> StyledCell {
     StyledCell {
         ch: painted_char(cell.c),
-        marks: cell
-            .zerowidth()
-            .into_iter()
-            .flatten()
-            .copied()
-            .filter(|ch| {
-                !matches!(
-                    ch,
-                    '\u{200c}' | '\u{200d}' | '\u{fe00}'..='\u{fe0f}' | '\u{e0100}'..='\u{e01ef}'
-                )
-            })
-            .collect(),
+        marks: match cell.zerowidth() {
+            None => SmallVec::new(),
+            Some(marks) => marks
+                .iter()
+                .copied()
+                .filter(|ch| {
+                    !matches!(
+                        ch,
+                        '\u{200c}'
+                            | '\u{200d}'
+                            | '\u{fe00}'..='\u{fe0f}'
+                            | '\u{e0100}'..='\u{e01ef}'
+                    )
+                })
+                .collect(),
+        },
         fg: map_color(cell.fg),
         bg: map_color(cell.bg),
         modifiers: map_modifiers(cell.flags),
