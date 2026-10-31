@@ -775,6 +775,7 @@ on key {
 
         git || changes {
             g -> [GotoNextChange(), SetMode(normal)];
+            h -> [GotoNextGitChange(), SetMode(normal)];
         }
 
         p -> [GotoNextParagraph(), SetMode(normal)];
@@ -807,6 +808,7 @@ on key {
 
         git || changes {
             g -> [GotoPrevChange(), SetMode(normal)];
+            h -> [GotoPrevGitChange(), SetMode(normal)];
         }
 
         p -> [GotoPrevParagraph(), SetMode(normal)];
@@ -839,6 +841,7 @@ on key {
 
         git || changes {
             g -> [GotoNextChange(), SetMode(select)];
+            h -> [GotoNextGitChange(), SetMode(select)];
         }
 
         p -> [ExtendGotoNextParagraph(), SetMode(select)];
@@ -868,6 +871,7 @@ on key {
 
         git || changes {
             g -> [GotoPrevChange(), SetMode(select)];
+            h -> [GotoPrevGitChange(), SetMode(select)];
         }
 
         p -> [ExtendGotoPrevParagraph(), SetMode(select)];
@@ -1234,12 +1238,15 @@ on key {
     # The side buttons ride the same hops, back as n and forward as p as in the
     # pinned chords, but through DiffBack and DiffForward. Those retrace the
     # jumplist once a jump has left the change, and walk changes again when the
-    # reader is back on it.
+    # reader is back on it. The shifted buttons walk whole hunks of the line
+    # diff, as N and P do in the pinned chords.
     view == diff && mode == normal {
         Alt-WheelDown -> GotoNextChange();
         Alt-WheelUp -> GotoPrevChange();
         MouseBack -> DiffBack();
         MouseForward -> DiffForward();
+        S-MouseBack -> GotoNextGitChange();
+        S-MouseForward -> GotoPrevGitChange();
     }
     view == diff && rebase_exec {
         C -> RebaseContinue();
@@ -1264,8 +1271,9 @@ on key {
     # leaves out acts on the excerpt's file. j, k, and the pages cross into the
     # next file at an excerpt's edge. n, p, the Alt notches, and the side
     # buttons walk the hunks across the excerpts, as the diff view's walk
-    # crosses into the next changed file. q closes the view. Escape is left
-    # to the normal block, as the per-file diff leaves it, so the key
+    # crosses into the next changed file. The shifted side buttons walk whole
+    # hunks of the line diff, as in the diff view. q closes the view. Escape
+    # is left to the normal block, as the per-file diff leaves it, so the key
     # dismisses the hints and never closes the view.
     view == diff_changes && mode == normal {
         q -> CloseDiffChanges();
@@ -1287,6 +1295,8 @@ on key {
         Alt-WheelUp -> GotoPrevChange();
         MouseBack -> DiffBack();
         MouseForward -> DiffForward();
+        S-MouseBack -> GotoNextGitChange();
+        S-MouseForward -> GotoPrevGitChange();
         : -> OpenCommandPalette();
     }
     view == conflict && mode == normal {
@@ -1538,7 +1548,7 @@ on key {
         }
     }
     # The goto chord. `a` mirrors the normal-mode `g a` so both spellings of
-    # goto reach the last buffer, and n/p repeat the git-change hops that the
+    # goto reach the last buffer, and n/p repeat the change hops that the
     # git submode below also carries. A second `g` pins the mode, so those hops
     # repeat until Escape; the doubled letter spells it the way `space G G`
     # spells the git one.
@@ -1548,6 +1558,10 @@ on key {
     # the back button, so the upper button walks up to the earlier change and
     # the lower button walks down to the later one. Unbound they walk the
     # jumplist, which is what they do in every other mode.
+    #
+    # N and P walk whole hunks of the line diff, where n and p walk the changes
+    # the tree pass marked. The shifted side buttons ride N and P as the plain
+    # buttons ride n and p.
     mode == space_goto {
         Escape -> SetMode(normal);
         g -> PinMode();
@@ -1561,6 +1575,10 @@ on key {
             p -> [GotoPrevChange(), SetMode(normal)];
             MouseForward -> [GotoPrevChange(), SetMode(normal)];
             MouseBack -> [GotoNextChange(), SetMode(normal)];
+            N -> [GotoNextGitChange(), SetMode(normal)];
+            P -> [GotoPrevGitChange(), SetMode(normal)];
+            S-MouseForward -> [GotoPrevGitChange(), SetMode(normal)];
+            S-MouseBack -> [GotoNextGitChange(), SetMode(normal)];
         }
     }
     # The git chord. Only a binding changes the mode, never the action it runs,
@@ -1602,6 +1620,10 @@ on key {
     # forward button sits above the back button, so the upper button walks up
     # to the earlier change and the lower button walks down to the later one.
     #
+    # N and P walk whole hunks of the line diff, where n and p walk the changes
+    # the tree pass marked. The shifted side buttons ride N and P as the plain
+    # buttons ride n and p.
+    #
     # The git arms bind only inside a repository, and the walk arms only with a
     # change to reach.
     mode == space_git {
@@ -1614,6 +1636,10 @@ on key {
             p -> [GotoPrevChange(), SetMode(normal)];
             MouseForward -> [GotoPrevChange(), SetMode(normal)];
             MouseBack -> [GotoNextChange(), SetMode(normal)];
+            N -> [GotoNextGitChange(), SetMode(normal)];
+            P -> [GotoPrevGitChange(), SetMode(normal)];
+            S-MouseForward -> [GotoPrevGitChange(), SetMode(normal)];
+            S-MouseBack -> [GotoNextGitChange(), SetMode(normal)];
         }
 
         git {
@@ -1728,10 +1754,11 @@ on key {
     # Reading a diff is a run of hops rather than one, so `space R` holds this
     # mode instead of running a single arm. d opens the diff and a second d
     # closes it. n, p, and the Alt notches walk the changes, and the side
-    # buttons walk changes or retrace a jump out of one. c turns the walk's
-    # wrap past the last changed file off and on. b flips the diff base
-    # between the index and HEAD. No arm here chains SetMode(normal), which is
-    # what holds the mode, and Escape leaves it.
+    # buttons walk changes or retrace a jump out of one. N, P, and the shifted
+    # side buttons walk whole hunks of the line diff. c turns the walk's wrap
+    # past the last changed file off and on. b flips the diff base between the
+    # index and HEAD. No arm here chains SetMode(normal), which is what holds
+    # the mode, and Escape leaves it.
     mode == review {
         Escape -> SetMode(normal);
         c -> ChangeWalkWrap();
@@ -1745,6 +1772,10 @@ on key {
             MouseForward -> DiffForward();
             Alt-WheelDown -> GotoNextChange();
             Alt-WheelUp -> GotoPrevChange();
+            N -> GotoNextGitChange();
+            P -> GotoPrevGitChange();
+            S-MouseBack -> GotoNextGitChange();
+            S-MouseForward -> GotoPrevGitChange();
         }
     }
     mode == space_lsp {

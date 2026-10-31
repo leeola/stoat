@@ -1453,6 +1453,29 @@ mod tests {
     }
 
     #[test]
+    fn a_shifted_side_button_resolves_apart_from_the_plain_one() {
+        let config = parse_config(
+            "on key { mode == normal { MouseBack -> GotoNextChange(); \
+             S-MouseBack -> GotoNextGitChange(); } }",
+        );
+        let keymap = Keymap::compile(&config);
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+        let back = |modifiers| {
+            action_names(keymap.lookup_side_button(&normal, SideButton::Back, modifiers))
+        };
+
+        assert_eq!(
+            [
+                back(KeyModifiers::NONE),
+                back(KeyModifiers::SHIFT),
+                back(KeyModifiers::ALT),
+            ],
+            [only("GotoNextChange"), only("GotoNextGitChange"), None],
+            "each press takes the binding of its own modifiers, and alt binds none",
+        );
+    }
+
+    #[test]
     fn lookup_wheel_resolves_a_bound_notch_and_ignores_the_rest() {
         let config =
             parse_config("on key { mode == normal { Alt-WheelDown -> GotoNextChange(); } }");
@@ -2375,6 +2398,14 @@ mod tests {
             ),
             "the diff view binds both buttons, and a plain buffer binds neither"
         );
+
+        let shifted =
+            |button| action_names(keymap.lookup_side_button(&in_diff, button, KeyModifiers::SHIFT));
+        assert_eq!(
+            [shifted(SideButton::Back), shifted(SideButton::Forward)],
+            [only("GotoNextGitChange"), only("GotoPrevGitChange")],
+            "the shifted buttons walk whole hunks",
+        );
     }
 
     #[test]
@@ -2385,11 +2416,13 @@ mod tests {
         let goto = TestState::in_repo("space_goto");
         let git = TestState::in_repo("space_git");
         let normal = TestState::in_repo("normal");
-        let bound = |state: &TestState, button| {
+        let lookup = |state: &TestState, button, modifiers| {
             keymap
-                .lookup_side_button(state, button, KeyModifiers::NONE)
+                .lookup_side_button(state, button, modifiers)
                 .map(|actions| actions[0].name.clone())
         };
+        let bound = |state: &TestState, button| lookup(state, button, KeyModifiers::NONE);
+        let shifted = |state: &TestState, button| lookup(state, button, KeyModifiers::SHIFT);
 
         assert_eq!(
             (
@@ -2410,6 +2443,75 @@ mod tests {
             ),
             "both chords bind forward to their p hop and back to their n hop, \
              and no other mode binds them"
+        );
+        assert_eq!(
+            [
+                shifted(&goto, SideButton::Forward),
+                shifted(&goto, SideButton::Back),
+                shifted(&git, SideButton::Forward),
+                shifted(&git, SideButton::Back),
+            ],
+            [
+                "GotoPrevGitChange",
+                "GotoNextGitChange",
+                "GotoPrevGitChange",
+                "GotoNextGitChange",
+            ]
+            .map(|name| Some(name.to_string())),
+            "both chords bind the shifted buttons to their P and N hops",
+        );
+    }
+
+    /// The git walk takes h in the bracket chords, and N and P in the goto and
+    /// git chords and the review mode, beside the structured walk's g, n and
+    /// p. A chord arm releases its chord, and a review arm holds the mode.
+    #[test]
+    fn the_git_walk_keys_sit_beside_the_structured_ones() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let pressed = |mode: &str, key| {
+            keymap
+                .lookup(
+                    &TestState::in_repo(mode),
+                    &key_event(KeyCode::Char(key), KeyModifiers::NONE),
+                )
+                .map(|actions| {
+                    actions
+                        .iter()
+                        .map(|action| match action.args.first().map(|arg| &arg.value) {
+                            Some(Value::Ident(mode)) => format!("{} {mode}", action.name),
+                            _ => action.name.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+        };
+        let arms = |actions: &[&str]| Some(actions.iter().map(|name| name.to_string()).collect());
+
+        assert_eq!(
+            [
+                pressed("bracket_next", 'h'),
+                pressed("bracket_prev", 'h'),
+                pressed("select_bracket_next", 'h'),
+                pressed("select_bracket_prev", 'h'),
+                pressed("space_goto", 'N'),
+                pressed("space_goto", 'P'),
+                pressed("space_git", 'N'),
+                pressed("space_git", 'P'),
+                pressed("review", 'N'),
+                pressed("review", 'P'),
+            ],
+            [
+                arms(&["GotoNextGitChange", "SetMode normal"]),
+                arms(&["GotoPrevGitChange", "SetMode normal"]),
+                arms(&["GotoNextGitChange", "SetMode select"]),
+                arms(&["GotoPrevGitChange", "SetMode select"]),
+                arms(&["GotoNextGitChange", "SetMode normal"]),
+                arms(&["GotoPrevGitChange", "SetMode normal"]),
+                arms(&["GotoNextGitChange", "SetMode normal"]),
+                arms(&["GotoPrevGitChange", "SetMode normal"]),
+                arms(&["GotoNextGitChange"]),
+                arms(&["GotoPrevGitChange"]),
+            ],
         );
     }
 
@@ -2862,6 +2964,8 @@ mod tests {
         let review = TestState::in_repo("review");
         let button =
             |button| action_names(keymap.lookup_side_button(&review, button, KeyModifiers::NONE));
+        let shifted =
+            |button| action_names(keymap.lookup_side_button(&review, button, KeyModifiers::SHIFT));
         let notch = |dir| action_names(keymap.lookup_wheel(&review, dir, KeyModifiers::ALT));
 
         assert_eq!(
@@ -2870,20 +2974,25 @@ mod tests {
                 button(SideButton::Forward),
                 notch(WheelDirection::Down),
                 notch(WheelDirection::Up),
+                shifted(SideButton::Back),
+                shifted(SideButton::Forward),
             ),
             (
                 only("DiffBack"),
                 only("DiffForward"),
                 only("GotoNextChange"),
                 only("GotoPrevChange"),
+                only("GotoNextGitChange"),
+                only("GotoPrevGitChange"),
             ),
-            "the buttons bridge the walk and the jumplist, and the Alt notches walk",
+            "the buttons bridge the walk and the jumplist, the Alt notches walk, \
+             and the shifted buttons walk whole hunks",
         );
     }
 
     /// The changes view walks the hunks on n, p, the Alt notches, and the side
     /// buttons, as the diff view does, and leaves g and G to the editor of its
-    /// focused excerpt.
+    /// focused excerpt. The shifted side buttons walk whole hunks.
     #[test]
     fn the_changes_view_walks_changes_and_leaves_g_to_the_editor() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
@@ -2897,6 +3006,8 @@ mod tests {
         };
         let button =
             |button| action_names(keymap.lookup_side_button(&changes, button, KeyModifiers::NONE));
+        let shifted =
+            |button| action_names(keymap.lookup_side_button(&changes, button, KeyModifiers::SHIFT));
         let notch = |dir| action_names(keymap.lookup_wheel(&changes, dir, KeyModifiers::ALT));
 
         assert_eq!(
@@ -2904,12 +3015,14 @@ mod tests {
                 (key('n'), key('p')),
                 (notch(WheelDirection::Down), notch(WheelDirection::Up)),
                 (button(SideButton::Back), button(SideButton::Forward)),
+                (shifted(SideButton::Back), shifted(SideButton::Forward)),
                 (key('g'), key('G')),
             ),
             (
                 (only("GotoNextChange"), only("GotoPrevChange")),
                 (only("GotoNextChange"), only("GotoPrevChange")),
                 (only("DiffBack"), only("DiffForward")),
+                (only("GotoNextGitChange"), only("GotoPrevGitChange")),
                 (only("SetMode"), only("GotoLineNumber")),
             ),
         );
