@@ -221,6 +221,17 @@ impl DiffHunk {
         self.token_detail.as_ref().is_some_and(|detail| detail.tree)
     }
 
+    /// Whether the tree pass read this hunk as unchanged.
+    ///
+    /// True for a `Modified` hunk the tree pass reached and found no change
+    /// in, such as a reindent. The structured walk and its change count pass
+    /// over it, and the git walk still stops on it.
+    pub(crate) fn tree_empty(&self) -> bool {
+        self.status == DiffHunkStatus::Modified
+            && self.tree_reached()
+            && self.marked_rows.is_empty()
+    }
+
     /// How the tree pass reads stored row `stored_row` of this hunk.
     ///
     /// A `Modified` hunk the tree pass reached marks the rows its runs name.
@@ -263,6 +274,10 @@ impl DiffHunk {
 /// one stop, take one position, and mark the rows between them. The hunks
 /// themselves stay as the differ made them, because staging and the changes
 /// view build from them.
+///
+/// A hunk the tree pass found nothing in is no change of its own. The
+/// structured walk and the count pass over it, and it joins two changes only
+/// when it joins the change above it.
 pub struct LiveHunks<'a> {
     hunks: Vec<LiveHunk<'a>>,
     /// The map's staged marks as the buffer rows they paint on now, sorted by
@@ -270,6 +285,8 @@ pub struct LiveHunks<'a> {
     staged: Vec<(Range<u32>, DiffHunkStatus)>,
     /// What the hunks' staged state means in the map.
     kind: MarkKind,
+    /// How many changes the hunks open.
+    changes: usize,
 }
 
 /// One hunk as it sits in the buffer now.
@@ -279,7 +296,9 @@ struct LiveHunk<'a> {
     /// Whether only whitespace-only rows separate this hunk's marked rows from
     /// the previous hunk's, which makes the two one change.
     joined_above: bool,
-    /// The 0-based index of the change this hunk belongs to.
+    /// The 0-based index of the change this hunk belongs to, or of the change
+    /// before it for a hunk the tree pass found nothing in. A hunk before the
+    /// first change holds `usize::MAX`.
     change: usize,
 }
 
@@ -405,13 +424,44 @@ impl<'a> LiveHunks<'a> {
     /// is part of that change. Its first stop extends the stop above, so the
     /// walk crosses both hunks in one press.
     ///
+    /// A hunk the tree pass found nothing in, such as a reindent, offers no
+    /// stop. [`Self::git_hunk_stops`] still stops on it.
+    ///
     /// A zero-width `Deleted` or `Moved` seam keeps its empty range. That is
     /// what a caller turns into a single-cell landing at the row the walk gives
     /// a seam.
     pub fn hunk_stops(&self) -> Vec<Range<u32>> {
+        self.stops(true)
+    }
+
+    /// The row ranges the git walk stops on, in document order.
+    ///
+    /// Each hunk offers its full live rows. The tree pass does not narrow or
+    /// remove a git stop. Hunks that only whitespace-only rows separate make
+    /// one stop, as in [`Self::hunk_stops`].
+    pub fn git_hunk_stops(&self) -> Vec<Range<u32>> {
+        self.stops(false)
+    }
+
+    /// The stops of the structured walk when `structured`, and of the git walk
+    /// otherwise.
+    ///
+    /// The structured walk passes a hunk the tree pass found nothing in and
+    /// tiles a refined hunk by its runs. A hunk extends the stop above through
+    /// a passed hunk only when the passed hunk joins that stop too.
+    ///
+    /// [`LiveRowsCache::answer`] counts changes by the same rule, so the count
+    /// and the stops agree.
+    fn stops(&self, structured: bool) -> Vec<Range<u32>> {
         let mut stops: Vec<Range<u32>> = Vec::with_capacity(self.hunks.len());
+        let mut carries = false;
         for live in &self.hunks {
-            let mut join = live.joined_above;
+            if structured && live.hunk.tree_empty() {
+                carries &= live.joined_above;
+                continue;
+            }
+            let mut join = live.joined_above && carries;
+            carries = true;
             let mut push = |stop: Range<u32>| {
                 match stops.last_mut() {
                     Some(above) if join => above.end = above.end.max(stop.end),
@@ -419,7 +469,7 @@ impl<'a> LiveHunks<'a> {
                 }
                 join = false;
             };
-            match live.hunk.refined() {
+            match structured && live.hunk.refined() {
                 // The runs are the hunk's own coordinates, so they shift with
                 // it the same way its live rows did.
                 true => {
@@ -452,7 +502,20 @@ impl<'a> LiveHunks<'a> {
     /// [`Self::hunk_stops`] alone, because a staged mark is no difference from
     /// the base the view compares against.
     pub fn change_stops(&self) -> Vec<Range<u32>> {
-        let mut stops = self.hunk_stops();
+        self.with_staged(self.hunk_stops())
+    }
+
+    /// The row ranges the git walk stops on outside the diff view, in document
+    /// order.
+    ///
+    /// The stops of [`Self::git_hunk_stops`] and the rows of each staged mark,
+    /// as [`Self::change_stops`] adds them to the structured stops.
+    pub fn git_change_stops(&self) -> Vec<Range<u32>> {
+        self.with_staged(self.git_hunk_stops())
+    }
+
+    /// `stops` with the rows of each staged mark, sorted by row.
+    fn with_staged(&self, mut stops: Vec<Range<u32>>) -> Vec<Range<u32>> {
         stops.extend(self.staged.iter().map(|(rows, _)| rows.clone()));
         stops.sort_by_key(|run| (run.start, run.end));
         stops
@@ -472,6 +535,9 @@ impl<'a> LiveHunks<'a> {
     /// A zero-width hunk counts from the live row above its seam, where the
     /// diff view's walk lands it, so a seam past the last row counts from the
     /// last row.
+    ///
+    /// A row in a hunk the tree pass found nothing in answers the change
+    /// before it, or `None` before the first change.
     pub fn hunk_index_at(&self, row: u32) -> Option<usize> {
         let hunks = self.hunks.partition_point(|live| {
             let landing = match live.rows.is_empty() {
@@ -480,16 +546,20 @@ impl<'a> LiveHunks<'a> {
             };
             landing <= row
         });
-        (hunks > 0).then(|| self.hunks[hunks - 1].change + 1)
+        (hunks > 0)
+            .then(|| self.hunks[hunks - 1].change.checked_add(1))
+            .flatten()
     }
 
-    /// How many changes the hunks make, where hunks that only whitespace-only
-    /// rows separate count as one.
+    /// How many changes the hunks make.
+    ///
+    /// Hunks that only whitespace-only rows separate count as one, and a hunk
+    /// the tree pass found nothing in counts as none.
     ///
     /// The denominator of the diff view's position. It agrees with
     /// [`Self::hunk_index_at`] and with the stops of [`Self::hunk_stops`].
     pub fn change_count(&self) -> usize {
-        self.hunks.last().map_or(0, |live| live.change + 1)
+        self.changes
     }
 
     /// The hunks meeting `rows`, each with the rows it now covers.
@@ -742,18 +812,29 @@ impl LiveRowsCache {
     /// `kind` comes from the map on each call. Clones of one map share this
     /// cache, and [`DiffMap::with_mark_kind`] sets the kind on one clone alone.
     fn answer<'a>(&self, hunk: impl Fn(usize) -> &'a DiffHunk, kind: MarkKind) -> LiveHunks<'a> {
-        let mut change = 0;
+        // `change` wraps from `usize::MAX` to 0 on the first change. `carries`
+        // says whether the hunk above belongs to the latest change. A hunk the
+        // tree pass found nothing in opens no change, and it belongs to the
+        // latest one only when it joins it.
+        let mut change = usize::MAX;
+        let mut carries = false;
         let hunks = self
             .order
             .iter()
             .zip(&self.joined)
-            .enumerate()
-            .map(|(k, (&i, &joined_above))| {
-                if k > 0 && !joined_above {
-                    change += 1;
+            .map(|(&i, &joined_above)| {
+                let hunk = hunk(i);
+                let joins = joined_above && carries;
+                if hunk.tree_empty() {
+                    carries = joins;
+                } else {
+                    if !joins {
+                        change = change.wrapping_add(1);
+                    }
+                    carries = true;
                 }
                 LiveHunk {
-                    hunk: hunk(i),
+                    hunk,
                     rows: self.rows[i].clone(),
                     joined_above,
                     change,
@@ -764,6 +845,7 @@ impl LiveRowsCache {
             hunks,
             staged: self.staged.clone(),
             kind,
+            changes: change.wrapping_add(1),
         }
     }
 }
@@ -2807,6 +2889,10 @@ mod tests {
     use std::sync::Arc;
     use stoat_language::structural_diff::{ChangeKind as LangChangeKind, DiffChange, Side};
 
+    /// The structured stops, the git stops, and the change count of one map,
+    /// each stop as its `(start, end)` rows.
+    type Walks = (Vec<(u32, u32)>, Vec<(u32, u32)>, usize);
+
     #[test]
     fn line_mapping_matches_prefix_newline_count() {
         // The two newlines at bytes 2 and 5 put line starts at 0, 3, and 6.
@@ -3460,6 +3546,11 @@ mod tests {
         assert_eq!(
             (rows(live.hunk_stops()), rows(live.change_stops())),
             (vec![(1, 2)], vec![(1, 2), (4, 5)]),
+        );
+        assert_eq!(
+            (rows(live.git_hunk_stops()), rows(live.git_change_stops())),
+            (vec![(1, 2)], vec![(1, 2), (4, 5)]),
+            "the git walk takes the staged mark outside the diff view too",
         );
     }
 
@@ -4630,6 +4721,119 @@ mod tests {
             stops_of(hunks, text),
             [0..2, 2..3, 4..7],
             "stops from both hunks follow row order"
+        );
+    }
+
+    /// A `Modified` hunk over `rows` the tree pass reached and found nothing in.
+    fn tree_empty_hunk(rows: std::ops::Range<u32>) -> DiffHunk {
+        DiffHunk {
+            token_detail: Some(empty_detail(true)),
+            ..refined_hunk(rows, Vec::new())
+        }
+    }
+
+    /// The structured stops, the git stops, and the change count a map of
+    /// `hunks` offers over `text`, each stop as its `(start, end)` rows.
+    fn walks(hunks: Vec<DiffHunk>, text: &str) -> Walks {
+        let map = DiffMap::from_hunks(hunks, Some(Arc::new(text.to_string())));
+        let multi = buffer_holding(text);
+        let snapshot = multi.snapshot();
+        let live = map.live_hunks(&snapshot);
+        let pairs = |stops: Vec<std::ops::Range<u32>>| {
+            stops.into_iter().map(|run| (run.start, run.end)).collect()
+        };
+        (
+            pairs(live.hunk_stops()),
+            pairs(live.git_hunk_stops()),
+            live.change_count(),
+        )
+    }
+
+    /// The structured walk stops once per run of a refined hunk, and the git
+    /// walk once per hunk.
+    #[test]
+    fn a_refined_hunk_offers_a_stop_per_run_and_one_git_stop() {
+        assert_eq!(
+            walks(
+                vec![refined_hunk(0..6, vec![1..2, 4..5])],
+                "0\n1\n2\n3\n4\n5\n"
+            ),
+            (vec![(0, 4), (4, 6)], vec![(0, 6)], 1),
+        );
+    }
+
+    /// A hunk the tree pass found nothing in is a git stop alone. The
+    /// structured walk and its count pass it, and a row in it answers the
+    /// change above.
+    #[test]
+    fn a_tree_empty_hunk_is_a_git_stop_alone() {
+        let text = "a\n1\nb\n2\nc\n";
+        let hunks = || {
+            vec![
+                refined_hunk(0..1, std::iter::once(0..1).collect()),
+                tree_empty_hunk(2..3),
+                refined_hunk(4..5, std::iter::once(4..5).collect()),
+            ]
+        };
+        assert_eq!(
+            (walks(hunks(), text), live_answer(hunks(), text, 2).1),
+            (
+                (vec![(0, 1), (4, 5)], vec![(0, 1), (2, 3), (4, 5)], 2),
+                Some(1)
+            ),
+        );
+    }
+
+    /// A hunk the tree pass found nothing in opens no change, first or not, so
+    /// a row in it before the first change has no position.
+    #[test]
+    fn a_tree_empty_first_hunk_answers_no_position() {
+        let text = "a\nx\nb\n";
+        let hunks = || {
+            vec![
+                tree_empty_hunk(0..1),
+                refined_hunk(2..3, std::iter::once(2..3).collect()),
+            ]
+        };
+        assert_eq!(
+            (
+                walks(hunks(), text),
+                [0, 2].map(|row| live_answer(hunks(), text, row).1),
+            ),
+            ((vec![(2, 3)], vec![(0, 1), (2, 3)], 1), [None, Some(1)]),
+        );
+    }
+
+    /// A hunk the tree pass never reached is one stop under both walks.
+    #[test]
+    fn an_unreached_hunk_is_one_stop_under_both_walks() {
+        assert_eq!(
+            walks(vec![refined_hunk(1..3, Vec::new())], "0\n1\n2\n3\n"),
+            (vec![(1, 3)], vec![(1, 3)], 1),
+        );
+    }
+
+    /// A join through a hunk the structured walk passes carries the change
+    /// only when that hunk joins the change above it.
+    #[test]
+    fn a_join_through_a_tree_empty_hunk_needs_it_to_join_the_change() {
+        let hunks = || {
+            vec![
+                refined_hunk(0..1, std::iter::once(0..1).collect()),
+                tree_empty_hunk(2..3),
+                refined_hunk(4..5, std::iter::once(4..5).collect()),
+            ]
+        };
+        assert_eq!(
+            [
+                walks(hunks(), "a\n\nb\n\nc\n"),
+                walks(hunks(), "a\nx\nb\n\nc\n"),
+            ],
+            [
+                (vec![(0, 5)], vec![(0, 5)], 1),
+                (vec![(0, 1), (4, 5)], vec![(0, 1), (2, 5)], 2),
+            ],
+            "blank rows join all three, and a text row above the empty hunk keeps the last one apart",
         );
     }
 
