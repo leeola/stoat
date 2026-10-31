@@ -134,9 +134,21 @@ pub(crate) fn render_diff_changes(
 
     state.viewport_rows = inner.height as usize;
     let rich = review::diff_gutter_is_rich(scene.live(), frame.theme, text_style);
+    // Every excerpt sizes its gutters for the widest count among them, so the
+    // text column lines up down the stack across files of different sizes.
+    let digits = state
+        .excerpts
+        .iter()
+        .filter_map(|excerpt| {
+            editors
+                .get_mut(excerpt.editor_id)
+                .map(|editor| review::diff_gutter_digits(&editor.display_map.snapshot()))
+        })
+        .max()
+        .unwrap_or(2);
     for excerpt in &state.excerpts {
         if let Some(editor) = editors.get_mut(excerpt.editor_id) {
-            let digits = review::diff_gutter_digits(&editor.display_map.snapshot());
+            editor.stack_gutter_digits = Some(digits);
             fit_diff_view(
                 editor,
                 inner,
@@ -462,12 +474,12 @@ mod tests {
             .to_string()
     }
 
-    /// The columns the live frame lays an excerpt of a file under a hundred
-    /// lines out in over `inner`, rich as the harness's theme resolves it.
-    fn excerpt_columns(h: &TestHarness, inner: Rect) -> DiffColumns {
+    /// The columns the live frame lays an excerpt out in over `inner` when the
+    /// stack's gutters take `digits`, rich as the harness's theme resolves it.
+    fn excerpt_columns(h: &TestHarness, inner: Rect, digits: u16) -> DiffColumns {
         let theme = &h.stoat.theme;
         let rich = review::diff_gutter_is_rich(true, theme, theme.get(scope::UI_TEXT));
-        DiffColumns::compute(inner, DiffLayout::diff_view(2, rich))
+        DiffColumns::compute(inner, DiffLayout::diff_view(digits, rich))
     }
 
     /// The line number a diff side's gutter shows on row `y`, the digits in
@@ -522,7 +534,7 @@ mod tests {
             let ws = h.stoat.active_workspace();
             split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
         };
-        let cols = excerpt_columns(&h, inner);
+        let cols = excerpt_columns(&h, inner, 2);
 
         // a.txt's three rows sit under its header on row 0, and b.txt's first
         // row under its header on row 4. Each header pairs its name with the
@@ -558,6 +570,50 @@ mod tests {
                 vec![pair("1"), pair("2"), pair("3"), pair("1")],
                 vec![Some((cols.right_text_x, inner.y + 1)), None],
             ),
+        );
+    }
+
+    /// The excerpts share the widest gutter any of them needs, so a five-line
+    /// file's text starts at the column a 1200-line file's text starts at, the
+    /// column a four-digit gutter leaves, and both wrap at that gutter's width.
+    #[test]
+    fn excerpts_of_different_sizes_share_one_text_column() {
+        let long_base: String = (1..=1200).map(|n| format!("{n}\n")).collect();
+        let long_text = long_base.replacen("1\n", "ONE\n", 1);
+        let mut h = changes_view(
+            120,
+            24,
+            &[
+                ("a.txt", "a\nb\nc\nd\ne\n", "A\nb\nc\nd\ne\n"),
+                ("b.txt", &long_base, &long_text),
+            ],
+        );
+        h.stoat.settings.editor_wrap = Some(WrapMode::EditorWidth);
+        h.render_composited();
+        let inner = {
+            let ws = h.stoat.active_workspace();
+            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+        // The wrap stops one cell short of the narrower text column.
+        let cols = excerpt_columns(&h, inner, 4);
+        let wrap = (cols.left_content_w.min(cols.right_content_w) - 1) as u32;
+
+        let (state, editors) = stack(&mut h);
+        let layouts: Vec<(Option<u16>, Option<u32>)> = state
+            .excerpts
+            .iter()
+            .map(|excerpt| {
+                let editor = &editors[excerpt.editor_id];
+                (
+                    editor.text_rect.map(|text| text.x),
+                    editor.display_map.wrap_width(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            layouts,
+            [(Some(cols.right_text_x), Some(wrap)); 2],
+            "both excerpts paint and wrap for the four-digit gutter"
         );
     }
 
@@ -638,7 +694,7 @@ mod tests {
 
         let buf = h.render_composited();
         let inner = Rect::new(0, 0, 120, 5);
-        let cols = excerpt_columns(&h, inner);
+        let cols = excerpt_columns(&h, inner, 2);
         let (state, editors) = stack(&mut h);
         let scroll_row = editors[state.excerpts[0].editor_id].scroll_row;
         assert_eq!(
@@ -810,7 +866,7 @@ mod tests {
             let ws = h.stoat.active_workspace();
             split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
         };
-        let cols = excerpt_columns(&h, inner);
+        let cols = excerpt_columns(&h, inner, 2);
         let (state, _) = stack(&mut h);
         let numbers: Vec<Vec<String>> = state
             .excerpts

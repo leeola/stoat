@@ -211,7 +211,9 @@ pub(crate) fn render_diff_view(
         .display_map
         .set_pair_modified_hunks(inner.width >= DIFF_TWO_COLUMN_MIN);
     let snapshot = editor.display_map.snapshot();
-    let digits = diff_gutter_digits(&snapshot);
+    let digits = editor
+        .stack_gutter_digits
+        .unwrap_or_else(|| diff_gutter_digits(&snapshot));
     let cols = DiffColumns::compute(
         inner,
         DiffLayout::diff_view(digits, diff_gutter_is_rich(stoatty, theme, fallback_style)),
@@ -536,6 +538,15 @@ pub(crate) fn diff_gutter_digits(snapshot: &DisplaySnapshot) -> u16 {
             .buffer_line_count()
             .max(snapshot.diff_map().map_or(0, DiffMap::base_lines)),
     )
+}
+
+/// The digit count `editor`'s diff gutters size for: the count its changes
+/// view stack shares, or [`diff_gutter_digits`] over its own snapshot.
+pub(crate) fn diff_gutter_digits_for(editor: &mut EditorState) -> u16 {
+    match editor.stack_gutter_digits {
+        Some(digits) => digits,
+        None => diff_gutter_digits(&editor.display_map.snapshot()),
+    }
 }
 
 /// One diff body's gutter shape and the narrowest rect it still splits in two.

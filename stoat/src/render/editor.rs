@@ -167,7 +167,7 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.diff_view {
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
-        let digits = review::diff_gutter_digits(&editor.display_map.snapshot());
+        let digits = review::diff_gutter_digits_for(editor);
         let rich = review::diff_gutter_is_rich(scene.is_some(), theme, fallback_style);
         fit_diff_view(editor, inner, wrap, wrap_column, digits, rich);
         view::apply_held_screen_row(editor);

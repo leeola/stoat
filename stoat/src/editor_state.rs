@@ -210,6 +210,10 @@ pub(crate) struct EditorState {
     /// shifted by. Transient render state written by `render_editor`, not
     /// persisted.
     pub(crate) gutter_width: u16,
+    /// The gutter digit count the changes view stack this editor is an excerpt
+    /// of shares, so the text column lines up down the stack. `None` for an
+    /// editor that sizes its diff gutter from its own buffer.
+    pub(crate) stack_gutter_digits: Option<u16>,
     /// Screen rect of the right-edge minimap strip the last render reserved,
     /// so pointer handlers can map a click inside it back to a buffer line.
     ///
@@ -293,6 +297,7 @@ impl EditorState {
             diagnostic_span_cache: None,
             diagnostic_paint_scratch: Default::default(),
             gutter_width: 0,
+            stack_gutter_digits: None,
             minimap_rect: None,
             text_rect: None,
             cursor_screen_cell: None,
