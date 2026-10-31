@@ -23,6 +23,7 @@ use crate::{
     minimap::emit::minimap_view_window,
     pane::{FocusTarget, PaneId, Placement, View},
     render::{
+        diff_changes::PagePaint,
         hover::HoverFrame,
         review::DiffDials,
         undercurl::UndercurlBatch,
@@ -138,14 +139,34 @@ pub(crate) struct WindowPage {
 ///
 /// The focused excerpt's selections stay out of the page version, so a step
 /// of a selection refills no page. The step paints the pages it touches again,
-/// and a row compare against the held page finds the rows that changed. Under
-/// relative numbering the stamp carries the cursor line too, so a step to
-/// another line repaints the page and its numbers.
+/// and a row compare against the held page finds the rows that changed.
+///
+/// Under relative numbering the stamp carries the cursor line too. A gutter
+/// that numbers its rows in cells repaints the page on a step to another line.
+/// A gutter that lays its numbers as runs paints them alone, and the held
+/// cells stay.
 pub(crate) struct HeldStackPage {
     /// The page stoatty holds.
     page: Buffer,
-    /// The selections the page shows, as [`painted_selection`] stamps them.
-    selection: Option<u64>,
+    /// The selections and the number line the page shows, as
+    /// [`painted_selection`] stamps them.
+    selection: PaintedSelection,
+}
+
+/// The focused excerpt's selections and number line, as a page of a changes
+/// view's pool paints them.
+///
+/// The terminal keeps a page's cells and replaces its decorations as one set.
+/// A move of `cells` therefore repaints the page and patches its rows, while a
+/// move of `cursor_line` alone sends new decorations over the cells it keeps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PaintedSelection {
+    /// A stamp of what the focused excerpt paints into the cells, or `None`
+    /// where it paints no cell.
+    cells: Option<u64>,
+    /// The focused excerpt and the 1-based line its relative numbers count
+    /// from, where the gutter lays its numbers as runs.
+    cursor_line: Option<(usize, u32)>,
 }
 
 /// The surface whose pages a pane pool holds.
@@ -1392,6 +1413,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     if !stack_panes.is_empty() {
         let focused_index = matches!(ws.focus, FocusTarget::SplitPane)
             .then(|| ws.panes.pane(ws.panes.focus()).index);
+        // A page's diff gutter lays its numbers as runs when the diff colors
+        // resolve, so a terminal that reads decorations-only fills takes a
+        // move of the line relative numbers count from as new runs alone.
+        let split_gutter = decorate_pages && diff_rich;
         let no_pairs = std::collections::HashMap::new();
         // The fields the stack paint reads take the live frame's values, so a
         // page shows what the live paint shows on its rows. A page holds no
@@ -1466,7 +1491,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 theme_epoch,
                 paint_generation,
             );
-            let selection = painted_selection(state, &ws.editors, is_focused, frame);
+            let selection = painted_selection(state, &ws.editors, is_focused, frame, split_gutter);
 
             let state = &*state;
             let editors = &mut ws.editors;
@@ -1493,6 +1518,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         frame,
                         region,
                         index,
+                        PagePaint::Cells,
                     );
                     let mut bytes = crate::render::serialize_buffer(&page);
                     bytes.extend_from_slice(scene.bytes());
@@ -1502,8 +1528,9 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             );
 
             // A selection that changed paints again the pages the composite
-            // reads and the page its cursor left, and sends the rows that
-            // differ from what the terminal holds.
+            // reads and the page its cursor left. A move of what paints cells
+            // sends the rows that differ from what the terminal holds. A move
+            // of the number line alone paints the decorations and nothing else.
             let relative = frame.line_numbers == LineNumbers::Relative && frame.mode != "insert";
             let cursor_row = diff_changes::cursor_stack_row(state, &mut ws.editors);
             let left = state
@@ -1516,9 +1543,14 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 let Some(held) = stoat.diff_changes_pages.get_mut(&(region.pool, index)) else {
                     continue;
                 };
-                if held.selection == selection {
-                    continue;
-                }
+                let paint = match (
+                    held.selection.cells == selection.cells,
+                    held.selection.cursor_line == selection.cursor_line,
+                ) {
+                    (true, true) => continue,
+                    (true, false) => PagePaint::DecorationsOnly,
+                    (false, _) => PagePaint::Cells,
+                };
                 let (page, scene) = paint_pool_page(
                     state,
                     &mut ws.editors,
@@ -1528,12 +1560,21 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     frame,
                     region,
                     index,
+                    paint,
                 );
-                stack_patches.extend(row_patches(region.pool, index, &held.page, &page));
+                if paint == PagePaint::Cells {
+                    stack_patches.extend(row_patches(region.pool, index, &held.page, &page));
+                }
                 // The terminal replaces a page's decorations as one set and
                 // keeps its cells, so the gutter runs that count from the
-                // cursor line ride beside the row patches.
-                if relative && decorate_pages && !scene.bytes().is_empty() {
+                // cursor line ride beside the row patches. A decorations-only
+                // paint sends them on every move of the line. A step out of
+                // relative numbering is such a move too.
+                let redecorate = match paint {
+                    PagePaint::Cells => relative && decorate_pages,
+                    PagePaint::DecorationsOnly => true,
+                };
+                if redecorate && !scene.bytes().is_empty() {
                     let mut batch = Vec::with_capacity(scene.bytes().len() + 32);
                     stoatty_protocol::command::encode_fill_decorations_scope(
                         &mut batch,
@@ -1543,7 +1584,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                     );
                     stack_patches.push(batch);
                 }
-                *held = HeldStackPage { page, selection };
+                if paint == PagePaint::Cells {
+                    held.page = page;
+                }
+                held.selection = selection;
             }
 
             let anchored = state
@@ -3347,56 +3391,69 @@ fn stack_page_version(
     hasher.finish()
 }
 
-/// The focused excerpt's selections as a page of a changes view's pool paints
-/// them, or `None` where they paint no cell.
+/// The focused excerpt's selections and number line as a page of a changes
+/// view's pool paints them.
 ///
-/// An unfocused pane paints none. Neither does a focused one whose one
-/// selection is a bare cursor that the terminal draws, while no goto label
-/// shows. Otherwise the stamp moves with the focused excerpt, its selections,
-/// whether the terminal draws its cursor, and the labels.
+/// An unfocused pane paints no selection into the cells. Neither does a
+/// focused one whose one selection is a bare cursor that the terminal draws,
+/// while no goto label shows. Otherwise the cells stamp moves with the focused
+/// excerpt, its selections, whether the terminal draws its cursor, and the
+/// labels.
 ///
 /// Under relative numbering every numbered row of the focused excerpt counts
-/// from the cursor's line, so the stamp also carries that line, even for a
-/// cursor that paints no cell. The selections of such a cursor stay out of the
-/// stamp, so a move along its line repaints no page.
+/// from the cursor's line, even for a cursor that paints no cell. With
+/// `split_gutter` the gutter lays its numbers as runs, so the line goes to
+/// `cursor_line`. Otherwise the numbers are cells, and the line folds into the
+/// cells stamp. The selections of a bare cursor stay out of both, so a move
+/// along its line repaints no page.
 fn painted_selection(
     state: &DiffChangesState,
     editors: &SlotMap<EditorId, EditorState>,
     is_focused: bool,
     frame: crate::render::FrameCtx<'_>,
-) -> Option<u64> {
-    if !is_focused {
-        return None;
-    }
-    let excerpt = state.focused_excerpt()?;
-    let editor = editors.get(excerpt.editor_id)?;
+    split_gutter: bool,
+) -> PaintedSelection {
+    let Some(excerpt) = state.focused_excerpt().filter(|_| is_focused) else {
+        return PaintedSelection::default();
+    };
+    let Some(editor) = editors.get(excerpt.editor_id) else {
+        return PaintedSelection::default();
+    };
     let delegated = frame.terminal_cursor_editor == Some(excerpt.editor_id);
     let paints_cells = !(delegated
         && frame.goto_word_labels.is_none()
         && crate::render::pane_cache::bare_cursor(editor));
     let relative = frame.line_numbers == LineNumbers::Relative && frame.mode != "insert";
-    if !paints_cells && !relative {
-        return None;
-    }
+    let line = relative
+        .then(|| crate::render::editor::editor_cursor_position(editor).map(|(line, _)| line))
+        .flatten();
+    let numbers_in_cells = line.is_some() && !split_gutter;
 
-    let mut hasher = DefaultHasher::new();
-    (state.focused, delegated, frame.goto_word_labels).hash(&mut hasher);
-    if paints_cells {
-        editor.selections.identity().hash(&mut hasher);
+    let cells = (paints_cells || numbers_in_cells).then(|| {
+        let mut hasher = DefaultHasher::new();
+        (state.focused, delegated, frame.goto_word_labels).hash(&mut hasher);
+        if paints_cells {
+            editor.selections.identity().hash(&mut hasher);
+        }
+        if numbers_in_cells {
+            line.hash(&mut hasher);
+        }
+        hasher.finish()
+    });
+    PaintedSelection {
+        cells,
+        cursor_line: line
+            .filter(|_| split_gutter)
+            .map(|line| (state.focused, line)),
     }
-    if relative {
-        crate::render::editor::editor_cursor_position(editor)
-            .map(|(line, _)| line)
-            .hash(&mut hasher);
-    }
-    Some(hasher.finish())
 }
 
 /// Paint page `index` of a changes view's pool, and answer its cells and the
 /// scene of the decorations the terminal keeps on the page.
 ///
 /// The page shows what the live paint shows on the same rows, with the fade of
-/// an unfocused pane.
+/// an unfocused pane. Under [`PagePaint::DecorationsOnly`] the cells come back
+/// without text, and only the scene is meant for the terminal.
 #[allow(clippy::too_many_arguments)]
 fn paint_pool_page(
     state: &DiffChangesState,
@@ -3407,6 +3464,7 @@ fn paint_pool_page(
     frame: crate::render::FrameCtx<'_>,
     region: PoolRegionCommand,
     index: u64,
+    paint: PagePaint,
 ) -> (Buffer, ApcScene) {
     let area = Rect::new(0, 0, region.width, region.height);
     let mut page = crate::smooth_scroll::page_buffer(area, frame.theme);
@@ -3422,6 +3480,7 @@ fn paint_pool_page(
         &mut page,
         &mut scene,
         crate::smooth_scroll::page_top_row(index, region.height) as usize,
+        paint,
     );
     crate::render::pane::dim_unfocused_pane(area, is_focused, frame, &mut page);
     (page, scene)

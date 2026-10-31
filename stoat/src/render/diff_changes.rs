@@ -24,6 +24,21 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use slotmap::SlotMap;
 use stoat_widgets::ApcScene;
 
+/// How much of a page of the changes view's pool a paint covers.
+///
+/// The terminal keeps a page's cells and replaces its decorations as one set.
+/// A step that moves only what the decorations show, such as the line that
+/// relative numbers count from, sends new decorations over the cells the
+/// terminal keeps, so its paint skips the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PagePaint {
+    /// The rows' cells and the decorations over them.
+    Cells,
+    /// The decorations alone, for a page whose cells the terminal keeps. The
+    /// paint writes no text into the cells.
+    DecorationsOnly,
+}
+
 /// What a paint records on an excerpt's editor about where it laid the
 /// excerpt out.
 ///
@@ -180,8 +195,18 @@ pub(crate) fn render_diff_changes(
     let mut covered = stack_composited(pane, frame).then(ApcScene::new);
     let scene = covered.as_mut().unwrap_or(scene);
     paint_stack_rows(
-        state, editors, buffers, is_focused, text_style, undercurls, frame, buf, scene, first_row,
+        state,
+        editors,
+        buffers,
+        is_focused,
+        text_style,
+        undercurls,
+        frame,
+        buf,
+        scene,
+        first_row,
         inner,
+        PagePaint::Cells,
     );
 }
 
@@ -207,6 +232,9 @@ pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
 /// lower rows. A painted excerpt's editor records where this paint laid it
 /// out: its scroll row, its viewport, its text rect, and the cell of its
 /// cursor.
+///
+/// Under [`PagePaint::DecorationsOnly`] the rows paint no header and no text,
+/// and the excerpts' diff gutters fill `scene` alone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_rows(
     state: &DiffChangesState,
@@ -220,6 +248,7 @@ pub(crate) fn paint_stack_rows(
     scene: &mut ApcScene,
     first_row: usize,
     area: Rect,
+    paint: PagePaint,
 ) {
     let header_style = frame.theme.get(scope::VCS_COMMIT_SHA);
     let (scroll, rows_on_screen) = (first_row, usize::from(area.height));
@@ -229,7 +258,7 @@ pub(crate) fn paint_stack_rows(
         if top + 1 + rows <= scroll || top >= scroll + rows_on_screen {
             continue;
         }
-        if top >= scroll {
+        if top >= scroll && paint == PagePaint::Cells {
             let y = area.y + (top - scroll) as u16;
             let end_x = area.x + area.width;
             let width = text_width(&excerpt.rel_path).min(usize::from(area.width)) as u16;
@@ -287,6 +316,7 @@ pub(crate) fn paint_stack_rows(
             frame.wrap_column,
             frame.scrolloff,
             frame.reload_flashes,
+            paint == PagePaint::DecorationsOnly,
         );
         editor.viewport_rows = Some(rows as u32);
     }
@@ -299,6 +329,9 @@ pub(crate) fn paint_stack_rows(
 /// matches, and diagnostics. Each excerpt's editor keeps the layout the live
 /// paint recorded, so a page painted after the live frame leaves the terminal
 /// cursor and pointer hits on the live rows.
+///
+/// `paint` names whether the page's cells paint too, as [`PagePaint`]
+/// describes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_page(
     state: &DiffChangesState,
@@ -311,6 +344,7 @@ pub(crate) fn paint_stack_page(
     page: &mut Buffer,
     scene: &mut ApcScene,
     first_row: usize,
+    paint: PagePaint,
 ) {
     let live: Vec<(EditorId, PaintLayout)> = state
         .excerpts
@@ -323,7 +357,7 @@ pub(crate) fn paint_stack_page(
     let area = page.area;
     paint_stack_rows(
         state, editors, buffers, is_focused, text_style, undercurls, frame, page, scene, first_row,
-        area,
+        area, paint,
     );
     for (editor_id, layout) in live {
         if let Some(editor) = editors.get_mut(editor_id) {
@@ -401,7 +435,7 @@ pub(crate) fn replay_cursor(
 
 #[cfg(test)]
 mod tests {
-    use super::{paint_stack_page, paint_stack_rows};
+    use super::{paint_stack_page, paint_stack_rows, PagePaint};
     use crate::{
         action_handlers, apc_emit,
         app::Stoat,
@@ -832,6 +866,7 @@ mod tests {
                 scene,
                 2,
                 area,
+                PagePaint::Cells,
             );
             run
         });
@@ -930,6 +965,7 @@ mod tests {
                 &mut page,
                 scene,
                 2,
+                PagePaint::Cells,
             );
             cells(&page, 0, 120, 2)
         });
@@ -938,6 +974,56 @@ mod tests {
             (live[0].2.is_some(), header.as_str(), layouts(&mut h)),
             (true, "b.txt", live.clone()),
             "the live cursor cell, the page's header row, and every layout field",
+        );
+    }
+
+    /// A decorations-only page paint lays the scene that a full paint of the
+    /// page lays, and writes no cell. The numbers and bars of both columns
+    /// therefore survive a refill that sends the decorations alone. The files
+    /// give the page paired, mirrored, and block rows.
+    #[test]
+    fn a_decorations_only_page_lays_the_full_scene_and_no_cell() {
+        let mut h = changes_view(
+            120,
+            24,
+            &[
+                ("a.txt", "a\nx\n", "A\nx\n"),
+                ("b.txt", "b\nd\ne\n", "b\ne\n"),
+            ],
+        );
+        h.stoat.render();
+        let mut paint = |paint: PagePaint| {
+            paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+                let mut page = Buffer::empty(Rect::new(0, 0, 120, 12));
+                let text_style = frame.theme.get(scope::UI_TEXT);
+                paint_stack_page(
+                    state,
+                    editors,
+                    buffers,
+                    true,
+                    text_style,
+                    &mut UndercurlBatch::default(),
+                    frame,
+                    &mut page,
+                    scene,
+                    0,
+                    paint,
+                );
+                (page, scene.bytes().to_vec())
+            })
+        };
+        let (full_page, full_scene) = paint(PagePaint::Cells);
+        let (page, scene) = paint(PagePaint::DecorationsOnly);
+
+        assert_eq!(
+            (
+                full_scene.is_empty(),
+                scene == full_scene,
+                page == Buffer::empty(page.area),
+                page == full_page,
+            ),
+            (false, true, true, false),
+            "an empty full scene, equal scenes, a blank page, and a page like the full one",
         );
     }
 

@@ -130,6 +130,7 @@ pub(crate) fn render_editor(
         80,
         0,
         &[],
+        false,
     );
 }
 
@@ -142,6 +143,10 @@ pub(crate) fn render_editor(
 ///
 /// The editor washes its buffer's entries of `reload_flashes` over the text
 /// they changed, focused or not, under its selections and its cursor.
+///
+/// With `decorations_only` a diff view paints its rich gutter into `scene`
+/// alone, for a page whose cells the terminal keeps. The other views ignore
+/// the flag.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -166,6 +171,7 @@ pub(crate) fn render_editor_with_overlay(
     wrap_column: u32,
     scrolloff: u32,
     reload_flashes: &[ReloadFlash],
+    decorations_only: bool,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -197,6 +203,7 @@ pub(crate) fn render_editor_with_overlay(
             dials,
             current_line,
             reload_flashes,
+            decorations_only,
         );
         return;
     }
@@ -3166,6 +3173,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
 
         let italic: String = (0..area.width)
@@ -3243,6 +3251,7 @@ mod tests {
                 80,
                 0,
                 &[],
+                false,
             );
             (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
         }
@@ -3338,6 +3347,7 @@ mod tests {
                 80,
                 0,
                 &[],
+                false,
             );
             buf
         }
@@ -3745,6 +3755,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
@@ -3861,6 +3872,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
 
         let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
@@ -3902,6 +3914,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
 
         assert!(
@@ -4040,6 +4053,7 @@ mod tests {
             wrap_column,
             0,
             &[],
+            false,
         );
         let snapshot = editor.display_map.snapshot();
         (
@@ -4213,6 +4227,7 @@ mod tests {
                 80,
                 0,
                 &[],
+                false,
             );
         }
 
@@ -4260,6 +4275,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         editor
             .gutter_geometry_cache
@@ -4423,6 +4439,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         editor
             .gutter_geometry_cache
@@ -4505,6 +4522,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         String::from_utf8_lossy(scene.bytes()).into_owned()
     }
@@ -4660,6 +4678,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         buf
     }
@@ -4702,6 +4721,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         let rect = editor.minimap_rect;
         let strip = (0..rows)
@@ -4846,6 +4866,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         let tree_x = editor.gutter_width - 2;
         (0..rows)
@@ -5319,6 +5340,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
 
         // Row 1 is the line the trailing newline opens, and the gutter takes
@@ -5381,6 +5403,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
 
         assert!(

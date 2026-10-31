@@ -204,6 +204,7 @@ pub(crate) fn render_page_decorations(
             gutter.current_line,
             None,
             None,
+            false,
         );
         let mut frame = Vec::with_capacity(scene.bytes().len() + 32);
         encode_fill_decorations_scope(&mut frame, pool, index, |out| {
@@ -294,6 +295,7 @@ pub(crate) fn render_page_from_snapshot(
             gutter.current_line,
             None,
             None,
+            false,
         );
         dim_page(&mut buf, area, gutter.theme(), dim);
         let mut bytes = serialize_buffer(&buf);
@@ -1043,6 +1045,7 @@ mod tests {
                 80,
                 0,
                 &[],
+                false,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
@@ -1126,6 +1129,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         let expected = serialize_buffer(&expected);
 
@@ -1219,6 +1223,7 @@ mod tests {
             80,
             0,
             &[],
+            false,
         );
         let expected = serialize_buffer(&expected);
 
@@ -1467,6 +1472,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
         let expected = serialize_buffer(&expected);
 

@@ -135,6 +135,7 @@ pub(crate) fn render_pane(
                     frame.wrap_column,
                     frame.scrolloff,
                     frame.reload_flashes,
+                    false,
                 );
 
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)

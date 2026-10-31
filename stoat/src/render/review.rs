@@ -195,6 +195,9 @@ impl DiffDials {
 ///
 /// Focused or not, the right column washes the buffer's entries of
 /// `reload_flashes` over the text they changed, under the selections.
+///
+/// With `decorations_only` the paint fills `scene` with the rich gutter alone,
+/// as [`paint_diff_rows`] describes, and paints no flash, selection, or label.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_diff_view(
     editor: &mut EditorState,
@@ -209,6 +212,7 @@ pub(crate) fn render_diff_view(
     dials: DiffDials,
     current_line: Option<u32>,
     reload_flashes: &[ReloadFlash],
+    decorations_only: bool,
 ) {
     let stoatty = scene.is_some();
     // The base rows pair with the live ones only where there are two columns to
@@ -245,7 +249,11 @@ pub(crate) fn render_diff_view(
         current_line,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
+        decorations_only,
     );
+    if decorations_only {
+        return;
+    }
 
     let end_row = (editor.scroll_row + inner.height as u32).min(snapshot.line_count());
     let text = editor.text_rect.expect("set above");
@@ -801,6 +809,11 @@ fn divider_x(inner: Rect) -> u16 {
 /// `endpoint_cache` and `row_cache` are the editor's, when this paint has one
 /// behind it. A pooled page has no editor at all and passes `None` for both,
 /// resolving its endpoints and row state fresh.
+///
+/// With `decorations_only`, the paint puts the rich gutter's numbers, status
+/// bars, and rules into `scene` and paints no text, for a page whose cells the
+/// terminal keeps. It resolves no highlight endpoints then. An ASCII gutter
+/// numbers its rows in cells, so the flag holds no meaning without a rich one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_diff_rows(
     snapshot: &DisplaySnapshot,
@@ -816,6 +829,7 @@ pub(crate) fn paint_diff_rows(
     current_line: Option<u32>,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
+    decorations_only: bool,
 ) {
     let total_rows = snapshot.line_count();
     let visible = inner.height as u32;
@@ -883,14 +897,16 @@ pub(crate) fn paint_diff_rows(
         .map(|dm| dm.moved_away_seams().collect())
         .unwrap_or_default();
     let mut seam_cursor = 0;
-    let row_endpoints = match endpoint_cache {
-        Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
-        None => snapshot.highlighted_endpoints(scroll_row..end_row),
-    };
     // One replay for the loop. The rows below ascend, and each opens its own
     // stream because the paint puts a gutter, a number and a status glyph
     // between them, so without this each row re-walks the endpoints above it.
-    let mut row_cursor = snapshot.row_highlight_cursor(row_endpoints);
+    let mut row_cursor = (!decorations_only).then(|| {
+        let row_endpoints = match endpoint_cache {
+            Some(cache) => snapshot.highlighted_endpoints_cached(scroll_row..end_row, cache),
+            None => snapshot.highlighted_endpoints(scroll_row..end_row),
+        };
+        snapshot.row_highlight_cursor(row_endpoints)
+    });
     let mut local_row_cache = None;
     let row_states = diff_row_states(
         snapshot,
@@ -965,6 +981,7 @@ pub(crate) fn paint_diff_rows(
                     (del_style, dim_style, fallback_style, moved_style),
                     theme,
                     dials,
+                    decorations_only,
                 );
                 // The unified layout paints this row's bars in its one status
                 // column already, so only the two-column layout has a gap.
@@ -1032,28 +1049,31 @@ pub(crate) fn paint_diff_rows(
                     true => fallback_style,
                     false => row_fallback,
                 };
-                paint_highlighted_row(
-                    snapshot,
-                    display_row,
-                    right_text_x,
-                    y,
-                    right_content_w,
-                    buf,
-                    row_fallback,
-                    gap_fallback,
-                    moved_style,
-                    inlay_style,
-                    changes,
-                    tints.as_ref(),
-                    soften_row,
-                    soften_gaps,
-                    dials,
-                    tint_row,
-                    &mut row_cursor,
-                );
+                if let Some(row_cursor) = row_cursor.as_mut() {
+                    paint_highlighted_row(
+                        snapshot,
+                        display_row,
+                        right_text_x,
+                        y,
+                        right_content_w,
+                        buf,
+                        row_fallback,
+                        gap_fallback,
+                        moved_style,
+                        inlay_style,
+                        changes,
+                        tints.as_ref(),
+                        soften_row,
+                        soften_gaps,
+                        dials,
+                        tint_row,
+                        row_cursor,
+                    );
+                }
                 // The chip follows the line's text, which a wrapped line ends
                 // on its last row.
-                if status == DiffStatus::Moved
+                if !decorations_only
+                    && status == DiffStatus::Moved
                     && last_row
                     && let Some((path, line)) =
                         move_chip_source(snapshot, buffer_row, &mut hunk_scratch)
@@ -1151,35 +1171,39 @@ pub(crate) fn paint_diff_rows(
                             );
                         }
                     }
-                    // An unchanged line reads the same on both sides, so the
-                    // live line's column at the window's start is the one the
-                    // base line's tabs in the window expand from.
-                    let column = match text[window.clone()].contains('\t') {
-                        true => snapshot.visual_column(Point::new(buffer_row, window.start as u32)),
-                        false => 0,
-                    };
-                    let token_spans = base_token_spans(snapshot, line_base);
-                    paint_base_segment(
-                        buf,
-                        left_text_x + indent as u16,
-                        y,
-                        text,
-                        window,
-                        column,
-                        left_content_w.saturating_sub(indent),
-                        snapshot.tab_snapshot().tab_size(),
-                        snapshot.tab_snapshot().max_expansion_column(),
-                        token_spans,
-                        dim_style,
-                        dim_style,
-                        dim_style,
-                        &[],
-                        tints.as_ref(),
-                        soften_row,
-                        None,
-                        dials,
-                        None,
-                    );
+                    if !decorations_only {
+                        // An unchanged line reads the same on both sides, so
+                        // the live line's column at the window's start is the
+                        // one the base line's tabs in the window expand from.
+                        let column = match text[window.clone()].contains('\t') {
+                            true => {
+                                snapshot.visual_column(Point::new(buffer_row, window.start as u32))
+                            },
+                            false => 0,
+                        };
+                        let token_spans = base_token_spans(snapshot, line_base);
+                        paint_base_segment(
+                            buf,
+                            left_text_x + indent as u16,
+                            y,
+                            text,
+                            window,
+                            column,
+                            left_content_w.saturating_sub(indent),
+                            snapshot.tab_snapshot().tab_size(),
+                            snapshot.tab_snapshot().max_expansion_column(),
+                            token_spans,
+                            dim_style,
+                            dim_style,
+                            dim_style,
+                            &[],
+                            tints.as_ref(),
+                            soften_row,
+                            None,
+                            dials,
+                            None,
+                        );
+                    }
                     if !continuation {
                         base_line += 1;
                     }
@@ -1220,6 +1244,7 @@ pub(crate) fn paint_diff_rows(
                         (del_style, dim_style, fallback_style, moved_style),
                         theme,
                         dials,
+                        decorations_only,
                     );
                     if !continuation {
                         base_line += 1;
@@ -1997,6 +2022,9 @@ impl<'a> BaseRow<'a> {
 /// `columns` is `(side, number, status, text, content width)` for the left
 /// side, `digits` the width of its number field, and `styles` is
 /// `(removed, dim, text, moved)`.
+///
+/// With `decorations_only` the row paints its number and its status alone, as
+/// [`paint_diff_rows`] paints a page whose cells the terminal keeps.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_side(
     snapshot: &DisplaySnapshot,
@@ -2014,6 +2042,7 @@ fn paint_base_side(
     styles: (Style, Style, Style, Style),
     theme: &crate::theme::Theme,
     dials: DiffDials,
+    decorations_only: bool,
 ) {
     let (side_x, num_x, status_x, text_x, content_w) = columns;
     let (del_style, dim_style, text_style, moved_style) = styles;
@@ -2032,64 +2061,66 @@ fn paint_base_side(
         );
     }
 
-    let token_spans = base_token_spans(snapshot, base_line);
     let changes = base_changes
         .get(&base_line)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
-    let removal = snapshot
-        .diff_map()
-        .and_then(|dm| dm.base_line_mark(base_line));
-    let refined = snapshot
-        .diff_map()
-        .is_some_and(|dm| dm.base_line_refined(base_line));
-    // A base line the change removed whole is gone from the working tree, so
-    // the row takes its status color entire. A refined line leaves that to its
-    // spans, because the chars outside them are unchanged text. Moved wins over
-    // deleted on the same test the gutter bar below uses, which keeps the two
-    // agreeing.
-    let moved = changes
-        .iter()
-        .any(|(_, k, _)| matches!(k, ChangeKind::Moved));
-    let tint_row = match (refined, moved) {
-        (true, _) => None,
-        (false, true) => tints.map(|t| t.moved),
-        (false, false) => tints.map(|t| t.deleted),
-    };
-    // The tree pass left this base line unmarked, so the row is context that
-    // re-indented or moved with its block. It takes the mirror arm's dim
-    // fallback and row soften.
-    let quiet = refined && changes.is_empty();
-    let gap_fallback = match (quiet, refined) {
-        (true, _) => dim_style,
-        (false, true) => text_style,
-        (false, false) => del_style,
-    };
-    paint_base_segment(
-        buf,
-        text_x + row.indent as u16,
-        y,
-        row.text,
-        row.window,
-        row.column,
-        content_w.saturating_sub(row.indent),
-        snapshot.tab_snapshot().tab_size(),
-        snapshot.tab_snapshot().max_expansion_column(),
-        token_spans,
-        del_style,
-        gap_fallback,
-        moved_style,
-        changes,
-        tints,
-        tints.filter(|_| quiet).map(|t| t.bg),
-        tints.map(|t| t.bg),
-        dials,
-        tint_row,
-    );
+    if !decorations_only {
+        let token_spans = base_token_spans(snapshot, base_line);
+        let refined = snapshot
+            .diff_map()
+            .is_some_and(|dm| dm.base_line_refined(base_line));
+        // A base line the change removed whole is gone from the working tree,
+        // so the row takes its status color entire. A refined line leaves that
+        // to its spans, because the chars outside them are unchanged text.
+        // Moved wins over deleted on the same test the gutter bar below uses,
+        // which keeps the two agreeing.
+        let moved = changes
+            .iter()
+            .any(|(_, k, _)| matches!(k, ChangeKind::Moved));
+        let tint_row = match (refined, moved) {
+            (true, _) => None,
+            (false, true) => tints.map(|t| t.moved),
+            (false, false) => tints.map(|t| t.deleted),
+        };
+        // The tree pass left this base line unmarked, so the row is context
+        // that re-indented or moved with its block. It takes the mirror arm's
+        // dim fallback and row soften.
+        let quiet = refined && changes.is_empty();
+        let gap_fallback = match (quiet, refined) {
+            (true, _) => dim_style,
+            (false, true) => text_style,
+            (false, false) => del_style,
+        };
+        paint_base_segment(
+            buf,
+            text_x + row.indent as u16,
+            y,
+            row.text,
+            row.window,
+            row.column,
+            content_w.saturating_sub(row.indent),
+            snapshot.tab_snapshot().tab_size(),
+            snapshot.tab_snapshot().max_expansion_column(),
+            token_spans,
+            del_style,
+            gap_fallback,
+            moved_style,
+            changes,
+            tints,
+            tints.filter(|_| quiet).map(|t| t.bg),
+            tints.map(|t| t.bg),
+            dials,
+            tint_row,
+        );
+    }
 
     if !row.first {
         return;
     }
+    let removal = snapshot
+        .diff_map()
+        .and_then(|dm| dm.base_line_mark(base_line));
     // The row is there for the removal, so the removal's status wins over a
     // staged mark on the same base line.
     match removal {
@@ -3387,6 +3418,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let expected: Vec<(String, String)> = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21]
@@ -3418,6 +3450,7 @@ mod tests {
                 DiffDials::shipped(),
                 None,
                 &[],
+                false,
             );
             buf
         };
@@ -3478,6 +3511,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let cols = two_digit_columns(area);
@@ -3555,6 +3589,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let x = two_digit_columns(area).left_text_x;
@@ -3608,6 +3643,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let cols = two_digit_columns(area);
@@ -3648,6 +3684,7 @@ mod tests {
             DiffDials::shipped(),
             Some(5),
             &[],
+            false,
         );
 
         let expected: Vec<(String, String)> = (1..=10)
@@ -3892,6 +3929,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         // The right status column follows the right number field, with its change
@@ -3955,6 +3993,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, false));
@@ -4088,6 +4127,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, true));
@@ -4238,6 +4278,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let barred = |x: u16| {
@@ -4406,6 +4447,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         (
@@ -4467,6 +4509,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let text_x = two_digit_columns(area).left_text_x;
@@ -4509,6 +4552,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert!(
@@ -4591,6 +4635,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
         assert!(has(&ascii_buf, "▎"), "the ASCII path paints status glyphs");
         assert!(has(&ascii_buf, "│"), "the ASCII path paints separators");
@@ -4635,6 +4680,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         // Width 120 is wide enough for the two-column layout, with the left text
@@ -4707,6 +4753,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let left_of = |right: &str| {
@@ -4748,6 +4795,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let left = |y| line_text(&buf, y, left_text(&cols));
@@ -4816,6 +4864,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let left = |y| line_text(&buf, y, left_text(&cols));
@@ -4865,6 +4914,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         // The gutter/code separator is painted at col 6, past the blank mark
@@ -4984,6 +5034,7 @@ mod tests {
             },
             None,
             &[],
+            false,
         );
         buf
     }
@@ -5414,6 +5465,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert_eq!(
@@ -5447,6 +5499,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert_eq!(
@@ -5478,6 +5531,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
         assert_eq!(
             editor.cursor_screen_cell,
@@ -5506,6 +5560,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert!(
@@ -5939,6 +5994,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert_eq!(
@@ -5975,6 +6031,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let column = |cols: std::ops::Range<u16>| {
@@ -6283,6 +6340,7 @@ mod tests {
             dials,
             None,
             &[],
+            false,
         );
         row_cells_with(&buf, &wide_columns(), "beta", modifier)
     }
@@ -6560,6 +6618,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert_eq!(
@@ -6621,6 +6680,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         // At this sub-threshold width the diff is unified, so the moved buffer
@@ -6745,6 +6805,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let row = buffer_text(&buf, 1);
@@ -6779,6 +6840,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         let row = buffer_text(&buf, 1);
@@ -6816,6 +6878,7 @@ mod tests {
             DiffDials::shipped(),
             None,
             &[],
+            false,
         );
 
         assert_eq!(
@@ -7418,6 +7481,7 @@ mod tests {
             },
             None,
             &[],
+            false,
         );
 
         let rx = editor
@@ -7453,6 +7517,7 @@ mod tests {
             },
             None,
             &[],
+            false,
         );
 
         let lx = two_digit_columns(area).left_text_x;
@@ -7499,6 +7564,7 @@ mod tests {
             },
             None,
             &[],
+            false,
         );
 
         let row = (0..area.height)
@@ -7556,6 +7622,7 @@ mod tests {
             },
             None,
             &[],
+            false,
         );
 
         let row = (0..area.height)

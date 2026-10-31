@@ -3242,6 +3242,25 @@ fn rgb_diff_gutter_theme() -> crate::theme::Theme {
         .expect("rgb theme builds")
 }
 
+/// [`rgb_diff_gutter_theme`] with a selection color, so a selection washes the
+/// cells it covers past its cursor's character.
+fn rgb_selecting_gutter_theme() -> crate::theme::Theme {
+    let src = r##"theme rgbselgutter {
+            diff.context.fg = "#808080";
+            diff.added.fg = "#00ff00";
+            diff.modified.fg = "#ffff00";
+            diff.deleted.fg = "#ff0000";
+            diff.moved.fg = "#0000ff";
+            diff.staged.fg = "#00ffff";
+            diff.unstaged.fg = "#ff00ff";
+            ui.background.bg = "#282c34";
+            ui.selection.bg = "#3e4451";
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbselgutter")
+        .expect("rgb theme builds")
+}
+
 /// A page of an unfocused changes view holds the cells that the live paint
 /// shows on its rows, fade included, and the gutter runs that the live scene
 /// lays over them.
@@ -3503,6 +3522,69 @@ fn a_cursor_step_under_relative_numbering_redecorates_a_rich_stack_page() {
         ),
         (vec!["1", "1", "2", "2", "1", "3"], 0),
         "the cursor on line 2: (buffer, base) per row is (1, 1), (2, 2), (1, 3)",
+    );
+}
+
+/// The cells of each page of `pool` that the changes view holds, by index.
+fn held_stack_cells(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<(u64, Buffer)> {
+    let mut pages: Vec<(u64, Buffer)> = h
+        .stoat
+        .diff_changes_pages
+        .iter()
+        .filter(|((page_pool, _), _)| *page_pool == pool)
+        .map(|((_, index), held)| (*index, held.page.clone()))
+        .collect();
+    pages.sort_by_key(|(index, _)| *index);
+    pages
+}
+
+/// A bare cursor's step to another line under relative numbering moves only
+/// the runs of a rich stack gutter. Both composited pages take new
+/// decorations, no row patch goes out, and the held cells stay.
+#[test]
+fn a_bare_cursor_step_redecorates_rich_stack_pages_and_keeps_their_cells() {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    let (mut h, mut rx, pool) = relative_stack(30, rgb_diff_gutter_theme());
+    let held = held_stack_cells(&h, pool);
+    h.type_keys("j");
+    h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let redecorated: Vec<u64> = command::decode_stream(&bytes)
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::FillDecorations(FillCommand { pool: p, index, .. }) if p == pool => {
+                Some(index)
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (
+            redecorated,
+            pool_patches_by_page(&bytes, pool),
+            held_stack_cells(&h, pool) == held,
+        ),
+        (vec![0, 1], vec![], true),
+        "the redecorated pages, the patched pages, and whether the held cells stayed",
+    );
+}
+
+/// A selection that grows past its cursor's character on the cursor's line
+/// paints cells under relative numbering too, so the rich stack page that
+/// holds it takes row patches. A selection one character wide paints none,
+/// since the terminal draws its cursor.
+#[test]
+fn a_selection_step_under_relative_numbering_patches_a_rich_stack_page() {
+    let (mut h, mut rx, pool) = relative_stack(30, rgb_selecting_gutter_theme());
+    h.type_keys("v l l");
+    h.stoat.render();
+    let bytes = emit_raw(&mut h, &mut rx);
+    assert_eq!(
+        pool_patches_by_page(&bytes, pool),
+        vec![0],
+        "the patched pages"
     );
 }
 
