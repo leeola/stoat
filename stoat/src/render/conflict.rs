@@ -271,7 +271,7 @@ fn paint_merge_side(
 ) {
     match side {
         Some(side) => {
-            render_side_num(buf, num_text, x, y, side.line_num, dim);
+            render_side_num(buf, num_text, x, y, side.line_num, dim, 4);
             render_side_text(
                 buf,
                 x + 5,

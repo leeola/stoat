@@ -15,7 +15,7 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         paint::{brighten_style, dim_rgb, style_rgb},
-        review::{render_diff_view, DiffColumns, DiffDials, DiffLayout, DIFF_TWO_COLUMN_MIN},
+        review::{self, render_diff_view, DiffColumns, DiffDials, DiffLayout, DIFF_TWO_COLUMN_MIN},
         undercurl::UndercurlBatch,
     },
     theme::Theme,
@@ -167,7 +167,9 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.diff_view {
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
-        fit_diff_view(editor, inner, wrap, wrap_column);
+        let digits = review::diff_gutter_digits(&editor.display_map.snapshot());
+        let rich = review::diff_gutter_is_rich(scene.is_some(), theme, fallback_style);
+        fit_diff_view(editor, inner, wrap, wrap_column, digits, rich);
         view::apply_held_screen_row(editor);
         view::clamp_scroll_to_display(editor, scrolloff);
         // The buffer column counts from the cursor line on the same condition
@@ -570,13 +572,17 @@ pub(crate) fn render_editor_with_overlay(
 /// Both columns wrap at the narrower one, so a mirrored segment always fits
 /// the side that shows it. A width that fits two columns pairs each modified
 /// line with the base line it replaced, on one row.
+///
+/// `digits` and `rich` size the gutters, as the paint that follows sizes them.
 pub(crate) fn fit_diff_view(
     editor: &mut EditorState,
     inner: Rect,
     wrap: WrapMode,
     wrap_column: u32,
+    digits: u16,
+    rich: bool,
 ) {
-    let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+    let cols = DiffColumns::compute(inner, DiffLayout::diff_view(digits, rich));
     let text_width = cols.left_content_w.min(cols.right_content_w) as u32;
     editor.display_map.set_wrap_width(wrap_width_for(
         editor.wrap_override.unwrap_or(wrap),
@@ -1569,7 +1575,7 @@ fn gutter_width_digits(snapshot: &DisplaySnapshot) -> u16 {
 /// `line_count` is a buffer fact, never wrap or block rows, which is what lets
 /// the paint size the gutter and resolve the wrap width before the display
 /// snapshot it is otherwise read from exists.
-fn gutter_digits(line_count: u32) -> u16 {
+pub(crate) fn gutter_digits(line_count: u32) -> u16 {
     decimal_digits(line_count).max(2)
 }
 
@@ -1579,7 +1585,7 @@ fn gutter_digits(line_count: u32) -> u16 {
 /// gutter instead reserves a mark column, the digits, and a gap. The result
 /// matches what [`draw_line_number_gutter`] paints for the same digit count, so
 /// the wrap width can be resolved before the wrapped snapshot exists.
-fn measure_gutter_width(width_digits: u16, rich: bool) -> u16 {
+pub(crate) fn measure_gutter_width(width_digits: u16, rich: bool) -> u16 {
     if rich {
         rich_gutter(&[], width_digits, [0; 3], [0; 3], [0; 3]).cell_width()
     } else {
@@ -2689,7 +2695,7 @@ mod tests {
     use crate::{
         action_handlers::{self, dispatch},
         diff_map::{DiffHunkStatus, DiffMap, MarkKind, MarkState, StagedMark},
-        render::review::{DiffColumns, DiffDials, DiffLayout},
+        render::review::{self, DiffColumns, DiffDials, DiffLayout},
         theme::scope as s,
         Stoat,
     };
@@ -4445,10 +4451,16 @@ mod tests {
     ) -> Vec<String> {
         let area = Rect::new(0, 0, 120, rows);
         let buf = render_without_scene(stoat, area, is_focused, insert_mode, LineNumbers::Relative);
-        let x = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).right_num_x;
+        let digits = review::diff_gutter_digits(
+            &action_handlers::focused_editor_mut(stoat)
+                .expect("focused editor")
+                .display_map
+                .snapshot(),
+        );
+        let x = DiffColumns::compute(area, DiffLayout::diff_view(digits, false)).right_num_x;
         (0..rows)
             .map(|y| {
-                (x..x + 4)
+                (x..x + digits)
                     .map(|x| buf[(x, y)].symbol())
                     .collect::<String>()
                     .trim()

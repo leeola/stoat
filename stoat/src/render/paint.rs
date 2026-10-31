@@ -111,7 +111,7 @@ pub(crate) fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
     style.fg(Color::Rgb(r, g, b))
 }
 
-/// Paint `num` right-aligned in the five-cell number field at `x`.
+/// Paint `num` right-aligned in `width` cells at `x`, then one blank cell.
 ///
 /// `scratch` holds the formatted field. Callers paint one number per row of a
 /// side, so they pass one buffer for the whole loop rather than letting each row
@@ -123,9 +123,10 @@ pub(crate) fn render_side_num(
     y: u16,
     num: u32,
     style: Style,
+    width: usize,
 ) {
     scratch.clear();
-    write!(scratch, "{num:>4} ").expect("writing to a String is infallible");
+    write!(scratch, "{num:>width$} ").expect("writing to a String is infallible");
     for (i, ch) in scratch.chars().enumerate() {
         let col = x + i as u16;
         if col >= buf.area.x + buf.area.width {

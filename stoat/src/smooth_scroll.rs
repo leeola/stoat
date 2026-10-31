@@ -35,7 +35,7 @@ use crate::{
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
-        review::{paint_diff_rows, DiffDials},
+        review::{diff_gutter_digits, paint_diff_rows, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
         walkthrough::Spotlight,
@@ -193,6 +193,7 @@ pub(crate) fn render_page_decorations(
             snapshot,
             top_row,
             area,
+            diff_gutter_digits(snapshot),
             fallback_style,
             gutter.theme(),
             &mut page_buffer(area, gutter.theme()),
@@ -282,6 +283,7 @@ pub(crate) fn render_page_from_snapshot(
             snapshot,
             top_row,
             area,
+            diff_gutter_digits(snapshot),
             fallback_style,
             gutter.theme(),
             &mut buf,
@@ -1402,8 +1404,8 @@ mod tests {
     #[test]
     fn diff_view_page_paints_the_two_column_body() {
         use super::{
-            page_buffer, paint_diff_rows, render_page_from_snapshot, serialize_buffer, PageGutter,
-            Rect,
+            diff_gutter_digits, page_buffer, paint_diff_rows, render_page_from_snapshot,
+            serialize_buffer, PageGutter, Rect,
         };
         use crate::{
             buffer::{BufferId, TextBuffer},
@@ -1448,6 +1450,7 @@ mod tests {
             &snapshot,
             0,
             area,
+            diff_gutter_digits(&snapshot),
             fallback,
             &theme,
             &mut expected,

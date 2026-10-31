@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     app::Stoat,
-    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, MarkState, ProseChange},
+    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
         BlockPlacement, BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot,
@@ -179,9 +179,10 @@ impl DiffDials {
 /// the display map. A continuation row carries text alone, with no number, no
 /// status glyph, and no base line of its own.
 ///
-/// Lays its columns out per [`DiffLayout::DIFF_VIEW`]. When a `scene` is
-/// threaded (a stoatty terminal) the gutter paints with the rich sub-cell
-/// components, otherwise it falls back to the ASCII gutter.
+/// Lays its columns out per [`DiffLayout::diff_view`], sized for the larger of
+/// the two files' line counts. When a `scene` is threaded (a stoatty terminal)
+/// the gutter paints with the rich sub-cell components, otherwise it falls
+/// back to the ASCII gutter.
 ///
 /// A focused pane paints its selections, cursors, and goto-word labels over the
 /// right column, as a plain pane does through [`editor::paint_selections`] and
@@ -203,13 +204,6 @@ pub(crate) fn render_diff_view(
     current_line: Option<u32>,
 ) {
     let stoatty = scene.is_some();
-    let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
-    editor.text_rect = Some(Rect {
-        x: cols.right_text_x,
-        y: inner.y,
-        width: cols.right_content_w as u16,
-        height: inner.height,
-    });
     // The base rows pair with the live ones only where there are two columns to
     // pair across, so the width decides it, and it has to be settled before the
     // snapshot because it changes which blocks the display map splices.
@@ -217,10 +211,22 @@ pub(crate) fn render_diff_view(
         .display_map
         .set_pair_modified_hunks(inner.width >= DIFF_TWO_COLUMN_MIN);
     let snapshot = editor.display_map.snapshot();
+    let digits = diff_gutter_digits(&snapshot);
+    let cols = DiffColumns::compute(
+        inner,
+        DiffLayout::diff_view(digits, diff_gutter_is_rich(stoatty, theme, fallback_style)),
+    );
+    editor.text_rect = Some(Rect {
+        x: cols.right_text_x,
+        y: inner.y,
+        width: cols.right_content_w as u16,
+        height: inner.height,
+    });
     paint_diff_rows(
         &snapshot,
         editor.scroll_row,
         inner,
+        digits,
         fallback_style,
         theme,
         buf,
@@ -519,6 +525,19 @@ fn paired_with_base<'a>(
     })
 }
 
+/// The digit count a diff-view gutter sizes its number field for.
+///
+/// The plain gutter's rule over the larger of the buffer's line count and the
+/// base text's, since the left column numbers base lines, the right column
+/// numbers buffer lines, and one field width serves both.
+pub(crate) fn diff_gutter_digits(snapshot: &DisplaySnapshot) -> u16 {
+    editor::gutter_digits(
+        snapshot
+            .buffer_line_count()
+            .max(snapshot.diff_map().map_or(0, DiffMap::base_lines)),
+    )
+}
+
 /// One diff body's gutter shape and the narrowest rect it still splits in two.
 ///
 /// The two bodies that draw a diff want different gutters. The diff view reads
@@ -529,52 +548,95 @@ fn paired_with_base<'a>(
 /// back a column.
 ///
 /// A layout exists so both bodies resolve their columns through
-/// [`DiffColumns`]. Click mapping reads the same geometry the paint does (see
-/// [`right_text_x`]), so a second formula misplaces clicks with nothing
+/// [`DiffColumns`]. Click mapping reads the text rect the paint records from
+/// the same geometry, so a second formula misplaces clicks with nothing
 /// failing.
+///
+/// The cell offsets place the parts of a cell gutter. A rich gutter places its
+/// parts at its sixteenth offsets instead, and no rich paint reads its cell
+/// offsets.
 #[derive(Clone, Copy)]
 pub(crate) struct DiffLayout {
-    num_w: u16,
-    status_w: u16,
-    /// Width of the rule between the gutter and the text. Zero for a layout
-    /// that runs the text straight after the gutter.
-    sep_w: u16,
-    /// The status column precedes the line number rather than following it.
-    status_first: bool,
+    /// Cells one side's gutter spans, its rule included.
+    gutter_w: u16,
+    /// The number field's first cell, from the side's start.
+    num_off: u16,
+    /// The status column's first cell, from the side's start.
+    status_off: u16,
+    /// The rule cell between the gutter and the text, from the side's start.
+    /// Absent for a layout that runs the text straight after the gutter.
+    sep_off: Option<u16>,
+    /// Where a rich gutter places its parts, absent for a cell gutter.
+    rich: Option<RichGutterOffsets>,
     /// Inner width below which both sides alias onto one unified column. Zero
     /// for a layout that always splits.
     two_column_min: u16,
 }
 
+/// Where a rich diff gutter places its parts, in sixteenths from the side's
+/// first cell.
+///
+/// The plain editor's sub-cell gutter answers each offset for the same digit
+/// count, so a diff side and a plain pane put the number, the bars and the
+/// hairline at the same place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RichGutterOffsets {
+    /// Where a right-aligned line number ends.
+    number_right: u16,
+    /// The change-kind bar's left edge.
+    git_x: u16,
+    /// The staged-state bar's left edge.
+    staged_x: u16,
+    /// The separator hairline's left edge.
+    separator_x: u16,
+}
+
 impl DiffLayout {
-    /// The diff view's gutter: line number, change/staged status, then a rule.
-    pub(crate) const DIFF_VIEW: Self = Self {
-        num_w: 5,
-        status_w: 2,
-        sep_w: 1,
-        status_first: false,
-        two_column_min: DIFF_TWO_COLUMN_MIN,
-    };
+    /// The diff view's gutter for `digits`-wide numbers: line number,
+    /// change and staged status, then a rule, as wide as the plain editor's
+    /// gutter.
+    ///
+    /// A cell gutter leaves its first cell blank, where the plain gutter
+    /// draws its mark column, right-aligns the number in the next `digits`
+    /// cells, puts the two status glyphs after it, and draws the rule in the
+    /// plain gutter's gap cell. A `rich` gutter spans the sub-cell gutter's
+    /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) and
+    /// places its parts at that gutter's sixteenth offsets.
+    pub(crate) fn diff_view(digits: u16, rich: bool) -> Self {
+        let rich = rich.then(|| {
+            let gutter = editor::rich_gutter(&[], digits, [0; 3], [0; 3], [0; 3]);
+            let offsets = RichGutterOffsets {
+                number_right: gutter.number_right_edge(),
+                git_x: gutter.git_x(),
+                staged_x: gutter.staged_x(),
+                separator_x: gutter.separator_x(),
+            };
+            (gutter.cell_width(), offsets)
+        });
+        Self {
+            gutter_w: rich.map_or(digits + 4, |(width, _)| width),
+            num_off: 1,
+            status_off: digits + 1,
+            sep_off: Some(digits + 3),
+            rich: rich.map(|(_, offsets)| offsets),
+            two_column_min: DIFF_TWO_COLUMN_MIN,
+        }
+    }
 
     /// The review screen's and commit preview's gutter: a one-cell chunk-status
     /// glyph, then the line number, then the text.
     pub(crate) const REVIEW: Self = Self {
-        num_w: 5,
-        status_w: 1,
-        sep_w: 0,
-        status_first: true,
+        gutter_w: 6,
+        num_off: 1,
+        status_off: 0,
+        sep_off: None,
+        rich: None,
         two_column_min: 0,
     };
 
     /// Offsets of the number, status, and rule columns from a side's start.
     fn offsets(&self) -> (u16, u16, Option<u16>) {
-        let (num, status) = if self.status_first {
-            (self.status_w, 0)
-        } else {
-            (0, self.num_w)
-        };
-        let sep = (self.sep_w > 0).then_some(self.num_w + self.status_w);
-        (num, status, sep)
+        (self.num_off, self.status_off, self.sep_off)
     }
 }
 
@@ -587,6 +649,8 @@ impl DiffLayout {
 /// unified diff.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct DiffColumns {
+    /// The left side's first cell, where its gutter starts.
+    pub(crate) left_x: u16,
     pub(crate) left_num_x: u16,
     pub(crate) status_left_x: u16,
     /// Absolute x of the rule between the left gutter and its text, absent for
@@ -594,6 +658,8 @@ pub(crate) struct DiffColumns {
     pub(crate) left_sep_x: Option<u16>,
     pub(crate) left_text_x: u16,
     pub(crate) left_content_w: usize,
+    /// The right side's first cell, the left side's in the unified layout.
+    pub(crate) right_x: u16,
     pub(crate) right_num_x: u16,
     pub(crate) status_right_x: u16,
     pub(crate) right_sep_x: Option<u16>,
@@ -601,11 +667,14 @@ pub(crate) struct DiffColumns {
     pub(crate) right_content_w: usize,
     /// Absolute x of the mid-divider, absent in the unified layout.
     pub(crate) sep_x: Option<u16>,
+    /// Where a rich gutter places its parts on either side, absent for a cell
+    /// gutter.
+    pub(crate) rich: Option<RichGutterOffsets>,
 }
 
 impl DiffColumns {
     pub(crate) fn compute(inner: Rect, layout: DiffLayout) -> Self {
-        let gutter_w = (layout.num_w + layout.status_w + layout.sep_w) as usize;
+        let gutter_w = layout.gutter_w as usize;
         let (num_off, status_off, sep_off) = layout.offsets();
 
         if inner.width < layout.two_column_min {
@@ -615,40 +684,59 @@ impl DiffColumns {
             let text_x = inner.x + gutter_w as u16;
             let content_w = (inner.width as usize).saturating_sub(gutter_w);
             return Self {
+                left_x: inner.x,
                 left_num_x: num_x,
                 status_left_x: status_x,
                 left_sep_x: sep_x,
                 left_text_x: text_x,
                 left_content_w: content_w,
+                right_x: inner.x,
                 right_num_x: num_x,
                 status_right_x: status_x,
                 right_sep_x: sep_x,
                 right_text_x: text_x,
                 right_content_w: content_w,
                 sep_x: None,
+                rich: layout.rich,
             };
         }
 
         let full_w = inner.width as usize;
         let sep: usize = 1;
-        let half_w = (full_w.saturating_sub(sep)) / 2;
+        let divider = divider_x(inner);
+        let half_w = (divider - inner.x) as usize;
         let left_content_w = half_w.saturating_sub(gutter_w);
-        let right_start = inner.x + half_w as u16 + sep as u16;
+        let right_start = divider + sep as u16;
         let right_content_w = (full_w - half_w - sep).saturating_sub(gutter_w);
         Self {
+            left_x: inner.x,
             left_num_x: inner.x + num_off,
             status_left_x: inner.x + status_off,
             left_sep_x: sep_off.map(|off| inner.x + off),
             left_text_x: inner.x + gutter_w as u16,
             left_content_w,
+            right_x: right_start,
             right_num_x: right_start + num_off,
             status_right_x: right_start + status_off,
             right_sep_x: sep_off.map(|off| right_start + off),
             right_text_x: right_start + gutter_w as u16,
             right_content_w,
-            sep_x: Some(inner.x + half_w as u16),
+            sep_x: Some(divider),
+            rich: layout.rich,
         }
     }
+}
+
+/// The diff view's mid-divider column in `inner`, absent below
+/// [`DIFF_TWO_COLUMN_MIN`], where both sides share one column.
+pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
+    (inner.width >= DIFF_TWO_COLUMN_MIN).then(|| divider_x(inner))
+}
+
+/// The column that splits `inner` into two sides, the left one the narrower
+/// when the width is even.
+fn divider_x(inner: Rect) -> u16 {
+    inner.x + inner.width.saturating_sub(1) / 2
 }
 
 /// Paint the diff body for the rows visible from `scroll_row`.
@@ -675,6 +763,9 @@ impl DiffColumns {
 /// the buffer column from, as [`render_diff_view`] describes. `None` paints
 /// absolute numbers.
 ///
+/// `digits` sizes both gutters, as [`diff_gutter_digits`] answers it for the
+/// snapshot, so the columns match the ones a caller fit the wrap width to.
+///
 /// `endpoint_cache` and `row_cache` are the editor's, when this paint has one
 /// behind it. A pooled page has no editor at all and passes `None` for both,
 /// resolving its endpoints and row state fresh.
@@ -683,6 +774,7 @@ pub(crate) fn paint_diff_rows(
     snapshot: &DisplaySnapshot,
     scroll_row: u32,
     inner: Rect,
+    digits: u16,
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
@@ -708,24 +800,34 @@ pub(crate) fn paint_diff_rows(
     // threaded and every gutter color resolves to RGB, so the two paths never
     // mix within one frame. `dim` fades the bars toward the background for a
     // pooled unfocused page, matching the cell dimming.
-    let mut rich = scene.and_then(|scene| {
-        resolve_diff_rich_colors(theme, fallback_style, dim)
-            .map(|colors| DiffRichGutter { scene, colors })
+    let layout = DiffLayout::diff_view(
+        digits,
+        diff_gutter_is_rich(scene.is_some(), theme, fallback_style),
+    );
+    let mut rich = layout.rich.zip(scene).and_then(|(offsets, scene)| {
+        resolve_diff_rich_colors(theme, fallback_style, dim).map(|colors| DiffRichGutter {
+            scene,
+            colors,
+            offsets,
+        })
     });
 
     let DiffColumns {
+        left_x,
         left_num_x,
         status_left_x,
         left_sep_x,
         left_text_x,
         left_content_w,
+        right_x,
         right_num_x,
         status_right_x,
         right_sep_x,
         right_text_x,
         right_content_w,
         sep_x,
-    } = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+        rich: _,
+    } = DiffColumns::compute(inner, layout);
 
     let dim_style = theme.get(s::DIFF_CONTEXT);
     let del_style = theme.get(s::DIFF_DELETED);
@@ -815,7 +917,14 @@ pub(crate) fn paint_diff_rows(
                     buf,
                     &mut num_text,
                     inner,
-                    (left_num_x, status_left_x, left_text_x, left_content_w),
+                    (
+                        left_x,
+                        left_num_x,
+                        status_left_x,
+                        left_text_x,
+                        left_content_w,
+                    ),
+                    digits,
                     y,
                     line_base,
                     BaseRow::segment(snapshot, text, line_base, segment, &mut base_layout),
@@ -828,7 +937,7 @@ pub(crate) fn paint_diff_rows(
                 // The unified layout paints this row's bars in its one status
                 // column already, so only the two-column layout has a gap.
                 if row_state.removal_tick && sep_x.is_some() {
-                    draw_removal_tick(&mut rich, buf, inner, status_right_x, y, theme);
+                    draw_removal_tick(&mut rich, buf, inner, (right_x, status_right_x), y, theme);
                 }
                 if !continuation {
                     base_line += 1;
@@ -853,10 +962,11 @@ pub(crate) fn paint_diff_rows(
                         buf,
                         &mut num_text,
                         inner,
-                        right_num_x,
+                        (right_x, right_num_x),
                         y,
                         editor::gutter_display_number(buffer_row + 1, current_line),
                         dim_style,
+                        digits,
                     );
                 }
                 let changes = &row_state.change_spans;
@@ -940,7 +1050,7 @@ pub(crate) fn paint_diff_rows(
                         &mut rich,
                         buf,
                         inner,
-                        status_right_x,
+                        (right_x, status_right_x),
                         y,
                         change_scope,
                         state,
@@ -980,10 +1090,11 @@ pub(crate) fn paint_diff_rows(
                             buf,
                             &mut num_text,
                             inner,
-                            left_num_x,
+                            (left_x, left_num_x),
                             y,
                             line_base + 1,
                             dim_style,
+                            digits,
                         );
                         if let Some((status, state)) = snapshot
                             .diff_map()
@@ -993,7 +1104,7 @@ pub(crate) fn paint_diff_rows(
                                 &mut rich,
                                 buf,
                                 inner,
-                                status_left_x,
+                                (left_x, status_left_x),
                                 y,
                                 staged_mark_scope(status),
                                 state,
@@ -1055,7 +1166,14 @@ pub(crate) fn paint_diff_rows(
                         buf,
                         &mut num_text,
                         inner,
-                        (left_num_x, status_left_x, left_text_x, left_content_w),
+                        (
+                            left_x,
+                            left_num_x,
+                            status_left_x,
+                            left_text_x,
+                            left_content_w,
+                        ),
+                        digits,
                         y,
                         line_base,
                         BaseRow::segment(snapshot, text, line_base, line_row, &mut base_layout),
@@ -1073,14 +1191,18 @@ pub(crate) fn paint_diff_rows(
         }
     }
 
-    // One hairline separator per gutter spanning the visible rows, replacing the
-    // per-row glyph. Centered in its cell via the +8 sixteenths offset.
+    // One hairline per gutter spanning the visible rows, replacing the per-row
+    // glyph. A gutter's hairline sits at the rich gutter's separator offset,
+    // and the mid divider centers in its cell at +8 sixteenths.
     if let Some(rg) = rich.as_mut() {
         let height = (end_row - scroll_row) as u16 * 16;
-        for sep in [left_sep_x, right_sep_x, sep_x].into_iter().flatten() {
-            if sep < inner.x + inner.width {
+        let gutter_rules =
+            [left_x, right_x].map(|side| (side - inner.x) * 16 + rg.offsets.separator_x);
+        let divider = sep_x.map(|sep| (sep - inner.x) * 16 + 8);
+        for x in gutter_rules.into_iter().chain(divider) {
+            if x / 16 < inner.width {
                 Bar {
-                    x: ((sep - inner.x) * 16 + 8) as i16,
+                    x: x as i16,
                     y: 0,
                     width: 1,
                     height,
@@ -1826,8 +1948,9 @@ impl<'a> BaseRow<'a> {
 /// paint the left column identically and differ only in where the text comes
 /// from.
 ///
-/// `columns` is `(number, status, text, content width)` for the left side, and
-/// `styles` is `(removed, dim, text, moved)`.
+/// `columns` is `(side, number, status, text, content width)` for the left
+/// side, `digits` the width of its number field, and `styles` is
+/// `(removed, dim, text, moved)`.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_side(
     snapshot: &DisplaySnapshot,
@@ -1835,7 +1958,8 @@ fn paint_base_side(
     buf: &mut Buffer,
     num_text: &mut String,
     inner: Rect,
-    columns: (u16, u16, u16, usize),
+    columns: (u16, u16, u16, u16, usize),
+    digits: u16,
     y: u16,
     base_line: u32,
     row: BaseRow<'_>,
@@ -1845,7 +1969,7 @@ fn paint_base_side(
     theme: &crate::theme::Theme,
     dials: DiffDials,
 ) {
-    let (num_x, status_x, text_x, content_w) = columns;
+    let (side_x, num_x, status_x, text_x, content_w) = columns;
     let (del_style, dim_style, text_style, moved_style) = styles;
 
     if row.first {
@@ -1854,10 +1978,11 @@ fn paint_base_side(
             buf,
             num_text,
             inner,
-            num_x,
+            (side_x, num_x),
             y,
             base_line + 1,
             dim_style,
+            digits,
         );
     }
 
@@ -1935,7 +2060,7 @@ fn paint_base_side(
                 rich,
                 buf,
                 inner,
-                status_x,
+                (side_x, status_x),
                 y,
                 change_scope,
                 state,
@@ -1952,7 +2077,7 @@ fn paint_base_side(
                     rich,
                     buf,
                     inner,
-                    status_x,
+                    (side_x, status_x),
                     y,
                     staged_mark_scope(status),
                     state,
@@ -2419,20 +2544,13 @@ fn move_chip_source<'a>(
     None
 }
 
-/// X column where the diff body's buffer text begins, for placing the cursor
-/// and mapping clicks onto buffer offsets.
-///
-/// In the two-column layout this is the right pane's text column. In the narrow
-/// unified layout it is the single shared text column. See [`DiffColumns`].
-pub(crate) fn right_text_x(inner: Rect) -> u16 {
-    DiffColumns::compute(inner, DiffLayout::DIFF_VIEW).right_text_x
-}
-
 /// The RGB gutter colors the diff view's rich sub-cell components composite
-/// with, plus the reused scene they append into.
+/// with, the sixteenth offsets they sit at, and the reused scene they append
+/// into.
 struct DiffRichGutter<'a> {
     scene: &'a mut ApcScene,
     colors: DiffRichColors,
+    offsets: RichGutterOffsets,
 }
 
 /// Line-number, separator, and status-bar colors for the diff rich gutter.
@@ -2468,6 +2586,9 @@ impl DiffRichColors {
 ///
 /// The smooth-scroll emit asks it too, because a pooled diff page lays its
 /// numbers out as runs only when these colors resolve.
+///
+/// See also:
+/// - [`diff_gutter_is_rich`] for the layout's half of the same decision.
 pub(crate) fn resolve_diff_rich_colors(
     theme: &crate::theme::Theme,
     fallback_style: Style,
@@ -2515,25 +2636,43 @@ pub(crate) fn resolve_diff_rich_colors(
     })
 }
 
+/// Whether a diff view paints its gutter with the rich sub-cell components,
+/// which also sets how wide the gutter is.
+///
+/// Rich takes a scene to append into and every gutter color as RGB, the test
+/// [`resolve_diff_rich_colors`] runs. The layout and the paint ask the same
+/// question, so the text column and the gutter it sits past always agree.
+pub(crate) fn diff_gutter_is_rich(
+    has_scene: bool,
+    theme: &crate::theme::Theme,
+    fallback_style: Style,
+) -> bool {
+    has_scene && resolve_diff_rich_colors(theme, fallback_style, 0.0).is_some()
+}
+
 /// Emit a right-aligned diff line number as a sub-cell run (rich) or paint the
 /// ASCII number.
+///
+/// `side_x` is the side's first cell, which the rich offsets count from, and
+/// `num_x` the cell gutter's number field, `digits` cells wide.
 #[allow(clippy::too_many_arguments)]
 fn draw_diff_num(
     rich: &mut Option<DiffRichGutter<'_>>,
     buf: &mut Buffer,
     scratch: &mut String,
     inner: Rect,
-    num_x: u16,
+    (side_x, num_x): (u16, u16),
     y: u16,
     num: u32,
     dim_style: Style,
+    digits: u16,
 ) {
     scratch.clear();
     write!(scratch, "{num}").expect("writing to a String is infallible");
     match rich {
         Some(rg) => {
             let advance = text_run::advance_sixteenths(scratch.len(), TEXT_SCALE_COMPACT);
-            let right_edge = (num_x - inner.x + 4) * 16;
+            let right_edge = (side_x - inner.x) * 16 + rg.offsets.number_right;
             TextRun {
                 col: right_edge.saturating_sub(advance) as i16,
                 row: ((y - inner.y) * 16) as i16,
@@ -2546,22 +2685,22 @@ fn draw_diff_num(
             }
             .render(inner, buf, &mut *rg.scene);
         },
-        None => render_side_num(buf, scratch, num_x, y, num, dim_style),
+        None => render_side_num(buf, scratch, num_x, y, num, dim_style, digits.into()),
     }
 }
 
 /// Emit the change and staged bars (rich) or paint the ASCII status glyphs.
 ///
-/// The bars follow the editor's rich gutter spacing, a five-sixteenth change bar
-/// at the status cell, then a five-sixteenth staged bar seven sixteenths later.
-/// A `seam` change bar is the short top-aligned bar the rich gutter draws for a
-/// deletion.
+/// The bars sit where the editor's rich gutter puts them, five sixteenths
+/// wide each, at the rich offsets from `side_x`, the side's first cell. The
+/// glyphs take the cell gutter's status column at `status_x`. A `seam` change
+/// bar is the short top-aligned bar the rich gutter draws for a deletion.
 #[allow(clippy::too_many_arguments)]
 fn draw_diff_status(
     rich: &mut Option<DiffRichGutter<'_>>,
     buf: &mut Buffer,
     inner: Rect,
-    status_x: u16,
+    (side_x, status_x): (u16, u16),
     y: u16,
     change_scope: &str,
     state: MarkState,
@@ -2579,10 +2718,10 @@ fn draw_diff_status(
                 MarkState::Approved => rg.colors.approved,
                 MarkState::Unapproved => rg.colors.unapproved,
             };
-            let x0 = ((status_x - inner.x) * 16) as i16;
+            let side = (side_x - inner.x) * 16;
             let y0 = ((y - inner.y) * 16) as i16;
             Bar {
-                x: x0,
+                x: (side + rg.offsets.git_x) as i16,
                 y: y0,
                 width: 5,
                 height: if seam { 6 } else { 16 },
@@ -2590,7 +2729,7 @@ fn draw_diff_status(
             }
             .render(inner, buf, &mut *rg.scene);
             Bar {
-                x: x0 + 7,
+                x: (side + rg.offsets.staged_x) as i16,
                 y: y0,
                 width: 5,
                 height: 16,
@@ -2605,27 +2744,30 @@ fn draw_diff_status(
 /// Emit the removal tick (rich) or paint its ASCII glyphs in the right status
 /// column of block row `y`.
 ///
-/// The tick spans both status cells at the top edge of the row, where the
+/// The tick spans both status bars at the top edge of the row, where the
 /// removed lines left the live side. It takes the deleted color and no staged
 /// color, because the left column already shows the removal's staged state.
+///
+/// `side_x` is the side's first cell, which the rich offsets count from, and
+/// `status_x` the cell gutter's status column.
 fn draw_removal_tick(
     rich: &mut Option<DiffRichGutter<'_>>,
     buf: &mut Buffer,
     inner: Rect,
-    status_x: u16,
+    (side_x, status_x): (u16, u16),
     y: u16,
     theme: &crate::theme::Theme,
 ) {
     match rich {
         Some(rg) => {
-            let x0 = ((status_x - inner.x) * 16) as i16;
+            let x0 = (side_x - inner.x) * 16 + rg.offsets.git_x;
             let y0 = ((y - inner.y) * 16) as i16;
-            // Twelve sixteenths spans both of `draw_diff_status`'s bars, the
-            // change bar at `x0` and the staged bar at `x0 + 7`, each five wide.
+            // The tick runs from the change bar's left edge through the staged
+            // bar, both of `draw_diff_status`'s bars being five wide.
             Bar {
-                x: x0,
+                x: x0 as i16,
                 y: y0,
-                width: 12,
+                width: rg.offsets.staged_x + 5 - rg.offsets.git_x,
                 height: 2,
                 color: rg
                     .colors
@@ -2727,17 +2869,20 @@ mod tests {
         assert_eq!(
             DiffColumns::compute(Rect::new(3, 0, 121, 10), DiffLayout::REVIEW),
             DiffColumns {
+                left_x: 3,
                 left_num_x: 4,
                 status_left_x: 3,
                 left_sep_x: None,
                 left_text_x: 9,
                 left_content_w: 54,
+                right_x: 64,
                 right_num_x: 65,
                 status_right_x: 64,
                 right_sep_x: None,
                 right_text_x: 70,
                 right_content_w: 54,
                 sep_x: Some(63),
+                rich: None,
             },
             "a wide review body splits either side of the mid-divider"
         );
@@ -2745,17 +2890,20 @@ mod tests {
         assert_eq!(
             DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::REVIEW),
             DiffColumns {
+                left_x: 0,
                 left_num_x: 1,
                 status_left_x: 0,
                 left_sep_x: None,
                 left_text_x: 6,
                 left_content_w: 13,
+                right_x: 20,
                 right_num_x: 21,
                 status_right_x: 20,
                 right_sep_x: None,
                 right_text_x: 26,
                 right_content_w: 14,
                 sep_x: Some(19),
+                rich: None,
             },
             "a review body stays two-column however narrow it gets"
         );
@@ -2763,42 +2911,104 @@ mod tests {
 
     /// The diff view lays a side out as line number, status column, rule, text,
     /// and aliases both sides onto one column below [`DIFF_TWO_COLUMN_MIN`].
+    ///
+    /// A cell gutter for two digits spans the plain degraded gutter's six
+    /// cells. A rich one spans the sub-cell gutter's four cells at the test
+    /// scale, where a digit advances a whole cell, and keeps the cell offsets.
     #[test]
     fn the_diff_view_layout_rules_off_its_gutter_and_unifies_when_narrow() {
+        let wide = Rect::new(3, 0, 121, 10);
+        let cell = DiffColumns::compute(wide, DiffLayout::diff_view(2, false));
         assert_eq!(
-            DiffColumns::compute(Rect::new(3, 0, 121, 10), DiffLayout::DIFF_VIEW),
+            cell,
             DiffColumns {
-                left_num_x: 3,
-                status_left_x: 8,
-                left_sep_x: Some(10),
-                left_text_x: 11,
-                left_content_w: 52,
-                right_num_x: 64,
-                status_right_x: 69,
-                right_sep_x: Some(71),
-                right_text_x: 72,
-                right_content_w: 52,
+                left_x: 3,
+                left_num_x: 4,
+                status_left_x: 6,
+                left_sep_x: Some(8),
+                left_text_x: 9,
+                left_content_w: 54,
+                right_x: 64,
+                right_num_x: 65,
+                status_right_x: 67,
+                right_sep_x: Some(69),
+                right_text_x: 70,
+                right_content_w: 54,
                 sep_x: Some(63),
+                rich: None,
             },
             "a wide diff body puts base text left and buffer text right"
         );
 
         assert_eq!(
-            DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::DIFF_VIEW),
+            DiffColumns::compute(wide, DiffLayout::diff_view(2, true)),
             DiffColumns {
-                left_num_x: 0,
-                status_left_x: 5,
-                left_sep_x: Some(7),
-                left_text_x: 8,
-                left_content_w: 32,
-                right_num_x: 0,
-                status_right_x: 5,
-                right_sep_x: Some(7),
-                right_text_x: 8,
-                right_content_w: 32,
+                left_text_x: 7,
+                left_content_w: 56,
+                right_text_x: 68,
+                right_content_w: 56,
+                rich: Some(RichGutterOffsets {
+                    number_right: 39,
+                    git_x: 43,
+                    staged_x: 50,
+                    separator_x: 59,
+                }),
+                ..cell
+            },
+            "a rich gutter is narrower and places its parts in sixteenths"
+        );
+
+        assert_eq!(
+            DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::diff_view(2, false)),
+            DiffColumns {
+                left_x: 0,
+                left_num_x: 1,
+                status_left_x: 3,
+                left_sep_x: Some(5),
+                left_text_x: 6,
+                left_content_w: 34,
+                right_x: 0,
+                right_num_x: 1,
+                status_right_x: 3,
+                right_sep_x: Some(5),
+                right_text_x: 6,
+                right_content_w: 34,
                 sep_x: None,
+                rich: None,
             },
             "a narrow diff body aliases both sides onto one column, no divider"
+        );
+    }
+
+    /// The digit count fits the larger of the live and base line counts, at
+    /// least two as the plain gutter's is.
+    #[test]
+    fn a_diff_gutter_counts_the_digits_of_the_longer_file() {
+        let base: String = (0..120).map(|n| format!("{n}\n")).collect();
+        let digits = |base: &str, text: &str| {
+            diff_gutter_digits(&diff_editor(base, text).display_map.snapshot())
+        };
+        assert_eq!([digits(&base, "a\nb\n"), digits("a\n", "a\nb\n")], [3, 2]);
+    }
+
+    /// A diff side reserves exactly the plain editor's gutter for the same
+    /// digit count, cell and rich alike, so toggling the view leaves the live
+    /// text column where the plain pane had it.
+    #[test]
+    fn a_diff_side_reserves_the_plain_gutters_width() {
+        let widths = [50, 1500].map(|lines| {
+            let digits = editor::gutter_digits(lines);
+            [false, true].map(|rich| {
+                (
+                    DiffLayout::diff_view(digits, rich).gutter_w,
+                    editor::measure_gutter_width(digits, rich),
+                )
+            })
+        });
+        assert_eq!(
+            widths,
+            [[(6, 6), (4, 4)], [(8, 8), (6, 6)]],
+            "each pair is the diff side's width beside the plain gutter's"
         );
     }
 
@@ -3168,7 +3378,7 @@ mod tests {
             .collect();
         let unified_area = Rect::new(0, 0, 60, 24);
         let unified = render(unified_area);
-        let cols = DiffColumns::compute(unified_area, DiffLayout::DIFF_VIEW);
+        let cols = two_digit_columns(unified_area);
         let number_beside = |needle: &str| {
             let y = (0..unified_area.height)
                 .find(|&y| {
@@ -3176,7 +3386,7 @@ mod tests {
                         == needle
                 })
                 .expect("a row shows the needle");
-            line_text(&unified, y, cols.left_num_x..cols.left_num_x + 4)
+            line_text(&unified, y, cols.left_num_x..cols.left_num_x + 2)
                 .trim()
                 .to_string()
         };
@@ -3218,7 +3428,7 @@ mod tests {
             None,
         );
 
-        let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let cols = two_digit_columns(area);
         let text_at = |y: u16| {
             line_text(&buf, y, cols.right_text_x..cols.right_text_x + 4)
                 .trim()
@@ -3228,7 +3438,7 @@ mod tests {
             let y = (0..area.height)
                 .find(|&y| text_at(y) == needle)
                 .expect("a row shows the needle");
-            line_text(&buf, y, cols.left_num_x..cols.left_num_x + 4)
+            line_text(&buf, y, cols.left_num_x..cols.left_num_x + 2)
                 .trim()
                 .to_string()
         };
@@ -3277,7 +3487,8 @@ mod tests {
             .display_map
             .fold(vec![Point::new(1, 2)..Point::new(2, 5)]);
         let area = Rect::new(0, 0, 120, 6);
-        editor::fit_diff_view(&mut editor, area, WrapMode::EditorWidth, 80);
+        let digits = diff_gutter_digits(&editor.display_map.snapshot());
+        editor::fit_diff_view(&mut editor, area, WrapMode::EditorWidth, 80, digits, false);
         let mut buf = Buffer::empty(area);
         render_diff_view(
             &mut editor,
@@ -3293,7 +3504,7 @@ mod tests {
             None,
         );
 
-        let x = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let x = two_digit_columns(area).left_text_x;
         assert_eq!(
             (0..4)
                 .map(|y| line_text(&buf, y, x..x + 4).trim().to_string())
@@ -3345,10 +3556,10 @@ mod tests {
             None,
         );
 
-        let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let cols = two_digit_columns(area);
         let row = |y: u16| {
             [
-                cols.left_num_x..cols.left_num_x + 4,
+                cols.left_num_x..cols.left_num_x + 2,
                 cols.left_text_x..cols.left_text_x + 4,
             ]
             .map(|cells| line_text(&buf, y, cells).trim().to_string())
@@ -3391,12 +3602,12 @@ mod tests {
         assert_eq!(number_pairs(&buf, area), expected);
     }
 
-    /// The `(left, right)` line numbers on each row of a diff view painted over
-    /// `area` of `buf`.
+    /// The `(left, right)` line numbers on each row of a cell-gutter diff view
+    /// of files under a hundred lines, painted over `area` of `buf`.
     fn number_pairs(buf: &Buffer, area: Rect) -> Vec<(String, String)> {
-        let cols = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let cols = two_digit_columns(area);
         let num = |x: u16, y: u16| {
-            (x..x + 4)
+            (x..x + 2)
                 .map(|x| buf[(x, y)].symbol())
                 .collect::<String>()
                 .trim()
@@ -3405,6 +3616,64 @@ mod tests {
         (area.y..area.y + area.height)
             .map(|y| (num(cols.left_num_x, y), num(cols.right_num_x, y)))
             .collect()
+    }
+
+    /// The cell columns a diff view paints over `area` for files under a
+    /// hundred lines, whose gutters take two digits.
+    fn two_digit_columns(area: Rect) -> DiffColumns {
+        DiffColumns::compute(area, DiffLayout::diff_view(2, false))
+    }
+
+    /// The cell columns of a 120-wide diff view of files under a hundred
+    /// lines, as the 120-wide renders with no scene lay it out.
+    fn wide_columns() -> DiffColumns {
+        two_digit_columns(Rect::new(0, 0, 120, 8))
+    }
+
+    /// The columns a harness's frame lays a diff view of files under a hundred
+    /// lines out in, rich as the harness's theme resolves it under stoatty.
+    fn harness_columns(h: &crate::test_harness::TestHarness) -> DiffColumns {
+        let theme = &h.stoat.theme;
+        let rich = diff_gutter_is_rich(
+            h.stoat.stoatty,
+            theme,
+            theme.get(crate::theme::scope::UI_TEXT),
+        );
+        let area = h.rendered_buffer().area;
+        DiffColumns::compute(area, DiffLayout::diff_view(2, rich))
+    }
+
+    /// The left text cells, up to the mid-divider in the two-column layout.
+    fn left_text(cols: &DiffColumns) -> std::ops::Range<u16> {
+        cols.left_text_x..cols.left_text_x + cols.left_content_w as u16
+    }
+
+    /// The right text cells.
+    fn right_text(cols: &DiffColumns) -> std::ops::Range<u16> {
+        cols.right_text_x..cols.right_text_x + cols.right_content_w as u16
+    }
+
+    /// The cells the left line number shows in.
+    fn left_num(cols: &DiffColumns) -> std::ops::Range<u16> {
+        number_cells(cols, cols.left_x, cols.left_num_x)
+    }
+
+    /// The cells the right line number shows in.
+    fn right_num(cols: &DiffColumns) -> std::ops::Range<u16> {
+        number_cells(cols, cols.right_x, cols.right_num_x)
+    }
+
+    /// The cells a line number shows in on the side that starts at `side_x`.
+    ///
+    /// A cell gutter writes the number into its field at `num_x`. A rich
+    /// gutter's run ends at its sixteenth offset and composites from the cell
+    /// it starts in, so a number of up to two digits lands in the cells before
+    /// the offset's own cell, where the change bar composites.
+    fn number_cells(cols: &DiffColumns, side_x: u16, num_x: u16) -> std::ops::Range<u16> {
+        match cols.rich {
+            Some(rich) => side_x..side_x + rich.number_right / 16,
+            None => num_x..num_x + (cols.status_left_x - cols.left_num_x),
+        }
     }
 
     /// A diff-view editor over `text`, diffed against `base`, with the view and
@@ -3568,9 +3837,9 @@ mod tests {
             None,
         );
 
-        // The right buffer status column follows its five-cell number gutter, so
-        // it paints its change bar at right_start + 5 and its staged bar after.
-        let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
+        // The right status column follows the right number field, with its change
+        // bar first and its staged bar after.
+        let change_col = wide_columns().status_right_x;
         let staged_col = change_col + 1;
         let staged_fg = theme.get(sc::DIFF_STAGED).fg.expect("staged fg");
         let unstaged_fg = theme.get(sc::DIFF_UNSTAGED).fg.expect("unstaged fg");
@@ -3614,6 +3883,7 @@ mod tests {
     /// wide under [`rgb_diff_theme`].
     fn status_cells(editor: &mut EditorState) -> Vec<[(String, Color); 4]> {
         let area = Rect::new(0, 0, 120, 8);
+        let digits = diff_gutter_digits(&editor.display_map.snapshot());
         let mut buf = Buffer::empty(area);
         render_diff_view(
             editor,
@@ -3629,7 +3899,7 @@ mod tests {
             None,
         );
 
-        let columns = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, false));
         let cell = |x: u16, y: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
         (0..area.height)
             .map(|y| {
@@ -3737,13 +4007,15 @@ mod tests {
             DiffDials::shipped(),
             None,
         );
-        let columns = DiffColumns::compute(area, DiffLayout::DIFF_VIEW);
+        let digits = diff_gutter_digits(&editor.display_map.snapshot());
+        let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, true));
+        let staged_x = columns.rich.expect("a rich layout").staged_x;
         let bytes = scene.buffer();
         let bars = |row: u16, scope: &str| {
             let color = style_rgb(rgb_diff_theme().get(scope).fg).expect("an rgb color");
-            [columns.status_left_x, columns.status_right_x].map(|x| {
+            [columns.left_x, columns.right_x].map(|x| {
                 let frame = encode_bar(&BarCommand {
-                    x: (x * 16 + 7) as i16,
+                    x: (x * 16 + staged_x) as i16,
                     y: (row * 16) as i16,
                     width: 5,
                     height: 16,
@@ -3829,6 +4101,7 @@ mod tests {
     /// clutter the refinement exists to remove.
     #[test]
     fn a_refined_hunk_bars_only_its_marked_rows() {
+        let cols = wide_columns();
         // One hunk over the whole block, refined to its middle row alone.
         let text = "a\nb\nc\nd\n";
         let mut editor = {
@@ -3871,14 +4144,14 @@ mod tests {
             None,
         );
 
-        let change_col = ((120 - 1) / 2 + 1 + 5) as u16;
+        let change_col = cols.status_right_x;
         let barred: Vec<u16> = (0..area.height)
             .filter(|&y| buf[(change_col, y)].symbol() == "▎")
             .collect();
         // The diff view stacks base rows, so the screen row is found by what it
         // shows rather than assumed equal to the buffer row.
         let marked_screen_row = (0..area.height)
-            .find(|&y| line_text(&buf, y, 68..120).trim() == "c")
+            .find(|&y| line_text(&buf, y, right_text(&cols)).trim() == "c")
             .expect("the marked buffer row is on screen");
         assert_eq!(
             barred,
@@ -3931,7 +4204,7 @@ mod tests {
             None,
         );
 
-        let text_x = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let text_x = two_digit_columns(area).left_text_x;
         let letter = |y: u16| {
             let x = (text_x..area.width)
                 .find(|&x| buf[(x, y)].symbol() != " ")
@@ -3981,11 +4254,21 @@ mod tests {
         let total = editor.display_map.snapshot().line_count();
         let rows = ((area.height as u32).min(total.saturating_sub(scroll))) as u16;
         let dim = [128, 128, 128];
+        let digits = diff_gutter_digits(&editor.display_map.snapshot());
+        let cols = DiffColumns::compute(area, DiffLayout::diff_view(digits, true));
+        let offsets = cols.rich.expect("a rich layout");
 
-        // Each side's gutter separator and the mid divider paint as hairlines.
-        for sep_x in [7u16, 59, 67] {
+        // Each side's gutter separator and the mid divider paint as hairlines,
+        // the separators at the rich gutter's offset and the divider centered
+        // in its cell.
+        let divider = cols.sep_x.expect("two columns") * 16 + 8;
+        for x in [cols.left_x, cols.right_x]
+            .map(|side| side * 16 + offsets.separator_x)
+            .into_iter()
+            .chain([divider])
+        {
             let frame = encode_bar(&BarCommand {
-                x: (sep_x * 16 + 8) as i16,
+                x: x as i16,
                 y: 0,
                 width: 1,
                 height: rows * 16,
@@ -3993,7 +4276,7 @@ mod tests {
             });
             assert!(
                 contains(scene.buffer(), &frame),
-                "separator hairline at col {sep_x}"
+                "separator hairline at sixteenth {x}"
             );
         }
 
@@ -4001,7 +4284,8 @@ mod tests {
         // columns. Every row is searched rather than pinning the block layout.
         let staged = [[0, 255, 255], [255, 0, 255]];
         let staged_bar = (0..rows).any(|row| {
-            [80u16 + 7, 65 * 16 + 7].iter().any(|&x| {
+            [cols.left_x, cols.right_x].iter().any(|&side| {
+                let x = side * 16 + offsets.staged_x;
                 staged.iter().any(|&color| {
                     contains(
                         scene.buffer(),
@@ -4067,6 +4351,7 @@ mod tests {
 
     #[test]
     fn diff_view_lays_out_base_left_buffer_right() {
+        let cols = wide_columns();
         let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
@@ -4084,10 +4369,11 @@ mod tests {
             None,
         );
 
-        // Width 120 is wide enough for the two-column layout. Left text spans
-        // cols 8..59, the mid-divider sits at col 59, right text spans 68..120.
-        let left = |y| line_text(&buf, y, 8..59);
-        let right = |y| line_text(&buf, y, 68..120);
+        // Width 120 is wide enough for the two-column layout, with the left text
+        // before the mid-divider at col 59 and the right text after the right
+        // gutter.
+        let left = |y| line_text(&buf, y, left_text(&cols));
+        let right = |y| line_text(&buf, y, right_text(&cols));
 
         assert!(
             left(0).contains("keep") && right(0).contains("keep"),
@@ -4124,8 +4410,9 @@ mod tests {
             "the two columns are split by a separator"
         );
         assert_eq!(
-            (buf[(7, 0)].symbol(), buf[(67, 0)].symbol()),
-            ("│", "│"),
+            [wide_columns().left_sep_x, wide_columns().right_sep_x]
+                .map(|x| buf[(x.expect("a gutter rule"), 0)].symbol()),
+            ["│", "│"],
             "each side carries a gutter/code separator after its status column"
         );
     }
@@ -4135,6 +4422,7 @@ mod tests {
     /// The moved-to row paints nothing on the left.
     #[test]
     fn diff_view_numbers_the_left_column_past_a_moved_away_line() {
+        let cols = wide_columns();
         let mut editor = moved_line_editor();
         let area = Rect::new(0, 0, 120, 6);
         let mut buf = Buffer::empty(area);
@@ -4154,11 +4442,11 @@ mod tests {
 
         let left_of = |right: &str| {
             let y = (0..area.height)
-                .find(|&y| line_text(&buf, y, 68..120).trim() == right)
+                .find(|&y| line_text(&buf, y, right_text(&cols)).trim() == right)
                 .unwrap_or_else(|| panic!("{right:?} rendered on the right"));
             (
-                line_text(&buf, y, 0..7).trim().to_string(),
-                line_text(&buf, y, 8..59).trim().to_string(),
+                line_text(&buf, y, left_num(&cols)).trim().to_string(),
+                line_text(&buf, y, left_text(&cols)).trim().to_string(),
             )
         };
         assert_eq!(
@@ -4174,6 +4462,7 @@ mod tests {
     /// the excess takes rows of its own.
     #[test]
     fn a_longer_base_hunk_pairs_then_trails_its_excess() {
+        let cols = wide_columns();
         let mut editor = diff_editor("keep\nold1\nold2\nold3\ntail\n", "keep\nnew1\ntail\n");
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
@@ -4191,8 +4480,8 @@ mod tests {
             None,
         );
 
-        let left = |y| line_text(&buf, y, 8..59);
-        let right = |y| line_text(&buf, y, 68..120);
+        let left = |y| line_text(&buf, y, left_text(&cols));
+        let right = |y| line_text(&buf, y, right_text(&cols));
 
         assert!(
             left(1).contains("old1") && right(1).contains("new1"),
@@ -4223,7 +4512,7 @@ mod tests {
         // is what a reader checks an alignment against. The status glyphs share
         // the gutter, so only the number itself is read.
         let number = |y| {
-            line_text(&buf, y, 0..7)
+            line_text(&buf, y, left_num(&cols))
                 .split_whitespace()
                 .next()
                 .unwrap_or("")
@@ -4240,6 +4529,7 @@ mod tests {
     /// blank past the pairing, which the paint gives without a block.
     #[test]
     fn a_longer_live_hunk_blanks_its_trailing_left_rows() {
+        let cols = wide_columns();
         let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew1\nnew2\ntail\n");
         let area = Rect::new(0, 0, 120, 8);
         let mut buf = Buffer::empty(area);
@@ -4257,8 +4547,8 @@ mod tests {
             None,
         );
 
-        let left = |y| line_text(&buf, y, 8..59);
-        let right = |y| line_text(&buf, y, 68..120);
+        let left = |y| line_text(&buf, y, left_text(&cols));
+        let right = |y| line_text(&buf, y, right_text(&cols));
 
         assert!(
             left(1).contains("old") && right(1).contains("new1"),
@@ -4280,7 +4570,7 @@ mod tests {
         );
 
         assert_eq!(
-            line_text(&buf, 3, 0..7).trim(),
+            line_text(&buf, 3, left_num(&cols)).trim(),
             "3",
             "and the base file has only three lines, so the context is its third",
         );
@@ -4305,15 +4595,17 @@ mod tests {
             None,
         );
 
-        // The gutter/code separator is painted at col 7, but a unified view has
-        // no two-column mid-divider, so no rule appears in the text region.
-        let sep_col = area.x + 7;
+        // The gutter/code separator is painted at col 5, past the blank mark
+        // cell, the two-digit number and the two status cells, but a unified
+        // view has no two-column mid-divider, so no rule appears in the text
+        // region.
+        let sep_col = area.x + 5;
         assert!(
             (0..area.height).any(|y| buf[(sep_col, y)].symbol() == "│"),
             "the gutter/code separator is painted in the unified view"
         );
         for y in 0..area.height {
-            for x in (area.x + 8)..area.width {
+            for x in (area.x + 6)..area.width {
                 assert_ne!(
                     buf[(x, y)].symbol(),
                     "│",
@@ -4324,8 +4616,11 @@ mod tests {
 
         // The single text column sits past the number, status, and separator
         // gutter, and both sides render into it.
-        let col = right_text_x(area);
-        assert_eq!(col, area.x + 8, "unified text starts past the one gutter");
+        let col = editor
+            .text_rect
+            .expect("the render records the text rect")
+            .x;
+        assert_eq!(col, area.x + 6, "unified text starts past the one gutter");
 
         let renders = |needle: &str| {
             (0..area.height).any(|y| {
@@ -4379,11 +4674,11 @@ mod tests {
             .set_diff_view(true);
         h.snapshot();
 
-        // At width 120 the right text begins at col 67. A syntax-highlighted right
-        // column paints more than one foreground color across the row's tokens.
+        // A syntax-highlighted right column paints more than one foreground color
+        // across the row's tokens.
         let buf = h.rendered_buffer();
         let mut colors = std::collections::HashSet::new();
-        for x in 67..120 {
+        for x in right_text(&harness_columns(&h)) {
             let cell = &buf[(x, 0)];
             if cell.symbol().trim().is_empty() {
                 continue;
@@ -4423,7 +4718,7 @@ mod tests {
     /// The fg of the first right-column text cell on the row whose right column
     /// starts with `needle`.
     fn right_fg(buf: &Buffer, needle: &str) -> Option<Color> {
-        let rx = right_text_x(buf.area);
+        let rx = two_digit_columns(buf.area).right_text_x;
         buf[(rx, row_holding(buf, rx..buf.area.width, needle))]
             .style()
             .fg
@@ -4489,7 +4784,10 @@ mod tests {
         );
         let mut editor = diff_editor_with_map("aa\nbbxx\ncc\n", dm);
         let buf = render_over_fallback(&mut editor, Style::default().fg(Color::Rgb(1, 2, 3)));
-        let rx = right_text_x(buf.area);
+        let rx = editor
+            .text_rect
+            .expect("the render records the text rect")
+            .x;
         let y = row_holding(&buf, rx..buf.area.width, "bbxx");
         assert_eq!(
             (rx..rx + 4)
@@ -4533,8 +4831,9 @@ mod tests {
         );
         let mut editor = diff_editor_with_map("aa\ncc\n", dm);
         let buf = render_over_fallback(&mut editor, Style::default().fg(Color::Rgb(1, 2, 3)));
-        let lx = DiffColumns::compute(buf.area, DiffLayout::DIFF_VIEW).left_text_x;
-        let y = row_holding(&buf, lx..right_text_x(buf.area), "bbxx");
+        let cols = two_digit_columns(buf.area);
+        let y = row_holding(&buf, cols.left_text_x..cols.right_text_x, "bbxx");
+        let lx = cols.left_text_x;
         assert_eq!(
             (lx..lx + 4)
                 .map(|x| buf[(x, y)].style().fg)
@@ -4566,12 +4865,11 @@ mod tests {
             .set_diff_view(true);
         h.snapshot();
 
-        // At width 120 left text spans cols 7..59 past the two-cell status and
-        // five-cell line-number gutter.
         let buf = h.rendered_buffer();
+        let left = left_text(&harness_columns(&h));
         let mut colors = std::collections::HashSet::new();
         for y in 0..buf.area.height {
-            for x in 7..59 {
+            for x in left.clone() {
                 let cell = &buf[(x, y)];
                 if cell.symbol().trim().is_empty() {
                     continue;
@@ -4589,8 +4887,8 @@ mod tests {
     /// `buffer`, rendered once. The default theme resolves diff colors to RGB, so
     /// the change washes engage.
     ///
-    /// Width 120 stays above the two-column threshold. Left text spans cols 7..59,
-    /// the separator sits at col 59, right text spans cols 67..120.
+    /// Width 120 stays above the two-column threshold, with the separator at col
+    /// 59. [`harness_columns`] gives the columns either side of it.
     fn diff_harness(base: &str, buffer: &str) -> crate::test_harness::TestHarness {
         diff_harness_sized(120, base, buffer)
     }
@@ -4723,13 +5021,35 @@ mod tests {
     fn a_long_live_line_wraps_into_the_right_column() {
         let h = diff_harness("keep\n", &format!("keep\n{}\n", long_line(45, 44)));
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(45));
         assert_eq!(
-            [y, y + 1].map(|y| cells(buf, y, [60..65, 68..120])),
+            [y, y + 1].map(|y| cells(buf, y, [right_num(&cols), right_text(&cols)])),
             [
                 ["2".to_string(), "a".repeat(45)],
                 [String::new(), "b".repeat(44)],
             ],
+        );
+    }
+
+    /// The wrap fit sizes the gutters as the paint does, so the widest line the
+    /// wrap keeps whole keeps one row, whichever gutter the harness paints. The
+    /// wrap stops one cell short of the narrower text column.
+    #[test]
+    fn a_line_one_cell_short_of_the_text_column_keeps_one_row() {
+        let width = {
+            let cols = harness_columns(&diff_harness("old\n", "new\n"));
+            cols.left_content_w.min(cols.right_content_w) - 1
+        };
+        let line = "a".repeat(width);
+        let h = diff_harness("keep\ntail\n", &format!("keep\n{line}\ntail\n"));
+        let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &line);
+        assert_eq!(
+            cells(buf, y + 1, [right_text(&cols)]),
+            ["tail".to_string()],
+            "the line's next row is the next line, not a continuation"
         );
     }
 
@@ -4738,9 +5058,10 @@ mod tests {
         let long = long_line(45, 44);
         let h = diff_harness(&format!("{long}\nold\n"), &format!("{long}\nnew\n"));
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(45));
         assert_eq!(
-            [y, y + 1].map(|y| cells(buf, y, [8..59, 68..120])),
+            [y, y + 1].map(|y| cells(buf, y, [left_text(&cols), right_text(&cols)])),
             [
                 ["a".repeat(45), "a".repeat(45)],
                 ["b".repeat(44), "b".repeat(44)],
@@ -4754,10 +5075,11 @@ mod tests {
         let long = long_line(45, 44);
         let h = diff_harness(&format!("{long}\nold\n"), &format!("{long}\nnew\n"));
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(45));
         assert_eq!(
             (y..y + 3)
-                .map(|y| cells(buf, y, [0..5, 8..59]))
+                .map(|y| cells(buf, y, [left_num(&cols), left_text(&cols)]))
                 .collect::<Vec<_>>(),
             [
                 ["1".to_string(), "a".repeat(45)],
@@ -4772,7 +5094,9 @@ mod tests {
     /// span's cells readable off the grid.
     #[test]
     fn a_change_span_on_a_continuation_row_marks_only_its_own_cells() {
-        let a = "a".repeat(40);
+        // 44 a's wrap the line before `TWO`, whichever gutter the harness
+        // paints, so the changed word starts the continuation row.
+        let a = "a".repeat(44);
         let mut h = diff_harness(
             &format!("// {a} one two three\n"),
             &format!("// {a} one TWO three\n"),
@@ -4780,19 +5104,20 @@ mod tests {
         h.stoat.diff_underline = true;
         h.snapshot();
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, "TWO three");
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), "TWO three");
         let underlined = |y| {
-            (68..120)
+            (right_text(&cols))
                 .filter(|&x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
                 .collect::<Vec<_>>()
         };
         assert_eq!(
             [underlined(y - 1), underlined(y)],
-            [vec![], vec![68, 69, 70]]
+            [vec![], (cols.right_text_x..cols.right_text_x + 3).collect()]
         );
     }
 
-    /// The right status column sits at x 65 at width 120.
+    /// The right status column is the one [`wide_columns`] gives at width 120.
     #[test]
     fn a_continuation_row_takes_no_status_bar() {
         let long = long_line(45, 44);
@@ -4816,7 +5141,9 @@ mod tests {
         );
 
         assert_eq!(
-            (0..3).map(|y| buf[(65, y)].symbol()).collect::<Vec<_>>(),
+            (0..3)
+                .map(|y| buf[(wide_columns().status_right_x, y)].symbol())
+                .collect::<Vec<_>>(),
             [" ", "▎", " "],
             "the added line's first row carries the bar and its continuation none",
         );
@@ -4846,7 +5173,9 @@ mod tests {
         );
 
         assert_eq!(
-            (0..3).map(|y| buf[(5, y)].symbol()).collect::<Vec<_>>(),
+            (0..3)
+                .map(|y| buf[(wide_columns().status_left_x, y)].symbol())
+                .collect::<Vec<_>>(),
             [" ", "▎", " "],
         );
     }
@@ -4874,7 +5203,7 @@ mod tests {
         );
         assert_eq!(
             editor.cursor_screen_cell,
-            Some((72, 1)),
+            Some((wide_columns().right_text_x + 4, 1)),
             "byte 50 is the fifth cell of the continuation row",
         );
     }
@@ -4910,7 +5239,7 @@ mod tests {
         );
         assert_eq!(
             editor.cursor_screen_cell,
-            Some((68, 3)),
+            Some((wide_columns().right_text_x, 3)),
             "the cursor on `b` paints three rows below a top row that is a deleted line",
         );
     }
@@ -4934,7 +5263,7 @@ mod tests {
             .bg
             .expect("a selection background");
         let buf = h.rendered_buffer();
-        let row = row_holding(buf, 68..buf.area.width, "fn other");
+        let row = row_holding(buf, right_text(&harness_columns(&h)), "fn other");
         let washed = (0..buf.area.width)
             .filter(|&x| buf[(x, row)].bg == sel_bg)
             .collect();
@@ -4948,7 +5277,10 @@ mod tests {
     fn a_word_end_motion_washes_the_selected_word() {
         assert_eq!(
             wash_and_cursor_after("e"),
-            (vec![68], vec![69]),
+            {
+                let x = wide_columns().right_text_x;
+                (vec![x], vec![x + 1])
+            },
             "`e` selects `fn` with the cursor on the `n`",
         );
     }
@@ -4959,7 +5291,10 @@ mod tests {
     fn a_line_selection_washes_only_the_live_column() {
         assert_eq!(
             wash_and_cursor_after("x"),
-            ((68..81).collect(), vec![81]),
+            {
+                let x = wide_columns().right_text_x;
+                ((x..x + 13).collect(), vec![x + 13])
+            },
             "`x` washes the thirteen glyphs and puts the cursor on the newline",
         );
     }
@@ -4974,7 +5309,8 @@ mod tests {
         h.snapshot();
 
         let buf = h.rendered_buffer();
-        let row = row_holding(buf, 8..59, "fn main");
+        let cols = harness_columns(&h);
+        let row = row_holding(buf, left_text(&cols), "fn main");
         let labels = (0..buf.area.width)
             .filter(|&x| {
                 buf[(x, row)]
@@ -4985,7 +5321,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             labels,
-            [(68, "a"), (71, "b")],
+            [(cols.right_text_x, "a"), (cols.right_text_x + 3, "b")],
             "each word of the live column carries its label, and the base column none",
         );
     }
@@ -4996,13 +5332,14 @@ mod tests {
         h.stoat.toggle_wrap();
         h.snapshot();
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(45));
         assert_eq!(
-            [y, y + 1].map(|y| cells(buf, y, [60..65, 68..120])),
+            [y, y + 1].map(|y| cells(buf, y, [right_num(&cols), right_text(&cols)])),
             [
                 [
                     "2".to_string(),
-                    format!("{} {}", "a".repeat(45), "b".repeat(6))
+                    long_line(45, 44)[..cols.right_content_w].to_string()
                 ],
                 ["3".to_string(), "tail".to_string()],
             ],
@@ -5017,9 +5354,21 @@ mod tests {
         let rows = |base: &str, count: u16| {
             let h = diff_harness(base, "keep\ntail\n");
             let buf = h.rendered_buffer();
-            let y = row_holding(buf, 68..120, "keep");
+            let cols = harness_columns(&h);
+            let y = row_holding(buf, right_text(&cols), "keep");
             (y..y + count)
-                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .map(|y| {
+                    cells(
+                        buf,
+                        y,
+                        [
+                            left_num(&cols),
+                            left_text(&cols),
+                            right_num(&cols),
+                            right_text(&cols),
+                        ],
+                    )
+                })
                 .collect::<Vec<_>>()
         };
         let row = |cells: [&str; 4]| cells.map(String::from);
@@ -5052,10 +5401,11 @@ mod tests {
         let long = long_line(45, 44);
         let h = diff_harness(&format!("keep\n{long}\ntail\n"), "keep\ntail\n");
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 8..59, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, left_text(&cols), &"a".repeat(45));
         assert_eq!(
             (y..y + 3)
-                .map(|y| cells(buf, y, [0..5, 8..59]))
+                .map(|y| cells(buf, y, [left_num(&cols), left_text(&cols)]))
                 .collect::<Vec<_>>(),
             [
                 ["2".to_string(), "a".repeat(45)],
@@ -5072,10 +5422,20 @@ mod tests {
         let long = long_line(45, 44);
         let h = diff_harness(&format!("{long}\ngone\ntail\n"), &format!("{long}\ntail\n"));
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(45));
         assert_eq!(
             (y..y + 4)
-                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .map(|y| cells(
+                    buf,
+                    y,
+                    [
+                        left_num(&cols),
+                        left_text(&cols),
+                        right_num(&cols),
+                        right_text(&cols)
+                    ]
+                ))
                 .collect::<Vec<_>>(),
             [
                 ["1".into(), "a".repeat(45), "1".into(), "a".repeat(45)],
@@ -5095,10 +5455,11 @@ mod tests {
             "keep\ntail\n",
         );
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 8..59, "short");
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, left_text(&cols), "short");
         assert_eq!(
             (y..y + 4)
-                .map(|y| cells(buf, y, [0..5, 8..59]))
+                .map(|y| cells(buf, y, [left_num(&cols), left_text(&cols)]))
                 .collect::<Vec<_>>(),
             [
                 ["2".to_string(), "short".to_string()],
@@ -5116,17 +5477,20 @@ mod tests {
     fn a_resize_resplits_the_standing_blocks() {
         let long = long_line(40, 7);
         let mut h = diff_harness(&format!("keep\n{long}\ntail\n"), "keep\ntail\n");
-        let rows = |h: &crate::test_harness::TestHarness, cols: std::ops::Range<u16>| {
+        let rows = |h: &crate::test_harness::TestHarness| {
             let buf = h.rendered_buffer();
-            let y = row_holding(buf, cols.clone(), &"a".repeat(40));
-            [y, y + 1].map(|y| line_text(buf, y, cols.clone()).trim().to_string())
+            let left = left_text(&harness_columns(h));
+            let y = row_holding(buf, left.clone(), &"a".repeat(40));
+            [y, y + 1].map(|y| line_text(buf, y, left.clone()).trim().to_string())
         };
-        assert_eq!(rows(&h, 8..59), [long.clone(), "tail".to_string()]);
+        assert_eq!(rows(&h), [long.clone(), "tail".to_string()]);
 
-        h.resize(110, 10);
+        // The 48-char line fits the left column at width 120 and not at 104,
+        // whichever gutter the harness paints.
+        h.resize(104, 10);
         h.snapshot();
         assert_eq!(
-            rows(&h, 8..54),
+            rows(&h),
             ["a".repeat(40), "b".repeat(7)],
             "the standing block grows a row at the narrower width",
         );
@@ -5142,10 +5506,20 @@ mod tests {
             &format!("keep\n{live}\ntail\n"),
         );
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 8..59, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, left_text(&cols), &"a".repeat(45));
         assert_eq!(
             (y..y + 3)
-                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .map(|y| cells(
+                    buf,
+                    y,
+                    [
+                        left_num(&cols),
+                        left_text(&cols),
+                        right_num(&cols),
+                        right_text(&cols)
+                    ]
+                ))
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "a".repeat(45), "2".into(), "c".repeat(45)],
@@ -5166,10 +5540,20 @@ mod tests {
             &format!("keep\n{}\ntail\n", "x".repeat(40)),
         );
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 8..59, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, left_text(&cols), &"a".repeat(45));
         assert_eq!(
             (y..y + 4)
-                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .map(|y| cells(
+                    buf,
+                    y,
+                    [
+                        left_num(&cols),
+                        left_text(&cols),
+                        right_num(&cols),
+                        right_text(&cols)
+                    ]
+                ))
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "a".repeat(45), "2".into(), "x".repeat(40)],
@@ -5190,10 +5574,20 @@ mod tests {
             &format!("keep\n{}\ntail\n", long_line(45, 44)),
         );
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 8..59, &"p".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, left_text(&cols), &"p".repeat(45));
         assert_eq!(
             (y..y + 4)
-                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .map(|y| cells(
+                    buf,
+                    y,
+                    [
+                        left_num(&cols),
+                        left_text(&cols),
+                        right_num(&cols),
+                        right_text(&cols)
+                    ]
+                ))
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "p".repeat(45), "2".into(), "a".repeat(45)],
@@ -5211,10 +5605,20 @@ mod tests {
             &format!("keep\n{}\ntail\n", long_line(45, 44)),
         );
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 68..120, &"a".repeat(45));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(45));
         assert_eq!(
             (y..y + 3)
-                .map(|y| cells(buf, y, [0..5, 8..59, 60..65, 68..120]))
+                .map(|y| cells(
+                    buf,
+                    y,
+                    [
+                        left_num(&cols),
+                        left_text(&cols),
+                        right_num(&cols),
+                        right_text(&cols)
+                    ]
+                ))
                 .collect::<Vec<_>>(),
             [
                 ["2".into(), "x".repeat(40), "2".into(), "a".repeat(45)],
@@ -5229,6 +5633,7 @@ mod tests {
     /// the live line falls inside the base line's fifty-first character.
     #[test]
     fn a_stale_map_mirrors_a_wrapped_multibyte_line_on_char_boundaries() {
+        let cols = wide_columns();
         let base = format!("{}\n", "\u{e9}".repeat(60));
         let live = format!("x{base}");
         let mut editor = diff_editor_with_map(
@@ -5257,7 +5662,7 @@ mod tests {
         );
 
         assert_eq!(
-            [0, 1].map(|y| line_text(&buf, y, 8..59).trim().to_string()),
+            [0, 1].map(|y| line_text(&buf, y, left_text(&cols)).trim().to_string()),
             ["\u{e9}".repeat(50), "\u{e9}".repeat(10)],
         );
     }
@@ -5268,6 +5673,7 @@ mod tests {
     /// 256, where a tab takes one column.
     #[test]
     fn a_wrapped_tabbed_base_line_keeps_its_tab_stops_on_every_segment() {
+        let cols = wide_columns();
         let line = "ab cd\t".repeat(40);
         let mut editor = diff_editor(
             &format!("{line}\nkeep\n{line}\n"),
@@ -5295,7 +5701,7 @@ mod tests {
                 .map(|y| line_text(&buf, y, cols.clone()).trim_end().to_string())
                 .collect::<Vec<_>>()
         };
-        let (left, right) = (column(8..59), column(68..120));
+        let (left, right) = (column(left_text(&cols)), column(right_text(&cols)));
         assert_eq!(right[6], "keep", "the live line takes six rows");
         assert_eq!(
             [&left[..6], &left[7..13]],
@@ -5304,14 +5710,16 @@ mod tests {
         );
     }
 
-    /// At width 80 both sides share one column 72 cells wide.
+    /// At width 80 both sides share one column, which wraps at the width past
+    /// its one gutter.
     #[test]
     fn a_narrow_diff_view_wraps_at_its_single_column() {
         let h = diff_harness_sized(80, "keep\n", &format!("keep\n{}\n", long_line(65, 24)));
         let buf = h.rendered_buffer();
-        let y = row_holding(buf, 8..80, &"a".repeat(65));
+        let cols = harness_columns(&h);
+        let y = row_holding(buf, right_text(&cols), &"a".repeat(65));
         assert_eq!(
-            [y, y + 1].map(|y| cells(buf, y, [0..5, 8..80])),
+            [y, y + 1].map(|y| cells(buf, y, [left_num(&cols), right_text(&cols)])),
             [
                 ["2".to_string(), "a".repeat(65)],
                 [String::new(), "b".repeat(24)],
@@ -5335,14 +5743,15 @@ mod tests {
             .and_then(|s| s.bg)
             .expect("an rgb editor background");
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("other"))
+            .find(|&y| line_text(buf, y, right_text(&cols)).contains("other"))
             .expect("the changed line rendered on the right");
         assert!(
-            line_text(buf, row, 8..59).contains("main"),
+            line_text(buf, row, left_text(&cols)).contains("main"),
             "and its base word beside it: {:?}",
-            line_text(buf, row, 8..59)
+            line_text(buf, row, left_text(&cols))
         );
 
         let painted = (0..buf.area.width)
@@ -5370,14 +5779,15 @@ mod tests {
         )
         .expect("rgb background");
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let row_with = |text: &str| {
             (0..buf.area.height)
-                .find(|&y| line_text(buf, y, 68..buf.area.width).contains(text))
+                .find(|&y| line_text(buf, y, right_text(&cols)).contains(text))
                 .unwrap_or_else(|| panic!("{text:?} rendered in the right column"))
         };
         let fg_of = |y: u16, glyph: &str| {
-            let x = (68..buf.area.width)
+            let x = right_text(&cols)
                 .find(|&x| buf[(x, y)].symbol() == glyph)
                 .unwrap_or_else(|| panic!("{glyph:?} on row {y}"));
             buf[(x, y)].style().fg.expect("an fg")
@@ -5419,12 +5829,13 @@ mod tests {
             "fn f() {\n    g(\"one zzz three\");\n}\n",
         );
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let changed_word = ("zzz".to_string(), "aaa".to_string());
         assert_eq!(
             (
-                row_cells_with(buf, "zzz", Modifier::BOLD),
-                row_cells_with(buf, "zzz", Modifier::UNDERLINED),
+                row_cells_with(buf, &cols, "zzz", Modifier::BOLD),
+                row_cells_with(buf, &cols, "zzz", Modifier::UNDERLINED),
             ),
             (changed_word.clone(), changed_word),
             "both columns bold and underline their changed word and nothing else of the literal"
@@ -5439,12 +5850,13 @@ mod tests {
     fn diff_view_marks_the_changed_word_of_a_similar_comment() {
         let h = diff_harness("// step aaa here\n", "// step zzz here\n");
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let changed_word = ("zzz".to_string(), "aaa".to_string());
         assert_eq!(
             (
-                row_cells_with(buf, "zzz", Modifier::BOLD),
-                row_cells_with(buf, "zzz", Modifier::UNDERLINED),
+                row_cells_with(buf, &cols, "zzz", Modifier::BOLD),
+                row_cells_with(buf, &cols, "zzz", Modifier::UNDERLINED),
             ),
             (changed_word.clone(), changed_word),
             "each column marks its own changed word and leaves the rest of the comment alone"
@@ -5458,11 +5870,12 @@ mod tests {
     fn a_comment_rewritten_as_a_whole_takes_no_underline() {
         let h = diff_harness("// aaa bbb\n", "// zzz yyy\n");
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         assert_eq!(
             (
-                row_cells_with(buf, "zzz", Modifier::BOLD),
-                row_cells_with(buf, "zzz", Modifier::UNDERLINED),
+                row_cells_with(buf, &cols, "zzz", Modifier::BOLD),
+                row_cells_with(buf, &cols, "zzz", Modifier::UNDERLINED),
             ),
             (
                 ("zzz yyy".to_string(), "aaa bbb".to_string()),
@@ -5484,11 +5897,12 @@ mod tests {
             "fn f() {\n    h();\n    // note here\n}\n",
         );
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         assert_eq!(
             (
-                row_cells_with(buf, "note here", Modifier::BOLD),
-                row_cells_with(buf, "note here", Modifier::UNDERLINED),
+                row_cells_with(buf, &cols, "note here", Modifier::BOLD),
+                row_cells_with(buf, &cols, "note here", Modifier::UNDERLINED),
             ),
             (
                 (String::new(), String::new()),
@@ -5504,11 +5918,12 @@ mod tests {
     fn diff_view_keeps_a_renamed_identifier_unbolded() {
         let h = diff_harness("fn alpha() {}\n", "fn beta() {}\n");
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 68..buf.area.width).contains("beta"))
+            .find(|&y| line_text(buf, y, right_text(&cols)).contains("beta"))
             .expect("the renamed line rendered on the right");
-        let bold = (68..buf.area.width)
+        let bold = right_text(&cols)
             .filter(|&x| buf[(x, row)].modifier.contains(Modifier::BOLD))
             .map(|x| buf[(x, row)].symbol().to_string())
             .collect::<String>();
@@ -5577,21 +5992,27 @@ mod tests {
         render_diff_view(
             editor, area, fallback, &theme, &mut buf, true, None, None, true, dials, None,
         );
-        row_cells_with(&buf, "beta", modifier)
+        row_cells_with(&buf, &wide_columns(), "beta", modifier)
     }
 
     /// The glyphs that carry `modifier` on the row whose right column shows
-    /// `needle`, right column then left.
-    fn row_cells_with(buf: &Buffer, needle: &str, modifier: Modifier) -> (String, String) {
+    /// `needle`, right column then left, read across `cols`.
+    fn row_cells_with(
+        buf: &Buffer,
+        cols: &DiffColumns,
+        needle: &str,
+        modifier: Modifier,
+    ) -> (String, String) {
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 68..buf.area.width).contains(needle))
+            .find(|&y| line_text(buf, y, right_text(cols)).contains(needle))
             .unwrap_or_else(|| panic!("{needle:?} rendered in the right column"));
-        let marked = |cols: std::ops::Range<u16>| {
-            cols.filter(|&x| buf[(x, row)].modifier.contains(modifier))
+        let marked = |cells: std::ops::Range<u16>| {
+            cells
+                .filter(|&x| buf[(x, row)].modifier.contains(modifier))
                 .map(|x| buf[(x, row)].symbol().to_string())
                 .collect::<String>()
         };
-        (marked(68..buf.area.width), marked(8..59))
+        (marked(right_text(cols)), marked(left_text(cols)))
     }
 
     /// A theme that cannot blend has no receding to lead a change with, so the
@@ -5635,14 +6056,15 @@ mod tests {
         )
         .expect("rgb background");
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let row_with = |text: &str| {
             (0..buf.area.height)
-                .find(|&y| line_text(buf, y, 68..buf.area.width).contains(text))
+                .find(|&y| line_text(buf, y, right_text(&cols)).contains(text))
                 .unwrap_or_else(|| panic!("{text:?} rendered in the right column"))
         };
         let leading_glyph = |y: u16| {
-            let x = (68..buf.area.width)
+            let x = right_text(&cols)
                 .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
                 .expect("a glyph on the row");
             (buf[(x, y)].symbol().to_string(), buf[(x, y)].style().fg)
@@ -5684,10 +6106,11 @@ mod tests {
         let context_fg = |h: &mut crate::test_harness::TestHarness| {
             h.snapshot();
             let buf = h.rendered_buffer();
+            let cols = harness_columns(h);
             let y = (0..buf.area.height)
-                .find(|&y| line_text(buf, y, 68..buf.area.width).contains("fn keep"))
+                .find(|&y| line_text(buf, y, right_text(&cols)).contains("fn keep"))
                 .expect("the context row renders");
-            let x = (68..buf.area.width)
+            let x = right_text(&cols)
                 .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
                 .expect("a glyph on the row");
             buf[(x, y)].style().fg
@@ -5745,6 +6168,7 @@ mod tests {
         let h = diff_harness("fn a() {}\n", "fn a() {}\nfn b() {}\n");
 
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let underlined = (0..buf.area.height).any(|y| {
             (0..buf.area.width).any(|x| buf[(x, y)].modifier.contains(Modifier::UNDERLINED))
@@ -5752,13 +6176,13 @@ mod tests {
         assert!(!underlined, "a pure added line underlines nothing");
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 68..120).contains("fn b"))
+            .find(|&y| line_text(buf, y, right_text(&cols)).contains("fn b"))
             .expect("added line rendered on the right");
         let context = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 68..120).contains("fn a"))
+            .find(|&y| line_text(buf, y, right_text(&cols)).contains("fn a"))
             .expect("context line rendered on the right");
         assert!(
-            (68..120).all(|x| buf[(x, row)].bg == buf[(x, context)].bg),
+            (right_text(&cols)).all(|x| buf[(x, row)].bg == buf[(x, context)].bg),
             "the added line's cells carry the same background as an unchanged row"
         );
     }
@@ -5769,15 +6193,16 @@ mod tests {
         let h = diff_harness("keep\nold\ntail\n", "keep\ntail\n");
 
         let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 8..59).contains("old"))
+            .find(|&y| line_text(buf, y, left_text(&cols)).contains("old"))
             .expect("deleted base line rendered on the left");
         let context = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 8..59).contains("keep"))
+            .find(|&y| line_text(buf, y, left_text(&cols)).contains("keep"))
             .expect("unchanged base line mirrored on the left");
         assert!(
-            (8..59).all(|x| buf[(x, row)].bg == buf[(x, context)].bg),
+            (left_text(&cols)).all(|x| buf[(x, row)].bg == buf[(x, context)].bg),
             "the deleted base line's cells carry the same background as a mirrored row"
         );
     }
@@ -5793,12 +6218,17 @@ mod tests {
             .and_then(|s| s.bg)
             .expect("an rgb editor background");
         let buf = h.rendered_buffer();
+        // The gutter's last cell, where its rule sits, then the left text.
+        let left = {
+            let text = left_text(&harness_columns(&h));
+            text.start - 1..text.end
+        };
 
         let row = (0..buf.area.height)
-            .find(|&y| line_text(buf, y, 7..59).contains("keep"))
+            .find(|&y| line_text(buf, y, left.clone()).contains("keep"))
             .expect("unchanged base line mirrored on the left");
         assert!(
-            (7..59).all(|x| buf[(x, row)].bg == canvas),
+            left.clone().all(|x| buf[(x, row)].bg == canvas),
             "an unchanged mirrored base row paints no background of its own"
         );
     }
@@ -5809,6 +6239,7 @@ mod tests {
     /// colors there.
     #[test]
     fn diff_view_mirrors_the_base_line_without_the_live_inlays() {
+        let cols = wide_columns();
         let mut editor = diff_editor("keep\nold\ntail\n", "keep\nnew\ntail\n");
         let anchor = {
             let snapshot = editor.display_map.buffer_snapshot();
@@ -5840,8 +6271,8 @@ mod tests {
 
         assert_eq!(
             (
-                line_text(&buf, 0, 68..120).trim_end().to_string(),
-                line_text(&buf, 0, 8..59).trim_end().to_string(),
+                line_text(&buf, 0, right_text(&cols)).trim_end().to_string(),
+                line_text(&buf, 0, left_text(&cols)).trim_end().to_string(),
             ),
             ("keep: u32".to_string(), "keep".to_string()),
             "the hint rides the live line on the right and stays off the mirrored base line"
@@ -5899,7 +6330,10 @@ mod tests {
 
         // At this sub-threshold width the diff is unified, so the moved buffer
         // row "bb" paints at the single text column. It sits on display row 1.
-        let rx = right_text_x(area);
+        let rx = editor
+            .text_rect
+            .expect("the render records the text rect")
+            .x;
         assert_eq!(
             buf[(rx, 1)].symbol(),
             "b",
@@ -6685,7 +7119,10 @@ mod tests {
             None,
         );
 
-        let rx = right_text_x(area);
+        let rx = editor
+            .text_rect
+            .expect("the render records the text rect")
+            .x;
         let row = (0..area.height)
             .find(|&y| buffer_text(&buf, y).contains("added"))
             .expect("the added line renders");
@@ -6716,7 +7153,7 @@ mod tests {
             None,
         );
 
-        let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let lx = two_digit_columns(area).left_text_x;
         let row = (0..area.height)
             .find(|&y| buffer_text(&buf, y).contains("gone"))
             .expect("the deleted base line renders");
@@ -6764,8 +7201,11 @@ mod tests {
         let row = (0..area.height)
             .find(|&y| buffer_text(&buf, y).contains("new mid tail"))
             .expect("the modified line renders");
-        let rx = right_text_x(area);
-        let lx = DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x;
+        let rx = editor
+            .text_rect
+            .expect("the render records the text rect")
+            .x;
+        let lx = two_digit_columns(area).left_text_x;
         let colors = |x0: u16, len: u16| -> Vec<_> {
             (x0..x0 + len).map(|x| buf[(x, row)].style().fg).collect()
         };
@@ -6826,7 +7266,7 @@ mod tests {
     /// side does.
     #[test]
     fn a_refined_live_row_paints_its_unchanged_chars_in_the_text_color() {
-        let colors = refined_pair_colors(right_text_x);
+        let colors = refined_pair_colors(|area| two_digit_columns(area).right_text_x);
         assert_eq!(
             (&colors[..3], &colors[3..]),
             (
@@ -6842,9 +7282,7 @@ mod tests {
     /// paints the rest as the unchanged text it is, not as removed text.
     #[test]
     fn a_refined_base_row_paints_its_unchanged_chars_in_the_text_color() {
-        let colors = refined_pair_colors(|area| {
-            DiffColumns::compute(area, DiffLayout::DIFF_VIEW).left_text_x
-        });
+        let colors = refined_pair_colors(|area| two_digit_columns(area).left_text_x);
         assert_eq!(
             (&colors[..3], &colors[3..]),
             (

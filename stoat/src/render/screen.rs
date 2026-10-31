@@ -183,9 +183,13 @@ mod tests {
 
         let on = cell_with_diff_view(&mut h, true);
         let content = content(&h);
+        let text = focused(&mut h)
+            .text_rect
+            .expect("the render records the text rect");
+        let divider = review::diff_divider_x(content).expect("a two-column diff");
         assert_eq!(
-            on,
-            Some((review::right_text_x(content) + 2, content.y)),
+            (on, text.x > divider),
+            (Some((text.x + 2, content.y)), true),
             "with diff on the popup anchors at the right diff text column"
         );
     }

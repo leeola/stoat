@@ -1019,6 +1019,14 @@ impl DiffMap {
         self.base_text.as_ref()
     }
 
+    /// The base text's line count, zero with no base text.
+    ///
+    /// A trailing newline counts the empty line after it, as a buffer's line
+    /// count does, so the two compare line for line.
+    pub(crate) fn base_lines(&self) -> u32 {
+        self.base_line_starts.len() as u32
+    }
+
     pub fn is_empty(&self) -> bool {
         self.hunks.is_empty()
     }

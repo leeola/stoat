@@ -2212,8 +2212,12 @@ pub(crate) fn editor_screen_to_offset(
     // The diff view puts the editable text in the right column, so a click
     // maps against the right column's start rather than the left gutter.
     // Cells left of it (the base column and gutters) clamp to the line start.
+    // The paint records that column, because the gutter widths follow the
+    // file's line count.
     let gutter_width = if editor.diff_view {
-        crate::render::review::right_text_x(area).saturating_sub(area.x)
+        editor
+            .text_rect
+            .map_or(0, |text| text.x.saturating_sub(area.x))
     } else {
         editor.gutter_width
     };
@@ -2797,7 +2801,8 @@ mod tests {
 
     #[test]
     fn diff_view_click_maps_into_the_right_column() {
-        let mut h = Stoat::test();
+        let mut h = crate::test_harness::TestHarness::with_size(120, 10);
+        h.stoat.minimap_override = Some(false);
         open_scratch_file(&mut h, "keep\nnew\ntail\n");
 
         let (editor_id, buffer_id) = {
@@ -2826,17 +2831,27 @@ mod tests {
                 .diff_map = Some(dm);
         }
         h.stoat.active_workspace_mut().editors[editor_id].set_diff_view(true);
+        // The paint records the right column's text rect, which the click maps
+        // against, as every click after a frame does.
+        h.stoat.render();
 
-        let area = Rect::new(0, 0, 120, 10);
-        // At width 120 the two-column right text begins at col 68, so col 70 row 0
-        // is the right column's third character of the context line "keep".
+        let (area, text_x) = {
+            let ws = h.stoat.active_workspace();
+            let area = ws.panes.pane(ws.panes.focus()).area;
+            let text = ws.editors[editor_id]
+                .text_rect
+                .expect("the render records the text rect");
+            (area, text.x - area.x)
+        };
+        // Two cells into the right text, row 0 is the third character of the
+        // context line "keep".
         assert_eq!(
-            editor_screen_to_offset(&mut h.stoat, editor_id, area, 70, 0),
+            editor_screen_to_offset(&mut h.stoat, editor_id, area, text_x + 2, 0),
             Some(2),
             "a click in the right column lands on the buffer character"
         );
         assert_eq!(
-            editor_screen_to_offset(&mut h.stoat, editor_id, area, 8, 0),
+            editor_screen_to_offset(&mut h.stoat, editor_id, area, 10, 0),
             Some(0),
             "a click left of the right column clamps to the buffer line start"
         );

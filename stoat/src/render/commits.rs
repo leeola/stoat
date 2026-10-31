@@ -618,8 +618,8 @@ pub(crate) fn render_commit_preview(
                 }
                 match diff_row {
                     ReviewRow::Context { left, right } => {
-                        render_side_num(buf, &mut num_text, left_num_x, y, left.line_num, dim);
-                        render_side_num(buf, &mut num_text, right_num_x, y, right.line_num, dim);
+                        render_side_num(buf, &mut num_text, left_num_x, y, left.line_num, dim, 4);
+                        render_side_num(buf, &mut num_text, right_num_x, y, right.line_num, dim, 4);
                         match &tints {
                             Some(tints) => {
                                 paint_preview_side(
@@ -680,7 +680,15 @@ pub(crate) fn render_commit_preview(
                     ReviewRow::Changed { left, right } => {
                         match left {
                             Some(l) => {
-                                render_side_num(buf, &mut num_text, left_num_x, y, l.line_num, dim);
+                                render_side_num(
+                                    buf,
+                                    &mut num_text,
+                                    left_num_x,
+                                    y,
+                                    l.line_num,
+                                    dim,
+                                    4,
+                                );
                                 match &tints {
                                     Some(tints) => paint_preview_side(
                                         buf,
@@ -720,6 +728,7 @@ pub(crate) fn render_commit_preview(
                                     y,
                                     r.line_num,
                                     dim,
+                                    4,
                                 );
                                 match &tints {
                                     Some(tints) => paint_preview_side(

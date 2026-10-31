@@ -338,6 +338,7 @@ fn paint_conflict_rows(
                     y,
                     buffer_row + 1,
                     dim,
+                    4,
                 );
                 paint_highlighted_row(
                     snapshot,
@@ -420,7 +421,7 @@ fn paint_side(
     match side {
         Some(side) => {
             if side_nums {
-                render_side_num(buf, num_text, num_x, y, side.line_num, dim);
+                render_side_num(buf, num_text, num_x, y, side.line_num, dim, 4);
             }
             render_side_text(
                 buf,

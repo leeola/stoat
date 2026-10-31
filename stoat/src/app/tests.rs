@@ -18,7 +18,11 @@ use crate::{
     keymap::KeymapState,
     pane::{DockPanel, DockSide},
     render::{
-        content_lane, hints::HintRow, pane::pane_areas, review::DiffDials, status_lane,
+        content_lane,
+        hints::HintRow,
+        pane::pane_areas,
+        review::{DiffColumns, DiffDials, DiffLayout},
+        status_lane,
         walkthrough::Spotlight,
     },
     run::GridSelection,
@@ -508,6 +512,30 @@ fn row_holding(buf: &Buffer, cols: Range<u16>, text: &str) -> u16 {
         .unwrap_or_else(|| panic!("{text:?} rendered in cols {cols:?}"))
 }
 
+/// The left text cells of the diff view `h` paints, before the mid-divider.
+fn diff_left_text(h: &crate::test_harness::TestHarness) -> Range<u16> {
+    let cols = diff_columns(h);
+    cols.left_text_x..cols.left_text_x + cols.left_content_w as u16
+}
+
+/// The right text cells of the diff view `h` paints.
+fn diff_right_text(h: &crate::test_harness::TestHarness) -> Range<u16> {
+    let cols = diff_columns(h);
+    cols.right_text_x..cols.right_text_x + cols.right_content_w as u16
+}
+
+/// The columns `h`'s frame lays a diff view of files under a hundred lines
+/// out in, rich as its theme resolves under stoatty.
+fn diff_columns(h: &crate::test_harness::TestHarness) -> DiffColumns {
+    let theme = &h.stoat.theme;
+    let rich = crate::render::review::diff_gutter_is_rich(
+        h.stoat.stoatty,
+        theme,
+        theme.get(crate::theme::scope::UI_TEXT),
+    );
+    DiffColumns::compute(h.rendered_buffer().area, DiffLayout::diff_view(2, rich))
+}
+
 /// With nothing over the panes the combo is a pane resize, so the focused
 /// pane takes room from its neighbor.
 #[test]
@@ -641,9 +669,9 @@ fn the_syntax_chord_drops_both_diff_columns_to_one_color() {
         "the diff view opens with its syntax color on"
     );
     assert!(
-        row_colors(&h, 68..120, "fn keep") > 1
-            && row_colors(&h, 8..59, "fn keep") > 1
-            && row_colors(&h, 8..59, "fn old") > 1,
+        row_colors(&h, diff_right_text(&h), "fn keep") > 1
+            && row_colors(&h, diff_left_text(&h), "fn keep") > 1
+            && row_colors(&h, diff_left_text(&h), "fn old") > 1,
         "every row starts out carrying token colors"
     );
 
@@ -652,9 +680,9 @@ fn the_syntax_chord_drops_both_diff_columns_to_one_color() {
     assert_eq!(
         (
             h.stoat.diff_syntax,
-            row_colors(&h, 68..120, "fn keep"),
-            row_colors(&h, 8..59, "fn keep"),
-            row_colors(&h, 8..59, "fn old"),
+            row_colors(&h, diff_right_text(&h), "fn keep"),
+            row_colors(&h, diff_left_text(&h), "fn keep"),
+            row_colors(&h, diff_left_text(&h), "fn old"),
         ),
         (false, 1, 1, 2),
         "every row loses its tokens, and the two left on the removed row are \
@@ -665,7 +693,7 @@ fn the_syntax_chord_drops_both_diff_columns_to_one_color() {
     h.stoat.handle_window_ipc(chord('8'));
     h.snapshot();
     assert!(
-        h.stoat.diff_syntax && row_colors(&h, 68..120, "fn keep") > 1,
+        h.stoat.diff_syntax && row_colors(&h, diff_right_text(&h), "fn keep") > 1,
         "a second chord brings the color back"
     );
 }
@@ -809,7 +837,7 @@ fn the_seven_chord_bolds_every_change_span() {
     assert_eq!(
         (
             h.stoat.diff_bold,
-            glyphs_with(&h, 68..120, "fn new", Modifier::BOLD)
+            glyphs_with(&h, diff_right_text(&h), "fn new", Modifier::BOLD)
         ),
         (false, String::new()),
         "a session opens with the bold off, and a code change carries none"
@@ -819,9 +847,9 @@ fn the_seven_chord_bolds_every_change_span() {
     h.snapshot();
     assert_eq!(
         (
-            glyphs_with(&h, 68..120, "fn new", Modifier::BOLD),
-            glyphs_with(&h, 8..59, "fn old", Modifier::BOLD),
-            glyphs_with(&h, 68..120, "fn keep", Modifier::BOLD),
+            glyphs_with(&h, diff_right_text(&h), "fn new", Modifier::BOLD),
+            glyphs_with(&h, diff_left_text(&h), "fn old", Modifier::BOLD),
+            glyphs_with(&h, diff_right_text(&h), "fn keep", Modifier::BOLD),
         ),
         ("new".to_string(), "old".to_string(), String::new()),
         "each column bolds its changed word, and the context row stays plain"
@@ -832,7 +860,7 @@ fn the_seven_chord_bolds_every_change_span() {
     assert_eq!(
         (
             h.stoat.diff_bold,
-            glyphs_with(&h, 68..120, "fn new", Modifier::BOLD)
+            glyphs_with(&h, diff_right_text(&h), "fn new", Modifier::BOLD)
         ),
         (false, String::new()),
         "a second chord clears it"
@@ -863,7 +891,7 @@ fn the_six_chord_underlines_every_change_span() {
     assert_eq!(
         (
             h.stoat.diff_underline,
-            glyphs_with(&h, 68..120, "fn new", Modifier::UNDERLINED),
+            glyphs_with(&h, diff_right_text(&h), "fn new", Modifier::UNDERLINED),
         ),
         (false, String::new()),
         "a session opens with the underline off, and a blending theme draws none"
@@ -873,9 +901,9 @@ fn the_six_chord_underlines_every_change_span() {
     h.snapshot();
     assert_eq!(
         (
-            glyphs_with(&h, 68..120, "fn new", Modifier::UNDERLINED),
-            glyphs_with(&h, 8..59, "fn old", Modifier::UNDERLINED),
-            glyphs_with(&h, 68..120, "fn keep", Modifier::UNDERLINED),
+            glyphs_with(&h, diff_right_text(&h), "fn new", Modifier::UNDERLINED),
+            glyphs_with(&h, diff_left_text(&h), "fn old", Modifier::UNDERLINED),
+            glyphs_with(&h, diff_right_text(&h), "fn keep", Modifier::UNDERLINED),
         ),
         ("new".to_string(), "old".to_string(), String::new()),
         "each column underlines its changed word, and the context row stays plain"
@@ -886,7 +914,7 @@ fn the_six_chord_underlines_every_change_span() {
     assert_eq!(
         (
             h.stoat.diff_underline,
-            glyphs_with(&h, 68..120, "fn new", Modifier::UNDERLINED),
+            glyphs_with(&h, diff_right_text(&h), "fn new", Modifier::UNDERLINED),
         ),
         (false, String::new()),
         "a second chord clears it"

@@ -13,6 +13,7 @@ use crate::{
     render::{
         editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         layout::split_pane_status,
+        review,
         text::{text_width, write_str, write_str_clipped},
         undercurl::UndercurlBatch,
         FrameCtx,
@@ -132,9 +133,18 @@ pub(crate) fn render_diff_changes(
     }
 
     state.viewport_rows = inner.height as usize;
+    let rich = review::diff_gutter_is_rich(scene.live(), frame.theme, text_style);
     for excerpt in &state.excerpts {
         if let Some(editor) = editors.get_mut(excerpt.editor_id) {
-            fit_diff_view(editor, inner, frame.wrap_mode, frame.wrap_column);
+            let digits = review::diff_gutter_digits(&editor.display_map.snapshot());
+            fit_diff_view(
+                editor,
+                inner,
+                frame.wrap_mode,
+                frame.wrap_column,
+                digits,
+                rich,
+            );
         }
     }
     let total = diff_changes::layout_stack(state, editors);
@@ -452,6 +462,29 @@ mod tests {
             .to_string()
     }
 
+    /// The columns the live frame lays an excerpt of a file under a hundred
+    /// lines out in over `inner`, rich as the harness's theme resolves it.
+    fn excerpt_columns(h: &TestHarness, inner: Rect) -> DiffColumns {
+        let theme = &h.stoat.theme;
+        let rich = review::diff_gutter_is_rich(true, theme, theme.get(scope::UI_TEXT));
+        DiffColumns::compute(inner, DiffLayout::diff_view(2, rich))
+    }
+
+    /// The line number a diff side's gutter shows on row `y`, the digits in
+    /// the cells from the side's first cell to its text.
+    ///
+    /// A rich gutter's number composites at the cell its run starts in, which
+    /// is not the cell gutter's number field, so the reader takes the digits
+    /// wherever the gutter put them.
+    fn gutter_number(buf: &Buffer, side_x: u16, text_x: u16, y: u16) -> String {
+        (side_x..text_x)
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+            .chars()
+            .filter(char::is_ascii_digit)
+            .collect()
+    }
+
     /// Two changed files under a focused changes view with no minimap, at a
     /// width that pairs each modified line with its base line, settled.
     fn two_files(height: u16) -> TestHarness {
@@ -489,7 +522,7 @@ mod tests {
             let ws = h.stoat.active_workspace();
             split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
         };
-        let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
+        let cols = excerpt_columns(&h, inner);
 
         // a.txt's three rows sit under its header on row 0, and b.txt's first
         // row under its header on row 4. Each header pairs its name with the
@@ -502,8 +535,8 @@ mod tests {
             .into_iter()
             .map(|row| {
                 (
-                    cells(&buf, cols.left_num_x, 4, inner.y + row),
-                    cells(&buf, cols.right_num_x, 4, inner.y + row),
+                    gutter_number(&buf, cols.left_x, cols.left_text_x, inner.y + row),
+                    gutter_number(&buf, cols.right_x, cols.right_text_x, inner.y + row),
                 )
             })
             .collect();
@@ -604,15 +637,15 @@ mod tests {
         }
 
         let buf = h.render_composited();
+        let inner = Rect::new(0, 0, 120, 5);
+        let cols = excerpt_columns(&h, inner);
         let (state, editors) = stack(&mut h);
         let scroll_row = editors[state.excerpts[0].editor_id].scroll_row;
-        let inner = Rect::new(0, 0, 120, 5);
-        let cols = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW);
         assert_eq!(
             (
                 state.scroll,
                 scroll_row,
-                cells(&buf, cols.right_num_x, 4, inner.y)
+                gutter_number(&buf, cols.right_x, cols.right_text_x, inner.y)
             ),
             (3, 2, "3".to_string()),
         );
@@ -777,14 +810,17 @@ mod tests {
             let ws = h.stoat.active_workspace();
             split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
         };
-        let x = DiffColumns::compute(inner, DiffLayout::DIFF_VIEW).right_num_x;
+        let cols = excerpt_columns(&h, inner);
         let (state, _) = stack(&mut h);
         let numbers: Vec<Vec<String>> = state
             .excerpts
             .iter()
             .map(|excerpt| {
                 (1..=5)
-                    .map(|row| cells(&buf, x, 4, inner.y + (excerpt.top + row) as u16))
+                    .map(|row| {
+                        let y = inner.y + (excerpt.top + row) as u16;
+                        gutter_number(&buf, cols.right_x, cols.right_text_x, y)
+                    })
                     .collect()
             })
             .collect();

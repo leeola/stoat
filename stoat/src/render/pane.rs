@@ -16,7 +16,7 @@ use crate::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
         },
-        review::{DiffColumns, DiffLayout},
+        review,
         run_pane::render_run_pane,
         status_lane,
         term_pane::render_term_pane,
@@ -455,7 +455,7 @@ fn paint_diff_sides_bar(
     let lead_cells = cells(lead_chars);
     let text_cells = cells(text.chars().count());
 
-    let divider = DiffColumns::compute(content_area, DiffLayout::DIFF_VIEW).sep_x;
+    let divider = review::diff_divider_x(content_area);
     let Some(area) = diff_sides_bar_area(content_area, divider, lead_cells, text_cells) else {
         return;
     };
