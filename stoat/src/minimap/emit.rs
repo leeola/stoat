@@ -16,10 +16,10 @@ use crate::{
     buffer::BufferId,
     diff_changes::DiffChangesId,
     display_map::{DisplayPoint, DisplaySnapshot},
-    editor_state::EditorId,
+    editor_state::{EditorId, EditorState},
     minimap::{
         diff_changes::{self, DiffChangesStrip},
-        EdgeSource, RowMark,
+        BuildWindow, EdgeSource, RowMark, LINES_PER_CELL,
     },
     pane::View,
     render::{
@@ -30,6 +30,7 @@ use crate::{
     theme::Theme,
     workspace::WorkspaceId,
 };
+use ratatui::layout::Rect;
 use std::{
     cell::OnceCell,
     collections::hash_map::{DefaultHasher, Entry},
@@ -314,7 +315,11 @@ fn sync_minimap_strip(
 
     let buffer_syntax_version = stoat.workspaces[ws_id].buffers.syntax_version(buffer_id);
     let lsp_token_version = stoat.workspaces[ws_id].buffers.lsp_token_version(buffer_id);
-    let (snapshot, diff_version, diag_version, severity_map) =
+    let single_strip = match stoat.minimap_mode() {
+        MinimapMode::Single => Some(stoat.single_minimap_rect),
+        _ => None,
+    };
+    let (snapshot, diff_version, diag_version, severity_map, window) =
         match stoat.workspaces[ws_id].editors.get_mut(editor_id) {
             Some(editor) => {
                 let snapshot = editor.display_map.snapshot();
@@ -324,7 +329,9 @@ fn sync_minimap_strip(
                     .as_ref()
                     .map(|cache| (cache.version, cache.map.clone()))
                     .unwrap_or_default();
-                (snapshot, diff_version, diag_version, severity_map)
+                let strip = single_strip.unwrap_or(editor.minimap_rect);
+                let window = minimap_build_window(&snapshot, editor, strip);
+                (snapshot, diff_version, diag_version, severity_map, window)
             },
             None => return,
         };
@@ -389,8 +396,15 @@ fn sync_minimap_strip(
         },
         tokens_for,
         marks,
+        window,
     );
 
+    if let Some(lines) = content.take_len() {
+        stoatty_protocol::command::encode_minimap_len_into(
+            out,
+            &stoatty_protocol::command::MinimapLenCommand { content_id, lines },
+        );
+    }
     for splice in content.take_queued() {
         let command = stoatty_protocol::command::MinimapLinesCommand {
             content_id,
@@ -403,6 +417,36 @@ fn sync_minimap_strip(
         } else {
             stoatty_protocol::command::encode_minimap_lines_into(out, &command);
         }
+    }
+}
+
+/// The rows a strip builds, which are the editor's view at rest padded by two
+/// strip spans on each side.
+///
+/// A strip draws its height in cells times [`LINES_PER_CELL`] lines, and that
+/// span rides at most one span past the view in either direction, so one span
+/// of padding holds every line it draws. The second span is scroll margin, so
+/// a page or two of scroll lands on lines already sent. The view is read at
+/// rest rather than mid-glide, so a jump builds where it lands.
+///
+/// `strip` is the strip's rect when known. A strip shorter than the viewport
+/// still pads by the viewport, so a first frame before the rect is laid out
+/// builds enough.
+fn minimap_build_window(
+    snapshot: &DisplaySnapshot,
+    editor: &EditorState,
+    strip: Option<Rect>,
+) -> BuildWindow {
+    let viewport = editor.viewport_rows.unwrap_or(0);
+    let rest = editor.scroll_row as f32 + editor.scroll_frac;
+    let (top, visible) = minimap_view_window(snapshot, rest, viewport);
+
+    let cells = strip.map_or(0, |rect| u32::from(rect.height)).max(viewport);
+    let pad = 2 * cells * u32::from(LINES_PER_CELL);
+    let top = top as u32;
+    BuildWindow {
+        rows: top.saturating_sub(pad)..top.saturating_add(u32::from(visible) + pad),
+        from: top,
     }
 }
 
@@ -928,59 +972,115 @@ mod tests {
         );
     }
 
+    /// A file longer than the strip's window sends its length and then only
+    /// the window's lines, over as many idle emits as the budget takes. A
+    /// scroll moves the window, and the emits after it cover only the lines
+    /// the new window adds.
     #[test]
-    fn a_multi_slice_minimap_build_completes_over_idle_emits() {
-        use stoatty_protocol::command::Command;
-
+    fn a_large_file_builds_only_the_window_its_view_needs() {
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
 
-        // Three slices, so the build fills over three syncs at one slice each.
-        let total = 3 * SYNC_SLICE as usize;
-        let body: String = vec!["ln"; total].join("\n");
+        // Eight slices long, at a height whose window takes two slices, so a
+        // window fills over two syncs at one slice each.
+        let total = 8 * SYNC_SLICE;
+        let body: String = vec!["ln"; total as usize].join("\n");
         let root = PathBuf::from("/minimap");
         let path = root.join("big.txt");
         h.fake_fs().insert_file(&path, body.as_bytes());
         h.stoat.active_workspace_mut().git_root = root;
         action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
         h.settle();
-        h.resize(80, 24);
+        h.resize(80, 60);
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
 
         let _ = h.stoat.render();
         apc_emit::emit_apc_scene(&mut h.stoat);
         one_slice_per_sync(&mut h.stoat);
-        emit_minimap(&mut h.stoat);
-        assert!(
-            h.stoat.minimap_build_pending,
-            "a file this size leaves the build pending after the first emit",
-        );
+        let (first_lens, first_rows) = build_until_idle(&mut h, &mut rx);
+        let first = expected_window(&mut h, editor_id, total);
 
-        // Drive the build the way an idle frame tick does, gathering the lines
-        // every emitted splice covers.
-        let mut covered: Vec<u32> = Vec::new();
-        for _ in 0..400 {
-            for cmd in drain_apc(&mut rx) {
-                if let Command::MinimapLines(lines) = cmd {
-                    covered.extend(lines.start..lines.start + lines.lines.len() as u32);
+        {
+            let editor = h
+                .stoat
+                .active_workspace_mut()
+                .editors
+                .get_mut(editor_id)
+                .expect("editor");
+            editor.scroll_row = total - 50;
+            editor.scroll_offset = (total - 50) as f32;
+        }
+        let _ = h.stoat.render();
+        let (second_lens, second_rows) = build_until_idle(&mut h, &mut rx);
+        let second = expected_window(&mut h, editor_id, total);
+
+        assert!(
+            first.start == 0 && first.end < second.start && second.end == total,
+            "two windows of a file longer than both, apart: {first:?} {second:?}",
+        );
+        assert_eq!(
+            [(first_lens, first_rows), (second_lens, second_rows)],
+            [(vec![total], first.collect()), (vec![], second.collect())],
+            "the length goes once, and each window's lines go exactly once",
+        );
+    }
+
+    /// Emit until the minimap build settles, the way idle frame ticks drive
+    /// it, and return the store lengths sent and the rows the splices covered.
+    fn build_until_idle(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> (Vec<u32>, Vec<u32>) {
+        use stoatty_protocol::command::Command;
+
+        let mut lens = Vec::new();
+        let mut rows = Vec::new();
+        for emit in 0..400 {
+            emit_minimap(&mut h.stoat);
+            for cmd in drain_apc(rx) {
+                match cmd {
+                    Command::MinimapLen(len) => lens.push(len.lines),
+                    Command::MinimapLines(lines) => {
+                        rows.extend(lines.start..lines.start + lines.lines.len() as u32)
+                    },
+                    _ => {},
                 }
             }
+            assert!(
+                emit > 0 || h.stoat.minimap_build_pending,
+                "a window of two slices outlasts its first emit",
+            );
             if !h.stoat.minimap_build_pending {
                 break;
             }
-            emit_minimap(&mut h.stoat);
         }
+        rows.sort_unstable();
+        (lens, rows)
+    }
 
-        assert!(
-            !h.stoat.minimap_build_pending,
-            "the build completes over successive emits",
-        );
-        covered.sort_unstable();
-        assert_eq!(
-            covered,
-            (0..total as u32).collect::<Vec<_>>(),
-            "the emitted splices cover every line exactly once",
-        );
+    /// The rows the focused editor's strip builds, cut to the file.
+    fn expected_window(
+        h: &mut crate::test_harness::TestHarness,
+        editor_id: EditorId,
+        total: u32,
+    ) -> Range<u32> {
+        let single = h.stoat.single_minimap_rect;
+        let single_mode = h.stoat.minimap_mode() == MinimapMode::Single;
+        let editor = h
+            .stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(editor_id)
+            .expect("editor");
+        let strip = if single_mode {
+            single
+        } else {
+            editor.minimap_rect
+        };
+        let snapshot = editor.display_map.snapshot();
+        let window = minimap_build_window(&snapshot, editor, strip);
+        window.rows.start..window.rows.end.min(total)
     }
 
     #[test]
@@ -1354,6 +1454,47 @@ mod tests {
             top_after_scroll,
             Some(50 * 256),
             "the thumb tracks the scrolled top row, got {scrolled:?}"
+        );
+    }
+
+    /// The window pads the view by two strip spans on each side. A strip draws
+    /// its cells times eight lines and rides at most one span past the view,
+    /// so the window holds every line it draws, plus a span of scroll margin.
+    /// A strip shorter than the viewport pads by the viewport.
+    #[test]
+    fn the_build_window_pads_the_view_by_two_strip_spans() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap-window");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, vec!["ln"; 3000].join("\n").as_bytes());
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        h.resize(80, 40);
+        let _ = h.stoat.render();
+
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        let editor = h
+            .stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(editor_id)
+            .expect("editor");
+        editor.scroll_row = 1000;
+        editor.scroll_frac = 0.0;
+        editor.viewport_rows = Some(30);
+        let snapshot = editor.display_map.snapshot();
+        let strip = |height| Some(Rect::new(0, 0, 8, height));
+        let window = |rows| BuildWindow { rows, from: 1000 };
+
+        assert_eq!(
+            [
+                minimap_build_window(&snapshot, editor, None),
+                minimap_build_window(&snapshot, editor, strip(40)),
+                minimap_build_window(&snapshot, editor, strip(20)),
+            ],
+            [window(520..1510), window(360..1670), window(520..1510)],
         );
     }
 

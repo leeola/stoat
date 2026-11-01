@@ -1,7 +1,7 @@
 //! Pure per-line run summaries feeding the stoatty minimap strip.
 //!
 //! A [`MinimapContent`] holds one summary per buffer line, updated incrementally
-//! from buffer edits and filled progressively for a freshly opened file, and
+//! from buffer edits and built over the lines around the strip's view, and
 //! drains the changes as [`Splice`]s the emission layer turns into `minimap_lines`
 //! frames. [`summarize_line`] compresses a line into colored [`Run`] blocks, never
 //! the file text. Nothing here does IO, so the whole module is unit-tested.
@@ -22,6 +22,9 @@ use stoat_text::{
 
 pub(crate) mod diff_changes;
 pub(crate) mod emit;
+mod row_set;
+
+use row_set::RowSet;
 
 /// Minimap columns a line is summarized into, matching the strip's declared
 /// `max_columns`. Display columns past this are dropped.
@@ -75,7 +78,10 @@ const EDIT_SUMMARIZE_MAX: usize = 32;
 
 /// Line count past which a buffer disables its minimap, so a huge file neither
 /// summarizes nor emits.
-const MAX_LINES: usize = 500_000;
+///
+/// The terminal cuts a content store at this many lines, and the strip of a
+/// longer file then shows a tail out of step with the file.
+const MAX_LINES: usize = 2_000_000;
 
 /// Buffer lines drawn per vertical strip cell, matching the strip's declared
 /// `lines_per_cell`. A pointer row therefore spans this many lines.
@@ -209,6 +215,19 @@ impl RowMark {
 pub struct LineToken {
     pub range: Range<usize>,
     pub class: u8,
+}
+
+/// The rows a [`MinimapContent::sync`] holds built, and the row it builds
+/// outward from.
+///
+/// A strip draws a window of lines around its view, so a sync builds those and
+/// leaves the rest of a large file blank until a scroll brings them near.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildWindow {
+    /// The rows to hold built. The part past the file is ignored.
+    pub rows: Range<u32>,
+    /// The row the build grows outward from, the nearest unbuilt rows first.
+    pub from: u32,
 }
 
 /// A pending change to a content store, replacing `removed` lines from `start`
@@ -355,8 +374,8 @@ impl EdgeSource for ResolvedEdges {
 ///
 /// Mirrors the terminal's content store: one entry per line, spliced as the
 /// buffer changes. Retains the rope it last synced against so an edit's old byte
-/// range resolves to old rows, and a build cursor so a fresh file fills over
-/// several frames.
+/// range resolves to old rows, and the set of built rows, so a strip builds only
+/// the lines around its view and a large file costs that window.
 pub struct MinimapContent {
     content_id: u32,
     /// Time one [`Self::sync`] spends on chunked work before it leaves the rest
@@ -365,6 +384,8 @@ pub struct MinimapContent {
     /// The executor whose clock measures [`Self::budget`], so a test scheduler
     /// decides when the budget ends a sync.
     executor: Executor,
+    /// One summary per buffer line from the first sync on, blank for a row
+    /// outside [`Self::built`], as the terminal's store holds it.
     lines: Vec<LineRuns>,
     /// The built rows carrying a mark and the mark each carries, ascending by
     /// row. A row absent from it is unmarked.
@@ -377,7 +398,15 @@ pub struct MinimapContent {
     edges: Vec<(u32, RowMark)>,
     synced_version: u64,
     synced_rope: Rope,
-    built_upto: u32,
+    /// The rows that hold their summaries. The build adds the window's rows,
+    /// and an edit splices the set as it splices the store.
+    built: RowSet,
+    /// The rows the last sync asked to hold built, so [`Self::build_pending`]
+    /// knows whether the window still has gaps.
+    wanted: Range<u32>,
+    /// The store length the emitter sends as `minimap_len` before the queued
+    /// splices, set by the first sync, which sizes the store.
+    pending_len: Option<u32>,
     disabled: bool,
     /// Combined diff and diagnostic version last synced. A change re-checks the
     /// built lines' edge marks without a buffer edit having occurred.
@@ -395,8 +424,8 @@ pub struct MinimapContent {
     /// steps until it reaches [`Self::resync_end`]. It rests there while
     /// [`Self::resync_extra`] still holds rows.
     resync_upto: Option<u32>,
-    /// The row an active sweep's cursor stops at, or `None` to run to
-    /// [`Self::built_upto`]. Always clamped to `built_upto` in use.
+    /// The row an active sweep's cursor stops at, or `None` to run to the end
+    /// of the store. The sweep visits only the [`Self::built`] rows on its way.
     resync_end: Option<u32>,
     /// The rows a parse reported while a sweep ran that lie outside the
     /// cursor's remaining window, swept once the cursor is done.
@@ -447,7 +476,9 @@ impl MinimapContent {
             edges: Vec::new(),
             synced_version: 0,
             synced_rope: Rope::new(),
-            built_upto: 0,
+            built: RowSet::default(),
+            wanted: 0..0,
+            pending_len: None,
             disabled: false,
             synced_decoration_version: 0,
             synced_syntax_version: 0,
@@ -484,18 +515,18 @@ impl MinimapContent {
         self.synced_version
     }
 
-    /// Whether chunked work is still outstanding, from the initial build or
+    /// Whether chunked work is still outstanding, from the window's build or
     /// either sweep.
     ///
     /// The caller ticks [`Self::sync`] on idle frames while this holds, so
     /// every cursor runs to completion instead of stalling until the next user
     /// event. A sweep needs this as much as the build does. It spends one
-    /// budget per sync on a file that is already fully built, so without it
-    /// every row past that budget's reach keeps stale colors or stale marks
-    /// until some unrelated event happens to tick another sync.
+    /// budget per sync on rows that are already built, so without it every
+    /// row past that budget's reach keeps stale colors or stale marks until
+    /// some unrelated event happens to tick another sync.
     pub fn build_pending(&self) -> bool {
         !self.disabled
-            && (self.built_upto < line_count(&self.synced_rope)
+            && (!self.built.covers(self.wanted.clone())
                 || self.resync_upto.is_some()
                 || self.edge_resync_upto.is_some())
     }
@@ -503,6 +534,16 @@ impl MinimapContent {
     /// Drain the pending splices for the emission layer.
     pub fn take_queued(&mut self) -> Vec<Splice> {
         std::mem::take(&mut self.queued)
+    }
+
+    /// Take the store length the emitter sends as `minimap_len` ahead of the
+    /// queued splices.
+    ///
+    /// Set once, by the first sync, which sizes the store to the file with
+    /// blank lines so each later splice lands at its own row. An edit's splice
+    /// carries its own length change, so no later sync sets it.
+    pub fn take_len(&mut self) -> Option<u32> {
+        self.pending_len.take()
     }
 
     /// Bring the summaries up to date with `new_rope` at `version`.
@@ -514,12 +555,19 @@ impl MinimapContent {
     /// changing re-checks the built lines' edge marks and [`SyncVersions::syntax`]
     /// changing re-summarizes their content, each without a buffer edit.
     ///
-    /// Edits within the already-built prefix queue splices. A patch of more
-    /// than [`EDIT_SUMMARIZE_MAX`] edits splices rows that stand in for the
-    /// edited lines, and the recolor sweep re-summarizes them over the
-    /// following calls. The unbuilt tail fills as far as [`Self::budget`]
-    /// reaches per call. A buffer over [`MAX_LINES`] disables and queues
-    /// nothing.
+    /// The first sync sizes the store to the file with blank lines and sets
+    /// the length [`Self::take_len`] hands over. Every edit after it queues a
+    /// splice, which summarizes the rows the edit inserted when it replaced
+    /// built rows or reaches into `window`, and leaves them blank otherwise.
+    /// A patch of more than [`EDIT_SUMMARIZE_MAX`] edits splices rows that
+    /// stand in for the edited lines, and the recolor sweep re-summarizes them
+    /// over the following calls.
+    ///
+    /// The rows of `window` that are not built fill nearest
+    /// [`BuildWindow::from`] first, as far as [`Self::budget`] reaches per
+    /// call. Rows outside every window a sync named stay blank. A buffer over
+    /// [`MAX_LINES`] disables and queues nothing.
+    #[allow(clippy::too_many_arguments)]
     pub fn sync(
         &mut self,
         new_rope: &Rope,
@@ -528,6 +576,7 @@ impl MinimapContent {
         versions: SyncVersions,
         tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: impl EdgeSource,
+        window: BuildWindow,
     ) {
         if self.disabled {
             return;
@@ -540,7 +589,9 @@ impl MinimapContent {
             self.lines.clear();
             self.edges.clear();
             self.queued.clear();
-            self.built_upto = 0;
+            self.built = RowSet::default();
+            self.wanted = 0..0;
+            self.pending_len = None;
             self.synced_version = version;
             self.synced_decoration_version = versions.decoration;
             self.synced_syntax_version = versions.syntax;
@@ -548,36 +599,48 @@ impl MinimapContent {
             return;
         }
 
-        if version != self.synced_version {
+        let wanted = window.rows.start.min(total)..window.rows.end.min(total);
+        if self.lines.is_empty() {
+            // The store starts as the file's length in blank lines, so the
+            // window's splices land at their own rows, wherever the view is.
+            self.lines = vec![LineRuns::default(); total as usize];
+            self.pending_len = Some(total);
+            self.synced_version = version;
+            self.synced_rope = new_rope.clone();
+        } else if version != self.synced_version {
             if edits.edits().len() > EDIT_SUMMARIZE_MAX {
                 self.splice_edits(edits, new_rope, &marks);
             } else {
                 for edit in edits.edits() {
-                    self.apply_edit(edit, new_rope, &tokens_for, &marks);
+                    self.apply_edit(edit, new_rope, &tokens_for, &marks, &wanted);
                 }
             }
             self.synced_version = version;
             self.synced_rope = new_rope.clone();
         }
+        self.wanted = wanted.clone();
 
         // Every stage below reads the clock after its slice rather than before
         // it, so a sync that arrives with the budget already spent still
         // advances its cursor by one slice.
-        while self.built_upto < total {
-            let end = (self.built_upto + SYNC_SLICE).min(total);
-            let tokens = tokens_for(self.built_upto..end);
+        let from = window.from.min(total);
+        while let Some(slice) = self.next_build_slice(&wanted, from) {
+            let tokens = tokens_for(slice.clone());
             // Resolved once through the bulk path, since the summary below and
             // the record beside it both want every row's edge.
-            let edges = ResolvedEdges::over(&marks, self.built_upto..end);
-            let lines = summarize_rows(new_rope, self.built_upto..end, &tokens, &edges);
+            let edges = ResolvedEdges::over(&marks, slice.clone());
+            let lines = summarize_rows(new_rope, slice.clone(), &tokens, &edges);
+            self.lines[slice.start as usize..slice.end as usize].copy_from_slice(&lines);
+            // An unbuilt row carries no mark, so the slice's marks go in
+            // whole at the place their rows sort to.
+            let at = self.edges.partition_point(|&(row, _)| row < slice.start);
+            self.edges.splice(at..at, edges.marks);
             self.queue_splice(Splice {
-                start: self.built_upto,
-                removed: 0,
-                lines: lines.clone(),
+                start: slice.start,
+                removed: slice.end - slice.start,
+                lines,
             });
-            self.edges.extend(edges.marks);
-            self.lines.extend(lines);
-            self.built_upto = end;
+            self.built.insert(slice);
 
             if self.executor.now().duration_since(started) >= self.budget {
                 break;
@@ -643,7 +706,7 @@ impl MinimapContent {
         // sweep. A sweep of their own aims at the version the strip already
         // shows, so finishing it moves no version.
         if let Some(rows) = self.edited_rows.take() {
-            let rows = rows.start.min(self.built_upto)..rows.end.min(self.built_upto);
+            let rows = rows.start.min(total)..rows.end.min(total);
             if !rows.is_empty() {
                 match self.resync_upto {
                     None => {
@@ -659,24 +722,26 @@ impl MinimapContent {
             }
         }
         if let Some(from) = self.resync_upto {
-            let end = self
-                .resync_end
-                .unwrap_or(self.built_upto)
-                .min(self.built_upto);
+            let end = self.resync_end.unwrap_or(total).min(total);
             let mut from = from.min(end);
 
             // The loop sweeps the cursor's window first and the rows held for
             // the end after it. Both go one slice at a time under one budget.
+            // A row outside the built ones is passed over, since the build
+            // summarizes it fresh when a window reaches it.
             loop {
-                let slice = if from < end {
-                    let to = from.saturating_add(SYNC_SLICE).min(end);
-                    let slice = from..to;
-                    from = to;
-                    slice
-                } else if let Some(slice) = self.next_extra_slice() {
-                    slice
-                } else {
-                    break;
+                let slice = match self.built.next_run(from, end, SYNC_SLICE) {
+                    Some(run) => {
+                        from = run.end;
+                        run
+                    },
+                    None => {
+                        from = end;
+                        match self.next_extra_slice() {
+                            Some(slice) => slice,
+                            None => break,
+                        }
+                    },
                 };
                 self.resync_slice(new_rope, slice, &tokens_for);
 
@@ -707,13 +772,16 @@ impl MinimapContent {
             self.edge_resync_upto = Some(0);
         }
         if let Some(from) = self.edge_resync_upto {
-            let end = self.built_upto;
+            let end = total;
             let mut from = from.min(end);
 
             loop {
-                let to = from.saturating_add(SYNC_SLICE).min(end);
-                self.resync_edges(new_rope, &tokens_for, &marks, from..to);
-                from = to;
+                let Some(run) = self.built.next_run(from, end, SYNC_SLICE) else {
+                    from = end;
+                    break;
+                };
+                self.resync_edges(new_rope, &tokens_for, &marks, run.clone());
+                from = run.end;
 
                 if from >= end || self.executor.now().duration_since(started) >= self.budget {
                     break;
@@ -729,20 +797,40 @@ impl MinimapContent {
         }
     }
 
-    /// The next slice of [`Self::resync_extra`] within the built rows, taken off
-    /// its front, or `None` once none of it is left.
+    /// The next built run of [`Self::resync_extra`], taken off its front, or
+    /// `None` once none of its rows is built.
     fn next_extra_slice(&mut self) -> Option<Range<u32>> {
         let extra = self.resync_extra.take()?;
-        let end = extra.end.min(self.built_upto);
-        if extra.start >= end {
-            return None;
+        let run = self.built.next_run(extra.start, extra.end, SYNC_SLICE)?;
+        if run.end < extra.end {
+            self.resync_extra = Some(run.end..extra.end);
         }
+        Some(run)
+    }
 
-        let to = extra.start.saturating_add(SYNC_SLICE).min(end);
-        if to < end {
-            self.resync_extra = Some(to..end);
-        }
-        Some(extra.start..to)
+    /// The next slice of the window's unbuilt rows, from the gap nearest
+    /// `from`, at most [`SYNC_SLICE`] rows from the gap's side that faces it.
+    ///
+    /// The build therefore covers the view first and then grows out from it
+    /// in both directions, one slice at a time.
+    fn next_build_slice(&self, wanted: &Range<u32>, from: u32) -> Option<Range<u32>> {
+        self.built
+            .gaps(wanted.clone())
+            .into_iter()
+            .map(|gap| {
+                if gap.end <= from {
+                    let start = gap.start.max(gap.end.saturating_sub(SYNC_SLICE));
+                    (from - gap.end, start..gap.end)
+                } else {
+                    let start = gap.start.max(from);
+                    (
+                        start - from,
+                        start..gap.end.min(start.saturating_add(SYNC_SLICE)),
+                    )
+                }
+            })
+            .min_by_key(|&(distance, _)| distance)
+            .map(|(_, slice)| slice)
     }
 
     /// Re-summarize the built lines in `range` and queue a one-line splice where
@@ -845,50 +933,59 @@ impl MinimapContent {
         }
     }
 
-    /// Apply one edit that falls inside the built prefix, re-summarizing the new
-    /// rows and shifting the build and recolor-sweep cursors by the line delta.
+    /// Apply one edit to the store, shifting the built rows and the
+    /// recolor-sweep bounds by the line delta.
     ///
-    /// An edit starting past the build cursor is left for the chunked build to
-    /// summarize fresh when it reaches those rows.
+    /// The edit's inserted rows are summarized and join the built rows when
+    /// any row it replaced was built or the inserted rows reach into `wanted`.
+    /// Otherwise they splice in blank, as the rest of the unbuilt file sits in
+    /// the terminal's store, and no tokens are asked for them.
     ///
-    /// An edit that starts inside the prefix but reaches past the cursor keeps
-    /// every row it inserted. It summarizes all of them and the cursor advances
-    /// by the same line delta, so the rows the store holds and the rows the
-    /// cursor claims stay equal, and the build picks up at the row after the
-    /// edit's last.
-    ///
-    /// `removed` is clamped to the prefix for the same reason. The store cannot
-    /// lose a row it never held, so the clamp is what keeps the count the splice
-    /// reports equal to what the store gave up.
+    /// `removed` is clamped to the store for safety. The store holds every row
+    /// of the file, so the clamp only matters to a patch that does not match
+    /// the rope the store last synced against.
     fn apply_edit(
         &mut self,
         edit: &Edit<usize>,
         new_rope: &Rope,
         tokens_for: &impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
         marks: &impl EdgeSource,
+        wanted: &Range<u32>,
     ) {
         // The earlier edits of this patch already spliced the rows under this
         // one, so the row it replaces has moved by their line delta. The new
         // rope's prefix differs from the old one's by exactly that much, which
         // makes its own start row the index the store wants.
         let new_start_row = new_rope.offset_to_point(edit.new.start).row;
-        if new_start_row >= self.built_upto {
-            return;
-        }
         let new_end_row = new_rope.offset_to_point(edit.new.end).row;
 
         let old_start_row = self.synced_rope.offset_to_point(edit.old.start).row;
         let old_end_row = self.synced_rope.offset_to_point(edit.old.end).row;
 
-        let tokens = tokens_for(new_start_row..new_end_row + 1);
-
         // A shift moves where the replaced rows sit, not how many there are.
         let replaced = old_end_row + 1 - old_start_row;
-        let removed = (new_start_row + replaced).min(self.built_upto) - new_start_row;
-        let inserted = summarize_rows(new_rope, new_start_row..new_end_row + 1, &tokens, marks);
-        let inserted_marks: Vec<RowMark> = (new_start_row..new_end_row + 1)
-            .map(|row| marks.mark_of(row))
-            .collect();
+        let removed = (new_start_row + replaced)
+            .min(self.lines.len() as u32)
+            .saturating_sub(new_start_row);
+        let inserted_rows = new_start_row..new_end_row + 1;
+        let build = self
+            .built
+            .intersects(new_start_row..new_start_row + removed)
+            || (inserted_rows.start < wanted.end && wanted.start < inserted_rows.end);
+
+        let (inserted, inserted_marks): (Vec<LineRuns>, Vec<RowMark>) = if build {
+            let tokens = tokens_for(inserted_rows.clone());
+            (
+                summarize_rows(new_rope, inserted_rows.clone(), &tokens, marks),
+                inserted_rows
+                    .clone()
+                    .map(|row| marks.mark_of(row))
+                    .collect(),
+            )
+        } else {
+            let count = inserted_rows.len();
+            (vec![LineRuns::default(); count], vec![RowMark::NONE; count])
+        };
 
         let start = new_start_row as usize;
         let end = (start + removed as usize).min(self.lines.len());
@@ -896,7 +993,8 @@ impl MinimapContent {
         self.splice_edges(new_start_row..end as u32, &inserted_marks);
 
         let delta = inserted.len() as i64 - removed as i64;
-        self.built_upto = (self.built_upto as i64 + delta).max(0) as u32;
+        self.built
+            .splice(new_start_row, removed, inserted.len() as u32, build);
         self.slide_sweep_bounds(new_start_row, replaced, delta);
 
         self.queue_splice(Splice {
@@ -915,8 +1013,8 @@ impl MinimapContent {
         // edit re-summarized already carry current tokens, so resuming at the
         // seam of a straddling edit re-sweeps them idempotently.
         //
-        // `resync_end` of `None` runs to `built_upto`, which the splice
-        // already moved, so only a bounded end needs sliding.
+        // `resync_end` of `None` runs to the end of the store, which the
+        // splice already moved, so only a bounded end needs sliding.
         //
         // The bounds are the rows the edit replaced as the store held them, so
         // they read from the new start rather than the old.
@@ -954,8 +1052,11 @@ impl MinimapContent {
     /// row count changes nothing the terminal shows and queues no splice. The
     /// new rows land in [`Self::edited_rows`] for [`Self::sync`] to sweep.
     ///
-    /// Rows, marks, splices, and cursors end where [`Self::apply_edit`] per
-    /// edit leaves them, apart from the summaries the sweep has yet to reach.
+    /// An edit's new rows stay built when any row it replaced was built, and
+    /// stay blank otherwise, for the build to summarize when a window reaches
+    /// them. Rows, marks, and splices end where [`Self::apply_edit`] per edit
+    /// leaves them, apart from the summaries the sweep and the build have yet
+    /// to reach.
     fn splice_edits(&mut self, edits: &Patch<usize>, new_rope: &Rope, marks: &impl EdgeSource) {
         let edits = edits.edits();
         let new_points = new_rope.offsets_to_points_batch(
@@ -971,25 +1072,25 @@ impl MinimapContent {
                 .collect::<Vec<_>>(),
         );
 
-        let built = self.lines.len();
-        let mut lines: Vec<LineRuns> = Vec::with_capacity(built);
+        let mut lines: Vec<LineRuns> = Vec::with_capacity(self.lines.len());
         let mut edges: Vec<(u32, RowMark)> = Vec::with_capacity(self.edges.len());
         // The first old row, and the first old mark, not yet copied or replaced.
         let mut old_row = 0;
         let mut old_edge = 0;
-        let mut built_upto = self.built_upto;
+        let mut store_len = self.lines.len() as u32;
 
         for (old, new) in old_points.chunks(2).zip(new_points.chunks(2)) {
             let (old_start_row, old_end_row) = (old[0].row, old[1].row);
-            // The chunked build summarizes the rows past the cursor fresh.
-            if old_start_row as usize >= built {
-                break;
-            }
             let (new_start_row, new_end_row) = (new[0].row, new[1].row);
 
             let replaced = old_end_row + 1 - old_start_row;
-            let removed = (new_start_row + replaced).min(built_upto) - new_start_row;
+            let removed = (new_start_row + replaced)
+                .min(store_len)
+                .saturating_sub(new_start_row);
             let inserted = new_end_row + 1 - new_start_row;
+            let build = self
+                .built
+                .intersects(new_start_row..new_start_row + removed);
 
             let start = new_start_row as usize;
             if lines.len() < start {
@@ -1033,14 +1134,18 @@ impl MinimapContent {
             }
 
             lines.extend_from_slice(&stand_ins);
-            edges.extend(
-                (new_start_row..new_end_row + 1)
-                    .map(|row| (row, marks.mark_of(row)))
-                    .filter(|&(_, mark)| mark != RowMark::NONE),
-            );
+            // A blank row carries no mark until the build reaches it.
+            if build {
+                edges.extend(
+                    (new_start_row..new_end_row + 1)
+                        .map(|row| (row, marks.mark_of(row)))
+                        .filter(|&(_, mark)| mark != RowMark::NONE),
+                );
+            }
 
             let delta = inserted as i64 - removed as i64;
-            built_upto = (built_upto as i64 + delta) as u32;
+            store_len = (store_len as i64 + delta) as u32;
+            self.built.splice(new_start_row, removed, inserted, build);
             self.slide_sweep_bounds(new_start_row, replaced, delta);
             self.edited_rows = Some(match self.edited_rows.take() {
                 Some(rows) => rows.start.min(new_start_row)..rows.end.max(new_end_row + 1),
@@ -1066,7 +1171,6 @@ impl MinimapContent {
 
         self.lines = lines;
         self.edges = edges;
-        self.built_upto = built_upto;
     }
 
     /// Store `summary` as `row`'s and queue the one-line splice carrying it.
@@ -1525,8 +1629,9 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        summarize_line, EdgeSource, LineRuns, LineToken, MinimapContent, RowMark, Run, Splice,
-        SyncVersions, MAX_LINES, MAX_RUNS, SYNC_BUDGET, SYNC_SLICE,
+        summarize_line, BuildWindow, EdgeSource, LineRuns, LineToken, MinimapContent, RowMark,
+        RowSet, Run, Splice, SyncVersions, EDIT_SUMMARIZE_MAX, MAX_LINES, MAX_RUNS, SYNC_BUDGET,
+        SYNC_SLICE,
     };
     use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
     use stoat_scheduler::{Executor, TestScheduler};
@@ -1535,8 +1640,40 @@ mod tests {
         Rope,
     };
 
+    /// Every row of the file, built from row 0 down, the order a strip whose
+    /// view sits at the top builds a file that fits its window in.
+    const ALL: BuildWindow = BuildWindow {
+        rows: 0..u32::MAX,
+        from: 0,
+    };
+
+    impl MinimapContent {
+        /// [`MinimapContent::sync`] with [`ALL`] as the window, for the tests
+        /// of what a sync does to the rows it builds.
+        fn sync_all(
+            &mut self,
+            new_rope: &Rope,
+            version: u64,
+            edits: &Patch<usize>,
+            versions: SyncVersions,
+            tokens_for: impl Fn(Range<u32>) -> HashMap<u32, Vec<LineToken>>,
+            marks: impl EdgeSource,
+        ) {
+            self.sync(new_rope, version, edits, versions, tokens_for, marks, ALL);
+        }
+    }
+
     fn rope(text: &str) -> Rope {
         Rope::from(text)
+    }
+
+    /// The built-row set holding the `(start, end)` runs in `runs`.
+    fn built_rows(runs: &[(u32, u32)]) -> RowSet {
+        let mut set = RowSet::default();
+        for &(start, end) in runs {
+            set.insert(start..end);
+        }
+        set
     }
 
     /// An executor on a test clock, which moves only when a test moves it.
@@ -1735,19 +1872,20 @@ mod tests {
         );
     }
 
-    /// An edit can insert rows past the build cursor, since the cursor sits
-    /// wherever the last slice stopped. It summarizes those rows itself and the
-    /// cursor advances by the same delta, so the summarized prefix and the
-    /// claimed one stay equal and the build resumes at the seam.
+    /// An edit that opens lines on the last built row inserts rows past the
+    /// built ones, since the build stops wherever its last slice did. The edit
+    /// summarizes those rows itself and moves the unbuilt rows after them by
+    /// its delta, so the build resumes right after the edit's rows with no gap
+    /// and no overlap.
     #[test]
-    fn an_edit_reaching_past_the_build_cursor_summarizes_what_it_inserts() {
+    fn an_edit_reaching_past_the_built_rows_summarizes_what_it_inserts() {
         // Two slices, so the sync that carries the edit also finishes the build.
         let total = 2 * SYNC_SLICE as usize;
         let before = rope(&vec!["line"; total].join("\n"));
         let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
 
-        // One slice, leaving the cursor at SYNC_SLICE with the tail unbuilt.
-        content.sync(
+        // One slice, leaving the second unbuilt.
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -1756,11 +1894,15 @@ mod tests {
             no_edges,
         );
         let _ = content.take_queued();
-        assert_eq!(content.lines.len(), SYNC_SLICE as usize, "one slice built");
+        assert_eq!(
+            content.built,
+            built_rows(&[(0, SYNC_SLICE)]),
+            "one slice built"
+        );
 
-        // Three lines open on the cursor's last built row, so the rows they
-        // occupy run past where the build had reached. Every line is "line\n", so
-        // a row starts every five bytes.
+        // Three lines open on the last built row, so the rows they occupy run
+        // past the built ones. Every line is "line\n", so a row starts every five
+        // bytes.
         let seam = 5 * (SYNC_SLICE as usize - 1);
         let mut after: Vec<&str> = vec!["line"; total];
         after.splice(SYNC_SLICE as usize - 1..SYNC_SLICE as usize - 1, ["new"; 3]);
@@ -1769,7 +1911,7 @@ mod tests {
             old: seam..seam,
             new: seam..seam + 12,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         // The same sync then builds the tail, so the two splices together show
         // the edit's reach and where the build picked up from it.
@@ -1781,15 +1923,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 (SYNC_SLICE - 1, 1, 4),
-                (SYNC_SLICE + 3, 0, total - SYNC_SLICE as usize),
+                (SYNC_SLICE + 3, SYNC_SLICE, total - SYNC_SLICE as usize),
             ],
-            "the edit removes the one row it replaced, and the build resumes at \
-             the row after the four it left, with no gap and no overlap",
+            "the edit removes the one row it replaced, and the build replaces \
+             the blanks after the four it left, with no gap and no overlap",
         );
         assert_eq!(
-            content.lines.len(),
-            total + 3,
-            "the store holds every row, the edit's included",
+            (content.lines.len(), content.built.clone()),
+            (total + 3, built_rows(&[(0, total as u32 + 3)])),
+            "the store holds every row, and every row is built",
         );
 
         let inserted = summarize_line("new", &[], RowMark::NONE);
@@ -1801,18 +1943,18 @@ mod tests {
         assert!(!content.build_pending(), "and nothing is left to build");
     }
 
-    /// An edit can also replace rows across the build cursor, and the store only
-    /// held the ones before it. The splice has to report what the store gave up
-    /// rather than what the buffer lost, or the terminal drops rows the strip
-    /// never had.
+    /// An edit that replaces rows across the end of the built ones removes all
+    /// of them. The store holds every row, blank or not, so the splice reports
+    /// every row the buffer lost and the terminal's store keeps the file's
+    /// length.
     #[test]
-    fn an_edit_replacing_across_the_build_cursor_reports_only_the_built_rows() {
+    fn an_edit_replacing_across_the_built_rows_removes_every_row_it_replaced() {
         // Two slices, so the sync that carries the edit also finishes the build.
         let total = 2 * SYNC_SLICE as usize;
         let before = rope(&vec!["line"; total].join("\n"));
         let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
 
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -1821,11 +1963,16 @@ mod tests {
             no_edges,
         );
         let _ = content.take_queued();
-        assert_eq!(content.lines.len(), SYNC_SLICE as usize, "one slice built");
+        assert_eq!(
+            content.built,
+            built_rows(&[(0, SYNC_SLICE)]),
+            "one slice built"
+        );
 
-        // Four rows collapse into one, starting two rows below the cursor, so two
-        // of the four were built and two were not. Every line is "line\n", so a
-        // row starts every five bytes and a row's last byte is its newline.
+        // Four rows collapse into one, starting two rows above the end of the
+        // built ones, so two of the four were built and two were blank. Every
+        // line is "line\n", so a row starts every five bytes and a row's last
+        // byte is its newline.
         let first = SYNC_SLICE as usize - 2;
         let after = rope(
             &[
@@ -1840,18 +1987,18 @@ mod tests {
             old: 5 * first..5 * (first + 4) - 1,
             new: 5 * first..5 * first + 3,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let splices = content.take_queued();
         assert_eq!(
             (splices[0].start, splices[0].removed, splices[0].lines.len()),
-            (first as u32, 2, 1),
-            "the two built rows go, not the four the buffer lost",
+            (first as u32, 4, 1),
+            "all four rows the buffer lost go, the built two and the blank two",
         );
         assert_eq!(
             content.lines.len(),
             total - 3,
-            "and the store still holds exactly the rows the cursor claims",
+            "and the store holds exactly the file's rows",
         );
     }
 
@@ -1863,7 +2010,7 @@ mod tests {
     fn a_later_edit_in_one_patch_lands_on_the_moved_row() {
         let before = rope("alpha\nbravo\ncharlie\ndelta");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -1886,7 +2033,7 @@ mod tests {
                 new: 16..23,
             },
         ]);
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         assert_eq!(
             content
@@ -1908,7 +2055,7 @@ mod tests {
     fn single_line_edit_queues_one_one_line_splice() {
         let before = rope("alpha\nbeta\ngamma\n");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -1924,7 +2071,7 @@ mod tests {
             old: 6..10,
             new: 6..11,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -1947,7 +2094,7 @@ mod tests {
         let mut content = MinimapContent::new(1, test_executor());
 
         // The initial build queries exactly the rows it fills.
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -1969,7 +2116,7 @@ mod tests {
             old: 4..5,
             new: 4..5,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 0), record, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), record, no_edges);
         assert_eq!(
             *queried.borrow(),
             vec![2..3],
@@ -1981,7 +2128,7 @@ mod tests {
     fn newline_insertion_inserts_one_more_than_removed() {
         let before = rope("alpha\nbeta\ngamma\n");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -1997,7 +2144,7 @@ mod tests {
             old: 8..8,
             new: 8..9,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -2064,9 +2211,13 @@ mod tests {
         (after, Patch::new(patch))
     }
 
-    /// Apply `splices` to `store` in order, as the terminal applies them.
-    fn replay(store: &mut Vec<LineRuns>, splices: Vec<Splice>) {
-        for splice in splices {
+    /// Apply what `content` queued to `store`, as the terminal applies it. The
+    /// store length goes first, then each splice in order.
+    fn replay(store: &mut Vec<LineRuns>, content: &mut MinimapContent) {
+        if let Some(len) = content.take_len() {
+            store.resize(len as usize, LineRuns::default());
+        }
+        for splice in content.take_queued() {
             let start = splice.start as usize;
             store.splice(start..start + splice.removed as usize, splice.lines);
         }
@@ -2085,7 +2236,7 @@ mod tests {
         let tokens = color(3);
         let mut content = MinimapContent::with_budget(1, test_executor(), budget);
         let mut terminal = Vec::new();
-        content.sync(
+        content.sync_all(
             &rope(before),
             1,
             &Patch::empty(),
@@ -2093,14 +2244,14 @@ mod tests {
             &tokens,
             no_edges,
         );
-        replay(&mut terminal, content.take_queued());
+        replay(&mut terminal, &mut content);
 
         let (after, patch) = patched(before, edits);
         let after = rope(&after);
-        content.sync(&after, 2, &patch, parse_versions(0, 1), &tokens, no_edges);
-        replay(&mut terminal, content.take_queued());
+        content.sync_all(&after, 2, &patch, parse_versions(0, 1), &tokens, no_edges);
+        replay(&mut terminal, &mut content);
         while content.build_pending() {
-            content.sync(
+            content.sync_all(
                 &after,
                 2,
                 &Patch::empty(),
@@ -2108,11 +2259,11 @@ mod tests {
                 &tokens,
                 no_edges,
             );
-            replay(&mut terminal, content.take_queued());
+            replay(&mut terminal, &mut content);
         }
 
         let mut fresh = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
-        fresh.sync(
+        fresh.sync_all(
             &after,
             1,
             &Patch::empty(),
@@ -2143,7 +2294,8 @@ mod tests {
 
         let (content, terminal, fresh) = edit_and_settle(&lines.join("\n"), Duration::MAX, &edits);
         assert_eq!(
-            content.built_upto, 264,
+            content.built,
+            built_rows(&[(0, 264)]),
             "every row is built, both halves of each split one included"
         );
         assert_eq!(
@@ -2168,7 +2320,7 @@ mod tests {
         let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
         let before = rope(&before);
         loop {
-            content.sync(
+            content.sync_all(
                 &before,
                 1,
                 &Patch::empty(),
@@ -2182,7 +2334,7 @@ mod tests {
         }
 
         *queries.borrow_mut() = 0;
-        content.sync(
+        content.sync_all(
             &rope(&after),
             2,
             &patch,
@@ -2222,17 +2374,18 @@ mod tests {
         assert_eq!(terminal, fresh, "and so does the terminal");
     }
 
-    /// A bulk patch whose last built edit replaces rows across the build
-    /// cursor, followed by one past it. The store gives up only the rows it
-    /// held, and the build fills the rest.
+    /// A bulk patch with an edit that replaces rows across the end of the
+    /// built ones, and one more in the blank rows past them. The store and the
+    /// terminal give up every replaced row, built or blank, and the build
+    /// fills the blank rest.
     #[test]
-    fn a_bulk_edit_across_the_build_cursor_stays_aligned() {
+    fn a_bulk_edit_across_the_built_rows_stays_aligned() {
         let lines = varied_lines(2 * SYNC_SLICE as usize);
         let starts = line_starts(&lines);
-        let cursor = SYNC_SLICE as usize;
+        let built_end = SYNC_SLICE as usize;
         let mut edits = every_third_row(&starts, 40, 0, "z");
-        edits.push((starts[cursor - 2]..starts[cursor + 2] - 1, "ONE"));
-        edits.push((starts[cursor + 100]..starts[cursor + 100], "z"));
+        edits.push((starts[built_end - 2]..starts[built_end + 2] - 1, "ONE"));
+        edits.push((starts[built_end + 100]..starts[built_end + 100], "z"));
 
         let (content, terminal, fresh) = edit_and_settle(&lines.join("\n"), Duration::ZERO, &edits);
         assert_eq!(
@@ -2246,7 +2399,7 @@ mod tests {
     fn multi_line_replace_removes_the_old_span() {
         let before = rope("a\nb\nc\nd\ne\n");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -2262,7 +2415,7 @@ mod tests {
             old: 2..7,
             new: 2..3,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, no_edges);
 
         let queued = content.take_queued();
         assert_eq!(queued.len(), 1);
@@ -2272,7 +2425,7 @@ mod tests {
     }
 
     #[test]
-    fn sliced_build_appends_until_complete() {
+    fn sliced_build_fills_until_complete() {
         let total = SYNC_SLICE + SYNC_SLICE / 2;
         // Exactly `total` lines, with no trailing newline that would add an empty
         // last line.
@@ -2280,7 +2433,7 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2289,19 +2442,17 @@ mod tests {
             no_edges,
         );
         let first = content.take_queued();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].start, 0);
         assert_eq!(
-            first[0].lines.len() as u32,
-            SYNC_SLICE,
-            "first slice is full"
+            splice_shapes(&first),
+            [(0, SYNC_SLICE, SYNC_SLICE as usize)],
+            "the first slice is full, over the blanks the store starts as"
         );
         assert!(
             content.build_pending(),
             "the build still has a slice after the first sync"
         );
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2310,11 +2461,9 @@ mod tests {
             no_edges,
         );
         let second = content.take_queued();
-        assert_eq!(second.len(), 1);
-        assert_eq!(second[0].start, SYNC_SLICE);
         assert_eq!(
-            second[0].lines.len() as u32,
-            SYNC_SLICE / 2,
+            splice_shapes(&second),
+            [(SYNC_SLICE, SYNC_SLICE / 2, (SYNC_SLICE / 2) as usize)],
             "the remainder finishes the build",
         );
         assert!(
@@ -2322,7 +2471,7 @@ mod tests {
             "the build is complete after the last slice"
         );
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2345,7 +2494,7 @@ mod tests {
         let rope = rope(&vec!["line"; total as usize].join("\n"));
         let mut content = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2360,7 +2509,7 @@ mod tests {
             "the build covers every row in one sync"
         );
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2380,7 +2529,7 @@ mod tests {
             marked: &marked,
             asked: &asked,
         };
-        content.sync(&rope, 1, &Patch::empty(), versions(1, 1), no_tokens, marks);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(1, 1), no_tokens, marks);
         assert_eq!(
             spliced_rows(&content.take_queued()),
             vec![1, SYNC_SLICE + 1],
@@ -2403,8 +2552,8 @@ mod tests {
                 scheduler.advance_clock(step);
                 HashMap::new()
             };
-            content.sync(&rope, 1, &Patch::empty(), versions(0, 0), tokens, no_edges);
-            content.lines.len() as u32
+            content.sync_all(&rope, 1, &Patch::empty(), versions(0, 0), tokens, no_edges);
+            content.built
         };
 
         assert_eq!(
@@ -2412,8 +2561,316 @@ mod tests {
                 built_in_one_sync(Duration::ZERO),
                 built_in_one_sync(SYNC_BUDGET)
             ),
-            (2 * SYNC_SLICE, SYNC_SLICE),
+            (
+                built_rows(&[(0, 2 * SYNC_SLICE)]),
+                built_rows(&[(0, SYNC_SLICE)])
+            ),
             "rows one sync builds on a still clock and on a clock past the budget"
+        );
+    }
+
+    /// The rows a strip around row 51,000 of a 100,000-line file builds.
+    const WINDOW: BuildWindow = BuildWindow {
+        rows: 50_000..52_000,
+        from: 51_000,
+    };
+
+    /// A 100,000-line file of one repeated line, built over [`WINDOW`] at an
+    /// unbounded budget, with that first sync's output drained.
+    fn windowed_fixture() -> (Rope, MinimapContent) {
+        let rope = rope(&vec!["line"; 100_000].join("\n"));
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+            WINDOW,
+        );
+        let _ = (content.take_len(), content.take_queued());
+        (rope, content)
+    }
+
+    /// The start, removed count, and inserted count of each splice.
+    fn splice_shapes(splices: &[Splice]) -> Vec<(u32, u32, usize)> {
+        splices
+            .iter()
+            .map(|s| (s.start, s.removed, s.lines.len()))
+            .collect()
+    }
+
+    /// A file far longer than its strip's window builds the window alone. The
+    /// store holds every line, blank outside the window, and its length goes
+    /// first so each splice replaces blanks at its own rows. The view's rows
+    /// go first and the build grows out from them.
+    #[test]
+    fn a_long_file_builds_only_the_window_around_its_view() {
+        let rope = rope(&vec!["line"; 100_000].join("\n"));
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+            WINDOW,
+        );
+
+        let line = summarize_line("line", &[], RowMark::NONE);
+        let summarized = content.lines.iter().filter(|&&row| row == line).count();
+        assert_eq!(
+            (
+                content.take_len(),
+                splice_shapes(&content.take_queued()),
+                content.built.clone(),
+                (content.lines.len(), summarized),
+            ),
+            (
+                Some(100_000),
+                vec![
+                    (51_000, 512, 512),
+                    (50_488, 512, 512),
+                    (50_000, 488, 488),
+                    (51_512, 488, 488),
+                ],
+                built_rows(&[(50_000, 52_000)]),
+                (100_000, 2_000),
+            ),
+        );
+    }
+
+    /// A jump moves the window, and the next sync builds the rows the new
+    /// window adds, at their own rows and nearest the view first. The length
+    /// went with the first sync and does not go again.
+    #[test]
+    fn a_jump_builds_the_new_window_at_its_own_rows() {
+        let (rope, mut content) = windowed_fixture();
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            no_edges,
+            BuildWindow {
+                rows: 90_000..91_000,
+                from: 90_200,
+            },
+        );
+
+        assert_eq!(
+            (
+                content.take_len(),
+                splice_shapes(&content.take_queued()),
+                content.built.clone(),
+            ),
+            (
+                None,
+                vec![(90_200, 512, 512), (90_000, 200, 200), (90_712, 288, 288)],
+                built_rows(&[(50_000, 52_000), (90_000, 91_000)]),
+            ),
+        );
+    }
+
+    /// An edit inside the window summarizes the rows it replaced, and asks
+    /// for their tokens alone.
+    #[test]
+    fn an_edit_inside_the_window_splices_its_summary() {
+        let (before, mut content) = windowed_fixture();
+        let (after, patch) = patched(
+            &before.to_string(),
+            &[(5 * 51_000..5 * 51_000 + 4, "LINES")],
+        );
+        let asked = RefCell::new(Vec::new());
+        let tokens = |rows: Range<u32>| {
+            asked.borrow_mut().push((rows.start, rows.end));
+            HashMap::new()
+        };
+
+        content.sync(
+            &rope(&after),
+            2,
+            &patch,
+            versions(0, 0),
+            tokens,
+            no_edges,
+            WINDOW,
+        );
+
+        assert_eq!(
+            (content.take_queued(), asked.into_inner()),
+            (
+                vec![Splice {
+                    start: 51_000,
+                    removed: 1,
+                    lines: vec![summarize_line("LINES", &[], RowMark::NONE)],
+                }],
+                vec![(51_000, 51_001)],
+            ),
+        );
+    }
+
+    /// An edit outside the window and the built rows splices blank lines, so
+    /// the terminal's store keeps step with the file, and summarizes nothing.
+    /// The built rows after it move down with their lines.
+    #[test]
+    fn an_edit_outside_the_window_splices_blank_lines() {
+        let (before, mut content) = windowed_fixture();
+        let (after, patch) = patched(&before.to_string(), &[(5 * 10..5 * 10, "x\n")]);
+        let asked = RefCell::new(Vec::new());
+        let tokens = |rows: Range<u32>| {
+            asked.borrow_mut().push(rows);
+            HashMap::new()
+        };
+
+        content.sync(
+            &rope(&after),
+            2,
+            &patch,
+            versions(0, 0),
+            tokens,
+            no_edges,
+            BuildWindow {
+                rows: 50_001..52_001,
+                from: 51_001,
+            },
+        );
+
+        assert_eq!(
+            (
+                content.take_queued(),
+                asked.into_inner(),
+                content.built.clone(),
+                content.lines.len(),
+            ),
+            (
+                vec![Splice {
+                    start: 10,
+                    removed: 1,
+                    lines: vec![LineRuns::default(); 2],
+                }],
+                vec![],
+                built_rows(&[(50_001, 52_001)]),
+                100_001,
+            ),
+        );
+    }
+
+    /// The window builds outward from its view, so the second slice holds rows
+    /// above the first one's. Each slice's marks still go in at the place their
+    /// rows sort to, since a row's mark is found by binary search.
+    #[test]
+    fn a_window_keeps_its_marks_in_row_order() {
+        let rope = rope(&vec!["line"; 100_000].join("\n"));
+        let mut content = MinimapContent::with_budget(1, test_executor(), Duration::MAX);
+        let marks = |row: u32| (row == 50_900 || row == 51_100).then_some(40);
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(0, 0),
+            no_tokens,
+            marks,
+            WINDOW,
+        );
+
+        assert_eq!(
+            content
+                .edges
+                .iter()
+                .map(|&(row, mark)| (row, mark.edge))
+                .collect::<Vec<_>>(),
+            vec![(50_900, Some(40)), (51_100, Some(40))],
+        );
+    }
+
+    /// A patch of many edits outside the window gives its rows blank stand-ins
+    /// and leaves them unbuilt, so no sweep asks for their tokens.
+    #[test]
+    fn a_bulk_edit_outside_the_window_stays_blank() {
+        let (before, mut content) = windowed_fixture();
+        let edits: Vec<(Range<usize>, &str)> = (0..2 * EDIT_SUMMARIZE_MAX)
+            .map(|row| (5 * row..5 * row, "\n"))
+            .collect();
+        let (after, patch) = patched(&before.to_string(), &edits);
+        let asked = RefCell::new(Vec::new());
+        let tokens = |rows: Range<u32>| {
+            asked.borrow_mut().push(rows);
+            HashMap::new()
+        };
+        let shift = 2 * EDIT_SUMMARIZE_MAX as u32;
+
+        content.sync(
+            &rope(&after),
+            2,
+            &patch,
+            versions(0, 0),
+            tokens,
+            no_edges,
+            BuildWindow {
+                rows: 50_000 + shift..52_000 + shift,
+                from: 51_000 + shift,
+            },
+        );
+
+        assert_eq!(
+            (asked.into_inner(), content.built.clone()),
+            (vec![], built_rows(&[(50_000 + shift, 52_000 + shift)])),
+        );
+    }
+
+    /// An edge source with no marks that records each range it is asked about
+    /// in bulk.
+    struct AskedEdges<'a>(&'a RefCell<Vec<Range<u32>>>);
+
+    impl EdgeSource for AskedEdges<'_> {
+        fn mark_of(&self, _: u32) -> RowMark {
+            RowMark::NONE
+        }
+
+        fn marked_rows(&self, rows: Range<u32>) -> Vec<u32> {
+            self.0.borrow_mut().push(rows);
+            Vec::new()
+        }
+    }
+
+    /// Both sweeps visit the built rows alone. The rest are blank and build
+    /// fresh, at the versions then current, when a window reaches them.
+    #[test]
+    fn the_sweeps_visit_only_the_built_rows() {
+        let (rope, mut content) = windowed_fixture();
+        let tokens_asked = RefCell::new(Vec::new());
+        let marks_asked = RefCell::new(Vec::new());
+        let tokens = |rows: Range<u32>| {
+            tokens_asked.borrow_mut().push(rows);
+            HashMap::new()
+        };
+
+        content.sync(
+            &rope,
+            1,
+            &Patch::empty(),
+            versions(1, 1),
+            tokens,
+            AskedEdges(&marks_asked),
+            WINDOW,
+        );
+
+        let slices = vec![
+            50_000..50_512,
+            50_512..51_024,
+            51_024..51_536,
+            51_536..52_000,
+        ];
+        assert_eq!(
+            (tokens_asked.into_inner(), marks_asked.into_inner()),
+            (slices.clone(), slices),
         );
     }
 
@@ -2425,7 +2882,7 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::with_budget(1, test_executor(), Duration::ZERO);
         // Build the whole file monochrome over two syncs (syntax 0 sweeps nothing).
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2433,7 +2890,7 @@ mod tests {
             no_tokens,
             no_edges,
         );
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2469,7 +2926,7 @@ mod tests {
     fn small_recolor_fixture(lines: u32) -> (Rope, MinimapContent) {
         let rope = rope(&vec!["line"; lines as usize].join("\n"));
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2494,7 +2951,7 @@ mod tests {
         let (rope, mut content) = small_recolor_fixture(100);
 
         content.note_syntax_rows(Some(10..12));
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2519,7 +2976,7 @@ mod tests {
         let (rope, mut content) = small_recolor_fixture(100);
 
         content.note_syntax_rows(Some(0..0));
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2533,7 +2990,7 @@ mod tests {
         );
 
         // The version still advanced, so a later sync does not re-enter the sweep.
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2552,7 +3009,7 @@ mod tests {
         let (rope, mut content) = small_recolor_fixture(20);
 
         content.note_syntax_rows(None);
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2575,7 +3032,7 @@ mod tests {
         // The highlight toggle and LSP tokens carry no row information, so they
         // must widen the sweep past whatever the last parse reported.
         content.note_syntax_rows(Some(10..12));
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2597,7 +3054,7 @@ mod tests {
 
         content.note_syntax_rows(Some(10..12));
         content.note_syntax_rows(Some(40..41));
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2627,7 +3084,7 @@ mod tests {
             old: 0..20,
             new: 0..0,
         }]);
-        content.sync(&after, 2, &edit, parse_versions(0, 2), color(1), no_edges);
+        content.sync_all(&after, 2, &edit, parse_versions(0, 2), color(1), no_edges);
 
         let mut swept = spliced_rows(&content.take_queued());
         // The edit's own rows re-summarize on the buffer-edit path, so drop
@@ -2650,7 +3107,7 @@ mod tests {
 
         // Park a full sweep's cursor at SYNC_SLICE.
         content.note_syntax_rows(None);
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2663,7 +3120,7 @@ mod tests {
         content.note_syntax_rows(Some(100..101));
         let mut swept = Vec::new();
         for _ in 0..8 {
-            content.sync(
+            content.sync_all(
                 &rope,
                 1,
                 &Patch::empty(),
@@ -2698,7 +3155,7 @@ mod tests {
     fn a_sweep_finishes_while_a_parse_lands_every_sync() {
         let (rope, mut content) = built_recolor_fixture();
         content.note_syntax_rows(None);
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2712,7 +3169,7 @@ mod tests {
                 break;
             }
             content.note_syntax_rows(Some(10..11));
-            content.sync(
+            content.sync_all(
                 &rope,
                 1,
                 &Patch::empty(),
@@ -2736,7 +3193,7 @@ mod tests {
         // Settle a full sweep to version 1 first, so the next report scopes one.
         content.note_syntax_rows(None);
         for _ in 0..2 {
-            content.sync(
+            content.sync_all(
                 &rope,
                 1,
                 &Patch::empty(),
@@ -2746,7 +3203,7 @@ mod tests {
             );
         }
         content.note_syntax_rows(Some(0..600));
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2759,7 +3216,7 @@ mod tests {
         content.note_syntax_rows(Some(700..701));
         let mut swept = Vec::new();
         for _ in 0..8 {
-            content.sync(
+            content.sync_all(
                 &rope,
                 1,
                 &Patch::empty(),
@@ -2783,7 +3240,7 @@ mod tests {
         let total = SYNC_SLICE + SYNC_SLICE / 2;
         let (before, mut content) = built_recolor_fixture();
         content.note_syntax_rows(None);
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -2793,7 +3250,7 @@ mod tests {
         );
         // The cursor finishes its window and holds row 100 for the next sync.
         content.note_syntax_rows(Some(100..101));
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -2809,7 +3266,7 @@ mod tests {
             old: 0..20,
             new: 0..0,
         }]);
-        content.sync(
+        content.sync_all(
             &after,
             2,
             &edit,
@@ -2830,7 +3287,7 @@ mod tests {
         let (rope, mut content) = built_recolor_fixture();
 
         // A syntax bump recolors, one slice per sync.
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2856,7 +3313,7 @@ mod tests {
             "the swept summary matches a direct resummarize"
         );
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2874,7 +3331,7 @@ mod tests {
         assert_eq!(second[0].start, SYNC_SLICE);
 
         // The sweep has reached the version, so a further sync recolors nothing.
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2896,7 +3353,7 @@ mod tests {
 
         // The first recolor sweeps slice 0 to class 1, leaving the cursor mid-file.
         content.note_syntax_rows(None);
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -2907,7 +3364,7 @@ mod tests {
         content.take_queued();
 
         content.note_syntax_rows(None);
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3060,7 +3517,7 @@ mod tests {
         let mut content = MinimapContent::new(1, test_executor());
         let edge_of = |row: u32| (row == 1).then_some(40);
 
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3106,7 +3563,7 @@ mod tests {
         };
         let base = std::cell::Cell::new(0);
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3117,7 +3574,7 @@ mod tests {
         content.take_queued();
 
         base.set(39);
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3158,7 +3615,7 @@ mod tests {
             "the fixture is fully built, so nothing is pending before the bump"
         );
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3172,7 +3629,7 @@ mod tests {
             "the sweep has rows left, so idle ticks must keep coming"
         );
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3196,7 +3653,7 @@ mod tests {
         let (before, mut content) = built_recolor_fixture();
 
         // Sweep the first slice, parking the cursor at SYNC_SLICE.
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -3213,10 +3670,10 @@ mod tests {
             old: 0..20,
             new: 0..0,
         }]);
-        content.sync(&after, 2, &edit, versions(0, 1), color(1), no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 1), color(1), no_edges);
 
         while content.build_pending() {
-            content.sync(
+            content.sync_all(
                 &after,
                 2,
                 &Patch::empty(),
@@ -3256,7 +3713,7 @@ mod tests {
         let (before, mut content) = built_recolor_fixture();
 
         // Sweep the first slice, parking the cursor at SYNC_SLICE.
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -3281,10 +3738,10 @@ mod tests {
                 new: second + 25..second + 30,
             },
         ]);
-        content.sync(&after, 2, &edit, versions(0, 1), color(1), no_edges);
+        content.sync_all(&after, 2, &edit, versions(0, 1), color(1), no_edges);
 
         while content.build_pending() {
-            content.sync(
+            content.sync_all(
                 &after,
                 2,
                 &Patch::empty(),
@@ -3318,7 +3775,7 @@ mod tests {
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3334,7 +3791,7 @@ mod tests {
                 .map(|row| (row, vec![tok(0..4, 1)]))
                 .collect::<HashMap<_, _>>()
         };
-        content.sync(&rope, 1, &Patch::empty(), versions(0, 1), tokens, no_edges);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(0, 1), tokens, no_edges);
 
         let splices = content.take_queued();
         assert_eq!(splices.len(), 2, "the untouched row splits the run");
@@ -3348,7 +3805,7 @@ mod tests {
         let text: String = vec!["line"; total as usize].join("\n");
         let rope = rope(&text);
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3360,7 +3817,7 @@ mod tests {
 
         // Marks appear on rows 5, 6, and 9: one adjacent pair and a loner.
         let edge_of = |row: u32| matches!(row, 5 | 6 | 9).then_some(40);
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3391,7 +3848,7 @@ mod tests {
             asked: &asked,
         };
 
-        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         assert!(
             asked.borrow().iter().all(|&row| row < SYNC_SLICE),
             "the first sync stays inside its own window",
@@ -3401,7 +3858,7 @@ mod tests {
         assert_eq!(first[0].start, 1);
 
         asked.borrow_mut().clear();
-        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         assert!(
             asked.borrow().iter().all(|&row| row >= SYNC_SLICE),
             "and the second picks up where the first stopped",
@@ -3412,7 +3869,7 @@ mod tests {
 
         // The sweep has reached the end, so a third sync has nothing left.
         asked.borrow_mut().clear();
-        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         assert!(
             asked.borrow().is_empty(),
             "a settled sweep re-checks nothing",
@@ -3443,14 +3900,14 @@ mod tests {
             asked: &asked,
         };
 
-        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         let _ = content.take_queued();
         assert!(
             content.build_pending(),
             "the sweep has rows left, so idle ticks must keep coming"
         );
 
-        content.sync(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
+        content.sync_all(&rope, 1, &Patch::empty(), versions(1, 0), no_tokens, marks);
         let _ = content.take_queued();
         assert!(
             !content.build_pending(),
@@ -3468,7 +3925,7 @@ mod tests {
         let text: String = vec!["line"; rows as usize].join("\n");
         let rope = rope(&text);
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3503,7 +3960,7 @@ mod tests {
             row.is_multiple_of(4).then_some(41)
         }
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3513,7 +3970,7 @@ mod tests {
         );
         assert_eq!(content.edges, marks_of(every_third));
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3531,7 +3988,7 @@ mod tests {
         fn every_fourth_but_eight(row: u32) -> Option<u8> {
             (row.is_multiple_of(4) && row != 8).then_some(41)
         }
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
@@ -3549,7 +4006,7 @@ mod tests {
     fn an_edge_resync_that_changes_nothing_fetches_no_tokens() {
         let text = rope("alpha\nbravo\ncharlie");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3564,7 +4021,7 @@ mod tests {
             fetches.set(fetches.get() + 1);
             no_tokens(rows)
         };
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3585,7 +4042,7 @@ mod tests {
     fn a_sync_with_nothing_to_do_consults_no_edge_source() {
         let text = rope("alpha\nbravo\ncharlie");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3595,7 +4052,7 @@ mod tests {
         );
         let _ = content.take_queued();
 
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3614,7 +4071,7 @@ mod tests {
     fn an_edge_resync_fetches_only_the_changed_rows() {
         let text = rope("alpha\nbravo\ncharlie\ndelta\necho");
         let mut content = MinimapContent::new(1, test_executor());
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3631,7 +4088,7 @@ mod tests {
         };
         // Marks land on rows 1, 2, and 4: one adjacent pair and a loner.
         let edge_of = |row: u32| matches!(row, 1 | 2 | 4).then_some(40);
-        content.sync(&text, 1, &Patch::empty(), versions(1, 0), counting, edge_of);
+        content.sync_all(&text, 1, &Patch::empty(), versions(1, 0), counting, edge_of);
 
         assert_eq!(
             *spans.borrow(),
@@ -3661,11 +4118,11 @@ mod tests {
             asked: &asked,
         };
 
-        content.sync(&text, 1, &Patch::empty(), versions(0, 0), no_tokens, source);
+        content.sync_all(&text, 1, &Patch::empty(), versions(0, 0), no_tokens, source);
         let _ = content.take_queued();
         asked.borrow_mut().clear();
 
-        content.sync(&text, 1, &Patch::empty(), versions(1, 0), no_tokens, source);
+        content.sync_all(&text, 1, &Patch::empty(), versions(1, 0), no_tokens, source);
 
         assert_eq!(
             *asked.borrow(),
@@ -3687,7 +4144,7 @@ mod tests {
         let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
 
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -3706,7 +4163,7 @@ mod tests {
             old: 0..0,
             new: 0..4,
         }]);
-        content.sync(
+        content.sync_all(
             &after,
             2,
             &edit,
@@ -3720,7 +4177,7 @@ mod tests {
         let _ = content.take_queued();
         asked.borrow_mut().clear();
 
-        content.sync(
+        content.sync_all(
             &after,
             2,
             &Patch::empty(),
@@ -3747,7 +4204,7 @@ mod tests {
         let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
 
-        content.sync(
+        content.sync_all(
             &before,
             1,
             &Patch::empty(),
@@ -3769,11 +4226,11 @@ mod tests {
             marked: &[],
             asked: &asked,
         };
-        content.sync(&after, 2, &edit, versions(0, 0), no_tokens, unmarked);
+        content.sync_all(&after, 2, &edit, versions(0, 0), no_tokens, unmarked);
         let _ = content.take_queued();
         asked.borrow_mut().clear();
 
-        content.sync(
+        content.sync_all(
             &after,
             2,
             &Patch::empty(),
@@ -3798,7 +4255,7 @@ mod tests {
         let mut content = MinimapContent::new(1, test_executor());
         let asked = RefCell::new(Vec::new());
 
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3812,7 +4269,7 @@ mod tests {
         let _ = content.take_queued();
         asked.borrow_mut().clear();
 
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3845,7 +4302,7 @@ mod tests {
         let text = rope("alpha\nbravo\ncharlie");
         let mut content = MinimapContent::new(1, test_executor());
 
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3857,7 +4314,7 @@ mod tests {
 
         // The buffer is unchanged, but a diagnostic appears on line 1.
         let edge_of = |row: u32| (row == 1).then_some(40);
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3890,12 +4347,12 @@ mod tests {
             }
             map
         };
-        content.sync(&text, 1, &Patch::empty(), versions(0, 1), colored, no_edges);
+        content.sync_all(&text, 1, &Patch::empty(), versions(0, 1), colored, no_edges);
         let _ = content.take_queued();
 
         // The buffer is unchanged, but the syntax version bumps and the color is
         // gone, so line 0 re-summarizes monochrome and line 1 stays put.
-        content.sync(
+        content.sync_all(
             &text,
             1,
             &Patch::empty(),
@@ -3928,12 +4385,12 @@ mod tests {
             asked: &asked,
         };
 
-        content.sync(&text, 1, &Patch::empty(), versions(0, 1), no_tokens, source);
+        content.sync_all(&text, 1, &Patch::empty(), versions(0, 1), no_tokens, source);
         let _ = content.take_queued();
         asked.borrow_mut().clear();
 
         // The buffer and the marks stand still, only the coloring moves.
-        content.sync(&text, 1, &Patch::empty(), versions(0, 2), color(2), source);
+        content.sync_all(&text, 1, &Patch::empty(), versions(0, 2), color(2), source);
 
         assert!(
             asked.borrow().is_empty(),
@@ -4035,7 +4492,7 @@ mod tests {
         let rope = rope(&text);
         let mut content = MinimapContent::new(1, test_executor());
 
-        content.sync(
+        content.sync_all(
             &rope,
             1,
             &Patch::empty(),
