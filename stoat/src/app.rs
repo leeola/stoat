@@ -4460,6 +4460,14 @@ impl Stoat {
             }
         }
 
+        // A background walk stops at its next batch when its receiver closes,
+        // and the runtime's shutdown waits for each walk that still runs. The
+        // binary exits without dropping this struct, so the receivers close here.
+        self.index_update_rx.close();
+        self.file_finder = None;
+        self.command_palette = None;
+        self.pending_code_search = None;
+
         // A dropped task is cancelled on the executor's next turn, and the yield
         // gives it that turn. So the socket files are gone before the caller
         // starts its shutdown, which a kill cuts short when a server is slow.

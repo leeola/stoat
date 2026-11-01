@@ -3,7 +3,7 @@ use crossterm::event::Event;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
     future::Future,
-    io,
+    io, mem,
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
     sync::Arc,
@@ -690,6 +690,13 @@ fn run_tui(
 
         let outcome = stoat.run(event_rx, render_tx).await;
         hosts::shutdown_lsp(&stoat).await;
+        // The drop of the editor takes nearly all of the quit time. Its syntax
+        // trees alone take tens of milliseconds for one source file and most
+        // of a second for a large one. The process exit releases that memory.
+        // Nothing else in the drop has an effect past the process, because
+        // `run` closes the background walks and the agent sockets, and the LSP
+        // shutdown writes out the transcripts.
+        mem::forget(stoat);
         outcome
     })
     .whatever_context("stoat event loop")?;

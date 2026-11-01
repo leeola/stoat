@@ -178,8 +178,9 @@ pub(crate) fn build_index(
         let cancelled = AtomicBool::new(false);
         fs.walk_workspace_files_parallel(&git_root, &|batch| {
             for path in &batch {
-                // The receiver drops on quit. Stop the walk instead of scanning
-                // the rest of the tree while the runtime blocks on shutdown.
+                // The run loop closes the receiver on quit. Stop the walk instead
+                // of scanning the rest of the tree while the runtime blocks on
+                // shutdown.
                 if tx.is_closed() {
                     cancelled.store(true, Ordering::Relaxed);
                     return ControlFlow::Break(());

@@ -184,9 +184,13 @@ pub struct LocalLsp {
     notif_rx: TokioMutex<UnboundedReceiver<LspNotification>>,
     incoming_rx: TokioMutex<UnboundedReceiver<IncomingRequest>>,
     capabilities: Mutex<Arc<ServerCapabilities>>,
-    /// Outgoing-frame transcript, `Some` when `text_proto_log` is on. The
-    /// paired incoming transcript lives in the reader thread.
+    /// Outgoing-frame transcript, `Some` when `text_proto_log` is on.
     tx_transcript: Option<TextProtoLog>,
+    /// Incoming-frame transcript, `Some` when `text_proto_log` is on.
+    ///
+    /// The reader thread records into it. The host keeps a handle too, so
+    /// [`Self::flush_transcripts`] reaches it while that thread still runs.
+    rx_transcript: Option<Arc<TextProtoLog>>,
 }
 
 impl LocalLsp {
@@ -232,12 +236,13 @@ impl LocalLsp {
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
 
         let (tx_transcript, rx_transcript) = match transcript {
-            Some(transcript) => (Some(transcript.tx), Some(transcript.rx)),
+            Some(transcript) => (Some(transcript.tx), Some(Arc::new(transcript.rx))),
             None => (None, None),
         };
 
         std::thread::spawn({
             let pending = pending.clone();
+            let rx_transcript = rx_transcript.clone();
             move || reader_loop(stdout, pending, notif_tx, incoming_tx, rx_transcript, wake)
         });
         std::thread::spawn(move || stderr_loop(stderr));
@@ -260,6 +265,7 @@ impl LocalLsp {
             incoming_rx: TokioMutex::new(incoming_rx),
             capabilities: Mutex::new(Arc::new(ServerCapabilities::default())),
             tx_transcript,
+            rx_transcript,
         })
     }
 
@@ -362,6 +368,21 @@ impl LocalLsp {
         self.writer_tx
             .send(body)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "language server closed"))
+    }
+
+    /// Write both protocol transcripts out to disk.
+    ///
+    /// The binary exits without dropping the host, and the drop is the only
+    /// other flush. Without this call, each transcript loses the frames its
+    /// buffer still holds, which include the shutdown and the exit.
+    ///
+    /// A frame that the reader thread records after this call stays in the
+    /// buffer. Only a server that writes after its shutdown response sends one.
+    fn flush_transcripts(&self) {
+        let transcripts = [self.tx_transcript.as_ref(), self.rx_transcript.as_deref()];
+        for transcript in transcripts.into_iter().flatten() {
+            transcript.flush();
+        }
     }
 }
 
@@ -493,6 +514,7 @@ impl LspHost for LocalLsp {
         let _ = self.notify("exit", Value::Null);
         reap_child(&self.child, REAP_TIMEOUT, REAP_POLL).await;
         guard.armed = false;
+        self.flush_transcripts();
         tracing::info!(target: "stoat::lsp", "language server shut down");
         Ok(())
     }
@@ -788,7 +810,7 @@ fn reader_loop(
     pending: PendingMap,
     notif_tx: UnboundedSender<LspNotification>,
     incoming_tx: UnboundedSender<IncomingRequest>,
-    rx_transcript: Option<TextProtoLog>,
+    rx_transcript: Option<Arc<TextProtoLog>>,
     wake: Arc<Notify>,
 ) {
     let mut reader = BufReader::new(stdout);
@@ -837,6 +859,13 @@ fn reader_loop(
                 wake.notify_one();
             }
         }
+    }
+
+    // The host holds a handle to the transcript as well, so the end of this
+    // thread does not drop the last one. Flush here, so the last frames of a
+    // server that exits mid-session reach the disk before the editor quits.
+    if let Some(transcript) = &rx_transcript {
+        transcript.flush();
     }
 }
 
@@ -1517,8 +1546,8 @@ mod tests {
         transcript_stem, unbounded_channel, wakes_for, write_framed, writer_loop, Arc, AtomicI64,
         AtomicUsize, Command, DeltaTokensReply, DeserializeOwned, DiagnosticTag, Duration,
         Envelope, FrameDecoder, FullTokensReply, HashSet, Instant, LocalLsp, Mutex, Notify,
-        Ordering, PendingMap, Receiver, Routed, SemanticTokensFullDeltaResult,
-        SemanticTokensResult, ServerCapabilities, Stdio, TokioMutex, REAP_TIMEOUT,
+        Ordering, Path, PendingMap, Receiver, Routed, SemanticTokensFullDeltaResult,
+        SemanticTokensResult, ServerCapabilities, Stdio, TextProtoLog, TokioMutex, REAP_TIMEOUT,
         SHUTDOWN_REQUEST_TIMEOUT, WRITE_STALL_THRESHOLD,
     };
     use crate::host::lsp::{IncomingRequest, LspHost, LspNotification};
@@ -1617,6 +1646,40 @@ mod tests {
         }
     }
 
+    /// The binary exits without dropping the host, so the shutdown is the last
+    /// chance to write out the frames that each transcript's buffer holds.
+    #[tokio::test]
+    async fn a_shutdown_writes_both_transcripts_out() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let (tx_path, rx_path) = (dir.path().join("tx.jsonl"), dir.path().join("rx.jsonl"));
+        let (mut lsp, _writer_rx) = unanswered_transport();
+        lsp.tx_transcript = Some(TextProtoLog::create_at(&tx_path).expect("a tx transcript"));
+        let rx_transcript = Arc::new(TextProtoLog::create_at(&rx_path).expect("an rx transcript"));
+        rx_transcript.record(r#"{"jsonrpc":"2.0","method":"window/logMessage"}"#);
+        lsp.rx_transcript = Some(rx_transcript);
+
+        lsp.shutdown().await.expect("a shutdown reports no error");
+
+        assert_eq!(
+            [transcript_methods(&tx_path), transcript_methods(&rx_path)],
+            [
+                vec!["shutdown", "$/cancelRequest", "exit"],
+                vec!["window/logMessage"]
+            ],
+            "nothing answers the shutdown, so its timeout cancels it before the exit",
+        );
+    }
+
+    /// The `method` of each frame in the transcript file at `path`, in order.
+    fn transcript_methods(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .expect("a transcript file")
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter_map(|frame| frame.get("method")?.as_str().map(str::to_string))
+            .collect()
+    }
+
     /// A transport whose outgoing frames the test reads.
     ///
     /// The frame a cancel writes goes to the writer thread, so a test that
@@ -1644,6 +1707,7 @@ mod tests {
             incoming_rx: TokioMutex::new(incoming_rx),
             capabilities: Mutex::new(Arc::new(ServerCapabilities::default())),
             tx_transcript: None,
+            rx_transcript: None,
         };
         (lsp, writer_rx)
     }
@@ -1810,6 +1874,43 @@ mod tests {
             [true],
             "the request woke once, with the map free",
         );
+    }
+
+    /// The host keeps a handle to the incoming transcript, so the end of the
+    /// reader drops no last handle. A server that exits mid-session must still
+    /// leave its last frames on disk.
+    #[test]
+    fn a_server_that_exits_leaves_its_last_frames_on_disk() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let path = dir.path().join("rx.jsonl");
+        let transcript = Arc::new(TextProtoLog::create_at(&path).expect("an rx transcript"));
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("a child that echoes whatever it is given");
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        write_framed(
+            &mut stdin,
+            br#"{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"bye"}}"#,
+        )
+        .expect("the child takes the frame");
+        drop(stdin);
+
+        let (notif_tx, _notif_rx) = unbounded_channel();
+        let (incoming_tx, _incoming_rx) = unbounded_channel();
+        let stdout = child.stdout.take().expect("stdout was piped");
+        reader_loop(
+            stdout,
+            Default::default(),
+            notif_tx,
+            incoming_tx,
+            Some(transcript.clone()),
+            Arc::new(Notify::new()),
+        );
+        child.wait().expect("the child exits once its input closes");
+
+        assert_eq!(transcript_methods(&path), ["window/logMessage"]);
     }
 
     /// The method names the transport wrote, in order.

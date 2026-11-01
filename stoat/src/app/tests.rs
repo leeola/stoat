@@ -12515,6 +12515,74 @@ fn shutdown_notify_quits_the_run_loop() {
     });
 }
 
+/// The binary exits without dropping the editor, and the runtime's shutdown
+/// waits for each walk that still runs. So the run loop itself closes every
+/// receiver that a background walk stops on.
+#[test]
+fn a_quit_closes_the_receivers_that_background_walks_stop_on() {
+    fn open_finder(stoat: &mut Stoat) {
+        action_handlers::dispatch(stoat, &stoat_action::OpenFileFinder);
+    }
+    fn open_palette(stoat: &mut Stoat) {
+        action_handlers::dispatch(stoat, &stoat_action::OpenCommandPalette);
+    }
+    fn start_code_search(stoat: &mut Stoat) {
+        action_handlers::dispatch(stoat, &stoat_action::OpenCodeSearch);
+        let root = stoat.active_workspace().git_root.clone();
+        stoat.pending_code_search =
+            action_handlers::code_search::spawn_code_search(stoat, root, "fn");
+    }
+    const CLOSED: [bool; 4] = [true, false, false, false];
+
+    assert_eq!(
+        [
+            walk_receivers_around_a_quit(open_finder),
+            walk_receivers_around_a_quit(open_palette),
+            walk_receivers_around_a_quit(start_code_search),
+        ],
+        [
+            ([false, true, false, false], CLOSED),
+            ([false, false, true, false], CLOSED),
+            ([false, false, false, true], CLOSED),
+        ],
+    );
+}
+
+/// Whether the index channel is closed and whether the finder, the palette, and
+/// a code search scan are held, after `open` and again after a quit.
+fn walk_receivers_around_a_quit(open: fn(&mut Stoat)) -> ([bool; 4], [bool; 4]) {
+    fn held(stoat: &Stoat) -> [bool; 4] {
+        [
+            stoat.index_update_tx.is_closed(),
+            stoat.file_finder.is_some(),
+            stoat.command_palette.is_some(),
+            stoat.pending_code_search.is_some(),
+        ]
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    rt.block_on(async {
+        let mut h = Stoat::test();
+        h.stoat.persistence_disabled = true;
+        open(&mut h.stoat);
+        let opened = held(&h.stoat);
+
+        h.stoat.shutdown_handle().notify_one();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        let (render_tx, render_rx) = watch::channel(None);
+        let _keep = (event_tx, render_rx);
+        h.stoat
+            .run(event_rx, render_tx)
+            .await
+            .expect("the run loop quits cleanly");
+
+        (opened, held(&h.stoat))
+    })
+}
+
 /// A published frame's APC batches are on the channel and released by the
 /// time the run loop waits again. The UI thread holds the frame's synchronized
 /// update open until the run loop's hold on them is gone.
