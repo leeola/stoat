@@ -1,4 +1,7 @@
-use crate::term_session::TermSession;
+use crate::{
+    render::{self, pane, FrameCtx},
+    term_session::TermSession,
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -25,6 +28,9 @@ use ratatui::{
 /// the drag and the text under it, and persists until it is cleared. The
 /// zero-width selection a click leaves paints nothing, so a click draws no
 /// cell that reads as a cursor.
+///
+/// See also:
+/// - [`render_term_rows`] to paint some rows over an earlier paint.
 pub(crate) fn render_term_pane(
     agent: &TermSession,
     theme: &crate::theme::Theme,
@@ -32,19 +38,45 @@ pub(crate) fn render_term_pane(
     is_focused: bool,
     buf: &mut Buffer,
 ) {
+    render_term_rows(
+        agent,
+        theme,
+        area,
+        is_focused,
+        buf,
+        &vec![true; agent.term.rows()],
+    );
+}
+
+/// Paint the rows of `agent`'s screen that `rows` marks into `area`, as
+/// [`render_term_pane`] paints them, and leave every other row of `buf` as it
+/// was.
+///
+/// The cursor's block paints only when `rows` marks the cursor's row. A
+/// caller that paints over an earlier paint marks the rows that changed since,
+/// which include every row the cursor left or entered.
+pub(crate) fn render_term_rows(
+    agent: &TermSession,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    is_focused: bool,
+    buf: &mut Buffer,
+    rows: &[bool],
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let term = &agent.term;
-    let rows = term.rows().min(area.height as usize);
+    let row_count = term.rows().min(area.height as usize);
     let cols = term.cols().min(area.width as usize);
     let selection = agent.painted_selection();
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let marked = |row: usize| rows.get(row).copied().unwrap_or(false);
 
     let mut cells = Vec::new();
     let mut symbol = String::new();
-    for row_idx in 0..rows {
+    for row_idx in (0..row_count).filter(|&row| marked(row)) {
         let y = area.y + row_idx as u16;
         term.row_into(row_idx, &mut cells);
         for (col, cell) in cells.iter().enumerate().take(cols) {
@@ -76,12 +108,61 @@ pub(crate) fn render_term_pane(
     if is_focused
         && selection.is_none()
         && let Some(cursor) = term.cursor()
-        && cursor.row < rows
+        && cursor.row < row_count
+        && marked(cursor.row)
         && cursor.col < cols
     {
         let x = area.x + cursor.col as u16;
         let y = area.y + cursor.row as u16;
         buf[(x, y)].set_style(Style::default().add_modifier(Modifier::REVERSED));
+    }
+}
+
+/// Paint again, over a replayed capture of `agent`'s pane in `area`, the rows
+/// that `rows` marks, with the fade an unfocused pane takes.
+///
+/// The cursor's row joins `rows` first, since a focused pane draws its block
+/// on every paint. Each row clears to the theme's blank before it paints,
+/// because a cell in the terminal's default colors keeps the colors and the
+/// modifiers under it, and a whole paint starts from a blank frame. The clear
+/// and the fade cover the columns the paint writes and no more, since a cell
+/// past the emulator's grid keeps its faded capture.
+pub(crate) fn repaint_term_rows(
+    agent: &TermSession,
+    frame: FrameCtx<'_>,
+    area: Rect,
+    is_focused: bool,
+    buf: &mut Buffer,
+    rows: &mut [bool],
+) {
+    if let Some(cursor) = agent.term.cursor()
+        && let Some(row) = rows.get_mut(cursor.row)
+    {
+        *row = true;
+    }
+    let rows = &*rows;
+
+    let row_count = agent.term.rows().min(usize::from(area.height));
+    let width = agent.term.cols().min(usize::from(area.width)) as u16;
+    let lines = || {
+        rows.iter()
+            .enumerate()
+            .take(row_count)
+            .filter(|(_, marked)| **marked)
+            .map(|(row, _)| Rect {
+                y: area.y + row as u16,
+                width,
+                height: 1,
+                ..area
+            })
+    };
+
+    for line in lines() {
+        render::clear_themed(line, buf, frame.theme);
+    }
+    render_term_rows(agent, frame.theme, area, is_focused, buf, rows);
+    for line in lines() {
+        pane::dim_unfocused_pane(line, is_focused, frame, buf);
     }
 }
 

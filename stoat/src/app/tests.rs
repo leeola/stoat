@@ -6673,6 +6673,116 @@ fn a_hold_of_an_older_capture_copies_the_cells() {
     );
 }
 
+/// [`split_pair`] with its unfocused left pane turned into a terminal, fitted
+/// to the pane, fed `content`, and painted once.
+fn unfocused_terminal(h: &mut crate::test_harness::TestHarness, content: &[u8]) -> TermId {
+    split_pair(h);
+    let term_id = {
+        let ws = h.stoat.active_workspace_mut();
+        let left = ws.panes.split_pane_ids()[0];
+        let term_id = insert_term_session(ws);
+        ws.panes.pane_mut(left).view = View::Terminal(term_id);
+        term_id
+    };
+    let _ = h.stoat.render();
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(content);
+    let _ = h.stoat.render();
+    term_id
+}
+
+/// A terminal pane whose screen took a character since its capture replays,
+/// paints the damaged rows again, and matches a frame that paints it whole.
+/// The pane is unfocused, so the faded rows compare too.
+#[test]
+fn a_replayed_terminal_pane_paints_what_repainting_it_would() {
+    let mut h = Stoat::test();
+    let term_id = unfocused_terminal(&mut h, b"$ ls\r\na  b\r\n$ ");
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"x");
+
+    repaint_focused_pane(&mut h);
+    let painted_before = h.stoat.pane_paints;
+    let replayed = h.stoat.render();
+    let paints = h.stoat.pane_paints - painted_before;
+
+    h.stoat.pane_cache.clear();
+    assert_eq!(
+        (paints, replayed),
+        (1, h.stoat.render()),
+        "the editor alone painted, and the frame matches a whole paint",
+    );
+}
+
+/// A held terminal capture comes back with its buffer, and the replay paints
+/// again only the rows the screen damaged since the capture. Those are the
+/// row the cursor left and the row it wrote. The hold is poisoned, so each
+/// row the replay left shows the poison.
+///
+/// The emptied cache makes the first frame capture the fed screen, since a
+/// replay keeps its capture and paints the rows damaged since it again.
+#[test]
+fn a_terminal_replay_paints_only_the_damaged_rows() {
+    let mut h = Stoat::test();
+    let term_id = focused_terminal_pane(&mut h, b"one\r\ntwo\r\nthree");
+    h.stoat.pane_cache.clear();
+    let _ = h.stoat.render();
+    let (buf, mut holds) = paint_held(&mut h);
+    for hold in &mut holds {
+        poison_hold(hold);
+    }
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"\r\nfour");
+
+    let restored = paint_restored(&mut h, buf, holds);
+    let content = {
+        let ws = h.stoat.active_workspace();
+        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+    };
+    let painted: Vec<u16> = (0..content.height)
+        .filter(|&row| restored[(content.x, content.y + row)].symbol() != "#")
+        .collect();
+    assert_eq!(painted, [2, 3], "the rows the replay painted again");
+}
+
+/// A scroll of a terminal pane's view, a selection over it, and a move of the
+/// focus onto it each paint the pane whole. A frame that moves none of them
+/// replays it, so the focused editor alone paints.
+#[test]
+fn a_terminal_pane_paints_whole_after_a_scroll_a_selection_or_a_focus_move() {
+    let mut h = Stoat::test();
+    let term_id = unfocused_terminal(&mut h, &b"line\r\n".repeat(30));
+    let paints = |h: &mut crate::test_harness::TestHarness| {
+        repaint_focused_pane(h);
+        let before = h.stoat.pane_paints;
+        let _ = h.stoat.render();
+        h.stoat.pane_paints - before
+    };
+
+    let still = paints(&mut h);
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .scroll_lines(1);
+    let scrolled = paints(&mut h);
+    {
+        let term = &mut h.stoat.active_workspace_mut().terms[term_id].term;
+        term.start_selection(0, 0);
+        term.extend_selection(0, 2);
+    }
+    let selected = paints(&mut h);
+    h.stoat.active_workspace_mut().panes.focus_prev();
+    let focused = paints(&mut h);
+
+    assert_eq!(
+        [still, scrolled, selected, focused],
+        [1, 2, 2, 2],
+        "pane paints for no move, a scroll, a selection, and a focus move",
+    );
+}
+
 /// A pane that moved since its buffer's frame paints over a blank rect, so
 /// the cells held under its old rect never reach the frame. The split runs
 /// with no frame between, so the pane's entry still holds that capture.

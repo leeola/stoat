@@ -32,6 +32,11 @@
 //! the placement and the versions of every shown excerpt into one hash. An
 //! excerpt outside the window paints nothing, so a parse that lands there
 //! replays the pane.
+//!
+//! A live terminal pane paints its screen, its selection, and its cursor. The
+//! screen moves on every read of the child's output, so its key leaves the
+//! screen out, and a replay paints again the rows the screen damaged since the
+//! capture. See [`PaneCacheEntry::generation`].
 
 use crate::{
     buffer::BufferId,
@@ -39,11 +44,16 @@ use crate::{
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::PaintVersion,
     editor_state::{EditorId, EditorState},
-    pane::{Pane, PaneId, View},
+    pane::{Pane, PaneId, Placement, View},
     render::{
-        diff_changes::stack_composited, editor, pane::diff_sides_for, review::DiffDials,
-        undercurl::UndercurlBatch, FrameCtx, Hold,
+        diff_changes::stack_composited,
+        editor,
+        pane::{diff_sides_for, pane_areas},
+        review::DiffDials,
+        undercurl::UndercurlBatch,
+        FrameCtx, Hold,
     },
+    term_session::{TermId, TermSession},
     workspace::WorkspaceId,
 };
 use lsp_types::MessageType;
@@ -53,6 +63,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{
+    collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     sync::Arc,
 };
@@ -163,6 +174,9 @@ pub(crate) struct PaneCacheKey {
     /// stack. Each one counts its buffer, placement, rows, path, fold,
     /// versions, and diagnostics. Zero for an editor pane.
     pub(crate) stack: u64,
+    /// The terminal a terminal pane shows and its painted selection, hashed.
+    /// Zero for any other pane.
+    pub(crate) terminal: u64,
 }
 
 /// One pane's last content paint, held so a frame whose key still matches puts
@@ -210,6 +224,15 @@ pub(crate) struct PaneCacheEntry {
     /// [`Self::capture_into`].
     seen: Option<PaneCacheKey>,
     moved: bool,
+    /// The screen generation a terminal pane's capture shows. Zero for any
+    /// other pane.
+    ///
+    /// A replay paints again every row the screen damaged since, over the
+    /// cells the capture put back, and leaves the capture as it was. A hold of
+    /// the capture then stays current, so a held buffer puts the cells back
+    /// with no copy. The damaged rows add up until the screen no longer names
+    /// them, and then the pane paints whole and captures again.
+    pub(crate) generation: u64,
 }
 
 /// The content lane's length and the span count to hand
@@ -251,7 +274,8 @@ impl PaneCacheEntry {
     ///
     /// A capture writes over whatever this entry held, keeping its
     /// allocations, except the cells that a [`Hold`] still shares. It takes
-    /// `tick`, the render tick of the frame that painted, as its id.
+    /// `tick`, the render tick of the frame that painted, as its id, and
+    /// `generation`, the screen generation of a terminal pane's paint.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn capture_into(
         &mut self,
@@ -262,6 +286,7 @@ impl PaneCacheEntry {
         undercurls: &UndercurlBatch,
         mark: PaintMark,
         tick: u64,
+        generation: u64,
     ) -> bool {
         let moved = self.seen.is_none_or(|seen| {
             seen != PaneCacheKey {
@@ -288,6 +313,7 @@ impl PaneCacheEntry {
         }
         cells_into(buf, rect, Arc::make_mut(cells));
         self.capture_seq = tick;
+        self.generation = generation;
 
         let (id, start) = mark.lane;
         let (held_id, bytes) = &mut self.scene;
@@ -384,6 +410,8 @@ impl PaneCacheEntry {
 ///
 /// So does an editor whose buffer a reload flash washes. The wash fades on
 /// every frame tick, and no part of the key moves with it.
+///
+/// A terminal pane qualifies too, as [`terminal_cache_key`] describes.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_cache_key(
     pane: &Pane,
@@ -391,12 +419,26 @@ pub(crate) fn pane_cache_key(
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     diff_changes_views: &mut SlotMap<DiffChangesId, DiffChangesState>,
+    terms: &SlotMap<TermId, TermSession>,
+    term_pool_grids: &HashMap<TermId, (u16, u16)>,
     frame: FrameCtx<'_>,
     paint_generation: u64,
     scene_live: bool,
 ) -> Option<PaneCacheKey> {
     let editor_id = match pane.view {
         View::Editor(editor_id) => editor_id,
+        View::Agent(term_id) | View::Terminal(term_id) => {
+            return terminal_cache_key(
+                pane,
+                is_focused,
+                terms.get(term_id)?,
+                term_id,
+                term_pool_grids,
+                frame,
+                paint_generation,
+                scene_live,
+            );
+        },
         View::DiffChanges(id) => {
             let state = diff_changes_views.get_mut(id)?;
             return stack_cache_key(
@@ -473,6 +515,81 @@ pub(crate) fn pane_cache_key(
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
         stack: 0,
+        terminal: 0,
+    })
+}
+
+/// The key for a terminal pane over `agent`, or `None` for a pane whose paint
+/// the cache does not replay.
+///
+/// The key holds the terminal, the content rect, the focus, the selection, the
+/// theme, and the dim, which is all the paint reads besides the screen. The
+/// screen stays out, so output keeps the key, and the replay paints the
+/// damaged rows again.
+///
+/// A pooled split pane paints a blank grid that the terminal covers with its
+/// pool, so it gets no key. Nor does a focused pane under the LSP status card
+/// or the LSP error card, which [`render_pane`](crate::render::pane::render_pane)
+/// paints over the pane's rows.
+#[allow(clippy::too_many_arguments)]
+fn terminal_cache_key(
+    pane: &Pane,
+    is_focused: bool,
+    agent: &TermSession,
+    term_id: TermId,
+    term_pool_grids: &HashMap<TermId, (u16, u16)>,
+    frame: FrameCtx<'_>,
+    paint_generation: u64,
+    scene_live: bool,
+) -> Option<PaneCacheKey> {
+    let error_card = frame
+        .lsp_message
+        .is_some_and(|(typ, _)| typ == MessageType::ERROR);
+    if (pane.placement == Placement::Split && term_pool_grids.contains_key(&term_id))
+        || (is_focused && (frame.lsp_status_open || error_card))
+    {
+        return None;
+    }
+
+    let mut terminal = DefaultHasher::new();
+    term_id.hash(&mut terminal);
+    agent
+        .painted_selection()
+        .map(|range| {
+            (
+                (range.start.line.0, range.start.column.0),
+                (range.end.line.0, range.end.column.0),
+                range.is_block,
+            )
+        })
+        .hash(&mut terminal);
+
+    Some(PaneCacheKey {
+        buffer: BufferId::new(0),
+        buffer_version: 0,
+        paint_version: PaintVersion::default(),
+        wrap: (None, WrapMode::None, 0),
+        scroll_row: 0,
+        area: pane_areas(pane.area, frame.minimap_band).0,
+        pane_index: pane.index as usize,
+        paint_generation,
+        inactive_dim_bits: frame.inactive_dim.to_bits(),
+        line_numbers: LineNumbers::Off,
+        diagnostics_version: 0,
+        diff_version: 0,
+        diff_view: false,
+        diff_dials: (0, 0, false, false),
+        diff_sides: 0,
+        minimap_content_id: 0,
+        minimap_enabled: false,
+        focused: is_focused,
+        selections: None,
+        insert_mode: false,
+        hover_cell: None,
+        scene_live,
+        terminal_cursor: false,
+        stack: 0,
+        terminal: terminal.finish(),
     })
 }
 
@@ -610,6 +727,7 @@ fn stack_cache_key(
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
         stack: stack.finish(),
+        terminal: 0,
     })
 }
 
@@ -729,6 +847,7 @@ mod tests {
             scene_live: false,
             terminal_cursor: false,
             stack: 0,
+            terminal: 0,
         }
     }
 
@@ -741,7 +860,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 23] = [
+        let moved: [(&str, PaneCacheKey); 24] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -897,6 +1016,13 @@ mod tests {
                 },
             ),
             ("stack", PaneCacheKey { stack: 1, ..base }),
+            (
+                "terminal",
+                PaneCacheKey {
+                    terminal: 1,
+                    ..base
+                },
+            ),
         ];
 
         for (field, other) in moved {

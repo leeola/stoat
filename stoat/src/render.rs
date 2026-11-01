@@ -1312,14 +1312,16 @@ pub(crate) fn frame(
             lsp_badge_rect = status_row.badge;
         }
 
-        // Only an editor pane and a changes view pane are replayable. A run,
-        // terminal or label pane reads state this never audited.
+        // An editor pane, a changes view pane, and a live terminal pane are
+        // replayable. A run or label pane reads state this never audited.
         let key = pane_cache::pane_cache_key(
             pane,
             is_focused,
             &mut ws.editors,
             &ws.buffers,
             &mut ws.diff_changes_views,
+            &ws.terms,
+            &ws.term_pool_grids,
             frame,
             paint_generation,
             scene.live(),
@@ -1328,13 +1330,31 @@ pub(crate) fn frame(
             .iter()
             .position(|hold| hold.pane.1 == id)
             .map(|at| held.swap_remove(at));
+        // A terminal pane's replay paints again the rows its screen damaged
+        // since the capture, and the capture keeps its cells, so a held
+        // buffer still puts them back with no copy. When the screen does not
+        // name its damage, the pane takes the whole paint and a new capture.
+        let terminal = match pane.view {
+            View::Agent(term_id) | View::Terminal(term_id) => ws.terms.get(term_id),
+            _ => None,
+        };
+        let damaged = terminal
+            .zip(stoat.pane_cache.get(&(workspace, id)))
+            .map(|(agent, entry)| agent.term.damaged_rows_since(entry.generation));
         if let Some(key) = key
+            && !matches!(damaged, Some(None))
             && let Some(entry) = stoat.pane_cache.get_mut(&(workspace, id))
             && entry.key == Some(key)
         {
             entry.replay(buf, scene, undercurls, hold.is_none());
             if hold.is_some() {
                 stoat.pane_replays_held += 1;
+            }
+            if let (Some(agent), Some(Some(mut rows))) = (terminal, damaged)
+                && rows.contains(&true)
+            {
+                let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
+                term_pane::repaint_term_rows(agent, frame, content, is_focused, buf, &mut rows);
             }
             frame_holds.push(entry.hold((workspace, id)));
             if let View::DiffChanges(view) = pane.view
@@ -1384,8 +1404,9 @@ pub(crate) fn frame(
 
         if let Some(key) = key {
             let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
+            let generation = terminal.map_or(0, |agent| agent.term.generation());
             let entry = stoat.pane_cache.entry((workspace, id)).or_default();
-            if entry.capture_into(key, content, buf, scene, undercurls, mark, tick) {
+            if entry.capture_into(key, content, buf, scene, undercurls, mark, tick, generation) {
                 stoat.pane_captures += 1;
                 frame_holds.push(entry.hold((workspace, id)));
             }
