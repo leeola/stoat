@@ -9,6 +9,7 @@ use crate::{
     action_handlers::search::LastSearch,
     agent_ipc::BridgeOutcome,
     agent_status::AgentStatus,
+    alloc_trim,
     auto_reload::ReloadFlash,
     badge::BadgeTray,
     buffer::{BufferId, SharedBuffer, TextBufferSnapshot},
@@ -1084,6 +1085,9 @@ impl Workspace {
     ///
     /// `path` releases the file's cached HEAD and index blobs, which are the
     /// bulk of what a long browsing session accumulates.
+    ///
+    /// The buffer's parses ran on the pool, so the next run-loop turn returns
+    /// the pages their trees held to the kernel.
     pub(crate) fn release_buffer(&mut self, id: BufferId, path: Option<&Path>) {
         self.cancel_parse_job(id);
         self.partial_token_buffers.remove(&id);
@@ -1091,6 +1095,7 @@ impl Workspace {
         self.index_extractions.remove(&id);
         self.index_debounce.remove(&id);
         self.diff.release(id, path);
+        alloc_trim::request();
     }
 
     /// Keep `extraction` for its buffer's next reindex.
@@ -2256,6 +2261,7 @@ mod tests {
     use super::{BridgeWaiter, ParseJob, Workspace};
     use crate::{
         action_handlers::dispatch,
+        alloc_trim,
         buffer::BufferId,
         code_index::build::IndexUpdate,
         commit_list::CommitListId,
@@ -2279,6 +2285,21 @@ mod tests {
     use stoat_language::LanguageRegistry;
     use stoat_scheduler::{Task, TestScheduler};
     use tokio::sync::mpsc;
+
+    /// A closed buffer's parses ran on the pool, so its release asks the run
+    /// loop to return the pages their trees held.
+    #[test]
+    fn a_buffer_release_asks_for_a_trim() {
+        let mut h = TestHarness::with_size(80, 24);
+        alloc_trim::run_pending();
+        let before = alloc_trim::pending();
+
+        h.stoat
+            .active_workspace_mut()
+            .release_buffer(BufferId::new(0), None);
+
+        assert_eq!((before, alloc_trim::pending()), (false, true));
+    }
 
     /// A run keeps its place while a new tab parks the tab that shows it, and
     /// a view no surface shows has no place.

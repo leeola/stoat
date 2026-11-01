@@ -1,5 +1,6 @@
 use crate::{
     action_handlers::GZIP_MAGIC,
+    alloc_trim,
     buffer::BufferId,
     editor_state::{EditorId, EditorState, ScrollGlide},
     fuzzy,
@@ -1929,9 +1930,13 @@ impl Preview {
     }
 
     /// Remove the owned editor and scratch buffer from the workspace.
+    ///
+    /// The preview's parses ran on the pool, so the next run-loop turn returns
+    /// the pages their trees held to the kernel.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         ws.editors.remove(self.editor);
         ws.buffers.remove(self.buffer);
+        alloc_trim::request();
     }
 
     /// A preview holding no real workspace slots, for unit tests that construct
@@ -2631,6 +2636,23 @@ mod tests {
             .map(|language| language.name);
         preview.dispose(ws);
         (text, language)
+    }
+
+    /// A preview's parses ran on the pool, so its dispose, which every picker's
+    /// close goes through, asks the run loop to return the pages their trees
+    /// held.
+    #[test]
+    fn a_dispose_asks_for_a_trim() {
+        let mut h = crate::Stoat::test();
+        let executor = h.stoat.executor.clone();
+        let ws = h.stoat.active_workspace_mut();
+        let preview = Preview::new(ws, executor);
+        alloc_trim::run_pending();
+        let before = alloc_trim::pending();
+
+        preview.dispose(ws);
+
+        assert_eq!((before, alloc_trim::pending()), (false, true));
     }
 
     /// A source with no language previews as plain text, even after a source

@@ -2,6 +2,7 @@ pub mod action_handlers;
 pub(crate) mod agent_goto;
 pub mod agent_ipc;
 pub mod agent_status;
+mod alloc_trim;
 pub mod apc_emit;
 pub mod app;
 pub mod attach;

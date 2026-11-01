@@ -12532,13 +12532,23 @@ fn a_quit_closes_the_receivers_that_background_walks_stop_on() {
         stoat.pending_code_search =
             action_handlers::code_search::spawn_code_search(stoat, root, "fn");
     }
+    /// Whether the index channel is closed and whether the finder, the
+    /// palette, and a code search scan are held.
+    fn held(stoat: &Stoat) -> [bool; 4] {
+        [
+            stoat.index_update_tx.is_closed(),
+            stoat.file_finder.is_some(),
+            stoat.command_palette.is_some(),
+            stoat.pending_code_search.is_some(),
+        ]
+    }
     const CLOSED: [bool; 4] = [true, false, false, false];
 
     assert_eq!(
         [
-            walk_receivers_around_a_quit(open_finder),
-            walk_receivers_around_a_quit(open_palette),
-            walk_receivers_around_a_quit(start_code_search),
+            around_a_quit(open_finder, held),
+            around_a_quit(open_palette, held),
+            around_a_quit(start_code_search, held),
         ],
         [
             ([false, true, false, false], CLOSED),
@@ -12548,18 +12558,17 @@ fn a_quit_closes_the_receivers_that_background_walks_stop_on() {
     );
 }
 
-/// Whether the index channel is closed and whether the finder, the palette, and
-/// a code search scan are held, after `open` and again after a quit.
-fn walk_receivers_around_a_quit(open: fn(&mut Stoat)) -> ([bool; 4], [bool; 4]) {
-    fn held(stoat: &Stoat) -> [bool; 4] {
-        [
-            stoat.index_update_tx.is_closed(),
-            stoat.file_finder.is_some(),
-            stoat.command_palette.is_some(),
-            stoat.pending_code_search.is_some(),
-        ]
-    }
+/// Each run-loop turn starts with the trim that the turn before it asked for.
+#[test]
+fn a_run_loop_turn_takes_a_pending_trim() {
+    assert_eq!(
+        around_a_quit(|_| alloc_trim::request(), |_| alloc_trim::pending()),
+        (true, false),
+    );
+}
 
+/// What `read` sees after `open` and again after the run loop quits.
+fn around_a_quit<T>(open: fn(&mut Stoat), read: fn(&Stoat) -> T) -> (T, T) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -12568,7 +12577,7 @@ fn walk_receivers_around_a_quit(open: fn(&mut Stoat)) -> ([bool; 4], [bool; 4]) 
         let mut h = Stoat::test();
         h.stoat.persistence_disabled = true;
         open(&mut h.stoat);
-        let opened = held(&h.stoat);
+        let opened = read(&h.stoat);
 
         h.stoat.shutdown_handle().notify_one();
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<Event>();
@@ -12579,7 +12588,7 @@ fn walk_receivers_around_a_quit(open: fn(&mut Stoat)) -> ([bool; 4], [bool; 4]) 
             .await
             .expect("the run loop quits cleanly");
 
-        (opened, held(&h.stoat))
+        (opened, read(&h.stoat))
     })
 }
 

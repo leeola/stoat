@@ -2,6 +2,7 @@ use crate::{
     action_handlers,
     agent_ipc::{AgentControl, AgentEvent},
     agent_status::AgentStatus,
+    alloc_trim,
     apc_emit::{self, HeldStackPage, PoolOwner, TerminalPage, WindowPage},
     auto_reload::{FLASH_FADE, FLASH_HOLD},
     badge::BadgeTray,
@@ -4191,6 +4192,10 @@ impl Stoat {
         let mut timer_won = false;
 
         loop {
+            // The trim runs at the top of a turn, so it comes after the frame of
+            // the turn that released the memory, whatever path that turn took.
+            alloc_trim::run_pending();
+
             let animating = self.is_animating();
             let building = self.minimap_build_pending;
             let dirty = self.pty_dirty;
