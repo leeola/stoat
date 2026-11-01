@@ -46,9 +46,10 @@ use std::{
 use stoatty_protocol::{
     command::{
         self, BarCommand, BorderCommand, Command, FillRowsCommand, HelloCommand, IconCommand,
-        IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapLinesCommand,
-        PanelCommand, PolylineCommand, PoolKind, PoolRegionCommand, PopoverCommand, ScaleCommand,
-        ScrollRegionCommand, SketchCommand, TextRunCommand, WindowOpenCommand,
+        IdentReply, LineLayoutCommand, LineSummary, MinimapCommand, MinimapLenCommand,
+        MinimapLinesCommand, PanelCommand, PolylineCommand, PoolKind, PoolRegionCommand,
+        PopoverCommand, ScaleCommand, ScrollRegionCommand, SketchCommand, TextRunCommand,
+        WindowOpenCommand,
     },
     frame::FrameScratch,
     iterm, kitty,
@@ -178,6 +179,9 @@ const MAX_MINIMAP_LINES: usize = 2_000_000;
 /// [`Terminal::minimap_journal`] for the replay contract.
 enum MinimapJournal {
     Splice(MinimapLinesCommand),
+    /// A store's content id and the length a `minimap_len` sized it to, after
+    /// the line cap.
+    Len(u32, usize),
     Drop(u32),
 }
 
@@ -318,15 +322,16 @@ pub struct Terminal {
     minimaps: Vec<MinimapCommand>,
     minimap_seq: Vec<u32>,
     /// Minimap line-summary stores keyed by content id, spliced by
-    /// `Gstoatty;minimap_lines`. Persistent and pool-like: untouched by
-    /// `Gstoatty;reset`, retired only by `Gstoatty;minimap_drop`, so incremental
-    /// splices need not resend the whole buffer.
+    /// `Gstoatty;minimap_lines` and sized by `Gstoatty;minimap_len`. Persistent
+    /// and pool-like: untouched by `Gstoatty;reset`, retired only by
+    /// `Gstoatty;minimap_drop`, so incremental splices need not resend the whole
+    /// buffer.
     minimap_contents: HashMap<u32, Vec<LineSummary>>,
     /// Minimap viewport thumbs keyed by strip id, set by `Gstoatty;minimap_view`.
     /// Persistent like [`Self::minimap_contents`], so a scroll rides a small
     /// frame that moves the thumb without redeclaring the strip.
     minimap_views: HashMap<u32, MinimapView>,
-    /// Whether a content-store splice or drop happened since the last
+    /// Whether a content-store splice, resize, or drop happened since the last
     /// [`Self::project`], so the projection replays [`Self::minimap_journal`] into
     /// the grid only when the stores changed rather than on every viewport frame.
     minimap_content_dirty: bool,
@@ -1469,14 +1474,15 @@ impl Terminal {
                 // Fill and capture controls always act. A Bar and a TextRun's
                 // capture are page-targeted decorations the open fill stores on
                 // its slot (the Bar arm and commit_capture route them there), so
-                // they act too. The minimap content, view, and drop commands are
-                // persistent state whose incremental splices must not be dropped
-                // mid-fill, so they act as well. The pool commands are persistent
-                // state too, and none of them touches a live-grid decoration, so
-                // the leak below does not reach them. Dropping a pool_drop here
-                // would strand the pool and its page grids instead. Every other
-                // decoration is target-bound and would leak onto the live grid,
-                // so it is dropped while a page paints or a content capture runs.
+                // they act too. The minimap content, length, view, and drop
+                // commands are persistent state whose incremental splices must not
+                // be dropped mid-fill, so they act as well. The pool commands are
+                // persistent state too, and none of them touches a live-grid
+                // decoration, so the leak below does not reach them. Dropping a
+                // pool_drop here would strand the pool and its page grids instead.
+                // Every other decoration is target-bound and would leak onto the
+                // live grid, so it is dropped while a page paints or a content
+                // capture runs.
                 let routed = matches!(
                     command,
                     Command::Fill(_)
@@ -1501,6 +1507,7 @@ impl Terminal {
                         | Command::Reposition(_)
                         | Command::PoolDrop(_)
                         | Command::MinimapLines(_)
+                        | Command::MinimapLen(_)
                         | Command::MinimapView(_)
                         | Command::MinimapDrop(_)
                         | Command::WindowOpen(_)
@@ -1947,6 +1954,7 @@ impl Terminal {
             // that acts immediately, so an incremental splice is never lost.
             Command::Minimap(_) => self.stage_or_apply(command),
             Command::MinimapLines(lines) => self.splice_minimap_content(lines),
+            Command::MinimapLen(len) => self.resize_minimap_content(len),
             Command::MinimapView(view) => {
                 // An id already drawn keeps advancing its thumb at the cap, so
                 // the limit costs a real scene nothing and refuses only the
@@ -2125,6 +2133,29 @@ impl Terminal {
         self.journal_minimap(MinimapJournal::Splice(command));
     }
 
+    /// Size the content store `content_id` to `lines` lines, truncating it or
+    /// extending it with blank lines.
+    ///
+    /// Creates the store when absent, unless [`MAX_MINIMAP_STORES`] already
+    /// exist. A length past [`MAX_MINIMAP_LINES`] clamps to the cap, and the
+    /// journal records the clamped length, so the grid's store keeps matching
+    /// this one.
+    fn resize_minimap_content(&mut self, command: MinimapLenCommand) {
+        if self.minimap_store_len(command.content_id).is_none() {
+            return;
+        }
+
+        let mut lines = command.lines as usize;
+        if lines > MAX_MINIMAP_LINES {
+            lines = MAX_MINIMAP_LINES;
+            self.warn_minimap_cap("minimap content store past the line cap, trimming");
+        }
+
+        let store = self.minimap_contents.entry(command.content_id).or_default();
+        grid::resize_summaries(store, lines);
+        self.journal_minimap(MinimapJournal::Len(command.content_id, lines));
+    }
+
     /// Record `change` for the next projection to replay, or give up on
     /// replaying and ask it for the whole map instead.
     ///
@@ -2140,7 +2171,7 @@ impl Terminal {
 
         self.minimap_journal_lines += match &change {
             MinimapJournal::Splice(command) => command.lines.len(),
-            MinimapJournal::Drop(_) => 0,
+            MinimapJournal::Len(..) | MinimapJournal::Drop(_) => 0,
         };
         self.minimap_journal.push(change);
 
@@ -2342,7 +2373,7 @@ impl Terminal {
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
             // the stream and pool controls, and the immediate minimap content,
-            // view, and drop commands.
+            // length, view, and drop commands.
             Command::Fill(_)
             | Command::FillRows(_)
             | Command::FillDecorations(_)
@@ -2357,6 +2388,7 @@ impl Terminal {
             | Command::Reposition(_)
             | Command::PoolDrop(_)
             | Command::MinimapLines(_)
+            | Command::MinimapLen(_)
             | Command::MinimapView(_)
             | Command::MinimapDrop(_)
             | Command::WindowOpen(_)
@@ -3777,6 +3809,9 @@ impl Terminal {
                         command.removed,
                         &command.lines,
                     ),
+                    MinimapJournal::Len(content_id, lines) => {
+                        grid.resize_minimap_content(content_id, lines)
+                    },
                     MinimapJournal::Drop(content_id) => grid.drop_minimap_content(content_id),
                 }
             }

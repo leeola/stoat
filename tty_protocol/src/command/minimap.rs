@@ -98,6 +98,17 @@ pub struct MinimapViewCommand {
     pub visible_lines: u16,
 }
 
+/// Size the content store [`Self::content_id`] to [`Self::lines`] lines.
+///
+/// The payload of [`Command::MinimapLen`]. A shorter length truncates the store,
+/// and a longer one extends it with blank lines. A program that builds only the
+/// lines near the view sends this first, so each splice lands at its true index.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MinimapLenCommand {
+    pub content_id: u32,
+    pub lines: u32,
+}
+
 /// Retire the minimap content store [`Self::content_id`].
 ///
 /// The payload of [`Command::MinimapDrop`]: a single content-store id, dropped
@@ -281,6 +292,25 @@ pub fn encode_minimap_view_into(out: &mut Vec<u8>, command: &MinimapViewCommand)
     frame::end(out);
 }
 
+/// Encode a [`MinimapLenCommand`] as a full `Gstoatty;minimap_len` frame.
+///
+/// The content id and the line count ride in a fixed 8-byte argument.
+pub fn encode_minimap_len(command: &MinimapLenCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_minimap_len_into(&mut out, command);
+    out
+}
+
+/// Append a `Gstoatty;minimap_len` frame for `command` to `out`.
+pub fn encode_minimap_len_into(out: &mut Vec<u8>, command: &MinimapLenCommand) {
+    frame::begin(out, "minimap_len");
+    frame::push_arg(out, |w| {
+        w.write_all(&command.content_id.to_be_bytes())?;
+        w.write_all(&command.lines.to_be_bytes())
+    });
+    frame::end(out);
+}
+
 /// Encode a [`MinimapDropCommand`] as a full `Gstoatty;minimap_drop` frame.
 pub fn encode_minimap_drop(command: &MinimapDropCommand) -> Vec<u8> {
     let mut out = Vec::new();
@@ -386,6 +416,15 @@ pub(super) fn decode_minimap_view(args: &[Vec<u8>]) -> Option<MinimapViewCommand
         strip_id: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
         top_256: u32::from_be_bytes([arg[4], arg[5], arg[6], arg[7]]),
         visible_lines: u16::from_be_bytes([arg[8], arg[9]]),
+    })
+}
+
+pub(super) fn decode_minimap_len(args: &[Vec<u8>]) -> Option<MinimapLenCommand> {
+    let arg: &[u8; 8] = args.first()?.get(..8)?.try_into().ok()?;
+
+    Some(MinimapLenCommand {
+        content_id: u32::from_be_bytes([arg[0], arg[1], arg[2], arg[3]]),
+        lines: u32::from_be_bytes([arg[4], arg[5], arg[6], arg[7]]),
     })
 }
 
@@ -782,5 +821,25 @@ mod tests {
     fn rejects_wrong_length_minimap_drop_payload() {
         // The single arg here decodes to 3 bytes, not the 4 a content id needs.
         assert!(decode(b"Gstoatty;minimap_drop;YWJj").is_none());
+    }
+
+    #[test]
+    fn minimap_len_round_trips() {
+        let command = MinimapLenCommand {
+            content_id: 9,
+            lines: 473_100,
+        };
+
+        assert_eq!(
+            decode(&encode_minimap_len(&command)),
+            Some(Command::MinimapLen(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_minimap_len_payload() {
+        // The single arg here decodes to 6 bytes, not the 8 that a content id
+        // and a line count need.
+        assert!(decode(b"Gstoatty;minimap_len;YWJjZGVm").is_none());
     }
 }

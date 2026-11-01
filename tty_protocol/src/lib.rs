@@ -123,9 +123,15 @@
 /// pointer, and writes no SGR report for it. A terminal that predates it
 /// reports the gesture in the grid's cells alone.
 ///
+/// Version 17 reads `minimap_len`, which sizes a minimap content store with
+/// blank lines before any of them arrive, so a splice far into the file lands
+/// at its true index. A terminal that predates it ignores those frames whole
+/// and clamps such a splice to the end of its store, so an emitter sends only
+/// the lines near the view to a terminal at version 17 or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 pub mod command;
 pub mod detect;

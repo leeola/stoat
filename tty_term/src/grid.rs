@@ -933,6 +933,18 @@ impl Grid {
         self.minimap_epoch += 1;
     }
 
+    /// Size store `content_id` to `lines` lines, replaying a `minimap_len`.
+    ///
+    /// Truncates the store or extends it with blank lines, and creates it when
+    /// absent. Moves [`Self::minimap_epoch`], as [`Self::splice_minimap_content`]
+    /// does.
+    pub fn resize_minimap_content(&mut self, content_id: u32, lines: usize) {
+        let store = self.minimap_contents.entry(content_id).or_default();
+        resize_summaries(store, lines);
+        *self.minimap_content_versions.entry(content_id).or_default() += 1;
+        self.minimap_epoch += 1;
+    }
+
     /// Remove the store under `content_id`, replaying a `minimap_drop`.
     ///
     /// Moves [`Self::minimap_epoch`], as [`Self::splice_minimap_content`] does.
@@ -1042,6 +1054,14 @@ pub(crate) fn splice_summaries(
     let start = (start as usize).min(store.len());
     let end = start.saturating_add(removed as usize).min(store.len());
     store.splice(start..end, lines.iter().cloned());
+}
+
+/// Truncate `store` to `lines` lines, or extend it with blank ones.
+///
+/// Every blank line shares one empty summary, so an extension by a whole
+/// file's worth of lines takes a handle per line and no allocation per line.
+pub(crate) fn resize_summaries(store: &mut Vec<LineSummary>, lines: usize) {
+    store.resize(lines, LineSummary::default());
 }
 
 /// The newest stamp any [`PagePool`] page took.

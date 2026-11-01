@@ -22,19 +22,19 @@ use stoatty_protocol::command::{
     encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_decorations_scope,
     encode_fill_end, encode_fill_rows_scope, encode_font_step, encode_hello, encode_icon,
     encode_ident_reply, encode_lane_begin, encode_lane_end, encode_line_layout, encode_minimap,
-    encode_minimap_drop, encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline,
-    encode_pool_anchor, encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop,
-    encode_pool_region, encode_popover, encode_reposition, encode_reset, encode_scale,
-    encode_scroll, encode_scroll_region, encode_sketch, encode_text_run, encode_text_run_end,
-    encode_window_open, encode_zoom_capture, BarCommand, BorderCommand,
-    BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand, HelloCommand, IconCommand,
-    IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
-    MinimapDropCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand, PanelCommand,
-    PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand, PoolCursorCommand,
-    PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand, PopoverCommand,
-    RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand, SketchBounds,
-    SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
-    TextRunCommand, WindowOpenCommand,
+    encode_minimap_drop, encode_minimap_len, encode_minimap_lines, encode_minimap_view,
+    encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor,
+    encode_pool_cursor_release, encode_pool_drop, encode_pool_region, encode_popover,
+    encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
+    encode_sketch, encode_text_run, encode_text_run_end, encode_window_open, encode_zoom_capture,
+    BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand,
+    HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand,
+    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand,
+    MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand,
+    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
+    PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
+    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
+    SketchStyle, SketchTiming, TextRunCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -6114,6 +6114,138 @@ fn projection_replays_a_drop_to_an_empty_grid_store() {
     assert!(
         grid.minimap_content(9).is_empty(),
         "a replayed drop empties the grid store",
+    );
+}
+
+fn len(content_id: u32, lines: u32) -> Vec<u8> {
+    encode_minimap_len(&MinimapLenCommand { content_id, lines })
+}
+
+/// A store's length and each of its non-blank lines by index, which pin a
+/// large sized store down without a list of its blanks.
+fn non_blank(store: &[LineSummary]) -> (usize, Vec<(usize, LineSummary)>) {
+    let lines = store
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty())
+        .map(|(index, line)| (index, line.clone()))
+        .collect();
+    (store.len(), lines)
+}
+
+/// A program that builds only the lines near the view sizes the store first,
+/// so a splice far into the file replaces blanks at its true index rather
+/// than clamping to the end of a short store.
+#[test]
+fn a_sized_store_takes_a_splice_at_its_true_index() {
+    let mut terminal = Terminal::new(4, 4, Theme::default());
+
+    terminal.advance(&len(9, 473_100));
+    terminal.advance(&splice(
+        9,
+        400_000,
+        2,
+        vec![vec![run(0, 2, 1)], vec![run(1, 1, 2)]],
+    ));
+
+    let lines = summaries(vec![vec![run(0, 2, 1)], vec![run(1, 1, 2)]]);
+    assert_eq!(
+        non_blank(&terminal.minimap_contents[&9]),
+        (
+            473_100,
+            vec![(400_000, lines[0].clone()), (400_001, lines[1].clone())]
+        ),
+    );
+}
+
+/// A shorter length cuts the store's tail, as a deletion of the file's last
+/// lines does.
+#[test]
+fn a_shorter_len_truncates_the_store() {
+    let mut terminal = Terminal::new(4, 4, Theme::default());
+    terminal.advance(&splice(
+        9,
+        0,
+        0,
+        vec![vec![run(0, 2, 1)], vec![run(1, 1, 2)], vec![run(0, 1, 3)]],
+    ));
+
+    terminal.advance(&len(9, 1));
+
+    assert_eq!(
+        terminal.minimap_contents[&9],
+        summaries(vec![vec![run(0, 2, 1)]])
+    );
+}
+
+/// Without a cap, one frame with a huge length exhausts memory, so a len meets
+/// the line cap that a splice meets. The journal carries the clamped length,
+/// so the grid's store matches the terminal's.
+#[test]
+fn a_len_past_the_line_cap_clamps_and_warns() {
+    let mut terminal = Terminal::new(4, 4, Theme::default());
+    let mut grid = Grid::new(4, 4);
+
+    terminal.advance(&len(9, MAX_MINIMAP_LINES as u32 + 16));
+    terminal.project(&mut grid);
+
+    assert_eq!(
+        (
+            terminal.minimap_contents[&9].len(),
+            grid.minimap_content(9).len(),
+            terminal.warned_minimap_cap,
+        ),
+        (MAX_MINIMAP_LINES, MAX_MINIMAP_LINES, true),
+    );
+}
+
+/// A len names a store the way a splice does, so a fresh id meets the same
+/// store ceiling.
+#[test]
+fn a_len_past_the_store_cap_creates_no_store() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    for content_id in 0..(MAX_MINIMAP_STORES as u32 + 16) {
+        terminal.advance(&len(content_id, 1));
+    }
+
+    assert_eq!(terminal.minimap_contents.len(), MAX_MINIMAP_STORES);
+}
+
+/// A len held behind a page redirect is lost, and every later splice of the
+/// store then lands at the wrong index.
+#[test]
+fn a_len_during_a_fill_still_sizes_the_store() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    declare_pool(&mut terminal, 1, 2, 4);
+
+    terminal.advance(&encode_fill(&FillCommand { pool: 1, index: 0 }));
+    terminal.advance(&len(9, 3));
+    terminal.advance(&encode_fill_end());
+
+    assert_eq!(terminal.minimap_contents.get(&9).map(Vec::len), Some(3));
+}
+
+/// The projection replays a len into the grid's store, which grows and is cut
+/// as the terminal's store was.
+#[test]
+fn projection_replays_a_len() {
+    let mut terminal = Terminal::new(4, 4, Theme::default());
+    let mut grid = Grid::new(4, 4);
+
+    terminal.advance(&splice(9, 0, 0, vec![vec![run(0, 2, 1)]]));
+    terminal.advance(&len(9, 3));
+    terminal.project(&mut grid);
+    let grown = grid.minimap_content(9).to_vec();
+
+    terminal.advance(&len(9, 1));
+    terminal.project(&mut grid);
+
+    assert_eq!(
+        [grown, grid.minimap_content(9).to_vec()],
+        [
+            summaries(vec![vec![run(0, 2, 1)], vec![], vec![]]),
+            summaries(vec![vec![run(0, 2, 1)]]),
+        ],
     );
 }
 

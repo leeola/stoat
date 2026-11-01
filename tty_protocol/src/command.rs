@@ -27,8 +27,8 @@ use icon::decode_icon;
 use lane::decode_lane_begin;
 use line_layout::decode_line_layout;
 use minimap::{
-    decode_minimap, decode_minimap_drop, decode_minimap_lines, decode_minimap_runs,
-    decode_minimap_view,
+    decode_minimap, decode_minimap_drop, decode_minimap_len, decode_minimap_lines,
+    decode_minimap_runs, decode_minimap_view,
 };
 use panel::decode_panel;
 use polyline::decode_polyline;
@@ -69,9 +69,10 @@ pub use lane::{encode_lane_begin, encode_lane_begin_into, encode_lane_end, encod
 pub use line_layout::{encode_line_layout, encode_line_layout_into, LineLayoutCommand};
 pub use minimap::{
     encode_minimap, encode_minimap_drop, encode_minimap_drop_into, encode_minimap_into,
-    encode_minimap_lines, encode_minimap_lines_into, encode_minimap_runs_into, encode_minimap_view,
-    encode_minimap_view_into, LineSummary, MinimapCommand, MinimapDropCommand, MinimapLinesCommand,
-    MinimapRun, MinimapViewCommand,
+    encode_minimap_len, encode_minimap_len_into, encode_minimap_lines, encode_minimap_lines_into,
+    encode_minimap_runs_into, encode_minimap_view, encode_minimap_view_into, LineSummary,
+    MinimapCommand, MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand, MinimapRun,
+    MinimapViewCommand,
 };
 pub use panel::{decode_panels, encode_panel, encode_panel_into, PanelCommand, PanelShadow};
 pub use polyline::{encode_polyline, encode_polyline_into, PolylineCommand};
@@ -229,6 +230,12 @@ pub enum Command {
     /// [`Command::Reset`] and is retired only by [`Command::MinimapDrop`], so the
     /// program streams incremental line updates without resending the whole file.
     MinimapLines(MinimapLinesCommand),
+    /// Size a minimap content store before its lines arrive.
+    ///
+    /// Persistent like [`Command::MinimapLines`]. A program that sends only the
+    /// lines near the view declares the file's length first, so each splice
+    /// lands at its true index and the strip spans the whole file.
+    MinimapLen(MinimapLenCommand),
     /// Update a minimap strip's viewport thumb position.
     ///
     /// Persistent state carrying only where the thumb sits, so a scroll moves the
@@ -435,6 +442,7 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::PoolDrop(c) => encode_pool_drop_into(out, c.pool),
         Command::Minimap(c) => encode_minimap_into(out, c),
         Command::MinimapLines(c) => encode_minimap_lines_into(out, c),
+        Command::MinimapLen(c) => encode_minimap_len_into(out, c),
         Command::MinimapView(c) => encode_minimap_view_into(out, c),
         Command::MinimapDrop(c) => encode_minimap_drop_into(out, c),
         Command::WindowOpen(c) => encode_window_open_into(out, c),
@@ -492,6 +500,7 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "minimap" => decode_minimap(args).map(Command::Minimap),
         "minimap_lines" => decode_minimap_lines(args).map(Command::MinimapLines),
         "minimap_runs" => decode_minimap_runs(args).map(Command::MinimapLines),
+        "minimap_len" => decode_minimap_len(args).map(Command::MinimapLen),
         "minimap_view" => decode_minimap_view(args).map(Command::MinimapView),
         "minimap_drop" => decode_minimap_drop(args).map(Command::MinimapDrop),
         "window_open" => decode_window_open(args).map(Command::WindowOpen),
@@ -660,6 +669,13 @@ mod tests {
                     strip_id: 1,
                     top_256: 2,
                     visible_lines: 3,
+                }),
+            ),
+            (
+                "minimap_len",
+                encode_minimap_len(&MinimapLenCommand {
+                    content_id: 1,
+                    lines: 2,
                 }),
             ),
             (
@@ -1183,6 +1199,10 @@ mod tests {
                 strip_id: 5,
                 top_256: 1_280,
                 visible_lines: 40,
+            }),
+            Command::MinimapLen(MinimapLenCommand {
+                content_id: 9,
+                lines: 400_000,
             }),
             Command::MinimapDrop(MinimapDropCommand { content_id: 9 }),
             Command::Reset,
