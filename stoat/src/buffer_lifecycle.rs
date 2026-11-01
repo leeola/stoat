@@ -12,7 +12,8 @@
 use crate::{
     action_handlers::{
         dispose_view, file::display_name, focused_editor_mut, gc_editor_if_unreferenced, jump,
-        read_open_content, restore_covered_terminal, EditorDisposal, OpenContent,
+        read_open_content, restore_covered_terminal, search::SearchText, EditorDisposal,
+        OpenContent,
     },
     app::{self, Stoat, UpdateEffect},
     badge::{Anchor, Badge, BadgeSource, BadgeState},
@@ -1103,6 +1104,7 @@ pub(crate) fn close_buffer_by_id(stoat: &mut Stoat, buffer_id: BufferId) -> Upda
         .active_workspace_mut()
         .release_bridge_waiters(buffer_id, outcome);
     stoat.marks.retain(|(id, _), _| *id != buffer_id);
+    SearchText::forget(&mut stoat.search_text, buffer_id);
 
     // The servers mirror one workspace. A buffer of any other was never opened
     // on them, and its id names another workspace's document in their state.

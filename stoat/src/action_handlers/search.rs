@@ -1,19 +1,49 @@
 use crate::{
     action_handlers::split_selection::RegexSelectKind,
     app::{Stoat, UpdateEffect},
+    buffer::BufferId,
     editor_state::{EditorState, ScrollGlide},
     input_history::InputHistory,
     input_view::{InputView, SubmitTarget},
     jumplist::JumpEntry,
+    multi_buffer::MultiBufferSnapshot,
     pane::View,
 };
-use regex_cursor::{engines::meta, regex_automata::util::syntax};
+use regex_cursor::{engines::meta, regex_automata::util::syntax, Input};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, ops::Range, sync::Arc};
 use stoat_text::{char_is_word, Anchor, Rope, Selection};
 
-/// The search pattern compiled for the engine that matches over a rope.
+/// The search pattern compiled for the engine that matches over a rope or over
+/// one byte slice.
 pub(crate) type CursorRegex = meta::Regex;
+
+/// The whole text of the buffer a search last scanned, held so that each scan
+/// runs over one byte slice.
+///
+/// The rope's leaves hold 128 bytes. A scan across them steps a tree cursor
+/// per leaf and defeats the regex engine's prefilters, so on a large file a
+/// scan that finds nothing costs several times a scan of one slice. Each
+/// keystroke of a search prompt, and each `n` and `N`, scans the same buffer,
+/// so one copy serves them all until the buffer's text moves.
+///
+/// One slot holds one buffer, so the copy costs the memory of one buffer's
+/// text beside its rope.
+pub(crate) struct SearchText {
+    buffer: BufferId,
+    version: u64,
+    text: Arc<String>,
+}
+
+impl SearchText {
+    /// Drop `held` when it holds `buffer`, so a closed buffer's text does not
+    /// outlive it.
+    pub(crate) fn forget(held: &mut Option<SearchText>, buffer: BufferId) {
+        if held.as_ref().is_some_and(|text| text.buffer == buffer) {
+            *held = None;
+        }
+    }
+}
 
 /// Direction the search was opened in. Forward (`/`) finds matches at
 /// or after the cursor; Reverse (`?`) finds matches before the cursor.
@@ -691,17 +721,19 @@ fn jump_to_match(
     };
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let sel = editor.selections.newest_anchor();
-    let reversed = sel.reversed;
-    let from = match direction {
-        SearchDirection::Forward => buffer_snapshot.resolve_anchor(&sel.end),
-        SearchDirection::Reverse => buffer_snapshot.resolve_anchor(&sel.start),
+    let (reversed, from) = {
+        let sel = editor.selections.newest_anchor();
+        let from = match direction {
+            SearchDirection::Forward => buffer_snapshot.resolve_anchor(&sel.end),
+            SearchDirection::Reverse => buffer_snapshot.resolve_anchor(&sel.start),
+        };
+        (sel.reversed, from)
     };
 
+    let text = search_text(&mut stoat.search_text, buffer_snapshot);
     let target = match direction {
-        SearchDirection::Forward => find_forward(regex, rope, from),
-        SearchDirection::Reverse => find_reverse(regex, rope, from),
+        SearchDirection::Forward => find_forward(regex, &text, from),
+        SearchDirection::Reverse => find_reverse(regex, &text, from),
     };
     let Some(hit) = target else {
         return SearchOutcome::NoMatch;
@@ -712,6 +744,9 @@ fn jump_to_match(
         return SearchOutcome::NoMatch;
     }
 
+    let Some(editor) = pane_editor(stoat) else {
+        return SearchOutcome::NoMatch;
+    };
     match extend {
         true => editor
             .selections
@@ -724,6 +759,29 @@ fn jump_to_match(
         true => SearchOutcome::Wrapped,
         false => SearchOutcome::Landed,
     }
+}
+
+/// The whole text of `buffer`, from `held` when it holds that buffer at its
+/// current version, and otherwise collected from the rope and held in place of
+/// what `held` had.
+fn search_text(held: &mut Option<SearchText>, buffer: &MultiBufferSnapshot) -> Arc<String> {
+    if let Some(text) = held.as_ref()
+        && text.buffer == buffer.buffer_id()
+        && text.version == buffer.version()
+    {
+        return Arc::clone(&text.text);
+    }
+
+    let rope = buffer.rope();
+    let mut text = String::with_capacity(rope.len());
+    text.extend(rope.chunks());
+    let text = Arc::new(text);
+    *held = Some(SearchText {
+        buffer: buffer.buffer_id(),
+        version: buffer.version(),
+        text: Arc::clone(&text),
+    });
+    text
 }
 
 /// A match a search step reached, and whether the scan ran off the end of the
@@ -743,11 +801,11 @@ struct Hit {
 ///
 /// `from` is the primary selection's end, so the match it currently covers is
 /// already behind the bound and a repeat advances.
-fn find_forward(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
-    if let Some(hit) = next_match_at_or_after(regex, rope, from.min(rope.len())) {
+fn find_forward(regex: &CursorRegex, text: &str, from: usize) -> Option<Hit> {
+    if let Some(hit) = next_match_at_or_after(regex, text, from.min(text.len())) {
         return Some(hit);
     }
-    next_match_at_or_after(regex, rope, 0).map(|hit| Hit {
+    next_match_at_or_after(regex, text, 0).map(|hit| Hit {
         wrapped: true,
         ..hit
     })
@@ -766,11 +824,11 @@ fn find_forward(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
 ///
 /// The wrap arm scans from `from` afresh rather than reading on from the first
 /// scan, so a run of overlapping candidates aligns from the cursor.
-fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
-    let from = from.min(rope.len());
+fn find_reverse(regex: &CursorRegex, text: &str, from: usize) -> Option<Hit> {
+    let from = from.min(text.len());
     let last = |range: Range<usize>| {
         regex
-            .find_iter(rope.regex_input(range))
+            .find_iter(Input::new(text.as_bytes()).range(range))
             .last()
             .map(|m| Hit {
                 start: m.start(),
@@ -782,7 +840,7 @@ fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
     if let Some(hit) = last(0..from) {
         return Some(hit);
     }
-    last(from..rope.len()).map(|hit| Hit {
+    last(from..text.len()).map(|hit| Hit {
         wrapped: true,
         ..hit
     })
@@ -796,11 +854,11 @@ fn find_reverse(regex: &CursorRegex, rope: &Rope, from: usize) -> Option<Hit> {
 ///
 /// The hit is never marked as wrapped. Only the caller knows whether this scan
 /// is the first one or the one that resumed from the buffer's start.
-fn next_match_at_or_after(regex: &CursorRegex, rope: &Rope, at: usize) -> Option<Hit> {
-    if at > rope.len() {
+fn next_match_at_or_after(regex: &CursorRegex, text: &str, at: usize) -> Option<Hit> {
+    if at > text.len() {
         return None;
     }
-    let m = regex.find(rope.regex_input(at..rope.len()))?;
+    let m = regex.find(Input::new(text.as_bytes()).range(at..text.len()))?;
     if m.start() >= at {
         Some(Hit {
             start: m.start(),
@@ -864,9 +922,16 @@ pub(crate) fn compile_cursor_regex(pattern: &str, smart_case: bool) -> Option<Cu
 mod tests {
     use super::{LastSearch, SearchDirection};
     use crate::{
-        editor_state::ScrollGlide, test_fixture::open_scratch_at, test_harness::TestHarness,
+        buffer::{BufferId, TextBuffer},
+        editor_state::ScrollGlide,
+        multi_buffer::MultiBuffer,
+        test_fixture::open_scratch_at,
+        test_harness::TestHarness,
     };
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        sync::{Arc, RwLock},
+    };
     use stoat_action as action;
 
     fn seed(h: &mut TestHarness, contents: &str) -> PathBuf {
@@ -1444,44 +1509,44 @@ mod tests {
     /// come up.
     #[test]
     fn find_forward_resumes_from_inside_a_multibyte_character() {
-        let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
+        let text = "\u{FC}ber \u{FC}ber";
         let regex = super::compile_cursor_regex("\u{FC}ber", false).expect("valid regex");
 
         // A selection covering the umlaut at 0 ends at 2, so the scan starts
         // there. The bound lands mid-character whenever a caller hands over an
         // offset the buffer clipped differently.
         assert_eq!(
-            super::find_forward(&regex, &text, 1),
+            super::find_forward(&regex, text, 1),
             hit(6, 11),
             "a start inside the umlaut still reaches the next match",
         );
         assert_eq!(
-            super::find_forward(&regex, &text, 11),
+            super::find_forward(&regex, text, 11),
             wrapped_hit(0, 5),
             "and with nothing after it, wraps rather than stalling there",
         );
 
         // Four bytes wide, so a start one byte in falls inside the character.
-        let wide = stoat_text::Rope::from("\u{1F600}x\u{1F600}x");
+        let wide = "\u{1F600}x\u{1F600}x";
         let regex = super::compile_cursor_regex("x", false).expect("valid regex");
-        assert_eq!(super::find_forward(&regex, &wide, 1), hit(4, 5));
-        assert_eq!(super::find_forward(&regex, &wide, 6), hit(9, 10));
+        assert_eq!(super::find_forward(&regex, wide, 1), hit(4, 5));
+        assert_eq!(super::find_forward(&regex, wide, 6), hit(9, 10));
     }
 
     /// Case-insensitive search folds non-ASCII pairs, not just ASCII ones.
     #[test]
     fn find_forward_folds_non_ascii_case() {
-        let text = stoat_text::Rope::from("a\u{FC}b");
+        let text = "a\u{FC}b";
         let regex = super::compile_cursor_regex("(?i)\u{DC}", false).expect("valid regex");
         assert_eq!(
-            super::find_forward(&regex, &text, 0),
+            super::find_forward(&regex, text, 0),
             hit(1, 3),
             "an uppercase umlaut pattern matches the lowercase one",
         );
 
         let sensitive = super::compile_cursor_regex("\u{DC}", false).expect("valid regex");
         assert_eq!(
-            super::find_forward(&sensitive, &text, 0),
+            super::find_forward(&sensitive, text, 0),
             None,
             "and without the flag it does not, so the fold is what matched",
         );
@@ -1496,10 +1561,10 @@ mod tests {
     /// boundary after it.
     #[test]
     fn find_forward_with_an_empty_pattern_reports_a_boundary() {
-        let text = stoat_text::Rope::from("\u{FC}ber \u{FC}ber");
+        let text = "\u{FC}ber \u{FC}ber";
         let regex = super::compile_cursor_regex("", false).expect("valid regex");
         assert_eq!(
-            super::find_forward(&regex, &text, 1),
+            super::find_forward(&regex, text, 1),
             hit(2, 2),
             "the boundary after the umlaut, not the byte inside it",
         );
@@ -1514,32 +1579,29 @@ mod tests {
     #[test]
     fn find_reverse_picks_the_last_match_before_the_cursor() {
         let regex = super::compile_cursor_regex("ab", false).expect("valid regex");
-        let text = stoat_text::Rope::from("ab..ab..ab");
+        let text = "ab..ab..ab";
 
         assert_eq!(
-            super::find_reverse(&regex, &text, 8),
+            super::find_reverse(&regex, text, 8),
             hit(4, 6),
             "the nearest match before the cursor wins, not the first or last",
         );
         assert_eq!(
-            super::find_reverse(&regex, &text, 9),
+            super::find_reverse(&regex, text, 9),
             hit(4, 6),
             "the match at 8 straddles the cursor, so the one before it answers",
         );
         assert_eq!(
-            super::find_reverse(&regex, &text, 5),
+            super::find_reverse(&regex, text, 5),
             hit(0, 2),
             "and a match ending one byte past the cursor is out on the same rule",
         );
         assert_eq!(
-            super::find_reverse(&regex, &text, 0),
+            super::find_reverse(&regex, text, 0),
             wrapped_hit(8, 10),
             "with nothing before the cursor it wraps to the last match",
         );
-        assert_eq!(
-            super::find_reverse(&regex, &stoat_text::Rope::from("nope"), 2),
-            None
-        );
+        assert_eq!(super::find_reverse(&regex, "nope", 2), None);
     }
 
     /// The wrap scan starts at the cursor, so a run of overlapping candidates
@@ -1552,18 +1614,19 @@ mod tests {
     #[test]
     fn a_wrapping_reverse_search_aligns_its_matches_from_the_cursor() {
         let regex = super::compile_cursor_regex("aa", false).expect("valid regex");
-        let text = stoat_text::Rope::from("aaaa");
+        let text = "aaaa";
 
         assert_eq!(
-            super::find_reverse(&regex, &text, 1),
+            super::find_reverse(&regex, text, 1),
             wrapped_hit(1, 3),
             "the run starts at the cursor, so it reaches 1..3 and stops",
         );
     }
 
     /// Chunks are far smaller than the file, so a match near the end of one
-    /// spans the boundary into the next. Nothing else here reaches past a
-    /// single chunk, so without this the chunk walking is untested.
+    /// spans the boundary into the next. The scan reads the held text that
+    /// the chunks were joined into, and nothing else here reaches past a
+    /// single chunk, so without this the join is untested.
     #[test]
     fn a_match_straddling_a_chunk_boundary_is_found_either_way() {
         let mut text = String::new();
@@ -1576,31 +1639,73 @@ mod tests {
             text.push_str(&format!("trailing line {row}\n"));
         }
 
-        let rope = stoat_text::Rope::from(text.as_str());
+        let buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        let snapshot = MultiBuffer::singleton(Arc::new(RwLock::new(buffer))).snapshot();
+        let held = super::search_text(&mut None, &snapshot);
         let needle = "needle_in_a_haystack";
         let regex = super::compile_cursor_regex(needle, false).expect("valid regex");
         let target = at + "the ".len();
         let end = target + needle.len();
 
         assert!(
-            rope.chunks().count() > 1,
+            snapshot.rope().chunks().count() > 1,
             "the fixture has to span chunks for this to test anything"
         );
         assert_eq!(
-            super::find_forward(&regex, &rope, 0),
+            super::find_forward(&regex, &held, 0),
             hit(target, end),
             "found walking forward from the start"
         );
         assert_eq!(
-            super::find_reverse(&regex, &rope, rope.len()),
+            super::find_reverse(&regex, &held, held.len()),
             hit(target, end),
             "and walking back from the end"
         );
         assert_eq!(
-            super::find_forward(&regex, &rope, end),
+            super::find_forward(&regex, &held, end),
             wrapped_hit(target, end),
             "and wrapping round when the selection covers it"
         );
+    }
+
+    /// The text a prompt's keystroke scanned, as the held copy holds it.
+    fn held_text(h: &TestHarness) -> Arc<String> {
+        Arc::clone(&h.stoat.search_text.as_ref().expect("a held text").text)
+    }
+
+    /// The second keystroke of a search scans the copy the first one held,
+    /// since the buffer's text did not move between them.
+    #[test]
+    fn a_second_keystroke_reuses_the_held_text() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::OpenSearchInput);
+        h.type_text("a");
+        let first = held_text(&h);
+        h.type_text("b");
+        assert!(
+            Arc::ptr_eq(&first, &held_text(&h)),
+            "the second keystroke scanned the same copy"
+        );
+    }
+
+    /// A search after an edit scans the edited text, so the held copy follows
+    /// the buffer's version.
+    #[test]
+    fn a_search_after_an_edit_finds_the_edited_text() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::OpenSearchInput);
+        h.type_text("def");
+        h.type_keys("enter");
+        h.type_keys("A");
+        h.type_text(" ghi");
+        h.type_keys("escape");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::OpenSearchInput);
+        h.type_text("ghi");
+        h.type_keys("enter");
+        assert_eq!(h.selection_spans(), vec![(8, 11, false)]);
     }
 
     #[test]

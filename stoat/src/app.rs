@@ -1569,6 +1569,10 @@ pub struct Stoat {
     /// [`action_handlers::search::search_submit`] or
     /// [`action_handlers::search::search_cancel`].
     pub(crate) search_input: Option<action_handlers::search::SearchInputState>,
+    /// The text of the buffer a search last scanned, held across the prompt's
+    /// keystrokes and each `n` and `N`. See
+    /// [`SearchText`](action_handlers::search::SearchText).
+    pub(crate) search_text: Option<action_handlers::search::SearchText>,
     /// Buffer accumulating text typed during the current
     /// insert-mode session. `Some` while `mode == "insert"` (or
     /// equivalent), `None` outside.
@@ -2792,6 +2796,7 @@ impl Stoat {
             pending_surround_count: 1,
             pending_textobject_select: None,
             search_input: None,
+            search_text: None,
             current_insert_run: None,
             restore_cursor: false,
             group_held_for_insert: false,
