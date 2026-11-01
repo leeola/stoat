@@ -2339,6 +2339,91 @@ fn separate_changed_rows_ship_separate_patches() {
     );
 }
 
+/// The `(rows, cols)` grid page of `term_id`'s pooled pane as a fresh render
+/// draws it.
+fn fresh_terminal_page(
+    h: &crate::test_harness::TestHarness,
+    term_id: TermId,
+    (rows, cols): (u16, u16),
+) -> Buffer {
+    let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
+    let pane = terminal_pool_panes(&h.stoat, inactive_dim, None)
+        .into_iter()
+        .find(|pane| pane.term_id == term_id)
+        .expect("the terminal pane pools");
+    let mut page = Buffer::empty(Rect::default());
+    let term = &h.stoat.active_workspace().terms[term_id];
+    render_terminal_page(term, &h.stoat.theme, rows, cols, &pane, &mut page);
+    page
+}
+
+/// An echo renders and compares only the rows the screen damaged since the
+/// held page. A held row outside the damage is poisoned and ships no patch,
+/// so no whole compare ran, and every other row matches a fresh render.
+#[test]
+fn an_echo_compares_only_the_damaged_rows() {
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(b"one\r\ntwo");
+    h.stoat.stoatty_protocol = 10;
+    {
+        let held = &mut h
+            .stoat
+            .terminal_pages
+            .get_mut(&index)
+            .expect("a held page")
+            .page;
+        let mut poison = held[(0, 4)].clone();
+        poison.set_symbol("#");
+        held[(0, 4)] = poison;
+    }
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .feed(b"x");
+    let bytes = emit_raw(&mut h, &mut rx);
+
+    let fresh = fresh_terminal_page(&h, term_id, (6, 30));
+    let held = &h.stoat.terminal_pages[&index].page;
+    let differing: Vec<(u16, u16)> = (0..6)
+        .flat_map(|y| (0..30).map(move |x| (x, y)))
+        .filter(|&cell| held[cell] != fresh[cell])
+        .collect();
+    assert_eq!(
+        (pool_patches(&bytes, index), differing),
+        (vec![(1, 1)], vec![(0, 4)]),
+        "the echo's row ships alone, and only the poisoned cell differs from a fresh page",
+    );
+}
+
+/// A scroll of the terminal's view moves every row, and a selection changes
+/// rows that no screen damage names, so each compares the whole page and
+/// ships the rows that changed.
+#[test]
+fn a_view_scroll_or_a_selection_compares_the_whole_page() {
+    let output: String = (0..12).map(|line| format!("{line}\r\n")).collect();
+    let (mut h, mut rx, term_id, index) = pooled_terminal_sent(output.as_bytes());
+    h.stoat.stoatty_protocol = 10;
+    let mut patches = |h: &mut crate::test_harness::TestHarness| {
+        let bytes = emit_raw(h, &mut rx);
+        pool_patches(&bytes, index)
+    };
+
+    h.stoat.active_workspace_mut().terms[term_id]
+        .term
+        .scroll_lines(1);
+    let scrolled = patches(&mut h);
+    {
+        let term = &mut h.stoat.active_workspace_mut().terms[term_id].term;
+        term.start_selection(0, 0);
+        term.extend_selection(0, 1);
+    }
+    let selected = patches(&mut h);
+
+    assert_eq!(
+        (scrolled, selected),
+        (vec![(0, 6)], vec![(0, 1)]),
+        "the scroll ships every row, and the selection its own row",
+    );
+}
+
 /// A stoat at protocol 9 whose focused pane pools a fresh terminal fed
 /// `output`, with the pane's grid reported and its first page sent, the
 /// terminal's id, and the pane's pool id.

@@ -112,6 +112,17 @@ pub(crate) struct TerminalPage {
     /// The buffer the next render draws into, swapped with `page` when that
     /// render goes out, so that a compare allocates nothing.
     spare: Buffer,
+    /// The screen generation `page` shows.
+    ///
+    /// While the page's other inputs hold, an update renders and compares only
+    /// the rows the screen damaged since, as
+    /// [`TermScreen::damaged_rows_since`](crate::term_screen::TermScreen::damaged_rows_since)
+    /// answers them.
+    generation: u64,
+    /// A hash of the theme, the focus, the fade the page takes, and the
+    /// selection, which is what `page` shows besides the screen. A move of any
+    /// of them changes rows that no screen damage names.
+    inputs: u64,
 }
 
 /// The content page a detached non-editor pane last sent to its aux window,
@@ -2959,15 +2970,21 @@ fn emit_terminal_pool(
     };
     let grid = ws.term_pool_grids.get(&pane.term_id).copied();
     let pool = pane.region.pool;
-    let version = {
+    let inputs = {
         let mut hasher = DefaultHasher::new();
         theme_epoch.hash(&mut hasher);
-        pane.region.hash(&mut hasher);
-        grid.hash(&mut hasher);
         pane.is_focused.hash(&mut hasher);
         pane.dim.to_bits().hash(&mut hasher);
-        term.term.generation().hash(&mut hasher);
         selection_key(term).hash(&mut hasher);
+        hasher.finish()
+    };
+    let generation = term.term.generation();
+    let version = {
+        let mut hasher = DefaultHasher::new();
+        inputs.hash(&mut hasher);
+        pane.region.hash(&mut hasher);
+        grid.hash(&mut hasher);
+        generation.hash(&mut hasher);
         hasher.finish()
     };
     if state.already_emitted(pool, version) {
@@ -2984,19 +3001,54 @@ fn emit_terminal_pool(
         term: pane.term_id,
         page: Buffer::empty(Rect::default()),
         spare: Buffer::empty(Rect::default()),
+        generation: 0,
+        inputs: 0,
     });
-    render_terminal_page(term, theme, rows, cols, pane, &mut held.spare);
-    // The render takes the grid's size, so an area the held page shares is the
+    // A render takes the grid's size, so an area the held page shares is the
     // grid it was rendered at.
+    let area = Rect::new(0, 0, cols, rows);
     let held_by_stoatty = held.term == pane.term_id
         && state.holds_region(pool, &pane.region)
-        && held.page.area == held.spare.area;
+        && held.page.area == area;
     // A new dim fades the page stoatty holds, so it rides the shared batch
     // ahead of the compare, and ahead of any patch the compare answers.
     if held_by_stoatty {
         state.declare_region(out, pane.region);
     }
+
+    // While the page's other inputs hold, a row that the screen did not damage
+    // since the held page still equals it. The damaged rows alone render and
+    // compare, and the held page takes the ones that changed in place.
+    if patches
+        && held_by_stoatty
+        && held.inputs == inputs
+        && let Some(mut damaged) = term.term.damaged_rows_since(held.generation)
+    {
+        render_terminal_rows(term, theme, pane, area, &mut held.spare, &mut damaged);
+        let width = usize::from(cols);
+        let changed: Vec<bool> = damaged
+            .iter()
+            .take(usize::from(rows))
+            .enumerate()
+            .map(|(row, marked)| {
+                let span = row * width..(row + 1) * width;
+                *marked && held.page.content[span.clone()] != held.spare.content[span]
+            })
+            .collect();
+        for (row, _) in changed.iter().enumerate().filter(|(_, changed)| **changed) {
+            let span = row * width..(row + 1) * width;
+            held.page.content[span.clone()].clone_from_slice(&held.spare.content[span]);
+        }
+        held.generation = generation;
+        state.record_content_version(pool, version);
+        return patch_runs(pool, 0, &held.page, |row| {
+            changed.get(usize::from(row)).copied().unwrap_or(false)
+        });
+    }
+
+    render_terminal_page(term, theme, rows, cols, pane, &mut held.spare);
     if held_by_stoatty && held.spare == held.page {
+        (held.generation, held.inputs) = (generation, inputs);
         state.record_content_version(pool, version);
         return Vec::new();
     }
@@ -3004,6 +3056,7 @@ fn emit_terminal_pool(
         let batches = row_patches(pool, 0, &held.page, &held.spare);
         state.record_content_version(pool, version);
         std::mem::swap(&mut held.page, &mut held.spare);
+        (held.generation, held.inputs) = (generation, inputs);
         return batches;
     }
 
@@ -3016,6 +3069,7 @@ fn emit_terminal_pool(
 
     std::mem::swap(&mut held.page, &mut held.spare);
     held.term = pane.term_id;
+    (held.generation, held.inputs) = (generation, inputs);
     let page = crate::render::serialize_buffer(&held.page);
     let mut batch = Vec::new();
     stoatty_protocol::command::encode_fill_scope(&mut batch, pool, 0, |out| {
@@ -3042,13 +3096,18 @@ fn selection_key(term: &TermSession) -> Option<(i32, usize, i32, usize)> {
 ///
 /// Both pages share one area, which is the grid each patch names.
 fn row_patches(pool: u32, index: u64, held: &Buffer, page: &Buffer) -> Vec<Vec<u8>> {
-    let area = page.area;
-    let width = usize::from(area.width);
-    let differs = |row: u16| {
+    let width = usize::from(page.area.width);
+    patch_runs(pool, index, page, |row| {
         let start = usize::from(row) * width;
         held.content[start..start + width] != page.content[start..start + width]
-    };
+    })
+}
 
+/// The `fill_rows` batches that bring the rows `differs` marks, of page
+/// `index` that stoatty holds for `pool`, to `page`, one batch for each run of
+/// adjacent marked rows.
+fn patch_runs(pool: u32, index: u64, page: &Buffer, differs: impl Fn(u16) -> bool) -> Vec<Vec<u8>> {
+    let area = page.area;
     let mut batches = Vec::new();
     let mut row = 0;
     while row < area.height {
@@ -3103,6 +3162,59 @@ fn render_terminal_page(
         )
     {
         crate::render::pane::dim_pane_content(buf, area, bg, pane.dim);
+    }
+}
+
+/// Draw the rows `rows` marks of `term`'s `area`-sized page into `buf`, as
+/// [`render_terminal_page`] draws them, and leave the other rows of `buf` as
+/// they were.
+///
+/// The cursor's row joins `rows` first, since the page draws the cursor's
+/// block. Each marked row blanks before it paints, as the whole page does,
+/// because a cell in the terminal's default colors keeps the style under it.
+fn render_terminal_rows(
+    term: &TermSession,
+    theme: &crate::theme::Theme,
+    pane: &TerminalPoolPane,
+    area: Rect,
+    buf: &mut Buffer,
+    rows: &mut [bool],
+) {
+    buf.resize(area);
+    if let Some(cursor) = term.term.cursor()
+        && let Some(row) = rows.get_mut(cursor.row)
+    {
+        *row = true;
+    }
+    let rows = &*rows;
+    let marked = || {
+        rows.iter()
+            .take(usize::from(area.height))
+            .enumerate()
+            .filter_map(|(row, marked)| marked.then_some(row))
+    };
+
+    let width = usize::from(area.width);
+    let blank = crate::render::themed_blank(theme);
+    for row in marked() {
+        buf.content[row * width..(row + 1) * width].fill(blank.clone());
+    }
+    crate::render::term_pane::render_term_rows(term, theme, area, pane.is_focused, buf, rows);
+    if pane.dim > 0.0
+        && let Some(bg) = crate::render::paint::style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|style| style.bg),
+        )
+    {
+        for row in marked() {
+            let line = Rect {
+                y: row as u16,
+                height: 1,
+                ..area
+            };
+            crate::render::pane::dim_pane_content(buf, line, bg, pane.dim);
+        }
     }
 }
 
