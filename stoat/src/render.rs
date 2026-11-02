@@ -2043,7 +2043,10 @@ pub(crate) fn frame(
             // The conflict screen rides on normal mode, so scope to its own
             // `view == conflict` bindings. A terminal or agent pane at rest
             // sends every other key to its child, so it scopes to the bindings
-            // that name its pane kind. A primary mode narrows to the chord
+            // that name its pane kind. The walkthrough mode lasts a whole tour,
+            // and the reader reads code under its box, so it scopes to its own
+            // mode's bindings. At 24 rows the full list wraps into a second
+            // column over the text. A primary mode narrows to the chord
             // entries and the context-bound keys, because the whole editor
             // keymap is what the help screen is for. A chord sub-mode owns its
             // whole mode, so take them all.
@@ -2056,6 +2059,8 @@ pub(crate) fn frame(
                 stoat.keymap.scoped_bindings(&state, "view", "conflict")
             } else if let Some(kind @ ("terminal" | "agent")) = pane.filter(|_| mode == "normal") {
                 stoat.keymap.scoped_bindings(&state, "pane", kind)
+            } else if mode == "walkthrough" {
+                stoat.keymap.scoped_bindings(&state, "mode", "walkthrough")
             } else {
                 let keys = if PRIMARY_MODES.contains(&mode) {
                     stoat.keymap.context_bindings(&state, PRIMARY_MODES)

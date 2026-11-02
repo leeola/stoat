@@ -280,7 +280,7 @@ fn walkthrough_fixture_plays_its_whole_tour() {
 #[test]
 fn walkthrough_commits_fixture_checks_each_commit_out() {
     let (_dir, root, harness) = fixture_harness("walkthrough-commits");
-    let mut harness = harness.with_size(WIDE_COLS, LANDING_ROWS);
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     let tour = store::load(&LocalFs, &root, "tour").expect("the fixture commits its tour");
     let first = tour.stops[0]
         .commit
@@ -377,15 +377,6 @@ fn head_of(root: &Path) -> String {
 /// after the message expires. A checkout restarts the server's work and the
 /// diff warm, so a tour over commits meets them at each checkout.
 const WIDE_COLS: u16 = 200;
-
-/// A frame height at which the walkthrough mode's key-hint overlay keeps to
-/// the right end of each line.
-///
-/// The overlay fills one column until its rows outgrow the frame. Past that, it
-/// wraps into a second column that reaches over the start of a diff's right
-/// side. At 26 rows, the mode's rows in these fixtures still fit one column, so
-/// each landing text at the start of its line stays visible.
-const LANDING_ROWS: u16 = 26;
 
 /// Drift is only ever reported against what is on screen, so the status line
 /// the reader sees is the thing worth pinning here. This walks the drifted
@@ -730,7 +721,7 @@ fn walkthrough_picker_plays_one_tour_after_another() {
 #[test]
 fn walkthrough_changes_fixture_lands_in_the_diff_view() {
     let (_dir, _root, harness) = fixture_harness("walkthrough-changes");
-    let mut harness = harness.with_size(WIDE_COLS, LANDING_ROWS);
+    let mut harness = harness.with_size(WIDE_COLS, 24);
     harness.run(|mut handle| async move {
         handle
             .send_keys(":walkthrough tour<Enter>")

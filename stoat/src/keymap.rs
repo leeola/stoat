@@ -949,6 +949,9 @@ impl Keymap {
     /// A key that a binding outside the scope outranks is left out as well.
     /// The popup otherwise promises this modal's action for a press that runs
     /// another one.
+    ///
+    /// A wheel binding is left out, because every box this feeds affords a key
+    /// press, which a notch is not.
     pub fn scoped_bindings(
         &self,
         state: &dyn KeymapState,
@@ -963,6 +966,7 @@ impl Keymap {
                     .iter()
                     .any(|p| predicate_eq_matches(p, scope_field, scope_value))
             })
+            .filter(|binding| binding.key.wheel.is_none())
             .map(|binding| (binding.key.display_label(), binding.actions.as_ref()))
             .collect()
     }

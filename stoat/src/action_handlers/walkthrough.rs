@@ -1946,6 +1946,44 @@ mod tests {
         );
     }
 
+    /// The walkthrough box lists only the mode's own keys, so it stays one
+    /// column over the code the reader reads through the tour.
+    #[test]
+    fn the_walkthrough_box_lists_the_modes_own_keys() {
+        let mut h = harness_with_tour();
+        open(&mut h.stoat, "tour");
+        h.type_keys("space W");
+        h.render_composited();
+
+        let rows: Vec<(String, String)> = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the walkthrough mode laid out its box")
+            .rows
+            .iter()
+            .map(|row| (row.keys.clone(), row.action.clone()))
+            .collect();
+        let expected = [
+            ("Esc", "normal mode"),
+            ("n, Dn", "go to the next walkthrough stop"),
+            ("p, Up", "go to the previous walkthrough stop"),
+            ("a", "go to the next annotation of this stop"),
+            ("A", "go to the previous annotation of this stop"),
+            ("s", "show the narration for this point again"),
+            ("S", "show the walkthrough's description"),
+            ("d", "end the walkthrough"),
+            ("o", "open the walkthrough picker"),
+            ("Rt", "go to the next point of the walkthrough"),
+            ("Lt", "go to the previous point of the walkthrough"),
+        ]
+        .map(|(keys, action)| (keys.to_owned(), action.to_owned()));
+        assert_eq!(
+            rows, expected,
+            "the box names the tour keys and nothing else"
+        );
+    }
+
     /// The picker opens over the tour that plays, so the reader swaps tours
     /// without closing the open one first.
     #[test]
