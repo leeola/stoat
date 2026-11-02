@@ -181,6 +181,127 @@ pub(super) fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
     })
 }
 
+/// Draw several text runs that share one scale, color, background, follow,
+/// and anchor, in one frame.
+///
+/// A gutter numbers each row with a run of its own, and a frame per number
+/// spends most of its bytes on the head rather than the digits. Each entry of
+/// [`Self::runs`] is one run's `col`, `row`, and text, and the fields the runs
+/// share are written once. A terminal stores each entry as the
+/// [`TextRunCommand`] it stands for, in order, so a batch draws what its runs
+/// draw as separate frames.
+///
+/// The texts ride inside the frame's argument rather than streaming after it,
+/// so the frame cap bounds them, and [`encode_text_runs_into`] splits a batch
+/// past it. The text is generic over its container for the same reason
+/// [`TextRunCommand`]'s is.
+#[derive(Clone, PartialEq, Debug)]
+pub struct TextRunsCommand<S = String> {
+    pub scale: u16,
+    pub color: [u8; 3],
+    pub bg: Option<[u8; 3]>,
+    pub follow: u32,
+    pub anchor: Option<(u32, f32)>,
+    pub runs: Vec<(i16, i16, S)>,
+}
+
+/// Bytes a `text_runs` argument spends ahead of its runs, the shared fields and
+/// the run count.
+const TEXT_RUNS_HEAD: usize = 24;
+
+/// Bytes a run spends ahead of its text, its column, row, and text length.
+const TEXT_RUNS_ENTRY: usize = 6;
+
+/// Encode a [`TextRunsCommand`] as `Gstoatty;text_runs` frames for an emitter.
+pub fn encode_text_runs<S: AsRef<str>>(command: &TextRunsCommand<S>) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_text_runs_into(&mut out, command);
+    out
+}
+
+/// Append the `Gstoatty;text_runs` frames for `command` to `out`.
+///
+/// The terminal drops a payload past [`frame::MAX_APC_PAYLOAD`] whole, so a
+/// batch whose runs overrun it is split across as many frames as it takes, each
+/// carrying the shared fields. Applied in order, the frames store the runs one
+/// frame stores. A batch with no runs emits nothing, and a run whose text
+/// alone overruns the cap goes out in a frame of its own, which the terminal
+/// drops.
+pub fn encode_text_runs_into<S: AsRef<str>>(out: &mut Vec<u8>, command: &TextRunsCommand<S>) {
+    let mut rest = &command.runs[..];
+    while !rest.is_empty() {
+        let take = frame::fitting(rest, frame::MAX_RAW_ARG - TEXT_RUNS_HEAD, |(_, _, text)| {
+            TEXT_RUNS_ENTRY + text.as_ref().len()
+        });
+        let (runs, tail) = rest.split_at(take);
+        rest = tail;
+
+        frame::begin(out, "text_runs");
+        frame::push_arg(out, |w| {
+            w.write_all(&command.scale.to_be_bytes())?;
+            w.write_all(&command.color)?;
+            w.write_all(&command.bg.unwrap_or([0, 0, 0]))?;
+            w.write_all(&[command.bg.is_some() as u8])?;
+            w.write_all(&command.follow.to_be_bytes())?;
+            w.write_all(&[command.anchor.is_some() as u8])?;
+            let (host, top_rows) = command.anchor.unwrap_or((0, 0.0));
+            w.write_all(&host.to_be_bytes())?;
+            w.write_all(&top_rows.to_be_bytes())?;
+            w.write_all(&(runs.len() as u16).to_be_bytes())?;
+            for (col, row, text) in runs {
+                let text = text.as_ref().as_bytes();
+                w.write_all(&col.to_be_bytes())?;
+                w.write_all(&row.to_be_bytes())?;
+                w.write_all(&(text.len() as u16).to_be_bytes())?;
+                w.write_all(text)?;
+            }
+            Ok(())
+        });
+        frame::end(out);
+    }
+}
+
+/// Decode a `Gstoatty;text_runs` frame, or `None` when its runs do not fill the
+/// argument exactly.
+pub(super) fn decode_text_runs(args: &[Vec<u8>]) -> Option<TextRunsCommand> {
+    let arg = args.first()?;
+    let head: &[u8; TEXT_RUNS_HEAD] = arg.get(..TEXT_RUNS_HEAD)?.try_into().ok()?;
+    let count = u16::from_be_bytes([head[22], head[23]]);
+
+    // Grown by push rather than pre-allocated, so an inflated count forces no
+    // huge allocation before the run bytes prove short.
+    let mut runs = Vec::new();
+    let mut cursor = TEXT_RUNS_HEAD;
+    for _ in 0..count {
+        let fixed = arg.get(cursor..cursor + TEXT_RUNS_ENTRY)?;
+        let start = cursor + TEXT_RUNS_ENTRY;
+        let end = start + usize::from(u16::from_be_bytes([fixed[4], fixed[5]]));
+        runs.push((
+            i16::from_be_bytes([fixed[0], fixed[1]]),
+            i16::from_be_bytes([fixed[2], fixed[3]]),
+            String::from_utf8_lossy(arg.get(start..end)?).into_owned(),
+        ));
+        cursor = end;
+    }
+    if cursor != arg.len() {
+        return None;
+    }
+
+    Some(TextRunsCommand {
+        scale: u16::from_be_bytes([head[0], head[1]]),
+        color: [head[2], head[3], head[4]],
+        bg: (head[8] != 0).then_some([head[5], head[6], head[7]]),
+        follow: u32::from_be_bytes([head[9], head[10], head[11], head[12]]),
+        anchor: (head[13] != 0).then(|| {
+            (
+                u32::from_be_bytes([head[14], head[15], head[16], head[17]]),
+                f32::from_be_bytes([head[18], head[19], head[20], head[21]]),
+            )
+        }),
+        runs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,5 +423,90 @@ mod tests {
                 text: String::new(),
             })
         );
+    }
+
+    fn batch(runs: Vec<(i16, i16, String)>) -> TextRunsCommand {
+        TextRunsCommand {
+            scale: 160,
+            color: [1, 2, 3],
+            bg: Some([4, 5, 6]),
+            follow: 9,
+            anchor: Some((7, 2.5)),
+            runs,
+        }
+    }
+
+    /// A batch carries each run's position and text, and the shared fields
+    /// once, and comes back whole. An empty batch sends nothing.
+    #[test]
+    fn a_text_runs_batch_round_trips() {
+        let runs = batch(vec![
+            (0, 0, "1".into()),
+            (-2, 16, "42".into()),
+            (5, 32, "".into()),
+        ]);
+        assert_eq!(
+            decode_stream(&encode_text_runs(&runs)),
+            vec![Command::TextRuns(runs)],
+        );
+        assert_eq!(encode_text_runs(&batch(Vec::new())), Vec::<u8>::new());
+    }
+
+    /// A batch past the frame cap goes out as several frames, each under the
+    /// cap and each with the shared fields, which together carry every run in
+    /// order.
+    #[test]
+    fn a_text_runs_batch_past_the_cap_splits_across_frames() {
+        let runs = batch((0..9000).map(|i| (i, 0, i.to_string())).collect());
+        let encoded = encode_text_runs(&runs);
+
+        let mut payloads = Vec::new();
+        let mut rest = &encoded[..];
+        while let Some(span) = frame::apc_span(rest) {
+            payloads.push(frame::payload_len(span.len()));
+            rest = &rest[span.end..];
+        }
+        assert!(
+            payloads.len() > 1 && payloads.iter().all(|&len| len <= frame::MAX_APC_PAYLOAD),
+            "several frames under the cap, got {payloads:?}",
+        );
+
+        let frames: Vec<TextRunsCommand> = decode_stream(&encoded)
+            .into_iter()
+            .map(|command| match command {
+                Command::TextRuns(frame) => frame,
+                other => panic!("a text_runs frame, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            frames
+                .iter()
+                .flat_map(|frame| frame.runs.clone())
+                .collect::<Vec<_>>(),
+            runs.runs,
+        );
+        assert!(
+            frames
+                .iter()
+                .all(|frame| batch(frame.runs.clone()) == *frame),
+            "every frame carries the shared fields",
+        );
+    }
+
+    /// A payload whose runs stop short of their count, or one with bytes past
+    /// the last run, decodes to nothing rather than to a guess.
+    #[test]
+    fn a_text_runs_payload_that_misses_its_count_is_rejected() {
+        let encoded = encode_text_runs(&batch(vec![(1, 2, "ab".into())]));
+        let mut arg = frame::decode(&encoded).expect("one frame").args.remove(0);
+
+        arg.push(0);
+        assert_eq!(
+            decode_text_runs(&[arg.clone()]),
+            None,
+            "a byte past the run"
+        );
+        arg.truncate(arg.len() - 2);
+        assert_eq!(decode_text_runs(&[arg]), None, "a text cut short");
     }
 }

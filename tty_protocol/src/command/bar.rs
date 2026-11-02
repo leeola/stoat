@@ -56,10 +56,92 @@ pub(super) fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
     })
 }
 
+/// Fill several thin rectangles of one color off the cell grid, in one frame.
+///
+/// A gutter draws a bar per marked row, and a frame per bar spends most of its
+/// bytes on the frame itself. Each entry of [`Self::bars`] is one bar's x, y,
+/// width, and height in sixteenths of a cell, as [`BarCommand`] places one, and
+/// a terminal stores each entry as the [`BarCommand`] it stands for, in order.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BarsCommand {
+    pub color: [u8; 3],
+    pub bars: Vec<(i16, i16, u16, u16)>,
+}
+
+/// Bytes a `bars` argument spends ahead of its bars, the color and the count.
+const BARS_HEAD: usize = 5;
+
+/// Bytes one bar takes in a `bars` argument.
+const BARS_ENTRY: usize = 8;
+
+/// Encode a [`BarsCommand`] as `Gstoatty;bars` frames for an emitter.
+pub fn encode_bars(command: &BarsCommand) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_bars_into(&mut out, command);
+    out
+}
+
+/// Append the `Gstoatty;bars` frames for `command` to `out`.
+///
+/// The terminal drops a payload past [`frame::MAX_APC_PAYLOAD`] whole, so a
+/// batch past it is split across as many frames as it takes, each carrying the
+/// color. A batch with no bars emits nothing.
+pub fn encode_bars_into(out: &mut Vec<u8>, command: &BarsCommand) {
+    let mut rest = &command.bars[..];
+    while !rest.is_empty() {
+        let take = frame::fitting(rest, frame::MAX_RAW_ARG - BARS_HEAD, |_| BARS_ENTRY);
+        let (bars, tail) = rest.split_at(take);
+        rest = tail;
+
+        frame::begin(out, "bars");
+        frame::push_arg(out, |w| {
+            w.write_all(&command.color)?;
+            w.write_all(&(bars.len() as u16).to_be_bytes())?;
+            for (x, y, width, height) in bars {
+                w.write_all(&x.to_be_bytes())?;
+                w.write_all(&y.to_be_bytes())?;
+                w.write_all(&width.to_be_bytes())?;
+                w.write_all(&height.to_be_bytes())?;
+            }
+            Ok(())
+        });
+        frame::end(out);
+    }
+}
+
+/// Decode a `Gstoatty;bars` frame, or `None` when its bars do not fill the
+/// argument exactly.
+pub(super) fn decode_bars(args: &[Vec<u8>]) -> Option<BarsCommand> {
+    let arg = args.first()?;
+    let head: &[u8; BARS_HEAD] = arg.get(..BARS_HEAD)?.try_into().ok()?;
+    let entries = &arg[BARS_HEAD..];
+    if entries.len() != usize::from(u16::from_be_bytes([head[3], head[4]])) * BARS_ENTRY {
+        return None;
+    }
+
+    let bars = entries
+        .as_chunks::<BARS_ENTRY>()
+        .0
+        .iter()
+        .map(|bar| {
+            (
+                i16::from_be_bytes([bar[0], bar[1]]),
+                i16::from_be_bytes([bar[2], bar[3]]),
+                u16::from_be_bytes([bar[4], bar[5]]),
+                u16::from_be_bytes([bar[6], bar[7]]),
+            )
+        })
+        .collect();
+    Some(BarsCommand {
+        color: [head[0], head[1], head[2]],
+        bars,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{decode, Command};
+    use crate::command::{decode, decode_stream, Command};
 
     #[test]
     fn bar_round_trips() {
@@ -78,5 +160,61 @@ mod tests {
     fn rejects_wrong_length_bar_payload() {
         // The single arg here decodes to 3 bytes, not the 11 a bar needs.
         assert!(decode(b"Gstoatty;bar;YWJj").is_none());
+    }
+
+    /// A batch of bars comes back whole, and an empty batch sends nothing.
+    #[test]
+    fn a_bars_batch_round_trips() {
+        let bars = BarsCommand {
+            color: [7, 8, 9],
+            bars: vec![(-4, 32, 3, 16), (0, 48, 2, 8)],
+        };
+        assert_eq!(decode(&encode_bars(&bars)), Some(Command::Bars(bars)));
+        assert_eq!(
+            encode_bars(&BarsCommand {
+                color: [0; 3],
+                bars: Vec::new()
+            }),
+            Vec::<u8>::new()
+        );
+    }
+
+    /// A batch past the frame cap goes out as several frames under the cap,
+    /// which together carry every bar in order. A payload that misses its count
+    /// decodes to nothing.
+    #[test]
+    fn a_bars_batch_splits_past_the_cap_and_rejects_a_short_payload() {
+        let bars = BarsCommand {
+            color: [1, 2, 3],
+            bars: (0..8000).map(|i| (i, 0, 1, 1)).collect(),
+        };
+        let encoded = encode_bars(&bars);
+
+        let mut payloads = Vec::new();
+        let mut rest = &encoded[..];
+        while let Some(span) = frame::apc_span(rest) {
+            payloads.push(frame::payload_len(span.len()));
+            rest = &rest[span.end..];
+        }
+        assert!(
+            payloads.len() > 1 && payloads.iter().all(|&len| len <= frame::MAX_APC_PAYLOAD),
+            "several frames under the cap, got {payloads:?}",
+        );
+        let decoded: Vec<_> = decode_stream(&encoded)
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::Bars(frame) if frame.color == bars.color => frame.bars,
+                other => panic!("a bars frame in the batch color, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(decoded, bars.bars);
+
+        let one = encode_bars(&BarsCommand {
+            color: [1, 2, 3],
+            bars: vec![(1, 2, 3, 4)],
+        });
+        let mut arg = frame::decode(&one).expect("one frame").args.remove(0);
+        arg.pop();
+        assert_eq!(decode_bars(&[arg]), None);
     }
 }

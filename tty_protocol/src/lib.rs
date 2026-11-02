@@ -129,9 +129,21 @@
 /// and clamps such a splice to the end of its store, so an emitter sends only
 /// the lines near the view to a terminal at version 17 or later.
 ///
+/// Version 18 reads `text_runs` and `bars`, which carry a batch of text runs or
+/// bars that share one style in one frame. A terminal that predates it ignores
+/// those frames whole, so an emitter sends the batches only to a terminal at
+/// [`BATCHED_DECORATIONS_PROTOCOL`] or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
+/// `bars` batches.
+///
+/// An emitter facing an earlier terminal sends one `text_run` or `bar` frame
+/// per decoration instead.
+pub const BATCHED_DECORATIONS_PROTOCOL: u32 = 18;
 
 pub mod command;
 pub mod detect;

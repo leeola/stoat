@@ -21,7 +21,7 @@ use crate::{
     iterm::ItermFile,
     kitty::{self, GraphicsFrame},
 };
-use bar::decode_bar;
+use bar::{decode_bar, decode_bars};
 use border::decode_border;
 use icon::decode_icon;
 use lane::decode_lane_begin;
@@ -42,7 +42,7 @@ use scale::decode_scale;
 use scroll_region::decode_scroll_region;
 use sketch::decode_sketch;
 use terminal_control::{decode_font_step, decode_hello, decode_zoom_capture};
-use text_run::decode_text_run;
+use text_run::{decode_text_run, decode_text_runs};
 use window::{decode_window_close, decode_window_focus, decode_window_open};
 
 pub mod bar;
@@ -62,7 +62,9 @@ pub mod terminal_control;
 pub mod text_run;
 pub mod window;
 
-pub use bar::{encode_bar, encode_bar_into, BarCommand};
+pub use bar::{
+    encode_bar, encode_bar_into, encode_bars, encode_bars_into, BarCommand, BarsCommand,
+};
 pub use border::{encode_border, encode_border_into, BorderCommand, BorderStyle};
 pub use icon::{encode_icon, encode_icon_into, IconCommand, IconKind};
 pub use lane::{encode_lane_begin, encode_lane_begin_into, encode_lane_end, encode_lane_end_into};
@@ -106,7 +108,8 @@ pub use terminal_control::{
 };
 pub use text_run::{
     encode_text_run, encode_text_run_end, encode_text_run_end_into, encode_text_run_into,
-    encode_text_run_scope, TextRunCommand,
+    encode_text_run_scope, encode_text_runs, encode_text_runs_into, TextRunCommand,
+    TextRunsCommand,
 };
 pub use window::{
     encode_window_close, encode_window_close_into, encode_window_focus, encode_window_focus_into,
@@ -146,7 +149,14 @@ pub enum Command {
     /// Close the text run opened by [`Command::TextRun`], committing the streamed
     /// text into its [`TextRunCommand::text`]. Carries no payload.
     TextRunEnd,
+    /// Draw several text runs that share their style, each stored as the
+    /// [`Command::TextRun`] it stands for. The texts ride in the frame, so
+    /// nothing streams after it.
+    TextRuns(TextRunsCommand),
     Bar(BarCommand),
+    /// Fill several bars of one color, each stored as the [`Command::Bar`] it
+    /// stands for.
+    Bars(BarsCommand),
     Polyline(PolylineCommand),
     /// Stroke a hand-drawn mark the terminal generates and animates itself.
     Sketch(SketchCommand),
@@ -426,7 +436,9 @@ pub fn encode_into(out: &mut Vec<u8>, command: &Command) {
         Command::Icon(c) => encode_icon_into(out, c),
         Command::TextRun(c) => encode_text_run_into(out, c),
         Command::TextRunEnd => encode_text_run_end_into(out),
+        Command::TextRuns(c) => encode_text_runs_into(out, c),
         Command::Bar(c) => encode_bar_into(out, c),
+        Command::Bars(c) => encode_bars_into(out, c),
         Command::Polyline(c) => encode_polyline_into(out, c),
         Command::Sketch(c) => encode_sketch_into(out, c),
         Command::LineLayout(c) => encode_line_layout_into(out, &c.heights),
@@ -481,7 +493,9 @@ fn dispatch(sub: &str, args: &[Vec<u8>]) -> Option<Command> {
         "icon" => decode_icon(args).map(Command::Icon),
         "text_run" => decode_text_run(args).map(Command::TextRun),
         "text_run_end" => Some(Command::TextRunEnd),
+        "text_runs" => decode_text_runs(args).map(Command::TextRuns),
         "bar" => decode_bar(args).map(Command::Bar),
+        "bars" => decode_bars(args).map(Command::Bars),
         "polyline" => decode_polyline(args).map(Command::Polyline),
         "sketch_ellipse" | "sketch_rect" | "sketch_line" | "sketch_path" | "sketch_elbow" => {
             decode_sketch(sub, args).map(Command::Sketch)
@@ -1137,12 +1151,24 @@ mod tests {
             // text are covered by the tty_term text_run tests. Its close marker is
             // single-frame and covered here.
             Command::TextRunEnd,
+            Command::TextRuns(TextRunsCommand {
+                scale: 192,
+                color: [10, 20, 30],
+                bg: None,
+                follow: 0,
+                anchor: Some((3, 1.5)),
+                runs: vec![(16, 32, "7".to_owned()), (16, 48, "8".to_owned())],
+            }),
             Command::Bar(BarCommand {
                 x: -4,
                 y: 8,
                 width: 6,
                 height: 16,
                 color: [200, 100, 50],
+            }),
+            Command::Bars(BarsCommand {
+                color: [200, 100, 50],
+                bars: vec![(-4, 8, 6, 16), (-4, 24, 6, 16)],
             }),
             Command::LineLayout(LineLayoutCommand {
                 heights: vec![1, 2, 3, 1],

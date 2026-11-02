@@ -104,6 +104,32 @@ pub(crate) fn payload_len(frame_len: usize) -> usize {
     frame_len.saturating_sub(INTRODUCER.len() + TERMINATOR.len())
 }
 
+/// The most raw argument bytes one frame carries.
+///
+/// Base64 turns 3 bytes into 4, so the pre-image of a full payload is three
+/// quarters of [`MAX_APC_PAYLOAD`]. The 64 subtracted covers the
+/// `Gstoatty;<sub>;` prefix, which shares the payload budget with the argument,
+/// plus margin.
+pub(crate) const MAX_RAW_ARG: usize = (MAX_APC_PAYLOAD - 64) / 4 * 3;
+
+/// How many of `entries`, from the front, fit in `budget` by their `cost`.
+///
+/// A batch encoder takes this many into its next frame. The answer is at least
+/// one for a non-empty slice, so the encoder always advances, and an entry past
+/// the whole budget goes out in a frame of its own, which the terminal drops.
+pub(crate) fn fitting<T>(entries: &[T], budget: usize, cost: impl Fn(&T) -> usize) -> usize {
+    let mut used = 0;
+    entries
+        .iter()
+        .take_while(|entry| {
+            used += cost(entry);
+            used <= budget
+        })
+        .count()
+        .max(1)
+        .min(entries.len())
+}
+
 /// Parse a stoatty frame, or `None` if `bytes` is not a well-formed one.
 ///
 /// Accepts either the full frame or the bare payload a VT parser yields after

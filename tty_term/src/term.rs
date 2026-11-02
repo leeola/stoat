@@ -1471,10 +1471,11 @@ impl Terminal {
                 },
             };
             if let Some(command) = command {
-                // Fill and capture controls always act. A Bar and a TextRun's
-                // capture are page-targeted decorations the open fill stores on
-                // its slot (the Bar arm and commit_capture route them there), so
-                // they act too. The minimap content, length, view, and drop
+                // Fill and capture controls always act. A Bar, a TextRun's
+                // capture, and a batch of either are page-targeted decorations
+                // the open fill stores on its slot (the Bar arm, commit_capture,
+                // and the batch arms route them there), so they act too. The
+                // minimap content, length, view, and drop
                 // commands are persistent state whose incremental splices must not
                 // be dropped mid-fill, so they act as well. The pool commands are
                 // persistent state too, and none of them touches a live-grid
@@ -1498,7 +1499,9 @@ impl Terminal {
                         | Command::PopoverEnd
                         | Command::TextRun(_)
                         | Command::TextRunEnd
+                        | Command::TextRuns(_)
                         | Command::Bar(_)
+                        | Command::Bars(_)
                         | Command::Polyline(_)
                         | Command::PoolRegion(_)
                         | Command::Scroll(_)
@@ -1814,6 +1817,22 @@ impl Terminal {
             Command::PopoverEnd => self.commit_capture(),
             Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
             Command::TextRunEnd => self.commit_capture(),
+            // A batch stores each entry as the single run or bar it stands for,
+            // so each takes that command's fork onto the open fill or the grid.
+            Command::TextRuns(batch) => {
+                for (col, row, text) in batch.runs {
+                    self.store_text_run(TextRunCommand {
+                        col,
+                        row,
+                        scale: batch.scale,
+                        color: batch.color,
+                        bg: batch.bg,
+                        follow: batch.follow,
+                        anchor: batch.anchor,
+                        text,
+                    });
+                }
+            },
             // A page-targeted bar rides the open fill's slot at feed time. A live
             // bar accumulates onto the grid and stages like the other decorations.
             Command::Bar(bar) => match &mut self.fill {
@@ -1821,6 +1840,17 @@ impl Terminal {
                     push_capped(&mut fill.bars, bar, &mut self.warned_decoration_cap);
                 },
                 None => self.stage_or_apply(Command::Bar(bar)),
+            },
+            Command::Bars(batch) => {
+                for (x, y, width, height) in batch.bars {
+                    self.apply_command(Command::Bar(BarCommand {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color: batch.color,
+                    }));
+                }
             },
             // Stroked paths take the same fork as bars. They land on the open
             // fill's slot when one is capturing, and on the live grid otherwise.
@@ -2372,14 +2402,17 @@ impl Terminal {
             Command::LaneEnd => self.lane = 0,
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
-            // the stream and pool controls, and the immediate minimap content,
-            // length, view, and drop commands.
+            // the stream and pool controls, the immediate minimap content,
+            // length, view, and drop commands, and the batches it splits into
+            // single runs and bars.
             Command::Fill(_)
             | Command::FillRows(_)
             | Command::FillDecorations(_)
             | Command::FillEnd
             | Command::PopoverEnd
             | Command::TextRunEnd
+            | Command::TextRuns(_)
+            | Command::Bars(_)
             | Command::PoolRegion(_)
             | Command::Scroll(_)
             | Command::PoolCursor(_)
@@ -3072,20 +3105,26 @@ impl Terminal {
             },
             CaptureTarget::TextRun(mut command) => {
                 command.text = text;
-                match &mut self.fill {
-                    Some(fill) => {
-                        push_capped(
-                            &mut fill.text_runs,
-                            command,
-                            &mut self.warned_decoration_cap,
-                        );
-                    },
-                    None => self.stage_or_apply(Command::TextRun(command)),
-                }
+                self.store_text_run(command);
             },
         }
 
         self.capture_scratch = capture.content;
+    }
+
+    /// Store a whole text run on the open fill's slot, or stage it onto the live
+    /// grid when no page paints.
+    fn store_text_run(&mut self, command: TextRunCommand) {
+        match &mut self.fill {
+            Some(fill) => {
+                push_capped(
+                    &mut fill.text_runs,
+                    command,
+                    &mut self.warned_decoration_cap,
+                );
+            },
+            None => self.stage_or_apply(Command::TextRun(command)),
+        }
     }
 
     /// Report the first capture this session to overrun [`MAX_CAPTURE_BYTES`].

@@ -19,22 +19,23 @@ use alacritty_terminal::{
     term::TermMode,
 };
 use stoatty_protocol::command::{
-    encode_bar, encode_border, encode_config_reload, encode_fill, encode_fill_decorations_scope,
-    encode_fill_end, encode_fill_rows_scope, encode_font_step, encode_hello, encode_icon,
-    encode_ident_reply, encode_lane_begin, encode_lane_end, encode_line_layout, encode_minimap,
-    encode_minimap_drop, encode_minimap_len, encode_minimap_lines, encode_minimap_view,
-    encode_panel, encode_polyline, encode_pool_anchor, encode_pool_cursor,
-    encode_pool_cursor_release, encode_pool_drop, encode_pool_region, encode_popover,
-    encode_reposition, encode_reset, encode_scale, encode_scroll, encode_scroll_region,
-    encode_sketch, encode_text_run, encode_text_run_end, encode_window_open, encode_zoom_capture,
-    BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand,
-    HelloCommand, IconCommand, IconKind as ProtoIconKind, IdentReply, LineLayoutCommand,
-    LineSummary, MinimapCommand, MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand,
-    MinimapRun, MinimapViewCommand, PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand,
-    PoolAnchorCommand, PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind,
-    PoolRegionCommand, PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand,
-    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
-    SketchStyle, SketchTiming, TextRunCommand, WindowOpenCommand,
+    encode_bar, encode_bars, encode_border, encode_config_reload, encode_fill,
+    encode_fill_decorations_scope, encode_fill_end, encode_fill_rows_scope, encode_font_step,
+    encode_hello, encode_icon, encode_ident_reply, encode_lane_begin, encode_lane_end,
+    encode_line_layout, encode_minimap, encode_minimap_drop, encode_minimap_len,
+    encode_minimap_lines, encode_minimap_view, encode_panel, encode_polyline, encode_pool_anchor,
+    encode_pool_cursor, encode_pool_cursor_release, encode_pool_drop, encode_pool_region,
+    encode_popover, encode_reposition, encode_reset, encode_scale, encode_scroll,
+    encode_scroll_region, encode_sketch, encode_text_run, encode_text_run_end, encode_text_runs,
+    encode_window_open, encode_zoom_capture, BarCommand, BarsCommand, BorderCommand,
+    BorderStyle as ProtoBorderStyle, FillCommand, FillRowsCommand, HelloCommand, IconCommand,
+    IconKind as ProtoIconKind, IdentReply, LineLayoutCommand, LineSummary, MinimapCommand,
+    MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
+    PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand,
+    PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
+    PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
+    SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
+    TextRunCommand, TextRunsCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -2923,6 +2924,137 @@ fn a_redeclared_lane_replaces_only_its_runs_and_bars() {
         (run_labels(&grid), bars),
         (vec!["c", "b"], vec![3, 2]),
         "lane 1's new declaration replaces its old one, and lane 2 keeps its own"
+    );
+}
+
+/// A `text_runs` frame of `texts` in the style of [`text_run_frame`].
+fn text_runs_frame(texts: &[&str]) -> Vec<u8> {
+    encode_text_runs(&TextRunsCommand {
+        scale: 160,
+        color: [200, 200, 200],
+        bg: Some([0, 0, 0]),
+        follow: 0,
+        anchor: None,
+        runs: texts
+            .iter()
+            .map(|text| (0, 0, (*text).to_owned()))
+            .collect(),
+    })
+}
+
+/// A `bars` frame of bars at `xs` in the style of [`bar_at`].
+fn bars_at(xs: &[i16]) -> Vec<u8> {
+    encode_bars(&BarsCommand {
+        color: [1, 2, 3],
+        bars: xs.iter().map(|&x| (x, 0, 1, 16)).collect(),
+    })
+}
+
+/// A batch stores each entry as the single frame it stands for, in order and
+/// with a seq of its own, so a grid holds the same runs and bars as it holds
+/// from single frames.
+#[test]
+fn a_batch_stores_what_its_single_frames_store() {
+    let projected = |stream: Vec<u8>| {
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&stream);
+        terminal.project(&mut grid);
+        (grid.text_runs().to_vec(), grid.bars().to_vec())
+    };
+
+    assert_eq!(
+        projected([text_runs_frame(&["a", "b", "c"]), bars_at(&[1, 2, 3])].concat()),
+        projected(
+            [
+                text_run_frame("a"),
+                text_run_frame("b"),
+                text_run_frame("c"),
+                bar_at(1),
+                bar_at(2),
+                bar_at(3),
+            ]
+            .concat()
+        ),
+    );
+}
+
+#[test]
+fn a_redeclared_lane_replaces_its_batched_runs_and_bars() {
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(
+        &[
+            in_lane(
+                1,
+                &[text_runs_frame(&["a", "b"]), bars_at(&[1, 2])].concat(),
+            ),
+            in_lane(2, &[text_run_frame("z"), bar_at(9)].concat()),
+        ]
+        .concat(),
+    );
+    terminal.project(&mut grid);
+
+    terminal.advance(&in_lane(
+        1,
+        &[text_runs_frame(&["c"]), bars_at(&[3])].concat(),
+    ));
+    terminal.project(&mut grid);
+
+    let bars: Vec<i16> = grid.bars().iter().map(|bar| bar.x).collect();
+    assert_eq!(
+        (run_labels(&grid), bars),
+        (vec!["c", "z"], vec![3, 9]),
+        "lane 1's batch replaces its old batch, and lane 2 keeps its own"
+    );
+}
+
+/// A batch inside a page rides onto the page's slot as its single frames do,
+/// and leaves the live grid alone.
+#[test]
+fn a_fill_captures_a_batch_onto_the_slot() {
+    let page = |body: Vec<u8>| {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+        declare_pool(&mut terminal, 0, 2, 4);
+        terminal.advance(
+            &[
+                encode_fill(&FillCommand { pool: 0, index: 0 }),
+                body,
+                encode_fill_end(),
+            ]
+            .concat(),
+        );
+        terminal.project(&mut grid);
+
+        let (runs, bars, _) = terminal.pools[&0]
+            .page_pool
+            .page_decorations(0)
+            .expect("page buffered");
+        (
+            runs.to_vec(),
+            bars.to_vec(),
+            grid.text_runs().len() + grid.bars().len(),
+        )
+    };
+
+    let batched = page([text_runs_frame(&["a", "b"]), bars_at(&[1, 2])].concat());
+    assert_eq!(
+        batched,
+        page(
+            [
+                text_run_frame("a"),
+                text_run_frame("b"),
+                bar_at(1),
+                bar_at(2)
+            ]
+            .concat()
+        ),
+    );
+    assert_eq!(
+        (batched.0.len(), batched.1.len(), batched.2),
+        (2, 2, 0),
+        "two runs and two bars on the page, and none on the live grid"
     );
 }
 
