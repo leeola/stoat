@@ -792,6 +792,7 @@ mod tests {
             inactive_dim: 0.0,
             diff_dials: DiffDials::from_stoat(stoat),
             images_capable: false,
+            batch_decorations: false,
             minimap_enabled: false,
             minimap_chrome: None,
             minimap_band: None,

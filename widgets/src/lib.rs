@@ -93,6 +93,10 @@ pub struct ApcScene {
     active: usize,
     /// Whether the host reads lane markers, as [`Self::set_lane_protocol`] set.
     lanes_enabled: bool,
+    /// Whether the host reads `text_runs` and `bars` batches, as
+    /// [`Self::set_batch_protocol`] set. [`text_run::TextRunBatch`] and
+    /// [`bar::BarBatch`] read it when they flush.
+    pub(crate) batches: bool,
     /// Whether the next flush resets the terminal and sends the whole scene.
     ///
     /// Set by a switch of the lane protocol, since a flush in the other mode
@@ -116,6 +120,7 @@ impl ApcScene {
             lanes: vec![Lane::new(0)],
             active: 0,
             lanes_enabled: false,
+            batches: false,
             resync: false,
             dynamic_current: Vec::new(),
             dynamic_previous: Vec::new(),
@@ -149,6 +154,19 @@ impl ApcScene {
             self.lanes_enabled = enabled;
             self.resync = true;
         }
+    }
+
+    /// Declare whether the host reads `text_runs` and `bars` batches, which a
+    /// stoatty at
+    /// [`BATCHED_DECORATIONS_PROTOCOL`](stoatty_protocol::BATCHED_DECORATIONS_PROTOCOL)
+    /// or later does.
+    ///
+    /// A batch picks its frames when it flushes, so set this before the widgets
+    /// paint, as [`Self::set_live`] is. Off, a batch sends one frame per run or
+    /// bar, which every stoatty reads. A switch needs no resync, since a batch
+    /// stores the same runs and bars its single frames do.
+    pub fn set_batch_protocol(&mut self, enabled: bool) {
+        self.batches = enabled;
     }
 
     /// Empty every lane so widgets build the next frame from scratch, and send

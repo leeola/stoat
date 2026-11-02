@@ -1,7 +1,7 @@
 use crate::{
-    bar::Bar,
+    bar::{Bar, BarBatch},
     cells,
-    text_run::{self, TextRun},
+    text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::StatefulWidget};
@@ -164,8 +164,13 @@ impl Gutter<'_> {
     /// An app that composites rich chrome itself calls this instead of the
     /// [`StatefulWidget`] render, which also lays down the degraded cell gutter
     /// and would double under the components inside a rich terminal.
-    pub fn draw_components(&self, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
+    pub fn draw_components(&self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
+        // The numbers sit right of the diagnostic bar and left of the diff bars
+        // and the separator. Nothing overlaps, so a batch that groups by style
+        // leaves what shows as it is.
+        let mut numbers = TextRunBatch::default();
+        let mut bars = BarBatch::default();
 
         let limit = cells::span_sixteenths(area.height);
 
@@ -190,27 +195,31 @@ impl Gutter<'_> {
             let col = cells::signed_sixteenths(
                 number_right.saturating_sub(self.number_advance(text.len())),
             );
-            TextRun {
-                col,
-                row,
-                scale: self.number_scale,
-                color: self.number_fg,
-                bg: Some(self.bg),
-                text,
-                follow: 0,
-                anchor: None,
-            }
-            .render(area, buf, scene);
+            numbers.push(
+                area,
+                TextRun {
+                    col,
+                    row,
+                    scale: self.number_scale,
+                    color: self.number_fg,
+                    bg: Some(self.bg),
+                    text,
+                    follow: 0,
+                    anchor: None,
+                },
+            );
 
             if let Some(diag) = line.diagnostic {
-                Bar {
-                    x: 0,
-                    y: row,
-                    width: self.bar_width,
-                    height: cells::span_sixteenths(line.height).min(remaining),
-                    color: diag.color,
-                }
-                .render(area, buf, scene);
+                bars.push(
+                    area,
+                    Bar {
+                        x: 0,
+                        y: row,
+                        width: self.bar_width,
+                        height: cells::span_sixteenths(line.height).min(remaining),
+                        color: diag.color,
+                    },
+                );
             }
             if let Some(git) = line.git {
                 let slots = (0u16..).zip(git.slots).take(usize::from(self.diff_bars));
@@ -223,14 +232,16 @@ impl Gutter<'_> {
                         _ if git.seam => 6,
                         _ => 16,
                     };
-                    Bar {
-                        x: cells::signed_sixteenths(self.bar_x(slot)),
-                        y: row,
-                        width: self.diff_bar_width,
-                        height: height.min(remaining),
-                        color,
-                    }
-                    .render(area, buf, scene);
+                    bars.push(
+                        area,
+                        Bar {
+                            x: cells::signed_sixteenths(self.bar_x(slot)),
+                            y: row,
+                            width: self.diff_bar_width,
+                            height: height.min(remaining),
+                            color,
+                        },
+                    );
                 }
             }
 
@@ -238,14 +249,18 @@ impl Gutter<'_> {
             logical = logical.saturating_add(1);
         }
 
-        Bar {
-            x: cells::signed_sixteenths(self.separator_x()),
-            y: 0,
-            width: 1,
-            height: cells::span_sixteenths(self.total_rows().min(area.height)),
-            color: self.separator,
-        }
-        .render(area, buf, scene);
+        bars.push(
+            area,
+            Bar {
+                x: cells::signed_sixteenths(self.separator_x()),
+                y: 0,
+                width: 1,
+                height: cells::span_sixteenths(self.total_rows().min(area.height)),
+                color: self.separator,
+            },
+        );
+        numbers.flush(scene);
+        bars.flush(scene);
     }
 
     /// Draw only the degraded cell gutter (a right-aligned number and a
@@ -316,7 +331,9 @@ mod tests {
     use super::{Diagnostic, GitMark, Gutter, GutterLine};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_bar, encode_text_run, BarCommand, TextRunCommand};
+    use stoatty_protocol::command::{
+        decode_stream, encode_bar, encode_text_run, BarCommand, Command, TextRunCommand,
+    };
 
     fn config(lines: &[GutterLine]) -> Gutter<'_> {
         Gutter {
@@ -334,10 +351,94 @@ mod tests {
         }
     }
 
+    /// Whether every run and bar `needle` encodes is among those `haystack`
+    /// draws, a batch read as the runs or bars it stands for.
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack
-            .windows(needle.len())
-            .any(|window| window == needle)
+        let drawn = singles(haystack);
+        singles(needle)
+            .iter()
+            .all(|command| drawn.contains(command))
+    }
+
+    /// The commands `bytes` decode to, each batch expanded into the single
+    /// runs or bars it stands for and the close markers dropped.
+    fn singles(bytes: &[u8]) -> Vec<Command> {
+        decode_stream(bytes)
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::TextRuns(batch) => batch
+                    .runs
+                    .into_iter()
+                    .map(|(col, row, text)| {
+                        Command::TextRun(TextRunCommand {
+                            col,
+                            row,
+                            scale: batch.scale,
+                            color: batch.color,
+                            bg: batch.bg,
+                            follow: batch.follow,
+                            anchor: batch.anchor,
+                            text,
+                        })
+                    })
+                    .collect(),
+                Command::Bars(batch) => batch
+                    .bars
+                    .into_iter()
+                    .map(|(x, y, width, height)| {
+                        Command::Bar(BarCommand {
+                            x,
+                            y,
+                            width,
+                            height,
+                            color: batch.color,
+                        })
+                    })
+                    .collect(),
+                Command::TextRunEnd => Vec::new(),
+                other => vec![other],
+            })
+            .collect()
+    }
+
+    /// Under the batch protocol the gutter sends one `text_runs` frame for its
+    /// numbers and one `bars` frame per bar color, and they draw what the
+    /// per-run frames draw.
+    #[test]
+    fn a_batching_host_takes_one_frame_per_style() {
+        let line = |number| GutterLine {
+            number,
+            height: 1,
+            git: Some(GitMark {
+                slots: [Some([152, 195, 121]), None, None],
+                seam: false,
+            }),
+            diagnostic: None,
+        };
+        let lines = [line(1), line(2)];
+        let emit = |batches: bool| {
+            let area = Rect::new(0, 0, 10, 2);
+            let mut scene = ApcScene::new();
+            scene.set_batch_protocol(batches);
+            config(&lines).draw_components(area, &mut Buffer::empty(area), &mut scene);
+            scene.buffer().to_vec()
+        };
+
+        let batched = emit(true);
+        let frames: Vec<&str> = decode_stream(&batched)
+            .iter()
+            .map(|command| match command {
+                Command::TextRuns(_) => "text_runs",
+                Command::Bars(_) => "bars",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            ["text_runs", "bars", "bars"],
+            "both numbers in one frame, then the diff bars and the separator by color",
+        );
+        assert_eq!(singles(&batched), singles(&emit(false)));
     }
 
     #[test]

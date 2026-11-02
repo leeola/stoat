@@ -49,7 +49,10 @@ use stoat_widgets::{
     pool::{self, MinimapWindowInputs, PageVersions, Refill, SmoothScrollState},
     ApcScene,
 };
-use stoatty_protocol::command::{FillRowsCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand};
+use stoatty_protocol::{
+    command::{FillRowsCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand},
+    BATCHED_DECORATIONS_PROTOCOL,
+};
 
 /// The protocol version that reads a decorations-only page fill. An older
 /// terminal ignores the marker and lays the runs after it on the live grid, so
@@ -401,6 +404,7 @@ pub(crate) fn emit_windows(stoat: &mut Stoat) {
 /// on its own after `out`. Every other content page goes out whole in `out`.
 fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let paints_patches = stoat.stoatty_protocol >= TERMINAL_ROWS_PROTOCOL;
+    let batch_decorations = stoat.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL;
     let mode = stoat.focused_mode().to_string();
     let lsp_pending = crate::lsp::lsp_pending_label(stoat);
     // Resolved before the workspace borrow. The constructor reads the whole
@@ -477,6 +481,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         inactive_dim: 0.0,
         diff_dials: DiffDials::shipped(),
         images_capable: false,
+        batch_decorations,
         minimap_enabled: false,
         minimap_chrome: None,
         minimap_band: None,
@@ -1132,6 +1137,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     let diff_rich =
         crate::render::review::resolve_diff_rich_colors(theme, fallback_style, 0.0).is_some();
     let decorate_pages = stoat.stoatty_protocol >= FILL_DECORATIONS_PROTOCOL;
+    let batch_decorations = stoat.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL;
     for (_, editor_id, region) in &panes {
         let region = *region;
         let Some(editor) = ws.editors.get_mut(*editor_id) else {
@@ -1270,7 +1276,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             theme.clone(),
             base_rich.clone().map(|r| r.dim(dim)),
             current_line,
-        );
+        )
+        .batched(batch_decorations);
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
         let Refill {
@@ -1476,6 +1483,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             inactive_dim,
             diff_dials,
             images_capable: false,
+            batch_decorations,
             minimap_enabled: false,
             minimap_chrome: None,
             minimap_band: None,
@@ -1828,7 +1836,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         theme.clone(),
                         base_rich.clone(),
                         None,
-                    ),
+                    )
+                    .batched(batch_decorations),
                     diff_view,
                     // A modal preview is not the diff view the knobs turn, so
                     // it paints at the shipped dials.
@@ -3581,6 +3590,7 @@ fn paint_pool_page(
     let area = Rect::new(0, 0, region.width, region.height);
     let mut page = crate::smooth_scroll::page_buffer(area, frame.theme);
     let mut scene = ApcScene::new();
+    scene.set_batch_protocol(frame.batch_decorations);
     crate::render::diff_changes::paint_stack_page(
         state,
         editors,

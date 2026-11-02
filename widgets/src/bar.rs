@@ -1,6 +1,6 @@
 use crate::{cells, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-use stoatty_protocol::command::{self, BarCommand};
+use stoatty_protocol::command::{self, BarCommand, BarsCommand};
 
 /// A solid sub-cell rectangle drawn off the cell grid.
 ///
@@ -41,12 +41,76 @@ impl StatefulWidget for Bar {
     }
 }
 
+/// Bars gathered across a widget's rows, to go out as one `bars` frame per
+/// color.
+///
+/// A gutter draws its marks a bar at a time, and a frame per bar spends most of
+/// its bytes on the frame itself. The batch groups the bars pushed into it by
+/// color, and [`Self::flush`] writes each group as one frame. The groups go out
+/// in the order their first bars arrived, so the draw order between colors
+/// changes. Batch only bars that do not overlap one another.
+///
+/// A scene without the batch protocol, as [`ApcScene::set_batch_protocol`]
+/// declares it, takes one `bar` per bar, in the same group order.
+#[derive(Default)]
+pub struct BarBatch {
+    groups: Vec<BarsCommand>,
+}
+
+impl BarBatch {
+    /// Add `bar`, placed in `area` as the [`Bar`] render places it.
+    pub fn push(&mut self, area: Rect, bar: Bar) {
+        let entry = (
+            cells::to_sixteenths(area.x, bar.x),
+            cells::to_sixteenths(area.y, bar.y),
+            bar.width,
+            bar.height,
+        );
+        match self
+            .groups
+            .iter_mut()
+            .find(|group| group.color == bar.color)
+        {
+            Some(group) => group.bars.push(entry),
+            None => self.groups.push(BarsCommand {
+                color: bar.color,
+                bars: vec![entry],
+            }),
+        }
+    }
+
+    /// Write the gathered bars into `scene` and empty the batch.
+    pub fn flush(&mut self, scene: &mut ApcScene) {
+        let batches = scene.batches;
+        let out = scene.buffer();
+        for group in self.groups.drain(..) {
+            if batches {
+                command::encode_bars_into(out, &group);
+                continue;
+            }
+
+            for (x, y, width, height) in group.bars {
+                command::encode_bar_into(
+                    out,
+                    &BarCommand {
+                        x,
+                        y,
+                        width,
+                        height,
+                        color: group.color,
+                    },
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Bar;
+    use super::{Bar, BarBatch};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_bar, BarCommand};
+    use stoatty_protocol::command::{decode_stream, encode_bar, BarCommand, BarsCommand, Command};
 
     #[test]
     fn emits_a_bar_at_absolute_sixteenths() {
@@ -97,6 +161,58 @@ mod tests {
             scene.buffer().as_slice(),
             expected.as_slice(),
             "the bar sits left of and above the area origin"
+        );
+    }
+
+    /// A batch sends one `bars` frame per color, in the order each color first
+    /// arrived, and a host without the batch protocol one `bar` per bar in that
+    /// order. Each bar sits where its own render puts it.
+    #[test]
+    fn a_batch_groups_its_bars_by_color() {
+        let (red, blue) = ([200, 0, 0], [0, 0, 200]);
+        let flushed = |batches: bool| {
+            let mut scene = ApcScene::new();
+            scene.set_batch_protocol(batches);
+            let mut batch = BarBatch::default();
+            for (y, color) in [(0, red), (16, blue), (32, red)] {
+                let bar = Bar {
+                    x: 0,
+                    y,
+                    width: 2,
+                    height: 16,
+                    color,
+                };
+                batch.push(Rect::new(1, 2, 4, 4), bar);
+            }
+            batch.flush(&mut scene);
+            decode_stream(scene.buffer())
+        };
+        let single = |y, color| {
+            Command::Bar(BarCommand {
+                x: 16,
+                y,
+                width: 2,
+                height: 16,
+                color,
+            })
+        };
+
+        assert_eq!(
+            flushed(true),
+            [
+                Command::Bars(BarsCommand {
+                    color: red,
+                    bars: vec![(16, 32, 2, 16), (16, 64, 2, 16)],
+                }),
+                Command::Bars(BarsCommand {
+                    color: blue,
+                    bars: vec![(16, 48, 2, 16)],
+                }),
+            ],
+        );
+        assert_eq!(
+            flushed(false),
+            [single(32, red), single(64, red), single(48, blue)],
         );
     }
 }

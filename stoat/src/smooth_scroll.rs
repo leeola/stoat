@@ -189,7 +189,7 @@ pub(crate) fn render_page_decorations(
     if diff_view {
         // The terminal keeps the cells this paint writes, so they go to a
         // buffer nothing reads.
-        let mut scene = ApcScene::new();
+        let mut scene = gutter.scene();
         paint_diff_rows(
             snapshot,
             top_row,
@@ -280,7 +280,7 @@ pub(crate) fn render_page_from_snapshot(
     // rich sub-cell components ride as APC frames appended after the serialized
     // cells, faded to match the dimmed grid.
     if diff_view {
-        let mut scene = gutter.rich.is_some().then(ApcScene::new);
+        let mut scene = gutter.rich.is_some().then(|| gutter.scene());
         paint_diff_rows(
             snapshot,
             top_row,
@@ -418,6 +418,9 @@ pub(crate) struct PageGutter {
     severity: Arc<RowSeverity>,
     theme: Arc<crate::theme::Theme>,
     rich: Option<RichGutterColors>,
+    /// Whether the terminal reads `text_runs` and `bars` batches, which the
+    /// scene a page paints its rich gutter into takes from [`Self::scene`].
+    batch: bool,
 }
 
 impl PageGutter {
@@ -439,7 +442,24 @@ impl PageGutter {
             severity,
             theme,
             rich,
+            batch: false,
         }
+    }
+
+    /// This gutter at the terminal's batch protocol.
+    ///
+    /// Off until set, so a page sends one frame per run and bar unless the run
+    /// loop learned that the terminal reads batches.
+    pub(crate) fn batched(self, batch: bool) -> PageGutter {
+        PageGutter { batch, ..self }
+    }
+
+    /// A scene for a page's rich gutter to paint into, at this gutter's batch
+    /// protocol.
+    fn scene(&self) -> ApcScene {
+        let mut scene = ApcScene::new();
+        scene.set_batch_protocol(self.batch);
+        scene
     }
 
     /// The theme resolved on the run loop, reused by a diff-view page to style
@@ -498,7 +518,7 @@ fn paint_page_gutter(
                 PLAIN_DIFF_BARS,
                 PLAIN_DIFF_BAR_WIDTH,
             );
-            let mut scene = ApcScene::new();
+            let mut scene = gutter.scene();
             // The components write only the scene, so `buf` keeps its cells.
             widget.draw_components(area, buf, &mut scene);
             (widget.cell_width(), scene.buffer().clone())

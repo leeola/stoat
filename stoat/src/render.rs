@@ -100,6 +100,7 @@ use std::{
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
+use stoatty_protocol::BATCHED_DECORATIONS_PROTOCOL;
 use unicode_width::UnicodeWidthStr;
 
 /// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
@@ -419,6 +420,13 @@ pub(crate) struct FrameCtx<'a> {
     /// Whether the terminal can draw an image, which is a stoatty new enough to
     /// have the pass for it. An image pane says what is missing when it cannot.
     pub(crate) images_capable: bool,
+    /// Whether the terminal reads `text_runs` and `bars` batches, which a
+    /// stoatty at [`BATCHED_DECORATIONS_PROTOCOL`] or later does.
+    ///
+    /// The frame's own scene takes this before the panes paint. A page paints
+    /// into a scene of its own, which takes it from here through
+    /// [`ApcScene::set_batch_protocol`].
+    pub(crate) batch_decorations: bool,
     /// Whether editor and changes view panes reserve their own per-pane
     /// right-edge minimap strip. `true` only in [`MinimapMode::PerPane`] under
     /// stoatty. Single mode gates this off and declares one shared strip over
@@ -1239,6 +1247,7 @@ pub(crate) fn frame(
         inactive_dim,
         diff_dials,
         images_capable: stoat.stoatty && stoat.stoatty_protocol >= 2,
+        batch_decorations: stoat.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL,
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         minimap_band: single_minimap_rect,

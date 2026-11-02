@@ -5911,9 +5911,118 @@ fn a_relative_line_scroll_in_an_ascii_diff_view_refills_its_pages() {
     );
 }
 
+/// The frame's own scene batches the gutter it paints, as the pages do, at the
+/// batch protocol and not before it.
+#[test]
+fn the_frames_gutter_batches_at_the_batch_protocol() {
+    use stoatty_protocol::command::Command;
+
+    let batches_at = |protocol| {
+        let (mut h, mut rx) = buffered_relative_pool(protocol, false, rgb_diagnostic_theme());
+        h.stoat.render();
+        emit_apc_scene(&mut h.stoat);
+        drain_apc(&mut rx)
+            .iter()
+            .filter(|c| matches!(c, Command::TextRuns(_)))
+            .count()
+    };
+
+    assert_eq!(
+        (
+            batches_at(BATCHED_DECORATIONS_PROTOCOL),
+            batches_at(BATCHED_DECORATIONS_PROTOCOL - 1)
+        ),
+        (1, 0),
+        "one batch of the editor's numbers at the batch protocol, none before it",
+    );
+}
+
+/// At the batch protocol a rich stack page's redecoration sends the page's
+/// numbers as one `text_runs` frame, in the row order the single runs take.
+#[test]
+fn a_rich_stack_page_batches_its_numbers_at_the_batch_protocol() {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    let (mut h, mut rx, pool) = relative_stack(30, rgb_diff_gutter_theme());
+    h.stoat.stoatty_protocol = BATCHED_DECORATIONS_PROTOCOL;
+    h.type_keys("j");
+    h.stoat.render();
+    let page: Vec<Command> = command::decode_stream(&emit_raw(&mut h, &mut rx))
+        .into_iter()
+        .skip_while(|c| {
+            !matches!(c, Command::FillDecorations(FillCommand { pool: p, index: 0, .. }) if *p == pool)
+        })
+        .take_while(|c| !matches!(c, Command::FillEnd))
+        .collect();
+    let texts: Vec<&str> = page
+        .iter()
+        .flat_map(|c| match c {
+            Command::TextRuns(batch) => batch
+                .runs
+                .iter()
+                .map(|(_, _, text)| text.as_str())
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+
+    assert_eq!(
+        (
+            page.iter()
+                .filter(|c| matches!(c, Command::TextRuns(_)))
+                .count(),
+            page.iter()
+                .filter(|c| matches!(c, Command::TextRun(_)))
+                .count(),
+            texts.iter().take(6).copied().collect::<Vec<_>>(),
+        ),
+        (1, 0, vec!["1", "1", "2", "2", "1", "3"]),
+        "one batch and no single run, (buffer, base) per row as (1, 1), (2, 2), (1, 3)",
+    );
+}
+
+/// A step under relative numbering renumbers every gutter row of the window's
+/// pages. A terminal at the batch protocol takes each page's numbers in one
+/// `text_runs` frame, where an earlier one takes a `text_run` per number.
+#[test]
+fn a_relative_step_sends_each_pages_numbers_in_one_frame() {
+    use stoatty_protocol::command::Command;
+
+    let frames_at = |protocol| {
+        let (mut h, mut rx) = buffered_relative_pool(protocol, false, rgb_diagnostic_theme());
+        move_one_line_down(&mut h);
+        let commands = drain_apc(&mut rx);
+        let runs = |batch: bool| {
+            commands
+                .iter()
+                .filter(|c| match batch {
+                    true => matches!(c, Command::TextRuns(_)),
+                    false => matches!(c, Command::TextRun(_)),
+                })
+                .count()
+        };
+        (runs(false), runs(true), commands.len())
+    };
+
+    let batched = frames_at(BATCHED_DECORATIONS_PROTOCOL);
+    let single = frames_at(BATCHED_DECORATIONS_PROTOCOL - 1);
+    assert_eq!(
+        (batched.0, batched.1, single.0, single.1),
+        (0, 5, 115, 0),
+        "five redecorated pages, a text_runs frame each, against a text_run per number",
+    );
+    assert!(
+        batched.2 * 10 < single.2,
+        "the step sends {} frames against {}",
+        batched.2,
+        single.2,
+    );
+}
+
 /// A rich diff page's decorations batch numbers the buffer column from the
 /// cursor line, beside the base column's own numbers. Each row paints its
-/// buffer number first and then its base number.
+/// buffer number first and then its base number, in a `text_runs` batch that
+/// keeps that order.
 #[test]
 fn a_diff_page_decoration_carries_the_new_numbers() {
     use stoatty_protocol::command::{Command, FillCommand};
@@ -5929,9 +6038,9 @@ fn a_diff_page_decoration_carries_the_new_numbers() {
         .into_iter()
         .skip_while(|c| !matches!(c, Command::FillDecorations(FillCommand { index: 0, .. })))
         .take_while(|c| !matches!(c, Command::FillEnd))
-        .filter_map(|c| match c {
-            Command::TextRun(run) => Some(run.text),
-            _ => None,
+        .flat_map(|c| match c {
+            Command::TextRuns(batch) => batch.runs.into_iter().map(|(_, _, text)| text).collect(),
+            _ => Vec::new(),
         })
         .collect();
     assert_eq!(

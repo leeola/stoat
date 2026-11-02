@@ -1,6 +1,7 @@
 use crate::{cells, ApcScene};
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-use stoatty_protocol::command::{self, TextRunCommand};
+use std::ops::Range;
+use stoatty_protocol::command::{self, TextRunCommand, TextRunsCommand};
 
 /// A run of text drawn at a fractional scale, off the cell grid.
 ///
@@ -80,12 +81,129 @@ impl StatefulWidget for TextRun<'_> {
     }
 }
 
+/// Text runs gathered across a widget's rows, to go out as one `text_runs`
+/// frame per style.
+///
+/// A gutter numbers every row with a run of its own, and a frame per number
+/// spends most of its bytes on the head. The batch groups the runs pushed into
+/// it by the fields they share, the scale, color, background, follow, and
+/// anchor, and [`Self::flush`] writes each group as one frame. The groups go
+/// out in the order their first runs arrived, so the draw order between styles
+/// changes. Batch only runs that do not overlap one another.
+///
+/// A scene without the batch protocol, as [`ApcScene::set_batch_protocol`]
+/// declares it, takes one `text_run` per run, in the same group order.
+#[derive(Default)]
+pub struct TextRunBatch {
+    groups: Vec<RunGroup>,
+    /// Every pushed run's text end to end. Each grouped run names its span.
+    text: String,
+}
+
+/// The runs of one style in a [`TextRunBatch`], each at its position in
+/// absolute sixteenths with its span of the batch's text.
+struct RunGroup {
+    style: RunStyle,
+    runs: Vec<(i16, i16, Range<usize>)>,
+}
+
+/// The fields every run of one `text_runs` frame shares.
+#[derive(Clone, Copy, PartialEq)]
+struct RunStyle {
+    scale: u16,
+    color: [u8; 3],
+    bg: Option<[u8; 3]>,
+    follow: u32,
+    anchor: Option<(u32, f32)>,
+}
+
+impl TextRunBatch {
+    /// Add `run`, placed in `area` as the [`TextRun`] render places it.
+    pub fn push(&mut self, area: Rect, run: TextRun<'_>) {
+        let style = RunStyle {
+            scale: run.scale,
+            color: run.color,
+            bg: run.bg,
+            follow: run.follow,
+            anchor: run.anchor,
+        };
+        let start = self.text.len();
+        self.text.push_str(run.text);
+        let entry = (
+            cells::to_sixteenths(area.x, run.col),
+            cells::to_sixteenths(area.y, run.row),
+            start..self.text.len(),
+        );
+
+        match self.groups.iter_mut().find(|group| group.style == style) {
+            Some(group) => group.runs.push(entry),
+            None => self.groups.push(RunGroup {
+                style,
+                runs: vec![entry],
+            }),
+        }
+    }
+
+    /// Write the gathered runs into `scene` and empty the batch.
+    pub fn flush(&mut self, scene: &mut ApcScene) {
+        let batches = scene.batches;
+        let out = scene.buffer();
+        for group in self.groups.drain(..) {
+            let RunStyle {
+                scale,
+                color,
+                bg,
+                follow,
+                anchor,
+            } = group.style;
+            if batches {
+                let runs = group
+                    .runs
+                    .iter()
+                    .map(|(col, row, span)| (*col, *row, &self.text[span.clone()]))
+                    .collect();
+                command::encode_text_runs_into(
+                    out,
+                    &TextRunsCommand {
+                        scale,
+                        color,
+                        bg,
+                        follow,
+                        anchor,
+                        runs,
+                    },
+                );
+                continue;
+            }
+
+            for (col, row, span) in group.runs {
+                command::encode_text_run_into(
+                    out,
+                    &TextRunCommand {
+                        col,
+                        row,
+                        scale,
+                        color,
+                        bg,
+                        follow,
+                        anchor,
+                        text: &self.text[span],
+                    },
+                );
+            }
+        }
+        self.text.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{advance_sixteenths, TextRun};
+    use super::{advance_sixteenths, TextRun, TextRunBatch};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_text_run, TextRunCommand};
+    use stoatty_protocol::command::{
+        decode_stream, encode_text_run, Command, TextRunCommand, TextRunsCommand,
+    };
 
     #[test]
     fn emits_a_run_at_absolute_sixteenths() {
@@ -205,5 +323,78 @@ mod tests {
         assert_eq!(advance_sixteenths(1, 218), 14, "218/16 is 13.625");
         assert_eq!(advance_sixteenths(1, 8), 1, "exactly half rounds up");
         assert_eq!(advance_sixteenths(1, 7), 0, "just under half rounds down");
+    }
+
+    /// A batch sends one `text_runs` frame per style, in the order each style
+    /// first arrived, and a host without the batch protocol one `text_run` per
+    /// run in that order. Each run sits where its own render puts it.
+    #[test]
+    fn a_batch_groups_its_runs_by_style() {
+        let (grey, gold) = ([1, 1, 1], [9, 9, 0]);
+        let flushed = |batches: bool| {
+            let mut scene = ApcScene::new();
+            scene.set_batch_protocol(batches);
+            let mut batch = TextRunBatch::default();
+            for (row, color, text) in [(0, grey, "1"), (16, gold, "2"), (32, grey, "3")] {
+                let run = TextRun {
+                    col: 0,
+                    row,
+                    scale: 160,
+                    color,
+                    bg: None,
+                    text,
+                    follow: 0,
+                    anchor: None,
+                };
+                batch.push(Rect::new(2, 1, 4, 3), run);
+            }
+            batch.flush(&mut scene);
+            decode_stream(scene.buffer())
+        };
+        let batch_of = |color, runs: &[(i16, &str)]| {
+            Command::TextRuns(TextRunsCommand {
+                scale: 160,
+                color,
+                bg: None,
+                follow: 0,
+                anchor: None,
+                runs: runs
+                    .iter()
+                    .map(|&(row, text)| (32, row, text.to_owned()))
+                    .collect(),
+            })
+        };
+        let single = |row, color, text: &str| {
+            [
+                Command::TextRun(TextRunCommand {
+                    col: 32,
+                    row,
+                    scale: 160,
+                    color,
+                    bg: None,
+                    follow: 0,
+                    anchor: None,
+                    text: text.to_owned(),
+                }),
+                Command::TextRunEnd,
+            ]
+        };
+
+        assert_eq!(
+            flushed(true),
+            [
+                batch_of(grey, &[(16, "1"), (48, "3")]),
+                batch_of(gold, &[(32, "2")])
+            ],
+        );
+        assert_eq!(
+            flushed(false),
+            [
+                single(16, grey, "1"),
+                single(48, grey, "3"),
+                single(32, gold, "2")
+            ]
+            .concat(),
+        );
     }
 }

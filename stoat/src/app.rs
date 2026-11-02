@@ -88,7 +88,10 @@ use stoat_text::{
     Anchor, Bias, IndentStyle, Rope, Selection, SelectionGoal,
 };
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
-use stoatty_protocol::window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent};
+use stoatty_protocol::{
+    window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
+    BATCHED_DECORATIONS_PROTOCOL,
+};
 use tokio::{
     io::AsyncBufReadExt,
     sync::{
@@ -9497,6 +9500,7 @@ impl Stoat {
         // before the ident handshake answers, so a scene built with `Stoat` would
         // be stuck at whatever was true then.
         scene.set_live(self.stoatty);
+        scene.set_batch_protocol(self.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL);
         let mut undercurls = std::mem::take(&mut self.pending_undercurls);
         undercurls.begin();
         let painted = crate::render::frame(self, buf, &mut scene, &mut undercurls, holds);

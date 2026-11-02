@@ -25,7 +25,6 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::StatefulWidget,
 };
 use std::{
     cmp::Ordering,
@@ -35,8 +34,8 @@ use std::{
 };
 use stoat_text::Point;
 use stoat_widgets::{
-    bar::Bar,
-    text_run::{self, TextRun},
+    bar::{Bar, BarBatch},
+    text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
 
@@ -855,6 +854,8 @@ pub(crate) fn paint_diff_rows(
             scene,
             colors,
             offsets,
+            numbers: TextRunBatch::default(),
+            bars: BarBatch::default(),
         })
     });
 
@@ -1264,16 +1265,20 @@ pub(crate) fn paint_diff_rows(
         let divider = sep_x.map(|sep| (sep - inner.x) * 16 + 8);
         for x in gutter_rules.into_iter().chain(divider) {
             if x / 16 < inner.width {
-                Bar {
-                    x: x as i16,
-                    y: 0,
-                    width: 1,
-                    height,
-                    color: rg.colors.dim,
-                }
-                .render(inner, buf, &mut *rg.scene);
+                rg.bars.push(
+                    inner,
+                    Bar {
+                        x: x as i16,
+                        y: 0,
+                        width: 1,
+                        height,
+                        color: rg.colors.dim,
+                    },
+                );
             }
         }
+        rg.numbers.flush(rg.scene);
+        rg.bars.flush(rg.scene);
     }
 }
 
@@ -2625,6 +2630,15 @@ struct DiffRichGutter<'a> {
     scene: &'a mut ApcScene,
     colors: DiffRichColors,
     offsets: RichGutterOffsets,
+    /// The numbers and bars the paint gathers row by row, flushed into
+    /// [`Self::scene`] after the last row so each style goes out as one batch.
+    ///
+    /// Nothing in the gutter overlaps. The numbers sit left of each side's bars
+    /// and the hairlines right of them, and a removal tick marks a base-only row,
+    /// whose live side has no bars. So grouping by style leaves what shows as it
+    /// is.
+    numbers: TextRunBatch,
+    bars: BarBatch,
 }
 
 /// Line-number, separator, and status-bar colors for the diff rich gutter.
@@ -2747,17 +2761,19 @@ fn draw_diff_num(
         Some(rg) => {
             let advance = text_run::advance_sixteenths(scratch.len(), TEXT_SCALE_COMPACT);
             let right_edge = (side_x - inner.x) * 16 + rg.offsets.number_right;
-            TextRun {
-                col: right_edge.saturating_sub(advance) as i16,
-                row: ((y - inner.y) * 16) as i16,
-                scale: TEXT_SCALE_COMPACT,
-                color: rg.colors.dim,
-                bg: Some(rg.colors.bg),
-                text: scratch,
-                follow: 0,
-                anchor: None,
-            }
-            .render(inner, buf, &mut *rg.scene);
+            rg.numbers.push(
+                inner,
+                TextRun {
+                    col: right_edge.saturating_sub(advance) as i16,
+                    row: ((y - inner.y) * 16) as i16,
+                    scale: TEXT_SCALE_COMPACT,
+                    color: rg.colors.dim,
+                    bg: Some(rg.colors.bg),
+                    text: scratch,
+                    follow: 0,
+                    anchor: None,
+                },
+            );
         },
         None => render_side_num(buf, scratch, num_x, y, num, dim_style, digits.into()),
     }
@@ -2815,14 +2831,16 @@ fn draw_diff_status(
                 let Some(color) = color else {
                     continue;
                 };
-                Bar {
-                    x: (side + x) as i16,
-                    y: y0,
-                    width: rg.offsets.bar_width,
-                    height,
-                    color,
-                }
-                .render(inner, buf, &mut *rg.scene);
+                rg.bars.push(
+                    inner,
+                    Bar {
+                        x: (side + x) as i16,
+                        y: y0,
+                        width: rg.offsets.bar_width,
+                        height,
+                        color,
+                    },
+                );
             }
         },
         None => paint_status_bars(buf, (status_x, y), change_scope, state, tree, seam, theme),
@@ -2850,16 +2868,19 @@ fn draw_removal_tick(
         Some(rg) => {
             let bars = rg.offsets.bars;
             let y0 = ((y - inner.y) * 16) as i16;
-            Bar {
-                x: ((side_x - inner.x) * 16 + bars[0]) as i16,
-                y: y0,
-                width: bars[2] + rg.offsets.bar_width - bars[0],
-                height: 2,
-                color: rg
-                    .colors
-                    .faded(style_rgb(theme.get(s::DIFF_DELETED).fg).unwrap_or(rg.colors.dim)),
-            }
-            .render(inner, buf, &mut *rg.scene);
+            let color = rg
+                .colors
+                .faded(style_rgb(theme.get(s::DIFF_DELETED).fg).unwrap_or(rg.colors.dim));
+            rg.bars.push(
+                inner,
+                Bar {
+                    x: ((side_x - inner.x) * 16 + bars[0]) as i16,
+                    y: y0,
+                    width: bars[2] + rg.offsets.bar_width - bars[0],
+                    height: 2,
+                    color,
+                },
+            );
         },
         None => {
             let style = theme.get(s::DIFF_DELETED);
