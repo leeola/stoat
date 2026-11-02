@@ -33,11 +33,13 @@ const MAX_COLUMNS: u32 = 120;
 /// Display width of a tab stop.
 const TAB_WIDTH: u32 = 4;
 
-/// Runs kept per line. The last run swallows any overflow to end-of-line, so a
-/// busy line never emits an unbounded number of blocks.
+/// Runs kept per line, so a busy line never emits an unbounded number of
+/// blocks.
 ///
 /// A line splits on glyph weight as well as on class, so a line of code carries
-/// roughly twice the runs its coloring alone would give.
+/// roughly twice as many runs as its colors alone. A line that fills its slots
+/// merges its contiguous runs of one class at their mean weight. Only a line
+/// with nothing left to merge has its last run swallow the rest.
 const MAX_RUNS: usize = 24;
 
 /// Time [`MinimapContent::sync`] spends on chunked work before it leaves the
@@ -106,8 +108,11 @@ pub struct Run {
     pub len: u8,
     pub class: u8,
     /// How much ink the glyphs under this run put on the page, from
-    /// [`glyph_weight`]. A run covers one weight class, so a word and the
-    /// punctuation beside it are separate runs even in one color.
+    /// [`glyph_weight`].
+    ///
+    /// A run covers one weight until its line fills its slots, so a word and
+    /// the punctuation beside it are separate runs even in one color. On a full
+    /// line, contiguous runs of one class merge and carry their mean weight.
     pub weight: u8,
 }
 
@@ -148,14 +153,52 @@ impl LineRuns {
     /// Append `run`, or drop it once the line holds [`MAX_RUNS`].
     ///
     /// Dropping is what the summary wants rather than a failure to report.
-    /// [`summarize_line`] widens its last run to swallow the rest of the line
-    /// past the cap, so a caller reaching this has already decided the run has
-    /// nowhere to go.
+    /// [`summarize_line`] merges a full line's runs or widens its last run to
+    /// swallow the rest of the line, so a caller reaching this has already
+    /// decided the run has nowhere to go.
     fn push(&mut self, run: Run) {
         if (self.len as usize) < MAX_RUNS {
             self.runs[self.len as usize] = run;
             self.len += 1;
         }
+    }
+
+    /// Fold each group of contiguous runs that share a class into one run at
+    /// the group's mean weight, and return whether the count fell.
+    ///
+    /// [`summarize_line`] calls this once a line fills its slots. The line then
+    /// trades the weight texture inside its words for the room to keep its
+    /// colors and its gaps. An edge mark's class is one that no content class
+    /// takes, so the lane run never merges.
+    fn merge_contiguous(&mut self) -> bool {
+        let count = self.len();
+        if count < 2 {
+            return false;
+        }
+
+        let ink = |run: &Run| u32::from(run.weight) * u32::from(run.len);
+        let runs = self.runs;
+        let mut open = 0;
+        let mut open_ink = ink(&runs[0]);
+        for run in &runs[1..count] {
+            let group = &mut self.runs[open];
+            if run.class == group.class
+                && u32::from(group.start_col) + u32::from(group.len) == u32::from(run.start_col)
+            {
+                group.len += run.len;
+                open_ink += ink(run);
+            } else {
+                group.weight = (open_ink / u32::from(group.len)) as u8;
+                open += 1;
+                self.runs[open] = *run;
+                open_ink = ink(run);
+            }
+        }
+        let group = &mut self.runs[open];
+        group.weight = (open_ink / u32::from(group.len)) as u8;
+
+        self.len = (open + 1) as u8;
+        self.len() < count
     }
 
     fn last(&self) -> Option<&Run> {
@@ -1371,8 +1414,13 @@ fn line_count(rope: &Rope) -> u32 {
 /// non-whitespace char extends the current run when it is contiguous and shares
 /// both the covering token's class and the glyph weight, otherwise opens a new
 /// run. Whitespace ends the current run, so a gap breaks the blocks. A char
-/// uncovered by any token is class 0. Once [`MAX_RUNS`] runs exist, the last run
-/// swallows the rest of the line.
+/// uncovered by any token is class 0.
+///
+/// A run covers one weight until the line fills its [`MAX_RUNS`] slots. Then
+/// the contiguous runs of one class merge across the whole line and carry
+/// their mean weight, so a long line keeps its colors and its gaps. If a full
+/// line has no runs to merge, its last run swallows the rest of the line at
+/// its own weight.
 ///
 /// Every content class takes the mark's `class_base`. Under an offset, class 0 is
 /// therefore the uncovered-text color of the row's population block.
@@ -1392,6 +1440,7 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
     let mut byte: usize = 0;
     let mut token_idx = 0;
     let mut overflowed = false;
+    let mut merged = false;
 
     for ch in line.chars() {
         if col >= MAX_COLUMNS {
@@ -1420,25 +1469,30 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
                     && last.weight == weight
                     && last.start_col as u32 + last.len as u32 == col
             });
+            if !overflowed && !contiguous && runs.len() == MAX_RUNS {
+                merged = true;
+                overflowed = !runs.merge_contiguous();
+            }
+
             if overflowed || contiguous {
                 let last = runs.last_mut().expect("a run to extend");
                 last.len = (col + width - last.start_col as u32) as u8;
-            } else if runs.len() < MAX_RUNS {
+            } else {
                 runs.push(Run {
                     start_col: col as u8,
                     len: width as u8,
                     class,
                     weight,
                 });
-            } else {
-                overflowed = true;
-                let last = runs.last_mut().expect("a run to extend");
-                last.len = (col + width - last.start_col as u32) as u8;
             }
         }
 
         col += width;
         byte += ch.len_utf8();
+    }
+
+    if merged {
+        runs.merge_contiguous();
     }
 
     runs
@@ -1943,6 +1997,46 @@ mod tests {
                 last.start_col as usize + last.len as usize
             ),
             (2 * MAX_RUNS, 2 * CHARS + 1)
+        );
+    }
+
+    /// A full line merges its contiguous runs of one class at their mean
+    /// weight, so twenty `a_` words keep one run and one gap each. Forty words
+    /// fill the slots again after each merge. Once nothing is left to merge,
+    /// the last run swallows the rest of the line at its own weight. A run of
+    /// another class stays apart from the run beside it.
+    #[test]
+    fn a_full_line_merges_contiguous_runs_before_it_swallows() {
+        let words = |word: &str, count: usize| {
+            let line = word.repeat(count);
+            let tokens: Vec<LineToken> = (0..count)
+                .map(|i| tok(i * word.len()..i * word.len() + 2, 1))
+                .collect();
+            summarize_line(&line, &tokens, RowMark::NONE)
+        };
+        let pairs = |count: u8| (0..count).map(|i| weighted(2 + 3 * i, 2, 1, 150));
+
+        assert_eq!(
+            words("a_ ", 20).as_slice(),
+            pairs(20).collect::<Vec<_>>(),
+            "twenty words fit once their runs merge",
+        );
+        assert_eq!(
+            words("a_ ", 40).as_slice(),
+            pairs(23)
+                .chain([weighted(71, 49, 1, 190)])
+                .collect::<Vec<_>>(),
+            "forty words swallow from the run after the last merge",
+        );
+        assert_eq!(
+            words("a_b ", 12).as_slice(),
+            (0..12)
+                .flat_map(|i| [
+                    weighted(2 + 4 * i, 2, 1, 150),
+                    weighted(4 + 4 * i, 1, 0, 190)
+                ])
+                .collect::<Vec<_>>(),
+            "an uncovered b keeps its own run beside the merged pair",
         );
     }
 
