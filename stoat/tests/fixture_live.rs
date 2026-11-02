@@ -378,13 +378,13 @@ fn head_of(root: &Path) -> String {
 /// diff warm, so a tour over commits meets them at each checkout.
 const WIDE_COLS: u16 = 200;
 
-/// A frame height at which a walkthrough landing shows above the mode's
-/// key-hint overlay.
+/// A frame height at which the walkthrough mode's key-hint overlay keeps to
+/// the right end of each line.
 ///
-/// The overlay sits on the bottom of the pane and grows up as the mode answers
-/// more keys. A landing that fits the view centers in it, so each row added to
-/// the frame moves the overlay down one row and moves the landing down half a
-/// row.
+/// The overlay fills one column until its rows outgrow the frame. Past that, it
+/// wraps into a second column that reaches over the start of a diff's right
+/// side. At 26 rows, the mode's rows in these fixtures still fit one column, so
+/// each landing text at the start of its line stays visible.
 const LANDING_ROWS: u16 = 26;
 
 /// Drift is only ever reported against what is on screen, so the status line
