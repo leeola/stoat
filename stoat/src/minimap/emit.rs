@@ -537,6 +537,13 @@ fn minimap_buffer_line(snapshot: &DisplaySnapshot, display_row: u32) -> u32 {
 /// the pieces bucket per row as line-relative [`crate::minimap::LineToken`]s
 /// carrying their scope's palette class. Tokens whose style names no syntax
 /// scope classify 0 and drop, and `syntax_on` off yields an empty map.
+///
+/// A row gathers its tokens in the editor's precedence order: the tree-sitter
+/// channel, then the LSP channel, each in channel index order, which is the
+/// slot order the editor's highlight keys take. Each row then goes through
+/// [`crate::minimap::resolve_overlaps`], so its tokens come out disjoint and
+/// each byte keeps the token the editor paints, an escape inside a string and
+/// an LSP token over a tree-sitter one included.
 pub(crate) fn minimap_line_tokens(
     snapshot: &DisplaySnapshot,
     buffer_id: BufferId,
@@ -636,7 +643,7 @@ pub(crate) fn minimap_line_tokens(
     }
 
     for tokens in by_row.values_mut() {
-        tokens.sort_by_key(|token| token.range.start);
+        crate::minimap::resolve_overlaps(tokens);
     }
     by_row
 }
@@ -2496,6 +2503,75 @@ mod tests {
         );
         assert_eq!(row(3), Vec::new(), "outside the rows asked about");
         assert_eq!(tokens.len(), 3, "and no other row carries anything");
+    }
+
+    /// The editor paints an LSP token over the tree-sitter token under it, so
+    /// the strip carries the LSP token's class alone over that word.
+    #[test]
+    fn an_lsp_token_over_a_syntax_token_colors_the_strip_as_the_text() {
+        use crate::display_map::highlights::{BufferSemanticTokens, SemanticTokenHighlight};
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/minimap-overlap");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"word rest\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let (editor_id, buffer_id) = h.stoat.focused_editor_ids().expect("editor");
+        let style = |id| {
+            h.stoat
+                .syntax_styles
+                .id_for_highlight(stoat_language::HighlightId(id))
+                .expect("the theme key resolves")
+        };
+        let (syntax, lsp) = (style(0), style(2));
+        let interner = h.stoat.syntax_styles.interner.clone();
+        let classes = (
+            h.stoat.minimap_class_table.class_of(syntax),
+            h.stoat.minimap_class_table.class_of(lsp),
+        );
+        assert!(
+            classes.0 != 0 && classes.1 != 0 && classes.0 != classes.1,
+            "two distinct syntax classes, got {classes:?}",
+        );
+
+        let snap = {
+            let shared = h
+                .stoat
+                .active_workspace()
+                .buffers
+                .get(buffer_id)
+                .expect("buffer");
+            shared.read().expect("poisoned").snapshot.clone()
+        };
+        let word = |style| -> Arc<[SemanticTokenHighlight]> {
+            Arc::from(vec![SemanticTokenHighlight {
+                range: snap.anchor_at(0, Bias::Right)..snap.anchor_at(4, Bias::Left),
+                style,
+            }])
+        };
+        let display_map = &mut h.stoat.active_workspace_mut().editors[editor_id].display_map;
+        display_map.set_semantic_token_highlights(buffer_id, word(syntax), interner.clone());
+        display_map.set_lsp_token_channel(
+            buffer_id,
+            BufferSemanticTokens::with_resolved_ends(word(lsp), interner, &[4]),
+        );
+        let snapshot = display_map.snapshot();
+
+        let tokens = minimap_line_tokens(
+            &snapshot,
+            buffer_id,
+            h.stoat.syntax_highlight,
+            &h.stoat.minimap_class_table,
+            0..1,
+        );
+        let row: Vec<(usize, usize, u8)> = tokens[&0]
+            .iter()
+            .map(|token| (token.range.start, token.range.end, token.class))
+            .collect();
+        assert_eq!(row, vec![(0, 4, classes.1)]);
     }
 
     /// A theme switch keeps the minimap's syntax highlighting.

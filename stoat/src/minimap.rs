@@ -91,6 +91,13 @@ pub const LINES_PER_CELL: u8 = 8;
 /// a mark never overwrites the code silhouette. Content starts after it.
 const LANE_WIDTH: u32 = 2;
 
+/// Bytes of a line that [`summarize_line`] reaches.
+///
+/// Content stops after `MAX_COLUMNS - LANE_WIDTH` columns, and each char takes
+/// at least one column and at most four bytes, so no token byte past this cap
+/// reaches the strip.
+const TOKEN_BYTE_CAP: usize = (MAX_COLUMNS - LANE_WIDTH) as usize * 4;
+
 /// A single colored run on one line, `len` display columns from `start_col`
 /// drawn in palette class `class` at opacity `weight`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -211,6 +218,11 @@ impl RowMark {
 ///
 /// The style-to-class resolution lives in [`ClassTable`]; [`summarize_line`] takes
 /// the resolved class so it stays free of the theme.
+///
+/// [`summarize_line`] reads a row's tokens sorted by start and disjoint.
+/// [`resolve_overlaps`] makes them so from a row gathered in the editor's
+/// precedence order, lowest first, so each byte keeps the token the editor
+/// paints.
 #[derive(Clone, Debug)]
 pub struct LineToken {
     pub range: Range<usize>,
@@ -1432,6 +1444,45 @@ pub fn summarize_line(line: &str, tokens: &[LineToken], mark: RowMark) -> LineRu
     runs
 }
 
+/// Flatten a row's tokens so each byte keeps the class of the last token in
+/// `tokens` that covers it.
+///
+/// `tokens` arrive in the editor's precedence order, lowest first, so a later
+/// token paints over the ones before it, as the editor lets the higher key's
+/// color win. The result is sorted by start and disjoint, which is what
+/// [`summarize_line`]'s forward scan reads. With two tokens or more, the result
+/// holds no byte past [`TOKEN_BYTE_CAP`], since the strip never reaches one.
+pub(crate) fn resolve_overlaps(tokens: &mut Vec<LineToken>) {
+    if tokens.len() < 2 {
+        return;
+    }
+
+    let mut classes = [0u8; TOKEN_BYTE_CAP];
+    let mut end = 0;
+    for token in tokens.iter() {
+        let range = token.range.start.min(TOKEN_BYTE_CAP)..token.range.end.min(TOKEN_BYTE_CAP);
+        end = end.max(range.end);
+        classes[range].fill(token.class);
+    }
+
+    tokens.clear();
+    let mut at = 0;
+    while at < end {
+        let class = classes[at];
+        let run_end = classes[at..end]
+            .iter()
+            .position(|&other| other != class)
+            .map_or(end, |len| at + len);
+        if class != 0 {
+            tokens.push(LineToken {
+                range: at..run_end,
+                class,
+            });
+        }
+        at = run_end;
+    }
+}
+
 /// How much ink `ch` puts on the page, as a run's weight.
 ///
 /// A strip draws a line a couple of pixels tall, far under what a letter needs,
@@ -1629,9 +1680,9 @@ pub(crate) fn color_to_rgb(color: Color) -> [u8; 3] {
 #[cfg(test)]
 mod tests {
     use super::{
-        summarize_line, BuildWindow, EdgeSource, LineRuns, LineToken, MinimapContent, RowMark,
-        RowSet, Run, Splice, SyncVersions, EDIT_SUMMARIZE_MAX, MAX_LINES, MAX_RUNS, SYNC_BUDGET,
-        SYNC_SLICE,
+        resolve_overlaps, summarize_line, BuildWindow, EdgeSource, LineRuns, LineToken,
+        MinimapContent, RowMark, RowSet, Run, Splice, SyncVersions, EDIT_SUMMARIZE_MAX, MAX_LINES,
+        MAX_RUNS, SYNC_BUDGET, SYNC_SLICE, TOKEN_BYTE_CAP,
     };
     use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc, time::Duration};
     use stoat_scheduler::{Executor, TestScheduler};
@@ -1796,6 +1847,47 @@ mod tests {
         // broken by the space, each carrying its token's class.
         let runs = summarize_line("ab cd", &[tok(0..2, 1), tok(3..5, 2)], RowMark::NONE);
         assert_eq!(runs.as_slice(), [run(2, 2, 1), run(5, 2, 2)]);
+    }
+
+    /// `tokens` after [`resolve_overlaps`], as `(start, end, class)` triples.
+    fn resolved(tokens: &[(usize, usize, u8)]) -> Vec<(usize, usize, u8)> {
+        let mut tokens: Vec<LineToken> = tokens
+            .iter()
+            .map(|&(start, end, class)| tok(start..end, class))
+            .collect();
+        resolve_overlaps(&mut tokens);
+        tokens
+            .iter()
+            .map(|token| (token.range.start, token.range.end, token.class))
+            .collect()
+    }
+
+    /// Each byte keeps the last token in precedence order that covers it, as
+    /// the editor's merge lets the higher key's color win. An inner token wins
+    /// over the outer one it sits in, which keeps both flanks. A later token
+    /// over the same range replaces the earlier one. Disjoint tokens out of
+    /// order come out sorted. A lone token is left as it is, and among two or
+    /// more, a byte past the cap is clipped.
+    #[test]
+    fn overlapping_tokens_resolve_to_the_last_one_over_each_byte() {
+        let cap = TOKEN_BYTE_CAP;
+
+        assert_eq!(
+            [
+                resolved(&[(0, 10, 1), (3, 6, 2)]),
+                resolved(&[(0, 5, 1), (0, 5, 2)]),
+                resolved(&[(6, 9, 2), (0, 4, 1)]),
+                resolved(&[(0, cap + 10, 1)]),
+                resolved(&[(0, 4, 1), (2, cap + 10, 2)]),
+            ],
+            [
+                vec![(0, 3, 1), (3, 6, 2), (6, 10, 1)],
+                vec![(0, 5, 2)],
+                vec![(0, 4, 1), (6, 9, 2)],
+                vec![(0, cap + 10, 1)],
+                vec![(0, 2, 1), (2, cap, 2)],
+            ],
+        );
     }
 
     #[test]
