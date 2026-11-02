@@ -264,23 +264,45 @@ pub(crate) fn screen_surfaces(stoat: &mut Stoat) -> Option<ScreenSurfaces> {
 /// A left press on the screen's minimap strip, and every event while a strip
 /// scrub is armed, also go to that routing. A scrub owns its gesture wherever
 /// the pointer goes.
+///
+/// On the changes view, a middle press puts the cursor on the pressed cell and
+/// runs goto definition. A right press puts the cursor there and runs hover.
+/// The view's excerpts are editors, so the buttons act as they do in an editor.
 fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEffect> {
     let surfaces = screen_surfaces(stoat).filter(|s| s.holds(mouse))?;
     if stoat.minimap_drag.is_some() || surfaces.presses_strip(mouse) {
         return None;
     }
 
-    // A press selects the row without acting on it. The user asked for select
-    // rather than activate, so a second press on the same row is a no-op too,
-    // unlike the modal two-step.
-    let Some(index) = surfaces
-        .row_at(mouse)
-        .filter(|_| matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)))
-    else {
+    // A left press selects the row without acting on it. The user asked for
+    // select rather than activate, so a second press on the same row is a
+    // no-op too, unlike the modal two-step.
+    let MouseEventKind::Down(button) = mouse.kind else {
+        return Some(UpdateEffect::None);
+    };
+    let Some(index) = surfaces.row_at(mouse) else {
         return Some(UpdateEffect::None);
     };
 
     Some(match surfaces.kind {
+        ScreenKind::DiffChanges => {
+            let placed =
+                action_handlers::diff_changes::diff_changes_press(stoat, index, mouse.column);
+            if placed == UpdateEffect::None {
+                return Some(placed);
+            }
+            match button {
+                MouseButton::Left => {},
+                MouseButton::Middle => {
+                    action_handlers::lsp::goto_definition(stoat);
+                },
+                MouseButton::Right => {
+                    crate::lsp::hover::hover(stoat);
+                },
+            }
+            UpdateEffect::Redraw
+        },
+        _ if button != MouseButton::Left => UpdateEffect::None,
         ScreenKind::Commits => {
             let delta = index as isize - surfaces.selected as isize;
             let step = match delta < 0 {
@@ -288,9 +310,6 @@ fn handle_screen_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<UpdateEff
                 false => CommitStep::Down(delta as usize),
             };
             action_handlers::commits::commits_step(stoat, step)
-        },
-        ScreenKind::DiffChanges => {
-            action_handlers::diff_changes::diff_changes_press(stoat, index, mouse.column)
         },
         ScreenKind::Rebase => action_handlers::rebase::rebase_select(stoat, index),
         ScreenKind::RebaseConflict => action_handlers::conflict::conflict_select(stoat, index),
@@ -954,15 +973,6 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         return UpdateEffect::Redraw;
     }
 
-    // A pane-overlay screen owns the pointer inside the pane it paints over.
-    // The editor underneath is still open, so an unclaimed press moves a
-    // cursor hidden behind the screen. Outside that pane this reports None and
-    // the routing below carries on, which keeps the other split panes working
-    // while a screen is up.
-    if let Some(effect) = handle_screen_mouse(stoat, mouse) {
-        return effect;
-    }
-
     // A left-button drag over an open hover popup selects its text. Routed
     // ahead of focus_at and the pane handlers so the click never reaches the
     // editor, leaving the buffer selection and cursor untouched.
@@ -980,6 +990,17 @@ pub(crate) fn handle_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect
         UpdateEffect::None if hover_closed => UpdateEffect::Redraw,
         other => other,
     };
+
+    // A pane-overlay screen owns the pointer inside the pane it paints over.
+    // The editor underneath is still open, so an unclaimed press moves a
+    // cursor hidden behind the screen. Outside that pane this reports None and
+    // the routing below carries on, which keeps the other split panes working
+    // while a screen is up. The popup's handling above runs first, because a
+    // right press on the changes view opens a popup over the stack. A press
+    // outside that popup closes it before this gate reads the press.
+    if let Some(effect) = handle_screen_mouse(stoat, mouse) {
+        return closed_effect(effect);
+    }
 
     // A press or drag over a pane's minimap strip scrubs that pane, ahead of
     // focus_at and the text-area handlers so the strip owns the gesture.
@@ -2305,9 +2326,12 @@ mod tests {
     use crate::{
         diff_changes::DiffChangesState,
         editor_state::EditorState,
+        host::NoopLsp,
+        render::hover::HoverPopup,
         test_fixture::{mouse_event, open_scratch_file},
     };
     use crossterm::event::KeyModifiers;
+    use ratatui::style::Style;
     use slotmap::SlotMap;
     use std::{
         path::{Path, PathBuf},
@@ -3088,6 +3112,65 @@ mod tests {
         assert_eq!(
             pressed,
             [at("f01.txt", 1), at("f01.txt", 0), at("f00.txt", 0)]
+        );
+    }
+
+    /// A middle press runs goto definition and a right press runs hover, each
+    /// from the cell under the pointer, as the same buttons do in an editor.
+    #[test]
+    fn a_middle_or_right_press_over_the_changes_view_places_the_cursor_and_asks_the_server() {
+        let mut h = diff_changes_harness(MinimapMode::Single, 20);
+        h.allow_host_swap();
+        h.stoat.set_lsp_host(Arc::new(NoopLsp));
+        let (list, text_x) = diff_changes_columns(&mut h);
+        let mut press = |button, y| {
+            h.stoat
+                .update(mouse_event(MouseEventKind::Down(button), text_x + 1, y));
+            (diff_changes_cursor(&mut h), h.stoat.pending_message.take())
+        };
+
+        // Every one-line file takes three stack rows, so f02's changed row is
+        // row 7.
+        let pressed = [
+            press(MouseButton::Middle, list.y + 4),
+            press(MouseButton::Right, list.y + 7),
+        ];
+        let asked = |path: &str| {
+            let unavailable = "lsp: no language server running".to_string();
+            ((path.to_string(), Point::new(0, 1)), Some(unavailable))
+        };
+        assert_eq!(
+            pressed,
+            [asked("f01.txt"), asked("f02.txt")],
+            "each press puts the cursor on its cell, then asks the server"
+        );
+    }
+
+    /// A press outside an open hover popup closes it and still lands on the
+    /// stack, as a press outside the popup does over an editor.
+    #[test]
+    fn a_press_outside_a_hover_popup_over_the_changes_view_closes_it_and_lands() {
+        let mut h = diff_changes_harness(MinimapMode::Single, 20);
+        let (list, text_x) = diff_changes_columns(&mut h);
+
+        // The popup's area stays empty until a paint lays it out, so every
+        // press lands outside it.
+        let editor_id = h.stoat.focused_editor_ids().expect("a focused excerpt").0;
+        h.stoat.pending_hover = Some(HoverPopup::new(
+            vec![vec![("hi".to_string(), Style::default())]],
+            0,
+            editor_id,
+        ));
+
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            text_x + 1,
+            list.y + 4,
+        ));
+        assert_eq!(
+            (h.stoat.pending_hover.is_none(), diff_changes_cursor(&mut h)),
+            (true, ("f01.txt".to_string(), Point::new(0, 1))),
+            "the press closes the popup and puts f01's cursor on its cell"
         );
     }
 
