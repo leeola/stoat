@@ -300,7 +300,7 @@ define_action!(
     "FontSizeInc",
     ActionKind::FontSizeInc,
     "grow the terminal's font size a step",
-    "Ask the hosting stoatty to render one font size larger, re-fitting the cell grid around it. This is the explicit way to reach font zoom, because stoat claims the platform zoom combo to resize whatever the user is looking at instead. Reports that it needs stoatty under any other terminal, which has no way to be asked.",
+    "Ask the hosting stoatty to render one font size larger, re-fitting the cell grid around it. This is the explicit way to reach font zoom, because stoat claims the platform zoom combo to resize whatever the user is looking at instead. Reports that it needs stoatty under any other terminal, which has no way to be asked. The shipped chord is Ctrl-Shift-=.",
     ActionPriority::Normal
 );
 
@@ -310,7 +310,7 @@ define_action!(
     "FontSizeDec",
     ActionKind::FontSizeDec,
     "shrink the terminal's font size a step",
-    "Ask the hosting stoatty to render one font size smaller, re-fitting the cell grid around it. The counterpart to FontSizeInc, and subject to the same stoatty requirement. The terminal holds a floor, so repeated steps stop at its smallest size rather than reaching zero.",
+    "Ask the hosting stoatty to render one font size smaller, re-fitting the cell grid around it. The counterpart to FontSizeInc, and subject to the same stoatty requirement. The terminal holds a floor, so repeated steps stop at its smallest size rather than reaching zero. The shipped chord is Ctrl-Shift--.",
     ActionPriority::Normal
 );
 

@@ -416,6 +416,12 @@ on key {
     # keyboard that types `:` with Shift reaches `Ctrl-:` only as `Ctrl-Shift-;`.
     Ctrl-: -> OpenCommandPalette();
     Ctrl-; -> OpenCommandPalette();
+    # The font chords step the stoatty font size for the session. Under the
+    # alternate-keys flag of the kitty keyboard protocol, a `Ctrl-Shift-=` press
+    # arrives as `Ctrl-+` and a `Ctrl-Shift--` press arrives as `Ctrl-_`. Stoat
+    # claims the unshifted combo for its own zoom.
+    Ctrl-Plus -> FontSizeInc();
+    Ctrl-_ -> FontSizeDec();
 
     # The modes named here bind `?` to something of their own. This block
     # outranks theirs on atom count, so a mode that takes the key has to be
@@ -1345,6 +1351,10 @@ on key {
         Ctrl-? -> ToggleKeyHints();
         Ctrl-: -> OpenCommandPalette();
         Ctrl-; -> OpenCommandPalette();
+        # The font chords take `Ctrl-_` from the child, where readline binds it
+        # to undo.
+        Ctrl-Plus -> FontSizeInc();
+        Ctrl-_ -> FontSizeDec();
         # Shift walks the pane's own history, the xterm convention, which
         # leaves plain PageUp and PageDown with the child.
         Shift-PageUp -> PageUp();

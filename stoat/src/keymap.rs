@@ -3285,6 +3285,23 @@ mod tests {
     fn ctrl_colon_and_ctrl_semicolon_open_the_palette_from_every_mode() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
+        for c in [':', ';'] {
+            assert_ctrl_chord_from_every_mode(&keymap, c, "OpenCommandPalette");
+        }
+    }
+
+    /// Both font chords are bound at the root of `on key`, so every mode
+    /// answers them, and so does a prompt that a modal owns.
+    #[test]
+    fn ctrl_plus_and_ctrl_underscore_step_the_font_from_every_mode() {
+        let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
+        assert_ctrl_chord_from_every_mode(&keymap, '+', "FontSizeInc");
+        assert_ctrl_chord_from_every_mode(&keymap, '_', "FontSizeDec");
+    }
+
+    /// Assert that `Ctrl-<c>` runs `action` alone in three modes and under an
+    /// open finder, a sample of the places a root binding of `on key` reaches.
+    fn assert_ctrl_chord_from_every_mode(keymap: &Keymap, c: char, action: &str) {
         let in_mode = |mode: &str| TestState::new().set("mode", StateValue::String(mode.into()));
         let in_finder = in_mode("insert").set("modal", StateValue::String("finder".into()));
 
@@ -3294,16 +3311,14 @@ mod tests {
             ("space_goto mode", in_mode("space_goto")),
             ("an open finder", in_finder),
         ] {
-            for c in [':', ';'] {
-                let bound = keymap
-                    .lookup(&state, &key_event(KeyCode::Char(c), KeyModifiers::CONTROL))
-                    .unwrap_or_else(|| panic!("Ctrl-{c} is bound in {name}"));
-                assert_eq!(
-                    (bound.len(), bound[0].name.as_str()),
-                    (1, "OpenCommandPalette"),
-                    "Ctrl-{c} opens the palette in {name} and switches no mode",
-                );
-            }
+            let bound = keymap
+                .lookup(&state, &key_event(KeyCode::Char(c), KeyModifiers::CONTROL))
+                .unwrap_or_else(|| panic!("Ctrl-{c} is bound in {name}"));
+            assert_eq!(
+                (bound.len(), bound[0].name.as_str()),
+                (1, action),
+                "Ctrl-{c} runs {action} in {name} and switches no mode",
+            );
         }
     }
 
@@ -3364,7 +3379,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_at_rest_answers_ctrl_a_ctrl_question_ctrl_colon_and_ctrl_semicolon() {
+    fn a_pane_at_rest_answers_the_root_control_keys() {
         let keymap = Keymap::compile(&parse_config(crate::app::DEFAULT_KEYMAP));
         let ctrl = |c| key_event(KeyCode::Char(c), KeyModifiers::CONTROL);
         let bare = |code| key_event(code, KeyModifiers::NONE);
@@ -3388,10 +3403,13 @@ mod tests {
                     scoped(&at_rest(), ctrl('?')),
                     scoped(&at_rest(), ctrl(':')),
                     scoped(&at_rest(), ctrl(';')),
+                    scoped(&at_rest(), ctrl('+')),
+                    scoped(&at_rest(), ctrl('_')),
                     scoped(&at_rest(), bare(KeyCode::Esc)),
                     scoped(&at_rest(), bare(KeyCode::Tab)),
                     scoped(&at_rest(), ctrl('d')),
                     scoped(&under_palette, ctrl('a')),
+                    scoped(&under_palette, ctrl('+')),
                 ),
                 (
                     Some(vec![(
@@ -3401,13 +3419,16 @@ mod tests {
                     Some(vec![("ToggleKeyHints".to_string(), Vec::new())]),
                     Some(vec![("OpenCommandPalette".to_string(), Vec::new())]),
                     Some(vec![("OpenCommandPalette".to_string(), Vec::new())]),
+                    Some(vec![("FontSizeInc".to_string(), Vec::new())]),
+                    Some(vec![("FontSizeDec".to_string(), Vec::new())]),
+                    None,
                     None,
                     None,
                     None,
                     None,
                 ),
-                "the {pane} pane takes back only Ctrl-a, Ctrl-?, Ctrl-:, and Ctrl-;, and only \
-                 with no modal open"
+                "the {pane} pane takes back only Ctrl-a, Ctrl-?, Ctrl-:, Ctrl-;, Ctrl-+, and \
+                 Ctrl-_, and only with no modal open"
             );
         }
     }

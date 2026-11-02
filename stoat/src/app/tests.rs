@@ -4733,7 +4733,7 @@ fn the_hints_box_of_a_terminal_lists_only_the_keys_it_takes_from_the_child() {
         .collect();
     assert_eq!(
         keys,
-        ["C-a", "C-?", "C-:, C-;", "S-PgUp", "S-PgDn"],
+        ["C-a", "C-?", "C-:, C-;", "C-+", "C-_", "S-PgUp", "S-PgDn"],
         "a terminal at rest lists only the keys it takes from its child"
     );
 }
