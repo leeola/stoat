@@ -3672,11 +3672,10 @@ mod tests {
     }
 
     #[test]
-    fn space_r_reloads_all_and_returns_to_normal() {
+    fn space_r_discards_unsaved_edits_and_returns_to_normal() {
         let mut h = Stoat::test();
-        let root = Path::new("/space-r");
-        let path = root.join("a.txt");
-        let id = open_plain(&mut h, root, "a.txt", b"before\n");
+        let path = open_edited(&mut h, Path::new("/space-r"), "a.txt", b"before\n");
+        let id = focused_editor_mut(&mut h.stoat).expect("editor").buffer_id;
 
         h.fake_fs().insert_file(&path, b"after\n");
         h.type_keys("space r");
@@ -3684,7 +3683,7 @@ mod tests {
         assert_eq!(
             h.buffer_text(id),
             "after\n",
-            "space r reloads the buffer from disk",
+            "space r discards the unsaved edit and reloads the buffer from disk",
         );
         assert_eq!(
             h.stoat.focused_mode(),

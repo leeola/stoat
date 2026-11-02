@@ -1498,7 +1498,7 @@ on key {
         }
 
         p -> OpenFileFinder();
-        r -> [ReloadAll(), SetMode(normal)];
+        r -> [ForceReloadAll(), SetMode(normal)];
         g -> SetMode(space_goto);
         G -> SetMode(space_git);
 
@@ -1676,7 +1676,7 @@ on key {
         }
 
         c -> [ChangeWalkWrap(), SetMode(normal)];
-        r -> [ReloadAll(), SetMode(normal)];
+        r -> [ForceReloadAll(), SetMode(normal)];
         R -> [LiveReload(), SetMode(normal)];
     }
     # The diff chord. It picks a diff layout, and it holds the diff arms the

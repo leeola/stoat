@@ -3849,7 +3849,7 @@ mod tests {
         for (key, action) in [
             ('n', "GotoNextChange"),
             ('s', "ToggleStageHunk"),
-            ('r', "ReloadAll"),
+            ('r', "ForceReloadAll"),
             ('b', "DiffBaseToggle"),
         ] {
             let bound = keymap

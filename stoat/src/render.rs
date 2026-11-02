@@ -3115,7 +3115,10 @@ mod lsp_filter_tests {
         };
         assert_eq!(
             (
-                listed(&scratch, &["ReloadAll", "LiveReload", "ChangeWalkWrap"]),
+                listed(
+                    &scratch,
+                    &["ForceReloadAll", "LiveReload", "ChangeWalkWrap"]
+                ),
                 listed(&scratch, &["GitLs", "ToggleStageHunk", "GotoNextChange"]),
                 listed(&staged, &["GitLs"]),
             ),
