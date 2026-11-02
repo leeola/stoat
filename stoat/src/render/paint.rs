@@ -215,10 +215,9 @@ pub(crate) fn render_side_text(
 /// `style_at` receives byte offsets in increasing order, so a caller resolving
 /// spans through a monotonic cursor keeps that cursor across the whole row.
 ///
-/// Characters sharing a style are painted in one write, which keeps a grapheme
-/// cluster whole. The write segments by cluster, and a zero-width character
-/// never opens a run, so a span boundary between a base character and its mark
-/// never separates them.
+/// A zero-width character joins the cell of the character before it and never
+/// opens a run, so a span boundary between a base character and its mark never
+/// separates them. A control character takes no cell.
 pub(crate) fn paint_style_runs(
     buf: &mut Buffer,
     start_x: u16,
@@ -263,25 +262,45 @@ pub(crate) fn paint_style_runs(
 }
 
 /// Paint one same-style run, answering the column after it.
-fn paint_run(buf: &mut Buffer, x: u16, y: u16, text: &str, end_x: u16, style: Style) -> u16 {
-    if x >= end_x {
-        return x;
+fn paint_run(buf: &mut Buffer, mut x: u16, y: u16, text: &str, end_x: u16, style: Style) -> u16 {
+    // The glyph a mark joins sits one or two columns back by its own width, so
+    // its cell is kept rather than derived from `x`.
+    let mut base_cell: Option<u16> = None;
+    for ch in text.chars() {
+        // `display_width` gives a control char no width. In a cell's symbol it
+        // reaches the terminal as a control, so it takes no cell.
+        if ch.is_control() {
+            continue;
+        }
+        let width = display_width(ch) as u16;
+        if width == 0 {
+            if let Some(base) = base_cell {
+                let cell = &mut buf[(base, y)];
+                let mut symbol = String::from(cell.symbol());
+                symbol.push(ch);
+                cell.set_symbol(&symbol);
+            }
+            continue;
+        }
+        if u32::from(x) + u32::from(width) > u32::from(end_x) {
+            break;
+        }
+
+        buf[(x, y)].set_char(ch).set_style(style);
+        if width == 2 {
+            buf[(x + 1, y)].set_char(' ').set_style(style);
+        }
+        base_cell = Some(x);
+        x += width;
     }
-    let (next_x, _) = buf.set_stringn(x, y, text, (end_x - x) as usize, style);
-    // The write resets the cells a double-width glyph continues into, which
-    // leaves half of it outside the run's style. Restating the style over what
-    // the write covered keeps a span wash on whole glyphs.
-    for col in x..next_x {
-        buf[(col, y)].set_style(style);
-    }
-    next_x
+    x
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::layout::Rect;
-    use std::slice;
+    use std::{ops::Range, slice};
 
     /// A wide glyph occupies the two columns its width claims, and a span over
     /// it washes both.
@@ -324,7 +343,8 @@ mod tests {
     }
 
     /// The budget drops a glyph too wide for what remains rather than painting
-    /// half of it.
+    /// half of it, and the run ends there, so the narrow glyph after it does
+    /// not take the column left.
     #[test]
     fn a_wide_glyph_straddling_the_budget_is_dropped() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
@@ -332,7 +352,7 @@ mod tests {
             &mut buf,
             0,
             0,
-            "日本",
+            "日本x",
             3,
             Style::default(),
             &[],
@@ -381,6 +401,65 @@ mod tests {
             buf[(0, 0)].bg,
             Color::Reset,
             "the cluster takes the style its base resolved",
+        );
+    }
+
+    /// A mark joins the cell of the glyph before it when a span ends between
+    /// the two, and joins a wide glyph's first cell rather than the one it
+    /// continues into. A control character takes no cell.
+    #[test]
+    fn a_mark_joins_its_base_cell_and_a_control_character_takes_none() {
+        let lit = Color::Rgb(10, 20, 30);
+        let cells = |text: &str, span: Range<usize>| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 4, 1));
+            render_side_text(
+                &mut buf,
+                0,
+                0,
+                text,
+                4,
+                Style::default(),
+                slice::from_ref(&span),
+                Style::default().bg(lit),
+                &[],
+                Style::default(),
+            );
+            (0..4)
+                .map(|x| (buf[(x, 0)].symbol().to_string(), buf[(x, 0)].bg))
+                .collect::<Vec<_>>()
+        };
+        let cell = |symbol: &str, bg| (symbol.to_string(), bg);
+        let blank = cell(" ", Color::Reset);
+
+        assert_eq!(
+            cells("e\u{301}x", 0..1),
+            [
+                cell("e\u{301}", lit),
+                cell("x", Color::Reset),
+                blank.clone(),
+                blank.clone()
+            ],
+            "the mark after the span's end takes its base's cell and style",
+        );
+        assert_eq!(
+            cells("日\u{301}x", 0..0),
+            [
+                cell("日\u{301}", Color::Reset),
+                blank.clone(),
+                cell("x", Color::Reset),
+                blank.clone()
+            ],
+            "the mark joins the wide glyph's first cell",
+        );
+        assert_eq!(
+            cells("a\rb", 0..0),
+            [
+                cell("a", Color::Reset),
+                cell("b", Color::Reset),
+                blank.clone(),
+                blank
+            ],
+            "the control character takes no cell",
         );
     }
 
