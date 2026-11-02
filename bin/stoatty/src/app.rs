@@ -1001,6 +1001,15 @@ impl ApplicationHandler<PtyEvent> for App {
             self.terminal_font_size,
             scale_factor as f32,
         );
+        sync_row_anchor(
+            &terminal,
+            render::grid_layout(
+                size.width.max(1),
+                size.height.max(1),
+                self.font_size,
+                scale_factor as f32,
+            ),
+        );
         if let Some(ident) = stoat_log::ident::get() {
             terminal
                 .lock()
@@ -2107,6 +2116,23 @@ fn update_cell_pixels(
     terminal.set_terminal_cell_pixels(terminal_width, terminal_height);
 }
 
+/// Record where `layout` hangs the primary window's last row in the terminal.
+///
+/// A surface whose height is not a whole number of cells hangs its last row
+/// from the bottom edge, over the row above it. A terminal pane's region ends
+/// where that row starts, so its pool grid measures this layout, not the
+/// uniform pitch. Otherwise the last row covers the pane's last terminal row.
+///
+/// Re-run whenever the surface size or the editor cell size changes, since
+/// both move the last row.
+fn sync_row_anchor(terminal: &FairMutex<Terminal>, layout: GridLayout) {
+    // The surface height and the cell height are whole pixels, so
+    // `bottom_row_y` is too and the cast drops nothing.
+    terminal
+        .lock()
+        .set_row_anchor(layout.bottom_row_y as u32, layout.rows.saturating_sub(1));
+}
+
 /// The text area's pixel extent, which the pty reports so an image client can
 /// size what it draws.
 ///
@@ -2202,6 +2228,7 @@ fn apply_font_step(state: &mut State, delta: i32) {
         state.terminal_font_size,
         state.scale_factor as f32,
     );
+    sync_row_anchor(&state.terminal, state.gpu.grid_layout());
 
     let (rows, cols) = state.gpu.grid_size();
     let (pixel_width, pixel_height) = grid_pixels(font_size, state.scale_factor as f32, rows, cols);
@@ -2561,6 +2588,7 @@ fn apply_config_reload(
         state
             .gpu
             .set_font_size(state.font_size, state.scale_factor as f32);
+        sync_row_anchor(&state.terminal, state.gpu.grid_layout());
 
         // The surface is unchanged, so only the cell metrics moved. Re-read the
         // grid size and resize the rest to match, as the font-zoom path does.
@@ -3938,6 +3966,7 @@ fn apply_primary_resize(state: &mut State) {
     };
     let grid_before = state.gpu.grid_size();
     state.gpu.resize(width, height);
+    sync_row_anchor(&state.terminal, state.gpu.grid_layout());
     let (rows, cols) = state.gpu.grid_size();
     let (pixel_width, pixel_height) =
         grid_pixels(state.font_size, state.scale_factor as f32, rows, cols);
@@ -4292,9 +4321,10 @@ mod tests {
         classify_window_open, compose_aux_grid, earliest, forced_damage, grid_pixels,
         grid_window_size, net_font_step, notification_should_show, pool_cell, pool_composite,
         pool_grid_reports, selection_copy_text, side_button_event, snap_shift_to_pixels,
-        step_popovers, swallow_super_combo, terminal_pool_at, update_cell_pixels, wheel_upstream,
-        zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize, PoolView, PtyWrite,
-        TermEvent, Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute, MAX_AUX_WINDOWS,
+        step_popovers, swallow_super_combo, sync_row_anchor, terminal_pool_at, update_cell_pixels,
+        wheel_upstream, zoom_route, ActivePool, ForceFull, FrameOutcome, Input, PendingResize,
+        PoolView, PtyWrite, TermEvent, Visibility, WindowIpcEvent, WindowOpenVerdict, ZoomRoute,
+        MAX_AUX_WINDOWS,
     };
     #[cfg(unix)]
     use super::{
@@ -5190,9 +5220,32 @@ mod tests {
         declare_terminal_pool(&mut terminal.lock(), 0);
         let redeclared = reports(20, 20);
 
+        // A 40 pixel surface of 24 pixel rows hangs its second row from y 16,
+        // so the region's two rows span 40 pixels, which hold one terminal row
+        // of 24.
+        let mut anchor_reports = || {
+            let anchor = GridLayout {
+                rows: 2,
+                cols: 8,
+                bottom_row_y: 16.0,
+            };
+            sync_row_anchor(&terminal, anchor);
+            pool_grid_reports(&terminal.lock().pools(), &mut reported)
+        };
+        let anchored = anchor_reports();
+        let reanchored = anchor_reports();
+
         assert_eq!(
-            [declared, held, stepped, retired, redeclared],
-            [sized(8, 4), vec![], sized(4, 2), vec![], sized(4, 2)],
+            [declared, held, stepped, retired, redeclared, anchored, reanchored],
+            [
+                sized(8, 4),
+                vec![],
+                sized(4, 2),
+                vec![],
+                sized(4, 2),
+                sized(4, 1),
+                vec![]
+            ],
             "each grid the program has not heard reports once",
         );
     }

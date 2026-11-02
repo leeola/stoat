@@ -3293,6 +3293,64 @@ fn a_terminal_pool_sizes_its_pages_at_the_terminal_cell_size() {
     assert_eq!(pool_grids(&mut terminal, 1), ((12, 50), (12, 50), [50, 0]));
 }
 
+/// A 467 pixel surface of 20 pixel rows holds 23 full rows and a 7 pixel strip,
+/// so its 24th row hangs from y 447. A terminal pool over the 23 rows above it
+/// spans 447 pixels, which hold 27 terminal rows of 16 where the uniform pitch
+/// fits 28. An anchor that arrives after the declare re-sizes the pool in place,
+/// and the pool reads as changed. The anchor places the primary window's rows
+/// only, so the same pool in an aux window keeps the uniform pitch.
+#[test]
+fn a_terminal_pool_fits_above_the_anchored_last_row() {
+    let cell_sized = || {
+        let mut terminal = Terminal::new(24, 80, Theme::default());
+        terminal.set_cell_pixels(10, 20);
+        terminal.set_terminal_cell_pixels(8, 16);
+        terminal
+    };
+
+    let mut anchored_first = cell_sized();
+    anchored_first.set_row_anchor(447, 23);
+    declare_terminal_pool(&mut anchored_first, 1, 23, 40, 0);
+    anchored_first.advance(&encode_pool_region(&PoolRegionCommand {
+        pool: 2,
+        top: 0,
+        left: 0,
+        width: 40,
+        height: 23,
+        window: 1,
+        kind: PoolKind::Terminal,
+        dim: 0,
+        resident: true,
+    }));
+    let aux = anchored_first.window_pools(1).first().map(|view| view.grid);
+
+    let mut declared_first = cell_sized();
+    declare_terminal_pool(&mut declared_first, 1, 23, 40, 0);
+    let uniform = pool_grids(&mut declared_first, 1);
+    let before = declared_first.pool_content_version(1);
+    declared_first.set_row_anchor(447, 23);
+    let after = declared_first.pool_content_version(1);
+
+    assert_eq!(
+        (
+            pool_grids(&mut anchored_first, 1),
+            aux,
+            uniform,
+            pool_grids(&mut declared_first, 1),
+            after == before,
+        ),
+        (
+            ((27, 50), (27, 50), [50, 0]),
+            Some((28, 50)),
+            ((28, 50), (28, 50), [50, 0]),
+            ((27, 50), (27, 50), [50, 0]),
+            false,
+        ),
+        "the primary pool holds the rows above the last row, whichever arrives first, \
+         and the aux pool keeps the uniform pitch",
+    );
+}
+
 #[test]
 fn a_grid_pool_ignores_the_terminal_cell_size() {
     let mut terminal = Terminal::new(24, 80, Theme::default());

@@ -529,6 +529,16 @@ pub struct Terminal {
     /// `(0, 0)` until the app calls [`Self::set_terminal_cell_pixels`], and a
     /// terminal pool sizes its pages in grid cells while either size is unset.
     terminal_cell_pixels: (u16, u16),
+    /// The pixel y the primary window's last row hangs from, and that row's
+    /// index, which the app records from the renderer's `GridLayout`.
+    ///
+    /// A surface whose height is not a whole number of cells hangs its last row
+    /// above the uniform pitch, over the bottom of the row above it. A terminal
+    /// pool whose region reaches that row measures the pixels the renderer gives
+    /// it, so its grid holds no row that the last row covers. `None` until the
+    /// app calls [`Self::set_row_anchor`], and every row keeps the uniform pitch
+    /// while unset.
+    row_anchor: Option<(u32, usize)>,
     /// Decoration commands deferred while a DEC 2026 synchronized update buffers,
     /// applied in arrival order once it ends.
     ///
@@ -1013,10 +1023,17 @@ impl Pool {
 /// `cell_pixels`, floored and at least one each way. While either size has a
 /// zero side, the terminal pool takes the grid answer, because the ratio of the
 /// two cells is unknown until the app sets both.
+///
+/// In the primary window, `row_anchor` places the rows as the renderer does,
+/// with the last row hung from its recorded pixel y. A region that ends at the
+/// last row then spans only the pixels above where that row hangs, which is
+/// where the renderer clips the pool. A region in an aux window, or any region
+/// before the app records the anchor, spans its rows at the uniform pitch.
 fn pool_grid(
     region: &PoolRegion,
     cell_pixels: (u16, u16),
     terminal_cell_pixels: (u16, u16),
+    row_anchor: Option<(u32, usize)>,
 ) -> (usize, usize) {
     let rows = usize::from(region.height.max(1));
     let cols = usize::from(region.width.max(1));
@@ -1035,10 +1052,20 @@ fn pool_grid(
         usize::from(terminal_cell_pixels.0),
         usize::from(terminal_cell_pixels.1),
     );
-    (
-        (rows * cell_h / term_h).max(1),
-        (cols * cell_w / term_w).max(1),
-    )
+    let span = match row_anchor {
+        Some((bottom_row_y, last_row)) if region.window == 0 => {
+            let row_y = |row: usize| {
+                if row < last_row {
+                    return row * cell_h;
+                }
+                bottom_row_y as usize + (row - last_row) * cell_h
+            };
+            let top = usize::from(region.top);
+            row_y(top + rows).saturating_sub(row_y(top))
+        },
+        _ => rows * cell_h,
+    };
+    ((span / term_h).max(1), (cols * cell_w / term_w).max(1))
 }
 
 /// The isolated VT context a `Gstoatty;fill` redirect paints a page into.
@@ -1253,6 +1280,7 @@ impl Terminal {
             pending_events: Vec::new(),
             cell_pixels: (0, 0),
             terminal_cell_pixels: (0, 0),
+            row_anchor: None,
             sync_staged: Vec::new(),
         }
     }
@@ -1619,20 +1647,38 @@ impl Terminal {
         self.resize_terminal_pools();
     }
 
+    /// Record the pixel y the primary window's last row hangs from, and that
+    /// row's index, from the renderer's layout.
+    ///
+    /// A terminal-kind pool in the primary window measures its region by where
+    /// the renderer places its rows. A region that reaches the last row then
+    /// holds only the terminal rows the renderer shows above where that row
+    /// hangs. A change rebuilds every such pool whose grid moves, as
+    /// [`Self::set_terminal_cell_pixels`] does.
+    ///
+    /// The app records it again whenever the surface height or the grid's cell
+    /// height changes, since both move the last row. Until the app calls it,
+    /// every row keeps the uniform pitch.
+    pub fn set_row_anchor(&mut self, bottom_row_y: u32, last_row: usize) {
+        self.row_anchor = Some((bottom_row_y, last_row));
+        self.resize_terminal_pools();
+    }
+
     /// Rebuild each terminal-kind pool whose grid moved under the current cell
-    /// sizes.
+    /// sizes and row anchor.
     ///
     /// A page painting into such a pool was sized for the old grid, so it is
     /// doomed the way a re-declare that resizes the pool dooms it.
     fn resize_terminal_pools(&mut self) {
-        let (cell, terminal_cell) = (self.cell_pixels, self.terminal_cell_pixels);
+        let (cell, terminal_cell, row_anchor) =
+            (self.cell_pixels, self.terminal_cell_pixels, self.row_anchor);
         let mut rebuilt = Vec::new();
         for pool in self
             .pools
             .values_mut()
             .filter(|pool| pool.region.kind == PoolKind::Terminal)
         {
-            let grid = pool_grid(&pool.region, cell, terminal_cell);
+            let grid = pool_grid(&pool.region, cell, terminal_cell, row_anchor);
             if pool.grid == grid {
                 continue;
             }
@@ -1871,7 +1917,12 @@ impl Terminal {
                 let region =
                     grid::from_command::pool_region_from_command(self.clamp_region(region));
                 let window = region.window;
-                let grid = pool_grid(&region, self.cell_pixels, self.terminal_cell_pixels);
+                let grid = pool_grid(
+                    &region,
+                    self.cell_pixels,
+                    self.terminal_cell_pixels,
+                    self.row_anchor,
+                );
                 // Whether the declare left the pool's pages newly built or
                 // rebuilt, so a page painting into them lost the slot it started
                 // on. A re-declare at the grid already held moves nothing, which
