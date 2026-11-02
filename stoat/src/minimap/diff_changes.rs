@@ -63,6 +63,9 @@ pub(crate) struct DiffChangesStrip {
     populations: bool,
     /// Whether the held lines take syntax colors.
     syntax_on: bool,
+    /// The [`ClassTable::class_version`] the held lines were summarized
+    /// under.
+    classes: u64,
     /// Whether the last sync left lines of the followed stack unsent.
     pending: bool,
     /// The rows each stacked buffer's parses changed since its excerpt's lines
@@ -172,6 +175,7 @@ impl DiffChangesStrip {
             held: Vec::new(),
             populations: false,
             syntax_on: false,
+            classes: 0,
             pending: false,
             parsed: HashMap::new(),
             marks: HashMap::new(),
@@ -371,7 +375,8 @@ pub(crate) fn summarize_rows(
 /// the lines of the rows those touched. An excerpt whose layout moved, a new
 /// excerpt, and an excerpt that left the stack each splice that excerpt's
 /// lines alone. A protocol that changes whether lines carry population blocks,
-/// and a syntax switch, replace every line. Each call sends slices of at most
+/// a syntax switch, and a class table that gives other scopes a class replace
+/// every line. Each call sends slices of at most
 /// [`SYNC_SLICE`] lines until its time budget runs out, so a long stack fills
 /// over idle frames. A stack with no rows empties the strip.
 pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out: &mut Vec<u8>) {
@@ -398,10 +403,12 @@ pub(crate) fn sync_diff_changes_strip(stoat: &mut Stoat, ws_id: WorkspaceId, out
         excerpt_keys(ws, id, &mut strip.marks)
     });
     strip.prune(&target);
-    if (strip.populations, strip.syntax_on) != (populations, syntax_on) {
+    let classes = minimap_class_table.class_version;
+    if (strip.populations, strip.syntax_on, strip.classes) != (populations, syntax_on, classes) {
         strip.forget_held();
         strip.populations = populations;
         strip.syntax_on = syntax_on;
+        strip.classes = classes;
     }
 
     let Workspace {
@@ -1876,6 +1883,22 @@ mod tests {
         let (_, held) = layout(&mut h);
 
         h.stoat.syntax_highlight = false;
+        let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
+        assert_eq!(
+            splices,
+            [(strip_id(&h), 0, held as u32, wire_lines(&mut h, 0..held))]
+        );
+    }
+
+    /// A class table that gives other scopes a class sends every line again,
+    /// since the held lines carry the classes of the old one.
+    #[test]
+    fn a_class_table_change_sends_the_lines_again() {
+        let (mut h, mut rx) = strip_harness(8);
+        frame(&mut h, &mut rx);
+        let (_, held) = layout(&mut h);
+
+        h.stoat.minimap_class_table = ClassTable::from_theme(&Theme::empty());
         let (splices, _) = strip_frames(&frame(&mut h, &mut rx));
         assert_eq!(
             splices,

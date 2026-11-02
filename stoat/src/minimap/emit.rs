@@ -354,13 +354,15 @@ fn sync_minimap_strip(
         populations.hash(&mut hasher);
         hasher.finish()
     };
+    let classes = stoat.minimap_class_table.class_version;
     let syntax_version = minimap_syntax_version(
         stoat.syntax_highlight,
+        classes,
         buffer_syntax_version,
         lsp_token_version,
     );
     let syntax_other_version =
-        minimap_syntax_other_version(stoat.syntax_highlight, lsp_token_version);
+        minimap_syntax_other_version(stoat.syntax_highlight, classes, lsp_token_version);
 
     let syntax_on = stoat.syntax_highlight;
     // Read before the store is borrowed below, which holds `stoat` for the rest
@@ -453,15 +455,25 @@ fn minimap_build_window(
 /// Content version of a minimap strip's coloring, hashing the inputs whose
 /// change must re-summarize every row already built.
 ///
+/// `classes` is the class table's
+/// [`class_version`](crate::minimap::ClassTable::class_version), which moves
+/// when a theme switch changes which scopes carry a class.
+///
 /// The parse and LSP versions stay [`Option`]s rather than collapsing to a
 /// sentinel. Both count *buffer* versions and a freshly opened buffer sits at
 /// version 0, so flattening `None` to 0 would make "not parsed yet" and "parsed
 /// the untouched file" hash alike. Any buffer past the sync-parse cap summarizes
 /// its rows before its first parse lands, and that collision would leave them
 /// monochrome until an unrelated edit re-summarized them.
-fn minimap_syntax_version(syntax_on: bool, parse: Option<u64>, lsp: Option<u64>) -> u64 {
+fn minimap_syntax_version(
+    syntax_on: bool,
+    classes: u64,
+    parse: Option<u64>,
+    lsp: Option<u64>,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     syntax_on.hash(&mut hasher);
+    classes.hash(&mut hasher);
     parse.hash(&mut hasher);
     lsp.hash(&mut hasher);
     hasher.finish()
@@ -472,9 +484,10 @@ fn minimap_syntax_version(syntax_on: bool, parse: Option<u64>, lsp: Option<u64>)
 /// Only the parse reports which rows its tokens changed, so the strip needs to
 /// tell a bump it has row information for from one it does not. A change here
 /// puts the recolor sweep back to covering every built row.
-fn minimap_syntax_other_version(syntax_on: bool, lsp: Option<u64>) -> u64 {
+fn minimap_syntax_other_version(syntax_on: bool, classes: u64, lsp: Option<u64>) -> u64 {
     let mut hasher = DefaultHasher::new();
     syntax_on.hash(&mut hasher);
+    classes.hash(&mut hasher);
     lsp.hash(&mut hasher);
     hasher.finish()
 }
@@ -784,36 +797,41 @@ mod tests {
 
     #[test]
     fn minimap_syntax_version_separates_unparsed_from_parsed_at_zero() {
-        let base = minimap_syntax_version(true, None, None);
+        let base = minimap_syntax_version(true, 0, None, None);
         assert_eq!(
             base,
-            minimap_syntax_version(true, None, None),
+            minimap_syntax_version(true, 0, None, None),
             "identical inputs leave the built rows alone"
         );
         assert_ne!(
             base,
-            minimap_syntax_version(true, Some(0), None),
+            minimap_syntax_version(true, 0, Some(0), None),
             "the first parse of an unedited buffer recolors the strip"
         );
         assert_ne!(
-            minimap_syntax_version(true, Some(0), None),
-            minimap_syntax_version(true, Some(1), None),
+            minimap_syntax_version(true, 0, Some(0), None),
+            minimap_syntax_version(true, 0, Some(1), None),
             "a reparse after an edit recolors the strip"
         );
         assert_ne!(
             base,
-            minimap_syntax_version(true, None, Some(0)),
+            minimap_syntax_version(true, 0, None, Some(0)),
             "the first LSP semantic tokens for an unedited buffer recolor the strip"
         );
         assert_ne!(
-            minimap_syntax_version(true, Some(0), Some(0)),
-            minimap_syntax_version(true, Some(0), Some(1)),
+            minimap_syntax_version(true, 0, Some(0), Some(0)),
+            minimap_syntax_version(true, 0, Some(0), Some(1)),
             "LSP tokens for a newer buffer version recolor the strip"
         );
         assert_ne!(
             base,
-            minimap_syntax_version(false, None, None),
+            minimap_syntax_version(false, 0, None, None),
             "toggling syntax highlighting recolors the strip"
+        );
+        assert_ne!(
+            base,
+            minimap_syntax_version(true, 1, None, None),
+            "a class table that gives other scopes a class recolors the strip"
         );
     }
 
@@ -2348,11 +2366,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn minimap_recolors_on_syntax_toggle() {
+    /// A strip over a buffer whose row 0 starts with a word in the first syntax
+    /// scope, built and drained once.
+    fn colored_word_strip() -> (crate::test_harness::TestHarness, UnboundedReceiver<Vec<u8>>) {
         use crate::display_map::highlights::SemanticTokenHighlight;
-        use std::sync::Arc;
-        use stoatty_protocol::command::Command;
 
         let mut h = Stoat::test();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -2397,37 +2414,62 @@ mod tests {
             .panes
             .resize(Rect::new(0, 0, 80, 24));
 
-        let line0_class = |cmds: &[Command]| {
-            cmds.iter().rev().find_map(|cmd| match cmd {
-                Command::MinimapLines(l) if l.start == 0 => l
-                    .lines
-                    .first()
-                    .and_then(|runs| runs.first())
-                    .map(|r| r.class),
-                _ => None,
-            })
-        };
+        assert_eq!(
+            synced_row0_class(&mut h, &mut rx),
+            Some(colored_class),
+            "line 0 is colored under syntax highlighting"
+        );
+        (h, rx)
+    }
+
+    /// Render a frame and sync the strips, and answer the class of the first
+    /// run in the last splice that resends row 0.
+    fn synced_row0_class(
+        h: &mut crate::test_harness::TestHarness,
+        rx: &mut UnboundedReceiver<Vec<u8>>,
+    ) -> Option<u8> {
+        use stoatty_protocol::command::Command;
 
         let _ = h.stoat.render();
         apc_emit::emit_apc_scene(&mut h.stoat);
         emit_minimap(&mut h.stoat);
-        let colored = drain_apc(&mut rx);
-        assert_eq!(
-            line0_class(&colored),
-            Some(colored_class),
-            "line 0 is colored under syntax highlighting, got {colored:?}"
-        );
+        drain_apc(rx).iter().rev().find_map(|cmd| match cmd {
+            Command::MinimapLines(l) if l.start == 0 => l
+                .lines
+                .first()
+                .and_then(|runs| runs.first())
+                .map(|r| r.class),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn minimap_recolors_on_syntax_toggle() {
+        let (mut h, mut rx) = colored_word_strip();
 
         // Toggling syntax off re-summarizes the built lines monochrome, with no
         // buffer edit.
         h.stoat.syntax_highlight = false;
-        let _ = h.stoat.render();
-        emit_minimap(&mut h.stoat);
-        let mono = drain_apc(&mut rx);
         assert_eq!(
-            line0_class(&mono),
+            synced_row0_class(&mut h, &mut rx),
             Some(0),
-            "the toggle recolors line 0 monochrome, got {mono:?}"
+            "the toggle recolors line 0 monochrome"
+        );
+    }
+
+    /// A class table that gives the word's scope no class recolors the row, as
+    /// a theme switch that takes the scope's foreground away does.
+    #[test]
+    fn minimap_recolors_on_a_class_table_change() {
+        use crate::{minimap::ClassTable, theme::Theme};
+
+        let (mut h, mut rx) = colored_word_strip();
+
+        h.stoat.minimap_class_table = ClassTable::from_theme(&Theme::empty());
+        assert_eq!(
+            synced_row0_class(&mut h, &mut rx),
+            Some(0),
+            "the new table recolors line 0 with no buffer edit"
         );
     }
 

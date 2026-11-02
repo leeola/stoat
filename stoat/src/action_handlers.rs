@@ -1582,10 +1582,11 @@ fn set_theme(stoat: &mut Stoat, name: &str) -> UpdateEffect {
                 picker.requested_preview = None;
             }
 
-            // The class table is rebuilt and the stores are kept: a class is a
+            // The class table is rebuilt and the stores are kept. A class is a
             // theme-key index, so what a store holds means the same under the
-            // new palette. Only the colors move, and they ride the strip
-            // declaration on the next frame.
+            // new palette, and the colors ride the strip declaration on the
+            // next frame. A theme that changes which scopes have a foreground
+            // moves the table's class version, and each strip recolors.
             stoat.minimap_class_table = crate::minimap::ClassTable::from_theme(&stoat.theme);
             stoat.theme_epoch += 1;
             stoat.paint_generation += 1;

@@ -12,7 +12,12 @@ use crate::{
     theme::{scope, Theme},
 };
 use ratatui::style::Color;
-use std::{collections::HashMap, ops::Range, time::Duration};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
+    ops::Range,
+    time::Duration,
+};
 use stoat_language::HighlightId;
 use stoat_scheduler::Executor;
 use stoat_text::{
@@ -1563,12 +1568,18 @@ fn glyph_weight(ch: char) -> u8 {
 /// its class via [`Self::class_of`]. A span whose style was resolved to a color
 /// resolves through [`Self::class_of_fg`].
 ///
-/// A class is therefore a theme-key index, which is the same index under every
-/// theme: the key set is static, and
+/// A scope with no foreground of its own takes no class, so its tokens leave
+/// the color beneath them in place, as the editor's merge does. Its palette
+/// entry is the default foreground, so a row that still holds the class from
+/// an earlier theme shows the text color until it recolors.
+///
+/// A class is otherwise a theme-key index, the same index under every theme.
+/// The key set is static, and
 /// [`HighlightStyleInterner::push`](crate::display_map::highlights::HighlightStyleInterner::push)
 /// never dedups, so an id recorded under one theme names the same key under the
-/// next. A minimap store built under one theme is valid under every other, and a
-/// switch re-declares the palette rather than rebuilding what the strip holds.
+/// next. Two tables with the same [`Self::class_version`] map every style alike,
+/// so a switch between them re-declares the palette rather than rebuilding what
+/// the strip holds.
 ///
 /// The palette lays out the syntax block of [`Self::stride`] classes, then the
 /// seven edge classes, then four copies of the syntax block for added,
@@ -1583,6 +1594,12 @@ pub struct ClassTable {
     by_fg: HashMap<[u8; 3], u8>,
     edge_base: u8,
     population_base: u8,
+    /// A hash of which syntax scopes carry a class.
+    ///
+    /// A theme switch that gives a scope a foreground or takes one away moves
+    /// it. Each strip folds it into the version its rows were colored under,
+    /// so such a switch recolors the rows the strip holds.
+    pub(crate) class_version: u64,
 }
 
 impl ClassTable {
@@ -1593,18 +1610,24 @@ impl ClassTable {
         let mut palette = vec![default_fg];
         let mut by_style = HashMap::new();
         let mut by_fg = HashMap::new();
+        let mut classes = DefaultHasher::new();
         for index in 0..styles.theme_keys().len() {
             let Some(style_id) = styles.id_for_highlight(HighlightId(index as u32)) else {
                 palette.push(default_fg);
                 continue;
             };
+            let Some(fg) = styles.interner[style_id].foreground else {
+                palette.push(default_fg);
+                continue;
+            };
             let class = (index + 1) as u8;
             by_style.insert(style_id, class);
-            let fg = styles.interner[style_id].foreground;
-            if let Some(rgb) = fg.map(color_to_rgb).filter(|&rgb| rgb != default_fg) {
+            class.hash(&mut classes);
+            let rgb = color_to_rgb(fg);
+            if rgb != default_fg {
                 by_fg.entry(rgb).or_insert(class);
             }
-            palette.push(color_to_rgb(fg.unwrap_or(Color::White)));
+            palette.push(rgb);
         }
 
         // The edge classes follow the syntax scopes, in EdgeClass order, so a
@@ -1635,6 +1658,7 @@ impl ClassTable {
             by_fg,
             edge_base,
             population_base,
+            class_version: classes.finish(),
         }
     }
 
@@ -1682,7 +1706,7 @@ impl ClassTable {
     }
 
     /// The class a token drawn in `style` maps to, or 0 when the style is not a
-    /// recognized syntax scope.
+    /// recognized syntax scope or its scope has no foreground of its own.
     pub fn class_of(&self, style: HighlightStyleId) -> u8 {
         self.by_style.get(&style).copied().unwrap_or(0)
     }
@@ -4609,16 +4633,21 @@ mod tests {
 
     /// Scopes keep distinct classes even when they paint the same color.
     ///
-    /// An unstyled theme gives every scope the same fallback foreground. A
-    /// color-keyed lookup cannot tell those apart, and would collapse every
-    /// scope onto whichever one it saw first.
+    /// `keyword.control` inherits the keyword's red, and a color-keyed lookup
+    /// collapses both scopes onto whichever one it sees first.
     #[test]
     fn class_of_maps_a_style_id_to_its_scope_class() {
         use super::ClassTable;
         use crate::{display_map::syntax_theme::SyntaxStyles, theme::Theme};
         use stoat_language::HighlightId;
 
-        let theme = Theme::empty();
+        let src = r##"theme classtest {
+            ui.text.fg = "#ffffff";
+            syntax.keyword.fg = "#ff0000";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        let theme = Theme::from_config(&config.expect("theme config parses"), "classtest")
+            .expect("theme builds");
         let table = ClassTable::from_theme(&theme);
         let styles = SyntaxStyles::from_theme(&theme);
         assert_eq!(
@@ -4635,6 +4664,42 @@ mod tests {
             table.class_of(styles.id_for_highlight(HighlightId(1)).expect("second key")),
             2,
         );
+    }
+
+    /// A scope with no foreground of its own takes no class, so its tokens
+    /// leave the color beneath them in place, and its palette entry is the
+    /// text color. The class version follows which scopes carry a class, not
+    /// the colors they paint.
+    #[test]
+    fn a_scope_with_no_foreground_takes_no_class() {
+        use super::ClassTable;
+        use crate::{display_map::syntax_theme::SyntaxStyles, theme::Theme};
+        use stoat_language::HighlightId;
+
+        let theme = |body: &str| {
+            let (config, errors) = stoat_config::parse(&format!("theme t {{ {body} }}"));
+            assert!(errors.is_empty(), "parse errors: {errors:?}");
+            Theme::from_config(&config.expect("the theme parses"), "t").expect("theme t exists")
+        };
+        let bold = theme(r##"ui.text.fg = "#101010"; syntax.keyword = { modifiers: [bold] };"##);
+        let table = ClassTable::from_theme(&bold);
+        let keyword = SyntaxStyles::from_theme(&bold)
+            .id_for_highlight(HighlightId(0))
+            .expect("the keyword key resolves");
+        assert_eq!(
+            (table.class_of(keyword), table.palette()[1]),
+            (0, [16, 16, 16]),
+            "the keyword takes no class and paints the text color",
+        );
+
+        let version = |body: &str| ClassTable::from_theme(&theme(body)).class_version;
+        let red = version(r##"syntax.keyword.fg = "#ff0000";"##);
+        assert_eq!(
+            [version(r##"syntax.keyword.fg = "#00ff00";"##), version("")],
+            [red, table.class_version],
+            "colors and modifiers leave the version alone",
+        );
+        assert_ne!(red, table.class_version, "a lost foreground moves it");
     }
 
     /// A span with a resolved color maps to the class of the first key that
