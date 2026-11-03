@@ -3578,24 +3578,14 @@ fn a_cursor_step_under_relative_numbering_patches_the_numbered_rows() {
 /// then each row's buffer number and base number.
 #[test]
 fn a_cursor_step_under_relative_numbering_redecorates_a_rich_stack_page() {
-    use stoatty_protocol::command::{Command, FillCommand};
+    use stoatty_protocol::command::Command;
 
     let (mut h, mut rx, pool) = relative_stack(30, rgb_diff_gutter_theme());
     h.type_keys("j");
     h.stoat.render();
     let commands = command::decode_stream(&emit_raw(&mut h, &mut rx));
 
-    let texts: Vec<String> = commands
-        .iter()
-        .skip_while(|c| {
-            !matches!(c, Command::FillDecorations(FillCommand { pool: p, index: 0, .. }) if *p == pool)
-        })
-        .take_while(|c| !matches!(c, Command::FillEnd))
-        .filter_map(|c| match c {
-            Command::TextRun(run) => Some(run.text.clone()),
-            _ => None,
-        })
-        .collect();
+    let texts = decoration_texts(&commands, pool, 0);
     let fills = commands
         .iter()
         .filter(|c| matches!(c, Command::Fill(fill) if fill.pool == pool))
@@ -3608,6 +3598,52 @@ fn a_cursor_step_under_relative_numbering_redecorates_a_rich_stack_page() {
         (vec!["1", "1", "2", "2", "1", "3"], 0),
         "the cursor on line 2: (buffer, base) per row is (1, 1), (2, 2), (1, 3)",
     );
+}
+
+/// A step onto a wrapped line's continuation row keeps the cursor's line and
+/// moves every step count by one, so the rich stack page takes new
+/// decorations with the counts from the new row.
+#[test]
+fn a_step_onto_a_continuation_row_redecorates_a_rich_stack_page() {
+    let long = "x".repeat(70);
+    let (head, working) = (format!("{long}\n2\n3\n"), format!("L{long}\n2\n3\n"));
+    let (mut h, mut rx, pool) = resident_stack(&[("a.txt", &head, &working)], MinimapMode::Off);
+    h.stoat.theme = Arc::new(rgb_diff_gutter_theme());
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Relative);
+    h.stoat.settings.editor_wrap = Some(WrapMode::EditorWidth);
+    h.stoat.paint_generation += 1;
+    h.stoat.render();
+    emit_raw(&mut h, &mut rx);
+    h.type_keys("j");
+    h.stoat.render();
+    let commands = command::decode_stream(&emit_raw(&mut h, &mut rx));
+
+    let texts = decoration_texts(&commands, pool, 0);
+    assert_eq!(
+        texts.iter().take(6).map(String::as_str).collect::<Vec<_>>(),
+        ["1", "1", "1", "2", "2", "3"],
+        "the cursor on line 1's second row: (buffer, base) per numbered row is \
+         (1, 1), (1, 2), (2, 3)",
+    );
+}
+
+/// The text of each run in the decorations-only fill of page `index` of
+/// `pool` among `commands`, empty when no such fill went out.
+fn decoration_texts(commands: &[command::Command], pool: u32, index: u64) -> Vec<String> {
+    use stoatty_protocol::command::{Command, FillCommand};
+
+    commands
+        .iter()
+        .skip_while(|c| {
+            !matches!(c, Command::FillDecorations(FillCommand { pool: p, index: i, .. })
+                if *p == pool && *i == index)
+        })
+        .take_while(|c| !matches!(c, Command::FillEnd))
+        .filter_map(|c| match c {
+            Command::TextRun(run) => Some(run.text.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The cells of each page of `pool` that the changes view holds, by index.

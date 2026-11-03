@@ -301,6 +301,56 @@ pub(crate) fn cursor_stack_row(
     Some(excerpt.top + 1 + view::cursor_display_row(editor) as usize)
 }
 
+/// The signed `j` or `k` steps from the focused excerpt's cursor to the row
+/// before each excerpt's display row 0, one per excerpt in stack order.
+///
+/// A step lands on each display row that maps to a buffer position, as the
+/// changes view's `j` and `k` walk the stack. So a removed base row and an
+/// excerpt header take no step, and a fold placeholder takes one. An origin is
+/// negative for the focused excerpt and the excerpts above it.
+///
+/// `None` on an empty stack, and while the focused excerpt waits on its diff
+/// map.
+pub(crate) fn step_origins(
+    state: &DiffChangesState,
+    editors: &mut SlotMap<EditorId, EditorState>,
+) -> Option<Vec<i64>> {
+    let focused = state.focused_excerpt()?;
+    focused.folded_version?;
+    let through_cursor = {
+        let editor = editors.get_mut(focused.editor_id)?;
+        let cursor_row = view::cursor_display_row(editor);
+        editor
+            .display_map
+            .snapshot()
+            .buffer_rows_above(cursor_row + 1)
+    };
+
+    // An excerpt that waits on its diff map paints no row, so the walk passes
+    // over it.
+    let totals: Vec<i64> = state
+        .excerpts
+        .iter()
+        .map(|excerpt| match excerpt.folded_version {
+            None => 0,
+            Some(_) => editors.get_mut(excerpt.editor_id).map_or(0, |editor| {
+                let snapshot = editor.display_map.snapshot();
+                i64::from(snapshot.buffer_rows_above(snapshot.line_count()))
+            }),
+        })
+        .collect();
+
+    let mut origins = vec![0; totals.len()];
+    origins[state.focused] = -i64::from(through_cursor);
+    for index in state.focused + 1..totals.len() {
+        origins[index] = origins[index - 1] + totals[index - 1];
+    }
+    for index in (0..state.focused).rev() {
+        origins[index] = origins[index + 1] - totals[index];
+    }
+    Some(origins)
+}
+
 /// Focus the excerpt that stack row `row` falls in and put its cursor at the
 /// start of the row, as of the last [`layout_stack`], and report whether the
 /// row held one.

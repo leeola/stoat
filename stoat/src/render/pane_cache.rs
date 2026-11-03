@@ -47,7 +47,6 @@ use crate::{
     pane::{Pane, PaneId, Placement, View},
     render::{
         diff_changes::stack_composited,
-        editor,
         pane::{diff_sides_for, pane_areas},
         review::DiffDials,
         undercurl::UndercurlBatch,
@@ -616,9 +615,9 @@ fn terminal_cache_key(
 /// replay then records the cursor where the paint records it, through
 /// [`replay_cursor`](crate::render::diff_changes::replay_cursor).
 ///
-/// Under relative numbering, each number of the focused excerpt counts from
-/// the cursor's line, so the key holds that line too. Then only a move along
-/// the line replays the pane.
+/// Under relative numbering, every excerpt in the window numbers its rows by
+/// the steps from the cursor, so the key holds each one's step origin. Then
+/// only a move along the cursor's display row replays the pane.
 #[allow(clippy::too_many_arguments)]
 fn stack_cache_key(
     pane: &Pane,
@@ -650,17 +649,15 @@ fn stack_cache_key(
         return None;
     }
 
-    let counted_line =
-        match frame.line_numbers == LineNumbers::Relative && is_focused && frame.mode != "insert" {
-            true => editor::editor_cursor_position(editors.get(editor_id)?).map(|(line, _)| line),
-            false => None,
-        };
+    let origins =
+        (frame.line_numbers == LineNumbers::Relative && is_focused && frame.mode != "insert")
+            .then(|| diff_changes::step_origins(state, editors))
+            .flatten();
     let mut stack = DefaultHasher::new();
     (
         state.focused,
         state.viewport_rows,
         stack_composited(pane, frame),
-        counted_line,
     )
         .hash(&mut stack);
     let ends = state
@@ -669,7 +666,7 @@ fn stack_cache_key(
         .skip(1)
         .map(|excerpt| excerpt.top)
         .chain([total]);
-    for (excerpt, end) in state.excerpts.iter().zip(ends) {
+    for (index, (excerpt, end)) in state.excerpts.iter().zip(ends).enumerate() {
         if end <= window.start || excerpt.top >= window.end {
             continue;
         }
@@ -687,6 +684,7 @@ fn stack_cache_key(
             shown.display_map.snapshot().paint_version(),
             diff_version(buffers, excerpt.buffer_id)?,
             diagnostics_version(buffers, excerpt.buffer_id, frame),
+            origins.as_ref().map(|origins| origins[index]),
         )
             .hash(&mut stack);
     }

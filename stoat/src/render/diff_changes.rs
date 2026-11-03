@@ -4,6 +4,10 @@
 //! per-file diff's painter, so a hunk reads the same here as in the per-file
 //! diff. A header row names each excerpt's file, centered across the pane.
 //! The focused excerpt paints the cursor where the changes view's keys act.
+//!
+//! Under relative numbering every excerpt numbers its rows by the `j` or `k`
+//! steps that reach them from the focused excerpt's cursor, so a number is
+//! the count to type before the key.
 
 use crate::{
     buffer_registry::BufferRegistry,
@@ -22,6 +26,7 @@ use crate::{
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use slotmap::SlotMap;
+use stoat_config::LineNumbers;
 use stoat_widgets::ApcScene;
 
 /// How much of a page of the changes view's pool a paint covers.
@@ -252,6 +257,10 @@ pub(crate) fn paint_stack_rows(
 ) {
     let header_style = frame.theme.get(scope::VCS_COMMIT_SHA);
     let (scroll, rows_on_screen) = (first_row, usize::from(area.height));
+    let origins =
+        (is_focused && frame.line_numbers == LineNumbers::Relative && frame.mode != "insert")
+            .then(|| diff_changes::step_origins(state, editors))
+            .flatten();
     for (index, excerpt) in state.excerpts.iter().enumerate() {
         let rows = diff_changes::excerpt_rows(excerpt, editors);
         let top = excerpt.top;
@@ -317,6 +326,7 @@ pub(crate) fn paint_stack_rows(
             frame.scrolloff,
             frame.reload_flashes,
             paint == PagePaint::DecorationsOnly,
+            origins.as_ref().map(|origins| origins[index]),
         );
         editor.viewport_rows = Some(rows as u32);
     }
@@ -457,6 +467,7 @@ mod tests {
         theme::scope,
         workspace::Workspace,
     };
+    use crossterm::event::Event;
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use slotmap::SlotMap;
     use std::{
@@ -882,46 +893,189 @@ mod tests {
         );
     }
 
-    /// The focused excerpt numbers its live column from its cursor line, and
-    /// the other excerpt numbers its own lines. The frame before the keys
-    /// leaves a capture that the frames after them do not replay.
-    ///
-    /// Each file changes its second line, so the context rows cover the whole
-    /// file and no fold row joins the numbers.
+    /// Every excerpt numbers its live column by the steps from the focused
+    /// cursor, so the excerpt below counts on past the focused excerpt's last
+    /// row. The frame before the keys leaves a capture that the frames after
+    /// them do not replay.
     #[test]
-    fn the_focused_excerpt_counts_from_its_cursor_and_the_other_excerpt_does_not() {
-        let (base, text) = ("1\n2\n3\n4\n", "1\nTWO\n3\n4\n");
-        let mut h = changes_view(120, 24, &[("a.txt", base, text), ("b.txt", base, text)]);
-        {
-            let (state, editors) = stack(&mut h);
-            diff_changes::place_cursor(&mut editors[state.excerpts[0].editor_id], Point::new(0, 0));
-        }
+    fn every_excerpt_counts_the_steps_from_the_focused_cursor() {
+        let mut h = numbered_files();
+        focus_at(&mut h, 0, Point::new(0, 0));
         h.render_composited();
         h.type_keys("j j");
 
         let buf = h.render_composited();
+        assert_eq!(
+            excerpt_numbers(&mut h, &buf),
+            [["2", "1", "3", "1", "2"], ["3", "4", "5", "6", "7"]]
+        );
+    }
+
+    /// An excerpt above the focused one counts the steps up to the cursor.
+    #[test]
+    fn an_excerpt_above_the_cursor_counts_up_to_it() {
+        let mut h = numbered_files();
+        focus_at(&mut h, 1, Point::new(1, 0));
+        let buf = h.render_composited();
+        assert_eq!(
+            excerpt_numbers(&mut h, &buf),
+            [["6", "5", "4", "3", "2"], ["1", "2", "1", "2", "3"]]
+        );
+    }
+
+    /// Each number is the count that `j` or `k` takes to reach its row from
+    /// the cursor, across fold placeholders, removed base rows, and excerpt
+    /// headers.
+    ///
+    /// a.txt changes its first line and folds the lines past its fourth into
+    /// that row. b.txt changes line 15 and folds lines 1 to 11 into a
+    /// placeholder row of its own, where the cursor sits. c.txt drops line 3,
+    /// which leaves a removed base row and no fold.
+    #[test]
+    fn a_number_is_the_count_that_reaches_its_row() {
+        let twenty: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let six: String = (1..=6).map(|n| format!("{n}\n")).collect();
+        let mut h = changes_view(
+            120,
+            30,
+            &[
+                ("a.txt", &twenty, &twenty.replacen("1\n", "ONE\n", 1)),
+                ("b.txt", &twenty, &twenty.replace("\n15\n", "\nFIFTEEN\n")),
+                ("c.txt", &six, &six.replace("\n3\n", "\n")),
+            ],
+        );
+        // The stack row of the cursor, as of the last paint's layout.
+        let home = |h: &mut TestHarness| {
+            focus_at(h, 1, Point::new(0, 0));
+            let (state, editors) = stack(h);
+            diff_changes::cursor_stack_row(state, editors).expect("b.txt shows its rows")
+        };
+        home(&mut h);
+        let buf = h.render_composited();
+        let numbers = excerpt_numbers(&mut h, &buf);
+        assert_eq!(
+            numbers,
+            vec![
+                vec!["4", "3", "2", "1"],
+                vec!["1", "1", "2", "3", "4", "5", "6", "7"],
+                vec!["8", "9", "", "10", "11", "12", "13"],
+            ]
+        );
+
+        let cursor = home(&mut h);
+        let tops: Vec<usize> = stack(&mut h)
+            .0
+            .excerpts
+            .iter()
+            .map(|excerpt| excerpt.top)
+            .collect();
+        let (mut targets, mut reached) = (Vec::new(), Vec::new());
+        for (top, rows) in tops.into_iter().zip(&numbers) {
+            for (offset, number) in rows.iter().enumerate() {
+                let row = top + 1 + offset;
+                if row == cursor || number.is_empty() {
+                    continue;
+                }
+                let digits: Vec<String> = number.chars().map(String::from).collect();
+                let key = if row < cursor { "k" } else { "j" };
+                home(&mut h);
+                h.type_keys(&format!("{} {key}", digits.join(" ")));
+                let (state, editors) = stack(&mut h);
+                targets.push(Some(row));
+                reached.push(diff_changes::cursor_stack_row(state, editors));
+            }
+        }
+        assert_eq!(reached, targets, "the stack row each count's keys reach");
+    }
+
+    /// While the window is in the background every excerpt numbers its rows
+    /// by their own lines, and the steps from the cursor come back with the
+    /// focus.
+    #[test]
+    fn an_unfocused_window_numbers_each_excerpt_by_its_own_lines() {
+        let mut h = numbered_files();
+        focus_at(&mut h, 0, Point::new(2, 0));
+        h.stoat.update(Event::FocusLost);
+        let buf = h.render_composited();
+        let background = excerpt_numbers(&mut h, &buf);
+        h.stoat.update(Event::FocusGained);
+        let buf = h.render_composited();
+        assert_eq!(
+            [background, excerpt_numbers(&mut h, &buf)],
+            [
+                [["1", "2", "3", "4", "5"], ["1", "2", "3", "4", "5"]],
+                [["2", "1", "3", "1", "2"], ["3", "4", "5", "6", "7"]],
+            ],
+            "the numbers in the background, then with the focus back",
+        );
+    }
+
+    /// A changes view that a dock took focus from numbers each excerpt by its
+    /// own lines, as an unfocused per-file diff does.
+    #[test]
+    fn an_unfocused_changes_view_numbers_each_excerpt_by_its_own_lines() {
+        let mut h = numbered_files();
+        focus_at(&mut h, 0, Point::new(2, 0));
+        focus_hidden_dock(&mut h);
+        let buf = h.render_composited();
+        h.stoat.active_workspace_mut().focus = FocusTarget::SplitPane;
+        assert_eq!(
+            excerpt_numbers(&mut h, &buf),
+            [["1", "2", "3", "4", "5"], ["1", "2", "3", "4", "5"]]
+        );
+    }
+
+    /// Give the focus to a hidden dock, so the changes view's pane keeps the
+    /// window's focus and loses its own.
+    fn focus_hidden_dock(h: &mut TestHarness) {
+        let ws = h.stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Default::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+    }
+
+    /// Two four-line files that each change their second line, under a
+    /// focused changes view. The context rows cover each whole file, so no
+    /// fold row joins the numbers, and each excerpt shows five rows.
+    fn numbered_files() -> TestHarness {
+        let (base, text) = ("1\n2\n3\n4\n", "1\nTWO\n3\n4\n");
+        changes_view(120, 24, &[("a.txt", base, text), ("b.txt", base, text)])
+    }
+
+    /// Focus excerpt `index` of the changes view, with its cursor at `point`.
+    fn focus_at(h: &mut TestHarness, index: usize, point: Point) {
+        let (state, editors) = stack(h);
+        state.focused = index;
+        diff_changes::place_cursor(&mut editors[state.excerpts[index].editor_id], point);
+    }
+
+    /// The buffer-column number on each row of each excerpt in `buf`, in stack
+    /// order, for a stack that starts at the window's top.
+    fn excerpt_numbers(h: &mut TestHarness, buf: &Buffer) -> Vec<Vec<String>> {
         let inner = {
             let ws = h.stoat.active_workspace();
             split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
         };
-        let cols = excerpt_columns(&h, inner, 2);
-        let (state, _) = stack(&mut h);
-        let numbers: Vec<Vec<String>> = state
+        let cols = excerpt_columns(h, inner, 2);
+        let (state, editors) = stack(h);
+        state
             .excerpts
             .iter()
             .map(|excerpt| {
-                (1..=5)
+                let rows = diff_changes::excerpt_rows(excerpt, editors);
+                (1..=rows)
                     .map(|row| {
                         let y = inner.y + (excerpt.top + row) as u16;
-                        gutter_number(&buf, cols.right_x, cols.right_text_x, y)
+                        gutter_number(buf, cols.right_x, cols.right_text_x, y)
                     })
                     .collect()
             })
-            .collect();
-        assert_eq!(
-            numbers,
-            [["2", "1", "3", "1", "2"], ["1", "2", "3", "4", "5"]]
-        );
+            .collect()
     }
 
     /// A page painted after the live frame leaves each excerpt's editor laid
@@ -1119,15 +1273,7 @@ mod tests {
     fn an_unfocused_per_pane_changes_view_dims_its_strip() {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
         let index = focused_pane_index(&h);
-        let ws = h.stoat.active_workspace_mut();
-        let dock = ws.docks.insert(DockPanel {
-            view: View::Label("dock".into()),
-            side: DockSide::Right,
-            visibility: DockVisibility::Hidden,
-            default_width: 30,
-            area: Default::default(),
-        });
-        ws.focus = FocusTarget::Dock(dock);
+        focus_hidden_dock(&mut h);
 
         let (_, _, declared) = paint_strips(&mut h, &mut rx);
         // 0.25 is the default ui.inactive_dim the test harness resolves.

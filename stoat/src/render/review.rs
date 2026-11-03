@@ -173,9 +173,10 @@ impl DiffDials {
 /// style for its changed chars alone. Added and modified new lines leave it
 /// blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
-/// With `current_line` set, the right column counts from that 1-based buffer
-/// line, as a relative gutter does. The left column always numbers the base
-/// file, because the cursor never sits on a base row.
+/// Under [`BufferNumbering::Absolute`] each right row paints its buffer line.
+/// Under [`BufferNumbering::FromLine`] it paints its distance from the cursor
+/// line, and under [`BufferNumbering::FromSteps`] the steps that reach it from
+/// the cursor.
 ///
 /// Both columns soft-wrap at the narrower one's width, which the caller sets on
 /// the display map. A continuation row carries text alone, with no number, no
@@ -209,7 +210,7 @@ pub(crate) fn render_diff_view(
     scene: Option<&mut ApcScene>,
     delegates_cursor: bool,
     dials: DiffDials,
-    current_line: Option<u32>,
+    numbering: BufferNumbering,
     reload_flashes: &[ReloadFlash],
     decorations_only: bool,
 ) {
@@ -245,7 +246,7 @@ pub(crate) fn render_diff_view(
         scene,
         0.0,
         dials,
-        current_line,
+        numbering,
         Some(&mut editor.highlight_endpoint_cache),
         Some(&mut editor.diff_row_cache),
         decorations_only,
@@ -331,6 +332,29 @@ pub(crate) enum DiffRowKind {
     BufferRow {
         buffer_row: u32,
     },
+}
+
+/// What the buffer column of a diff view numbers each row by.
+///
+/// The base column always numbers the base file, because the cursor never
+/// sits on a base row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BufferNumbering {
+    /// Each row paints its 1-based buffer line.
+    Absolute,
+    /// Each row paints its distance in buffer lines from this 1-based cursor
+    /// line, and the cursor's line paints its own number, as
+    /// [`editor::gutter_display_number`] counts.
+    FromLine(u32),
+    /// Each row paints the count of `j` or `k` steps that reach it from the
+    /// cursor, as the changes view walks its rows.
+    ///
+    /// `origin` is the signed step count from the cursor to the row before
+    /// display row 0, negative while the cursor lies below it. Each display
+    /// row that maps to a buffer position adds one step, and a spliced base
+    /// row adds none. The row whose count is zero is the cursor's, and it
+    /// paints its buffer line.
+    FromSteps { origin: i64 },
 }
 
 /// One display row's derived state, as the diff and conflict bodies read it.
@@ -798,9 +822,10 @@ fn divider_x(inner: Rect) -> u16 {
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
 ///
-/// `current_line` is the 1-based buffer line that relative numbering counts
-/// the buffer column from, as [`render_diff_view`] describes. `None` paints
-/// absolute numbers.
+/// `numbering` picks what the buffer column paints, as [`render_diff_view`]
+/// describes. The origin of [`BufferNumbering::FromSteps`] counts to the row
+/// before display row 0, not to `scroll_row`, so a paint from any scroll row
+/// takes the same origin.
 ///
 /// `digits` sizes both gutters, as [`diff_gutter_digits`] answers it for the
 /// snapshot, so the columns match the ones a caller fit the wrap width to.
@@ -825,7 +850,7 @@ pub(crate) fn paint_diff_rows(
     scene: Option<&mut ApcScene>,
     dim: f32,
     dials: DiffDials,
-    current_line: Option<u32>,
+    numbering: BufferNumbering,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<DiffRowCache>>,
     decorations_only: bool,
@@ -890,6 +915,9 @@ pub(crate) fn paint_diff_rows(
 
     let mut base_line = base_line_at(snapshot, scroll_row);
     let mut next_buffer_row = lines_above(snapshot, scroll_row);
+    // The rows a step lands on through the loop's row. A spliced base row maps
+    // to no buffer position, so only a buffer row adds one.
+    let mut landed = snapshot.buffer_rows_above(scroll_row);
     // A moved-away seam's base lines take no row, so the walk adds them when it
     // reaches the buffer row the seam sits before. `base_line_at` already
     // counted the seams above the first visible buffer row.
@@ -994,6 +1022,7 @@ pub(crate) fn paint_diff_rows(
                 }
             },
             DiffRowKind::BufferRow { buffer_row } => {
+                landed += 1;
                 // A continuation belongs to the line its first row numbered and
                 // counted, so it paints text alone. `base_line_at` counts a
                 // continuation top row's seams, so the walk skips them here.
@@ -1007,6 +1036,18 @@ pub(crate) fn paint_diff_rows(
                     base_line += hidden_base_lines(snapshot, next_buffer_row..buffer_row)
                         + seam_lines_through(&seams, &mut seam_cursor, next_buffer_row, buffer_row);
                     next_buffer_row = buffer_row + 1;
+                    let number = match numbering {
+                        BufferNumbering::Absolute => buffer_row + 1,
+                        BufferNumbering::FromLine(line) => {
+                            editor::gutter_display_number(buffer_row + 1, Some(line))
+                        },
+                        BufferNumbering::FromSteps { origin } => {
+                            match (origin + i64::from(landed)).unsigned_abs() {
+                                0 => buffer_row + 1,
+                                steps => steps as u32,
+                            }
+                        },
+                    };
                     draw_diff_num(
                         &mut rich,
                         buf,
@@ -1014,7 +1055,7 @@ pub(crate) fn paint_diff_rows(
                         inner,
                         (right_x, right_num_x),
                         y,
-                        editor::gutter_display_number(buffer_row + 1, current_line),
+                        number,
                         dim_style,
                         digits,
                     );
@@ -3418,34 +3459,11 @@ mod tests {
     /// right column numbers its buffer line.
     #[test]
     fn a_folded_diff_view_numbers_its_base_lines_past_the_fold() {
-        let base: String = (1..=20).map(|n| format!("{n}\n")).collect();
-        let text = base.replace("\n16\n", "\nSIXTEEN\n");
-        let mut editor = diff_editor(&base, &text);
-        editor
-            .display_map
-            .fold(vec![Point::new(0, 0)..Point::new(11, 2)]);
-        let area = Rect::new(0, 0, 120, 10);
-        let mut buf = Buffer::empty(area);
-        render_diff_view(
-            &mut editor,
-            area,
-            Style::default(),
-            &rgb_diff_theme(),
-            &mut buf,
-            false,
-            None,
-            None,
-            false,
-            DiffDials::shipped(),
-            None,
-            &[],
-            false,
+        let lines = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+        assert_eq!(
+            numbered_pairs(&mut folded_editor(), BufferNumbering::Absolute),
+            pairs(lines, lines)
         );
-
-        let expected: Vec<(String, String)> = [1, 13, 14, 15, 16, 17, 18, 19, 20, 21]
-            .map(|n| (n.to_string(), n.to_string()))
-            .to_vec();
-        assert_eq!(number_pairs(&buf, area), expected);
     }
 
     /// A fold inside a modified hunk hides live rows, and the rows below it
@@ -3469,7 +3487,7 @@ mod tests {
                 None,
                 false,
                 DiffDials::shipped(),
-                None,
+                BufferNumbering::Absolute,
                 &[],
                 false,
             );
@@ -3530,7 +3548,7 @@ mod tests {
             None,
             false,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -3608,7 +3626,7 @@ mod tests {
             None,
             false,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -3662,7 +3680,7 @@ mod tests {
             None,
             false,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -3689,11 +3707,53 @@ mod tests {
     #[test]
     fn the_diff_view_numbers_the_buffer_column_from_the_cursor_line() {
         let text: String = (1..=10).map(|n| format!("{n}\n")).collect();
-        let mut editor = diff_editor(&text, &text);
+        assert_eq!(
+            numbered_pairs(&mut diff_editor(&text, &text), BufferNumbering::FromLine(5)),
+            pairs(1..=10, [4, 3, 2, 1, 5, 1, 2, 3, 4, 5])
+        );
+    }
+
+    /// Under step numbering a removed base row takes no step, so the row below
+    /// it counts on from the row above it. The removed row has a base number
+    /// and no buffer number.
+    #[test]
+    fn a_removed_base_row_takes_no_step() {
+        let base: String = (1..=10).map(|n| format!("{n}\n")).collect();
+        let mut editor = diff_editor(&base, &base.replace("\n5\n", "\n"));
+        assert_eq!(
+            numbered_pairs(&mut editor, BufferNumbering::FromSteps { origin: -2 }),
+            pairs(1..=10, ["1", "2", "1", "2", "", "3", "4", "5", "6", "7"]),
+            "the cursor on line 2",
+        );
+    }
+
+    /// Under step numbering a fold's placeholder row takes one step, however
+    /// many lines it hides.
+    #[test]
+    fn a_fold_placeholder_takes_one_step() {
+        assert_eq!(
+            numbered_pairs(
+                &mut folded_editor(),
+                BufferNumbering::FromSteps { origin: -3 }
+            ),
+            pairs(
+                [1, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+                ["2", "1", "14", "1", "2", "3", "4", "5", "6", "7"]
+            ),
+            "the cursor on display row 2, line 14",
+        );
+    }
+
+    /// The `(left, right)` line numbers of `editor` painted as a 120 by 10
+    /// diff view with no cursor, its buffer column numbered by `numbering`.
+    fn numbered_pairs(
+        editor: &mut EditorState,
+        numbering: BufferNumbering,
+    ) -> Vec<(String, String)> {
         let area = Rect::new(0, 0, 120, 10);
         let mut buf = Buffer::empty(area);
         render_diff_view(
-            &mut editor,
+            editor,
             area,
             Style::default(),
             &rgb_diff_theme(),
@@ -3703,16 +3763,34 @@ mod tests {
             None,
             false,
             DiffDials::shipped(),
-            Some(5),
+            numbering,
             &[],
             false,
         );
+        number_pairs(&buf, area)
+    }
 
-        let expected: Vec<(String, String)> = (1..=10)
-            .zip([4, 3, 2, 1, 5, 1, 2, 3, 4, 5])
+    /// A diff view of twenty lines whose sixteenth line changed, with lines 1
+    /// to 12 folded into its first row.
+    fn folded_editor() -> EditorState {
+        let base: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let mut editor = diff_editor(&base, &base.replace("\n16\n", "\nSIXTEEN\n"));
+        editor
+            .display_map
+            .fold(vec![Point::new(0, 0)..Point::new(11, 2)]);
+        editor
+    }
+
+    /// `left` and `right` zipped into the `(left, right)` pairs that
+    /// [`number_pairs`] reads.
+    fn pairs<L: ToString, R: ToString>(
+        left: impl IntoIterator<Item = L>,
+        right: impl IntoIterator<Item = R>,
+    ) -> Vec<(String, String)> {
+        left.into_iter()
+            .zip(right)
             .map(|(left, right)| (left.to_string(), right.to_string()))
-            .collect();
-        assert_eq!(number_pairs(&buf, area), expected);
+            .collect()
     }
 
     /// The `(left, right)` line numbers on each row of a cell-gutter diff view
@@ -3948,7 +4026,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4012,7 +4090,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4146,7 +4224,7 @@ mod tests {
             Some(&mut scene),
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4297,7 +4375,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4466,7 +4544,7 @@ mod tests {
             Some(&mut scene),
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4528,7 +4606,7 @@ mod tests {
             None,
             false,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4571,7 +4649,7 @@ mod tests {
             Some(&mut scene),
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4654,7 +4732,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4699,7 +4777,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4772,7 +4850,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4814,7 +4892,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4883,7 +4961,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -4933,7 +5011,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -5053,7 +5131,7 @@ mod tests {
                 soften_scale: 0.0,
                 ..DiffDials::shipped()
             },
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -5484,7 +5562,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -5518,7 +5596,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -5550,7 +5628,7 @@ mod tests {
             Some(&mut ApcScene::new()),
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -5579,7 +5657,7 @@ mod tests {
             Some(&mut ApcScene::new()),
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6013,7 +6091,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6050,7 +6128,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6359,7 +6437,7 @@ mod tests {
             None,
             true,
             dials,
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6637,7 +6715,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6699,7 +6777,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6824,7 +6902,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6859,7 +6937,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -6897,7 +6975,7 @@ mod tests {
             None,
             true,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -7500,7 +7578,7 @@ mod tests {
                 tint_amount: 1.0,
                 ..DiffDials::shipped()
             },
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -7536,7 +7614,7 @@ mod tests {
                 tint_amount: 1.0,
                 ..DiffDials::shipped()
             },
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -7583,7 +7661,7 @@ mod tests {
                 tint_amount: 1.0,
                 ..DiffDials::shipped()
             },
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );
@@ -7641,7 +7719,7 @@ mod tests {
                 soften_scale: 0.0,
                 ..DiffDials::shipped()
             },
-            None,
+            BufferNumbering::Absolute,
             &[],
             false,
         );

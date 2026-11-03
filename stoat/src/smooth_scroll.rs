@@ -36,7 +36,7 @@ use crate::{
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
-        review::{diff_gutter_digits, paint_diff_rows, DiffDials},
+        review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
         walkthrough::Spotlight,
@@ -201,7 +201,9 @@ pub(crate) fn render_page_decorations(
             Some(&mut scene),
             dim,
             dials,
-            gutter.current_line,
+            gutter
+                .current_line
+                .map_or(BufferNumbering::Absolute, BufferNumbering::FromLine),
             None,
             None,
             false,
@@ -292,7 +294,9 @@ pub(crate) fn render_page_from_snapshot(
             scene.as_mut(),
             dim,
             dials,
-            gutter.current_line,
+            gutter
+                .current_line
+                .map_or(BufferNumbering::Absolute, BufferNumbering::FromLine),
             None,
             None,
             false,
@@ -1066,6 +1070,7 @@ mod tests {
                 0,
                 &[],
                 false,
+                None,
             );
             editor.scroll_row = saved;
             let expected = serialize_buffer(&expected);
@@ -1150,6 +1155,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         let expected = serialize_buffer(&expected);
 
@@ -1244,6 +1250,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         let expected = serialize_buffer(&expected);
 
@@ -1437,7 +1444,7 @@ mod tests {
     fn diff_view_page_paints_the_two_column_body() {
         use super::{
             diff_gutter_digits, page_buffer, paint_diff_rows, render_page_from_snapshot,
-            serialize_buffer, PageGutter, Rect,
+            serialize_buffer, BufferNumbering, PageGutter, Rect,
         };
         use crate::{
             buffer::{BufferId, TextBuffer},
@@ -1489,7 +1496,7 @@ mod tests {
             None,
             0.0,
             DiffDials::shipped(),
-            None,
+            BufferNumbering::Absolute,
             None,
             None,
             false,

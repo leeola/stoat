@@ -17,7 +17,10 @@ use crate::{
     render::{
         conflict_view::render_conflict_view,
         paint::{brighten_style, dim_rgb, style_rgb},
-        review::{self, render_diff_view, DiffColumns, DiffDials, DiffLayout, DIFF_TWO_COLUMN_MIN},
+        review::{
+            self, render_diff_view, BufferNumbering, DiffColumns, DiffDials, DiffLayout,
+            DIFF_TWO_COLUMN_MIN,
+        },
         undercurl::UndercurlBatch,
     },
     theme::Theme,
@@ -131,6 +134,7 @@ pub(crate) fn render_editor(
         0,
         &[],
         false,
+        None,
     );
 }
 
@@ -147,6 +151,13 @@ pub(crate) fn render_editor(
 /// With `decorations_only` a diff view paints its rich gutter into `scene`
 /// alone, for a page whose cells the terminal keeps. The other views ignore
 /// the flag.
+///
+/// A changes view excerpt passes its entry of
+/// [`step_origins`](crate::diff_changes::step_origins) as `step_origin`.
+/// Under relative numbering its diff view then numbers each row by the `j` or
+/// `k` steps from the focused cursor across the whole stack, focused or not.
+/// With no step origin, a focused diff view counts buffer lines from its
+/// cursor line, and an unfocused one paints absolute numbers.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_editor_with_overlay(
     editor: &mut EditorState,
@@ -172,6 +183,7 @@ pub(crate) fn render_editor_with_overlay(
     scrolloff: u32,
     reload_flashes: &[ReloadFlash],
     decorations_only: bool,
+    step_origin: Option<i64>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
@@ -185,11 +197,21 @@ pub(crate) fn render_editor_with_overlay(
         fit_diff_view(editor, inner, wrap, wrap_column, digits, rich);
         view::apply_held_screen_row(editor);
         view::clamp_scroll_to_display(editor, scrolloff);
-        // The buffer column counts from the cursor line on the same condition
-        // the plain gutter below counts from it.
-        let current_line = (line_numbers == LineNumbers::Relative && is_focused && !insert_mode)
-            .then(|| editor_cursor_position(editor).map(|(line, _)| line))
-            .flatten();
+        // A changes view excerpt counts the steps across its stack. Any other
+        // diff view counts from the cursor line on the same condition the plain
+        // gutter below counts from it.
+        let numbering = match (
+            line_numbers == LineNumbers::Relative && !insert_mode,
+            step_origin,
+        ) {
+            (false, _) => BufferNumbering::Absolute,
+            (true, Some(origin)) => BufferNumbering::FromSteps { origin },
+            (true, None) if is_focused => editor_cursor_position(editor)
+                .map_or(BufferNumbering::Absolute, |(line, _)| {
+                    BufferNumbering::FromLine(line)
+                }),
+            (true, None) => BufferNumbering::Absolute,
+        };
         render_diff_view(
             editor,
             inner,
@@ -201,7 +223,7 @@ pub(crate) fn render_editor_with_overlay(
             scene,
             delegates_cursor,
             dials,
-            current_line,
+            numbering,
             reload_flashes,
             decorations_only,
         );
@@ -3174,6 +3196,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
 
         let italic: String = (0..area.width)
@@ -3252,6 +3275,7 @@ mod tests {
                 0,
                 &[],
                 false,
+                None,
             );
             (0..area.width).map(|x| buf[(x, 1)].clone()).collect()
         }
@@ -3348,6 +3372,7 @@ mod tests {
                 0,
                 &[],
                 false,
+                None,
             );
             buf
         }
@@ -3756,6 +3781,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         (0..area.width).map(|x| buf[(x, 0)].clone()).collect()
     }
@@ -3873,6 +3899,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
 
         let washed: Vec<bool> = (0..4).map(|x| Some(buf[(x, 0)].bg) == sel_bg).collect();
@@ -3915,6 +3942,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
 
         assert!(
@@ -4054,6 +4082,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         let snapshot = editor.display_map.snapshot();
         (
@@ -4228,6 +4257,7 @@ mod tests {
                 0,
                 &[],
                 false,
+                None,
             );
         }
 
@@ -4276,6 +4306,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         editor
             .gutter_geometry_cache
@@ -4440,6 +4471,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         editor
             .gutter_geometry_cache
@@ -4523,6 +4555,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         String::from_utf8_lossy(scene.bytes()).into_owned()
     }
@@ -4679,6 +4712,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         buf
     }
@@ -4722,6 +4756,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         let rect = editor.minimap_rect;
         let strip = (0..rows)
@@ -4867,6 +4902,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
         let tree_x = editor.gutter_width - 2;
         (0..rows)
@@ -5341,6 +5377,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
 
         // Row 1 is the line the trailing newline opens, and the gutter takes
@@ -5404,6 +5441,7 @@ mod tests {
             0,
             &[],
             false,
+            None,
         );
 
         assert!(
