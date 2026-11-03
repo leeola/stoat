@@ -5,8 +5,8 @@ use crate::{
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
-            CommitsRefresh, GitCheckout, GitCommit, GitCommitAbort, GitCommitConfirm, GitLs,
-            OpenCommits,
+            CommitsRefresh, GitAdd, GitCheckout, GitCommit, GitCommitAbort, GitCommitConfirm,
+            GitLs, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -1038,6 +1038,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GitCommitConfirm::DEF, |_| Ok(Box::new(GitCommitConfirm)));
     add(GitCommitAbort::DEF, |_| Ok(Box::new(GitCommitAbort)));
     add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
+    add(GitAdd::DEF, |_| Ok(Box::new(GitAdd)));
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(GitRebase::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `git rebase`
@@ -1423,6 +1424,7 @@ mod tests {
         "GitCommitConfirm",
         "GitCommitAbort",
         "GitCommit",
+        "GitAdd",
         "EnterRebase",
         "GitRebase",
         "AbortRebase",
@@ -2036,6 +2038,7 @@ mod tests {
         // + 1 GitCheckout.
         // + 2 GitCommitConfirm/GitCommitAbort.
         // + 1 GitCommit.
+        // + 1 GitAdd.
         // + 1 GitRebase.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
@@ -2070,7 +2073,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 466);
+        assert_eq!(all().count(), 467);
     }
 
     #[test]

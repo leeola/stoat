@@ -83,8 +83,45 @@ pub(super) fn git_commit_abort(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// The repository and working tree a commit goes into at the job's turn, or
-/// `None` after badging why the commit does not run.
+/// Stage every tracked change in the working tree, as `git add -u` does.
+///
+/// The stage waits its turn in the git queue behind every git write queued
+/// before the press. A review walk or a rebase owns HEAD until it ends, so
+/// either one refuses the command at its turn. Untracked files stay out of the
+/// index.
+pub(super) fn git_add(stoat: &mut Stoat) -> UpdateEffect {
+    let job = GitJob::new("stage tracked", None, |stoat: &mut Stoat| {
+        let (repo, _) = commit_repo(stoat)?;
+        Some(Box::new(move || {
+            let staged = match repo.stage_tracked() {
+                Ok(count) => Ok(count),
+                Err(GitApplyError::Backend { reason, .. }) => Err(reason),
+            };
+            Box::new(move |stoat: &mut Stoat| land_stage(stoat, staged)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Name how many files a landed stage moved into the index, and rediff every
+/// buffer against the index it changed.
+///
+/// A stage that moved nothing, or that the repository refused, badges instead.
+fn land_stage(stoat: &mut Stoat, staged: Result<usize, String>) {
+    match staged {
+        Ok(0) => emit_review_error_badge(stoat, "nothing to stage", None),
+        Ok(count) => {
+            stoat.active_workspace_mut().invalidate_all_diffs();
+            let noun = if count == 1 { "file" } else { "files" };
+            stoat.set_status(format!("staged {count} {noun}"));
+        },
+        Err(reason) => emit_review_error_badge(stoat, "stage failed", Some(reason)),
+    }
+}
+
+/// The repository and working tree a commit or a stage writes at the job's
+/// turn, or `None` after badging why the write does not run.
 fn commit_repo(stoat: &mut Stoat) -> Option<(Arc<dyn GitRepo>, PathBuf)> {
     let ws = stoat.active_workspace();
     let refusal = if ws.review_walk.is_some() {
@@ -251,6 +288,25 @@ mod tests {
             .map(|badge| badge.label.clone())
     }
 
+    /// Each changed path of `/repo`, relative to it, with whether the index
+    /// holds the change.
+    fn staged_flags(h: &TestHarness) -> Vec<(PathBuf, bool)> {
+        let repo = h
+            .stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .expect("the repo");
+        repo.changed_files()
+            .into_iter()
+            .map(|file| {
+                (
+                    file.path.strip_prefix("/repo").expect("under /repo").into(),
+                    file.staged,
+                )
+            })
+            .collect()
+    }
+
     /// The screen opens in insert mode under its own view, and the palette
     /// reads it as up.
     #[test]
@@ -309,6 +365,67 @@ mod tests {
                 Some(vec![PathBuf::from("a.rs")]),
                 Some(vec![PathBuf::from("a.rs")])
             ],
+        );
+    }
+
+    /// `:git add` and `:git au` stage every tracked change, and an untracked
+    /// file stays out of the index.
+    #[test]
+    fn git_add_stages_the_tracked_changes_and_leaves_untracked_files() {
+        let added = |command: &str| {
+            let mut h = harness(&[]);
+            h.fake_git()
+                .add_repo("/repo")
+                .unstaged_file("c.rs", "edit")
+                .untracked("d.rs");
+            submit(&mut h, command);
+            (staged_flags(&h), h.stoat.pending_message.clone())
+        };
+        let staged = (
+            vec![
+                (PathBuf::from("c.rs"), true),
+                (PathBuf::from("d.rs"), false),
+            ],
+            Some("staged 1 file".to_string()),
+        );
+        assert_eq!(
+            [added(":git add"), added(":git au")],
+            [staged.clone(), staged]
+        );
+    }
+
+    /// A tree with no tracked change badges and stages nothing, and an
+    /// untracked file does not count as one.
+    #[test]
+    fn git_add_with_no_tracked_change_badges_nothing_to_stage() {
+        let mut h = harness(&[]);
+        h.fake_git().add_repo("/repo").untracked("d.rs");
+        submit(&mut h, ":git add");
+        assert_eq!(
+            (staged_flags(&h), review_badge(&h)),
+            (
+                vec![(PathBuf::from("d.rs"), false)],
+                Some("nothing to stage".to_string())
+            ),
+        );
+    }
+
+    /// A stage the repository refuses badges the failure and leaves the change
+    /// unstaged.
+    #[test]
+    fn a_refused_stage_badges_the_failure() {
+        let mut h = harness(&[]);
+        h.fake_git()
+            .add_repo("/repo")
+            .unstaged_file("c.rs", "edit")
+            .fail_apply_with("disk full");
+        submit(&mut h, ":git add");
+        assert_eq!(
+            (staged_flags(&h), review_badge(&h)),
+            (
+                vec![(PathBuf::from("c.rs"), false)],
+                Some("stage failed".to_string())
+            ),
         );
     }
 

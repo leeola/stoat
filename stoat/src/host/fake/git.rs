@@ -1182,6 +1182,31 @@ impl GitRepo for FakeGitRepo {
         }
     }
 
+    /// Flips every tracked registration to staged, as a real stage moves each
+    /// tracked file's working text into the index.
+    ///
+    /// The fake registers no working text, so the index texts stay as they
+    /// were and only the staged flags move. Untracked paths stay untracked.
+    /// The apply failure knob fails it as it fails [`GitRepo::commit_index`].
+    fn stage_tracked(&self) -> Result<usize, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = &state.apply_error {
+            return BackendSnafu {
+                reason: reason.clone(),
+            }
+            .fail();
+        }
+
+        let mut staged = 0;
+        for change in &mut state.changed {
+            if !change.file.untracked && !change.file.staged {
+                change.file.staged = true;
+                staged += 1;
+            }
+        }
+        Ok(staged)
+    }
+
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
         let state = self.state.lock().unwrap();
         state.commits.get(sha).map(|c| c.tree.clone())
@@ -2075,6 +2100,34 @@ mod tests {
         assert_eq!(
             host.applied_patches(&workdir()),
             vec!["--- a\n+++ b\n".to_string(), "--- c\n+++ d\n".to_string()],
+        );
+    }
+
+    #[test]
+    fn stage_tracked_stages_every_tracked_change_and_no_untracked_one() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .unstaged_file("a.rs", "edit")
+            .staged_file("b.rs", "staged")
+            .untracked("c.rs");
+        let repo = host.discover(&workdir()).unwrap();
+        let staged = repo.stage_tracked();
+
+        let flags: Vec<(PathBuf, bool)> = repo
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged))
+            .collect();
+        assert_eq!(
+            (staged, flags),
+            (
+                Ok(1),
+                vec![
+                    (workdir().join("a.rs"), true),
+                    (workdir().join("b.rs"), true),
+                    (workdir().join("c.rs"), false),
+                ],
+            ),
         );
     }
 

@@ -360,6 +360,31 @@ impl GitRepo for LocalGitRepo {
         Ok(())
     }
 
+    fn stage_tracked(&self) -> Result<usize, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let staged = {
+            let mut opts = StatusOptions::new();
+            opts.include_untracked(false);
+            let tracked_unstaged = UNSTAGED
+                .difference(Status::WT_NEW)
+                .union(Status::WT_TYPECHANGE);
+            repo.statuses(Some(&mut opts))
+                .map_err(err_msg)?
+                .iter()
+                .filter(|entry| entry.status().intersects(tracked_unstaged))
+                .count()
+        };
+
+        let mut index = repo.index().map_err(err_msg)?;
+        // A held handle keeps the index it loaded first. Without this reload,
+        // the write puts stale entries back over any index change made since
+        // that load.
+        index.read(false).map_err(err_msg)?;
+        index.update_all(["*"], None).map_err(err_msg)?;
+        index.write().map_err(err_msg)?;
+        Ok(staged)
+    }
+
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
 
@@ -2581,6 +2606,37 @@ mod tests {
             .map(|entry| String::from_utf8(entry.path).unwrap())
             .collect();
         assert_eq!(paths, ["a.txt", "b.txt", "c.txt"]);
+    }
+
+    /// A tracked edit and then a tracked deletion each reach the index, an
+    /// untracked file stays out of it, and a stage with nothing left counts
+    /// zero.
+    #[test]
+    fn stage_tracked_stages_tracked_edits_and_deletions_only() {
+        let (dir, _repo, _shas) = seeded_repo();
+        let git = discover(&dir);
+        let (tracked, untracked) = (dir.path().join("a.txt"), dir.path().join("new.txt"));
+        std::fs::write(&tracked, "four").unwrap();
+        std::fs::write(&untracked, "new").unwrap();
+        let edit = (git.stage_tracked(), git.index_content(&tracked));
+
+        std::fs::remove_file(&tracked).unwrap();
+        let deletion = (git.stage_tracked(), git.index_content(&tracked));
+
+        assert_eq!(
+            (
+                edit,
+                deletion,
+                git.stage_tracked(),
+                git.index_content(&untracked)
+            ),
+            (
+                (Ok(1), Some("four".to_string())),
+                (Ok(1), None),
+                Ok(0),
+                None
+            ),
+        );
     }
 
     /// Commit a move of `from` to `to`, with `content` on the destination.

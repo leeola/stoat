@@ -816,6 +816,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             review_walk::git_checkout(stoat, &action.reference)
         },
         ActionKind::GitCommit => git_commit::git_commit(stoat),
+        ActionKind::GitAdd => git_commit::git_add(stoat),
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),

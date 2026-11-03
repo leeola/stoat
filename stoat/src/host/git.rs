@@ -579,6 +579,15 @@ pub trait GitRepo: Send + Sync {
     /// Fails too when the repository has no configured identity.
     fn commit_index(&self, message: &str) -> Result<String, GitApplyError>;
 
+    /// Stage every change to a tracked file, as `git add -u` does, and return
+    /// how many tracked paths it staged.
+    ///
+    /// A tracked path counts when its working tree differs from the index.
+    /// Edits and deletions reach the index. An untracked path stays out of it,
+    /// ignored or not, so a zero count means the index already held every
+    /// tracked change.
+    fn stage_tracked(&self) -> Result<usize, GitApplyError>;
+
     /// Check out `sha`, updating the working tree and index to its content and
     /// leaving HEAD detached there.
     ///

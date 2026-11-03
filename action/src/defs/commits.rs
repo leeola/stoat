@@ -248,6 +248,20 @@ define_action!(
 );
 
 define_action!(
+    GitAddDef,
+    GitAdd,
+    "GitAdd",
+    ActionKind::GitAdd,
+    "stage every tracked change",
+    "Stage every change to a tracked file, as `git add -u` does, so edits and \
+     deletions reach the index. Untracked files stay out of it. Refuses while \
+     a review walk or a rebase holds HEAD.",
+    ActionPriority::Common,
+    aliases = &["git au"],
+    command_name = "git add"
+);
+
+define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,
     "CommitsOpenReview",
