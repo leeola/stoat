@@ -157,9 +157,12 @@ fn land_stage(stoat: &mut Stoat, staged: Result<usize, String>) {
     }
 }
 
-/// The repository and working tree a commit or a stage writes at the job's
-/// turn, or `None` after badging why the write does not run.
-fn commit_repo(stoat: &mut Stoat) -> Option<(Arc<dyn GitRepo>, PathBuf)> {
+/// The repository and working tree a git write acts on at the job's turn, or
+/// `None` after badging why the write does not run.
+///
+/// A review walk or a rebase owns HEAD until it ends, so either one refuses
+/// the write. The commit, stage, and stash commands share this check.
+pub(super) fn commit_repo(stoat: &mut Stoat) -> Option<(Arc<dyn GitRepo>, PathBuf)> {
     let ws = stoat.active_workspace();
     let refusal = if ws.review_walk.is_some() {
         Some("a review walk is open")

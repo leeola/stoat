@@ -292,6 +292,62 @@ define_action!(
 );
 
 define_action!(
+    GitStashDef,
+    GitStash,
+    "GitStash",
+    ActionKind::GitStash,
+    "stash the working-tree changes",
+    "Stash every change to a tracked file, staged or not, under git's default \
+     message, as `git stash` does. Untracked files stay. Refuses while a \
+     review walk or a rebase holds HEAD, and badges when there is nothing to \
+     stash.",
+    ActionPriority::Common,
+    command_name = "git stash"
+);
+
+const GIT_STASH_PUSH_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "message",
+    kind: ParamKind::String,
+    value_source: ValueSource::None,
+    required: false,
+    description: "Message for the stash. Omit it for git's default message.",
+}];
+
+define_action_def!(
+    GitStashPushDef,
+    "GitStashPush",
+    ActionKind::GitStashPush,
+    "stash with a message",
+    "Stash every change to a tracked file, staged or not, under the given \
+     message, as `git stash push -m` does. Untracked files stay. Refuses while \
+     a review walk or a rebase holds HEAD, and badges when there is nothing \
+     to stash.",
+    ActionPriority::Common,
+    command_name = "git stash push",
+    params = GIT_STASH_PUSH_PARAMS
+);
+
+#[derive(Debug)]
+pub struct GitStashPush {
+    /// The stash message, or `None` for git's default message.
+    pub message: Option<String>,
+}
+
+impl GitStashPush {
+    pub const DEF: &GitStashPushDef = &GitStashPushDef;
+}
+
+impl Action for GitStashPush {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,
     "CommitsOpenReview",

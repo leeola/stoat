@@ -558,7 +558,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
-        | GitRebase | GitStatus | GitDiff | GitDiffCached => ctx.in_repo,
+        | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1789,6 +1789,8 @@ mod tests {
                 "git log",
                 "git rebase continue",
                 "git rebase main",
+                "git stash",
+                "git stash push wip",
             ]
             .map(split),
             [
@@ -1797,6 +1799,8 @@ mod tests {
                 None,
                 Some(("GitRebaseContinue", "git rebase continue", "")),
                 Some(("GitRebase", "git rebase", "main")),
+                Some(("GitStash", "git stash", "")),
+                Some(("GitStashPush", "git stash push", "wip")),
             ],
         );
         assert_eq!(names_for("git rebase c"), ["git rebase continue"]);
@@ -1990,6 +1994,8 @@ mod tests {
             "GitRebaseAbort",
             "GitRebaseContinue",
             "GitReview",
+            "GitStash",
+            "GitStashPush",
             "GitStatus",
         ];
         let no_rebase: Vec<&str> = group

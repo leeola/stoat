@@ -414,6 +414,8 @@ action_kinds! {
     GitCommit,
     GitAmend,
     GitAdd,
+    GitStash,
+    GitStashPush,
     ReviewNextCommit,
     ReviewPrevCommit,
     ReviewDone,

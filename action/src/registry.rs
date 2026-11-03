@@ -6,7 +6,7 @@ use crate::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
             CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitCommitAbort,
-            GitCommitConfirm, GitLs, OpenCommits,
+            GitCommitConfirm, GitLs, GitStash, GitStashPush, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -1045,6 +1045,21 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
     add(GitAmend::DEF, |_| Ok(Box::new(GitAmend)));
     add(GitAdd::DEF, |_| Ok(Box::new(GitAdd)));
+    add(GitStash::DEF, |_| Ok(Box::new(GitStash)));
+    add(GitStashPush::DEF, |params| {
+        let message = params
+            .first()
+            .map(|param| {
+                param.as_string().context(WrongKindSnafu {
+                    name: "message",
+                    expected: ParamKind::String,
+                })
+            })
+            .transpose()?
+            .filter(|message| !message.is_empty())
+            .map(str::to_owned);
+        Ok(Box::new(GitStashPush { message }))
+    });
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(GitRebase::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `git rebase`
@@ -1436,6 +1451,8 @@ mod tests {
         "GitCommit",
         "GitAmend",
         "GitAdd",
+        "GitStash",
+        "GitStashPush",
         "EnterRebase",
         "GitRebase",
         "GitRebaseContinue",
@@ -2056,6 +2073,7 @@ mod tests {
         // + 1 GitCommit.
         // + 1 GitAmend.
         // + 1 GitAdd.
+        // + 2 GitStash/GitStashPush.
         // + 1 GitStatus.
         // + 2 GitDiff/GitDiffCached.
         // + 1 GitRebase.
@@ -2094,7 +2112,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 474);
+        assert_eq!(all().count(), 476);
     }
 
     #[test]

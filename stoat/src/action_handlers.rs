@@ -11,6 +11,7 @@ pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
 mod git_commit;
+mod git_stash;
 pub(crate) mod help;
 pub(crate) mod jump;
 pub(crate) mod lsp;
@@ -67,8 +68,8 @@ pub(crate) use pane::{
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitCheckout,
-    GitLs, GitRebase, GitReview, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile, OpenLogs,
-    OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run, SetCwd, SetTheme, Ssh,
+    GitLs, GitRebase, GitReview, GitStashPush, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile,
+    OpenLogs, OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run, SetCwd, SetTheme, Ssh,
     WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
@@ -821,6 +822,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GitCommit => git_commit::git_commit(stoat),
         ActionKind::GitAmend => git_commit::git_amend(stoat),
         ActionKind::GitAdd => git_commit::git_add(stoat),
+        ActionKind::GitStash => git_stash::git_stash(stoat, None),
+        ActionKind::GitStashPush => {
+            let action = action
+                .as_any()
+                .downcast_ref::<GitStashPush>()
+                .expect("GitStashPush action downcast");
+            git_stash::git_stash(stoat, action.message.as_deref())
+        },
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),
