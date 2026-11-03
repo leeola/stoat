@@ -174,6 +174,34 @@ define_action!(
 );
 
 define_action!(
+    GitDiffDef,
+    GitDiff,
+    "GitDiff",
+    ActionKind::GitDiff,
+    "diff the working tree against the index",
+    "Open the diff view against the index, as DiffAgainstIndex does, from the \
+     git command group. The right column shows only unstaged edits.",
+    ActionPriority::Common,
+    aliases = &["git df"],
+    command_name = "git diff"
+);
+
+define_action!(
+    GitDiffCachedDef,
+    GitDiffCached,
+    "GitDiffCached",
+    ActionKind::GitDiffCached,
+    "diff the working tree against HEAD",
+    "Open the diff view against HEAD, as DiffAgainstHead does, from the git \
+     command group. The right column is the live buffer, so a staged hunk \
+     shows in the staged color beside the unstaged ones. No view shows the \
+     index alone.",
+    ActionPriority::Common,
+    aliases = &["git dc"],
+    command_name = "git diff-cached"
+);
+
+define_action!(
     DiffBaseToggleDef,
     DiffBaseToggle,
     "DiffBaseToggle",

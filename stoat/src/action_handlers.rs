@@ -718,6 +718,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DiffForward => diff_nav::forward(stoat),
         ActionKind::DiffAgainstIndex => review::diff_against(stoat, WorktreeBase::Index),
         ActionKind::DiffAgainstHead => review::diff_against(stoat, WorktreeBase::Head),
+        ActionKind::GitDiff => review::diff_against(stoat, WorktreeBase::Index),
+        ActionKind::GitDiffCached => review::diff_against(stoat, WorktreeBase::Head),
         ActionKind::DiffBaseToggle => review::toggle_diff_base(stoat),
         ActionKind::DiffBaseEdit => review::edit_diff_base(stoat),
         ActionKind::DiffPair => review::diff_pair(stoat),

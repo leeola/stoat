@@ -84,6 +84,8 @@ action_kinds! {
     DiffTintUp,
     DiffAgainstIndex,
     DiffAgainstHead,
+    GitDiff,
+    GitDiffCached,
     DiffBaseToggle,
     DiffBaseEdit,
     DiffPair,

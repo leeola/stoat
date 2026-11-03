@@ -1947,7 +1947,7 @@ mod tests {
         review_session::DiffDocument,
         test_harness::TestHarness,
         theme::Theme,
-        workspace::diff::{self, BaseHighlightCache, BaseHighlightMemo, DiffBase},
+        workspace::diff::{self, BaseHighlightCache, BaseHighlightMemo, DiffBase, WorktreeBase},
     };
     use std::{
         iter,
@@ -2538,6 +2538,26 @@ mod tests {
             ),
             (true, true),
             "the index base with the view still open",
+        );
+    }
+
+    /// `:git dc` picks HEAD and `:git df` returns to the index, each with the
+    /// diff view open.
+    #[test]
+    fn git_diff_cached_picks_head_and_git_diff_the_index() {
+        let mut h = half_staged_harness();
+        let mut picked = |command: &str| {
+            h.type_text(command);
+            h.type_keys("enter");
+            h.settle();
+            (
+                h.stoat.active_workspace().worktree_base(),
+                head_base_and_view(&mut h).1,
+            )
+        };
+        assert_eq!(
+            [picked(":git dc"), picked(":git df")],
+            [(WorktreeBase::Head, true), (WorktreeBase::Index, true)],
         );
     }
 

@@ -116,9 +116,10 @@ use crate::{
         review::{
             ChangeWalkWrap, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
             DiffBaseToggle, DiffBold, DiffFiles, DiffForward, DiffPair, DiffSyntax, DiffTintDown,
-            DiffTintUp, DiffUnderline, GitReview, JumpToMoveSource, JumpToMoveTarget,
-            JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships, Review, ReviewDone,
-            ReviewNextCommit, ReviewPrevCommit, ToggleStageHunk, ToggleStageLine,
+            DiffTintUp, DiffUnderline, GitDiff, GitDiffCached, GitReview, JumpToMoveSource,
+            JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, QueryMoveRelationships,
+            Review, ReviewDone, ReviewNextCommit, ReviewPrevCommit, ToggleStageHunk,
+            ToggleStageLine,
         },
         run::{
             OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunModalDismiss, RunSubmit,
@@ -350,6 +351,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DiffTintUp::DEF, |_| Ok(Box::new(DiffTintUp)));
     add(DiffAgainstIndex::DEF, |_| Ok(Box::new(DiffAgainstIndex)));
     add(DiffAgainstHead::DEF, |_| Ok(Box::new(DiffAgainstHead)));
+    add(GitDiff::DEF, |_| Ok(Box::new(GitDiff)));
+    add(GitDiffCached::DEF, |_| Ok(Box::new(GitDiffCached)));
     add(DiffBaseToggle::DEF, |_| Ok(Box::new(DiffBaseToggle)));
     add(DiffBaseEdit::DEF, |_| Ok(Box::new(DiffBaseEdit)));
     add(DiffPair::DEF, |_| Ok(Box::new(DiffPair)));
@@ -1514,6 +1517,8 @@ mod tests {
         "DiffTintUp",
         "DiffAgainstIndex",
         "DiffAgainstHead",
+        "GitDiff",
+        "GitDiffCached",
         "DiffBaseToggle",
         "DiffBaseEdit",
         "DiffPair",
@@ -2048,6 +2053,7 @@ mod tests {
         // + 1 GitAmend.
         // + 1 GitAdd.
         // + 1 GitStatus.
+        // + 2 GitDiff/GitDiffCached.
         // + 1 GitRebase.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
@@ -2082,7 +2088,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 470);
+        assert_eq!(all().count(), 472);
     }
 
     #[test]
