@@ -519,6 +519,7 @@ impl LanguageRegistry {
                 Arc::new(make_csv()),
                 Arc::new(make_bash()),
                 Arc::new(make_fish()),
+                Arc::new(make_git_commit()),
                 Arc::new(make_markdown()),
                 Arc::new(make_markdown_inline()),
             ],
@@ -993,6 +994,24 @@ fn make_fish() -> Language {
     }
 }
 
+fn make_git_commit() -> Language {
+    // The message files git writes and reads back after its editor exits.
+    // They have no extension, so the whole name selects the language.
+    Language {
+        file_names: &["COMMIT_EDITMSG", "MERGE_MSG", "TAG_EDITMSG"],
+        ..make_language(
+            "git-commit",
+            &[],
+            grammar::git_commit(),
+            include_str!("queries/git-commit/highlights.scm"),
+            AuxQuerySources {
+                line_comments: &["#"],
+                ..Default::default()
+            },
+        )
+    }
+}
+
 fn make_markdown() -> Language {
     // Inline nodes the block grammar emits parse as markdown-inline, for
     // emphasis, links and code spans.
@@ -1119,7 +1138,7 @@ mod tests {
         );
     }
 
-    const NAMES: [&str; 10] = [
+    const NAMES: [&str; 11] = [
         "rust",
         "json",
         "toml",
@@ -1128,6 +1147,7 @@ mod tests {
         "csv",
         "bash",
         "fish",
+        "git-commit",
         "markdown",
         "markdown-inline",
     ];
@@ -1212,6 +1232,10 @@ mod tests {
         assert_eq!(
             [".bashrc", "/home/u/.profile", "PKGBUILD"].map(name),
             [Some("bash"); 3]
+        );
+        assert_eq!(
+            ["/repo/.git/COMMIT_EDITMSG", "MERGE_MSG", "TAG_EDITMSG"].map(name),
+            [Some("git-commit"); 3]
         );
         assert_eq!(
             [".bashrc.bak", "pkgbuild"].map(name),
@@ -1317,6 +1341,7 @@ mod tests {
                 "csv",
                 "bash",
                 "fish",
+                "git-commit",
                 "markdown",
                 "markdown-inline"
             ],
@@ -1341,6 +1366,27 @@ mod tests {
                 lang.name
             );
         }
+    }
+
+    /// Each git-commit capture is a theme key, so no part of a message goes
+    /// unstyled for want of one.
+    #[test]
+    fn git_commit_captures_are_theme_keys() {
+        let reg = LanguageRegistry::standard();
+        let lang = reg
+            .for_path(Path::new("COMMIT_EDITMSG"))
+            .expect("the git-commit language");
+        assert_eq!(
+            lang.highlight_capture_names(),
+            [
+                "comment",
+                "title.markup",
+                "string",
+                "constant",
+                "property",
+                "punctuation.delimiter",
+            ],
+        );
     }
 
     #[test]

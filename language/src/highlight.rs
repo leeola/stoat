@@ -526,6 +526,12 @@ mod tests {
             .unwrap()
     }
 
+    fn git_commit() -> std::sync::Arc<crate::Language> {
+        LanguageRegistry::standard()
+            .for_path(std::path::Path::new("COMMIT_EDITMSG"))
+            .unwrap()
+    }
+
     /// Returns the last span matching the byte range of `fragment` in `text`.
     /// Last is the one the downstream merger picks for overlapping spans.
     fn span_for_text<'a>(
@@ -663,6 +669,29 @@ mod tests {
                     .unwrap_or(false)
             }),
             "expected at least one title capture, got {spans:?}"
+        );
+    }
+
+    /// A message in git's layout captures its subject, its comment lines, the
+    /// branch it names, and the paths of its change lines.
+    #[test]
+    fn git_commit_message_parts_captured() {
+        let text = "feat: x\n\n# On branch main\n# Changes to be committed:\n\
+                    #\tmodified:   a.rs\n#\n";
+        let lang = git_commit();
+        let tree = parse(&lang, text, None).unwrap();
+        let spans = extract_highlights(&lang, &tree, text);
+        let captured = |fragment| {
+            span_for_text(&spans, text, fragment).and_then(|span| capture_name(&lang, span))
+        };
+        assert_eq!(
+            ["feat: x", "# On branch main", "main", "a.rs"].map(captured),
+            [
+                Some("title.markup"),
+                Some("comment"),
+                Some("constant"),
+                Some("string")
+            ],
         );
     }
 

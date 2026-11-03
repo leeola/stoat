@@ -378,7 +378,7 @@ fn main() {
     /// The RON grammar names `enum_variant`, so it passes as the Rust grammar
     /// does. RON ships no outline query, which keeps it out of the index. The
     /// bash and fish grammars name no symbol kind, since their functions are
-    /// `function_definition`.
+    /// `function_definition`. A commit message has no symbols at all.
     #[test]
     fn only_the_rust_and_ron_grammars_yield_symbols() {
         let reg = LanguageRegistry::standard();
@@ -394,6 +394,7 @@ fn main() {
                 ("bash", false),
                 ("csv", false),
                 ("fish", false),
+                ("git-commit", false),
                 ("json", false),
                 ("markdown", false),
                 ("markdown-inline", false),

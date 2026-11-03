@@ -29,6 +29,15 @@ fn main() {
     // query targets. Its generator ships parser.h alone, which the scanner
     // includes through the include path.
     compile_grammar("tree-sitter-fish", "tree-sitter-fish", "src", true);
+    // the-mikedavis/tree-sitter-git-commit,
+    // 5a50da19b3841ac51e9d483cd9c856a85232233d. The grammar has no scanner, and
+    // its name is git_commit, so its entry point is tree_sitter_git_commit.
+    compile_grammar(
+        "tree-sitter-git-commit",
+        "tree-sitter-git-commit",
+        "src",
+        false,
+    );
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",
