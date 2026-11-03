@@ -815,6 +815,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("GitCheckout action downcast");
             review_walk::git_checkout(stoat, &action.reference)
         },
+        ActionKind::GitBranch => palette::open_palette_seeded(stoat, "git checkout "),
         ActionKind::GitCommit => git_commit::git_commit(stoat),
         ActionKind::GitAmend => git_commit::git_amend(stoat),
         ActionKind::GitAdd => git_commit::git_add(stoat),

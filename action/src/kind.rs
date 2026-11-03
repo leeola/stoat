@@ -406,6 +406,7 @@ action_kinds! {
     Review,
     GitLs,
     GitCheckout,
+    GitBranch,
     GitCommitConfirm,
     GitCommitAbort,
     GitCommit,

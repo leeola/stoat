@@ -210,6 +210,20 @@ impl Action for GitCheckout {
 }
 
 define_action!(
+    GitBranchDef,
+    GitBranch,
+    "GitBranch",
+    ActionKind::GitBranch,
+    "list the local branches",
+    "Open the command palette holding `git checkout `, so the local branches \
+     list with the branch HEAD is on first. Enter checks the chosen branch \
+     out, and Escape changes nothing.",
+    ActionPriority::Common,
+    aliases = &["git br"],
+    command_name = "git branch"
+);
+
+define_action!(
     GitCommitConfirmDef,
     GitCommitConfirm,
     "GitCommitConfirm",

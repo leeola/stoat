@@ -5,7 +5,7 @@ use crate::{
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
-            CommitsRefresh, GitAdd, GitAmend, GitCheckout, GitCommit, GitCommitAbort,
+            CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitCommitAbort,
             GitCommitConfirm, GitLs, OpenCommits,
         },
         conflict::{
@@ -1036,6 +1036,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             reference: reference.to_owned(),
         }))
     });
+    add(GitBranch::DEF, |_| Ok(Box::new(GitBranch)));
     add(GitCommitConfirm::DEF, |_| Ok(Box::new(GitCommitConfirm)));
     add(GitCommitAbort::DEF, |_| Ok(Box::new(GitCommitAbort)));
     add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
@@ -1424,6 +1425,7 @@ mod tests {
         "DiffChangesLast",
         "DiffChangesOpen",
         "GitLs",
+        "GitBranch",
         "GitCommitConfirm",
         "GitCommitAbort",
         "GitCommit",
@@ -2040,6 +2042,7 @@ mod tests {
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
         // + 1 GitCheckout.
+        // + 1 GitBranch.
         // + 2 GitCommitConfirm/GitCommitAbort.
         // + 1 GitCommit.
         // + 1 GitAmend.
@@ -2079,7 +2082,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 469);
+        assert_eq!(all().count(), 470);
     }
 
     #[test]

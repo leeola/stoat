@@ -556,8 +556,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        GitLs | GitReview | Review | GitCheckout | GitCommit | GitAmend | GitAdd | GitRebase
-        | GitStatus => ctx.in_repo,
+        GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
+        | GitRebase | GitStatus => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1966,6 +1966,7 @@ mod tests {
         let group = vec![
             "GitAdd",
             "GitAmend",
+            "GitBranch",
             "GitCheckout",
             "GitCommit",
             "GitLs",
@@ -2806,6 +2807,23 @@ mod tests {
         h.type_keys("tab");
         let _ = h.snapshot();
         assert_eq!(palette_text(&h), "git ls feature");
+    }
+
+    /// `:git br` opens the palette holding `git checkout `, with the branch
+    /// HEAD is on listed first.
+    #[test]
+    fn git_branch_opens_the_checkout_over_the_branches() {
+        let mut h = branch_harness();
+        h.type_text(":git br");
+        h.type_keys("enter");
+        let _ = h.snapshot();
+        assert_eq!(
+            (palette_text(&h), listed_arg_rows(&h)),
+            (
+                "git checkout ".to_string(),
+                vec!["main".to_string(), "feature".to_string()]
+            ),
+        );
     }
 
     /// An argument list is a whole workspace walk, so its ranking is handed
