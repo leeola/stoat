@@ -831,6 +831,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             git_stash::git_stash(stoat, action.message.as_deref())
         },
         ActionKind::GitStashPop => git_stash::git_stash_pop(stoat),
+        ActionKind::GitStashList => review_walk::git_stash_list(stoat),
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),
@@ -1398,6 +1399,7 @@ fn opens_picker_kind(kind: ActionKind) -> bool {
                 | ActionKind::OpenWorkspaceSymbolPicker
                 | ActionKind::GitReview
                 | ActionKind::GitLs
+                | ActionKind::GitStashList
         )
 }
 

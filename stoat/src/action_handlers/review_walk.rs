@@ -240,6 +240,26 @@ pub(crate) fn git_ls(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     )
 }
 
+/// List the stashes, newest first, in the commit picker.
+///
+/// Enter pops the highlighted stash and closes the picker. Escape closes the
+/// picker and keeps every stash. Each row previews the stash's changes against
+/// the commit that the stash was saved on.
+pub(crate) fn git_stash_list(stoat: &mut Stoat) -> UpdateEffect {
+    let git_root = stoat.active_workspace().git_root.clone();
+    let Some(repo) = stoat.git_host.discover(&git_root) else {
+        return review_error(stoat, "not in a git repository", None);
+    };
+    let Some(workdir) = repo.workdir() else {
+        return review_error(stoat, "git repo has no working tree", None);
+    };
+    let Some(head) = repo.resolve_rev("HEAD") else {
+        return review_error(stoat, "no commits on this branch", None);
+    };
+
+    open_commit_picker(stoat, &repo, CommitPickerRole::Stash, workdir, head, None)
+}
+
 /// Check `reference` out, attaching HEAD when it names a local branch and
 /// detaching HEAD at the commit it resolves to otherwise.
 ///
@@ -371,6 +391,14 @@ fn open_commit_picker(
                     repo.log_graph(&ref_sha, WALK_LIMIT)
                 },
                 CommitPickerRole::PickBase => repo.log_from(&ref_sha, WALK_LIMIT),
+                // No branch points at a stash commit, so the stash list
+                // carries no branch tips.
+                CommitPickerRole::Stash => {
+                    return LoadedCommits::Root {
+                        commits: repo.stash_list(),
+                        branch_tips: HashMap::new(),
+                    };
+                },
             };
             let mut branch_tips: HashMap<String, Vec<String>> = HashMap::new();
             for (name, sha) in repo.local_branches() {
@@ -462,11 +490,15 @@ pub(crate) fn commit_picker_column_cycle(stoat: &mut Stoat) -> UpdateEffect {
 /// The scope is `merge^1..merge^2`, which leaves out the mainline the merge
 /// landed on. That is the branch's own work, which is what a user drilling into
 /// a merge is asking to see. A row with fewer than two parents has no branch to
-/// drill into and badges instead.
+/// drill into and badges instead. So does every stash, whose second parent is
+/// the index it saved rather than a branch.
 pub(crate) fn commit_picker_drill_in(stoat: &mut Stoat) -> UpdateEffect {
     let Some(picker) = stoat.commit_picker.as_ref() else {
         return UpdateEffect::None;
     };
+    if picker.role == CommitPickerRole::Stash {
+        return review_error(stoat, "a stash has no branch to drill into", None);
+    }
     let Some(commit) = picker.selected_commit() else {
         return UpdateEffect::None;
     };
@@ -565,11 +597,15 @@ pub(crate) fn commit_picker_page(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
 /// Jump the commit picker's selection to the nearest branch tip in `dir`.
 ///
 /// Syncs the preview like [`commit_picker_step`] and [`commit_picker_page`], so
-/// the diff follows a jumped selection as it does a stepped one.
+/// the diff follows a jumped selection as it does a stepped one. The stash list
+/// has no branch tips, so the jump does nothing there.
 pub(crate) fn commit_picker_branch(stoat: &mut Stoat, dir: i32) -> UpdateEffect {
     let Some(picker) = stoat.commit_picker.as_mut() else {
         return UpdateEffect::None;
     };
+    if picker.role == CommitPickerRole::Stash {
+        return UpdateEffect::None;
+    }
     picker.select_branch(dir);
     ensure_selected_preview(stoat);
     UpdateEffect::Redraw
@@ -588,6 +624,7 @@ pub(crate) fn commit_picker_select(stoat: &mut Stoat) -> UpdateEffect {
         CommitPickerRole::PickBase => install_walk(stoat),
         CommitPickerRole::Browse => commit_picker_close(stoat),
         CommitPickerRole::PickRange => pick_range_step(stoat),
+        CommitPickerRole::Stash => pop_selected_stash(stoat),
     }
 }
 
@@ -650,6 +687,24 @@ fn revision_name(picker: &CommitPicker, commit: &CommitInfo) -> String {
         .and_then(|names| names.first())
         .unwrap_or(&commit.short_sha)
         .clone()
+}
+
+/// Pop the highlighted stash and close the stash list.
+///
+/// The list closes on the keystroke, and the pop waits its turn in the git
+/// queue, as `:git stash pop` does.
+fn pop_selected_stash(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(stash) = stoat
+        .commit_picker
+        .as_ref()
+        .and_then(|picker| picker.selected_commit().cloned())
+    else {
+        return UpdateEffect::None;
+    };
+
+    commit_picker_close(stoat);
+    super::git_stash::queue_stash_pop(stoat, Some(stash));
+    UpdateEffect::Redraw
 }
 
 fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
@@ -1899,6 +1954,100 @@ mod tests {
             "a browser starts at the newest commit, not a branch-tip heuristic"
         );
         assert_eq!(picker_shas(&h), ["c3d4e5f6", "b2c3d4e5", "a1b2c3d4"]);
+    }
+
+    /// [`harness`] with the stash list open over two stashes, `one` saved
+    /// before `two`.
+    fn stash_list_harness() -> TestHarness {
+        let mut h = harness();
+        let repo = h
+            .stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .expect("the repo");
+        for message in ["one", "two"] {
+            h.fake_git()
+                .add_repo("/repo")
+                .unstaged_file("a.rs", message);
+            repo.stash_save(Some(message)).expect("a stash");
+        }
+
+        h.type_text(":git sls");
+        h.type_keys("enter");
+        h.settle();
+        h
+    }
+
+    /// `:git sls` lists the stashes newest first, starts on the newest, and
+    /// titles the modal after the command.
+    #[test]
+    fn git_stash_list_lists_the_stashes_newest_first() {
+        let mut h = stash_list_harness();
+        h.snapshot();
+        let titled = h.rendered_text().contains(" git stash list ");
+
+        let picker = h.stoat.commit_picker.as_ref().expect("picker open");
+        let rows: Vec<(&str, &str)> = picker
+            .commits
+            .iter()
+            .map(|row| (row.sha.as_str(), row.summary.as_str()))
+            .collect();
+        assert_eq!(
+            (picker.role, rows, picker.selected, titled),
+            (
+                CommitPickerRole::Stash,
+                vec![("stash-2", "On main: two"), ("stash-1", "On main: one")],
+                0,
+                true,
+            ),
+        );
+    }
+
+    /// Enter pops the highlighted stash alone and closes the list.
+    #[test]
+    fn enter_pops_the_highlighted_stash_and_closes_the_list() {
+        let mut h = stash_list_harness();
+        h.type_keys("down");
+        h.type_keys("enter");
+        h.settle();
+
+        let kept: Vec<String> = h
+            .stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .expect("the repo")
+            .stash_list()
+            .into_iter()
+            .map(|row| row.sha)
+            .collect();
+        assert_eq!(
+            (
+                h.stoat.commit_picker.is_none(),
+                kept,
+                h.stoat.pending_message.clone()
+            ),
+            (
+                true,
+                vec!["stash-2".to_string()],
+                Some("popped stash-1 On main: one".to_string()),
+            ),
+        );
+    }
+
+    /// A stash commit's second parent is the index it saved, so the drill-in
+    /// key badges and the list stays as it was.
+    #[test]
+    fn drilling_into_a_stash_badges_and_keeps_the_rows() {
+        let mut h = stash_list_harness();
+        h.type_keys("alt-right");
+        h.settle();
+        assert_eq!(
+            (review_badge(&h), picker_shas(&h)),
+            (
+                Some("a stash has no branch to drill into".to_string()),
+                vec!["stash-2".to_string(), "stash-1".to_string()],
+            ),
+        );
     }
 
     /// The pump reading the preview task polls with a noop waker, so without a

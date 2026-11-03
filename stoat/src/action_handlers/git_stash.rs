@@ -53,10 +53,20 @@ fn land_stash(stoat: &mut Stoat, stashed: Result<String, String>) {
 /// rebase owns HEAD until it ends, so either one refuses the command. A pop
 /// that conflicts keeps the stash.
 pub(super) fn git_stash_pop(stoat: &mut Stoat) -> UpdateEffect {
-    let job = GitJob::new("stash pop", None, |stoat: &mut Stoat| {
+    queue_stash_pop(stoat, None);
+    UpdateEffect::Redraw
+}
+
+/// Queue a pop of `stash`, or of the newest stash at the pop's turn for
+/// `None`.
+///
+/// A stash that is gone by the pop's turn badges the host's refusal and pops
+/// nothing.
+pub(super) fn queue_stash_pop(stoat: &mut Stoat, stash: Option<CommitInfo>) {
+    let job = GitJob::new("stash pop", None, move |stoat: &mut Stoat| {
         let (repo, _) = commit_repo(stoat)?;
         Some(Box::new(move || {
-            let popped = match repo.stash_list().into_iter().next() {
+            let popped = match stash.or_else(|| repo.stash_list().into_iter().next()) {
                 None => Err(("no stash", None)),
                 Some(row) => match repo.stash_pop(&row.sha) {
                     Ok(()) => Ok(row),
@@ -69,7 +79,6 @@ pub(super) fn git_stash_pop(stoat: &mut Stoat) -> UpdateEffect {
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
-    UpdateEffect::Redraw
 }
 
 /// Bring the editor to the tree a landed pop left and name the popped stash,

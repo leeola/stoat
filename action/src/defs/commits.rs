@@ -363,6 +363,21 @@ define_action!(
 );
 
 define_action!(
+    GitStashListDef,
+    GitStashList,
+    "GitStashList",
+    ActionKind::GitStashList,
+    "list the stashes",
+    "Open a picker over the stashes, newest first, with a diff preview of \
+     the highlighted stash. Enter pops the highlighted stash, and Escape \
+     closes the picker with every stash kept. The pop refuses while a review \
+     walk or a rebase holds HEAD.",
+    ActionPriority::Common,
+    aliases = &["git sls"],
+    command_name = "git stash list"
+);
+
+define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,
     "CommitsOpenReview",

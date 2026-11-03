@@ -559,7 +559,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
         | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush
-        | GitStashPop => ctx.in_repo,
+        | GitStashPop | GitStashList => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1996,6 +1996,7 @@ mod tests {
             "GitRebaseContinue",
             "GitReview",
             "GitStash",
+            "GitStashList",
             "GitStashPop",
             "GitStashPush",
             "GitStatus",

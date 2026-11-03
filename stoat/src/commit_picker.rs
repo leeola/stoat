@@ -32,6 +32,9 @@ pub(crate) enum CommitPickerRole {
     /// under review, and the second, from that commit's own history, is the
     /// commit to review it against.
     PickRange,
+    /// The stash list. A row is a stash commit, and selecting it pops that
+    /// stash and dismisses the picker.
+    Stash,
 }
 
 /// Columns of the commit table, in display order.
@@ -663,10 +666,14 @@ impl CommitPicker {
     /// branch tip is a better landing spot than the tip the user is already
     /// sitting on.
     ///
-    /// A browser starts at the newest row instead. That heuristic answers
-    /// "where would a review begin", which is not a question a listing asks.
+    /// A browser and the stash list start at the newest row instead. That
+    /// heuristic answers "where would a review begin", which is not a question
+    /// a listing asks.
     pub(crate) fn default_selection(&self) -> usize {
-        if self.role == CommitPickerRole::Browse {
+        if matches!(
+            self.role,
+            CommitPickerRole::Browse | CommitPickerRole::Stash
+        ) {
             return 0;
         }
         self.filtered
