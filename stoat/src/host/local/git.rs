@@ -8,8 +8,8 @@ use crate::host::git::{
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Delta, Diff, DiffFindOptions,
-    DiffLineType, DiffOptions, Repository, RepositoryState, Sort, Status, StatusEntry,
-    StatusOptions,
+    DiffLineType, DiffOptions, ErrorCode, Repository, RepositoryState, Sort, StashFlags, Status,
+    StatusEntry, StatusOptions,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -905,6 +905,68 @@ impl GitRepo for LocalGitRepo {
             )
             .map_err(err_msg)?;
         Ok(new_id.to_string())
+    }
+
+    fn stash_save(&self, message: Option<&str>) -> Result<String, GitApplyError> {
+        let mut repo = self.repo.lock().expect("git repo lock");
+        let sig = repo.signature().map_err(err_msg)?;
+        match repo.stash_save2(&sig, message, Some(StashFlags::DEFAULT)) {
+            Ok(oid) => Ok(oid.to_string()),
+            Err(err) if err.code() == ErrorCode::NotFound => BackendSnafu {
+                reason: "nothing to stash",
+            }
+            .fail(),
+            Err(err) => Err(err_msg(err)),
+        }
+    }
+
+    fn stash_list(&self) -> Vec<CommitInfo> {
+        let mut repo = self.repo.lock().expect("git repo lock");
+        let mut stashes = Vec::new();
+        let walked = repo.stash_foreach(|_, message, oid| {
+            stashes.push((message.to_string(), *oid));
+            true
+        });
+        if walked.is_err() {
+            return Vec::new();
+        }
+
+        stashes
+            .into_iter()
+            .filter_map(|(message, oid)| {
+                let commit = repo.find_commit(oid).ok()?;
+                let author = commit.author();
+                let sha = oid.to_string();
+                Some(CommitInfo {
+                    short_sha: sha.chars().take(7).collect(),
+                    sha,
+                    summary: message,
+                    author_name: author.name().unwrap_or_default().to_string(),
+                    author_email: author.email().unwrap_or_default().to_string(),
+                    time: commit.time().seconds(),
+                    parents: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
+    fn stash_pop(&self, sha: &str) -> Result<(), GitApplyError> {
+        let mut repo = self.repo.lock().expect("git repo lock");
+        let mut found = None;
+        repo.stash_foreach(|index, _, oid| {
+            if oid.to_string() == sha {
+                found = Some(index);
+            }
+            found.is_none()
+        })
+        .map_err(err_msg)?;
+        let Some(index) = found else {
+            return BackendSnafu {
+                reason: "no such stash",
+            }
+            .fail();
+        };
+        repo.stash_pop(index, None).map_err(err_msg)
     }
 
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
@@ -2633,6 +2695,57 @@ mod tests {
                 .amend_index("x")
                 .map_err(|err| err.to_string()),
             Err("git backend failure: no commit to amend".to_string()),
+        );
+    }
+
+    /// A stash takes the tracked edit out of the working tree and lists one row
+    /// under its message, and a pop puts the edit back and empties the list. A
+    /// clean tree has nothing to stash, and a popped stash is gone.
+    #[test]
+    fn stash_save_lists_and_pop_restores_the_edit() {
+        let (dir, repo, _shas) = seeded_repo();
+        set_identity(&repo);
+        let git = discover(&dir);
+        let clean = git.stash_save(None).map_err(|err| err.to_string());
+
+        let a = dir.path().join("a.txt");
+        std::fs::write(&a, "four").unwrap();
+        let sha = git.stash_save(Some("wip")).unwrap();
+        let saved = (
+            git.changed_files(),
+            std::fs::read_to_string(&a).unwrap(),
+            git.stash_list()
+                .into_iter()
+                .map(|row| (row.sha, row.summary))
+                .collect::<Vec<_>>(),
+        );
+
+        git.stash_pop(&sha).unwrap();
+        let popped = (
+            git.changed_files()
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<Vec<_>>(),
+            std::fs::read_to_string(&a).unwrap(),
+            git.stash_list().len(),
+        );
+        assert_eq!(
+            (
+                clean,
+                saved,
+                popped,
+                git.stash_pop(&sha).map_err(|err| err.to_string())
+            ),
+            (
+                Err("git backend failure: nothing to stash".to_string()),
+                (
+                    Vec::new(),
+                    "three".to_string(),
+                    vec![(sha.clone(), "On main: wip".to_string())]
+                ),
+                (vec![a.clone()], "four".to_string(), 0),
+                Err("git backend failure: no such stash".to_string()),
+            ),
         );
     }
 

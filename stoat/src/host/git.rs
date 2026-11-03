@@ -596,6 +596,32 @@ pub trait GitRepo: Send + Sync {
     /// and fails when the repository has no configured identity.
     fn amend_index(&self, message: &str) -> Result<String, GitApplyError>;
 
+    /// Stash the tracked changes of the working tree and the index, as `git
+    /// stash` does, and return the stash commit's sha.
+    ///
+    /// The stasher is the repository's configured identity. The stash message
+    /// is `On <branch>: <message>` for a given `message`, and git's `WIP on
+    /// <branch>: <sha> <subject>` for `None`. Untracked files stay where they
+    /// are.
+    ///
+    /// Fails with the `Backend` reason `nothing to stash` when no tracked path
+    /// differs from HEAD.
+    fn stash_save(&self, message: Option<&str>) -> Result<String, GitApplyError>;
+
+    /// The stashes, newest first, each as a row the commit picker lists.
+    ///
+    /// A row holds the stash commit's sha, the stash message as its summary, the
+    /// stasher, and the stash time. Its `parents` stay empty, so the picker
+    /// draws no lanes between stashes.
+    fn stash_list(&self) -> Vec<CommitInfo>;
+
+    /// Apply the stash whose commit is `sha` to the working tree, then drop it.
+    ///
+    /// Fails with the `Backend` reason `no such stash` when no stash has that
+    /// commit. A pop that conflicts fails with the backend's reason and keeps
+    /// the stash.
+    fn stash_pop(&self, sha: &str) -> Result<(), GitApplyError>;
+
     /// Stage every change to a tracked file, as `git add -u` does, and return
     /// how many tracked paths it staged.
     ///

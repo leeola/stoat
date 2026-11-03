@@ -724,6 +724,16 @@ impl FakeChange {
     }
 }
 
+/// A stash, with the registrations and index texts it took from the working
+/// tree, so a pop puts back exactly what the save took.
+struct FakeStash {
+    sha: String,
+    message: String,
+    changed: Vec<FakeChange>,
+    index_contents: HashMap<PathBuf, String>,
+    time: i64,
+}
+
 #[derive(Default)]
 struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
@@ -804,6 +814,8 @@ struct FakeRepoState {
     /// `ref:<name>`. Read via [`FakeGit::checkouts`], which is how a walk test
     /// asserts which commits the working tree visited and in what order.
     checkouts: Vec<String>,
+    /// Stashes, oldest first. [`GitRepo::stash_list`] reports them newest first.
+    stashes: Vec<FakeStash>,
 }
 
 impl FakeRepoState {
@@ -1616,6 +1628,96 @@ impl GitRepo for FakeGitRepo {
 
         state.settle_index_into_head();
         Ok(new_sha)
+    }
+
+    /// Moves every registration and the index texts into a new stash, under the
+    /// message libgit2 writes.
+    ///
+    /// That message is `On <branch>: <message>` for a given message, and `WIP
+    /// on <branch>: <head6> <summary>` without one, with `(no branch)` for a
+    /// detached HEAD. Untracked paths live in their own set, so every
+    /// registration is tracked, and the untracked paths stay as a default stash
+    /// leaves them. The apply failure knob fails it as it fails
+    /// [`GitRepo::commit_index`].
+    fn stash_save(&self, message: Option<&str>) -> Result<String, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = &state.apply_error {
+            return BackendSnafu {
+                reason: reason.clone(),
+            }
+            .fail();
+        }
+        if state.changed.is_empty() {
+            return BackendSnafu {
+                reason: "nothing to stash",
+            }
+            .fail();
+        }
+
+        let branch = state.head_branch.as_deref().unwrap_or("(no branch)");
+        let message = match message {
+            Some(message) => format!("On {branch}: {message}"),
+            None => {
+                let head = state.head.as_deref().unwrap_or("");
+                let summary = state
+                    .commits
+                    .get(head)
+                    .and_then(|commit| commit.message.lines().next())
+                    .unwrap_or("");
+                format!("WIP on {branch}: {} {summary}", &head[..head.len().min(6)])
+            },
+        };
+        state.synth_counter += 1;
+        let sha = format!("stash-{}", state.synth_counter);
+        let stash = FakeStash {
+            sha: sha.clone(),
+            message,
+            changed: mem::take(&mut state.changed),
+            index_contents: mem::take(&mut state.index_contents),
+            time: 1_700_000_000 + state.synth_counter as i64,
+        };
+        state.stashes.push(stash);
+        Ok(sha)
+    }
+
+    fn stash_list(&self) -> Vec<CommitInfo> {
+        let state = self.state.lock().unwrap();
+        state
+            .stashes
+            .iter()
+            .rev()
+            .map(|stash| CommitInfo {
+                sha: stash.sha.clone(),
+                short_sha: stash.sha.chars().take(7).collect(),
+                summary: stash.message.clone(),
+                author_name: "fake".into(),
+                author_email: "fake@example.invalid".into(),
+                time: stash.time,
+                parents: Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Restores the stash's registrations and index texts and removes it. The
+    /// apply failure knob fails it as it fails [`GitRepo::commit_index`].
+    fn stash_pop(&self, sha: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = &state.apply_error {
+            return BackendSnafu {
+                reason: reason.clone(),
+            }
+            .fail();
+        }
+        let Some(at) = state.stashes.iter().position(|stash| stash.sha == sha) else {
+            return BackendSnafu {
+                reason: "no such stash",
+            }
+            .fail();
+        };
+        let stash = state.stashes.remove(at);
+        state.changed.extend(stash.changed);
+        state.index_contents.extend(stash.index_contents);
+        Ok(())
     }
 
     /// Records the checkout and moves head, without modelling libgit2's refusal
@@ -2740,6 +2842,67 @@ mod tests {
         assert_eq!(
             repo.amend_index("x").map_err(|err| err.to_string()),
             Err("git backend failure: no commit to amend".to_string()),
+        );
+    }
+
+    /// A stash takes the registrations and index texts out under the message
+    /// libgit2 writes, and a pop puts them back. A clean repository has nothing
+    /// to stash, and a popped stash is gone.
+    #[test]
+    fn stash_save_lists_and_pop_restores_the_changes() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit_with_message("c1", "one", &[("a.rs", "a")])
+            .branch("main", "c1")
+            .set_head_branch("main")
+            .unstaged_file("a.rs", "edit")
+            .staged_file("b.rs", "new")
+            .index_file("b.rs", "new")
+            .untracked("c.rs");
+        host.add_repo("/clean");
+        let repo = host.discover(&workdir()).unwrap();
+        let b = workdir().join("b.rs");
+        let before = repo.changed_files();
+
+        let sha = repo.stash_save(None).unwrap();
+        let saved = (
+            repo.changed_files(),
+            repo.index_content(&b),
+            repo.stash_list()
+                .into_iter()
+                .map(|row| (row.sha, row.summary))
+                .collect::<Vec<_>>(),
+        );
+        repo.stash_pop(&sha).unwrap();
+        let clean = host
+            .discover(Path::new("/clean"))
+            .unwrap()
+            .stash_save(None)
+            .map_err(|err| err.to_string());
+        assert_eq!(
+            (
+                saved,
+                repo.changed_files(),
+                repo.index_content(&b),
+                repo.stash_pop(&sha).map_err(|err| err.to_string()),
+                clean,
+            ),
+            (
+                (
+                    vec![ChangedFile {
+                        path: workdir().join("c.rs"),
+                        staged: false,
+                        untracked: true,
+                        renamed_from: None,
+                    }],
+                    None,
+                    vec![(sha.clone(), "WIP on main: c1 one".to_string())],
+                ),
+                before,
+                Some("new".to_string()),
+                Err("git backend failure: no such stash".to_string()),
+                Err("git backend failure: nothing to stash".to_string()),
+            ),
         );
     }
 
