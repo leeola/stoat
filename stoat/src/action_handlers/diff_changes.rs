@@ -2740,15 +2740,8 @@ mod tests {
             &stoat_action::DiffBack,
             &stoat_action::DiffForward,
         ];
-        let walk: Vec<(Option<&str>, (String, u32))> = presses
-            .into_iter()
-            .map(|action| {
-                dispatch(&mut h.stoat, action);
-                (h.stoat.current_view(), place(&mut h))
-            })
-            .collect();
         assert_eq!(
-            walk,
+            side_walk(&mut h, &presses),
             [
                 (Some("diff_changes"), at("a.txt", 8)),
                 (Some("diff_changes"), at("b.txt", 8)),
@@ -2756,6 +2749,70 @@ mod tests {
                 (Some("diff_changes"), at("a.txt", 8)),
             ],
         );
+    }
+
+    /// A jumplist push after a landing, with the cursor moved off the landed
+    /// hunk, leaves the side buttons walking the hunks. A retrace of the push
+    /// swaps the pane to a plain editor on the saved file, so the buttons
+    /// never retrace in a changes view.
+    ///
+    /// The `j` puts the cursor on a.txt's last row, below its one hunk, so the
+    /// walk goes on to b.txt.
+    #[test]
+    fn the_side_buttons_walk_on_after_a_push_off_the_landing() {
+        let mut h = deep_files();
+        h.cover_with_diff_changes(false);
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::DiffBack);
+        dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("j");
+        assert_eq!(
+            side_walk(
+                &mut h,
+                &[&stoat_action::DiffBack, &stoat_action::DiffForward]
+            ),
+            [
+                (Some("diff_changes"), at("b.txt", 8)),
+                (Some("diff_changes"), at("a.txt", 8)),
+            ],
+        );
+    }
+
+    /// Forward history that the pane gathered before the changes view covered
+    /// it leaves the forward button walking the hunks too. A retrace forward
+    /// swaps the pane to a plain editor on the entry's file.
+    ///
+    /// In the plain editor a walk lands a.txt's hunk, a save and a `k` leave
+    /// it, and a jump back to the save leaves the `k` row as forward history.
+    #[test]
+    fn the_forward_button_walks_past_forward_history_from_before_the_view() {
+        let mut h = deep_files();
+        h.open_file(Path::new("/repo/a.txt"));
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::DiffBack);
+        dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("k");
+        dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        assert_eq!(
+            side_walk(&mut h, &[&stoat_action::DiffForward]),
+            [(Some("diff_changes"), at("a.txt", 8))],
+        );
+    }
+
+    /// The view and the focused excerpt's place after each of `presses`.
+    fn side_walk(
+        h: &mut TestHarness,
+        presses: &[&dyn Action],
+    ) -> Vec<(Option<&'static str>, (String, u32))> {
+        presses
+            .iter()
+            .map(|action| {
+                dispatch(&mut h.stoat, *action);
+                (h.stoat.current_view(), place(h))
+            })
+            .collect()
     }
 
     /// `space G s` on an excerpt's hunk stages it, and the refold that follows

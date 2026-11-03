@@ -7,6 +7,9 @@
 //! once back at the change, is the change walk. One pair of buttons serves
 //! both by reading where the last walk landed and whether a jump has recorded
 //! a position since.
+//!
+//! A changes view never retraces, so there the buttons walk its hunks on every
+//! press, as [`in_changes_view`] explains.
 
 use super::{
     focused_editor_mut, jump,
@@ -24,11 +27,11 @@ use stoat_text::cursor_offset;
 /// Walks to the next change, the way `GotoNextChange` does. While a jump has
 /// carried the cursor off the change the last walk landed on, it retraces the
 /// jumplist instead, one position per press, until the cursor is on that
-/// change again.
+/// change again. In a changes view it always walks.
 pub(crate) fn back(stoat: &mut Stoat) -> UpdateEffect {
     let left = left_since_landing(stoat);
     let on = on_landing(stoat);
-    let retrace = jumped_away(left, on);
+    let retrace = jumped_away(left, on) && !in_changes_view(stoat);
     tracing::debug!(
         target: "stoat::change_walk",
         left_since_landing = left,
@@ -49,19 +52,20 @@ pub(crate) fn back(stoat: &mut Stoat) -> UpdateEffect {
 /// Re-advances the jumplist while a jump has left the change the last walk
 /// landed on and forward history remains. Otherwise walks to the previous
 /// change, the way `GotoPrevChange` does, so a back to the change followed by a
-/// forward returns to where the jump went.
+/// forward returns to where the jump went. In a changes view it always walks.
 pub(crate) fn forward(stoat: &mut Stoat) -> UpdateEffect {
     let left = left_since_landing(stoat);
+    let retrace = left && !in_changes_view(stoat);
     tracing::debug!(
         target: "stoat::change_walk",
         left_since_landing = left,
         on_landing = on_landing(stoat),
         landing_generation = ?landing(stoat).map(|(landing, _)| landing.generation),
         list_generation = ?landing(stoat).map(|(_, list)| list),
-        route = if left { "retrace jumplist" } else { "walk changes" },
+        route = if retrace { "retrace jumplist" } else { "walk changes" },
         "diff forward"
     );
-    if left && matches!(jump::jump_forward(stoat), UpdateEffect::Redraw) {
+    if retrace && matches!(jump::jump_forward(stoat), UpdateEffect::Redraw) {
         return UpdateEffect::Redraw;
     }
     movement::goto_change_impl(stoat, ChangeDir::Prev, 1, ChangeUnit::Tree)
@@ -91,6 +95,18 @@ fn left_since_landing(stoat: &Stoat) -> bool {
 /// history walk that arrives back on the change stops retracing.
 fn jumped_away(left_since_landing: bool, on_landing: bool) -> bool {
     left_since_landing && !on_landing
+}
+
+/// Whether the focused split pane shows a changes view, where the buttons walk
+/// changes on every press.
+///
+/// A jumplist entry applied in a changes view swaps the pane to a plain editor
+/// on the entry's file, since [`jump::apply_jump_entry`] reads the pane's
+/// buffer from an editor view alone. That drops the review surface. The view's
+/// excerpt hops record a landing on every crossing, so the walk is the answer
+/// there.
+fn in_changes_view(stoat: &Stoat) -> bool {
+    stoat.active_workspace().focused_diff_changes_id().is_some()
 }
 
 /// Whether the cursor sits on a row of the change the last walk landed on.
