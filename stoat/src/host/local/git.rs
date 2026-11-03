@@ -868,6 +868,45 @@ impl GitRepo for LocalGitRepo {
         Ok(new_id.to_string())
     }
 
+    fn commit_message(&self, sha: &str) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).ok()?;
+        let commit = repo.find_commit(oid).ok()?;
+        commit.message().ok().map(str::to_string)
+    }
+
+    fn amend_index(&self, message: &str) -> Result<String, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Some(head) = repo.head().and_then(|head| head.peel_to_commit()).ok() else {
+            return BackendSnafu {
+                reason: "no commit to amend",
+            }
+            .fail();
+        };
+
+        let mut index = repo.index().map_err(err_msg)?;
+        // A held handle keeps the index it loaded first. Without this reload,
+        // the amend misses what was staged since that load.
+        index.read(false).map_err(err_msg)?;
+        let tree = {
+            let tree_id = index.write_tree().map_err(err_msg)?;
+            repo.find_tree(tree_id).map_err(err_msg)?
+        };
+
+        let sig = repo.signature().map_err(err_msg)?;
+        let new_id = head
+            .amend(
+                Some("HEAD"),
+                None,
+                Some(&sig),
+                None,
+                Some(message),
+                Some(&tree),
+            )
+            .map_err(err_msg)?;
+        Ok(new_id.to_string())
+    }
+
     fn checkout_detached(&self, sha: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
@@ -2550,6 +2589,53 @@ mod tests {
         );
     }
 
+    /// An amend replaces HEAD with a commit over the staged edit, on HEAD's
+    /// parent. The author carries over, the committer is the configured
+    /// identity, and the branch moves to the new commit.
+    #[test]
+    fn amend_index_replaces_head_with_the_staged_edit() {
+        let (dir, repo, shas) = seeded_repo();
+        let git = discover(&dir);
+        stage_edit(&git, &repo, &dir);
+        let sha = git.amend_index("feat: four").unwrap();
+
+        let commit = repo.find_commit(Oid::from_str(&sha).unwrap()).unwrap();
+        let (author, committer) = (commit.author(), commit.committer());
+        assert_eq!(
+            (
+                commit
+                    .parent_ids()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>(),
+                author.name().ok(),
+                committer.name().ok(),
+                git.content_at(&sha, &dir.path().join("a.txt")),
+                git.commit_message(&sha),
+                git.resolve_rev("main"),
+            ),
+            (
+                vec![shas[1].clone()],
+                Some("test"),
+                Some("tester"),
+                Some("four".to_string()),
+                Some("feat: four".to_string()),
+                Some(sha.clone()),
+            ),
+        );
+    }
+
+    #[test]
+    fn amend_index_on_an_unborn_branch_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path()).unwrap();
+        assert_eq!(
+            discover(&dir)
+                .amend_index("x")
+                .map_err(|err| err.to_string()),
+            Err("git backend failure: no commit to amend".to_string()),
+        );
+    }
+
     /// Give `repo` an identity in its own config, which libgit2 reads ahead of
     /// the machine's global config, so a commit under it does not depend on
     /// that config.
@@ -2563,22 +2649,28 @@ mod tests {
 
     /// Stage `four` as `a.txt` through `repo`, then commit the index through
     /// `git` with `message`.
-    ///
-    /// `git` reads the status first, which loads its index before the edit is
-    /// staged, so the commit sees the edit only when it reads the index again.
     fn commit_staged_edit(
         git: &Arc<dyn GitRepo>,
         repo: &Repository,
         dir: &TempDir,
         message: &str,
     ) -> Result<String, String> {
+        stage_edit(git, repo, dir);
+        git.commit_index(message).map_err(|err| err.to_string())
+    }
+
+    /// Stage `four` as `a.txt` through `repo`, under a configured identity.
+    ///
+    /// `git` reads the status first, which loads its index before the edit is
+    /// staged, so a write through `git` sees the edit only when it reads the
+    /// index again.
+    fn stage_edit(git: &Arc<dyn GitRepo>, repo: &Repository, dir: &TempDir) {
         set_identity(repo);
         let _ = git.changed_files();
         std::fs::write(dir.path().join("a.txt"), "four").unwrap();
         let mut index = repo.index().unwrap();
         index.add_path(Path::new("a.txt")).unwrap();
         index.write().unwrap();
-        git.commit_index(message).map_err(|err| err.to_string())
     }
 
     /// A held handle caches the index it loaded first. A resolve through it

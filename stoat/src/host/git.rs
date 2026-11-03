@@ -579,6 +579,23 @@ pub trait GitRepo: Send + Sync {
     /// Fails too when the repository has no configured identity.
     fn commit_index(&self, message: &str) -> Result<String, GitApplyError>;
 
+    /// The full message of commit `sha`, or `None` when no commit has that sha
+    /// or its message is not UTF-8.
+    fn commit_message(&self, sha: &str) -> Option<String>;
+
+    /// Replace HEAD's commit with one over the index tree and `message`, and
+    /// return the new commit's sha.
+    ///
+    /// The parents and the author carry over, and the committer is the
+    /// repository's configured identity, as `git commit --amend` does. HEAD's
+    /// branch moves to the new commit, or a detached HEAD moves itself. An index
+    /// that matches HEAD's tree still amends, so a message edit needs no staged
+    /// change.
+    ///
+    /// Fails with the `Backend` reason `no commit to amend` on an unborn branch,
+    /// and fails when the repository has no configured identity.
+    fn amend_index(&self, message: &str) -> Result<String, GitApplyError>;
+
     /// Stage every change to a tracked file, as `git add -u` does, and return
     /// how many tracked paths it staged.
     ///

@@ -892,6 +892,31 @@ impl FakeRepoState {
 
         seen
     }
+
+    /// `base` with the index's texts over it and its removed entries taken out,
+    /// which is the tree a commit of the index records.
+    fn tree_over_index(&self, mut base: BTreeMap<PathBuf, String>) -> BTreeMap<PathBuf, String> {
+        base.extend(
+            self.index_contents
+                .iter()
+                .map(|(path, text)| (path.clone(), text.clone())),
+        );
+        for path in &self.removed_index_entries {
+            base.remove(path);
+        }
+        base
+    }
+
+    /// Move the index into HEAD, as a real commit leaves the two equal, so
+    /// staged entries leave `changed` and the index texts become HEAD's.
+    fn settle_index_into_head(&mut self) {
+        self.changed.retain(|change| !change.file.staged);
+        let index = mem::take(&mut self.index_contents);
+        self.head_contents.extend(index);
+        for path in mem::take(&mut self.removed_index_entries) {
+            self.head_contents.remove(&path);
+        }
+    }
 }
 
 /// The row a seeded commit reports through any of the log walks.
@@ -1507,20 +1532,14 @@ impl GitRepo for FakeGitRepo {
         }
 
         let head = state.head.clone();
-        let mut tree = head
-            .as_ref()
-            .and_then(|sha| state.commits.get(sha))
-            .map(|commit| commit.tree.clone())
-            .unwrap_or_default();
-        tree.extend(
-            state
-                .index_contents
-                .iter()
-                .map(|(path, text)| (path.clone(), text.clone())),
-        );
-        for path in &state.removed_index_entries {
-            tree.remove(path);
-        }
+        let tree = {
+            let base = head
+                .as_ref()
+                .and_then(|sha| state.commits.get(sha))
+                .map(|commit| commit.tree.clone())
+                .unwrap_or_default();
+            state.tree_over_index(base)
+        };
 
         state.synth_counter += 1;
         let parent_frag = head.as_deref().unwrap_or("root");
@@ -1543,12 +1562,59 @@ impl GitRepo for FakeGitRepo {
             state.branches.insert(branch, new_sha.clone());
         }
 
-        state.changed.retain(|change| !change.file.staged);
-        let index = mem::take(&mut state.index_contents);
-        state.head_contents.extend(index);
-        for path in mem::take(&mut state.removed_index_entries) {
-            state.head_contents.remove(&path);
+        state.settle_index_into_head();
+        Ok(new_sha)
+    }
+
+    fn commit_message(&self, sha: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.commits.get(sha).map(|commit| commit.message.clone())
+    }
+
+    /// Replaces the head commit with one over the index, keeping the head
+    /// commit's parents, author, and time.
+    ///
+    /// The index settles into HEAD as it does after [`GitRepo::commit_index`],
+    /// and the amend lands in `amend_history`, as one through
+    /// [`GitRepo::amend_head`] does.
+    fn amend_index(&self, message: &str) -> Result<String, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        let head = state
+            .head
+            .clone()
+            .and_then(|sha| state.commits.get(&sha).cloned().map(|commit| (sha, commit)));
+        let Some((head_sha, head_commit)) = head else {
+            return BackendSnafu {
+                reason: "no commit to amend",
+            }
+            .fail();
+        };
+
+        state.synth_counter += 1;
+        let new_sha = format!(
+            "amended-{}-{}",
+            &head_sha[..head_sha.len().min(6)],
+            state.synth_counter
+        );
+        let commit = FakeCommit {
+            parents: head_commit.parents,
+            tree: state.tree_over_index(head_commit.tree),
+            message: message.to_string(),
+            author_name: head_commit.author_name,
+            author_email: head_commit.author_email,
+            time: head_commit.time,
+        };
+        state.commits.insert(new_sha.clone(), commit);
+        state.head = Some(new_sha.clone());
+        if let Some(branch) = state.head_branch.clone() {
+            state.branches.insert(branch, new_sha.clone());
         }
+        state.amend_history.push(RecordedAmend {
+            old_head: head_sha,
+            new_head: new_sha.clone(),
+        });
+
+        state.settle_index_into_head();
         Ok(new_sha)
     }
 
@@ -2619,6 +2685,61 @@ mod tests {
                     Some("c1".to_string()),
                 ),
             ],
+        );
+    }
+
+    /// An amend replaces the head commit with one over the index, on the head
+    /// commit's parent. The branch moves, the index settles into HEAD, and
+    /// the amend is recorded.
+    #[test]
+    fn amend_index_replaces_the_head_commit_with_the_index() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "one")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "two")])
+            .branch("main", "c2")
+            .set_head_branch("main")
+            .staged_file("a.rs", "three")
+            .index_file("a.rs", "three");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let sha = repo.amend_index("feat: three").unwrap();
+        let amends: Vec<(String, String)> = host
+            .amend_history(&workdir())
+            .into_iter()
+            .map(|amend| (amend.old_head, amend.new_head))
+            .collect();
+        assert_eq!(
+            (
+                repo.resolve_rev("main"),
+                repo.parent_sha(&sha),
+                repo.commit_message(&sha),
+                repo.commit_tree(&sha),
+                repo.changed_files(),
+                amends,
+            ),
+            (
+                Some(sha.clone()),
+                Some("c1".to_string()),
+                Some("feat: three".to_string()),
+                Some(BTreeMap::from([(
+                    PathBuf::from("a.rs"),
+                    "three".to_string()
+                )])),
+                Vec::new(),
+                vec![("c2".to_string(), sha.clone())],
+            ),
+        );
+    }
+
+    #[test]
+    fn amend_index_with_no_head_fails() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(
+            repo.amend_index("x").map_err(|err| err.to_string()),
+            Err("git backend failure: no commit to amend".to_string()),
         );
     }
 
