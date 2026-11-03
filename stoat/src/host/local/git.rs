@@ -71,6 +71,11 @@ impl GitRepo for LocalGitRepo {
         repo.workdir().map(|p| p.to_path_buf())
     }
 
+    fn git_dir(&self) -> PathBuf {
+        let repo = self.repo.lock().expect("git repo lock");
+        repo.path().to_path_buf()
+    }
+
     fn is_path_ignored(&self, path: &Path) -> bool {
         let repo = self.repo.lock().expect("git repo lock");
         let rel = repo
@@ -2695,6 +2700,16 @@ mod tests {
                 .amend_index("x")
                 .map_err(|err| err.to_string()),
             Err("git backend failure: no commit to amend".to_string()),
+        );
+    }
+
+    #[test]
+    fn git_dir_is_the_dot_git_under_the_workdir() {
+        let (dir, _repo, _shas) = seeded_repo();
+        let git = discover(&dir);
+        assert_eq!(
+            Some(git.git_dir()),
+            git.workdir().map(|workdir| workdir.join(".git"))
         );
     }
 

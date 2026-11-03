@@ -165,6 +165,14 @@ pub trait GitHost: Send + Sync {
 /// git API exists that would benefit consumers here.
 pub trait GitRepo: Send + Sync {
     fn workdir(&self) -> Option<PathBuf>;
+
+    /// The repository's git directory, which holds COMMIT_EDITMSG and the
+    /// other message files.
+    ///
+    /// A linked worktree has its git directory under the main repository's
+    /// `.git`.
+    fn git_dir(&self) -> PathBuf;
+
     fn changed_files(&self) -> Vec<ChangedFile>;
 
     /// The working tree diffed against the tree of commit `base_sha`.

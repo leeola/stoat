@@ -975,6 +975,10 @@ impl GitRepo for FakeGitRepo {
         Some(self.workdir.clone())
     }
 
+    fn git_dir(&self) -> PathBuf {
+        self.workdir.join(".git")
+    }
+
     fn is_path_ignored(&self, path: &Path) -> bool {
         let state = self.state.lock().unwrap();
         state.ignored.contains(path)
@@ -2984,6 +2988,14 @@ mod tests {
 
         assert_eq!(repo.head_branch(), None);
         assert!(repo.local_branches().is_empty());
+    }
+
+    #[test]
+    fn git_dir_is_the_workdir_dot_git() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(repo.git_dir(), PathBuf::from("/work/.git"));
     }
 
     #[test]
