@@ -4673,7 +4673,7 @@ fn the_git_chord_marks_its_toggles() {
     h.stoat.stoatty = false;
     // The follow toggle binds only inside a repository.
     h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
-    h.type_keys("space G");
+    h.type_keys("space h");
     assert!(
         h.rendered_text().contains("f\u{25ab}  follow every change"),
         "follow starts off: {}",

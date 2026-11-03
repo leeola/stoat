@@ -3821,33 +3821,36 @@ mod tests {
         );
     }
 
-    /// The pin key holds the mode it is already in, so the chord's own arms
-    /// repeat. Each arm chains SetMode(normal), which is what releases the
-    /// chord unpinned and what the pin drops; Escape carries the switch alone,
-    /// so it releases either way.
+    /// The `~` pin holds the mode it is already in, so the chord's own arms
+    /// repeat. The pin is not a doubled `h`, because `h` inside the chord is
+    /// the HEAD diff.
+    ///
+    /// Each arm chains SetMode(normal), which releases the chord unpinned and
+    /// which the pin drops. Escape carries the switch alone, so it releases
+    /// either way.
     #[test]
-    fn space_capital_g_twice_pins_the_git_mode_and_holds_it() {
+    fn space_h_then_tilde_pins_the_git_mode_and_holds_it() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
 
         let space = TestState::new().set("mode", StateValue::String("space".into()));
         let to_git = keymap
-            .lookup(&space, &key_event(KeyCode::Char('G'), KeyModifiers::NONE))
-            .expect("G is bound in space mode");
+            .lookup(&space, &key_event(KeyCode::Char('h'), KeyModifiers::NONE))
+            .expect("h is bound in space mode");
         assert_eq!(to_git[0].name, "SetMode");
         assert_eq!(to_git[0].args[0].value, Value::Ident("space_git".into()));
 
         let space_git = TestState::in_repo("space_git").set("changes", StateValue::Bool(true));
-        let g = keymap
+        let pin = keymap
             .lookup(
                 &space_git,
-                &key_event(KeyCode::Char('G'), KeyModifiers::NONE),
+                &key_event(KeyCode::Char('~'), KeyModifiers::NONE),
             )
-            .expect("G is bound in space_git mode");
+            .expect("~ is bound in space_git mode");
         assert_eq!(
-            (g.len(), g[0].name.as_str()),
+            (pin.len(), pin[0].name.as_str()),
             (1, "PinMode"),
-            "the second G pins the mode it is already in",
+            "~ pins the mode it is already in",
         );
 
         for (key, action) in [
@@ -3996,8 +3999,8 @@ mod tests {
         );
     }
 
-    /// The pinned twin of `space G G`, spelled with the doubled letter the
-    /// same way.
+    /// The goto twin of the git chord's `~` pin. The goto chord pins on a
+    /// doubled `g`, because no goto arm takes `g`.
     #[test]
     fn space_g_twice_pins_the_goto_mode_and_holds_it() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);

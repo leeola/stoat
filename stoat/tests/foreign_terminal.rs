@@ -452,7 +452,7 @@ fn a_resize_and_the_key_after_it_land_without_another_key() {
     let repainted = session.settles(bar_reaches_the_edge);
     let after_resize = session.screen_text();
 
-    session.send(" Gf");
+    session.send(" hf");
     let reported = session.settles(|screen| screen.contains("follow changes on"));
     let after_key = session.screen_text();
     let (status, _) = session.quit();

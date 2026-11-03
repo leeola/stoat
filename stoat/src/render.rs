@@ -3106,11 +3106,11 @@ mod lsp_filter_tests {
     #[test]
     fn the_git_chord_box_lists_git_rows_only_inside_a_repository() {
         let mut h = TestHarness::with_size(150, 50);
-        let scratch = chord_rows(&mut h, "space G");
+        let scratch = chord_rows(&mut h, "space h");
 
         h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
         h.type_keys("escape");
-        let staged = chord_rows(&mut h, "space G");
+        let staged = chord_rows(&mut h, "space h");
 
         let listed = |rows: &[String], names: &[&str]| -> Vec<bool> {
             names
@@ -3129,6 +3129,16 @@ mod lsp_filter_tests {
             ),
             (vec![true; 3], vec![false; 3], vec![true]),
             "a scratch root lists only the ungated rows, and a repository brings GitLs back",
+        );
+    }
+
+    #[test]
+    fn the_git_chord_box_lists_its_pin() {
+        let mut h = TestHarness::with_size(150, 50);
+        let pin = short_desc("PinMode");
+        assert!(
+            chord_rows(&mut h, "space h").iter().any(|row| row == pin),
+            "the space h box lists the ~ pin",
         );
     }
 

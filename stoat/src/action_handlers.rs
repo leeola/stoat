@@ -3213,7 +3213,7 @@ mod tests {
         assert_eq!(
             focused_editor_mut(&mut h.stoat).map(|editor| editor.diff_view),
             Some(true),
-            "space G D reaches DiffPair only under the live pair value",
+            "space h D reaches DiffPair only under the live pair value",
         );
     }
 

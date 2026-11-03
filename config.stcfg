@@ -375,7 +375,7 @@ on init {
 #   changes        the focused buffer's diff holds at least one hunk, staged
 #                  or not
 #   pair_diff      the focused file diffs against another file, the pair
-#                  space G D set
+#                  space h D set
 #   pair           exactly two split panes show two different files
 #   git            the workspace root is inside a git repository
 #   walkthrough    a walkthrough tour is open
@@ -1500,7 +1500,7 @@ on key {
         p -> OpenFileFinder();
         r -> [ForceReloadAll(), SetMode(normal)];
         g -> SetMode(space_goto);
-        G -> SetMode(space_git);
+        h -> SetMode(space_git);
 
         walkthrough {
             W -> SetMode(walkthrough);
@@ -1560,8 +1560,8 @@ on key {
     # The goto chord. `a` mirrors the normal-mode `g a` so both spellings of
     # goto reach the last buffer, and n/p repeat the change hops that the
     # git submode below also carries. A second `g` pins the mode, so those hops
-    # repeat until Escape; the doubled letter spells it the way `space G G`
-    # spells the git one.
+    # repeat until Escape. The git chord pins on `~` instead, because `h` inside
+    # that chord is the HEAD diff.
     #
     # The mouse side buttons ride the same hops, forward as p and back as n, so
     # a pinned chord walks changes from the mouse. The forward button sits above
@@ -1593,7 +1593,7 @@ on key {
     }
     # The git chord. Only a binding changes the mode, never the action it runs,
     # so this chord releases after one key purely because each of its arms
-    # chains SetMode(normal). A second `G` pins the mode, which drops that
+    # chains SetMode(normal). `~` pins the mode, which drops that
     # chained switch, letting n and s repeat to walk and stage hunks until
     # Escape. Escape switches and nothing else, which is what releases the pin.
     #
@@ -1638,7 +1638,7 @@ on key {
     # change to reach.
     mode == space_git {
         Escape -> SetMode(normal);
-        G -> PinMode();
+        ~ -> PinMode();
 
         git || changes {
             d -> [DiffFiles(), SetMode(normal)];

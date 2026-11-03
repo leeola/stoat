@@ -55,7 +55,7 @@ fn diff_view_shows_fixture_change() {
         // Only the HEAD base shows it as a hunk with the committed line beside
         // it.
         handle
-            .send_keys("<Space>Gh")
+            .send_keys("<Space>hh")
             .await
             .expect("diff against HEAD");
 

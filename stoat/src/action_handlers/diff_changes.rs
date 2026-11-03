@@ -2815,10 +2815,10 @@ mod tests {
             .collect()
     }
 
-    /// `space G s` on an excerpt's hunk stages it, and the refold that follows
+    /// `space h s` on an excerpt's hunk stages it, and the refold that follows
     /// the stage keeps the cursor on its buffer position.
     #[test]
-    fn space_g_s_stages_an_excerpt_hunk_and_the_refold_keeps_the_cursor() {
+    fn space_h_s_stages_an_excerpt_hunk_and_the_refold_keeps_the_cursor() {
         let mut h = deep_files();
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/b.txt"));
@@ -2834,7 +2834,7 @@ mod tests {
         };
         let before = (place(&mut h), folded(&h));
 
-        h.type_keys("space G s");
+        h.type_keys("space h s");
         h.settle_diff_jobs();
         let patches = h.fake_git().applied_patches(Path::new("/repo")).len();
         assert_eq!(

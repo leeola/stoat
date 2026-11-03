@@ -4851,7 +4851,7 @@ mod tests {
     }
 
     #[test]
-    fn space_capital_g_s_stages_the_hunk_from_a_plain_editor() {
+    fn space_h_s_stages_the_hunk_from_a_plain_editor() {
         let mut h = TestHarness::with_size(80, 14);
         let workdir = open_git_file_at_cursor(&mut h, 2);
         // The stage keys bind once the diff holds a hunk, as it does a moment
@@ -4859,10 +4859,10 @@ mod tests {
         let buffer_id = h.stoat.focused_editor_ids().expect("focused editor").1;
         h.settle_diff_map(buffer_id);
 
-        h.type_keys("space G s");
+        h.type_keys("space h s");
 
         let patches = h.fake_git().applied_patches(&workdir);
-        assert_eq!(patches.len(), 1, "space G s stages the hunk: {patches:?}");
+        assert_eq!(patches.len(), 1, "space h s stages the hunk: {patches:?}");
         assert!(
             patches[0].contains("-c\n") && patches[0].contains("+X\n"),
             "stages the cursor hunk: {}",
@@ -4891,19 +4891,19 @@ mod tests {
     }
 
     #[test]
-    fn space_capital_g_s_unstages_a_staged_hunk_from_a_plain_editor() {
+    fn space_h_s_unstages_a_staged_hunk_from_a_plain_editor() {
         assert_eq!(
-            chord_on_the_second_hunk(SHIFT_BUFFER, "space G s"),
+            chord_on_the_second_hunk(SHIFT_BUFFER, "space h s"),
             [SECOND_HUNK_UNSTAGE]
         );
     }
 
     #[test]
-    fn space_capital_g_capital_s_toggles_the_line_from_a_plain_editor() {
+    fn space_h_capital_s_toggles_the_line_from_a_plain_editor() {
         assert_eq!(
             (
-                chord_on_the_second_hunk(SHIFT_HEAD, "space G S"),
-                chord_on_the_second_hunk(SHIFT_BUFFER, "space G S")
+                chord_on_the_second_hunk(SHIFT_HEAD, "space h S"),
+                chord_on_the_second_hunk(SHIFT_BUFFER, "space h S")
             ),
             (
                 vec![SECOND_HUNK_STAGE.to_string()],
