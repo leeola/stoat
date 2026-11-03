@@ -558,7 +558,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
-        | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush => ctx.in_repo,
+        | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush
+        | GitStashPop => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1995,6 +1996,7 @@ mod tests {
             "GitRebaseContinue",
             "GitReview",
             "GitStash",
+            "GitStashPop",
             "GitStashPush",
             "GitStatus",
         ];

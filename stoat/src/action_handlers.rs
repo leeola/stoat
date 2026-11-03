@@ -830,6 +830,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("GitStashPush action downcast");
             git_stash::git_stash(stoat, action.message.as_deref())
         },
+        ActionKind::GitStashPop => git_stash::git_stash_pop(stoat),
         ActionKind::ReviewNextCommit => review_walk::review_next_commit(stoat),
         ActionKind::ReviewPrevCommit => review_walk::review_prev_commit(stoat),
         ActionKind::ReviewDone => review_walk::review_done(stoat),

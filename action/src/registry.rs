@@ -6,7 +6,7 @@ use crate::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
             CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitCommitAbort,
-            GitCommitConfirm, GitLs, GitStash, GitStashPush, OpenCommits,
+            GitCommitConfirm, GitLs, GitStash, GitStashPop, GitStashPush, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -1060,6 +1060,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             .map(str::to_owned);
         Ok(Box::new(GitStashPush { message }))
     });
+    add(GitStashPop::DEF, |_| Ok(Box::new(GitStashPop)));
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(GitRebase::DEF, |params| {
         // The palette autospaces a submitted command, so a bare `git rebase`
@@ -1453,6 +1454,7 @@ mod tests {
         "GitAdd",
         "GitStash",
         "GitStashPush",
+        "GitStashPop",
         "EnterRebase",
         "GitRebase",
         "GitRebaseContinue",
@@ -2074,6 +2076,7 @@ mod tests {
         // + 1 GitAmend.
         // + 1 GitAdd.
         // + 2 GitStash/GitStashPush.
+        // + 1 GitStashPop.
         // + 1 GitStatus.
         // + 2 GitDiff/GitDiffCached.
         // + 1 GitRebase.
@@ -2112,7 +2115,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 476);
+        assert_eq!(all().count(), 477);
     }
 
     #[test]

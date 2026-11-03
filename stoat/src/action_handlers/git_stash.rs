@@ -3,7 +3,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     auto_reload,
     git_jobs::{self, GitJob, GitLanding, GitWork},
-    host::GitApplyError,
+    host::{CommitInfo, GitApplyError},
 };
 
 /// Stash every tracked change, under `message` or git's default message.
@@ -46,10 +46,55 @@ fn land_stash(stoat: &mut Stoat, stashed: Result<String, String>) {
     stoat.set_status(format!("stashed {}", &sha[..sha.len().min(7)]));
 }
 
+/// Apply the newest stash to the working tree and drop it.
+///
+/// The pop waits its turn in the git queue behind every git write queued
+/// before the press, and reads the stash list at its turn. A review walk or a
+/// rebase owns HEAD until it ends, so either one refuses the command. A pop
+/// that conflicts keeps the stash.
+pub(super) fn git_stash_pop(stoat: &mut Stoat) -> UpdateEffect {
+    let job = GitJob::new("stash pop", None, |stoat: &mut Stoat| {
+        let (repo, _) = commit_repo(stoat)?;
+        Some(Box::new(move || {
+            let popped = match repo.stash_list().into_iter().next() {
+                None => Err(("no stash", None)),
+                Some(row) => match repo.stash_pop(&row.sha) {
+                    Ok(()) => Ok(row),
+                    Err(GitApplyError::Backend { reason, .. }) => {
+                        Err(("stash pop failed", Some(reason)))
+                    },
+                },
+            };
+            Box::new(move |stoat: &mut Stoat| land_stash_pop(stoat, popped)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Bring the editor to the tree a landed pop left and name the popped stash,
+/// or badge why the pop did not run.
+///
+/// The pop rewrote the working tree, so the clean buffers re-read their files
+/// and every diff recomputes, as after a stash.
+fn land_stash_pop(stoat: &mut Stoat, popped: Result<CommitInfo, (&str, Option<String>)>) {
+    let row = match popped {
+        Ok(row) => row,
+        Err((label, detail)) => {
+            emit_review_error_badge(stoat, label, detail);
+            return;
+        },
+    };
+
+    auto_reload::reload_clean_buffers(stoat);
+    stoat.active_workspace_mut().invalidate_all_diffs();
+    stoat.set_status(format!("popped {} {}", row.short_sha, row.summary));
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{app::Stoat, badge::BadgeSource, test_harness::TestHarness};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// A harness rooted in `/repo`, with HEAD on `main` at `c2` over `c1`, and
     /// `c.rs` edited in the working tree when `edited` holds.
@@ -86,6 +131,18 @@ mod tests {
             .stash_list()
             .into_iter()
             .map(|row| (row.sha, row.summary))
+            .collect()
+    }
+
+    /// The path of each changed file of `/repo`.
+    fn changed_paths(h: &TestHarness) -> Vec<PathBuf> {
+        h.stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .expect("the repo")
+            .changed_files()
+            .into_iter()
+            .map(|file| file.path)
             .collect()
     }
 
@@ -148,6 +205,57 @@ mod tests {
                     Some("nothing to stash".to_string())
                 )),
                 Vec::new(),
+            ),
+        );
+    }
+
+    /// `:git spo` puts the newest stash back in the working tree, drops it,
+    /// and names it in the status line.
+    #[test]
+    fn git_stash_pop_restores_the_newest_stash() {
+        let mut h = harness(true);
+        submit(&mut h, ":git stash");
+        let (sha, summary) = stashes(&h).into_iter().next().expect("a stash");
+
+        submit(&mut h, ":git spo");
+        let short: String = sha.chars().take(7).collect();
+        assert_eq!(
+            (
+                changed_paths(&h),
+                stashes(&h),
+                h.stoat.pending_message.clone()
+            ),
+            (
+                vec![PathBuf::from("/repo/c.rs")],
+                Vec::new(),
+                Some(format!("popped {short} {summary}")),
+            ),
+        );
+    }
+
+    #[test]
+    fn git_stash_pop_with_no_stash_badges_no_stash() {
+        let mut h = harness(false);
+        submit(&mut h, ":git spo");
+        assert_eq!(badge(&h), Some(("no stash".to_string(), None)));
+    }
+
+    /// A pop the repository refuses badges the reason and keeps the stash.
+    #[test]
+    fn a_refused_stash_pop_badges_and_keeps_the_stash() {
+        let mut h = harness(true);
+        submit(&mut h, ":git stash");
+        h.fake_git().add_repo("/repo").fail_apply_with("disk full");
+
+        submit(&mut h, ":git spo");
+        assert_eq!(
+            (badge(&h), stashes(&h).len()),
+            (
+                Some((
+                    "stash pop failed".to_string(),
+                    Some("disk full".to_string())
+                )),
+                1,
             ),
         );
     }

@@ -348,6 +348,21 @@ impl Action for GitStashPush {
 }
 
 define_action!(
+    GitStashPopDef,
+    GitStashPop,
+    "GitStashPop",
+    ActionKind::GitStashPop,
+    "apply and drop the newest stash",
+    "Apply the newest stash to the working tree and drop it, as `git stash \
+     pop` does. A pop that conflicts keeps the stash and badges, and with no \
+     stash it badges and changes nothing. Refuses while a review walk or a \
+     rebase holds HEAD.",
+    ActionPriority::Common,
+    aliases = &["git spo"],
+    command_name = "git stash pop"
+);
+
+define_action!(
     CommitsOpenReviewDef,
     CommitsOpenReview,
     "CommitsOpenReview",
