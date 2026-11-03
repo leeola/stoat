@@ -5,7 +5,7 @@ use crate::host::{
     git::{
         BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
         CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, RebaseError,
-        RebaseTodo, RewriteResult,
+        RebaseTodo, RewriteResult, StagedKind,
     },
 };
 use std::{
@@ -344,6 +344,7 @@ impl<'a> FakeRepoBuilder<'a> {
             state.changed.push(FakeChange::new(ChangedFile {
                 path: abs.clone(),
                 staged: false,
+                staged_kind: None,
                 untracked: false,
                 renamed_from: None,
             }));
@@ -364,6 +365,7 @@ impl<'a> FakeRepoBuilder<'a> {
             state.changed.push(FakeChange::new(ChangedFile {
                 path: abs.clone(),
                 staged: true,
+                staged_kind: None,
                 untracked: false,
                 renamed_from: None,
             }));
@@ -408,6 +410,7 @@ impl<'a> FakeRepoBuilder<'a> {
             state.changed.push(FakeChange::new(ChangedFile {
                 path: abs,
                 staged: false,
+                staged_kind: None,
                 untracked: false,
                 renamed_from: None,
             }));
@@ -437,6 +440,7 @@ impl<'a> FakeRepoBuilder<'a> {
                 file: ChangedFile {
                     path: new_abs.clone(),
                     staged: true,
+                    staged_kind: None,
                     untracked: false,
                     renamed_from: Some(old_abs),
                 },
@@ -819,6 +823,31 @@ struct FakeRepoState {
 }
 
 impl FakeRepoState {
+    /// How the index changes the staged `file` against HEAD, under a working
+    /// tree at `workdir`.
+    ///
+    /// A registration records a rename, and [`FakeRepoBuilder::remove_index_file`]
+    /// records a staged deletion. Otherwise the path is modified when HEAD holds
+    /// it, as a seeded blob or in the HEAD commit's tree, and added when not.
+    fn staged_kind(&self, workdir: &Path, file: &ChangedFile) -> StagedKind {
+        let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
+        let in_head = self.head_contents.contains_key(rel)
+            || self
+                .head
+                .as_ref()
+                .and_then(|head| self.commits.get(head))
+                .is_some_and(|commit| commit.tree.contains_key(rel));
+        if file.renamed_from.is_some() {
+            StagedKind::Renamed
+        } else if self.removed_index_entries.contains(rel) {
+            StagedKind::Deleted
+        } else if in_head {
+            StagedKind::Modified
+        } else {
+            StagedKind::Added
+        }
+    }
+
     /// Follow parent links from `start`, newest first, yielding at most `limit`
     /// commits. Stops early at a root commit or a sha with no seeded commit,
     /// which is how a test seeding a partial chain gets a bounded walk.
@@ -995,7 +1024,10 @@ impl GitRepo for FakeGitRepo {
             .changed
             .iter()
             .filter(|c| c.file.staged)
-            .map(|c| c.file.clone())
+            .map(|c| ChangedFile {
+                staged_kind: Some(state.staged_kind(&self.workdir, &c.file)),
+                ..c.file.clone()
+            })
             .collect();
         let mut unstaged: Vec<ChangedFile> = state
             .changed
@@ -1006,6 +1038,7 @@ impl GitRepo for FakeGitRepo {
         unstaged.extend(state.untracked.iter().map(|path| ChangedFile {
             path: path.clone(),
             staged: false,
+            staged_kind: None,
             untracked: true,
             renamed_from: None,
         }));
@@ -1057,6 +1090,7 @@ impl GitRepo for FakeGitRepo {
             .map(|rel| ChangedFile {
                 path: self.workdir.join(rel),
                 staged: false,
+                staged_kind: None,
                 untracked: false,
                 renamed_from: None,
             })
@@ -1068,12 +1102,14 @@ impl GitRepo for FakeGitRepo {
                 .map(|c| &c.file)
                 .map(|file| ChangedFile {
                     staged: false,
+                    staged_kind: None,
                     ..file.clone()
                 }),
         );
         files.extend(state.untracked.iter().map(|path| ChangedFile {
             path: path.clone(),
             staged: false,
+            staged_kind: None,
             untracked: true,
             renamed_from: None,
         }));
@@ -2896,6 +2932,7 @@ mod tests {
                     vec![ChangedFile {
                         path: workdir().join("c.rs"),
                         staged: false,
+                        staged_kind: None,
                         untracked: true,
                         renamed_from: None,
                     }],
@@ -2996,6 +3033,38 @@ mod tests {
         host.add_repo(workdir());
         let repo = host.discover(&workdir()).unwrap();
         assert_eq!(repo.git_dir(), PathBuf::from("/work/.git"));
+    }
+
+    /// A staged entry names its index change against HEAD, and an unstaged one
+    /// names none.
+    #[test]
+    fn changed_files_name_each_staged_change_kind() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "a"), ("c.rs", "c")])
+            .staged_file("a.rs", "edit")
+            .staged_file("b.rs", "new")
+            .staged_file("c.rs", "")
+            .remove_index_file("c.rs")
+            .renamed("d.rs", "e.rs", "d")
+            .unstaged_file("f.rs", "edit");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let kinds: Vec<(PathBuf, Option<StagedKind>)> = repo
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged_kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (workdir().join("a.rs"), Some(StagedKind::Modified)),
+                (workdir().join("b.rs"), Some(StagedKind::Added)),
+                (workdir().join("c.rs"), Some(StagedKind::Deleted)),
+                (workdir().join("e.rs"), Some(StagedKind::Renamed)),
+                (workdir().join("f.rs"), None),
+            ],
+        );
     }
 
     #[test]

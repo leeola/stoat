@@ -4,7 +4,7 @@ mod tree;
 use crate::host::git::{
     BackendSnafu, ChangedFile, CherryPickOutcome, CommitChanges, CommitFileChange,
     CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies,
-    RebaseError, RebaseTodo, RewriteResult,
+    RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Delta, Diff, DiffFindOptions,
@@ -124,6 +124,7 @@ impl GitRepo for LocalGitRepo {
                 staged.push(ChangedFile {
                     path: abs,
                     staged: true,
+                    staged_kind: Some(staged_kind(status)),
                     untracked: false,
                     renamed_from,
                 });
@@ -131,6 +132,7 @@ impl GitRepo for LocalGitRepo {
                 unstaged.push(ChangedFile {
                     path: abs,
                     staged: false,
+                    staged_kind: None,
                     untracked: status.intersects(Status::WT_NEW),
                     renamed_from,
                 });
@@ -180,6 +182,7 @@ impl GitRepo for LocalGitRepo {
                     // which says nothing about a file's distance from a commit
                     // further back. Every entry here is simply changed.
                     staged: false,
+                    staged_kind: None,
                     untracked: delta.status() == Delta::Untracked,
                     renamed_from: match delta.status() {
                         Delta::Renamed => delta.old_file().path().map(|old| workdir.join(old)),
@@ -1614,6 +1617,20 @@ fn entry_paths(entry: &StatusEntry<'_>, workdir: &Path) -> Option<(PathBuf, Opti
     }
 }
 
+/// The index change that `status` records against HEAD, for an entry that
+/// [`STAGED`] matches.
+fn staged_kind(status: Status) -> StagedKind {
+    if status.intersects(Status::INDEX_RENAMED) {
+        StagedKind::Renamed
+    } else if status.intersects(Status::INDEX_NEW) {
+        StagedKind::Added
+    } else if status.intersects(Status::INDEX_DELETED) {
+        StagedKind::Deleted
+    } else {
+        StagedKind::Modified
+    }
+}
+
 /// Hunks in `diff`, reporting each delta's path and its own count to `per_file`
 /// along the way.
 ///
@@ -1708,6 +1725,7 @@ mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
     use crate::host::git::{
         CherryPickOutcome, CommitFileChangeKind, GitHost, GitRepo, RebaseTodo, RebaseTodoOp,
+        StagedKind,
     };
     use git2::{Commit, Oid, Repository, RepositoryInitOptions, Signature};
     use std::{
@@ -2710,6 +2728,50 @@ mod tests {
         assert_eq!(
             Some(git.git_dir()),
             git.workdir().map(|workdir| workdir.join(".git"))
+        );
+    }
+
+    /// A staged entry names its index change against HEAD, and an untracked one
+    /// names none.
+    #[test]
+    fn changed_files_name_each_staged_change_kind() {
+        let (dir, repo, _shas) = seeded_repo();
+        commit_files(
+            &repo,
+            &dir,
+            &[("b.txt", b"b"), ("e.txt", b"a file that moves")],
+        );
+        let path = |name: &str| dir.path().join(name);
+        std::fs::write(path("a.txt"), "four").unwrap();
+        std::fs::write(path("c.txt"), "new").unwrap();
+        std::fs::remove_file(path("b.txt")).unwrap();
+        std::fs::rename(path("e.txt"), path("f.txt")).unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            for name in ["a.txt", "c.txt", "f.txt"] {
+                index.add_path(Path::new(name)).unwrap();
+            }
+            for name in ["b.txt", "e.txt"] {
+                index.remove_path(Path::new(name)).unwrap();
+            }
+            index.write().unwrap();
+        }
+        std::fs::write(path("d.txt"), "untracked").unwrap();
+
+        let kinds: Vec<(PathBuf, Option<StagedKind>)> = discover(&dir)
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged_kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (path("a.txt"), Some(StagedKind::Modified)),
+                (path("b.txt"), Some(StagedKind::Deleted)),
+                (path("c.txt"), Some(StagedKind::Added)),
+                (path("f.txt"), Some(StagedKind::Renamed)),
+                (path("d.txt"), None),
+            ],
         );
     }
 

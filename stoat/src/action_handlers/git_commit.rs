@@ -4,7 +4,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer_lifecycle,
     buffer_registry::OpenOrigin,
-    commit_message::{self, CommitDraft, CommitWait},
+    commit_message::{self, CommitDraft, CommitWait, StagedChange},
     git_jobs::{self, GitJob, GitLanding, GitWork},
     host::{FsHost, GitApplyError, GitRepo},
     pane::{Axis, FocusTarget},
@@ -157,14 +157,21 @@ pub(super) fn commit_repo(stoat: &mut Stoat) -> Option<(Arc<dyn GitRepo>, PathBu
     Some((repo, workdir))
 }
 
-/// The staged paths of `repo`, relative to `workdir`, on whatever thread calls.
-fn staged_paths(repo: &dyn GitRepo, workdir: &Path) -> Vec<PathBuf> {
+/// The staged changes of `repo`, with paths relative to `workdir`, on whatever
+/// thread calls.
+fn staged_changes(repo: &dyn GitRepo, workdir: &Path) -> Vec<StagedChange> {
+    let relative = |path: PathBuf| {
+        let stripped = path.strip_prefix(workdir).map(Path::to_path_buf);
+        stripped.unwrap_or(path)
+    };
     repo.changed_files()
         .into_iter()
-        .filter(|file| file.staged)
-        .map(|file| {
-            let relative = file.path.strip_prefix(workdir).map(Path::to_path_buf);
-            relative.unwrap_or(file.path)
+        .filter_map(|file| {
+            Some(StagedChange {
+                kind: file.staged_kind?,
+                path: relative(file.path),
+                from: file.renamed_from.map(relative),
+            })
         })
         .collect()
 }
@@ -207,7 +214,7 @@ fn prepare_draft(
     workdir: PathBuf,
     amend: bool,
 ) -> Result<(CommitDraft, io::Result<()>), &'static str> {
-    let staged = staged_paths(repo, &workdir);
+    let staged = staged_changes(repo, &workdir);
     let message = if amend {
         let head = repo
             .resolve_rev("HEAD")
@@ -397,8 +404,8 @@ mod tests {
         app::Stoat,
         badge::BadgeSource,
         buffer::BufferId,
-        commit_message::template,
-        host::FsHost,
+        commit_message::{template, StagedChange},
+        host::{FsHost, StagedKind},
         rebase::{ActiveRebase, RebaseState},
         test_harness::TestHarness,
     };
@@ -409,6 +416,15 @@ mod tests {
 
     /// Where the fake repository at `/repo` keeps its commit message.
     const MESSAGE: &str = "/repo/.git/COMMIT_EDITMSG";
+
+    /// A staged edit of `path`, which HEAD holds.
+    fn modified(path: &str) -> StagedChange {
+        StagedChange {
+            kind: StagedKind::Modified,
+            path: path.into(),
+            from: None,
+        }
+    }
 
     /// A harness rooted in `/repo`, with HEAD on `main` at `c2` over `c1`, and
     /// each of `staged` staged with its text in the index.
@@ -527,7 +543,7 @@ mod tests {
                 2,
                 true,
                 "normal",
-                Some(template("", Some("main"), &["a.rs".into()])),
+                Some(template("", Some("main"), &[modified("a.rs")])),
                 true,
             ),
         );
@@ -543,7 +559,7 @@ mod tests {
             submit(&mut h, command);
             message_file(&h)
         };
-        let listed = Some(template("", Some("main"), &["a.rs".into()]));
+        let listed = Some(template("", Some("main"), &[modified("a.rs")]));
         assert_eq!(
             [written(":git commit"), written(":git ci")],
             [listed.clone(), listed],
@@ -807,7 +823,8 @@ mod tests {
                 h.rendered_text().contains("COMMIT_EDITMSG [for git amend]"),
             )
         };
-        let amending = |staged: &[PathBuf]| (Some(template("two", Some("main"), staged)), true);
+        let amending =
+            |staged: &[StagedChange]| (Some(template("two", Some("main"), staged)), true);
         assert_eq!(
             [
                 opened(&[("a.rs", "3\n")], ":git amend"),
@@ -815,8 +832,8 @@ mod tests {
                 opened(&[], ":git amend"),
             ],
             [
-                amending(&["a.rs".into()]),
-                amending(&["a.rs".into()]),
+                amending(&[modified("a.rs")]),
+                amending(&[modified("a.rs")]),
                 amending(&[]),
             ],
         );

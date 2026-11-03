@@ -33,7 +33,7 @@ pub use fake::{
 pub use git::{
     ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
     ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
-    RebaseTodoOp, RewriteResult,
+    RebaseTodoOp, RewriteResult, StagedKind,
 };
 pub use local::{LocalClipboard, LocalGit, LocalLsp, LocalTerminalHost, LspTranscript};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};

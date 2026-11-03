@@ -69,6 +69,9 @@ pub struct ChangedFile {
     /// True when the change is present in the index (staged), false when
     /// it only exists in the working tree.
     pub staged: bool,
+    /// How the index changes the path against HEAD, which a commit message
+    /// template names. `Some` exactly when [`Self::staged`] holds.
+    pub staged_kind: Option<StagedKind>,
     /// True when the path is untracked, meaning it is present in the working
     /// tree but never staged and so has no HEAD blob to diff against. Tracked
     /// modifications, deletions, and staged additions are all `false`.
@@ -84,6 +87,18 @@ pub struct ChangedFile {
     /// old path as deleted. Resolve the diff base through this instead, and a
     /// pure move shows no hunks at all.
     pub renamed_from: Option<PathBuf>,
+}
+
+/// How a staged change takes a path from HEAD to the index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StagedKind {
+    /// HEAD has no blob at the path, so the index adds it.
+    Added,
+    Modified,
+    /// The index drops a path that HEAD has.
+    Deleted,
+    /// The index moves the path from [`ChangedFile::renamed_from`].
+    Renamed,
 }
 
 #[derive(Debug, Clone, PartialEq, Snafu)]
