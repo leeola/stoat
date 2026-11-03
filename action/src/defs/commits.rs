@@ -216,8 +216,9 @@ define_action!(
     ActionKind::GitCommitConfirm,
     "commit with the edited message",
     "Commit the staged changes with the message in the commit message \
-     screen, and close the screen once the commit lands. An empty message \
-     closes the screen without a commit.",
+     screen, and close the screen once the commit lands. On the amend form, \
+     replace HEAD with a commit of the index and the message instead. An \
+     empty message closes the screen without a commit.",
     ActionPriority::Rare
 );
 
@@ -245,6 +246,21 @@ define_action!(
     ActionPriority::Common,
     aliases = &["git ci"],
     command_name = "git commit"
+);
+
+define_action!(
+    GitAmendDef,
+    GitAmend,
+    "GitAmend",
+    ActionKind::GitAmend,
+    "amend HEAD with the staged changes",
+    "Open the commit message screen's amend form over HEAD's message. Ctrl-s \
+     replaces HEAD with a commit of the index and the edited message, as `git \
+     commit --amend` does. With nothing staged, the amend changes the message \
+     alone. Refuses while a review walk or a rebase holds HEAD.",
+    ActionPriority::Common,
+    aliases = &["git cia"],
+    command_name = "git amend"
 );
 
 define_action!(

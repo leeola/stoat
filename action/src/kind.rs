@@ -409,6 +409,7 @@ action_kinds! {
     GitCommitConfirm,
     GitCommitAbort,
     GitCommit,
+    GitAmend,
     GitAdd,
     ReviewNextCommit,
     ReviewPrevCommit,

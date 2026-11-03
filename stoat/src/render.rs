@@ -1519,7 +1519,7 @@ pub(crate) fn frame(
                 pane,
                 is_focused,
                 editor,
-                &commit.staged,
+                commit,
                 frame,
                 buf,
                 &mut *scene,

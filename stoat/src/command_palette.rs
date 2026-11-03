@@ -556,9 +556,8 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        GitLs | GitReview | Review | GitCheckout | GitCommit | GitAdd | GitRebase | GitStatus => {
-            ctx.in_repo
-        },
+        GitLs | GitReview | Review | GitCheckout | GitCommit | GitAmend | GitAdd | GitRebase
+        | GitStatus => ctx.in_repo,
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1966,6 +1965,7 @@ mod tests {
         };
         let group = vec![
             "GitAdd",
+            "GitAmend",
             "GitCheckout",
             "GitCommit",
             "GitLs",

@@ -6,12 +6,16 @@ use std::path::PathBuf;
 ///
 /// The message is an [`InputView`] editor, so it takes the modal keys a buffer
 /// takes. Ctrl-s commits the index with its text, and the screen stays up
-/// until that commit lands, so a failed commit keeps the message.
+/// until that commit lands, so a failed commit keeps the message. On the amend
+/// form, Ctrl-s replaces HEAD instead.
 pub(crate) struct CommitMessageEditor {
     /// The working tree of the repository the commit goes into.
     pub workdir: PathBuf,
     /// The staged paths, relative to [`Self::workdir`], which the screen lists
     /// above the message.
     pub staged: Vec<PathBuf>,
+    /// The screen amends HEAD with the index and the message, in place of a
+    /// commit on top of HEAD.
+    pub amend: bool,
     pub input: InputView,
 }

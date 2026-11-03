@@ -304,6 +304,7 @@ fn the_commit_message_screen_retires_the_editor_pool() {
     ws.commit_message = Some(CommitMessageEditor {
         workdir: PathBuf::from("/pool"),
         staged: Vec::new(),
+        amend: false,
         input,
     });
     emit_smooth_scroll(&mut h.stoat);

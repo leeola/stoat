@@ -1,4 +1,5 @@
 use crate::{
+    commit_message::CommitMessageEditor,
     editor_state::EditorState,
     pane::Pane,
     render::{
@@ -11,19 +12,19 @@ use crate::{
     theme::scope,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
-use std::path::PathBuf;
 use stoat_widgets::ApcScene;
 
 /// Paint the commit message screen over `pane`.
 ///
 /// The screen shows a header with the editor's mode, a help row that follows
 /// the mode, the staged paths, and the message editor. The message renders
-/// through the real [`render_editor`], so it takes full modal editing.
+/// through the real [`render_editor`], so it takes full modal editing. The
+/// header and the help row name an amend on the amend form.
 pub(crate) fn render_commit_message(
     pane: &Pane,
     is_focused: bool,
     editor: &mut EditorState,
-    staged: &[PathBuf],
+    screen: &CommitMessageEditor,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -42,20 +43,23 @@ pub(crate) fn render_commit_message(
     let dim = theme.get(scope::UI_TEXT_MUTED);
     let body_style = theme.get(scope::UI_TEXT);
 
+    let verb = if screen.amend { "amend" } else { "commit" };
     write_str(
         buf,
         inner.x,
         inner.y,
-        &format!("commit [{current_mode}]"),
+        &format!("{verb} [{current_mode}]"),
         header_style,
     );
-    let help = if current_mode == "insert" {
-        "Escape normal   Ctrl-s commit   (empty message aborts)"
-    } else {
-        "i insert   h/j/k/l move   Ctrl-s commit   Escape abort"
+    let help = match (screen.amend, current_mode == "insert") {
+        (false, true) => "Escape normal   Ctrl-s commit   (empty message aborts)",
+        (false, false) => "i insert   h/j/k/l move   Ctrl-s commit   Escape abort",
+        (true, true) => "Escape normal   Ctrl-s amend   (empty message aborts)",
+        (true, false) => "i insert   h/j/k/l move   Ctrl-s amend   Escape abort",
     };
     write_str(buf, inner.x, inner.y + 1, help, dim);
-    let names: Vec<String> = staged
+    let names: Vec<String> = screen
+        .staged
         .iter()
         .map(|path| path.display().to_string())
         .collect();
@@ -64,7 +68,7 @@ pub(crate) fn render_commit_message(
         inner.x,
         inner.y + 2,
         &truncate_to_cols(
-            &format!("{} staged: {}", staged.len(), names.join(", ")),
+            &format!("{} staged: {}", screen.staged.len(), names.join(", ")),
             inner.width as usize,
         ),
         dim,

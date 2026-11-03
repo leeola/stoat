@@ -26,21 +26,51 @@ pub(super) fn git_commit(stoat: &mut Stoat) -> UpdateEffect {
         let (repo, workdir) = commit_repo(stoat)?;
         Some(Box::new(move || {
             let staged = staged_paths(&*repo, &workdir);
-            Box::new(move |stoat: &mut Stoat| open_screen(stoat, workdir, staged)) as GitLanding
+            Box::new(move |stoat: &mut Stoat| open_screen(stoat, workdir, staged, false, ""))
+                as GitLanding
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
     UpdateEffect::Redraw
 }
 
-/// Commit the index with the screen's message.
+/// Open the commit message screen's amend form over HEAD's message, or badge
+/// why it does not open.
+///
+/// The form opens with nothing staged too, because an amend of the message
+/// alone is valid. A review walk or a rebase owns HEAD until it ends, so
+/// either one refuses the command at its turn. A screen already up stays as
+/// it is.
+pub(super) fn git_amend(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().commit_message.is_some() {
+        return UpdateEffect::None;
+    }
+    let job = GitJob::new("amend prepare", None, |stoat: &mut Stoat| {
+        let (repo, workdir) = commit_repo(stoat)?;
+        Some(Box::new(move || {
+            let staged = staged_paths(&*repo, &workdir);
+            let message = repo
+                .resolve_rev("HEAD")
+                .and_then(|head| repo.commit_message(&head));
+            Box::new(move |stoat: &mut Stoat| match message {
+                Some(message) => open_screen(stoat, workdir, staged, true, message.trim_end()),
+                None => emit_review_error_badge(stoat, "no commit to amend", None),
+            }) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
+}
+
+/// Commit the index with the screen's message, or on the amend form replace
+/// HEAD with a commit of the index and the message.
 ///
 /// The commit waits its turn in the git queue, and the screen stays up until it
 /// lands. A failed commit keeps the screen and its message, so the reader edits
 /// the message again or closes the screen. A blank message closes the screen
 /// with no commit.
 pub(super) fn git_commit_confirm(stoat: &mut Stoat) -> UpdateEffect {
-    let (workdir, message) = {
+    let (workdir, message, amend) = {
         let ws = stoat.active_workspace();
         let Some(screen) = ws.commit_message.as_ref() else {
             return UpdateEffect::None;
@@ -48,6 +78,7 @@ pub(super) fn git_commit_confirm(stoat: &mut Stoat) -> UpdateEffect {
         (
             screen.workdir.clone(),
             screen.input.text(ws).trim().to_string(),
+            screen.amend,
         )
     };
     if message.is_empty() {
@@ -63,11 +94,17 @@ pub(super) fn git_commit_confirm(stoat: &mut Stoat) -> UpdateEffect {
             return None;
         };
         Some(Box::new(move || {
-            let committed = match repo.commit_index(&message) {
+            let written = if amend {
+                repo.amend_index(&message)
+            } else {
+                repo.commit_index(&message)
+            };
+            let committed = match written {
                 Ok(sha) => Ok(sha),
                 Err(GitApplyError::Backend { reason, .. }) => Err(reason),
             };
-            Box::new(move |stoat: &mut Stoat| land_commit(stoat, &message, committed)) as GitLanding
+            Box::new(move |stoat: &mut Stoat| land_commit(stoat, &message, amend, committed))
+                as GitLanding
         }) as GitWork)
     });
     git_jobs::enqueue(stoat, job);
@@ -161,29 +198,40 @@ fn staged_paths(repo: &dyn GitRepo, workdir: &Path) -> Vec<PathBuf> {
 }
 
 /// Open the screen over `staged`, or badge that the index holds no change.
-fn open_screen(stoat: &mut Stoat, workdir: PathBuf, staged: Vec<PathBuf>) {
-    if staged.is_empty() {
+///
+/// The amend form opens over an empty index too, because an amend of the
+/// message alone is valid.
+fn open_screen(stoat: &mut Stoat, workdir: PathBuf, staged: Vec<PathBuf>, amend: bool, seed: &str) {
+    if staged.is_empty() && !amend {
         emit_review_error_badge(stoat, "nothing staged", None);
         return;
     }
-    install_commit_message(stoat, workdir, staged);
+    install_commit_message(stoat, workdir, staged, amend, seed);
 }
 
 /// Put the commit message screen up over the focused pane, for the `staged`
 /// paths of the repository at `workdir`.
 ///
-/// The message starts empty and in insert mode, so the reader types it at once.
-/// A screen already up stays as it is.
-fn install_commit_message(stoat: &mut Stoat, workdir: PathBuf, staged: Vec<PathBuf>) {
+/// The message starts as `seed`, in insert mode with the cursor after it, so
+/// the reader types at once. `amend` puts up the amend form. A screen already
+/// up stays as it is.
+fn install_commit_message(
+    stoat: &mut Stoat,
+    workdir: PathBuf,
+    staged: Vec<PathBuf>,
+    amend: bool,
+    seed: &str,
+) {
     if stoat.active_workspace().commit_message.is_some() {
         return;
     }
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::CommitMessage, "", "insert");
+    let input = InputView::create(ws, executor, SubmitTarget::CommitMessage, seed, "insert");
     ws.commit_message = Some(CommitMessageEditor {
         workdir,
         staged,
+        amend,
         input,
     });
 }
@@ -192,8 +240,9 @@ fn install_commit_message(stoat: &mut Stoat, workdir: PathBuf, staged: Vec<PathB
 /// or badge a failed commit and keep the screen.
 ///
 /// A screen the reader closed while the commit ran stays closed. The commit
-/// still moved HEAD, so the diffs and the commits lists follow either way.
-fn land_commit(stoat: &mut Stoat, message: &str, committed: Result<String, String>) {
+/// still moved HEAD, so the diffs and the commits lists follow either way. The
+/// status line names an amend as one.
+fn land_commit(stoat: &mut Stoat, message: &str, amend: bool, committed: Result<String, String>) {
     let sha = match committed {
         Ok(sha) => sha,
         Err(reason) => {
@@ -206,10 +255,8 @@ fn land_commit(stoat: &mut Stoat, message: &str, committed: Result<String, Strin
     stoat.active_workspace_mut().invalidate_all_diffs();
     super::commits::reload_every_list(stoat);
     let first_line = message.lines().next().unwrap_or("");
-    stoat.set_status(format!(
-        "committed {} {first_line}",
-        &sha[..sha.len().min(7)]
-    ));
+    let verb = if amend { "amended" } else { "committed" };
+    stoat.set_status(format!("{verb} {} {first_line}", &sha[..sha.len().min(7)]));
 }
 
 /// Close the commit message screen and dispose its editor.
@@ -312,7 +359,7 @@ mod tests {
     #[test]
     fn the_screen_opens_in_insert_mode_under_its_own_view() {
         let mut h = harness(&[("a.rs", "3\n")]);
-        install_commit_message(&mut h.stoat, "/repo".into(), vec!["a.rs".into()]);
+        install_commit_message(&mut h.stoat, "/repo".into(), vec!["a.rs".into()], false, "");
         assert_eq!(
             (
                 h.stoat.current_view(),
@@ -328,9 +375,9 @@ mod tests {
     #[test]
     fn a_second_install_keeps_the_screen_and_its_message() {
         let mut h = harness(&[("a.rs", "3\n")]);
-        install_commit_message(&mut h.stoat, "/repo".into(), vec!["a.rs".into()]);
+        install_commit_message(&mut h.stoat, "/repo".into(), vec!["a.rs".into()], false, "");
         h.type_text("feat: x");
-        install_commit_message(&mut h.stoat, "/repo".into(), vec!["b.rs".into()]);
+        install_commit_message(&mut h.stoat, "/repo".into(), vec!["b.rs".into()], false, "");
         let staged = h
             .stoat
             .active_workspace()
@@ -452,6 +499,70 @@ mod tests {
                 Some("feat: x".to_string()),
                 Some(format!("committed {} feat: x", &sha[..7])),
                 Some("two".to_string()),
+            ),
+        );
+    }
+
+    /// `:git amend` and `:git cia` open the amend form over HEAD's message, and
+    /// an empty index opens it too.
+    #[test]
+    fn git_amend_opens_the_screen_over_heads_message() {
+        let opened = |staged: &[(&str, &str)], command: &str| {
+            let mut h = harness(staged);
+            submit(&mut h, command);
+            let _ = h.snapshot();
+            let amend = h
+                .stoat
+                .active_workspace()
+                .commit_message
+                .as_ref()
+                .map(|screen| screen.amend);
+            (
+                screen_text(&h),
+                amend,
+                h.rendered_text().contains("amend [insert]"),
+            )
+        };
+        let amending = (Some("two".to_string()), Some(true), true);
+        assert_eq!(
+            [
+                opened(&[("a.rs", "3\n")], ":git amend"),
+                opened(&[("a.rs", "3\n")], ":git cia"),
+                opened(&[], ":git amend"),
+            ],
+            [amending.clone(), amending.clone(), amending],
+        );
+    }
+
+    /// Ctrl-s on the amend form replaces HEAD with a commit of the index and
+    /// the edited message, and names the amend in the status line.
+    #[test]
+    fn ctrl_s_amends_head_with_the_index_and_the_message() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git amend");
+        h.type_text(" amended");
+        h.type_keys("ctrl-s");
+        h.settle();
+
+        let sha = head(&h).expect("a HEAD");
+        let amends: Vec<(String, String)> = h
+            .fake_git()
+            .amend_history(Path::new("/repo"))
+            .into_iter()
+            .map(|amend| (amend.old_head, amend.new_head))
+            .collect();
+        assert_eq!(
+            (
+                screen_text(&h),
+                head_message(&h),
+                h.stoat.pending_message.clone(),
+                amends,
+            ),
+            (
+                None,
+                Some("two amended".to_string()),
+                Some(format!("amended {} two amended", &sha[..7])),
+                vec![("c2".to_string(), sha.clone())],
             ),
         );
     }
