@@ -1216,6 +1216,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             rebase::git_rebase(stoat, action.rev.as_deref())
         },
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
+        ActionKind::GitRebaseAbort => rebase::git_rebase_abort(stoat),
         ActionKind::ExecuteRebase => rebase::execute_rebase(stoat),
         ActionKind::RebaseNext => {
             let count = arming_count(stoat);

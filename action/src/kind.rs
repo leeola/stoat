@@ -445,6 +445,7 @@ action_kinds! {
     EnterRebase,
     GitRebase,
     GitRebaseContinue,
+    GitRebaseAbort,
     AbortRebase,
     ExecuteRebase,
     RebaseNext,

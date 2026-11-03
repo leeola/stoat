@@ -75,6 +75,21 @@ define_action!(
 );
 
 define_action!(
+    GitRebaseAbortDef,
+    GitRebaseAbort,
+    "GitRebaseAbort",
+    ActionKind::GitRebaseAbort,
+    "abort the rebase plan or the paused rebase",
+    "Close a rebase plan that has not run, with no commit rewritten, or end a \
+     paused rebase with HEAD left at the partial state, as an abort from the \
+     reword screen leaves it. With nothing to abort, it badges and changes \
+     nothing.",
+    ActionPriority::Common,
+    aliases = &["git ra"],
+    command_name = "git rebase abort"
+);
+
+define_action!(
     AbortRebaseDef,
     AbortRebase,
     "AbortRebase",

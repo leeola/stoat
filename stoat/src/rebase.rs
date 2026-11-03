@@ -775,6 +775,13 @@ mod tests {
             .collect()
     }
 
+    /// Type `:git ra` and let the git work it starts land.
+    fn git_ra(h: &mut TestHarness) {
+        h.type_text(":git ra");
+        h.type_keys("enter");
+        h.settle();
+    }
+
     fn checkouts(h: &TestHarness) -> Vec<String> {
         h.fake_git.checkouts(Path::new("/repo"))
     }
@@ -988,6 +995,59 @@ mod tests {
         h.type_keys("enter");
         h.settle();
         assert_eq!(log_summaries(&h), ["c3: tip", "reworded!", "c1: root"]);
+    }
+
+    /// `:git ra` closes a plan that has not run, with no commit rewritten.
+    #[test]
+    fn git_ra_closes_an_open_plan() {
+        let mut h = Stoat::test();
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+
+        git_ra(&mut h);
+        let head = h
+            .fake_git
+            .discover(Path::new("/repo"))
+            .unwrap()
+            .resolve_rev("HEAD");
+        assert_eq!(
+            (h.stoat.active_workspace().rebase.is_none(), head),
+            (true, Some("c3".to_string())),
+        );
+    }
+
+    /// `:git ra` at an edit stop ends the rebase there, puts the diff away, and
+    /// says HEAD stays where the rebase left it.
+    #[test]
+    fn git_ra_ends_the_rebase_at_an_edit_stop() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+
+        git_ra(&mut h);
+        let panes = &h.stoat.active_workspace().panes;
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_none(),
+                diff_base(&h),
+                panes.pane(panes.focus()).diff_mode,
+                pause_badge(&h),
+            ),
+            (
+                true,
+                None,
+                false,
+                Some("rebase aborted during edit".to_string())
+            ),
+        );
+    }
+
+    #[test]
+    fn git_ra_with_no_rebase_badges_nothing_to_abort() {
+        let mut h = Stoat::test();
+        git_ra(&mut h);
+        assert_eq!(pause_badge(&h), Some("no rebase to abort".to_string()));
     }
 
     /// A finished rebase leaves git as an interactive rebase does. The files

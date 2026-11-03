@@ -519,6 +519,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         EnterRebase => ctx.commits_open,
 
         RebaseContinue | GitRebaseContinue => ctx.in_rebase_exec,
+        GitRebaseAbort => ctx.in_rebase_plan || ctx.in_rebase_exec,
         RewordConfirm | RewordAbort => ctx.in_rebase_reword,
 
         RebaseConflictTakeOurs
@@ -1716,8 +1717,9 @@ mod tests {
     }
 
     /// `:git ` lists the group inside a repository and no command outside one,
-    /// where the group has no repository to act on. The rebase continue command
-    /// waits for a rebase to run, so a repository with none leaves it out.
+    /// where the group has no repository to act on. The rebase continue and
+    /// abort commands wait for a rebase, so a repository with none leaves them
+    /// out.
     #[test]
     fn the_git_group_lists_its_commands_only_inside_a_repository() {
         let listed = |mut h: TestHarness| {
@@ -1731,7 +1733,7 @@ mod tests {
         };
         let no_rebase: Vec<&str> = names_for("git ")
             .into_iter()
-            .filter(|name| *name != "git rebase continue")
+            .filter(|name| !matches!(*name, "git rebase continue" | "git rebase abort"))
             .collect();
         assert_eq!(
             (listed(Stoat::test()), listed(repo_harness())),
@@ -1961,8 +1963,9 @@ mod tests {
     }
 
     /// The git group acts on the workspace's repository, so the Active scope
-    /// lists its commands only inside one, and the rebase continue command only
-    /// while a rebase runs there. The All scope lists them anywhere.
+    /// lists its commands only inside one, and the rebase continue and abort
+    /// commands only while a rebase runs there. The All scope lists them
+    /// anywhere.
     #[test]
     fn active_scope_lists_the_git_group_only_in_a_repository() {
         let git_group = |scope, ctx: Availability| {
@@ -1984,6 +1987,7 @@ mod tests {
             "GitDiffCached",
             "GitLs",
             "GitRebase",
+            "GitRebaseAbort",
             "GitRebaseContinue",
             "GitReview",
             "GitStatus",
@@ -1991,7 +1995,7 @@ mod tests {
         let no_rebase: Vec<&str> = group
             .iter()
             .copied()
-            .filter(|name| *name != "GitRebaseContinue")
+            .filter(|name| !matches!(*name, "GitRebaseAbort" | "GitRebaseContinue"))
             .collect();
         let in_repo = Availability {
             in_repo: true,

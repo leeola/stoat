@@ -187,6 +187,52 @@ pub(super) fn abort_rebase(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Close the rebase plan that has not run, or end the paused rebase, so one
+/// command aborts either.
+///
+/// A plan closes with no commit rewritten. A paused rebase ends with HEAD left
+/// at the partial state, as an abort from the reword or the conflict screen
+/// leaves it. A rebase with a step in flight and no rebase at all each badge
+/// instead.
+pub(super) fn git_rebase_abort(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.active_workspace().rebase.is_some() {
+        return abort_rebase(stoat);
+    }
+    let pause = stoat
+        .active_workspace()
+        .rebase_active
+        .as_ref()
+        .map(|active| &active.pause);
+    match pause {
+        Some(Some(RebasePause::Reword { .. })) => super::reword::reword_abort(stoat),
+        Some(Some(RebasePause::Conflict { .. })) => super::conflict::conflict_abort(stoat),
+        Some(Some(RebasePause::Edit { .. })) => abort_edit_pause(stoat),
+        Some(None) => {
+            emit_rebase_error(stoat, "rebase step in flight", None);
+            UpdateEffect::Redraw
+        },
+        None => {
+            emit_rebase_error(stoat, "no rebase to abort", None);
+            UpdateEffect::Redraw
+        },
+    }
+}
+
+/// End the rebase at its edit stop, and put away the diff view the stop
+/// armed, as a continue from the stop does.
+fn abort_edit_pause(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    ws.rebase_active = None;
+    ws.set_diff_base(None);
+    super::review::exit_diff_view(stoat);
+    emit_rebase_error(
+        stoat,
+        "rebase aborted during edit",
+        Some("HEAD left at partial rebase state".into()),
+    );
+    UpdateEffect::Redraw
+}
+
 /// Select the todo entry at `index`, or do nothing when it names no entry.
 ///
 /// A press selects and nothing more, the way the commits list does. Running

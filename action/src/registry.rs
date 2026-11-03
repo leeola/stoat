@@ -106,7 +106,7 @@ use crate::{
             PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
-            AbortRebase, EnterRebase, ExecuteRebase, GitRebase, GitRebaseContinue,
+            AbortRebase, EnterRebase, ExecuteRebase, GitRebase, GitRebaseAbort, GitRebaseContinue,
             RebaseConflictAbort, RebaseConflictApply, RebaseConflictNextFile,
             RebaseConflictPrevFile, RebaseConflictSkipEntry, RebaseConflictTakeOurs,
             RebaseConflictTakeTheirs, RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext,
@@ -1064,6 +1064,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GitRebase { rev }))
     });
     add(GitRebaseContinue::DEF, |_| Ok(Box::new(GitRebaseContinue)));
+    add(GitRebaseAbort::DEF, |_| Ok(Box::new(GitRebaseAbort)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
     add(RebaseNext::DEF, |_| Ok(Box::new(RebaseNext)));
@@ -1438,6 +1439,7 @@ mod tests {
         "EnterRebase",
         "GitRebase",
         "GitRebaseContinue",
+        "GitRebaseAbort",
         "AbortRebase",
         "ExecuteRebase",
         "RebaseNext",
@@ -2058,6 +2060,7 @@ mod tests {
         // + 2 GitDiff/GitDiffCached.
         // + 1 GitRebase.
         // + 1 GitRebaseContinue.
+        // + 1 GitRebaseAbort.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
@@ -2091,7 +2094,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 473);
+        assert_eq!(all().count(), 474);
     }
 
     #[test]
