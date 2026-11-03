@@ -5,9 +5,8 @@ use crate::{
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
-            CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitCommitAbort,
-            GitCommitConfirm, GitLs, GitStash, GitStashList, GitStashPop, GitStashPush,
-            OpenCommits,
+            CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitLs, GitStash,
+            GitStashList, GitStashPop, GitStashPush, OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -1041,8 +1040,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         }))
     });
     add(GitBranch::DEF, |_| Ok(Box::new(GitBranch)));
-    add(GitCommitConfirm::DEF, |_| Ok(Box::new(GitCommitConfirm)));
-    add(GitCommitAbort::DEF, |_| Ok(Box::new(GitCommitAbort)));
     add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
     add(GitAmend::DEF, |_| Ok(Box::new(GitAmend)));
     add(GitAdd::DEF, |_| Ok(Box::new(GitAdd)));
@@ -1449,8 +1446,6 @@ mod tests {
         "DiffChangesOpen",
         "GitLs",
         "GitBranch",
-        "GitCommitConfirm",
-        "GitCommitAbort",
         "GitCommit",
         "GitAmend",
         "GitAdd",
@@ -2074,7 +2069,6 @@ mod tests {
         // + 1 GitLs.
         // + 1 GitCheckout.
         // + 1 GitBranch.
-        // + 2 GitCommitConfirm/GitCommitAbort.
         // + 1 GitCommit.
         // + 1 GitAmend.
         // + 1 GitAdd.
@@ -2119,7 +2113,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 478);
+        assert_eq!(all().count(), 476);
     }
 
     #[test]

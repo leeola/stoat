@@ -51,7 +51,6 @@ pub(crate) enum SubmitTarget {
     HelpSearch,
     Run,
     Reword,
-    CommitMessage,
     FileFinder,
     SymbolFinder,
     CommitPicker,

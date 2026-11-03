@@ -6856,10 +6856,6 @@ impl Stoat {
             return Some(ids);
         }
 
-        if let Some(screen) = ws.commit_message.as_ref() {
-            return Some((screen.input.editor_id, screen.input.buffer_id));
-        }
-
         if let Some((editor_id, buffer_id)) = ws
             .rebase_active
             .as_ref()
@@ -9571,6 +9567,7 @@ impl Stoat {
         action_handlers::code_search::sync_code_search(self);
 
         let git_jobs = git_jobs::pump(self);
+        let commit_wait = action_handlers::git_commit::pump_commit_wait(self);
 
         let changed_file_jump = action_handlers::movement::pump_changed_file_jump(self);
         let diff_wants = action_handlers::review::pump_diff_wants(self);
@@ -9599,6 +9596,7 @@ impl Stoat {
             || commits
             || commit_picker
             || git_jobs
+            || commit_wait
             || code_search
             || changed_file_jump
             || diff_wants

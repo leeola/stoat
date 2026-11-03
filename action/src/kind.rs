@@ -409,8 +409,6 @@ action_kinds! {
     GitLs,
     GitCheckout,
     GitBranch,
-    GitCommitConfirm,
-    GitCommitAbort,
     GitCommit,
     GitAmend,
     GitAdd,

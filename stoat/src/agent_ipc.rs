@@ -374,6 +374,14 @@ pub async fn serve_agent_hooks(
     }
 }
 
+/// A connection number no other waiter holds.
+///
+/// A waiter parked from inside the editor takes one too, so dropping the
+/// waiters of a connection that went away never drops it.
+pub(crate) fn next_client() -> u64 {
+    NEXT_CLIENT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Forward one client connection's hook events to `tx` and its requests to
 /// `control_tx`, writing each request's reply back over the same connection.
 ///
@@ -404,7 +412,7 @@ async fn serve_connection<R>(
 ) where
     R: AsyncRead + AsyncWrite + Unpin,
 {
-    let client = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
+    let client = next_client();
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
     loop {

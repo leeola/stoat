@@ -1,123 +1,92 @@
 use crate::{
     action_handlers::review::emit_review_error_badge,
+    agent_ipc::{self, BridgeOutcome},
     app::{Stoat, UpdateEffect},
-    commit_message::CommitMessageEditor,
+    buffer_lifecycle,
+    buffer_registry::OpenOrigin,
+    commit_message::{self, CommitDraft, CommitWait},
     git_jobs::{self, GitJob, GitLanding, GitWork},
-    host::{GitApplyError, GitRepo},
-    input_view::{InputView, SubmitTarget},
+    host::{FsHost, GitApplyError, GitRepo},
+    pane::{Axis, FocusTarget},
+    workspace::BridgeWaiter,
 };
 use std::{
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tokio::sync::mpsc::{self, error::TryRecvError};
 
-/// Open the commit message screen over the staged changes, or badge why it
-/// does not open.
+/// What a commit of a message file came to.
+enum Committed {
+    /// The commit landed as `sha`, with the cleaned `message`.
+    Landed { sha: String, message: String },
+    /// The file cleaned to nothing, so nothing was committed.
+    Empty,
+    /// The file did not read, for the reason given.
+    Unread(String),
+    /// The repository refused the commit for `reason`, and `rewritten` is how
+    /// the write of the message back to the file went.
+    Refused {
+        reason: String,
+        rewritten: io::Result<()>,
+    },
+}
+
+/// Open the repository's COMMIT_EDITMSG in a new split over git's message
+/// template for the staged changes, and commit when the buffer leaves the
+/// editor clean.
 ///
 /// The status read that lists the staged paths walks the working tree, so it
-/// runs on the pool behind every git write queued before the press. A review
-/// walk or a rebase owns HEAD until it ends, so either one refuses the command
-/// at its turn. A screen already up stays as it is.
+/// runs on the pool behind every git write queued before the press, and the
+/// template write runs with it. A review walk or a rebase owns HEAD until it
+/// ends, so either one refuses the command at its turn. A message buffer
+/// already held stays as it is.
 pub(super) fn git_commit(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.active_workspace().commit_message.is_some() {
-        return UpdateEffect::None;
-    }
-    let job = GitJob::new("commit prepare", None, |stoat: &mut Stoat| {
-        let (repo, workdir) = commit_repo(stoat)?;
-        Some(Box::new(move || {
-            let staged = staged_paths(&*repo, &workdir);
-            Box::new(move |stoat: &mut Stoat| open_screen(stoat, workdir, staged, false, ""))
-                as GitLanding
-        }) as GitWork)
-    });
-    git_jobs::enqueue(stoat, job);
-    UpdateEffect::Redraw
+    queue_message_open(stoat, false)
 }
 
-/// Open the commit message screen's amend form over HEAD's message, or badge
-/// why it does not open.
+/// Open the repository's COMMIT_EDITMSG in a new split over HEAD's message and
+/// git's template, and amend HEAD when the buffer leaves the editor clean.
 ///
-/// The form opens with nothing staged too, because an amend of the message
+/// The message opens with nothing staged too, because an amend of the message
 /// alone is valid. A review walk or a rebase owns HEAD until it ends, so
-/// either one refuses the command at its turn. A screen already up stays as
-/// it is.
+/// either one refuses the command at its turn. A message buffer already held
+/// stays as it is.
 pub(super) fn git_amend(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.active_workspace().commit_message.is_some() {
-        return UpdateEffect::None;
-    }
-    let job = GitJob::new("amend prepare", None, |stoat: &mut Stoat| {
-        let (repo, workdir) = commit_repo(stoat)?;
-        Some(Box::new(move || {
-            let staged = staged_paths(&*repo, &workdir);
-            let message = repo
-                .resolve_rev("HEAD")
-                .and_then(|head| repo.commit_message(&head));
-            Box::new(move |stoat: &mut Stoat| match message {
-                Some(message) => open_screen(stoat, workdir, staged, true, message.trim_end()),
-                None => emit_review_error_badge(stoat, "no commit to amend", None),
-            }) as GitLanding
-        }) as GitWork)
-    });
-    git_jobs::enqueue(stoat, job);
-    UpdateEffect::Redraw
+    queue_message_open(stoat, true)
 }
 
-/// Commit the index with the screen's message, or on the amend form replace
-/// HEAD with a commit of the index and the message.
+/// Start the commit that the held message buffer waits on once the buffer
+/// leaves the editor, and answer whether anything happened.
 ///
-/// The commit waits its turn in the git queue, and the screen stays up until it
-/// lands. A failed commit keeps the screen and its message, so the reader edits
-/// the message again or closes the screen. A blank message closes the screen
-/// with no commit.
-pub(super) fn git_commit_confirm(stoat: &mut Stoat) -> UpdateEffect {
-    let (workdir, message, amend) = {
-        let ws = stoat.active_workspace();
-        let Some(screen) = ws.commit_message.as_ref() else {
-            return UpdateEffect::None;
-        };
-        (
-            screen.workdir.clone(),
-            screen.input.text(ws).trim().to_string(),
-            screen.amend,
-        )
+/// A clean close commits what the file holds, which is what the last write
+/// left. A close over unsaved edits commits nothing, as git commits nothing
+/// when its editor exits without a write. Only the active workspace's wait is
+/// read, because the commit lands in the active workspace.
+pub(crate) fn pump_commit_wait(stoat: &mut Stoat) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let Some(mut wait) = ws.commit_wait.take() else {
+        return false;
     };
-    if message.is_empty() {
-        close_screen(stoat);
-        emit_review_error_badge(stoat, "commit aborted: empty message", None);
-        return UpdateEffect::Redraw;
-    }
+    let outcome = match wait.outcome.try_recv() {
+        Ok(outcome) => Some(outcome),
+        Err(TryRecvError::Empty) => {
+            ws.commit_wait = Some(wait);
+            return false;
+        },
+        Err(TryRecvError::Disconnected) => None,
+    };
 
-    let job = GitJob::new("commit", None, move |stoat: &mut Stoat| {
-        stoat.active_workspace().commit_message.as_ref()?;
-        let Some(repo) = stoat.git_host.discover(&workdir) else {
-            emit_review_error_badge(stoat, "not in a git repository", None);
-            return None;
-        };
-        Some(Box::new(move || {
-            let written = if amend {
-                repo.amend_index(&message)
-            } else {
-                repo.commit_index(&message)
-            };
-            let committed = match written {
-                Ok(sha) => Ok(sha),
-                Err(GitApplyError::Backend { reason, .. }) => Err(reason),
-            };
-            Box::new(move |stoat: &mut Stoat| land_commit(stoat, &message, amend, committed))
-                as GitLanding
-        }) as GitWork)
-    });
-    git_jobs::enqueue(stoat, job);
-    UpdateEffect::Redraw
-}
-
-/// Close the commit message screen without a commit.
-pub(super) fn git_commit_abort(stoat: &mut Stoat) -> UpdateEffect {
-    if stoat.active_workspace().commit_message.is_none() {
-        return UpdateEffect::None;
+    match outcome {
+        Some(BridgeOutcome::Closed) => queue_commit(stoat, wait.draft),
+        Some(BridgeOutcome::Abandoned) | None => emit_review_error_badge(
+            stoat,
+            "commit aborted: message closed without a write",
+            None,
+        ),
     }
-    close_screen(stoat);
-    UpdateEffect::Redraw
+    true
 }
 
 /// Stage every tracked change in the working tree, as `git add -u` does.
@@ -200,90 +169,246 @@ fn staged_paths(repo: &dyn GitRepo, workdir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Open the screen over `staged`, or badge that the index holds no change.
-///
-/// The amend form opens over an empty index too, because an amend of the
-/// message alone is valid.
-fn open_screen(stoat: &mut Stoat, workdir: PathBuf, staged: Vec<PathBuf>, amend: bool, seed: &str) {
-    if staged.is_empty() && !amend {
-        emit_review_error_badge(stoat, "nothing staged", None);
-        return;
+/// Queue the template write and the open of the message buffer, for a commit
+/// or, with `amend`, for an amend of HEAD.
+fn queue_message_open(stoat: &mut Stoat, amend: bool) -> UpdateEffect {
+    if stoat.active_workspace().commit_wait.is_some() {
+        return UpdateEffect::None;
     }
-    install_commit_message(stoat, workdir, staged, amend, seed);
-}
-
-/// Put the commit message screen up over the focused pane, for the `staged`
-/// paths of the repository at `workdir`.
-///
-/// The message starts as `seed`, in insert mode with the cursor after it, so
-/// the reader types at once. `amend` puts up the amend form. A screen already
-/// up stays as it is.
-fn install_commit_message(
-    stoat: &mut Stoat,
-    workdir: PathBuf,
-    staged: Vec<PathBuf>,
-    amend: bool,
-    seed: &str,
-) {
-    if stoat.active_workspace().commit_message.is_some() {
-        return;
-    }
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
-    let input = InputView::create(ws, executor, SubmitTarget::CommitMessage, seed, "insert");
-    ws.commit_message = Some(CommitMessageEditor {
-        workdir,
-        staged,
-        amend,
-        input,
+    let label = if amend {
+        "amend prepare"
+    } else {
+        "commit prepare"
+    };
+    let job = GitJob::new(label, None, move |stoat: &mut Stoat| {
+        let (repo, workdir) = commit_repo(stoat)?;
+        let fs = stoat.fs_host.clone();
+        Some(Box::new(move || {
+            let prepared = prepare_draft(&*fs, &*repo, workdir, amend);
+            Box::new(move |stoat: &mut Stoat| match prepared {
+                Ok((draft, written)) => open_message_buffer(stoat, draft, written),
+                Err(label) => emit_review_error_badge(stoat, label, None),
+            }) as GitLanding
+        }) as GitWork)
     });
+    git_jobs::enqueue(stoat, job);
+    UpdateEffect::Redraw
 }
 
-/// Close the screen over a landed commit and bring the editor to the new HEAD,
-/// or badge a failed commit and keep the screen.
+/// Write the message template for a commit, or with `amend` for an amend, on
+/// whatever thread calls.
 ///
-/// A screen the reader closed while the commit ran stays closed. The commit
-/// still moved HEAD, so the diffs and the commits lists follow either way. The
-/// status line names an amend as one.
-fn land_commit(stoat: &mut Stoat, message: &str, amend: bool, committed: Result<String, String>) {
-    let sha = match committed {
-        Ok(sha) => sha,
-        Err(reason) => {
+/// Answers the draft and how the write went. When there is nothing to commit,
+/// it answers the badge label instead. A commit needs a staged change, and an
+/// amend needs a HEAD.
+fn prepare_draft(
+    fs: &dyn FsHost,
+    repo: &dyn GitRepo,
+    workdir: PathBuf,
+    amend: bool,
+) -> Result<(CommitDraft, io::Result<()>), &'static str> {
+    let staged = staged_paths(repo, &workdir);
+    let message = if amend {
+        let head = repo
+            .resolve_rev("HEAD")
+            .and_then(|head| repo.commit_message(&head));
+        head.ok_or("no commit to amend")?.trim_end().to_string()
+    } else if staged.is_empty() {
+        return Err("nothing staged");
+    } else {
+        String::new()
+    };
+
+    let draft = CommitDraft {
+        workdir,
+        path: repo.git_dir().join("COMMIT_EDITMSG"),
+        staged,
+        branch: repo.head_branch(),
+        amend,
+    };
+    let written = write_message(fs, &draft, &message);
+    Ok((draft, written))
+}
+
+/// Write `message` above git's template to the draft's file.
+fn write_message(fs: &dyn FsHost, draft: &CommitDraft, message: &str) -> io::Result<()> {
+    let text = commit_message::template(message, draft.branch.as_deref(), &draft.staged);
+    fs.write(&draft.path, text.as_bytes())
+}
+
+/// Open the draft's file as a buffer in a new split and hold it, so the commit
+/// lands when the buffer leaves the editor.
+///
+/// `written` is how the write of the file went. A clean buffer already open on
+/// the file closes first, since it holds the text from before the write. A
+/// dirty one keeps its edits, and the open badges instead. A message buffer
+/// already held stays as it is.
+fn open_message_buffer(stoat: &mut Stoat, draft: CommitDraft, written: io::Result<()>) {
+    if let Err(err) = written {
+        emit_review_error_badge(stoat, "commit message not written", Some(err.to_string()));
+        return;
+    }
+    let (held, open) = {
+        let ws = stoat.active_workspace();
+        let open = ws.buffers.id_for_path(&draft.path).map(|id| {
+            let dirty = ws
+                .buffers
+                .get(id)
+                .is_some_and(|buffer| buffer.read().expect("buffer poisoned").dirty);
+            (id, dirty)
+        });
+        (ws.commit_wait.is_some(), open)
+    };
+    if held {
+        return;
+    }
+    match open {
+        Some((_, true)) => {
+            emit_review_error_badge(stoat, "commit message buffer holds unsaved edits", None);
+            return;
+        },
+        Some((id, false)) => {
+            buffer_lifecycle::close_buffer_by_id(stoat, id);
+        },
+        None => {},
+    }
+
+    let pane = {
+        let executor = stoat.executor.clone();
+        let ws = stoat.active_workspace_mut();
+        let pane = ws.panes.split(Axis::Vertical);
+        // The split copies the focused view, so the pane takes an editor of its
+        // own before the open fills it.
+        let scratch = super::pane::scratch_editor_view(ws, executor);
+        ws.panes.pane_mut(pane).view = scratch;
+        ws.focus = FocusTarget::SplitPane;
+        pane
+    };
+    let opened =
+        buffer_lifecycle::open_file_in_pane_now(stoat, pane, &draft.path, OpenOrigin::Named);
+    let Some(buffer) = opened else {
+        super::pane::close_pane_by_id(stoat, pane);
+        emit_review_error_badge(stoat, "commit message did not open", None);
+        return;
+    };
+
+    let (done, outcome) = mpsc::unbounded_channel();
+    let label = if draft.amend {
+        "git amend"
+    } else {
+        "git commit"
+    };
+    let ws = stoat.active_workspace_mut();
+    ws.hold_buffer(
+        buffer,
+        BridgeWaiter {
+            client: agent_ipc::next_client(),
+            label: label.to_string(),
+            done,
+        },
+    );
+    ws.commit_wait = Some(CommitWait { draft, outcome });
+}
+
+/// Queue the commit of the draft's file, or the amend of HEAD for an amend
+/// draft.
+///
+/// The commit waits its turn in the git queue behind every git write queued
+/// before the close. The file is read at that turn and cleaned as git cleans
+/// it, and an empty message commits nothing.
+fn queue_commit(stoat: &mut Stoat, draft: CommitDraft) {
+    let label = if draft.amend { "amend" } else { "commit" };
+    let fs = stoat.fs_host.clone();
+    let job = GitJob::new(label, None, move |stoat: &mut Stoat| {
+        let Some(repo) = stoat.git_host.discover(&draft.workdir) else {
+            emit_review_error_badge(stoat, "not in a git repository", None);
+            return None;
+        };
+        Some(Box::new(move || {
+            let committed = commit_draft(&*fs, &*repo, &draft);
+            Box::new(move |stoat: &mut Stoat| land_commit(stoat, draft, committed)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+}
+
+/// Read the draft's file, clean it, and commit or amend with what is left, on
+/// whatever thread calls.
+///
+/// A refused commit writes the cleaned message back above git's template, so
+/// the file that opens again holds it.
+fn commit_draft(fs: &dyn FsHost, repo: &dyn GitRepo, draft: &CommitDraft) -> Committed {
+    let text = match super::read_string_via_host(fs, &draft.path) {
+        Ok(text) => text,
+        Err(err) => return Committed::Unread(err.to_string()),
+    };
+    let message = commit_message::cleanup(&text);
+    if message.is_empty() {
+        return Committed::Empty;
+    }
+
+    let written = if draft.amend {
+        repo.amend_index(&message)
+    } else {
+        repo.commit_index(&message)
+    };
+    match written {
+        Ok(sha) => Committed::Landed { sha, message },
+        Err(GitApplyError::Backend { reason, .. }) => Committed::Refused {
+            reason,
+            rewritten: write_message(fs, draft, &message),
+        },
+    }
+}
+
+/// Bring the editor to the HEAD a landed commit left, or badge why the commit
+/// did not land.
+///
+/// A refused commit opens the message again, so the reader edits it and
+/// retries or closes it. The status line names an amend as one.
+fn land_commit(stoat: &mut Stoat, draft: CommitDraft, committed: Committed) {
+    let (sha, message) = match committed {
+        Committed::Landed { sha, message } => (sha, message),
+        Committed::Empty => {
+            emit_review_error_badge(stoat, "commit aborted: empty message", None);
+            return;
+        },
+        Committed::Unread(reason) => {
+            emit_review_error_badge(stoat, "commit message not read", Some(reason));
+            return;
+        },
+        Committed::Refused { reason, rewritten } => {
             emit_review_error_badge(stoat, "commit failed", Some(reason));
+            open_message_buffer(stoat, draft, rewritten);
             return;
         },
     };
 
-    close_screen(stoat);
     stoat.active_workspace_mut().invalidate_all_diffs();
     super::commits::reload_every_list(stoat);
     let first_line = message.lines().next().unwrap_or("");
-    let verb = if amend { "amended" } else { "committed" };
+    let verb = if draft.amend { "amended" } else { "committed" };
     stoat.set_status(format!("{verb} {} {first_line}", &sha[..sha.len().min(7)]));
-}
-
-/// Close the commit message screen and dispose its editor.
-fn close_screen(stoat: &mut Stoat) {
-    let ws = stoat.active_workspace_mut();
-    if let Some(screen) = ws.commit_message.take() {
-        screen.input.dispose(ws);
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::install_commit_message;
     use crate::{
-        action_handlers,
         app::Stoat,
         badge::BadgeSource,
-        command_palette::Availability,
-        git_jobs::{self, GitJob, GitLanding, GitWork},
+        buffer::BufferId,
+        commit_message::template,
+        host::FsHost,
         rebase::{ActiveRebase, RebaseState},
         test_harness::TestHarness,
     };
-    use std::path::{Path, PathBuf};
-    use stoat_action::{GitCommitAbort, GitCommitConfirm};
+    use std::{
+        io::ErrorKind,
+        path::{Path, PathBuf},
+    };
+
+    /// Where the fake repository at `/repo` keeps its commit message.
+    const MESSAGE: &str = "/repo/.git/COMMIT_EDITMSG";
 
     /// A harness rooted in `/repo`, with HEAD on `main` at `c2` over `c1`, and
     /// each of `staged` staged with its text in the index.
@@ -311,6 +436,13 @@ mod tests {
         h.settle();
     }
 
+    /// Type `message` at the cursor in insert mode, then return to normal mode.
+    fn type_message(h: &mut TestHarness, message: &str) {
+        h.type_keys("i");
+        h.type_text(message);
+        h.type_keys("escape");
+    }
+
     fn head(h: &TestHarness) -> Option<String> {
         h.stoat
             .git_host
@@ -322,12 +454,27 @@ mod tests {
         h.fake_git().commit_message(Path::new("/repo"), &head(h)?)
     }
 
-    /// The message on the screen, or `None` with no screen up.
-    fn screen_text(h: &TestHarness) -> Option<String> {
-        let ws = h.stoat.active_workspace();
-        ws.commit_message
-            .as_ref()
-            .map(|screen| screen.input.text(ws))
+    /// The open COMMIT_EDITMSG buffer, or `None` while the file is not open.
+    fn message_buffer(h: &TestHarness) -> Option<BufferId> {
+        h.stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new(MESSAGE))
+    }
+
+    /// The text of COMMIT_EDITMSG on the fake disk, or `None` before a write.
+    fn message_file(h: &TestHarness) -> Option<String> {
+        let mut bytes = Vec::new();
+        h.fake_fs().read(Path::new(MESSAGE), &mut bytes).ok()?;
+        String::from_utf8(bytes).ok()
+    }
+
+    fn pane_count(h: &TestHarness) -> usize {
+        h.stoat.active_workspace().panes.split_pane_ids().len()
+    }
+
+    fn waiting(h: &TestHarness) -> bool {
+        h.stoat.active_workspace().commit_wait.is_some()
     }
 
     fn review_badge(h: &TestHarness) -> Option<String> {
@@ -357,64 +504,49 @@ mod tests {
             .collect()
     }
 
-    /// The screen opens in insert mode under its own view, and the palette
-    /// reads it as up.
+    /// `:git commit` writes git's template to COMMIT_EDITMSG and opens it in a
+    /// split in normal mode, and the status row names what waits on it.
     #[test]
-    fn the_screen_opens_in_insert_mode_under_its_own_view() {
+    fn git_commit_opens_the_message_buffer_in_a_split() {
         let mut h = harness(&[("a.rs", "3\n")]);
-        install_commit_message(&mut h.stoat, "/repo".into(), vec!["a.rs".into()], false, "");
+        h.resize(120, 24);
+        submit(&mut h, ":git commit");
+        h.snapshot();
+
+        let focused = h.stoat.focused_editor_ids().map(|(_, buffer)| buffer);
         assert_eq!(
             (
-                h.stoat.current_view(),
+                pane_count(&h),
+                focused.is_some() && focused == message_buffer(&h),
                 h.stoat.focused_mode(),
-                Availability::from_stoat(&h.stoat).in_commit_message,
+                message_file(&h),
+                h.rendered_text()
+                    .contains("COMMIT_EDITMSG [for git commit]"),
             ),
-            (Some("commit_message"), "insert", true),
-        );
-    }
-
-    /// A second install while the screen is up keeps the screen and the message
-    /// typed into it.
-    #[test]
-    fn a_second_install_keeps_the_screen_and_its_message() {
-        let mut h = harness(&[("a.rs", "3\n")]);
-        install_commit_message(&mut h.stoat, "/repo".into(), vec!["a.rs".into()], false, "");
-        h.type_text("feat: x");
-        install_commit_message(&mut h.stoat, "/repo".into(), vec!["b.rs".into()], false, "");
-        let staged = h
-            .stoat
-            .active_workspace()
-            .commit_message
-            .as_ref()
-            .map(|screen| screen.staged.clone());
-        assert_eq!(
-            (screen_text(&h), staged),
             (
-                Some("feat: x".to_string()),
-                Some(vec![PathBuf::from("a.rs")])
+                2,
+                true,
+                "normal",
+                Some(template("", Some("main"), &["a.rs".into()])),
+                true,
             ),
         );
     }
 
-    /// `:git commit` and `:git ci` open the screen over the staged paths, and
-    /// an unstaged edit stays off it.
+    /// `:git commit` and `:git ci` write the staged paths into the template,
+    /// and an unstaged edit stays off it.
     #[test]
-    fn git_commit_opens_the_screen_over_the_staged_paths() {
-        let staged = |command: &str| {
+    fn git_commit_lists_the_staged_paths_in_the_template() {
+        let written = |command: &str| {
             let mut h = harness(&[("a.rs", "3\n")]);
             h.fake_git().add_repo("/repo").unstaged_file("c.rs", "edit");
             submit(&mut h, command);
-            let ws = h.stoat.active_workspace();
-            ws.commit_message
-                .as_ref()
-                .map(|screen| screen.staged.clone())
+            message_file(&h)
         };
+        let listed = Some(template("", Some("main"), &["a.rs".into()]));
         assert_eq!(
-            [staged(":git commit"), staged(":git ci")],
-            [
-                Some(vec![PathBuf::from("a.rs")]),
-                Some(vec![PathBuf::from("a.rs")])
-            ],
+            [written(":git commit"), written(":git ci")],
+            [listed.clone(), listed],
         );
     }
 
@@ -479,73 +611,225 @@ mod tests {
         );
     }
 
-    /// Ctrl-s commits the index with the message, closes the screen, and names
-    /// the commit in the status line.
+    /// A write alone leaves the commit waiting, as a write in git's editor
+    /// does.
     #[test]
-    fn ctrl_s_commits_the_index_with_the_message() {
+    fn a_write_alone_commits_nothing() {
         let mut h = harness(&[("a.rs", "3\n")]);
         submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        h.type_keys("ctrl-s");
-        h.settle();
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":w");
+        assert_eq!(
+            (head(&h), message_buffer(&h).is_some(), waiting(&h)),
+            (Some("c2".to_string()), true, true),
+        );
+    }
+
+    /// `:wq` commits the index with the written message, closes the split, and
+    /// names the commit in the status line.
+    #[test]
+    fn write_quit_commits_the_cleaned_message_and_closes_the_split() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git commit");
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":wq");
 
         let sha = head(&h).expect("a HEAD");
         assert_eq!(
             (
-                screen_text(&h),
                 head_message(&h),
+                pane_count(&h),
                 h.stoat.pending_message.clone(),
-                h.fake_git().commit_message(Path::new("/repo"), "c2"),
+                waiting(&h),
+                message_buffer(&h),
             ),
             (
-                None,
                 Some("feat: x".to_string()),
+                1,
                 Some(format!("committed {} feat: x", &sha[..7])),
-                Some("two".to_string()),
+                false,
+                None,
             ),
         );
     }
 
-    /// `:git amend` and `:git cia` open the amend form over HEAD's message, and
-    /// an empty index opens it too.
+    /// Git's cleanup takes a typed comment line and the trailing blank lines out
+    /// of the committed message.
     #[test]
-    fn git_amend_opens_the_screen_over_heads_message() {
+    fn comment_lines_leave_the_committed_message() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git commit");
+        h.type_keys("i");
+        h.type_text("feat: x");
+        h.type_keys("enter");
+        h.type_text("# note");
+        h.type_keys("enter enter escape");
+        submit(&mut h, ":wq");
+        assert_eq!(head_message(&h), Some("feat: x".to_string()));
+    }
+
+    /// A quit with no write leaves the bare template in the file, which cleans
+    /// to an empty message.
+    #[test]
+    fn a_quit_with_no_write_aborts_with_an_empty_message() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git commit");
+        submit(&mut h, ":q");
+        assert_eq!(
+            (head(&h), review_badge(&h)),
+            (
+                Some("c2".to_string()),
+                Some("commit aborted: empty message".to_string())
+            ),
+        );
+    }
+
+    /// A quit over unsaved edits abandons the message, as git does when its
+    /// editor exits without a write.
+    #[test]
+    fn a_quit_over_unsaved_edits_aborts_the_commit() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git commit");
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":q");
+        assert_eq!(
+            (head(&h), review_badge(&h)),
+            (
+                Some("c2".to_string()),
+                Some("commit aborted: message closed without a write".to_string())
+            ),
+        );
+    }
+
+    /// A file that does not read at the commit's turn commits nothing and badges
+    /// the read.
+    #[test]
+    fn an_unreadable_message_commits_nothing() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git commit");
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":w");
+        h.fake_fs()
+            .fail_next_read(MESSAGE, ErrorKind::PermissionDenied);
+        submit(&mut h, ":q");
+        assert_eq!(
+            (head(&h), review_badge(&h)),
+            (
+                Some("c2".to_string()),
+                Some("commit message not read".to_string())
+            ),
+        );
+    }
+
+    /// A commit the repository refuses opens the message again, so the reader
+    /// edits it and retries or closes it.
+    #[test]
+    fn a_failed_commit_reopens_the_message() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        h.fake_git().add_repo("/repo").fail_apply_with("disk full");
+        submit(&mut h, ":git commit");
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":wq");
+
+        let first_line = message_buffer(&h).map(|id| {
+            let text = h.buffer_text(id);
+            text.lines().next().unwrap_or("").to_string()
+        });
+        assert_eq!(
+            (head(&h), review_badge(&h), first_line, waiting(&h)),
+            (
+                Some("c2".to_string()),
+                Some("commit failed".to_string()),
+                Some("feat: x".to_string()),
+                true,
+            ),
+        );
+    }
+
+    /// The reader stages hunks in the diff view and commits from there, so the
+    /// message opens beside that pane and the close leaves it as it was.
+    #[test]
+    fn git_commit_from_a_diff_view_keeps_that_pane() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        h.fake_fs().insert_file("/repo/a.rs", "3\n");
+        h.open_file(Path::new("/repo/a.rs"));
+        let editor_id = h.stoat.focused_editor_ids().expect("an editor").0;
+        h.stoat
+            .active_workspace_mut()
+            .editors
+            .get_mut(editor_id)
+            .expect("the editor")
+            .set_diff_view(true);
+
+        submit(&mut h, ":git commit");
+        let beside = pane_count(&h);
+        type_message(&mut h, "fix: y");
+        submit(&mut h, ":wq");
+        let focused = h.stoat.focused_editor_ids().map(|(editor, _)| editor);
+        let diff_view = h
+            .stoat
+            .active_workspace()
+            .editors
+            .get(editor_id)
+            .map(|editor| editor.diff_view);
+        assert_eq!(
+            (beside, pane_count(&h), focused, diff_view, head_message(&h)),
+            (
+                2,
+                1,
+                Some(editor_id),
+                Some(true),
+                Some("fix: y".to_string())
+            ),
+        );
+    }
+
+    /// A second `:git commit` while the message is open changes nothing.
+    #[test]
+    fn a_second_git_commit_while_the_message_is_open_changes_nothing() {
+        let mut h = harness(&[("a.rs", "3\n")]);
+        submit(&mut h, ":git commit");
+        submit(&mut h, ":git commit");
+        assert_eq!((pane_count(&h), head(&h)), (2, Some("c2".to_string())));
+    }
+
+    /// `:git amend` and `:git cia` write HEAD's message above the template and
+    /// name the amend in the status row, and an empty index opens it too.
+    #[test]
+    fn git_amend_opens_the_message_buffer_over_heads_message() {
         let opened = |staged: &[(&str, &str)], command: &str| {
             let mut h = harness(staged);
+            h.resize(120, 24);
             submit(&mut h, command);
-            let _ = h.snapshot();
-            let amend = h
-                .stoat
-                .active_workspace()
-                .commit_message
-                .as_ref()
-                .map(|screen| screen.amend);
+            h.snapshot();
             (
-                screen_text(&h),
-                amend,
-                h.rendered_text().contains("amend [insert]"),
+                message_file(&h),
+                h.rendered_text().contains("COMMIT_EDITMSG [for git amend]"),
             )
         };
-        let amending = (Some("two".to_string()), Some(true), true);
+        let amending = |staged: &[PathBuf]| (Some(template("two", Some("main"), staged)), true);
         assert_eq!(
             [
                 opened(&[("a.rs", "3\n")], ":git amend"),
                 opened(&[("a.rs", "3\n")], ":git cia"),
                 opened(&[], ":git amend"),
             ],
-            [amending.clone(), amending.clone(), amending],
+            [
+                amending(&["a.rs".into()]),
+                amending(&["a.rs".into()]),
+                amending(&[]),
+            ],
         );
     }
 
-    /// Ctrl-s on the amend form replaces HEAD with a commit of the index and
+    /// `:wq` on the amend message replaces HEAD with a commit of the index and
     /// the edited message, and names the amend in the status line.
     #[test]
-    fn ctrl_s_amends_head_with_the_index_and_the_message() {
+    fn write_quit_amends_head_with_the_index_and_the_message() {
         let mut h = harness(&[("a.rs", "3\n")]);
         submit(&mut h, ":git amend");
-        h.type_text(" amended");
-        h.type_keys("ctrl-s");
-        h.settle();
+        type_message(&mut h, "fix: ");
+        submit(&mut h, ":wq");
 
         let sha = head(&h).expect("a HEAD");
         let amends: Vec<(String, String)> = h
@@ -555,16 +839,10 @@ mod tests {
             .map(|amend| (amend.old_head, amend.new_head))
             .collect();
         assert_eq!(
+            (head_message(&h), h.stoat.pending_message.clone(), amends),
             (
-                screen_text(&h),
-                head_message(&h),
-                h.stoat.pending_message.clone(),
-                amends,
-            ),
-            (
-                None,
-                Some("two amended".to_string()),
-                Some(format!("amended {} two amended", &sha[..7])),
+                Some("fix: two".to_string()),
+                Some(format!("amended {} fix: two", &sha[..7])),
                 vec![("c2".to_string(), sha.clone())],
             ),
         );
@@ -595,9 +873,8 @@ mod tests {
         let before = base(&h);
 
         submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        h.type_keys("ctrl-s");
-        h.settle();
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":wq");
         h.settle_diff_jobs();
         assert_eq!(
             (before.as_deref(), base(&h).as_deref()),
@@ -611,9 +888,8 @@ mod tests {
         let mut h = harness(&[("a.rs", "3\n")]);
         h.open_commits("/repo");
         submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        h.type_keys("ctrl-s");
-        h.settle();
+        type_message(&mut h, "feat: x");
+        submit(&mut h, ":wq");
         let listed: Vec<String> = h
             .stoat
             .active_workspace()
@@ -633,115 +909,16 @@ mod tests {
         );
     }
 
-    /// A screen closed while its commit waits behind another git write commits
-    /// nothing at the commit's turn.
-    #[test]
-    fn a_screen_closed_while_its_commit_waits_commits_nothing() {
-        let mut h = harness(&[("a.rs", "3\n")]);
-        submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        let hold = GitJob::new("hold", None, |_: &mut Stoat| {
-            Some(Box::new(|| Box::new(|_: &mut Stoat| {}) as GitLanding) as GitWork)
-        });
-        git_jobs::enqueue(&mut h.stoat, hold);
-        // A dispatch paints no frame and pumps no job, so the hold stays out
-        // until the settle and the commit waits behind it.
-        action_handlers::dispatch(&mut h.stoat, &GitCommitConfirm);
-        action_handlers::dispatch(&mut h.stoat, &GitCommitAbort);
-        h.settle();
-        assert_eq!((screen_text(&h), head(&h)), (None, Some("c2".to_string())));
-    }
-
-    /// Escape leaves insert mode, and Escape in normal mode closes the screen
-    /// with no commit.
-    #[test]
-    fn escape_twice_closes_the_screen_with_no_commit() {
-        let mut h = harness(&[("a.rs", "3\n")]);
-        submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        h.type_keys("escape escape");
-        h.settle();
-        assert_eq!((screen_text(&h), head(&h)), (None, Some("c2".to_string())));
-    }
-
-    #[test]
-    fn a_blank_message_closes_the_screen_with_no_commit() {
-        let mut h = harness(&[("a.rs", "3\n")]);
-        submit(&mut h, ":git commit");
-        h.type_text("  ");
-        h.type_keys("ctrl-s");
-        h.settle();
-        assert_eq!(
-            (screen_text(&h), head(&h), review_badge(&h)),
-            (
-                None,
-                Some("c2".to_string()),
-                Some("commit aborted: empty message".to_string()),
-            ),
-        );
-    }
-
-    /// A commit the repository refuses keeps the screen and its message, so the
-    /// reader edits it again or closes the screen.
-    #[test]
-    fn a_failed_commit_keeps_the_screen_and_its_message() {
-        let mut h = harness(&[("a.rs", "3\n")]);
-        h.fake_git().add_repo("/repo").fail_apply_with("disk full");
-        submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        h.type_keys("ctrl-s");
-        h.settle();
-        assert_eq!(
-            (screen_text(&h), head(&h), review_badge(&h)),
-            (
-                Some("feat: x".to_string()),
-                Some("c2".to_string()),
-                Some("commit failed".to_string()),
-            ),
-        );
-    }
-
-    /// The reader stages hunks in the diff view and commits from there, so the
-    /// screen outranks the diff view and takes the keys over it.
-    #[test]
-    fn the_screen_takes_the_keys_over_a_diff_view() {
-        let mut h = harness(&[("a.rs", "3\n")]);
-        h.fake_fs().insert_file("/repo/a.rs", "3\n");
-        h.open_file(Path::new("/repo/a.rs"));
-        let editor_id = h.stoat.focused_editor_ids().expect("an editor").0;
-        h.stoat
-            .active_workspace_mut()
-            .editors
-            .get_mut(editor_id)
-            .expect("the editor")
-            .set_diff_view(true);
-        let under = h.stoat.current_view();
-
-        submit(&mut h, ":git commit");
-        let over = h.stoat.current_view();
-        h.type_text("fix: y");
-        h.type_keys("ctrl-s");
-        h.settle();
-        assert_eq!(
-            (under, over, head_message(&h)),
-            (
-                Some("diff"),
-                Some("commit_message"),
-                Some("fix: y".to_string())
-            ),
-        );
-    }
-
-    /// An index with no change badges and opens nothing, even over an unstaged
-    /// edit.
+    /// An index with no change badges and writes nothing, even over an
+    /// unstaged edit.
     #[test]
     fn git_commit_over_a_clean_index_badges_and_opens_nothing() {
         let mut h = harness(&[]);
         h.fake_git().add_repo("/repo").unstaged_file("c.rs", "edit");
         submit(&mut h, ":git commit");
         assert_eq!(
-            (screen_text(&h), review_badge(&h)),
-            (None, Some("nothing staged".to_string())),
+            (pane_count(&h), message_file(&h), review_badge(&h)),
+            (1, None, Some("nothing staged".to_string())),
         );
     }
 
@@ -751,7 +928,7 @@ mod tests {
     fn git_commit_during_a_walk_or_a_rebase_opens_nothing() {
         let refused = |h: &mut TestHarness| {
             submit(h, ":git commit");
-            (screen_text(h), review_badge(h))
+            (message_file(h), review_badge(h))
         };
         let mut walking = harness(&[]);
         submit(&mut walking, ":git review main");
@@ -777,12 +954,11 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_commit_message_screen() {
+    fn snapshot_commit_message_buffer() {
         let mut h = harness(&[("a.rs", "3\n"), ("b.rs", "new\n")]);
         h.resize(90, 12);
         submit(&mut h, ":git commit");
-        h.type_text("feat: x");
-        assert_eq!(h.stoat.current_view(), Some("commit_message"));
-        h.assert_snapshot("commit_message_screen");
+        type_message(&mut h, "feat: x");
+        h.assert_snapshot("commit_message_buffer");
     }
 }

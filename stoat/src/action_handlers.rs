@@ -10,7 +10,7 @@ pub(crate) mod diff_nav;
 pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
-mod git_commit;
+pub(crate) mod git_commit;
 mod git_stash;
 pub(crate) mod help;
 pub(crate) mod jump;
@@ -1265,8 +1265,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::RewordConfirm => reword::reword_confirm(stoat),
         ActionKind::RewordAbort => reword::reword_abort(stoat),
-        ActionKind::GitCommitConfirm => git_commit::git_commit_confirm(stoat),
-        ActionKind::GitCommitAbort => git_commit::git_commit_abort(stoat),
         ActionKind::RebaseContinue => rebase::rebase_continue(stoat),
         ActionKind::GitRebaseContinue => rebase::git_rebase_continue(stoat),
         ActionKind::RebaseConflictTakeOurs => {

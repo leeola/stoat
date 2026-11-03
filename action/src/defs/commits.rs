@@ -224,39 +224,17 @@ define_action!(
 );
 
 define_action!(
-    GitCommitConfirmDef,
-    GitCommitConfirm,
-    "GitCommitConfirm",
-    ActionKind::GitCommitConfirm,
-    "commit with the edited message",
-    "Commit the staged changes with the message in the commit message \
-     screen, and close the screen once the commit lands. On the amend form, \
-     replace HEAD with a commit of the index and the message instead. An \
-     empty message closes the screen without a commit.",
-    ActionPriority::Rare
-);
-
-define_action!(
-    GitCommitAbortDef,
-    GitCommitAbort,
-    "GitCommitAbort",
-    ActionKind::GitCommitAbort,
-    "close the commit message editor",
-    "Close the commit message screen without a commit. The staged changes \
-     stay staged.",
-    ActionPriority::Rare
-);
-
-define_action!(
     GitCommitDef,
     GitCommit,
     "GitCommit",
     ActionKind::GitCommit,
     "commit the staged changes",
-    "Open a commit message screen over the focused pane that lists the staged \
-     files. Ctrl-s commits the index with the message, and Escape in normal \
-     mode closes the screen without a commit. Refuses while a review walk or \
-     a rebase holds HEAD, and when nothing is staged.",
+    "Write git's message template to the repository's COMMIT_EDITMSG, open \
+     it as a buffer in a new split, and hold it. The commit lands with the \
+     cleaned message when the written buffer closes, as with `:wq`. A write \
+     alone commits nothing, and a close without a write or with only comment \
+     lines commits nothing. Refuses while a review walk or a rebase holds \
+     HEAD, and when nothing is staged.",
     ActionPriority::Common,
     aliases = &["git ci"],
     command_name = "git commit"
@@ -268,10 +246,13 @@ define_action!(
     "GitAmend",
     ActionKind::GitAmend,
     "amend HEAD with the staged changes",
-    "Open the commit message screen's amend form over HEAD's message. Ctrl-s \
-     replaces HEAD with a commit of the index and the edited message, as `git \
-     commit --amend` does. With nothing staged, the amend changes the message \
-     alone. Refuses while a review walk or a rebase holds HEAD.",
+    "Write HEAD's message above git's template to the repository's \
+     COMMIT_EDITMSG, open it as a buffer in a new split, and hold it. When \
+     the buffer closes with no unsaved edits, HEAD is replaced with a commit \
+     of the index and the cleaned message, as `git commit --amend` does. A \
+     write alone amends nothing, and a message of only comment lines amends \
+     nothing. With nothing staged, the amend changes the message alone. \
+     Refuses while a review walk or a rebase holds HEAD.",
     ActionPriority::Common,
     aliases = &["git cia"],
     command_name = "git amend"

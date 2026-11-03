@@ -455,9 +455,6 @@ pub struct Availability {
     /// `workspace.repo_root.is_some()`: the workspace root sits inside a git
     /// repository, so the git commands have one to act on.
     pub in_repo: bool,
-    /// `workspace.commit_message.is_some()`: the commit message screen is up,
-    /// so its confirm and abort actions have a screen to act on.
-    pub in_commit_message: bool,
 }
 
 impl Availability {
@@ -500,7 +497,6 @@ impl Availability {
             run_focused,
             pair_open: ws.pair_panes().is_some(),
             in_repo: ws.repo_root.is_some(),
-            in_commit_message: ws.commit_message.is_some(),
         }
     }
 }
@@ -560,8 +556,6 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
         | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush
         | GitStashPop | GitStashList => ctx.in_repo,
-
-        GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
         // WalkthroughOpen is absent on purpose. A reader opens a tour when none
         // plays, so a gate on one hides it exactly when it is wanted.
@@ -1952,21 +1946,6 @@ mod tests {
         );
     }
 
-    /// The commit message screen's confirm and abort act on the screen, so the
-    /// Active scope lists them only while it is up.
-    #[test]
-    fn active_scope_lists_the_commit_screen_actions_only_with_the_screen() {
-        let lists = |in_commit_message| {
-            let ctx = Availability {
-                in_commit_message,
-                ..Availability::default()
-            };
-            let listed = action_names_for_scope("", PaletteScope::Active, &ctx);
-            ["GitCommitConfirm", "GitCommitAbort"].map(|name| listed.contains(&name))
-        };
-        assert_eq!([lists(false), lists(true)], [[false; 2], [true; 2]]);
-    }
-
     /// The git group acts on the workspace's repository, so the Active scope
     /// lists its commands only inside one, and the rebase continue and abort
     /// commands only while a rebase runs there. The All scope lists them
@@ -2162,7 +2141,6 @@ mod tests {
             run_focused: true,
             pair_open: true,
             in_repo: true,
-            in_commit_message: true,
         };
         for entry in registry::all() {
             assert!(
