@@ -750,6 +750,31 @@ mod tests {
         h.settle();
     }
 
+    /// Stop the stepper on a Reword entry, with the reword screen up over the
+    /// message of c2.
+    fn pause_on_reword(h: &mut TestHarness) {
+        h.resize(90, 12);
+        h.seed_linear_history("/repo", THREE_COMMITS);
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.type_keys("i");
+        // Mark c2 as Reword (first entry).
+        h.type_keys("r");
+        h.type_keys("Enter");
+        h.settle();
+    }
+
+    /// The summary of each commit on HEAD's history, newest first.
+    fn log_summaries(h: &TestHarness) -> Vec<String> {
+        h.fake_git
+            .discover(Path::new("/repo"))
+            .unwrap()
+            .log_commits(None, 10)
+            .into_iter()
+            .map(|commit| commit.summary)
+            .collect()
+    }
+
     fn checkouts(h: &TestHarness) -> Vec<String> {
         h.fake_git.checkouts(Path::new("/repo"))
     }
@@ -924,6 +949,45 @@ mod tests {
         let log = repo.log_commits(None, 10);
         // Two rebased commits (from c2 and c3) plus root c1.
         assert_eq!(log.len(), 3, "full chain rebased: {log:#?}");
+    }
+
+    /// `:git rc` resumes an edit stop as `C` does.
+    #[test]
+    fn git_rc_resumes_an_edit_stop() {
+        let mut h = Stoat::test();
+        pause_on_edit(&mut h);
+
+        h.type_text(":git rc");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(
+            (
+                h.stoat.active_workspace().rebase_active.is_none(),
+                log_summaries(&h),
+            ),
+            (
+                true,
+                vec!["c3: tip".into(), "c2: middle".into(), "c1: root".into()]
+            ),
+        );
+    }
+
+    /// `:git rc` at a reword stop commits the edited message, as Ctrl-s does.
+    #[test]
+    fn git_rc_lands_a_reworded_message() {
+        let mut h = Stoat::test();
+        pause_on_reword(&mut h);
+        h.type_keys("i");
+        for _ in 0.."c2: middle".len() {
+            h.type_keys("Backspace");
+        }
+        h.type_text("reworded!");
+        h.type_keys("Escape");
+
+        h.type_text(":git rc");
+        h.type_keys("enter");
+        h.settle();
+        assert_eq!(log_summaries(&h), ["c3: tip", "reworded!", "c1: root"]);
     }
 
     /// A finished rebase leaves git as an interactive rebase does. The files

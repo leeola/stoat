@@ -61,6 +61,20 @@ impl Action for GitRebase {
 }
 
 define_action!(
+    GitRebaseContinueDef,
+    GitRebaseContinue,
+    "GitRebaseContinue",
+    ActionKind::GitRebaseContinue,
+    "resume the paused rebase",
+    "Resume the paused rebase, whatever the pause. An edit stop resumes the \
+     plan, a reword stop commits the edited message, and a conflict commits \
+     the chosen sides. With no paused rebase, it badges and changes nothing.",
+    ActionPriority::Common,
+    aliases = &["git rc"],
+    command_name = "git rebase continue"
+);
+
+define_action!(
     AbortRebaseDef,
     AbortRebase,
     "AbortRebase",

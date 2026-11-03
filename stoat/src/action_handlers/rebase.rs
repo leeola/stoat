@@ -299,6 +299,33 @@ fn edit_paused(stoat: &Stoat) -> bool {
         .is_some_and(|active| matches!(active.pause, Some(RebasePause::Edit { .. })))
 }
 
+/// Resume the paused rebase, whatever the pause, so one command serves every
+/// stop.
+///
+/// An edit stop resumes the plan, a reword stop commits the edited message,
+/// and a conflict commits the chosen sides. A rebase with a step in flight and
+/// no rebase at all each badge instead.
+pub(super) fn git_rebase_continue(stoat: &mut Stoat) -> UpdateEffect {
+    let pause = stoat
+        .active_workspace()
+        .rebase_active
+        .as_ref()
+        .map(|active| &active.pause);
+    match pause {
+        Some(Some(RebasePause::Edit { .. })) => rebase_continue(stoat),
+        Some(Some(RebasePause::Reword { .. })) => super::reword::reword_confirm(stoat),
+        Some(Some(RebasePause::Conflict { .. })) => super::conflict::conflict_apply(stoat),
+        Some(None) => {
+            emit_rebase_error(stoat, "rebase step in flight", None);
+            UpdateEffect::Redraw
+        },
+        None => {
+            emit_rebase_error(stoat, "no paused rebase", None);
+            UpdateEffect::Redraw
+        },
+    }
+}
+
 /// Check the just-picked commit out and point `:diff-files` at what it changed.
 ///
 /// The stepper builds commits without moving HEAD or touching the working tree,

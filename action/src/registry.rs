@@ -106,12 +106,12 @@ use crate::{
             PromptInsertNewline, SubmitPromptInput,
         },
         rebase::{
-            AbortRebase, EnterRebase, ExecuteRebase, GitRebase, RebaseConflictAbort,
-            RebaseConflictApply, RebaseConflictNextFile, RebaseConflictPrevFile,
-            RebaseConflictSkipEntry, RebaseConflictTakeOurs, RebaseConflictTakeTheirs,
-            RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev, RewordAbort,
-            RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick,
-            SetRebaseOpReword, SetRebaseOpSquash,
+            AbortRebase, EnterRebase, ExecuteRebase, GitRebase, GitRebaseContinue,
+            RebaseConflictAbort, RebaseConflictApply, RebaseConflictNextFile,
+            RebaseConflictPrevFile, RebaseConflictSkipEntry, RebaseConflictTakeOurs,
+            RebaseConflictTakeTheirs, RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext,
+            RebasePrev, RewordAbort, RewordConfirm, SetRebaseOpDrop, SetRebaseOpEdit,
+            SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
             ChangeWalkWrap, DiffAgainstHead, DiffAgainstIndex, DiffBack, DiffBaseEdit,
@@ -1063,6 +1063,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             .map(str::to_owned);
         Ok(Box::new(GitRebase { rev }))
     });
+    add(GitRebaseContinue::DEF, |_| Ok(Box::new(GitRebaseContinue)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
     add(RebaseNext::DEF, |_| Ok(Box::new(RebaseNext)));
@@ -1436,6 +1437,7 @@ mod tests {
         "GitAdd",
         "EnterRebase",
         "GitRebase",
+        "GitRebaseContinue",
         "AbortRebase",
         "ExecuteRebase",
         "RebaseNext",
@@ -2055,6 +2057,7 @@ mod tests {
         // + 1 GitStatus.
         // + 2 GitDiff/GitDiffCached.
         // + 1 GitRebase.
+        // + 1 GitRebaseContinue.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
         // + 8 Jumplist/Diagnostics/Location/WorkspacePicker PageDown/PageUp.
@@ -2088,7 +2091,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 472);
+        assert_eq!(all().count(), 473);
     }
 
     #[test]

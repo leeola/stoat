@@ -1256,6 +1256,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GitCommitConfirm => git_commit::git_commit_confirm(stoat),
         ActionKind::GitCommitAbort => git_commit::git_commit_abort(stoat),
         ActionKind::RebaseContinue => rebase::rebase_continue(stoat),
+        ActionKind::GitRebaseContinue => rebase::git_rebase_continue(stoat),
         ActionKind::RebaseConflictTakeOurs => {
             conflict::conflict_set(stoat, conflict::ConflictChoice::Ours)
         },

@@ -444,6 +444,7 @@ action_kinds! {
     DiffChangesOpen,
     EnterRebase,
     GitRebase,
+    GitRebaseContinue,
     AbortRebase,
     ExecuteRebase,
     RebaseNext,

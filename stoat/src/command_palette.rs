@@ -518,7 +518,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         EnterRebase => ctx.commits_open,
 
-        RebaseContinue => ctx.in_rebase_exec,
+        RebaseContinue | GitRebaseContinue => ctx.in_rebase_exec,
         RewordConfirm | RewordAbort => ctx.in_rebase_reword,
 
         RebaseConflictTakeOurs
@@ -1041,31 +1041,29 @@ fn parse_command<'a>(
 /// Split palette input into the command its head names, the head, and the text
 /// after the space that ends the head.
 ///
-/// A command name such as `git log` holds a space, so the head is the longest
-/// run of leading tokens that names a command, with two tokens tried before
-/// one. A head resolves as a conditional command first, then through
-/// [`registry::lookup_alias`]. Returns `None` when no space ends a head that
+/// A command name such as `git log` holds spaces, so the head is the longest
+/// run of leading tokens that names a command. A head resolves as a
+/// conditional command first, then through [`registry::lookup_alias`].
+/// Returns `None` when neither the whole text nor a head that a space ends
 /// names a command.
 ///
-/// A two-token command that takes no argument, such as `review done`, is
-/// whole with no space after it, and answers with an empty tail. Without that,
-/// a one-token head such as `review` takes the second token as its argument.
+/// The whole text is tried first as a command that takes no argument, and it
+/// answers with an empty tail. So `review done` ends a review where `review
+/// feature` names a revision, and `git rebase continue` never reads as `git
+/// rebase` with the argument `continue`.
 pub(crate) fn split_head<'a>(
     text: &'a str,
     ctx: &Availability,
 ) -> Option<(&'static registry::RegistryEntry, &'a str, &'a str)> {
     let resolve =
         |head: &str| resolve_conditional(head, ctx).or_else(|| registry::lookup_alias(head));
-    let (first, rest) = text.split_once(' ')?;
-    if let Some((second, tail)) = rest.split_once(' ') {
-        let head = &text[..first.len() + 1 + second.len()];
-        if let Some(entry) = resolve(head) {
-            return Some((entry, head, tail));
-        }
-    } else if let Some(entry) = resolve(text).filter(|entry| entry.def.params().is_empty()) {
+    if let Some(entry) = resolve(text).filter(|entry| entry.def.params().is_empty()) {
         return Some((entry, text, ""));
     }
-    resolve(first).map(|entry| (entry, first, rest))
+    text.rmatch_indices(' ').find_map(|(i, _)| {
+        let head = &text[..i];
+        resolve(head).map(|entry| (entry, head, &text[i + 1..]))
+    })
 }
 
 /// Which parameter the token being typed at the end of `tail` fills, counting
@@ -1717,8 +1715,9 @@ mod tests {
         );
     }
 
-    /// `:git ` lists the whole group inside a repository and no command outside
-    /// one, where the group has no repository to act on.
+    /// `:git ` lists the group inside a repository and no command outside one,
+    /// where the group has no repository to act on. The rebase continue command
+    /// waits for a rebase to run, so a repository with none leaves it out.
     #[test]
     fn the_git_group_lists_its_commands_only_inside_a_repository() {
         let listed = |mut h: TestHarness| {
@@ -1730,9 +1729,13 @@ mod tests {
                 .map(|entry| entry.command_name.as_str())
                 .collect::<Vec<_>>()
         };
+        let no_rebase: Vec<&str> = names_for("git ")
+            .into_iter()
+            .filter(|name| *name != "git rebase continue")
+            .collect();
         assert_eq!(
             (listed(Stoat::test()), listed(repo_harness())),
-            (Vec::new(), names_for("git ")),
+            (Vec::new(), no_rebase),
         );
     }
 
@@ -1766,24 +1769,35 @@ mod tests {
         );
     }
 
-    /// A two-token command that takes no argument is whole with no space after
-    /// it, so `review done` ends a review where `review feature` names a
-    /// revision. One that takes an argument still waits for the space, so
-    /// `git log` stays filter text for the git group.
+    /// A command that takes no argument is whole with no space after it, so
+    /// `review done` ends a review where `review feature` names a revision, and
+    /// `git rebase continue` never reads as `git rebase` with an argument. One
+    /// that takes an argument still waits for the space, so `git log` stays
+    /// filter text for the git group.
     #[test]
-    fn a_whole_two_token_command_wins_over_its_first_token() {
+    fn a_whole_command_with_no_argument_wins_over_a_shorter_head() {
         let split = |text: &'static str| {
             split_head(text, &Availability::default())
                 .map(|(entry, head, tail)| (entry.def.name(), head, tail))
         };
         assert_eq!(
-            ["review done", "review feature", "git log"].map(split),
+            [
+                "review done",
+                "review feature",
+                "git log",
+                "git rebase continue",
+                "git rebase main",
+            ]
+            .map(split),
             [
                 Some(("ReviewDone", "review done", "")),
                 Some(("Review", "review", "feature")),
                 None,
+                Some(("GitRebaseContinue", "git rebase continue", "")),
+                Some(("GitRebase", "git rebase", "main")),
             ],
         );
+        assert_eq!(names_for("git rebase c"), ["git rebase continue"]);
     }
 
     #[test]
@@ -1947,14 +1961,11 @@ mod tests {
     }
 
     /// The git group acts on the workspace's repository, so the Active scope
-    /// lists its commands only inside one. The All scope lists them anywhere.
+    /// lists its commands only inside one, and the rebase continue command only
+    /// while a rebase runs there. The All scope lists them anywhere.
     #[test]
     fn active_scope_lists_the_git_group_only_in_a_repository() {
-        let git_group = |scope, in_repo| {
-            let ctx = Availability {
-                in_repo,
-                ..Availability::default()
-            };
+        let git_group = |scope, ctx: Availability| {
             let mut names: Vec<&str> = entries_for("", scope, &ctx)
                 .into_iter()
                 .filter(|entry| entry.command_name.starts_with("git "))
@@ -1973,16 +1984,31 @@ mod tests {
             "GitDiffCached",
             "GitLs",
             "GitRebase",
+            "GitRebaseContinue",
             "GitReview",
             "GitStatus",
         ];
+        let no_rebase: Vec<&str> = group
+            .iter()
+            .copied()
+            .filter(|name| *name != "GitRebaseContinue")
+            .collect();
+        let in_repo = Availability {
+            in_repo: true,
+            ..Availability::default()
+        };
+        let rebasing = Availability {
+            in_rebase_exec: true,
+            ..in_repo
+        };
         assert_eq!(
             [
-                git_group(PaletteScope::Active, false),
-                git_group(PaletteScope::Active, true),
-                git_group(PaletteScope::All, false),
+                git_group(PaletteScope::Active, Availability::default()),
+                git_group(PaletteScope::Active, in_repo),
+                git_group(PaletteScope::Active, rebasing),
+                git_group(PaletteScope::All, Availability::default()),
             ],
-            [Vec::new(), group.clone(), group],
+            [Vec::new(), no_rebase, group.clone(), group],
         );
     }
 
