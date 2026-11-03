@@ -556,7 +556,9 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        GitLs | GitReview | Review | GitCheckout | GitCommit | GitAdd | GitRebase => ctx.in_repo,
+        GitLs | GitReview | Review | GitCheckout | GitCommit | GitAdd | GitRebase | GitStatus => {
+            ctx.in_repo
+        },
 
         GitCommitConfirm | GitCommitAbort => ctx.in_commit_message,
 
@@ -1673,14 +1675,29 @@ mod tests {
             .expect("git log is a command")
             .def
             .short_desc();
+        // The top row always shows. A lower row moves down as the group grows,
+        // and in this window the key hints box covers the lowest rows.
+        let top = h
+            .stoat
+            .command_palette
+            .as_ref()
+            .expect("palette open")
+            .filtered
+            .first()
+            .copied()
+            .expect("the group lists a command");
         let row = text
             .lines()
-            .find(|line| line.contains(short))
+            .find(|line| line.contains(top.def.short_desc()))
             .unwrap_or_default();
         let titled = text
             .lines()
             .any(|line| line.contains("\u{250c} git \u{2500}"));
-        let shown = (row.contains(" log "), row.contains("git log"));
+        let subcommand = &top.command_name["git ".len()..];
+        let shown = (
+            row.contains(&format!(" {subcommand} ")),
+            row.contains(top.command_name.as_str()),
+        );
 
         h.type_text("l");
         let _ = h.snapshot();
@@ -1954,6 +1971,7 @@ mod tests {
             "GitLs",
             "GitRebase",
             "GitReview",
+            "GitStatus",
         ];
         assert_eq!(
             [

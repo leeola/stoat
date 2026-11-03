@@ -16,7 +16,7 @@ use crate::{
         diff_changes::{
             CloseDiffChanges, DiffChanges, DiffChangesFirst, DiffChangesHalfPageDown,
             DiffChangesHalfPageUp, DiffChangesLast, DiffChangesNext, DiffChangesOpen,
-            DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev,
+            DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev, GitStatus,
         },
         dump::Dump,
         editor::{
@@ -989,6 +989,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
     add(DiffChanges::DEF, |_| Ok(Box::new(DiffChanges)));
+    add(GitStatus::DEF, |_| Ok(Box::new(GitStatus)));
     add(CloseDiffChanges::DEF, |_| Ok(Box::new(CloseDiffChanges)));
     add(DiffChangesNext::DEF, |_| Ok(Box::new(DiffChangesNext)));
     add(DiffChangesPrev::DEF, |_| Ok(Box::new(DiffChangesPrev)));
@@ -1410,6 +1411,7 @@ mod tests {
         "CommitsRefresh",
         "CommitsOpenReview",
         "DiffChanges",
+        "GitStatus",
         "CloseDiffChanges",
         "DiffChangesNext",
         "DiffChangesPrev",
@@ -2039,6 +2041,7 @@ mod tests {
         // + 2 GitCommitConfirm/GitCommitAbort.
         // + 1 GitCommit.
         // + 1 GitAdd.
+        // + 1 GitStatus.
         // + 1 GitRebase.
         // + 2 FontSizeInc/FontSizeDec.
         // + 3 /PageUp/ColumnCycle.
@@ -2073,7 +2076,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 467);
+        assert_eq!(all().count(), 468);
     }
 
     #[test]

@@ -1180,6 +1180,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
         ActionKind::DiffChanges => diff_changes::toggle_diff_changes(stoat),
+        ActionKind::GitStatus => diff_changes::toggle_diff_changes(stoat),
         ActionKind::CloseDiffChanges => diff_changes::close_diff_changes(stoat),
         ActionKind::DiffChangesNext => {
             let step = arming_step(stoat);

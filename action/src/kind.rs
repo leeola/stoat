@@ -427,6 +427,7 @@ action_kinds! {
     CommitsRefresh,
     CommitsOpenReview,
     DiffChanges,
+    GitStatus,
     CloseDiffChanges,
     DiffChangesNext,
     DiffChangesPrev,
