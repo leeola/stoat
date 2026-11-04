@@ -1,5 +1,5 @@
-//! The wgpu rendering context: owns the surface, device, and queue, and
-//! drives a frame.
+//! The wgpu rendering context, which owns the render target, device, and
+//! queue and drives a frame.
 //!
 //! Windowing-toolkit-agnostic. The surface is created from any handle the
 //! app supplies via the raw-window-handle traits, so this crate never links
@@ -46,11 +46,14 @@ use stoatty_term::{
     term::Damage,
 };
 use wgpu::{
-    Adapter, Backends, Color, CommandEncoder, CommandEncoderDescriptor, CompositeAlphaMode,
-    CurrentSurfaceTexture, Device, DeviceDescriptor, Instance, InstanceDescriptor, LoadOp,
-    Operations, PowerPreference, PresentMode, Queue, RenderPass, RenderPassColorAttachment,
+    Adapter, Backends, BufferDescriptor, BufferUsages, Color, CommandEncoder,
+    CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device, DeviceDescriptor,
+    Extent3d, Instance, InstanceDescriptor, LoadOp, MapMode, Operations, Origin3d, PollType,
+    PowerPreference, PresentMode, Queue, RenderPass, RenderPassColorAttachment,
     RenderPassDescriptor, RequestAdapterOptions, StoreOp, Surface, SurfaceColorSpace,
-    SurfaceConfiguration, TextureFormat, TextureUsages, TextureView, TextureViewDescriptor,
+    SurfaceConfiguration, SurfaceTexture, TexelCopyBufferInfo, TexelCopyBufferLayout,
+    TexelCopyTextureInfo, Texture, TextureAspect, TextureDescriptor, TextureDimension,
+    TextureFormat, TextureUsages, TextureView, TextureViewDescriptor, COPY_BYTES_PER_ROW_ALIGNMENT,
 };
 #[cfg(feature = "perf")]
 use {
@@ -62,11 +65,14 @@ use {
         sync::atomic::{AtomicBool, Ordering},
         time::Duration,
     },
-    wgpu::{
-        Buffer, BufferDescriptor, BufferUsages, Features, MapMode, PollType, QuerySet,
-        QuerySetDescriptor, QueryType, RenderPassTimestampWrites,
-    },
+    wgpu::{Buffer, Features, QuerySet, QuerySetDescriptor, QueryType, RenderPassTimestampWrites},
 };
+
+/// The format an offscreen [`GpuContext`] draws in and reads back.
+///
+/// Non-sRGB, because the passes write colors they already encoded. Four bytes a
+/// texel in RGBA order, which is the order [`GpuContext::read_back`] returns.
+const OFFSCREEN_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 
 /// Slots in the timestamp readback ring. Three lets a frame's timing be read
 /// back when its slot cycles around, so `present` never waits on the GPU.
@@ -1540,34 +1546,63 @@ fn covered_rects(
     (rects, count)
 }
 
-/// The GPU swapchain wrapping a [`Renderer`] for an on-screen window.
+/// The GPU context that wraps a [`Renderer`] and the target its frames land on.
 ///
-/// Holds the surface configuration so [`Self::resize`] and the surface-loss
-/// recovery in [`Self::render`] can re-`configure` without re-querying
-/// capabilities.
+/// The target is a window's swapchain or an offscreen texture. [`Self::new`]
+/// and [`Self::with_shared`] build the swapchain target. It holds the surface
+/// configuration, so [`Self::resize`] and the surface-loss recovery in
+/// [`Self::render`] re-`configure` the surface without a second capabilities
+/// query.
+///
+/// [`Self::offscreen`] builds the texture target, which needs no window or
+/// display server. [`Self::read_back`] returns the pixels of the last frame it
+/// drew.
 pub struct GpuContext {
-    surface: Surface<'static>,
+    target: Target,
     /// The system-font scan this context did not wait for, `None` once taken or
     /// when the context waited. See [`Self::pending_fonts`].
     pending_fonts: Option<FontLoad>,
-    /// The handles another window's context can build on rather than requesting
+    /// The handles another window's context builds on rather than requesting
     /// its own, held past their use here for [`GpuContext::shared`]. The device
-    /// and queue below are the same two, kept beside the surface because that is
+    /// and queue below are the same two, kept beside the target because that is
     /// where this context reaches for them.
     shared: SharedGpu,
     device: Device,
     queue: Queue,
-    config: SurfaceConfiguration,
     /// The non-sRGB format the frame view is created with, so the passes'
     /// in-shader sRGB encoding is stored verbatim. Equals the surface format
     /// when that is already non-sRGB, or its non-sRGB sibling when only an sRGB
-    /// surface format is available.
+    /// surface format is available. An offscreen target draws in
+    /// [`OFFSCREEN_FORMAT`].
     view_format: TextureFormat,
     renderer: Renderer,
     perf: FrameProfiler,
     /// Whether to composite the perf HUD topmost. Toggled from the app.
     #[cfg(feature = "perf")]
     show_perf_hud: bool,
+}
+
+/// Where a [`GpuContext`] draws its frames.
+enum Target {
+    /// A window's swapchain, with the configuration it was last configured at.
+    Surface {
+        surface: Surface<'static>,
+        config: SurfaceConfiguration,
+    },
+    /// A texture that keeps each frame after the draw, for
+    /// [`GpuContext::read_back`].
+    Offscreen { texture: Texture, view: TextureView },
+}
+
+/// The view a frame records into, from [`GpuContext::acquire`].
+struct Acquired {
+    view: TextureView,
+    /// The swapchain drawable to present after the frame records. `None` for an
+    /// offscreen target, which has nothing to present.
+    present: Option<SurfaceTexture>,
+    /// Whether the drawable came at a size the passes did not prepare against,
+    /// so the frame prepares again before it records.
+    resized: bool,
 }
 
 /// What a render call did with the frame it was handed.
@@ -1578,7 +1613,8 @@ pub struct GpuContext {
 /// one more frame rather than by anything the caller has to remember.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FrameOutcome {
-    /// Whether the frame reached the screen.
+    /// Whether the frame reached its target, a window's screen or an offscreen
+    /// texture.
     ///
     /// A surface that timed out, went outdated or lost, or belongs to an
     /// occluded window yields no drawable, so the call draws nothing. The rows
@@ -1846,7 +1882,7 @@ impl GpuContext {
         );
 
         GpuContext {
-            surface,
+            target: Target::Surface { surface, config },
             pending_fonts,
             shared: SharedGpu {
                 instance,
@@ -1856,7 +1892,6 @@ impl GpuContext {
             },
             device,
             queue,
-            config,
             view_format,
             renderer,
             perf: FrameProfiler::new(),
@@ -1929,18 +1964,62 @@ impl GpuContext {
         );
 
         Some(GpuContext {
-            surface,
+            target: Target::Surface { surface, config },
             pending_fonts: None,
             shared: shared.clone(),
             device: shared.device.clone(),
             queue: shared.queue.clone(),
-            config,
             view_format,
             renderer,
             perf: FrameProfiler::new(),
             #[cfg(feature = "perf")]
             show_perf_hud: false,
         })
+    }
+
+    /// Build a context that draws into an offscreen texture of `size` physical
+    /// pixels on `shared`'s device, for frames a caller reads back through
+    /// [`Self::read_back`] rather than shows.
+    ///
+    /// Needs no window or display server. Text shapes against the bundled faces
+    /// alone (JetBrains Mono and Symbols Nerd Font), so the glyphs a frame draws
+    /// do not depend on the fonts the machine has installed. A `font.family`
+    /// outside that set shapes with the generic monospace, which is the bundled
+    /// JetBrains Mono.
+    ///
+    /// Panics when either dimension of `size` is zero, since wgpu refuses a
+    /// zero-area texture.
+    pub fn offscreen(
+        shared: &SharedGpu,
+        size: [u32; 2],
+        font: FontConfig<'_>,
+        background: Rgb,
+        cursor: Rgb,
+    ) -> GpuContext {
+        let [width, height] = size;
+        let (texture, view) = offscreen_texture(&shared.device, width, height);
+        let renderer = Renderer::new(
+            &shared.device,
+            OFFSCREEN_FORMAT,
+            size,
+            text::font::bundled_font_system(),
+            font,
+            background,
+            cursor,
+        );
+
+        GpuContext {
+            target: Target::Offscreen { texture, view },
+            pending_fonts: None,
+            shared: shared.clone(),
+            device: shared.device.clone(),
+            queue: shared.queue.clone(),
+            view_format: OFFSCREEN_FORMAT,
+            renderer,
+            perf: FrameProfiler::new(),
+            #[cfg(feature = "perf")]
+            show_perf_hud: false,
+        }
     }
 
     /// The GPU handles this context was built on, for a second window to build
@@ -1974,26 +2053,39 @@ impl GpuContext {
         self.renderer.fonts()
     }
 
-    /// Re-configure the surface to `width`x`height` physical pixels.
+    /// Resize the target to `width`x`height` physical pixels.
     ///
-    /// A size the surface already has costs nothing. Reconfiguring reallocates
-    /// the swapchain, and window managers repeat the current size freely, on a
-    /// focus change or a move.
+    /// A size the target already has costs nothing. Reconfiguring a surface
+    /// reallocates the swapchain, and window managers repeat the current size
+    /// freely, on a focus change or a move. An offscreen target allocates a new
+    /// texture, which holds no frame until the next render.
     ///
-    /// Zero-area sizes (e.g. a minimized window) are ignored, since
-    /// configuring a surface with a zero dimension is invalid.
+    /// Zero-area sizes (e.g. a minimized window) are ignored, since a surface or
+    /// a texture with a zero dimension is invalid.
     pub fn resize(&mut self, width: u32, height: u32) {
-        if !needs_configure(&self.config, width, height) {
-            return;
-        }
+        match &mut self.target {
+            Target::Surface { surface, config } => {
+                if !needs_configure(config, width, height) {
+                    return;
+                }
 
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+                config.width = width;
+                config.height = height;
+                surface.configure(&self.device, config);
+            },
+            Target::Offscreen { texture, view } => {
+                let unchanged = (texture.width(), texture.height()) == (width, height);
+                if width == 0 || height == 0 || unchanged {
+                    return;
+                }
+
+                (*texture, *view) = offscreen_texture(&self.device, width, height);
+            },
+        }
         self.renderer.set_size(width, height);
     }
 
-    /// The (rows, cols) cell grid that fills the current surface.
+    /// The (rows, cols) cell grid that fills the current target.
     ///
     /// The app sizes the terminal and PTY to this so the shell's view matches
     /// what the renderer draws.
@@ -2001,7 +2093,7 @@ impl GpuContext {
         self.renderer.grid_size()
     }
 
-    /// The [`GridLayout`] the current surface holds, which places the rows the
+    /// The [`GridLayout`] the current target holds, which places the rows the
     /// renderer draws.
     ///
     /// A caller that maps between pixels and cells, or that clips a pool to its
@@ -2030,7 +2122,7 @@ impl GpuContext {
         self.renderer.set_cursor_fill(fill);
     }
 
-    /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
+    /// Draw a frame of `grid` to the target. `cursor` is the cursor's
     /// position in fractional cell coordinates, or `None` when it is hidden.
     /// `scroll` carries the eased whole-grid and scroll-region offsets;
     /// `popover_scrolls` carries one content offset per overlay, in overlay order.
@@ -2057,35 +2149,24 @@ impl GpuContext {
             .prepare_frame(&self.device, &self.queue, grid, &frame, &[], &[]);
         self.perf.mark_prepared();
 
-        let surface_frame = match self.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
-                frame
-            },
-            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return FrameOutcome::SKIPPED;
-            },
-            CurrentSurfaceTexture::Timeout
-            | CurrentSurfaceTexture::Occluded
-            | CurrentSurfaceTexture::Validation => return FrameOutcome::SKIPPED,
+        let Some(Acquired {
+            view,
+            present,
+            resized,
+        }) = self.acquire()
+        else {
+            return FrameOutcome::SKIPPED;
         };
         self.perf.mark_acquired();
 
         // The drawable can arrive at a size the surface was not configured for,
         // and every pass just prepared against the old one. Preparing again is
         // what a resize frame costs; one that kept its size pays nothing.
-        if self.adopt_drawable_size(
-            surface_frame.texture.width(),
-            surface_frame.texture.height(),
-        ) {
+        if resized {
             self.renderer
                 .prepare_frame(&self.device, &self.queue, grid, &frame, &[], &[]);
         }
 
-        let view = surface_frame.texture.create_view(&TextureViewDescriptor {
-            format: Some(self.view_format),
-            ..Default::default()
-        });
         self.renderer.record_into(&self.device, &self.queue, &view);
 
         #[cfg(feature = "perf")]
@@ -2093,7 +2174,8 @@ impl GpuContext {
             && let Some(stats) = self.perf.stats()
         {
             let samples = self.perf.samples();
-            let resolution = [self.config.width as f32, self.config.height as f32];
+            let (width, height) = self.size();
+            let resolution = [width as f32, height as f32];
             self.renderer.draw_hud_over(
                 &self.device,
                 &self.queue,
@@ -2105,7 +2187,9 @@ impl GpuContext {
         }
 
         self.perf.mark_submitted();
-        self.queue.present(surface_frame);
+        if let Some(drawable) = present {
+            self.queue.present(drawable);
+        }
         self.perf.end_frame();
         #[cfg(feature = "perf")]
         if let Some(gpu) = self.renderer.take_gpu_time() {
@@ -2120,7 +2204,7 @@ impl GpuContext {
         }
     }
 
-    /// Draw `live_grid` to the window surface, then composite each pool in
+    /// Draw `live_grid` to the target, then composite each pool in
     /// `pools` over its scissor sub-rectangle, in one presented frame.
     ///
     /// `live_grid` and `frame` render as [`Self::render`] does, the static chrome
@@ -2163,34 +2247,22 @@ impl GpuContext {
         let mut atlas_changed = self.prepare_pooled(live_grid, &frame, pools, anchored);
         self.perf.mark_prepared();
 
-        let surface_frame = match self.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
-                frame
-            },
-            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return FrameOutcome::SKIPPED;
-            },
-            CurrentSurfaceTexture::Timeout
-            | CurrentSurfaceTexture::Occluded
-            | CurrentSurfaceTexture::Validation => return FrameOutcome::SKIPPED,
+        let Some(Acquired {
+            view,
+            present,
+            resized,
+        }) = self.acquire()
+        else {
+            return FrameOutcome::SKIPPED;
         };
         self.perf.mark_acquired();
 
         // The drawable can arrive at a size the surface was not configured for,
         // and every pass just prepared against the old one. Preparing again is
         // what a resize frame costs; one that kept its size pays nothing.
-        if self.adopt_drawable_size(
-            surface_frame.texture.width(),
-            surface_frame.texture.height(),
-        ) {
+        if resized {
             atlas_changed = self.prepare_pooled(live_grid, &frame, pools, anchored);
         }
-
-        let view = surface_frame.texture.create_view(&TextureViewDescriptor {
-            format: Some(self.view_format),
-            ..Default::default()
-        });
 
         let cursor_scissor = cursor_scissor.and_then(|s| self.renderer.pool_scissor(s));
 
@@ -2199,7 +2271,8 @@ impl GpuContext {
         #[cfg(feature = "perf")]
         if let Some(stats) = hud.as_ref() {
             let samples = self.perf.samples();
-            let resolution = [self.config.width as f32, self.config.height as f32];
+            let (width, height) = self.size();
+            let resolution = [width as f32, height as f32];
             self.renderer
                 .prepare_hud_over(&self.device, &self.queue, stats, &samples, resolution);
         }
@@ -2241,7 +2314,8 @@ impl GpuContext {
 
             // A pool leaves its own scissor set, so the strokes start from the full
             // surface and the riding ones apply their own.
-            render_pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            let (width, height) = self.size();
+            render_pass.set_scissor_rect(0, 0, width, height);
             // Every frame stroke, now that nothing left will paint over it.
             self.renderer.record_panel_strokes(&mut render_pass);
             self.renderer
@@ -2275,7 +2349,9 @@ impl GpuContext {
             .finish_frame(&self.device, &self.queue, encoder, timing);
 
         self.perf.mark_submitted();
-        self.queue.present(surface_frame);
+        if let Some(drawable) = present {
+            self.queue.present(drawable);
+        }
         self.perf.end_frame();
         #[cfg(feature = "perf")]
         if let Some(gpu) = self.renderer.take_gpu_time() {
@@ -2286,6 +2362,25 @@ impl GpuContext {
             presented: true,
             atlas_stale: atlas_changed,
         }
+    }
+
+    /// The RGBA bytes of the last frame an offscreen context drew, row-major
+    /// with no padding, or `None` for a window context, whose drawable is gone
+    /// once presented.
+    ///
+    /// Blocks until the device finishes every frame submitted before the call,
+    /// and panics when the poll fails.
+    pub fn read_back(&self) -> Option<Vec<u8>> {
+        let Target::Offscreen { texture, .. } = &self.target else {
+            return None;
+        };
+        Some(read_back_texture(
+            &self.device,
+            &self.queue,
+            texture,
+            texture.width(),
+            texture.height(),
+        ))
     }
 
     /// Prepare every buffer a pooled frame draws from, reporting whether the
@@ -2305,7 +2400,8 @@ impl GpuContext {
         pools: &[PoolComposite<'_>],
         anchored: &[HostRide],
     ) -> bool {
-        let resolution = [self.config.width as f32, self.config.height as f32];
+        let (width, height) = self.size();
+        let resolution = [width as f32, height as f32];
         let cursor_corners = frame.cursor_corners;
         let cursor_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
 
@@ -2417,6 +2513,55 @@ impl GpuContext {
         self.renderer.riding = riding;
     }
 
+    /// The view the next frame records into, or `None` when the window's
+    /// surface has no drawable to give.
+    ///
+    /// A window target acquires its swapchain drawable, which the caller
+    /// presents after the record, and adopts the drawable's size when it moved.
+    /// An outdated or lost surface re-configures, so the next frame recovers.
+    /// An offscreen target hands out the view of its texture every time.
+    fn acquire(&mut self) -> Option<Acquired> {
+        let drawable = match &mut self.target {
+            Target::Offscreen { view, .. } => {
+                return Some(Acquired {
+                    view: view.clone(),
+                    present: None,
+                    resized: false,
+                });
+            },
+            Target::Surface { surface, config } => match surface.get_current_texture() {
+                CurrentSurfaceTexture::Success(frame)
+                | CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
+                    surface.configure(&self.device, config);
+                    return None;
+                },
+                CurrentSurfaceTexture::Timeout
+                | CurrentSurfaceTexture::Occluded
+                | CurrentSurfaceTexture::Validation => return None,
+            },
+        };
+
+        let resized = self.adopt_drawable_size(drawable.texture.width(), drawable.texture.height());
+        let view = drawable.texture.create_view(&TextureViewDescriptor {
+            format: Some(self.view_format),
+            ..Default::default()
+        });
+        Some(Acquired {
+            view,
+            present: Some(drawable),
+            resized,
+        })
+    }
+
+    /// The target's (width, height) in physical pixels.
+    fn size(&self) -> (u32, u32) {
+        match &self.target {
+            Target::Surface { config, .. } => (config.width, config.height),
+            Target::Offscreen { texture, .. } => (texture.width(), texture.height()),
+        }
+    }
+
     /// Adopt a drawable's `width`x`height` when it disagrees with the
     /// configured surface size.
     ///
@@ -2431,12 +2576,15 @@ impl GpuContext {
     /// old one before the drawable existed and has to prepare again when it
     /// did.
     fn adopt_drawable_size(&mut self, width: u32, height: u32) -> bool {
-        if width == self.config.width && height == self.config.height {
+        let Target::Surface { config, .. } = &mut self.target else {
+            return false;
+        };
+        if width == config.width && height == config.height {
             return false;
         }
 
-        self.config.width = width;
-        self.config.height = height;
+        config.width = width;
+        config.height = height;
         self.renderer.set_size(width, height);
         true
     }
@@ -2534,6 +2682,17 @@ fn rgb_to_color(rgb: Rgb) -> Color {
 /// fails the test when no adapter answers rather than letting it pass having
 /// drawn nothing.
 pub fn headless_device() -> Option<(Device, Queue)> {
+    headless_gpu(false).map(|gpu| (gpu.device, gpu.queue))
+}
+
+/// Request the GPU handles an offscreen [`GpuContext`] builds on, with no
+/// surface, or `None` when no adapter answers.
+///
+/// Uses the same backends, power preference, and device descriptor as
+/// [`GpuContext::new`]. With `software`, only a CPU adapter such as lavapipe
+/// answers. A machine with none gives `None` rather than a hardware adapter,
+/// because a golden image comparison has to know which adapter drew the frame.
+pub fn headless_gpu(software: bool) -> Option<SharedGpu> {
     let instance = Instance::new(InstanceDescriptor {
         backends: Backends::PRIMARY,
         ..InstanceDescriptor::new_without_display_handle()
@@ -2542,12 +2701,110 @@ pub fn headless_device() -> Option<(Device, Queue)> {
     let adapter = executor::block_on(instance.request_adapter(&RequestAdapterOptions {
         power_preference: PowerPreference::HighPerformance,
         compatible_surface: None,
-        force_fallback_adapter: false,
+        force_fallback_adapter: software,
         apply_limit_buckets: false,
     }))
     .ok()?;
 
-    executor::block_on(adapter.request_device(&device_descriptor(&adapter))).ok()
+    let (device, queue) =
+        executor::block_on(adapter.request_device(&device_descriptor(&adapter))).ok()?;
+    Some(SharedGpu {
+        instance,
+        adapter,
+        device,
+        queue,
+    })
+}
+
+/// Copy `texture` into a mappable buffer and return its bytes, row-major with
+/// no padding.
+///
+/// `texture` holds four bytes a texel, as [`TextureFormat::Rgba8Unorm`] does,
+/// and carries [`TextureUsages::COPY_SRC`]. Any `width` works. wgpu copies rows
+/// at a stride that is a multiple of 256 bytes, so the copy pads each row out to
+/// one, and the result drops that padding.
+///
+/// Blocks until the device finishes the copy and every frame submitted before
+/// it, and panics when the poll fails.
+pub fn read_back_texture(
+    device: &Device,
+    queue: &Queue,
+    texture: &Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let row_bytes = width * 4;
+    let stride = row_bytes.next_multiple_of(COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buffer = device.create_buffer(&BufferDescriptor {
+        label: Some("readback"),
+        size: u64::from(stride) * u64::from(height),
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: Origin3d::ZERO,
+            aspect: TextureAspect::All,
+        },
+        TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(stride),
+                rows_per_image: None,
+            },
+        },
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(encoder.finish()));
+
+    buffer.slice(..).map_async(MapMode::Read, |_| {});
+    device
+        .poll(PollType::wait_indefinitely())
+        .expect("poll readback");
+
+    let mapped = buffer
+        .slice(..)
+        .get_mapped_range()
+        .expect("the buffer is mapped");
+    let mut pixels = Vec::with_capacity(row_bytes as usize * height as usize);
+    for row in mapped.chunks_exact(stride as usize) {
+        pixels.extend_from_slice(&row[..row_bytes as usize]);
+    }
+    pixels
+}
+
+/// A `width` by `height` texture in [`OFFSCREEN_FORMAT`] for frames to render
+/// into and read back, with its view.
+pub(crate) fn offscreen_texture(
+    device: &Device,
+    width: u32,
+    height: u32,
+) -> (Texture, TextureView) {
+    let texture = device.create_texture(&TextureDescriptor {
+        label: Some("offscreen target"),
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: OFFSCREEN_FORMAT,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&TextureViewDescriptor::default());
+    (texture, view)
 }
 
 #[cfg(test)]
@@ -2555,10 +2812,12 @@ mod tests {
     use super::{
         build_font_system, clamp_scissor, covered_rects, needs_configure, pool_cursor_cell,
         surface_formats, CommandEncoderDescriptor, CursorLayer, FontConfig, FontSystem, Frame,
-        PoolComposite, Renderer, SharedFonts, SurfaceColorSpace, SurfaceConfiguration,
-        TextureFormat, MAX_COVERED,
+        FrameOutcome, GpuContext, PoolComposite, Renderer, SharedFonts, SharedGpu,
+        SurfaceColorSpace, SurfaceConfiguration, TextureFormat, MAX_COVERED,
     };
-    use crate::test_support::{self, pixel, read_back, require_headless_device, still_frame};
+    use crate::test_support::{
+        self, pixel, read_back, require_headless_device, require_headless_gpu, still_frame,
+    };
     use std::iter;
     use stoatty_term::{
         grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
@@ -3297,6 +3556,107 @@ mod tests {
             !needs_configure(&config, 0, 600) && !needs_configure(&config, 800, 0),
             "a minimized window reports a zero dimension, which no surface is valid at",
         );
+    }
+
+    /// A context with no window draws a frame into its texture, and the read
+    /// back returns that frame.
+    #[test]
+    fn an_offscreen_context_draws_a_cell_and_reads_it_back() {
+        let ground = Rgb::new(0, 0, 90);
+        let mut context = offscreen_context(&require_headless_gpu(), [256, 128], ground);
+        let (rows, cols) = context.grid_size();
+        let mut grid = filled_grid(rows, cols, ground);
+        grid.get_mut(0, 0).bg = Rgb::new(255, 0, 0);
+
+        let outcome = draw_still(&mut context, &grid);
+        let shot = context
+            .read_back()
+            .expect("an offscreen context reads back");
+        assert_eq!(
+            (
+                outcome,
+                pixel(&shot, 256, 1, 1),
+                pixel(&shot, 256, CELL[0] + 1, 1)
+            ),
+            (
+                FrameOutcome {
+                    presented: true,
+                    atlas_stale: false,
+                },
+                [255, 0, 0],
+                [0, 0, 90]
+            ),
+            "the frame lands, with the red cell beside its ground-colored neighbor",
+        );
+    }
+
+    /// A 300-pixel row is 1200 bytes, which the copy pads to a 1280-byte
+    /// stride, and the read back drops those 80 bytes from every row.
+    #[test]
+    fn an_offscreen_read_back_strips_the_row_padding() {
+        let ground = Rgb::new(0, 0, 90);
+        let mut context = offscreen_context(&require_headless_gpu(), [300, 64], ground);
+        let (rows, cols) = context.grid_size();
+        draw_still(&mut context, &filled_grid(rows, cols, ground));
+
+        let shot = context
+            .read_back()
+            .expect("an offscreen context reads back");
+        let off_ground = shot
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .position(|texel| texel[..3] != [0, 0, 90]);
+        assert_eq!(
+            (shot.len(), off_ground),
+            (300 * 64 * 4, None),
+            "every pixel of every row is the ground, with no padding byte among them",
+        );
+    }
+
+    /// A resize reallocates the texture at the new size, and a zero-area size,
+    /// which a minimized window reports, leaves it as it is.
+    #[test]
+    fn an_offscreen_resize_reads_back_at_the_new_size() {
+        let mut context =
+            offscreen_context(&require_headless_gpu(), [256, 128], Rgb::new(0, 0, 90));
+        let len = |context: &GpuContext| context.read_back().map(|shot| shot.len());
+
+        context.resize(0, 72);
+        let after_zero = len(&context);
+        context.resize(320, 72);
+        assert_eq!(
+            (after_zero, len(&context), context.grid_size().1),
+            (
+                Some(256 * 128 * 4),
+                Some(320 * 72 * 4),
+                (320 / CELL[0]) as usize
+            ),
+            "the zero size is ignored, and the new one sizes the texture and the grid",
+        );
+    }
+
+    /// An offscreen context of `size` on `shared` at the 30-pixel font the
+    /// readback tests lay out at, clearing each frame to `clear`.
+    fn offscreen_context(shared: &SharedGpu, size: [u32; 2], clear: Rgb) -> GpuContext {
+        GpuContext::offscreen(
+            shared,
+            size,
+            FontConfig {
+                size: 30,
+                scale_factor: 1.0,
+                family: &["JetBrains Mono".to_owned()],
+                ligatures: true,
+            },
+            clear,
+            Rgb::new(255, 255, 255),
+        )
+    }
+
+    /// Render all of `grid` through `context` as a still frame.
+    fn draw_still(context: &mut GpuContext, grid: &Grid) -> FrameOutcome {
+        let (full, none) = (Damage::Full, Damage::Partial(Vec::new()));
+        context.render(grid, still_frame(&full, &none))
     }
 
     #[test]
