@@ -1103,6 +1103,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 spawn_cols as u16,
                 pixel_width,
                 pixel_height,
+                &[],
                 move |replies| {
                     move |output| match output {
                         PtyOutput::Data { bytes, may_refuse } => {

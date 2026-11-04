@@ -122,6 +122,11 @@ impl Pty {
     /// `PATH`, so a nested bare-`stoat` call from inside the child resolves to
     /// the same binary stoatty launched.
     ///
+    /// Each `extra_env` entry reaches the child after every variable stoatty
+    /// sets, so an entry replaces a stoatty marker of the same name. A run that
+    /// keeps the child out of the user's directories points the XDG variables
+    /// at a scratch home through it.
+    ///
     /// `sink` runs on the reader thread: it is called with [`PtyOutput::Data`]
     /// for each chunk the shell writes and once with [`PtyOutput::Eof`] when the
     /// shell exits. It must be `Send` since it runs off the main thread.
@@ -155,6 +160,7 @@ impl Pty {
         cols: u16,
         pixel_width: u16,
         pixel_height: u16,
+        extra_env: &[(String, String)],
         sink: impl FnOnce(PtyWriter) -> S,
         on_exit: impl FnOnce() + Send + 'static,
     ) -> io::Result<Pty>
@@ -180,6 +186,7 @@ impl Pty {
                 log_id,
                 window_socket,
                 theme,
+                extra_env,
             ))
             .map_err(io::Error::other)?;
         tracing::info!(program, pid = ?child.process_id(), "spawned child over pty");
@@ -324,6 +331,7 @@ fn spawn_waiter(
 
 /// Build the shell command to launch under stoatty, running in `cwd` when
 /// given. [`configure_child_env`] sets the environment the child inherits.
+#[allow(clippy::too_many_arguments)]
 fn shell_command(
     program: &str,
     args: &[String],
@@ -332,13 +340,21 @@ fn shell_command(
     log_id: Option<&str>,
     window_socket: Option<&str>,
     theme: &str,
+    extra_env: &[(String, String)],
 ) -> CommandBuilder {
     let mut command = CommandBuilder::new(program);
     command.args(args);
     if let Some(dir) = cwd {
         command.cwd(dir);
     }
-    configure_child_env(&mut command, stoat_dir, log_id, window_socket, theme);
+    configure_child_env(
+        &mut command,
+        stoat_dir,
+        log_id,
+        window_socket,
+        theme,
+        extra_env,
+    );
     command
 }
 
@@ -396,6 +412,9 @@ const HOST_ENV_VARS: [&str; 3] = ["STOAT_SESSION", "STOAT_AGENT_SOCK", "STOAT_TE
 /// started from a Stoat terminal pane is a new terminal. With them, a `stoat`
 /// in it sends its files to that pane's instance and starts no editor. The
 /// editor stoatty starts sets them again for its own panes.
+///
+/// Each `extra_env` entry applies last, after the markers, the removals, and
+/// `PATH`, so a caller's entry wins over all of them.
 // PATH is inherited to be extended, not consulted, and EnvHost::var yields only
 // UTF-8, which a PATH is not required to be. prepend_path holds the pure part.
 #[allow(clippy::disallowed_methods)]
@@ -405,6 +424,7 @@ fn configure_child_env(
     log_id: Option<&str>,
     window_socket: Option<&str>,
     theme: &str,
+    extra_env: &[(String, String)],
 ) {
     command.env("TERM", "xterm-256color");
     command.env("TERM_PROGRAM", "stoatty");
@@ -428,6 +448,9 @@ fn configure_child_env(
     }
     if let Some(dir) = stoat_dir {
         command.env("PATH", prepend_path(dir, std::env::var_os("PATH")));
+    }
+    for (key, value) in extra_env {
+        command.env(key, value);
     }
 }
 
@@ -821,6 +844,7 @@ mod tests {
             Some("20260718-143022-99"),
             Some("/run/stoat/stoatty-win-42.sock"),
             "gruvbox-dark",
+            &[],
         );
         assert_eq!(command.get_env("TERM"), Some(OsStr::new("xterm-256color")));
         assert_eq!(command.get_env("STOATTY"), Some(OsStr::new("1")));
@@ -848,7 +872,7 @@ mod tests {
             "stoat dir prepended to PATH: {path:?}"
         );
 
-        let without_id = shell_command("/bin/sh", &[], None, None, None, None, "");
+        let without_id = shell_command("/bin/sh", &[], None, None, None, None, "", &[]);
         assert_eq!(without_id.get_env("STOATTY_LOG_ID"), None);
         assert_eq!(without_id.get_env("STOATTY_WINDOW_SOCKET"), None);
         assert_eq!(
@@ -867,7 +891,7 @@ mod tests {
         command.env("ZELLIJ_SESSION_NAME", "main");
         command.env("ZELLIJ_PANE_ID", "71");
 
-        configure_child_env(&mut command, None, None, None, "");
+        configure_child_env(&mut command, None, None, None, "", &[]);
 
         for var in MULTIPLEXER_ENV_VARS {
             assert_eq!(command.get_env(var), None, "{var} not stripped");
@@ -891,7 +915,7 @@ mod tests {
             command.env(var, "set by the hosting pane");
         }
 
-        configure_child_env(&mut command, None, None, None, "");
+        configure_child_env(&mut command, None, None, None, "", &[]);
 
         let kept: Vec<Option<&OsStr>> = host.iter().map(|var| command.get_env(var)).collect();
         assert_eq!(kept, [None; 3]);
@@ -905,7 +929,7 @@ mod tests {
         command.env("TERM_PROGRAM", "iTerm.app");
         command.env("TERM_PROGRAM_VERSION", "3.4.19");
 
-        configure_child_env(&mut command, None, None, None, "");
+        configure_child_env(&mut command, None, None, None, "", &[]);
 
         assert_eq!(command.get_env("TERM_PROGRAM"), Some(OsStr::new("stoatty")));
         assert_eq!(
@@ -915,6 +939,38 @@ mod tests {
         assert!(
             !crate::cli::PACKAGE_VERSION.contains(' '),
             "a consumer parses this as a version, so it carries no build detail",
+        );
+    }
+
+    /// A caller's entry applies after every variable stoatty sets, so it
+    /// replaces a stoatty marker and the `PATH` stoatty extends, which is how a
+    /// headless run points the child's state at a scratch home.
+    #[test]
+    fn configure_child_env_applies_extra_entries_last() {
+        let mut command = CommandBuilder::new("/bin/sh");
+        let extra = [
+            ("STOATTY".to_owned(), "0".to_owned()),
+            ("XDG_STATE_HOME".to_owned(), "/scratch".to_owned()),
+            ("PATH".to_owned(), "/scratch/bin".to_owned()),
+        ];
+
+        configure_child_env(
+            &mut command,
+            Some(Path::new("/opt/stoat/bin")),
+            None,
+            None,
+            "",
+            &extra,
+        );
+
+        assert_eq!(
+            ["STOATTY", "XDG_STATE_HOME", "PATH"].map(|var| command.get_env(var)),
+            [
+                Some(OsStr::new("0")),
+                Some(OsStr::new("/scratch")),
+                Some(OsStr::new("/scratch/bin")),
+            ],
+            "each entry replaces what stoatty set, the stoat dir PATH included",
         );
     }
 
@@ -928,6 +984,7 @@ mod tests {
             None,
             None,
             "",
+            &[],
         );
         assert_eq!(
             command.get_cwd().map(|cwd| cwd.as_os_str()),
