@@ -28,7 +28,7 @@ use crate::{
         stepped_font_size, swallow_super_combo, wheel_lines, wheel_travel, zoom_csi_u,
         KeyEventKind, KeyPress,
     },
-    pty::{self, Pty, PtyOutput},
+    pty::{self, Pty, PtyOutput, PtyWriter},
     stoat_bin,
 };
 use alacritty_terminal::sync::FairMutex;
@@ -85,7 +85,7 @@ use winit::{
 
 /// Window title shown before a program sets one, and restored when a program
 /// resets it via OSC.
-const DEFAULT_TITLE: &str = "stoatty";
+pub(crate) const DEFAULT_TITLE: &str = "stoatty";
 
 /// Lines of terminal-owned scrollback the wheel moves per line of wheel travel,
 /// the idiomatic multi-line wheel step common terminals use (e.g. alacritty's
@@ -316,7 +316,7 @@ fn apply_log_level(config: &Config) {
 /// the follow-up it cannot do off-thread: redrawing the window, and the host
 /// actions that touch it such as the title and the clipboard. A query reply
 /// needs none of that, so the reader writes it back itself.
-enum PtyEvent {
+pub(crate) enum PtyEvent {
     /// The reader parsed output that changed the screen and asks for a redraw.
     /// Coalesced: the reader sends this on the clean-to-dirty edge of
     /// [`State::dirty`], so a burst of chunks collapses into one wakeup per
@@ -619,7 +619,7 @@ struct AuxWindowConfig<'a> {
     ligatures: bool,
 }
 
-struct State {
+pub(crate) struct State {
     /// The primary window, behind [`Host`] so a driver with no display server
     /// stands in for the winit one.
     window: Arc<dyn Host>,
@@ -926,6 +926,108 @@ struct State {
     show_perf_hud: bool,
 }
 
+impl State {
+    /// The window state a launch starts from, over the window, GPU context,
+    /// terminal, and child it built.
+    ///
+    /// Every field the arguments do not name starts at rest, with no input
+    /// held, no animation in flight, no aux window, and focus on the window.
+    /// A window launch and a driver with no event loop both start here, so a
+    /// fresh session holds the same state on both paths. `start` is the
+    /// process-start instant the first frame logs its cold-start time from.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        window: Arc<dyn Host>,
+        gpu: GpuContext,
+        terminal: Arc<FairMutex<Terminal>>,
+        pty: Pty,
+        grid: Grid,
+        dirty: Arc<AtomicBool>,
+        sync_pending: Arc<AtomicBool>,
+        ingest_at: Arc<AtomicU64>,
+        ingest_epoch: Instant,
+        window_socket: Option<WindowSocket>,
+        window_event_tx: Option<Sender<String>>,
+        window_client_connected: Arc<AtomicBool>,
+        font_size: u32,
+        terminal_font_size: u32,
+        scale_factor: f64,
+        cursor_animation: CursorAnimation,
+        start: Instant,
+    ) -> State {
+        State {
+            window,
+            shared_gpu: Some((gpu.shared(), gpu.fonts())),
+            pending_resize: PendingResize::default(),
+            last_title: None,
+            first_frame_start: Some(start),
+            gpu,
+            terminal,
+            dirty,
+            ingest_at,
+            ingest_epoch,
+            force_full: ForceFull::default(),
+            sync_pending,
+            grid,
+            pty,
+            font_size,
+            terminal_font_size,
+            scale_factor,
+            modifiers: ModifiersState::empty(),
+            forwarded_presses: Vec::new(),
+            zoom_capture: false,
+            zoom_inband: false,
+            focused: true,
+            app_focused: true,
+            last_bell: None,
+            last_notification: None,
+            cursor_anim: [0.0, 0.0],
+            cursor_animation,
+            cursor_corner_anim: [[0.0, 0.0]; 4],
+            cursor_target: None,
+            cursor_was_anchored: false,
+            cursor_locked: None,
+            popover_scrolls: Vec::new(),
+            popover_offsets: Vec::new(),
+            popover_wake: None,
+            sketch_clocks: SketchClocks::default(),
+            sketch_reveals: Vec::new(),
+            sketch_wake: None,
+            grid_scroll: 0.0,
+            scrollback_visual: 0.0,
+            scrollback_target: 0.0,
+            scrollback_grid: Grid::new(0, 0),
+            last_scrollback_offset: None,
+            last_clear_bg: None,
+            region_scroll: 0.0,
+            last_region_offset: 0.0,
+            pool_frame: PoolFrame::default(),
+            damage_spares: Vec::new(),
+            overflows_scratch: Vec::new(),
+            last_popovers_epoch: None,
+            aux: Vec::new(),
+            warned_window_open_refused: false,
+            _window_socket: window_socket,
+            window_event_tx,
+            window_client_connected,
+            reported_pool_grids: BTreeMap::new(),
+            wheel_pixels: 0.0,
+            pointer_cell: (0, 0),
+            pressed_button: None,
+            pool_gesture: None,
+            pointer_pixels: (0.0, 0.0),
+            held_side_button: None,
+            pointer_side_right: false,
+            native_drag: false,
+            clipboard: None,
+            last_redraw: None,
+            visibility: Visibility::default(),
+            #[cfg(feature = "perf")]
+            show_perf_hud: false,
+        }
+    }
+}
+
 /// The primary window, reduced to what the frame loop asks of it.
 ///
 /// A launch hands a winit [`Window`] in. A driver with no display server
@@ -1082,102 +1184,44 @@ impl ApplicationHandler<PtyEvent> for App {
         let (pixel_width, pixel_height) =
             grid_pixels(self.font_size, scale_factor as f32, spawn_rows, spawn_cols);
         let t_pty = Instant::now();
-        let pty = {
-            let proxy = self.proxy.clone();
-            let terminal = terminal.clone();
-            let dirty = dirty.clone();
-            let sync_pending = sync_pending.clone();
-            let ingest_at = ingest_at.clone();
-            let mut tail: Vec<u8> = Vec::new();
-            Pty::spawn(
-                &self.program,
-                &self.args,
-                self.working_directory.as_deref(),
-                self.stoat_dir.as_deref(),
-                stoat_log::ident::get().map(|i| i.id.as_str()),
-                window_socket
-                    .as_ref()
-                    .and_then(|socket| socket.path.to_str()),
-                &self.theme_name,
-                spawn_rows as u16,
-                spawn_cols as u16,
-                pixel_width,
-                pixel_height,
-                &[],
-                move |replies| {
-                    move |output| match output {
-                        PtyOutput::Data { bytes, may_refuse } => {
-                            // Parse on the reader thread under the shared lock. The
-                            // main thread holds it to render, and waiting here would
-                            // stop the reader draining the pty, which stops the
-                            // child. Better to leave the bytes with the reader and
-                            // take them once the frame is out.
-                            let (redraw, responses, events) = {
-                                let Some(mut terminal) = (if may_refuse {
-                                    terminal.try_lock_unfair()
-                                } else {
-                                    Some(terminal.lock())
-                                }) else {
-                                    return false;
-                                };
-
-                                // Recorded once the bytes are ours, since refused
-                                // ones come back and would otherwise land twice.
-                                pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
-
-                                let redraw = terminal.advance(bytes);
-                                // A buffering synchronized update needs the main
-                                // thread to arm and drive its timeout flush.
-                                sync_pending
-                                    .store(terminal.sync_deadline().is_some(), Ordering::Relaxed);
-                                (redraw, terminal.take_responses(), terminal.take_events())
-                            };
-                            // Written from here rather than posted to the main
-                            // thread, which the parse would then wait on for every
-                            // query. A prompt probing at startup issues several,
-                            // and startup is when that thread is least available.
-                            if !responses.is_empty() {
-                                let _ = replies.queue(responses);
-                            }
-                            if !events.is_empty() {
-                                let _ = proxy.send_event(PtyEvent::Term(events));
-                            }
-                            // Wake the main thread to redraw, but only on the
-                            // clean-to-dirty edge so a burst of chunks collapses into
-                            // one wakeup per render cycle. A chunk wholly held in the
-                            // synchronized-update buffer changes nothing on screen, so
-                            // it skips the wakeup.
-                            if redraw && !dirty.swap(true, Ordering::Relaxed) {
-                                // Stamped on the same edge as the wakeup, so the
-                                // frame that services it measures from the first
-                                // byte of the burst rather than the last.
-                                ingest_at.store(
-                                    ingest_epoch.elapsed().as_nanos() as u64,
-                                    Ordering::Relaxed,
-                                );
-                                let _ = proxy.send_event(PtyEvent::Redraw);
-                            }
-                            true
-                        },
-                        PtyOutput::Eof => {
-                            tracing::info!("child closed the pty");
-                            let last_output = pty::strip_escapes(&String::from_utf8_lossy(&tail));
-                            let _ = proxy.send_event(PtyEvent::Exited { last_output });
-                            true
-                        },
-                    }
-                },
+        let pty = Pty::spawn(
+            &self.program,
+            &self.args,
+            self.working_directory.as_deref(),
+            self.stoat_dir.as_deref(),
+            stoat_log::ident::get().map(|i| i.id.as_str()),
+            window_socket
+                .as_ref()
+                .and_then(|socket| socket.path.to_str()),
+            &self.theme_name,
+            spawn_rows as u16,
+            spawn_cols as u16,
+            pixel_width,
+            pixel_height,
+            &[],
+            pty_sink(
                 {
                     let proxy = self.proxy.clone();
-                    move || {
-                        let _ = proxy.send_event(PtyEvent::Exited {
-                            last_output: String::new(),
-                        });
+                    move |event| {
+                        let _ = proxy.send_event(event);
                     }
                 },
-            )
-            .expect("spawn shell over pty")
-        };
+                terminal.clone(),
+                dirty.clone(),
+                sync_pending.clone(),
+                ingest_at.clone(),
+                ingest_epoch,
+            ),
+            {
+                let proxy = self.proxy.clone();
+                move || {
+                    let _ = proxy.send_event(PtyEvent::Exited {
+                        last_output: String::new(),
+                    });
+                }
+            },
+        )
+        .expect("spawn shell over pty");
         let pty_time = t_pty.elapsed();
 
         let t_gpu = Instant::now();
@@ -1232,76 +1276,25 @@ impl ApplicationHandler<PtyEvent> for App {
         }
 
         window.request_redraw();
-        let state = State {
+        let state = State::new(
             window,
-            shared_gpu: Some((gpu.shared(), gpu.fonts())),
-            pending_resize: PendingResize::default(),
-            last_title: None,
-            first_frame_start: Some(self.start),
             gpu,
             terminal,
+            pty,
+            grid,
             dirty,
+            sync_pending,
             ingest_at,
             ingest_epoch,
-            force_full: ForceFull::default(),
-            sync_pending,
-            grid,
-            pty,
-            font_size: self.font_size,
-            terminal_font_size: self.terminal_font_size,
-            scale_factor,
-            modifiers: ModifiersState::empty(),
-            forwarded_presses: Vec::new(),
-            zoom_capture: false,
-            zoom_inband: false,
-            focused: true,
-            app_focused: true,
-            last_bell: None,
-            last_notification: None,
-            cursor_anim: [0.0, 0.0],
-            cursor_animation: self.cursor_animation,
-            cursor_corner_anim: [[0.0, 0.0]; 4],
-            cursor_target: None,
-            cursor_was_anchored: false,
-            cursor_locked: None,
-            popover_scrolls: Vec::new(),
-            popover_offsets: Vec::new(),
-            popover_wake: None,
-            sketch_clocks: SketchClocks::default(),
-            sketch_reveals: Vec::new(),
-            sketch_wake: None,
-            grid_scroll: 0.0,
-            scrollback_visual: 0.0,
-            scrollback_target: 0.0,
-            scrollback_grid: Grid::new(0, 0),
-            last_scrollback_offset: None,
-            last_clear_bg: None,
-            region_scroll: 0.0,
-            last_region_offset: 0.0,
-            pool_frame: PoolFrame::default(),
-            damage_spares: Vec::new(),
-            overflows_scratch: Vec::new(),
-            last_popovers_epoch: None,
-            aux: Vec::new(),
-            warned_window_open_refused: false,
-            _window_socket: window_socket,
+            window_socket,
             window_event_tx,
             window_client_connected,
-            reported_pool_grids: BTreeMap::new(),
-            wheel_pixels: 0.0,
-            pointer_cell: (0, 0),
-            pressed_button: None,
-            pool_gesture: None,
-            pointer_pixels: (0.0, 0.0),
-            held_side_button: None,
-            pointer_side_right: false,
-            native_drag: false,
-            clipboard: None,
-            last_redraw: None,
-            visibility: Visibility::default(),
-            #[cfg(feature = "perf")]
-            show_perf_hud: false,
-        };
+            self.font_size,
+            self.terminal_font_size,
+            scale_factor,
+            self.cursor_animation,
+            self.start,
+        );
         self.state = Some(state);
 
         // Whatever the child said while the GPU was coming up. Replaying it
@@ -1462,40 +1455,19 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        // Flushing a synchronized update dispatches its buffered bytes, which
-        // can carry host queries and notifications the parse held back, so
-        // drain both alongside the flush rather than losing them.
-        let (deadline, drained) = {
-            let mut terminal = state.terminal.lock();
-            match terminal.sync_deadline() {
-                Some(deadline) if deadline <= Instant::now() => {
-                    terminal.flush_synchronized_update();
-                    (
-                        None,
-                        Some((terminal.take_responses(), terminal.take_events())),
-                    )
+        let (deadline, events) = flush_due_sync_update(state);
+        if !events.is_empty() {
+            handle_term_events(
+                state,
+                event_loop,
+                &AuxWindowConfig {
+                    proxy: &self.proxy,
+                    theme: self.theme,
+                    font_family: &self.font_family,
+                    ligatures: self.ligatures,
                 },
-                other => (other, None),
-            }
-        };
-
-        if let Some((responses, events)) = drained {
-            if !responses.is_empty() {
-                let _ = state.pty.write(&responses);
-            }
-            if !events.is_empty() {
-                handle_term_events(
-                    state,
-                    event_loop,
-                    &AuxWindowConfig {
-                        proxy: &self.proxy,
-                        theme: self.theme,
-                        font_family: &self.font_family,
-                        ligatures: self.ligatures,
-                    },
-                    events,
-                );
-            }
+                events,
+            );
         }
 
         if deadline.is_none() {
@@ -2142,6 +2114,123 @@ impl ApplicationHandler<PtyEvent> for App {
     }
 }
 
+/// Build the sink that parses a child's output into `terminal` on the reader
+/// thread, for [`Pty::spawn`].
+///
+/// `wake` carries each thing the main thread acts on. These are a redraw on
+/// the clean-to-dirty edge of `dirty`, the host events a parse raised, and the
+/// child's exit with the tail of its output. A window launch wakes through its
+/// event loop proxy, and a driver with no event loop passes a channel sender,
+/// so both paths share one parse and one wakeup rule.
+///
+/// Query replies go back to the child from the reader thread itself.
+/// `sync_pending` holds while the parser holds back a synchronized update,
+/// which tells the main thread to drive its timeout flush.
+pub(crate) fn pty_sink(
+    wake: impl Fn(PtyEvent) + Send + 'static,
+    terminal: Arc<FairMutex<Terminal>>,
+    dirty: Arc<AtomicBool>,
+    sync_pending: Arc<AtomicBool>,
+    ingest_at: Arc<AtomicU64>,
+    ingest_epoch: Instant,
+) -> impl FnOnce(PtyWriter) -> Box<dyn FnMut(PtyOutput<'_>) -> bool + Send> {
+    let mut tail: Vec<u8> = Vec::new();
+    move |replies| {
+        // Boxed, since rustc refuses `impl Trait` in the return type of an
+        // `Fn` bound (E0562).
+        Box::new(move |output| match output {
+            PtyOutput::Data { bytes, may_refuse } => {
+                // Parse on the reader thread under the shared lock. The
+                // main thread holds it to render, and waiting here would
+                // stop the reader draining the pty, which stops the
+                // child. Better to leave the bytes with the reader and
+                // take them once the frame is out.
+                let (redraw, responses, events) = {
+                    let Some(mut terminal) = (if may_refuse {
+                        terminal.try_lock_unfair()
+                    } else {
+                        Some(terminal.lock())
+                    }) else {
+                        return false;
+                    };
+
+                    // Recorded once the bytes are ours, since refused
+                    // ones come back and would otherwise land twice.
+                    pty::push_tail(&mut tail, bytes, CHILD_OUTPUT_TAIL_CAP);
+
+                    let redraw = terminal.advance(bytes);
+                    // A buffering synchronized update needs the main
+                    // thread to arm and drive its timeout flush.
+                    sync_pending.store(terminal.sync_deadline().is_some(), Ordering::Relaxed);
+                    (redraw, terminal.take_responses(), terminal.take_events())
+                };
+                // Written from here rather than posted to the main
+                // thread, which the parse would then wait on for every
+                // query. A prompt probing at startup issues several,
+                // and startup is when that thread is least available.
+                if !responses.is_empty() {
+                    let _ = replies.queue(responses);
+                }
+                if !events.is_empty() {
+                    wake(PtyEvent::Term(events));
+                }
+                // Wake the main thread to redraw, but only on the
+                // clean-to-dirty edge so a burst of chunks collapses into
+                // one wakeup per render cycle. A chunk wholly held in the
+                // synchronized-update buffer changes nothing on screen, so
+                // it skips the wakeup.
+                if redraw && !dirty.swap(true, Ordering::Relaxed) {
+                    // Stamped on the same edge as the wakeup, so the
+                    // frame that services it measures from the first
+                    // byte of the burst rather than the last.
+                    ingest_at.store(ingest_epoch.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    wake(PtyEvent::Redraw);
+                }
+                true
+            },
+            PtyOutput::Eof => {
+                tracing::info!("child closed the pty");
+                let last_output = pty::strip_escapes(&String::from_utf8_lossy(&tail));
+                wake(PtyEvent::Exited { last_output });
+                true
+            },
+        })
+    }
+}
+
+/// Flush a buffered DEC 2026 synchronized update whose timeout has passed.
+///
+/// Returns the deadline still pending, `None` once the update has flushed or
+/// when the parser held none back, and the terminal events the flushed bytes
+/// raised, for the caller to handle. The host replies those bytes owe go to the child
+/// here.
+pub(crate) fn flush_due_sync_update(state: &mut State) -> (Option<Instant>, Vec<TermEvent>) {
+    // Flushing a synchronized update dispatches its buffered bytes, which
+    // can carry host queries and notifications the parse held back, so
+    // drain both alongside the flush rather than losing them.
+    let (deadline, drained) = {
+        let mut terminal = state.terminal.lock();
+        match terminal.sync_deadline() {
+            Some(deadline) if deadline <= Instant::now() => {
+                terminal.flush_synchronized_update();
+                (
+                    None,
+                    Some((terminal.take_responses(), terminal.take_events())),
+                )
+            },
+            other => (other, None),
+        }
+    };
+
+    let Some((responses, events)) = drained else {
+        return (deadline, Vec::new());
+    };
+    if !responses.is_empty() {
+        let _ = state.pty.write(&responses);
+    }
+    (deadline, events)
+}
+
 /// Record both physical cell pixel sizes in the terminal.
 ///
 /// The editor font's cell is what a CSI 14 t query reports the text area by.
@@ -2150,7 +2239,7 @@ impl ApplicationHandler<PtyEvent> for App {
 ///
 /// Re-run whenever either font size or the display scale factor changes, since
 /// the cell metrics move with all three.
-fn update_cell_pixels(
+pub(crate) fn update_cell_pixels(
     terminal: &FairMutex<Terminal>,
     font_size: u32,
     terminal_font_size: u32,
@@ -2174,7 +2263,7 @@ fn update_cell_pixels(
 ///
 /// Re-run whenever the surface size or the editor cell size changes, since
 /// both move the last row.
-fn sync_row_anchor(terminal: &FairMutex<Terminal>, layout: GridLayout) {
+pub(crate) fn sync_row_anchor(terminal: &FairMutex<Terminal>, layout: GridLayout) {
     // The surface height and the cell height are whole pixels, so
     // `bottom_row_y` is too and the cast drops nothing.
     terminal
@@ -2191,7 +2280,12 @@ fn sync_row_anchor(terminal: &FairMutex<Terminal>, layout: GridLayout) {
 /// A grid too wide for the field saturates rather than wrapping, since the cast
 /// does that on its own. No display reaches such a grid, but reporting a tiny
 /// area for an enormous one would be the worst answer available.
-fn grid_pixels(font_size: u32, scale_factor: f32, rows: usize, cols: usize) -> (u16, u16) {
+pub(crate) fn grid_pixels(
+    font_size: u32,
+    scale_factor: f32,
+    rows: usize,
+    cols: usize,
+) -> (u16, u16) {
     let [width, height] = render::cell_size(font_size, scale_factor);
     let extent = |cell: f32, count: usize| (cell * count as f32).round() as u16;
     (extent(width, cols), extent(height, rows))
@@ -2262,7 +2356,7 @@ fn wheel_upstream(claimed: bool, client_connected: bool, reporting: bool) -> boo
 /// the next frame reshapes the screen, reflows the terminal, and signals the
 /// child, and a zoom key held at the range's clamp asks for that on every
 /// autorepeat.
-fn apply_font_step(state: &mut State, delta: i32) {
+pub(crate) fn apply_font_step(state: &mut State, delta: i32) {
     let Some(font_size) = font_step_target(state.font_size, delta) else {
         return;
     };
@@ -2355,7 +2449,7 @@ impl PtyWrite for Pty {
 /// The arms of the winit event loop cannot be reached without a real window, so
 /// what they do lives here instead, where a test can call it with a terminal it
 /// built and a writer it can read back.
-struct Input<'a, W: PtyWrite> {
+pub(crate) struct Input<'a, W: PtyWrite> {
     terminal: &'a FairMutex<Terminal>,
     pty: &'a mut W,
 }
@@ -2366,7 +2460,7 @@ impl<W: PtyWrite> Input<'_, W> {
     ///
     /// The write happens outside the terminal lock, so the lock the reader
     /// thread wants is not held across a syscall.
-    fn key(&mut self, bytes: &[u8]) {
+    pub(crate) fn key(&mut self, bytes: &[u8]) {
         {
             let mut terminal = self.terminal.lock();
             terminal.clear_selection();
@@ -2758,7 +2852,7 @@ fn handle_term_events(
 ///
 /// The deltas arrive from the wire, so the sum saturates rather than
 /// overflowing, which would panic in debug and wrap in release.
-fn net_font_step(events: &mut Vec<TermEvent>) -> i32 {
+pub(crate) fn net_font_step(events: &mut Vec<TermEvent>) -> i32 {
     let mut net: i32 = 0;
     events.retain(|event| match event {
         TermEvent::FontStep(delta) => {
@@ -2777,7 +2871,7 @@ fn net_font_step(events: &mut Vec<TermEvent>) -> i32 {
 /// each one, so most arrivals repeat what the window already shows. `last` records
 /// what was pushed, and is updated here rather than by the caller so a write cannot
 /// land without the record moving with it.
-fn set_window_title(window: &dyn Host, last: &mut Option<String>, title: &str) {
+pub(crate) fn set_window_title(window: &dyn Host, last: &mut Option<String>, title: &str) {
     if last.as_deref() == Some(title) {
         return;
     }
@@ -3005,7 +3099,7 @@ fn grid_window_size(cols: u16, rows: u16, font_size: u32, scale: f64) -> Logical
 ///
 /// See also:
 /// - [`redraw_aux`] for the aux windows' counterpart.
-fn redraw(state: &mut State) {
+pub(crate) fn redraw(state: &mut State) {
     // Every frame goes through here, so one gate covers the lock, the
     // projection, the render, and the ease self-request below that
     // would otherwise keep asking for frames nobody sees.
@@ -3902,7 +3996,7 @@ fn wait_until(event_loop: &ActiveEventLoop, deadline: Option<Instant>) {
 ///
 /// Several things can want the loop back, and the loop wakes once: it has to
 /// wait for the first of them, then let the later one ask again.
-fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+pub(crate) fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
     match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
@@ -4074,7 +4168,7 @@ fn app_has_focus(primary: bool, aux: impl IntoIterator<Item = bool>) -> bool {
 ///
 /// The path is per pid, so no other process binds it while this one lives, and
 /// the drop removes the file without a check of what the path names.
-struct WindowSocket {
+pub(crate) struct WindowSocket {
     path: PathBuf,
 }
 
