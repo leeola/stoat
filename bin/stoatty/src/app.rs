@@ -620,7 +620,9 @@ struct AuxWindowConfig<'a> {
 }
 
 struct State {
-    window: Arc<Window>,
+    /// The primary window, behind [`Host`] so a driver with no display server
+    /// stands in for the winit one.
+    window: Arc<dyn Host>,
     /// The GPU handles and font database the primary window's context was built
     /// on, for the aux windows to build on rather than each asking the driver
     /// and the font directories the same questions again.
@@ -922,6 +924,52 @@ struct State {
     /// plus Shift+P. Drives both the HUD composite and the redraw keep-alive.
     #[cfg(feature = "perf")]
     show_perf_hud: bool,
+}
+
+/// The primary window, reduced to what the frame loop asks of it.
+///
+/// A launch hands a winit [`Window`] in. A driver with no display server
+/// implements this over no window at all, so a frame requests redraws and sets
+/// titles the same way on both paths. Aux windows stay winit windows, because a
+/// detached pane is a real OS window on every path.
+pub(crate) trait Host {
+    fn request_redraw(&self);
+
+    fn set_title(&self, title: &str);
+
+    /// Ask for the user's attention with `request`, or clear a pending request
+    /// with `None`.
+    fn request_user_attention(&self, request: Option<UserAttentionType>);
+
+    /// The drawable's (width, height) in physical pixels.
+    fn inner_size(&self) -> (u32, u32);
+
+    /// The OS window behind this host, or `None` for a host with no window,
+    /// which no window event names.
+    fn window_id(&self) -> Option<WindowId>;
+}
+
+impl Host for Window {
+    fn request_redraw(&self) {
+        Window::request_redraw(self);
+    }
+
+    fn set_title(&self, title: &str) {
+        Window::set_title(self, title);
+    }
+
+    fn request_user_attention(&self, request: Option<UserAttentionType>) {
+        Window::request_user_attention(self, request);
+    }
+
+    fn inner_size(&self) -> (u32, u32) {
+        let size = Window::inner_size(self);
+        (size.width, size.height)
+    }
+
+    fn window_id(&self) -> Option<WindowId> {
+        Some(self.id())
+    }
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -1477,7 +1525,7 @@ impl ApplicationHandler<PtyEvent> for App {
         // socket so they never reach the primary arms with aux coordinates.
         // Keyboard and modifier events fall through to the primary handling
         // below so an aux keypress drives the one PTY like a primary keypress.
-        let primary = id == state.window.id();
+        let primary = state.window.window_id() == Some(id);
         if !primary {
             match &event {
                 WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) => {},
@@ -1724,8 +1772,8 @@ impl ApplicationHandler<PtyEvent> for App {
                 // to be re-derived even though the surface has not changed
                 // size. Recording the size it already has does that, and costs
                 // nothing at the surface, which refuses a size it is at.
-                let size = state.window.inner_size();
-                state.pending_resize.record(size.width, size.height);
+                let (width, height) = state.window.inner_size();
+                state.pending_resize.record(width, height);
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => redraw(state),
@@ -2634,10 +2682,10 @@ fn handle_term_events(
     for event in events {
         match event {
             TermEvent::Title(title) => {
-                set_window_title(&state.window, &mut state.last_title, &title)
+                set_window_title(state.window.as_ref(), &mut state.last_title, &title)
             },
             TermEvent::ResetTitle => {
-                set_window_title(&state.window, &mut state.last_title, DEFAULT_TITLE)
+                set_window_title(state.window.as_ref(), &mut state.last_title, DEFAULT_TITLE)
             },
             TermEvent::ClipboardStore(text) => copy_to_clipboard(state, text),
             TermEvent::Bell => ring_bell(state, Instant::now()),
@@ -2728,7 +2776,7 @@ fn net_font_step(events: &mut Vec<TermEvent>) -> i32 {
 /// each one, so most arrivals repeat what the window already shows. `last` records
 /// what was pushed, and is updated here rather than by the caller so a write cannot
 /// land without the record moving with it.
-fn set_window_title(window: &Window, last: &mut Option<String>, title: &str) {
+fn set_window_title(window: &dyn Host, last: &mut Option<String>, title: &str) {
     if last.as_deref() == Some(title) {
         return;
     }
@@ -3167,7 +3215,7 @@ fn redraw(state: &mut State) {
                     sketch_reveals: &[],
                 },
             );
-            latch_skipped(&mut state.force_full, &state.window, outcome);
+            latch_skipped(&mut state.force_full, state.window.as_ref(), outcome);
             // Read now, so the row flags go back for the next
             // projection to fill rather than being dropped and
             // allocated again a frame later.
@@ -3216,7 +3264,7 @@ fn redraw(state: &mut State) {
                     sketch_reveals: &state.sketch_reveals,
                 },
             );
-            latch_skipped(&mut state.force_full, &state.window, outcome);
+            latch_skipped(&mut state.force_full, state.window.as_ref(), outcome);
             easing
         }
     } else {
@@ -3330,7 +3378,7 @@ fn redraw(state: &mut State) {
             &riding_hosts,
             cursor_scissor,
         );
-        latch_skipped(&mut state.force_full, &state.window, outcome);
+        latch_skipped(&mut state.force_full, state.window.as_ref(), outcome);
         if outcome.atlas_stale {
             // A pool composite grew or evicted from the atlas after
             // the live grid was drawn, so the live buffers now hold
@@ -3616,7 +3664,7 @@ fn redraw_aux(
         &[],
         None,
     );
-    latch_skipped(&mut aux.force_full, &aux.window, outcome);
+    latch_skipped(&mut aux.force_full, aux.window.as_ref(), outcome);
     easing || sketch_step.animating || outcome.atlas_stale
 }
 
@@ -3664,7 +3712,7 @@ impl ForceFull {
 /// the primary and an aux window run the same repair over their own two.
 ///
 /// An occluded window returns before any of this, so the retry cannot spin.
-fn latch_skipped(force_full: &mut ForceFull, window: &Window, outcome: FrameOutcome) {
+fn latch_skipped(force_full: &mut ForceFull, window: &dyn Host, outcome: FrameOutcome) {
     if force_full.arm(outcome) {
         window.request_redraw();
     }
