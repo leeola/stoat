@@ -508,11 +508,11 @@ impl Visibility {
 /// new size, so it runs on the last size of the batch instead of every size in
 /// it.
 #[derive(Default)]
-struct PendingResize(Option<(u32, u32)>);
+pub(crate) struct PendingResize(Option<(u32, u32)>);
 
 impl PendingResize {
     /// Note a size the window reported, displacing any earlier one.
-    fn record(&mut self, width: u32, height: u32) {
+    pub(crate) fn record(&mut self, width: u32, height: u32) {
         self.0 = Some((width, height));
     }
 
@@ -634,20 +634,20 @@ pub(crate) struct State {
     /// The title last pushed to [`Self::window`], so a repeated one costs no platform
     /// write. `None` until the first title lands, which leaves the window showing the
     /// title it was created with.
-    last_title: Option<String>,
+    pub(crate) last_title: Option<String>,
     /// Process-start instant, taken once when the first frame is presented to
     /// log the total cold-start time. `None` after that first frame.
     first_frame_start: Option<Instant>,
-    gpu: GpuContext,
+    pub(crate) gpu: GpuContext,
     /// The parsed screen, shared with the reader thread that advances it. The
     /// [`FairMutex`] lets the main thread lock it to project while the reader
     /// locks it to parse, neither starving the other under heavy output.
-    terminal: Arc<FairMutex<Terminal>>,
+    pub(crate) terminal: Arc<FairMutex<Terminal>>,
     /// Set by the reader when it parses output not yet redrawn, cleared when the
     /// main thread services a [`PtyEvent::Redraw`]. The reader sends a redraw
     /// wakeup only on the clean-to-dirty edge, so a flood of chunks coalesces
     /// into one wakeup per render cycle instead of one per chunk.
-    dirty: Arc<AtomicBool>,
+    pub(crate) dirty: Arc<AtomicBool>,
     /// When the reader last set [`Self::dirty`] from clean, as nanoseconds
     /// since [`Self::ingest_epoch`]. Zero means no wakeup is outstanding.
     ///
@@ -665,23 +665,23 @@ pub(crate) struct State {
     /// Set by the reader while a DEC 2026 synchronized update is buffering in the
     /// parser, so [`App::about_to_wait`] arms a wait until the update's timeout
     /// and flushes it if no ESU arrives. Cleared once the update flushes.
-    sync_pending: Arc<AtomicBool>,
+    pub(crate) sync_pending: Arc<AtomicBool>,
     grid: Grid,
-    pty: Pty,
+    pub(crate) pty: Pty,
     /// The live font size in logical points, seeded from the config and stepped
     /// by the platform zoom combo. Drives the renderer's cell metrics on each
     /// change, scaled by [`Self::scale_factor`].
-    font_size: u32,
+    pub(crate) font_size: u32,
     /// The live font size in logical points for the terminal and agent panes a
     /// stoat child draws, seeded from the config and stepped with
     /// [`Self::font_size`], so the two sizes keep their spacing.
     terminal_font_size: u32,
     /// Size the primary surface has yet to be fitted to. See [`PendingResize`].
-    pending_resize: PendingResize,
+    pub(crate) pending_resize: PendingResize,
     /// The window's display scale factor (physical pixels per logical point),
     /// tracked from `ScaleFactorChanged` so the cell metrics re-derive when the
     /// window moves to a display of a different density.
-    scale_factor: f64,
+    pub(crate) scale_factor: f64,
     /// The most recent modifier state, tracked from `ModifiersChanged` so a key
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
@@ -701,13 +701,13 @@ pub(crate) struct State {
     /// with instant native font zoom. A child that claims it and then wedges
     /// keeps the claim, since releasing on silence would make the combo flicker
     /// between meanings whenever the child was merely busy.
-    zoom_capture: bool,
+    pub(crate) zoom_capture: bool,
     /// Whether the claiming program asked for the press down the PTY rather
     /// than over the window socket.
     ///
     /// Meaningless while [`Self::zoom_capture`] is clear, since the two arrive
     /// together and a release names no delivery.
-    zoom_inband: bool,
+    pub(crate) zoom_inband: bool,
     /// Whether the primary window currently holds focus, tracked from
     /// `WindowEvent::Focused`. Combined with each aux window's focus into the
     /// app-wide DECSET 1004 report via [`reconcile_app_focus`]. It also selects
@@ -772,7 +772,7 @@ pub(crate) struct State {
     /// The redraw keep-alive asks for the next frame while something is easing,
     /// and a popover that is resting is by definition not easing, so nothing
     /// else would bring the loop back.
-    popover_wake: Option<Instant>,
+    pub(crate) popover_wake: Option<Instant>,
     /// Each declared mark's animation clock, keyed by the id the emitter chose.
     ///
     /// The terminal owns these rather than the renderer, so a frame is
@@ -787,7 +787,7 @@ pub(crate) struct State {
     ///
     /// A mark counting down its delay is not animating, so the redraw
     /// keep-alive does not bring the loop back for it.
-    sketch_wake: Option<Instant>,
+    pub(crate) sketch_wake: Option<Instant>,
     /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
     /// per-frame scroll delta and eased toward zero so content glides into place.
     grid_scroll: f32,
@@ -2427,6 +2427,27 @@ fn send_key(state: &mut State, event: &KeyEvent, kind: KeyEventKind) {
             }
             .key(&bytes);
         }
+    }
+}
+
+/// Type `press`, with `mods` held, into the shell as typing.
+///
+/// For a press a driver builds by hand, with no winit event behind it. Unlike
+/// [`send_key`] it records no forwarded press, because a hand-built press has
+/// no release for that list to wait for.
+pub(crate) fn type_press(state: &mut State, press: &KeyPress<'_>, mods: ModifiersState) {
+    // A guard taken in the `if let` scrutinee stays alive through
+    // the body, where `Input::key` locks again and deadlocks.
+    let (app_cursor, keyboard) = {
+        let terminal = state.terminal.lock();
+        (terminal.app_cursor(), terminal.keyboard_modes())
+    };
+    if let Some(bytes) = encode_key(press, mods, app_cursor, keyboard) {
+        Input {
+            terminal: &state.terminal,
+            pty: &mut state.pty,
+        }
+        .key(&bytes);
     }
 }
 

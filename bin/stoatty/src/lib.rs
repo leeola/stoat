@@ -9,6 +9,7 @@ mod anim;
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod headless;
 mod input;
 pub mod pty;
 #[cfg(unix)]
