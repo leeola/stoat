@@ -5682,7 +5682,7 @@ mod tests {
     ///
     /// stoatty draws the primary cursor itself, so the harness turns it off and
     /// the cell fallback paints the block onto the grid. The shipped theme styles
-    /// no `ui.cursor`, so the block is reverse video.
+    /// `ui.cursor` as a filled block, so the block is the cells on its background.
     fn wash_and_cursor_after(keys: &str) -> (Vec<u16>, Vec<u16>) {
         let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
         h.stoat.stoatty = false;
@@ -5695,13 +5695,19 @@ mod tests {
             .get(UI_SELECTION_EDITOR)
             .bg
             .expect("a selection background");
+        let cursor_bg = h
+            .stoat
+            .theme
+            .cursor_style()
+            .bg
+            .expect("a cursor block background");
         let buf = h.rendered_buffer();
         let row = row_holding(buf, right_text(&harness_columns(&h)), "fn other");
         let washed = (0..buf.area.width)
             .filter(|&x| buf[(x, row)].bg == sel_bg)
             .collect();
         let cursor = (0..buf.area.width)
-            .filter(|&x| buf[(x, row)].modifier.contains(Modifier::REVERSED))
+            .filter(|&x| buf[(x, row)].bg == cursor_bg)
             .collect();
         (washed, cursor)
     }

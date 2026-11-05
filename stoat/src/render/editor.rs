@@ -3910,7 +3910,7 @@ mod tests {
     fn a_cursor_on_a_wide_glyph_covers_both_its_cells() {
         let mut h = Stoat::test();
         open_search_buffer(&mut h, "\u{6c49}x\ny");
-        let theme = h.stoat.theme.clone();
+        let theme = crate::theme::Theme::empty();
         let fallback = theme.get(crate::theme::scope::UI_TEXT);
         let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
         let cursor_modifier = theme.cursor_style().add_modifier;
@@ -5663,8 +5663,8 @@ mod tests {
             "the warning span paints one underline run",
         );
         assert_eq!(
-            h.stoat.pending_undercurls.spans()[0].color,
-            [0xe5, 0xc0, 0x7b],
+            Some(h.stoat.pending_undercurls.spans()[0].color),
+            super::style_rgb(h.stoat.theme.get(s::UI_DIAGNOSTIC_WARNING).fg),
             "the run carries the shipped warning severity color",
         );
     }
@@ -5720,8 +5720,10 @@ mod tests {
             .iter()
             .map(|u| u.color)
             .collect();
+        let warning = super::style_rgb(h.stoat.theme.get(s::UI_DIAGNOSTIC_WARNING).fg)
+            .expect("the shipped warning color");
         assert!(
-            !colors.is_empty() && colors.iter().all(|c| *c == [0xe5, 0xc0, 0x7b]),
+            !colors.is_empty() && colors.iter().all(|c| *c == warning),
             "only the warning reaches the viewport, got {colors:?}",
         );
     }

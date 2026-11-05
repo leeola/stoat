@@ -1127,8 +1127,7 @@ mod tests {
         h.open_file(&b);
         h.settle();
 
-        // 0.25 is the default ui.inactive_dim the test harness resolves.
-        let dim = 0.25_f32;
+        let dim = h.stoat.painted_inactive_dim();
         let bg = style_rgb(
             h.stoat
                 .theme
@@ -2249,11 +2248,11 @@ mod tests {
                     .and_then(|s| s.bg),
             )
             .expect("the test theme has an rgb background");
-            // 0.25 is the default ui.inactive_dim the test harness resolves.
+            let dim = h.stoat.painted_inactive_dim();
             let dimmed = |palette: &[[u8; 3]]| -> Vec<[u8; 3]> {
                 palette
                     .iter()
-                    .map(|&c| paint::dim_rgb(c, bg, 0.25))
+                    .map(|&c| paint::dim_rgb(c, bg, dim))
                     .collect()
             };
             let plain = table.palette()[..len].to_vec();

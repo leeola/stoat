@@ -1276,8 +1276,8 @@ mod tests {
         focus_hidden_dock(&mut h);
 
         let (_, _, declared) = paint_strips(&mut h, &mut rx);
-        // 0.25 is the default ui.inactive_dim the test harness resolves.
-        assert_eq!(declared, [diff_changes_strip(&h, index, 0.25)]);
+        let dim = h.stoat.painted_inactive_dim();
+        assert_eq!(declared, [diff_changes_strip(&h, index, dim)]);
     }
 
     /// The single band shows a focused changes view's strip in the diff

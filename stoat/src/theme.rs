@@ -706,6 +706,8 @@ pub enum ThemeError {
 /// capture names with fallback.
 pub mod scope {
     pub const UI_BACKGROUND: &str = "ui.background";
+    pub const UI_SURFACE_CHROME: &str = "ui.surface.chrome";
+    pub const UI_SURFACE_OVERLAY: &str = "ui.surface.overlay";
     pub const UI_TEXT: &str = "ui.text";
     pub const UI_TEXT_MUTED: &str = "ui.text.muted";
     pub const UI_TEXT_DIM: &str = "ui.text.dim";
@@ -1295,106 +1297,215 @@ mod tests {
         );
     }
 
+    /// The themes the shipped config defines, the default first.
+    fn shipped_themes() -> [Theme; 2] {
+        ["ermine_night", "default_dark"].map(|name| load(crate::app::DEFAULT_KEYMAP, name))
+    }
+
+    fn rgb(hex: u32) -> Color {
+        let [_, r, g, b] = hex.to_be_bytes();
+        Color::Rgb(r, g, b)
+    }
+
+    #[test]
+    fn the_ermine_theme_resolves_from_the_shipped_config() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        assert_eq!(
+            (
+                theme.get(scope::UI_BACKGROUND).bg,
+                theme.get(scope::UI_SURFACE_CHROME).bg,
+                theme.get(scope::UI_STATUSLINE_NORMAL).fg,
+                theme.panel(PanelRole::Island),
+                theme.themed_type_scale(TypeRole::Small),
+            ),
+            (
+                Some(rgb(0x17191e)),
+                Some(rgb(0x121418)),
+                Some(rgb(0x7fb0ff)),
+                spec(2, PanelShadow::Tucked, 4, false),
+                208,
+            )
+        );
+    }
+
+    /// A let takes its color where it stands, so a role the ermine block does
+    /// not restate keeps default_dark's color in every scope inherited from it.
+    #[test]
+    fn the_ermine_semantic_colors_reach_the_inherited_scopes() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        assert_eq!(
+            [
+                scope::UI_TEXT,
+                scope::UI_TEXT_DIM,
+                scope::UI_TEXT_MUTED,
+                scope::DIFF_ADDED,
+                scope::DIFF_DELETED,
+                scope::DIFF_MODIFIED,
+                scope::UI_STATUSLINE_RUN,
+            ]
+            .map(|name| theme.get(name).fg),
+            [0xdfe2e8, 0xa3a9b5, 0x838a98, 0x8fd18a, 0xf2777f, 0xe8bd6a, 0xc59af0]
+                .map(|hex| Some(rgb(hex))),
+            "text, dim, muted, success, danger, warning, and special"
+        );
+    }
+
+    /// A map setting layers over the parent's fields, so an override that
+    /// drops one of default_dark's modifiers states the empty set.
+    #[test]
+    fn the_ermine_overrides_drop_the_parent_modifiers() {
+        let theme = load(crate::app::DEFAULT_KEYMAP, "ermine_night");
+        assert_eq!(
+            [
+                scope::UI_CURSOR,
+                scope::UI_SELECTION_REVERSED,
+                "syntax.keyword"
+            ]
+            .map(|name| theme.get(name)),
+            [
+                Style::default().fg(rgb(0x17191e)).bg(rgb(0x8a909c)),
+                Style::default().fg(rgb(0xdfe2e8)).bg(rgb(0x23324a)),
+                Style::default().fg(rgb(0xc59af0)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_ermine_theme_answers_every_scope_default_dark_does() {
+        let [ermine, dark] = shipped_themes();
+        let missing: Vec<&String> = dark
+            .styles
+            .keys()
+            .filter(|name| !ermine.styles.contains_key(*name))
+            .collect();
+        assert_eq!(missing, Vec::<&String>::new(), "scopes ermine_night lacks");
+    }
+
     /// A walkthrough draws its marks in whatever color it is handed, so a scope
-    /// the shipped theme leaves out draws in the fallback and reads as a bug in
+    /// a shipped theme leaves out draws in the fallback and reads as a bug in
     /// the drawing rather than a missing color.
     #[test]
     fn the_shipped_theme_answers_for_every_walkthrough_scope() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
+        for theme in shipped_themes() {
+            let unanswered: Vec<&str> = [scope::UI_WALKTHROUGH_FOCUS, scope::UI_WALKTHROUGH_CARD]
+                .into_iter()
+                .chain(scope::UI_WALKTHROUGH_MARKERS)
+                .filter(|name| theme.try_get(name).and_then(|style| style.fg).is_none())
+                .collect();
 
-        let unanswered: Vec<&str> = [scope::UI_WALKTHROUGH_FOCUS, scope::UI_WALKTHROUGH_CARD]
-            .into_iter()
-            .chain(scope::UI_WALKTHROUGH_MARKERS)
-            .filter(|name| theme.try_get(name).and_then(|style| style.fg).is_none())
-            .collect();
-
-        assert_eq!(unanswered, Vec::<&str>::new(), "every scope has a color");
+            assert_eq!(
+                unanswered,
+                Vec::<&str>::new(),
+                "{}: every scope has a color",
+                theme.name
+            );
+        }
     }
 
     /// A card is a stroke around a fill, so it needs both halves. The other
     /// seven are strokes alone.
     #[test]
     fn the_card_scope_carries_a_fill_as_well_as_a_stroke() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
-        let card = theme.try_get(scope::UI_WALKTHROUGH_CARD).expect("declared");
+        for theme in shipped_themes() {
+            let card = theme.try_get(scope::UI_WALKTHROUGH_CARD).expect("declared");
 
-        assert!(card.fg.is_some(), "the stroke");
-        assert!(card.bg.is_some(), "and the fill behind it");
+            assert!(card.fg.is_some(), "{}: the stroke", theme.name);
+            assert!(card.bg.is_some(), "{}: and the fill behind it", theme.name);
+        }
     }
 
     /// Annotations cycle through the markers, so two adjacent ones drawing the
     /// same color would read as one annotation in two places.
     #[test]
     fn every_marker_slot_is_a_distinct_color() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
-        let mut colors: Vec<Color> = scope::UI_WALKTHROUGH_MARKERS
-            .iter()
-            .map(|name| theme.try_get(name).and_then(|style| style.fg).expect(name))
-            .collect();
+        for theme in shipped_themes() {
+            let mut colors: Vec<Color> = scope::UI_WALKTHROUGH_MARKERS
+                .iter()
+                .map(|name| theme.try_get(name).and_then(|style| style.fg).expect(name))
+                .collect();
 
-        let declared = colors.len();
-        colors.sort_by_key(|color| format!("{color:?}"));
-        colors.dedup();
-        assert_eq!(colors.len(), declared, "no two slots share a color");
+            let declared = colors.len();
+            colors.sort_by_key(|color| format!("{color:?}"));
+            colors.dedup();
+            assert_eq!(
+                colors.len(),
+                declared,
+                "{}: no two slots share a color",
+                theme.name
+            );
+        }
     }
 
     /// A detached pane's badge paints in the focused bar's style on either bar,
     /// so its digit reads only while that style sets two different colors.
     #[test]
     fn the_focused_status_bar_style_sets_two_distinct_colors() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
-        let style = theme.get(scope::UI_STATUSBAR_FOCUSED);
-        let (fg, bg) = (
-            style.fg.expect("a foreground"),
-            style.bg.expect("a background"),
-        );
-        assert_ne!(fg, bg, "the badge digit reads against its box");
+        for theme in shipped_themes() {
+            let style = theme.get(scope::UI_STATUSBAR_FOCUSED);
+            let (fg, bg) = (
+                style.fg.expect("a foreground"),
+                style.bg.expect("a background"),
+            );
+            assert_ne!(
+                fg, bg,
+                "{}: the badge digit reads against its box",
+                theme.name
+            );
+        }
     }
 
     /// The editor's selection wash sits under every token it covers, so a
     /// foreground in the wash's own color vanishes into it.
     #[test]
     fn no_shipped_style_paints_text_in_the_selection_wash_color() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
-        let wash = theme
-            .get(scope::UI_SELECTION_EDITOR)
-            .bg
-            .expect("a selection wash");
-        let hidden: Vec<&str> = theme
-            .styles
-            .iter()
-            .filter(|(_, style)| style.fg == Some(wash))
-            .map(|(name, _)| name.as_str())
-            .collect();
-        assert_eq!(
-            hidden,
-            Vec::<&str>::new(),
-            "styles painting in the wash color"
-        );
+        for theme in shipped_themes() {
+            let wash = theme
+                .get(scope::UI_SELECTION_EDITOR)
+                .bg
+                .expect("a selection wash");
+            let hidden: Vec<&str> = theme
+                .styles
+                .iter()
+                .filter(|(_, style)| style.fg == Some(wash))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            assert_eq!(
+                hidden,
+                Vec::<&str>::new(),
+                "{}: styles painting in the wash color",
+                theme.name
+            );
+        }
     }
 
     /// The staged-state bar sits beside the change-kind bar, so a state that
     /// shares a kind's color reads a staged added line as two green bars.
     #[test]
     fn the_staged_state_colors_differ_from_every_change_kind() {
-        let theme = load(crate::app::DEFAULT_KEYMAP, "default_dark");
-        let fg = |name: &str| theme.get(name).fg.expect(name);
-        let kinds = [
-            scope::DIFF_ADDED,
-            scope::DIFF_DELETED,
-            scope::DIFF_MODIFIED,
-            scope::DIFF_MOVED,
-        ]
-        .map(fg);
-        let clashes: Vec<&str> = [
-            scope::DIFF_STAGED,
-            scope::DIFF_UNSTAGED,
-            scope::DIFF_APPROVED,
-            scope::DIFF_UNAPPROVED,
-        ]
-        .into_iter()
-        .filter(|state| kinds.contains(&fg(state)))
-        .collect();
-        assert_eq!(clashes, Vec::<&str>::new(), "states in a change-kind color");
+        for theme in shipped_themes() {
+            let fg = |name: &str| theme.get(name).fg.expect(name);
+            let kinds = [
+                scope::DIFF_ADDED,
+                scope::DIFF_DELETED,
+                scope::DIFF_MODIFIED,
+                scope::DIFF_MOVED,
+            ]
+            .map(fg);
+            let clashes: Vec<&str> = [
+                scope::DIFF_STAGED,
+                scope::DIFF_UNSTAGED,
+                scope::DIFF_APPROVED,
+                scope::DIFF_UNAPPROVED,
+            ]
+            .into_iter()
+            .filter(|state| kinds.contains(&fg(state)))
+            .collect();
+            assert_eq!(
+                clashes,
+                Vec::<&str>::new(),
+                "{}: states in a change-kind color",
+                theme.name
+            );
+        }
     }
 }

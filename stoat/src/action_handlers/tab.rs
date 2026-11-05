@@ -492,7 +492,7 @@ mod tests {
             [off, on],
             [
                 (0.0, Some("pane fade off".to_string())),
-                (0.25, Some("pane fade on".to_string())),
+                (0.14, Some("pane fade on".to_string())),
             ],
         );
     }
@@ -534,8 +534,8 @@ mod tests {
             (
                 UpdateEffect::Redraw,
                 UpdateEffect::Redraw,
-                (0.0, 0.25),
-                0.25
+                (0.0, 0.14),
+                0.14
             ),
         );
     }
@@ -545,7 +545,7 @@ mod tests {
         let mut h = Stoat::test();
         h.stoat.settings.ui_inactive_dim_follows_focus = Some(false);
         h.stoat.update(Event::FocusLost);
-        assert_eq!(h.stoat.painted_inactive_dim(), 0.25);
+        assert_eq!(h.stoat.painted_inactive_dim(), 0.14);
     }
 
     /// Relative numbers count from a cursor no keystroke reaches while the

@@ -20,12 +20,13 @@ then the terminal palette.
 
 ### Where it lives
 
-The built-in default theme is the `theme default_dark { ... }` block at the top
-of the embedded `config.stcfg`. Your own overrides go in
-`~/.config/stoat/config.stcfg` (open it with the `OpenConfig` command, which
-creates it from the default if it does not exist). The active theme is chosen by
-the `theme` setting -- `on init { theme = default_dark; }` -- and defaults to
-`default_dark`.
+The built-in default theme is the
+`theme ermine_night inherits default_dark { ... }` block of the embedded
+`config.stcfg`. It builds on the `theme default_dark { ... }` block at the top
+of that file. Your own overrides go in `~/.config/stoat/config.stcfg` (open it
+with the `OpenConfig` command, which creates it from the default if it does not
+exist). The active theme is chosen by the `theme` setting --
+`on init { theme = ermine_night; }` -- and defaults to `ermine_night`.
 
 You never have to copy the whole default. A `theme` block in your config layers
 over the built-in one of the same name field by field, so restating a single
@@ -106,9 +107,9 @@ syntax.comment = { fg: muted, modifiers: [italic] };
 
 ## Semantic palette groups: the primary knob
 
-The default theme defines a base of raw colors and then a semantic layer on top
-of them. The semantic names are the intended retheming knob -- most scopes
-reference these, not raw hex:
+The `default_dark` theme defines a base of raw colors and then a semantic layer
+on top of them, and `ermine_night` restates both. The semantic names are the
+intended retheming knob -- most scopes reference these, not raw hex:
 
 ```
 let accent  = cyan;      # highlights, focus, key labels
@@ -130,7 +131,7 @@ touching a single scope line:
 
 ```
 # ~/.config/stoat/config.stcfg
-theme default_dark {
+theme ermine_night {
     let accent = "#14b8a6";
 }
 ```

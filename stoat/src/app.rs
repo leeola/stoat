@@ -294,8 +294,8 @@ fn build_config_artifacts(
     let settings = {
         let cli_theme_set = cli_settings.theme.is_some();
         let from_user = user.as_ref().map(Settings::from_config);
-        // The embedded default sets `theme = default_dark` unconditionally,
-        // which an inherited theme is meant to beat. Only a theme the user's
+        // The embedded default sets a theme unconditionally, which an
+        // inherited theme is meant to beat. Only a theme the user's
         // own config names counts as the explicit choice that outranks it.
         let user_theme_set = from_user.as_ref().is_some_and(|s| s.theme.is_some());
 
@@ -317,7 +317,7 @@ fn build_config_artifacts(
     };
 
     let theme = {
-        let name = settings.theme.as_deref().unwrap_or("default_dark");
+        let name = settings.theme.as_deref().unwrap_or("ermine_night");
         if theme_pool.is_empty() {
             crate::theme::Theme::empty()
         } else {

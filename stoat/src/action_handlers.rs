@@ -2026,7 +2026,7 @@ mod tests {
 
         let mut stoat =
             stoat_with_config(Some("theme mine { ui.text.fg = \"#abcdef\"; }".to_string()));
-        assert_eq!(stoat.theme.name, "default_dark");
+        assert_eq!(stoat.theme.name, "ermine_night");
 
         let effect = dispatch(
             &mut stoat,
@@ -2103,7 +2103,7 @@ mod tests {
         dispatch(
             &mut h.stoat,
             &SetTheme {
-                name: "default_dark".to_string(),
+                name: "ermine_night".to_string(),
             },
         );
         assert_eq!(
@@ -2386,7 +2386,7 @@ mod tests {
     #[test]
     fn set_theme_unknown_keeps_theme_and_warns() {
         let mut stoat = stoat_with_config(None);
-        assert_eq!(stoat.theme.name, "default_dark");
+        assert_eq!(stoat.theme.name, "ermine_night");
 
         dispatch(
             &mut stoat,
@@ -2395,7 +2395,7 @@ mod tests {
             },
         );
         assert_eq!(
-            stoat.theme.name, "default_dark",
+            stoat.theme.name, "ermine_night",
             "an unknown theme keeps the current one",
         );
         assert!(

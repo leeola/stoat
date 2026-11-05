@@ -9915,7 +9915,7 @@ fn user_theme_block_layers_over_embedded_base() {
         scheduler.executor(),
         Settings::default(),
         PathBuf::new(),
-        Some("theme default_dark { ui.modal.palette.fg = \"#ff0000\"; }".to_string()),
+        Some("theme ermine_night { ui.modal.palette.fg = \"#ff0000\"; }".to_string()),
         Vec::new(),
         None,
     );
@@ -10121,7 +10121,7 @@ fn only_the_resolved_theme_converts() {
     );
 
     assert_eq!(
-        stoat.theme.name, "default_dark",
+        stoat.theme.name, "ermine_night",
         "an embedded theme is active"
     );
     assert!(
@@ -10258,7 +10258,7 @@ fn unknown_env_theme_keeps_the_embedded_default() {
     let stoat = stoat_with_env_theme(None, Settings::default(), "no-such-theme");
 
     assert_eq!(
-        stoat.theme.name, "default_dark",
+        stoat.theme.name, "ermine_night",
         "an unresolvable env theme is ignored rather than blanking the theme"
     );
     assert!(

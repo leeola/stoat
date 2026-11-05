@@ -186,12 +186,114 @@ theme default_dark {
     chat.throbber        = { fg: special, modifiers: [bold] };
 }
 
+# The dark theme of the Ermine design language, and the default.
+#
+# A let takes the color its value names at the point the let stands. A role
+# such as success = green therefore keeps default_dark's green unless this
+# block restates the role after its own green, so every role is restated.
+#
+# A setting here changes only the fields it names. Where default_dark sets a
+# modifier this theme does not want, the setting clears it with modifiers: [].
+theme ermine_night inherits default_dark {
+    let chrome           = "#121418";
+    let base             = "#17191e";
+    let raised           = "#1e2127";
+    let overlay          = "#252830";
+    let hover            = "#2c3039";
+    let select           = "#23324a";
+    let hairline         = "#2e323b";
+    let strong           = "#3e434e";
+    let disabled         = "#5b616d";
+    let brand            = "#c98a5a";
+    let number           = "#f2a869";
+    let wash             = "#2a3c5a";
+    let cursor_secondary = "#8a909c";
+    let divider          = "#22252b";
+
+    let black     = base;
+    let white     = "#dfe2e8";
+    let gray      = "#a3a9b5";
+    let dark_gray = "#838a98";
+    let red       = "#f2777f";
+    let green     = "#8fd18a";
+    let yellow    = "#e8bd6a";
+    let blue      = "#7fb0ff";
+    let magenta   = "#c59af0";
+    let cyan      = "#6cc7d6";
+
+    let accent    = blue;
+    let primary   = blue;
+    let success   = green;
+    let warning   = yellow;
+    let danger    = red;
+    let info      = cyan;
+    let special   = magenta;
+    let muted     = dark_gray;
+    let subtle    = hover;
+    let selection = select;
+    let dim       = gray;
+    let text      = white;
+
+    ui.background.bg      = base;
+    ui.surface.chrome.bg  = chrome;
+    ui.surface.overlay    = { fg: strong, bg: overlay };
+    ui.text.disabled.fg   = disabled;
+    ui.border.focused.fg  = accent;
+    ui.border.inactive.fg = hairline;
+
+    ui.selection           = { fg: text, bg: select };
+    ui.selection.reversed  = { fg: text, bg: select, modifiers: [] };
+    ui.selection.editor.bg = wash;
+    ui.cursor              = { fg: base, bg: cursor_secondary, modifiers: [] };
+    ui.virtual.inlay       = { fg: dim, bg: hover, modifiers: [italic] };
+
+    ui.tabbar.active       = { fg: text, bg: base };
+    ui.tabbar.inactive     = { fg: dim, bg: chrome };
+    ui.statusbar.focused   = { fg: dim, bg: chrome };
+    ui.statusbar.unfocused = { fg: muted, bg: chrome };
+    ui.mode_label          = { fg: chrome, modifiers: [bold] };
+
+    ui.statusline.normal.fg  = accent;
+    ui.statusline.submode.fg = muted;
+    ui.statusline.default.fg = dim;
+
+    ui.modal.help    = { fg: strong, bg: overlay };
+    ui.modal.hints   = { fg: strong, bg: overlay };
+    ui.modal.palette = { fg: strong, bg: overlay };
+    ui.modal.picker  = { fg: strong, bg: overlay };
+    ui.modal.run     = { fg: strong, bg: overlay };
+
+    ui.key_label.fg    = info;
+    ui.badge.active.fg = warning;
+
+    diff.moved.fg    = accent;
+    diff.staged.fg   = info;
+    diff.unstaged.fg = disabled;
+
+    syntax.keyword        = { fg: special, modifiers: [] };
+    syntax.function.fg    = accent;
+    syntax.type.fg        = warning;
+    syntax.constant.fg    = info;
+    syntax.punctuation.fg = muted;
+    syntax.number.fg      = number;
+
+    ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 4 };
+    ui.panel.popout  = { radius: 1, shadow: overhang };
+    ui.panel.overlay = { radius: 2, shadow: drop, above_pools: true };
+    ui.type.ui       = { scale: 232 };
+    ui.type.small    = { scale: 208 };
+}
+
 on init {
-    theme = default_dark;
+    theme = ermine_night;
 
     # When the tab bar occupies the top row: auto shows it only once a
     # workspace holds a second tab, always pins it, never hides it.
     ui.tab_bar = auto;
+
+    # How far an unfocused pane's colors blend toward the theme background,
+    # from 0 (no fade) to 1.
+    ui.inactive_dim = 0.14;
 
     # Fade the unfocused panes only while the stoatty window has focus. The
     # fade marks the pane a keystroke reaches, and with the window in the
