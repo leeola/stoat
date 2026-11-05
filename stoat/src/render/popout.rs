@@ -42,9 +42,9 @@ pub(crate) fn popout_area(
 /// Cells shaved off each horizontal side of a popout card, one per side, so the
 /// card sits just inside the status bar's edges rather than flush with them.
 ///
-/// The visible few-pixel gap where the editor background shows is carried by the
-/// `POPOUT_INSET_PX` pixel inset (see [`crate::render::chrome`]); this one cell
-/// keeps the card off the bar's exact edge columns.
+/// A pixel gap inside these cells comes from the inset of the theme's popout
+/// frame (see [`crate::render::chrome::popout_frame`]). This one cell keeps the
+/// card off the bar's exact edge columns.
 pub(crate) fn popout_inset() -> u16 {
     1
 }
@@ -73,8 +73,8 @@ pub(crate) fn popout_card_bg(theme: &Theme) -> Color {
 /// Paint a popout card into `area` and return the rect its text draws into.
 ///
 /// The leftmost and rightmost cell columns are glyph-cleared but keep their
-/// existing style, so the editor background shows in the few-pixel strip outside
-/// the inset frame rather than a squared background halo. The panel's own fill
+/// existing style, so the editor background shows in any strip that the frame's
+/// inset leaves outside it, rather than a squared background halo. The panel's own fill
 /// covers the rest of those cells, and the interior columns are cleared to `bg`
 /// spaces so the fallback and the pre-panel background pass both read `bg`.
 ///

@@ -1,5 +1,8 @@
 use super::TEXT_SCALE_FULL;
-use crate::{render::paint::style_rgb, theme::Theme};
+use crate::{
+    render::paint::style_rgb,
+    theme::{PanelRole, Theme},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -124,9 +127,9 @@ pub(crate) fn list_modal_width(area: Rect) -> u16 {
 /// [`BorderStyle::None_`], with no fill and no shadow. It draws nothing, and it
 /// keeps every pane pool's composite off the cells the fallback drew.
 ///
-/// When the border colour resolves to RGB it instead emits a hairline `panel` APC frame with
-/// rounded corners and a drop shadow, plus, for `Some(title)`, a full-size title [`TextRun`] over
-/// the top edge. The hairline runs unbroken through the title span, and the title run
+/// When the border colour resolves to RGB it instead emits a hairline `panel` APC frame in the
+/// theme's [`PanelRole::Overlay`] frame, plus, for `Some(title)`, a full-size title [`TextRun`]
+/// over the top edge. The hairline runs unbroken through the title span, and the title run
 /// carries no background box, so its glyphs blend directly over the grid cells
 /// behind them. No box-drawing glyphs are written in this arm.
 ///
@@ -202,13 +205,14 @@ pub(crate) fn modal_frame_anchored(
         return modal_frame(buf, area, None, style, theme, scene);
     };
 
+    let frame = theme.panel(PanelRole::Overlay);
     Panel {
         style: BorderStyle::Rounded,
         border,
-        corner_radius: 6,
+        corner_radius: frame.corner_radius,
         fill,
-        shadow: PanelShadow::Drop,
-        inset_x: 0,
+        shadow: frame.shadow,
+        inset_x: frame.inset_x,
         above_pools: true,
         anchor: Some(anchor),
     }
@@ -223,7 +227,7 @@ fn modal_frame_inner(
     area: Rect,
     title: Option<&str>,
     style: Style,
-    _theme: &Theme,
+    theme: &Theme,
     scene: &mut ApcScene,
     above_pools: bool,
 ) -> Rect {
@@ -231,13 +235,14 @@ fn modal_frame_inner(
 
     match style_rgb(style.fg).filter(|_| scene.live()) {
         Some(border) => {
+            let frame = theme.panel(PanelRole::Overlay);
             Panel {
                 style: BorderStyle::Rounded,
                 border,
-                corner_radius: 6,
+                corner_radius: frame.corner_radius,
                 fill: None,
-                shadow: PanelShadow::Drop,
-                inset_x: 0,
+                shadow: frame.shadow,
+                inset_x: frame.inset_x,
                 above_pools,
                 anchor: None,
             }
@@ -289,21 +294,15 @@ fn cover_cells(area: Rect, above_pools: bool, scene: &mut ApcScene) {
     .draw_components(area, scene);
 }
 
-/// Device pixels shaved off each horizontal edge of a popout card's panel, so the
-/// card draws a touch narrower than its cell rect and the editor background shows
-/// in the thin strip beside it.
-const POPOUT_INSET_PX: u8 = 4;
-
 /// Draw a popout card frame around `area`.
 ///
-/// The frame is a filled, square-cornered, drop-shadowed panel inset a few pixels
-/// from its cell rect. This draws only the frame, so the caller owns the interior.
+/// The frame is a filled panel in the theme's [`PanelRole::Popout`] frame, which
+/// gives its corner radius, shadow, and horizontal inset. This draws only the
+/// frame, so the caller owns the interior.
 ///
-/// The rich arm -- taken when `scene` is live and both `bg` and `border` resolve to RGB -- emits a
-/// `panel` APC frame with `fill` set to `bg`, a [`POPOUT_INSET_PX`] horizontal inset, a drop
-/// shadow, and a square light hairline in `border`. Square corners match the status bar the card
-/// extends, so the card reads as part of it. The inset and shadow are what make the card read
-/// as tucked behind the bar, and a plain terminal cannot draw them.
+/// The rich arm emits a `panel` APC frame with `fill` set to `bg` and a light hairline in
+/// `border`. It runs when `scene` is live and both `bg` and `border` resolve to RGB, because a
+/// plain terminal has no panel to draw the frame with.
 ///
 /// The fallback draws a ratatui [`Block`] with [`Borders::ALL`] in `border`. It
 /// draws only when `area` spans at least two rows, because a one-row card has no
@@ -318,7 +317,7 @@ pub(crate) fn popout_frame(
     area: Rect,
     bg: Color,
     border: Color,
-    _theme: &Theme,
+    theme: &Theme,
     scene: &mut ApcScene,
 ) {
     match style_rgb(Some(bg))
@@ -326,13 +325,14 @@ pub(crate) fn popout_frame(
         .filter(|_| scene.live())
     {
         Some((bg, border)) => {
+            let frame = theme.panel(PanelRole::Popout);
             Panel {
                 style: BorderStyle::Light,
                 border,
-                corner_radius: 0,
+                corner_radius: frame.corner_radius,
                 fill: Some(bg),
-                shadow: PanelShadow::Overhang,
-                inset_x: POPOUT_INSET_PX,
+                shadow: frame.shadow,
+                inset_x: frame.inset_x,
                 above_pools: false,
                 anchor: None,
             }
@@ -507,15 +507,16 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        hline, list_modal_width, modal_box, modal_frame, modal_frame_above_pools, popout_frame,
-        text, toggle_mark, vline, POPOUT_INSET_PX,
+        hline, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
+        modal_frame_anchored, popout_frame, text, toggle_mark, vline,
     };
-    use crate::theme::Theme;
+    use crate::theme::{PanelRole, Theme};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
         style::{Color, Style},
     };
+    use stoat_config::parse;
     use stoat_widgets::ApcScene;
     use stoatty_protocol::command::{
         encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
@@ -643,6 +644,7 @@ mod tests {
         // No box-drawing glyph is painted. The panel is off-grid.
         assert_eq!(buf.cell((2, 1)).unwrap().symbol(), " ");
 
+        let frame = theme.panel(PanelRole::Overlay);
         let panel = encode_panel(&PanelCommand {
             top: 1,
             left: 2,
@@ -650,10 +652,10 @@ mod tests {
             height: 4,
             style: BorderStyle::Rounded,
             border: [1, 2, 3],
-            corner_radius: 6,
+            corner_radius: frame.corner_radius,
             fill: None,
-            shadow: PanelShadow::Drop,
-            inset_x: 0,
+            shadow: frame.shadow,
+            inset_x: frame.inset_x,
             above_pools: false,
             anchor: None,
         });
@@ -684,6 +686,7 @@ mod tests {
 
         let inner = modal_frame_above_pools(&mut buf, area, None, rgb_style(), &theme, &mut scene);
 
+        let frame = theme.panel(PanelRole::Overlay);
         assert_eq!(inner, Rect::new(3, 2, 6, 2), "same layout as modal_frame");
         assert_eq!(
             scene.buffer(),
@@ -694,10 +697,10 @@ mod tests {
                 height: 4,
                 style: BorderStyle::Rounded,
                 border: [1, 2, 3],
-                corner_radius: 6,
+                corner_radius: frame.corner_radius,
                 fill: None,
-                shadow: PanelShadow::Drop,
-                inset_x: 0,
+                shadow: frame.shadow,
+                inset_x: frame.inset_x,
                 above_pools: true,
                 anchor: None,
             }),
@@ -751,6 +754,7 @@ mod tests {
 
         modal_frame(&mut buf, area, None, rgb_style(), &theme, &mut scene);
 
+        let frame = theme.panel(PanelRole::Overlay);
         assert_eq!(
             scene.buffer(),
             &encode_panel(&PanelCommand {
@@ -760,9 +764,40 @@ mod tests {
                 height: 4,
                 style: BorderStyle::Rounded,
                 border: [1, 2, 3],
-                corner_radius: 6,
+                corner_radius: frame.corner_radius,
                 fill: None,
-                shadow: PanelShadow::Drop,
+                shadow: frame.shadow,
+                inset_x: frame.inset_x,
+                above_pools: false,
+                anchor: None,
+            })
+        );
+    }
+
+    /// The theme's overlay role, not a literal, shapes every modal frame.
+    #[test]
+    fn an_overlay_role_in_the_theme_reshapes_the_modal_frame() {
+        let (config, errors) = parse("theme t { ui.panel.overlay = { radius: 9, shadow: none }; }");
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("a config"), "t").expect("the theme");
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+
+        modal_frame(&mut buf, area, None, rgb_style(), &theme, &mut scene);
+
+        assert_eq!(
+            scene.buffer(),
+            &encode_panel(&PanelCommand {
+                top: 1,
+                left: 2,
+                width: 8,
+                height: 4,
+                style: BorderStyle::Rounded,
+                border: [1, 2, 3],
+                corner_radius: 9,
+                fill: None,
+                shadow: PanelShadow::None_,
                 inset_x: 0,
                 above_pools: false,
                 anchor: None,
@@ -770,8 +805,73 @@ mod tests {
         );
     }
 
+    /// The hover popup and the popout card take their frames from the theme's
+    /// roles too, not only the modals.
     #[test]
-    fn popout_arm_emits_a_square_cornered_panel() {
+    fn the_hover_and_popout_frames_read_their_roles_from_the_theme() {
+        let (config, errors) = parse(
+            "theme t {
+                ui.panel.overlay = { radius: 9, shadow: none };
+                ui.panel.popout = { radius: 5, shadow: drop, inset_x: 3 };
+            }",
+        );
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("a config"), "t").expect("the theme");
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+
+        modal_frame_anchored(
+            &mut buf,
+            area,
+            rgb_style(),
+            &theme,
+            &mut scene,
+            Some((3, 1.5)),
+            Some([4, 5, 6]),
+        );
+        popout_frame(
+            &mut buf,
+            area,
+            Color::Rgb(4, 5, 6),
+            Color::Rgb(1, 2, 3),
+            &theme,
+            &mut scene,
+        );
+
+        let hover = encode_panel(&PanelCommand {
+            top: 1,
+            left: 2,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Rounded,
+            border: [1, 2, 3],
+            corner_radius: 9,
+            fill: Some([4, 5, 6]),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: true,
+            anchor: Some((3, 1.5)),
+        });
+        let popout = encode_panel(&PanelCommand {
+            top: 1,
+            left: 2,
+            width: 8,
+            height: 4,
+            style: BorderStyle::Light,
+            border: [1, 2, 3],
+            corner_radius: 5,
+            fill: Some([4, 5, 6]),
+            shadow: PanelShadow::Drop,
+            inset_x: 3,
+            above_pools: false,
+            anchor: None,
+        });
+        assert_eq!(scene.buffer(), &[hover, popout].concat());
+    }
+
+    #[test]
+    fn popout_arm_emits_a_filled_panel_in_the_popout_role() {
         let area = Rect::new(2, 1, 8, 4);
         let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
         let mut scene = ApcScene::new();
@@ -789,9 +889,9 @@ mod tests {
         // No box-drawing glyph is painted. The panel is off-grid.
         assert_eq!(buf.cell((2, 1)).unwrap().symbol(), " ");
 
-        // Square corners and a light hairline match the status bar the card
-        // extends, filled with the card background and inset so it tucks behind
-        // the bar.
+        // A light hairline in the theme's popout frame, filled with the card
+        // background.
+        let frame = theme.panel(PanelRole::Popout);
         assert_eq!(
             scene.buffer(),
             &encode_panel(&PanelCommand {
@@ -801,10 +901,10 @@ mod tests {
                 height: 4,
                 style: BorderStyle::Light,
                 border: [1, 2, 3],
-                corner_radius: 0,
+                corner_radius: frame.corner_radius,
                 fill: Some([4, 5, 6]),
-                shadow: PanelShadow::Overhang,
-                inset_x: POPOUT_INSET_PX,
+                shadow: frame.shadow,
+                inset_x: frame.inset_x,
                 above_pools: false,
                 anchor: None,
             }),
