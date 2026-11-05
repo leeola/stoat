@@ -39,7 +39,12 @@ const CHANNEL_TOLERANCE: u8 = 8;
 
 /// The largest share of the compared pixels that fail to match in a frame that
 /// still matches its golden.
-const MISMATCH_LIMIT: f64 = 0.005;
+///
+/// A cursor drawn one row lower changes about 0.10 percent of the compared
+/// pixels in the after frame. The limit sits at half that, so a cursor on the
+/// wrong row fails. A mesa update that moves more pixels than the limit fails
+/// too, and a reviewer then accepts its frames as the new goldens.
+const MISMATCH_LIMIT: f64 = 0.0005;
 
 /// Two cursor moves in the basic-diff fixture change the frame, the first
 /// frame draws text over the background, and both frames match their goldens.
