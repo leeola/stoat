@@ -368,7 +368,7 @@ impl BarPass {
     ///
     /// The bars are occluded against `occluders` with the seq test bypassed, so a
     /// gutter bar gliding beneath a modal is hidden by it. `occluders` carries
-    /// the frame's whole list and how much of it covers this pool, and all four
+    /// the frame's whole list and how much of it covers this pool, and all five
     /// of a pool's composite passes are handed the same one.
     ///
     /// `metrics` is the cell box the bars' cell fractions scale by, which a pool

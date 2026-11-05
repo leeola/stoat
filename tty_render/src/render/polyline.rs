@@ -462,7 +462,7 @@ impl PolylinePass {
     ///
     /// The paths are occluded against `occluders` with the seq test bypassed, so
     /// a line gliding beneath a modal is hidden by it. `occluders` carries the
-    /// frame's whole list and how much of it covers this pool, and all four of a
+    /// frame's whole list and how much of it covers this pool, and all five of a
     /// pool's composite passes are handed the same one.
     ///
     /// `metrics` is the cell box the paths' cell fractions scale by, which a pool

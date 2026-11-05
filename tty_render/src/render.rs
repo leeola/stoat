@@ -995,7 +995,7 @@ impl<'frame> PoolOccluders<'frame> {
     /// uniform.
     ///
     /// The pair maps directly onto the `panel_count` and `occlude_all` fields
-    /// the bar, text, polyline, and background composite shaders read. An
+    /// the bar, icon, text, polyline, and background composite shaders read. An
     /// `occlude_all` of 1 tells the shader to discard a fragment inside any
     /// occluder it walks regardless of seq, which is what a pool wants: the
     /// count has already narrowed the list to the panels that cover this pool,

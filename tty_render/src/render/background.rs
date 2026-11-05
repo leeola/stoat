@@ -560,7 +560,7 @@ impl BackgroundPass {
     /// The page cells are occluded against `occluders` with the seq test bypassed,
     /// so a pooled cell gliding beneath a modal is hidden by it. `occluders`
     /// carries the frame's whole list and how much of it covers this pool, and
-    /// all four of a pool's composite passes are handed the same one.
+    /// all five of a pool's composite passes are handed the same one.
     ///
     /// `metrics` is the cell box the pool's grid lays out in, which a pool at its
     /// own font size does not share with the live grid. The occluders stay cells

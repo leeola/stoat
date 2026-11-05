@@ -5,7 +5,9 @@
 //! renderer reads this grid to draw and the terminal driver writes it; colors
 //! are stored fully resolved, so the renderer needs no palette of its own.
 
-use from_command::{bar_from_command, fill_polyline, text_run_from_command, StoredTextRun};
+use from_command::{
+    bar_from_command, fill_polyline, icon_from_command, text_run_from_command, StoredTextRun,
+};
 use std::{
     collections::HashMap,
     hash::Hash,
@@ -16,7 +18,9 @@ use std::{
         Arc, Mutex, PoisonError,
     },
 };
-use stoatty_protocol::command::{BarCommand, PolylineCommand, SketchCommand, TextRunCommand};
+use stoatty_protocol::command::{
+    BarCommand, IconCommand, PolylineCommand, SketchCommand, TextRunCommand,
+};
 
 pub(crate) mod from_command;
 
@@ -53,6 +57,10 @@ static NEXT_PAGE_STAMP: AtomicU64 = AtomicU64::new(0);
 /// into its composite, and a per-grid table leaves a copied id naming another
 /// grid's sequence.
 static MARKS: Mutex<Vec<Arc<[char]>>> = Mutex::new(Vec::new());
+
+/// A page slot's decorations as [`PagePool::page_decorations`] answers them:
+/// its text runs, bars, stroked paths, and status icons, each in draw order.
+pub type PageDecorations<'a> = (&'a [TextRun], &'a [Bar], &'a [Polyline], &'a [Icon]);
 
 /// A rectangular grid of [`Cell`]s addressed by row and column.
 ///
@@ -555,6 +563,12 @@ impl Grid {
         self.icons = icons;
     }
 
+    /// The icon list, for a caller rewriting it from another grid's. See
+    /// [`Self::text_runs_mut`].
+    pub fn icons_mut(&mut self) -> &mut Vec<Icon> {
+        &mut self.icons
+    }
+
     /// The off-grid text runs drawn above the cells, in draw order.
     pub fn text_runs(&self) -> &[TextRun] {
         &self.text_runs
@@ -750,6 +764,10 @@ impl Grid {
         copy_translated(&mut self.polylines, src.polylines(), |polyline| {
             shift_polyline(polyline, dx, dy);
         });
+        copy_translated(&mut self.icons, src.icons(), |icon| {
+            icon.top = icon.top.saturating_add(top as u16);
+            icon.left = icon.left.saturating_add(left as u16);
+        });
     }
 
     /// Copy `rows` rows of `src` in at (`top`, `left`), adding `src`'s
@@ -801,6 +819,13 @@ impl Grid {
                 shift_polyline(&mut polyline, dx, dy);
                 polyline
             }));
+        // An icon anchors on a whole cell, so it moves by the cells the
+        // region's corner sits at rather than by sixteenths.
+        self.icons.extend(src.icons().iter().map(|icon| Icon {
+            top: icon.top.saturating_add(top as u16),
+            left: icon.left.saturating_add(left as u16),
+            ..*icon
+        }));
     }
 
     /// The rows and columns of `src` that fit at (`top`, `left`), or `None`
@@ -1117,6 +1142,7 @@ impl PagePool {
                 text_runs: Vec::new(),
                 bars: Vec::new(),
                 polylines: Vec::new(),
+                icons: Vec::new(),
             })
             .collect();
         PagePool { pages }
@@ -1210,6 +1236,7 @@ impl PagePool {
         text_runs: Vec<TextRunCommand>,
         bars: Vec<BarCommand>,
         polylines: Vec<PolylineCommand>,
+        icons: Vec<IconCommand>,
     ) {
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
@@ -1229,9 +1256,15 @@ impl PagePool {
             .map(|command| bar_from_command(command, command.y, 0))
             .collect();
 
-        let mut changed = page.text_runs != text_runs || page.bars != bars;
+        let icons: Vec<Icon> = icons
+            .iter()
+            .map(|command| icon_from_command(command, 0))
+            .collect();
+
+        let mut changed = page.text_runs != text_runs || page.bars != bars || page.icons != icons;
         page.text_runs = text_runs;
         page.bars = bars;
+        page.icons = icons;
 
         // Refilled in place rather than rebuilt, so each slot is compared as it
         // is written the way the cell projection compares its own.
@@ -1259,11 +1292,12 @@ impl PagePool {
         text_runs: Vec<TextRunCommand>,
         bars: Vec<BarCommand>,
         polylines: Vec<PolylineCommand>,
+        icons: Vec<IconCommand>,
     ) -> bool {
         if self.page(index).is_none() {
             return false;
         }
-        self.set_decorations(index, text_runs, bars, polylines);
+        self.set_decorations(index, text_runs, bars, polylines, icons);
 
         let slot = self.slot(index);
         let page = &mut self.pages[slot];
@@ -1300,9 +1334,14 @@ impl PagePool {
 
     /// The page-targeted decorations buffered for document page `index`, or
     /// `None` when that page is not currently in the pool's window.
-    pub fn page_decorations(&self, index: u64) -> Option<(&[TextRun], &[Bar], &[Polyline])> {
+    pub fn page_decorations(&self, index: u64) -> Option<PageDecorations<'_>> {
         let page = &self.pages[self.slot(index)];
-        (page.index == Some(index)).then_some((&page.text_runs, &page.bars, &page.polylines))
+        (page.index == Some(index)).then_some((
+            &page.text_runs,
+            &page.bars,
+            &page.polylines,
+            &page.icons,
+        ))
     }
 
     /// The buffered grid for document page `index`, or `None` when that page is
@@ -1376,6 +1415,7 @@ impl PagePool {
             page.text_runs.clear();
             page.bars.clear();
             page.polylines.clear();
+            page.icons.clear();
         }
     }
 
@@ -1394,6 +1434,7 @@ impl PagePool {
             page.text_runs.clear();
             page.bars.clear();
             page.polylines.clear();
+            page.icons.clear();
         }
     }
 
@@ -1461,6 +1502,10 @@ struct Page {
     /// Page-targeted stroked paths captured from the fill that painted this
     /// slot, page-local. See [`Self::text_runs`].
     polylines: Vec<Polyline>,
+    /// Page-targeted status icons captured from the fill that painted this
+    /// slot, page-local, with their rows in whole cells. See
+    /// [`Self::text_runs`].
+    icons: Vec<Icon>,
 }
 
 /// A single grid cell: one character and how to render it.
@@ -2465,18 +2510,18 @@ mod tests {
         let mut pool = PagePool::new(3, 4, 2);
 
         pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
-        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new());
+        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new(), Vec::new());
         pool.content_changed(0, true);
 
         pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
-        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new());
+        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new(), Vec::new());
         assert!(
             !pool.content_changed(0, false),
             "the same cells under the same bar is not a change",
         );
 
         pool.fill(0, 3, 4).get_mut(0, 0).ch = 'a';
-        pool.set_decorations(0, Vec::new(), vec![bar_at(1)], Vec::new());
+        pool.set_decorations(0, Vec::new(), vec![bar_at(1)], Vec::new(), Vec::new());
         assert!(
             pool.content_changed(0, false),
             "the bar moved, so the page renders differently",
@@ -3176,7 +3221,7 @@ mod tests {
             let page = pool.fill(0, 2, 3);
             page.row_mut(0)[0].ch = 'x';
         }
-        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new());
+        pool.set_decorations(0, Vec::new(), vec![bar_at(0)], Vec::new(), Vec::new());
 
         pool.invalidate();
 
@@ -3191,7 +3236,7 @@ mod tests {
         assert_eq!(page.row(0)[0].ch, ' ', "the refill blanked what stood");
         assert_eq!(
             pool.page_decorations(0),
-            Some((&[][..], &[][..], &[][..])),
+            Some((&[][..], &[][..], &[][..], &[][..])),
             "and the dropped page took its decorations",
         );
     }
@@ -3329,7 +3374,7 @@ mod tests {
 
 #[cfg(test)]
 mod region_blit_tests {
-    use super::{whole_row, Bar, Damage, Grid, Polyline, Rgb, RowDamage, TextRun};
+    use super::{whole_row, Bar, Damage, Grid, Icon, IconKind, Polyline, Rgb, RowDamage, TextRun};
 
     /// A 2x2 source with a sentinel in every cell and one of each decoration
     /// kind at the region's own origin.
@@ -3365,6 +3410,15 @@ mod region_blit_tests {
             color: Rgb::new(1, 2, 3),
             seq: 0,
         }]);
+        grid.set_icons(vec![Icon {
+            top: 0,
+            left: 0,
+            kind: IconKind::Error,
+            color: Rgb::new(1, 2, 3),
+            size: 1,
+            offset: [0, 0],
+            seq: 0,
+        }]);
         grid
     }
 
@@ -3391,6 +3445,11 @@ mod region_blit_tests {
             dst.polylines()[0].points,
             [[32, 16], [48, 32]],
             "every point of a path moves with it"
+        );
+        assert_eq!(
+            (dst.icons()[0].top, dst.icons()[0].left),
+            (1, 2),
+            "an icon moves by the origin in whole cells"
         );
     }
 
@@ -3484,6 +3543,11 @@ mod region_blit_tests {
             dst.polylines()[0].points,
             [[32, 16], [48, 32]],
             "every point of a path moves with it"
+        );
+        assert_eq!(
+            (dst.icons()[0].top, dst.icons()[0].left),
+            (1, 2),
+            "an icon moves by the origin in whole cells"
         );
     }
 

@@ -9,15 +9,16 @@
 use super::Damage;
 use crate::grid::{
     from_command::{
-        bar_from_command, fill_polyline, grid_border_style, minimap_strip_from_command, panel_grid,
-        popover_overlay, text_run_from_command, StoredTextRun,
+        bar_from_command, fill_polyline, grid_border_style, icon_from_command,
+        minimap_strip_from_command, panel_grid, popover_overlay, text_run_from_command,
+        StoredTextRun,
     },
-    Bar, Border, BorderEdge, Grid, Icon, IconKind, Minimap, MinimapView, PagePool, Polyline, Rgb,
+    Bar, Border, BorderEdge, Grid, Icon, Minimap, MinimapView, PagePool, Polyline, Rgb,
     ScrollRegion, Sketch, TextRun,
 };
 use std::{collections::HashMap, mem};
 use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, IconCommand, LineLayoutCommand, MinimapCommand, PanelCommand,
+    BarCommand, BorderCommand, IconCommand, LineLayoutCommand, MinimapCommand, PanelCommand,
     PolylineCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand, SketchCommand,
 };
 
@@ -199,25 +200,8 @@ pub(super) fn apply_scroll_region(grid: &mut Grid, command: Option<ScrollRegionC
 /// coordinates need no guard here.
 pub(super) fn apply_icons(grid: &mut Grid, commands: &[IconCommand], seqs: &[u32]) {
     grid.fill_icons(commands.len(), |index| {
-        let command = &commands[index];
-        Icon {
-            top: command.top,
-            left: command.left,
-            kind: grid_icon_kind(command.kind),
-            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
-            size: command.size,
-            offset: command.offset,
-            seq: seqs[index],
-        }
+        icon_from_command(&commands[index], seqs[index])
     });
-}
-
-fn grid_icon_kind(kind: command::IconKind) -> IconKind {
-    match kind {
-        command::IconKind::Error => IconKind::Error,
-        command::IconKind::Warning => IconKind::Warning,
-        command::IconKind::Info => IconKind::Info,
-    }
 }
 
 /// Apply the stored logical-line layout to the grid, or clear it when none is
@@ -230,15 +214,16 @@ pub(super) fn apply_line_layout(grid: &mut Grid, command: Option<&LineLayoutComm
     );
 }
 
-/// Stamp the buffered pages' text runs and bars into the composed `out` grid,
-/// translated from page-local rows to the window's rows.
+/// Stamp the buffered pages' text runs, bars, paths, and icons into the
+/// composed `out` grid, translated from page-local rows to the window's rows.
 ///
 /// Each page the window straddles contributes its slot decorations shifted by
 /// the whole-row gap between the page's document start and the window top `top`,
 /// in sixteenth-cell units. A decoration lying fully above or below the composed
-/// rows is dropped. The sub-cell scroll fraction stays with the renderer, so
-/// these shift by the same pixel offset as the cells [`PagePool::compose`]
-/// copied.
+/// rows is dropped. An icon anchors on a whole row, so it shifts by whole rows
+/// and drops when that row falls outside the composed rows. The sub-cell scroll
+/// fraction stays with the renderer, so these shift by the same pixel offset as
+/// the cells [`PagePool::compose`] copied.
 ///
 /// The page decorations are already in grid form (see
 /// [`PagePool::set_decorations`]), so re-stamping is Copy-field arithmetic plus
@@ -256,19 +241,32 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
     let mut text_runs = mem::take(out.text_runs_mut());
     let mut bars = mem::take(out.bars_mut());
     let mut polylines = mem::take(out.polylines_mut());
+    let mut icons = mem::take(out.icons_mut());
     text_runs.clear();
     bars.clear();
+    icons.clear();
     // Paths keep their entries, so each one's point list is refilled rather than
     // collected fresh. `kept` counts the survivors, and the tail is dropped once
     // the pages are walked.
     let mut kept = 0;
 
     for page in first_page..=last_page {
-        let Some((page_runs, page_bars, page_polylines)) = pool.page_decorations(page as u64)
+        let Some((page_runs, page_bars, page_polylines, page_icons)) =
+            pool.page_decorations(page as u64)
         else {
             continue;
         };
-        let shift = 16 * (page * page_rows as i64 - top);
+        let rows_shift = page * page_rows as i64 - top;
+        let shift = 16 * rows_shift;
+
+        for icon in page_icons {
+            let row = i64::from(icon.top) + rows_shift;
+            if let Ok(top) = u16::try_from(row)
+                && row < out_rows
+            {
+                icons.push(Icon { top, ..*icon });
+            }
+        }
 
         for run in page_runs {
             let row = run.row as i64 + shift;
@@ -333,6 +331,7 @@ pub(super) fn stamp_pool_decorations(pool: &PagePool, out: &mut Grid, top: i64, 
     out.set_text_runs(text_runs);
     out.set_bars(bars);
     out.set_polylines(polylines);
+    out.set_icons(icons);
 }
 
 /// Replace the grid's text-run list with each stored text-run command's run.

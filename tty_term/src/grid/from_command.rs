@@ -14,13 +14,13 @@
 //! are both conversions in this direction.
 
 use crate::grid::{
-    Bar, BorderStyle, MinimapStrip, Overlay, Panel, PanelShadow, Polyline, PoolRegion, Rgb, Rgba,
-    TextRun,
+    Bar, BorderStyle, Icon, IconKind, MinimapStrip, Overlay, Panel, PanelShadow, Polyline,
+    PoolRegion, Rgb, Rgba, TextRun,
 };
 use std::sync::Arc;
 use stoatty_protocol::command::{
-    self, BarCommand, MinimapCommand, PanelCommand, PolylineCommand, PoolRegionCommand,
-    PopoverCommand, TextRunCommand,
+    self, BarCommand, IconCommand, MinimapCommand, PanelCommand, PolylineCommand,
+    PoolRegionCommand, PopoverCommand, TextRunCommand,
 };
 
 /// A declared text run as the terminal holds it between projections.
@@ -88,6 +88,24 @@ pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32) -> Bar {
         width: command.width,
         height: command.height,
         color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+        seq,
+    }
+}
+
+/// Project a declared [`IconCommand`] into its grid [`Icon`] at the `seq` its
+/// layer gives it.
+pub(crate) fn icon_from_command(command: &IconCommand, seq: u32) -> Icon {
+    Icon {
+        top: command.top,
+        left: command.left,
+        kind: match command.kind {
+            command::IconKind::Error => IconKind::Error,
+            command::IconKind::Warning => IconKind::Warning,
+            command::IconKind::Info => IconKind::Info,
+        },
+        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+        size: command.size,
+        offset: command.offset,
         seq,
     }
 }

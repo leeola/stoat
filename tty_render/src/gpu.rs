@@ -1089,7 +1089,7 @@ impl Renderer {
             dim,
         ];
 
-        // All four passes occlude this pool against the same panels, so the list
+        // All five passes occlude this pool against the same panels, so the list
         // is built once here rather than in each of them. It cannot share
         // `self.occluders`: that holds the live grid's list, which the live
         // passes still read on a frame that also composites pools.
@@ -1164,6 +1164,20 @@ impl Renderer {
             pool,
             slot,
         );
+        self.icon.prepare_composite(
+            device,
+            queue,
+            pool_grid.icons(),
+            metrics,
+            occluders,
+            resolution,
+            self.text.text_band(),
+            shift_rows,
+            origin_cells,
+            content_changed,
+            pool,
+            slot,
+        );
     }
 
     /// A pool's clip rectangle trimmed to the render target, or `None` when it
@@ -1202,6 +1216,9 @@ impl Renderer {
         self.bar.draw_composite(render_pass, pool, slot);
         self.polyline.draw_composite(render_pass, pool, slot);
         self.text.draw_composite_text_runs(render_pass, pool, slot);
+        // A page's status icons draw over its other chrome, as the live grid's
+        // icons do.
+        self.icon.draw_composite(render_pass, pool, slot);
     }
 
     /// Draw the cursor block over an already-composited `view`, clipped to
@@ -2815,7 +2832,10 @@ mod tests {
     };
     use std::iter;
     use stoatty_term::{
-        grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb, ScrollRegion, UnderlineStyle},
+        grid::{
+            BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Rgb, ScrollRegion,
+            UnderlineStyle,
+        },
         term::Damage,
     };
     use wgpu::{
@@ -3378,6 +3398,45 @@ mod tests {
             ([center(1), center(2)], inked(&shot, 2, 1, [80, 80, 80])),
             ([[240, 240, 240], [80, 80, 80]], true),
             "the named row draws its new color, and the unnamed one its earlier color and glyph",
+        );
+    }
+
+    /// A pool composite draws the status icons its grid carries, as the live
+    /// grid draws its own, so a gliding page shows its diagnostics.
+    #[test]
+    fn a_pool_composite_draws_its_icons() {
+        let (device, queue) = require_headless_device();
+        let ground = Rgb::new(80, 80, 80);
+        let (target, mut renderer) = readback_renderer(&device, ground);
+        let (rows, cols) = renderer.grid_size();
+        let live = filled_grid(rows, cols, ground);
+        let mut pool = filled_grid(rows, cols, ground);
+        pool.set_icons(vec![Icon {
+            top: 1,
+            left: 1,
+            kind: IconKind::Error,
+            color: Rgb::new(255, 0, 0),
+            size: 1,
+            offset: [0, 0],
+            seq: 0,
+        }]);
+
+        let shot = draw_pooled(
+            &device,
+            &queue,
+            &mut renderer,
+            &target,
+            &live,
+            &[whole_pool(&pool)],
+        );
+
+        assert_eq!(
+            (
+                inked(&shot, 1, 1, [80, 80, 80]),
+                inked(&shot, 0, 0, [80, 80, 80])
+            ),
+            (true, false),
+            "the icon's cell takes its mark, and the cell beside it stays bare",
         );
     }
 

@@ -1113,6 +1113,9 @@ struct FillTarget {
     /// Page-targeted stroked paths captured while this page paints. See
     /// [`Self::text_runs`].
     polylines: Vec<PolylineCommand>,
+    /// Page-targeted status icons captured while this page paints. See
+    /// [`Self::text_runs`].
+    icons: Vec<IconCommand>,
 }
 
 impl FillTarget {
@@ -1142,6 +1145,7 @@ impl FillTarget {
             text_runs: Vec::new(),
             bars: Vec::new(),
             polylines: Vec::new(),
+            icons: Vec::new(),
         }
     }
 
@@ -1499,10 +1503,11 @@ impl Terminal {
                 },
             };
             if let Some(command) = command {
-                // Fill and capture controls always act. A Bar, a TextRun's
-                // capture, and a batch of either are page-targeted decorations
-                // the open fill stores on its slot (the Bar arm, commit_capture,
-                // and the batch arms route them there), so they act too. The
+                // Fill and capture controls always act. A Bar, an Icon, a
+                // TextRun's capture, and a batch of bars or runs are
+                // page-targeted decorations the open fill stores on its slot
+                // (the Bar and Icon arms, commit_capture, and the batch arms
+                // route them there), so they act too. The
                 // minimap content, length, view, and drop
                 // commands are persistent state whose incremental splices must not
                 // be dropped mid-fill, so they act as well. The pool commands are
@@ -1530,6 +1535,7 @@ impl Terminal {
                         | Command::TextRuns(_)
                         | Command::Bar(_)
                         | Command::Bars(_)
+                        | Command::Icon(_)
                         | Command::Polyline(_)
                         | Command::PoolRegion(_)
                         | Command::Scroll(_)
@@ -1856,9 +1862,16 @@ impl Terminal {
             | Command::Panel(_)
             | Command::Scale(_)
             | Command::ScrollRegion(_)
-            | Command::Icon(_)
             | Command::LineLayout(_)
             | Command::Sketch(_) => self.stage_or_apply(command),
+            // An icon takes the bar's fork. A page-targeted one rides the open
+            // fill's slot, and a live one stages onto the grid.
+            Command::Icon(icon) => match &mut self.fill {
+                Some(fill) => {
+                    push_capped(&mut fill.icons, icon, &mut self.warned_decoration_cap);
+                },
+                None => self.stage_or_apply(Command::Icon(icon)),
+            },
             Command::Popover(popover) => self.begin_capture(CaptureTarget::Popover(popover)),
             Command::PopoverEnd => self.commit_capture(),
             Command::TextRun(text_run) => self.begin_capture(CaptureTarget::TextRun(text_run)),
@@ -3051,6 +3064,7 @@ impl Terminal {
         let text_runs = mem::take(&mut fill.text_runs);
         let bars = mem::take(&mut fill.bars);
         let polylines = mem::take(&mut fill.polylines);
+        let icons = mem::take(&mut fill.icons);
 
         if !fill.discard
             && let Some(pool) = self.pools.get_mut(&fill.pool)
@@ -3080,12 +3094,12 @@ impl Terminal {
                     let cells_changed =
                         project_term_cells(grid, &fill.term, &self.theme, &self.palette);
                     pool.page_pool
-                        .set_decorations(fill.index, text_runs, bars, polylines);
+                        .set_decorations(fill.index, text_runs, bars, polylines, icons);
                     pool.page_pool.content_changed(fill.index, cells_changed)
                 },
                 (None, false) => pool
                     .page_pool
-                    .redecorate(fill.index, text_runs, bars, polylines),
+                    .redecorate(fill.index, text_runs, bars, polylines, icons),
             };
             if changed {
                 pool.content_version = pool.content_version.wrapping_add(1);

@@ -134,9 +134,14 @@
 /// those frames whole, so an emitter sends the batches only to a terminal at
 /// [`BATCHED_DECORATIONS_PROTOCOL`] or later.
 ///
+/// Version 19 stores an `icon` declared inside a `fill` on that page, beside the
+/// page's bars, and draws it with the page when the pool composites. A
+/// terminal that predates it drops such an icon, so an emitter sends page icons
+/// only to a terminal at [`PAGE_ICONS_PROTOCOL`] or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -144,6 +149,13 @@ pub const PROTOCOL_VERSION: u32 = 18;
 /// An emitter facing an earlier terminal sends one `text_run` or `bar` frame
 /// per decoration instead.
 pub const BATCHED_DECORATIONS_PROTOCOL: u32 = 18;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal stores an `icon` that a pool
+/// page declares.
+///
+/// An emitter facing an earlier terminal marks a page's diagnostics with
+/// something other than an icon, since that terminal drops the icon.
+pub const PAGE_ICONS_PROTOCOL: u32 = 19;
 
 pub mod command;
 pub mod detect;

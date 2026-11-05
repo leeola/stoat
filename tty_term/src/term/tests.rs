@@ -2437,7 +2437,7 @@ fn page_decorations_past_the_cap_are_dropped() {
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);
 
-    let (_runs, bars, _polylines) = terminal.pools[&0]
+    let (_runs, bars, _polylines, _icons) = terminal.pools[&0]
         .page_pool
         .page_decorations(0)
         .expect("page buffered");
@@ -3027,7 +3027,7 @@ fn a_fill_captures_a_batch_onto_the_slot() {
         );
         terminal.project(&mut grid);
 
-        let (runs, bars, _) = terminal.pools[&0]
+        let (runs, bars, _, _) = terminal.pools[&0]
             .page_pool
             .page_decorations(0)
             .expect("page buffered");
@@ -4052,7 +4052,7 @@ fn redecorate(
 
 /// The texts of the runs buffered on page `index` of pool 2.
 fn page_run_texts(terminal: &Terminal, index: u64) -> Vec<String> {
-    let (runs, _, _) = terminal.pools[&2]
+    let (runs, _, _, _) = terminal.pools[&2]
         .page_pool
         .page_decorations(index)
         .expect("page buffered");
@@ -4109,6 +4109,31 @@ fn a_decorations_only_fill_for_an_unbuffered_page_is_dropped() {
         "no cells to draw over, so nothing moved"
     );
     assert!(terminal.pools[&2].page_pool.page_decorations(3).is_none());
+}
+
+/// A decorations-only fill replaces a page's icons as it does its runs, and a
+/// changed icon is a new version of the page.
+#[test]
+fn a_decorations_only_fill_replaces_the_page_icons() {
+    let mut terminal = Terminal::new(4, 8, Theme::default());
+    declare_window_pool(&mut terminal, 2, 3);
+    let (filled, _) = refill(&mut terminal, 0, b"hi");
+
+    let mut stream = Vec::new();
+    encode_fill_decorations_scope(&mut stream, 2, 0, |out| {
+        out.extend(encode_icon(&page_icon(1)));
+    });
+    terminal.advance(&stream);
+
+    let (_, _, _, icons) = terminal.pools[&2]
+        .page_pool
+        .page_decorations(0)
+        .expect("page buffered");
+    let version = terminal.pool_content_version(2).expect("pool declared");
+    assert_eq!(
+        (icons.to_vec(), version != filled),
+        (vec![grid_icon(1)], true),
+    );
 }
 
 /// The window stamp moves with what page 0 draws, through a whole fill and
@@ -4361,7 +4386,7 @@ fn fill_captures_a_polyline_onto_the_slot() {
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);
 
-    let (_, _, polylines) = terminal.pools[&0]
+    let (_, _, polylines, _) = terminal.pools[&0]
         .page_pool
         .page_decorations(0)
         .expect("page buffered");
@@ -4595,7 +4620,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);
 
-    let (runs, bars, _) = terminal.pools[&0]
+    let (runs, bars, _, _) = terminal.pools[&0]
         .page_pool
         .page_decorations(0)
         .expect("page buffered");
@@ -4684,6 +4709,83 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
     );
 }
 
+/// An icon streamed inside a page rides onto its slot in grid form at the base
+/// layer, and the live grid stays without it.
+#[test]
+fn fill_captures_an_icon_onto_the_slot() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    let mut grid = Grid::new(2, 4);
+    declare_pool(&mut terminal, 0, 2, 4);
+
+    let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+    stream.extend_from_slice(&encode_icon(&page_icon(1)));
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+    terminal.project(&mut grid);
+
+    let (_, _, _, icons) = terminal.pools[&0]
+        .page_pool
+        .page_decorations(0)
+        .expect("page buffered");
+    assert_eq!(
+        (icons.to_vec(), grid.icons().to_vec()),
+        (vec![grid_icon(1)], vec![]),
+    );
+}
+
+/// A pool composite stamps a page's icon by the whole rows between the page
+/// and the window top, and drops one whose row lies above or below the window.
+#[test]
+fn project_pool_stamps_page_icons_by_whole_rows() {
+    let mut terminal = Terminal::new(2, 4, Theme::default());
+    let mut out = Grid::new(3, 4);
+    declare_pool(&mut terminal, 0, 2, 4);
+
+    let mut stream = encode_fill(&FillCommand { pool: 0, index: 0 });
+    stream.extend_from_slice(&encode_icon(&page_icon(0)));
+    stream.extend_from_slice(&encode_fill(&FillCommand { pool: 0, index: 1 }));
+    stream.extend_from_slice(&encode_icon(&page_icon(0)));
+    stream.extend_from_slice(&encode_icon(&page_icon(5)));
+    stream.extend_from_slice(&encode_fill_end());
+    terminal.advance(&stream);
+
+    // Half a page down puts page 0's row 0 above the window, page 1's row 0
+    // on window row 1, and page 1's row 5 past the window's three rows.
+    assert_eq!(
+        (
+            terminal.project_pool(0, &mut out, 0.5),
+            out.icons().to_vec()
+        ),
+        (Some((0.0, 1)), vec![grid_icon(1)]),
+    );
+}
+
+/// A page-local warning icon on page row `top`.
+fn page_icon(top: u16) -> IconCommand {
+    IconCommand {
+        top,
+        left: 2,
+        kind: ProtoIconKind::Warning,
+        color: [1, 2, 3],
+        size: 1,
+        offset: [0, 0],
+    }
+}
+
+/// [`page_icon`] on row `top` in grid form, at the base layer a page
+/// decoration takes.
+fn grid_icon(top: u16) -> Icon {
+    Icon {
+        top,
+        left: 2,
+        kind: IconKind::Warning,
+        color: Rgb::new(1, 2, 3),
+        size: 1,
+        offset: [0, 0],
+        seq: 0,
+    }
+}
+
 /// A gliding pool stamps into the same grid every frame, and the lists it
 /// writes are now the ones already there rather than fresh ones. A stamp
 /// therefore has to replace what it finds, including a path list left
@@ -4766,7 +4868,7 @@ fn refilling_a_slot_clears_its_decorations() {
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);
 
-    let (runs, bars, _) = terminal.pools[&0]
+    let (runs, bars, _, _) = terminal.pools[&0]
         .page_pool
         .page_decorations(0)
         .expect("page buffered");
@@ -4822,7 +4924,7 @@ fn a_page_paints_into_a_reused_context_without_the_previous_page() {
         "and in the default foreground, not the color the last page left set",
     );
 
-    let (runs, bars, polylines) = terminal.pools[&0]
+    let (runs, bars, polylines, _) = terminal.pools[&0]
         .page_pool
         .page_decorations(1)
         .expect("page buffered");
