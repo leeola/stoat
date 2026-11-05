@@ -70,6 +70,9 @@ pub struct Help {
     context: SnapshotState,
     entries: Vec<HelpEntry>,
     filtered: Vec<usize>,
+    /// The lowercased search text that [`Self::filtered`] ran on, which the
+    /// list marks where it occurs in each name.
+    needle: String,
     selected: usize,
     detail_scroll: u16,
     /// Content-version stamp for the help-list pool, from the shared generation
@@ -188,6 +191,7 @@ impl Help {
             context,
             entries: Vec::new(),
             filtered: Vec::new(),
+            needle: String::new(),
             selected: 0,
             detail_scroll: 0,
             generation: crate::picker::next_generation(),
@@ -241,6 +245,10 @@ impl Help {
 
     pub fn filtered(&self) -> &[usize] {
         &self.filtered
+    }
+
+    pub(crate) fn needle(&self) -> &str {
+        &self.needle
     }
 
     pub fn selected(&self) -> usize {
@@ -383,6 +391,7 @@ impl Help {
 
     fn refilter(&mut self, ws: &Workspace) {
         let needle = self.input.text(ws).to_lowercase();
+        self.needle.clone_from(&needle);
 
         let key = {
             let mut hasher = DefaultHasher::new();
@@ -528,6 +537,7 @@ mod tests {
         test_harness::{keys, TestHarness},
     };
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::style::{Color, Modifier};
 
     fn active_binding(label: &str, action_name: &str) -> (String, Vec<ResolvedAction>) {
         (
@@ -980,7 +990,9 @@ mod tests {
 
     #[test]
     fn help_detail_lists_the_follow_changes_binding_and_condition() {
-        let mut h = crate::Stoat::test();
+        // The bindings table follows the long description, so the pane needs
+        // the rows of a taller terminal to show it.
+        let mut h = TestHarness::with_size(120, 50);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         send_key(&mut h, keys::key(KeyCode::BackTab));
         type_str(&mut h, "FollowChanges");
@@ -1112,5 +1124,72 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.type_keys("escape");
         h.assert_snapshot("help_normal_mode");
+    }
+
+    /// A live binding's row ends in `live`, and a row whose predicates fail where
+    /// help opened ends in `not here`. `OpenAbove` is bound to `O` in normal
+    /// mode and again in select mode, and help opens from normal mode.
+    #[test]
+    fn a_binding_row_says_whether_it_is_live() {
+        let mut h = TestHarness::with_size(120, 50);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.type_text("openabove");
+        let _ = h.snapshot();
+        let text = h.rendered_text();
+
+        let statuses: Vec<&str> = text
+            .lines()
+            .filter_map(|line| {
+                ["\u{25CF} live", "\u{25CB} not here"]
+                    .into_iter()
+                    .find(|status| line.contains(status))
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            ["\u{25CF} live", "\u{25CB} not here"],
+            "the normal-mode binding, then the select-mode one:\n{text}",
+        );
+    }
+
+    /// A filtered row marks the needle in its name with the list's match style.
+    /// The needle starts the first row's name, so its first chars carry the mark
+    /// and the char after them does not.
+    #[test]
+    fn a_filtered_row_marks_the_needle_in_its_name() {
+        let mut h = crate::Stoat::test();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        h.type_text("move");
+        let _ = h.snapshot();
+
+        let list = crate::test_fixture::help_layout(&h).list;
+        let buf = h.rendered_buffer();
+        let text: String = (list.x..list.x + list.width)
+            .map(|x| buf[(x, list.y)].symbol())
+            .collect();
+        let start = text[..text
+            .find("Move")
+            .expect("the first row names a Move action")]
+            .chars()
+            .count() as u16;
+        let marks: Vec<_> = (0..5)
+            .map(|i| {
+                let cell = &buf[(list.x + start + i, list.y)];
+                (cell.fg, cell.modifier)
+            })
+            .collect();
+
+        let matched = (Color::Rgb(0xe8, 0xbd, 0x6a), Modifier::BOLD);
+        assert_eq!(
+            marks,
+            [
+                matched,
+                matched,
+                matched,
+                matched,
+                (Color::Rgb(0xdf, 0xe2, 0xe8), Modifier::empty()),
+            ],
+            "the M, o, v, e of the name, then the next char: {text:?}",
+        );
     }
 }

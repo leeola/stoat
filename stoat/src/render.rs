@@ -2073,7 +2073,6 @@ pub(crate) fn frame(
                     ws,
                     &stoat.theme,
                     chrome,
-                    &stoat.settings.mode_badges,
                     full,
                     modal_zoom_steps(&stoat.modal_zoom, ModalKind::Help),
                     buf,

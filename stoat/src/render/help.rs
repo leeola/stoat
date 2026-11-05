@@ -1,22 +1,39 @@
 use crate::{
-    help::{format_arg, Help, SnapshotState},
+    help::{format_arg, Help, HelpEntry, SnapshotState},
     keymap::{collect_predicate_fields, evaluate, KeymapState, ResolvedAction, StateValue},
     render::{
-        pane::mode_segment,
-        text::{wrap_text, write_str, write_str_clipped},
+        picker::{FilterHeader, FILTER_PROMPT},
+        text::{wrap_text, write_str_clipped},
     },
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, Borders},
 };
+use std::ops::Range;
+use stoat_action::registry;
 use stoat_config::Predicate;
+use unicode_width::UnicodeWidthStr;
 
-/// Box rows the chrome takes around the body. Two borders, the search row, and
-/// the status row under it.
-const CHROME_ROWS: u16 = 4;
+/// Box rows the chrome takes around the body, which are the two borders, the
+/// header row and the rule under it, and the footer row.
+const CHROME_ROWS: u16 = 5;
+
+/// The help footer's hints, each a bound key and the word for what it does.
+const HELP_HINTS: [(&str, &str); 6] = [
+    ("Enter", "run"),
+    ("j/k", "move"),
+    ("C-d/C-u", "scroll detail"),
+    ("S-Tab", "applicable / all"),
+    ("i", "search"),
+    ("Esc", "list"),
+];
+
+/// Widest key a list row or a binding row keeps before it clips, so one long
+/// chord does not push every name across the pane.
+const KEY_COLUMNS: usize = 10;
 
 /// Rows the help list would need for the scope's whole entry set.
 ///
@@ -35,12 +52,15 @@ pub(crate) fn help_content_rows(help: &Help) -> u16 {
 pub(crate) struct HelpLayout {
     /// The bordered modal box.
     pub(crate) modal: Rect,
-    /// Inside the border: search row, status row, then the body split.
+    /// Inside the border, holding the header rows, the body split, and the
+    /// footer.
     pub(crate) inner: Rect,
     /// The entry list, also a smooth-scroll pool region.
     pub(crate) list: Rect,
     /// The selected entry's detail, also a smooth-scroll pool region.
     pub(crate) detail: Rect,
+    /// The footer row of key hints, under the list and the detail.
+    pub(crate) footer: Rect,
 }
 
 /// Lay out the help modal within `area`, or `None` when `area` is too small to
@@ -59,17 +79,17 @@ pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<Hel
         (40, 12),
         zoom,
     )?;
-    // The title rides the top border, so it does not shrink the inner rect.
     let inner = Block::default().borders(Borders::ALL).inner(modal);
 
     let body_top = inner.y + 2;
-    let body_height = (inner.y + inner.height).saturating_sub(body_top);
+    let footer_y = (inner.y + inner.height).saturating_sub(1);
+    let body_height = footer_y.saturating_sub(body_top);
     if body_height == 0 {
         return None;
     }
 
     let body_width = inner.width;
-    let list_width = (body_width * 42 / 100).max(20);
+    let list_width = (body_width * 52 / 100).max(20);
     let detail_width = body_width.saturating_sub(list_width + 1);
     let list = Rect::new(inner.x, body_top, list_width, body_height);
     let detail = Rect::new(
@@ -84,6 +104,7 @@ pub(crate) fn help_layout(area: Rect, content_rows: u16, zoom: i8) -> Option<Hel
         inner,
         list,
         detail,
+        footer: Rect::new(inner.x, footer_y, inner.width, 1),
     })
 }
 
@@ -94,104 +115,96 @@ pub(crate) fn render_help(
     ws: &mut crate::workspace::Workspace,
     theme: &crate::theme::Theme,
     chrome: &crate::render::editor::ResolvedChrome,
-    mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
     zoom: i8,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     use crate::help::{help_input_mode, HelpInput, HelpScope};
-    let input_mode = help_input_mode(stoat_mode);
 
     let Some(layout) = help_layout(area, help_content_rows(help), zoom) else {
         return;
     };
 
-    let title = match help.scope() {
-        HelpScope::Active => format!(" help: active ({}) ", help.snapshot_mode()),
-        HelpScope::All => " help: all actions ".to_string(),
-    };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HELP);
     crate::render::clear_modal(layout.modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
+    crate::render::chrome::modal_frame(buf, layout.modal, None, modal_style, theme, &mut *scene);
+
+    // Normal mode walks the list with plain letter keys, so its prompt differs
+    // from the one a typed search shows.
+    let prompt = match help_input_mode(stoat_mode) {
+        HelpInput::Insert => FILTER_PROMPT,
+        HelpInput::Normal => ":",
+    };
+    let chip = match help.scope() {
+        HelpScope::Active => "applicable",
+        HelpScope::All => "all",
+    };
+    crate::render::picker::filter_header(
         buf,
-        layout.modal,
-        Some(title.as_str()),
-        modal_style,
+        layout.inner,
+        &FilterHeader {
+            label: "help",
+            prompt,
+            count: Some((help.filtered().len(), help.entries().len())),
+            chip: Some(chip),
+        },
+        &help.input,
+        ws,
         theme,
+        chrome,
         &mut *scene,
     );
 
-    let inner = layout.inner;
-    let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let separator = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
-
-    let search_row = inner.y;
-    let prompt = match input_mode {
-        HelpInput::Insert => "> ",
-        HelpInput::Normal => ": ",
-    };
-    write_str(buf, inner.x, search_row, prompt, prompt_style);
-    let input_area = Rect::new(inner.x + 2, search_row, inner.width.saturating_sub(2), 1);
-    help.input.render(
-        &mut ws.editors,
-        input_area,
-        true,
-        "prompt",
-        theme,
-        chrome,
-        mode_badges,
-        buf,
-    );
-
-    let status_row = search_row + 1;
-    let status_base = theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
-    for col in inner.x..inner.x + inner.width {
-        buf[(col, status_row)].set_char(' ').set_style(status_base);
-    }
-    let mode_str = match input_mode {
-        HelpInput::Insert => "insert",
-        HelpInput::Normal => "normal",
-    };
-    let (mode_label, mode_bg) = mode_segment(mode_str, theme, mode_badges);
-    let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
-    let chip = format!(" {mode_label} ");
-    write_str(buf, inner.x, status_row, &chip, mode_style);
-
-    let summary = context_summary(help.context());
-    if !summary.is_empty() {
-        let summary_x = inner.x + chip.chars().count() as u16 + 1;
-        let summary_style = status_base.patch(theme.get(crate::theme::scope::UI_TEXT_MUTED));
-        write_str_clipped(
-            buf,
-            summary_x,
-            status_row,
-            &summary,
-            summary_style,
-            inner.x + inner.width,
-        );
-    }
-
     let list_rect = layout.list;
-    let detail_rect = layout.detail;
-
     crate::render::chrome::vline(
         buf,
         list_rect.x + list_rect.width,
         list_rect.y,
         list_rect.height,
-        separator,
+        theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
         scene,
     );
 
     let list_scroll =
         crate::render::picker::window_start(help.selected(), list_rect.height as usize);
     paint_help_list_rows(help, list_rect, list_scroll, theme, buf, scene);
-    paint_help_detail_rows(help, detail_rect, help.detail_scroll() as usize, theme, buf);
+    paint_help_detail_rows(
+        help,
+        layout.detail,
+        help.detail_scroll() as usize,
+        theme,
+        buf,
+    );
+
+    let note = footer_note(help);
+    crate::render::picker::modal_footer(
+        buf,
+        layout.footer,
+        &HELP_HINTS,
+        Some(&note),
+        None,
+        theme,
+        scene,
+    );
+}
+
+/// The footer's note, which is the mode help opened from and the context it
+/// captured there.
+fn footer_note(help: &Help) -> String {
+    let summary = context_summary(help.context());
+    match summary.is_empty() {
+        true => help.snapshot_mode().to_owned(),
+        false => format!("{} \u{00B7} {summary}", help.snapshot_mode()),
+    }
 }
 
 /// Paint help entry rows into `area` starting at `start_row`, one row per entry,
 /// with the right-aligned key column, action name, and short description.
+///
+/// Each key reads bold in `ui.key_label`, and an entry with no key reads U+2014
+/// in `ui.text.disabled`. The search text is marked where it occurs in each
+/// name, and the short description reads in `ui.text.dim`.
 ///
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render identical
@@ -206,8 +219,12 @@ pub(crate) fn paint_help_list_rows(
 ) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
-    let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
-    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let key_style = theme
+        .get(crate::theme::scope::UI_KEY_LABEL)
+        .add_modifier(Modifier::BOLD);
+    let unbound_style = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
+    let desc_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let match_style = theme.list_match();
 
     let filtered = help.filtered();
     let entries = help.entries();
@@ -225,12 +242,11 @@ pub(crate) fn paint_help_list_rows(
             entries[i]
                 .key_label
                 .as_deref()
-                .map(|s| s.chars().count())
-                .unwrap_or(0)
+                .map_or(1, |label| label.chars().count())
         })
         .max()
         .unwrap_or(0)
-        .min(10);
+        .min(KEY_COLUMNS);
 
     let row_end = area.x + area.width;
     for (row_idx, &entry_idx) in filtered.iter().skip(start_row).take(rows).enumerate() {
@@ -250,32 +266,81 @@ pub(crate) fn paint_help_list_rows(
             crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
 
-        let key_text = entry.key_label.as_deref().unwrap_or("");
+        let (key_text, key_cell_style) = match entry.key_label.as_deref() {
+            Some(label) => (label, key_style),
+            None => ("\u{2014}", unbound_style),
+        };
         let padded = format!("{key_text:>width$}", width = key_col_width);
-        let key_display_style = if is_selected { base } else { key_style };
-        write_str_clipped(buf, area.x + 1, row, &padded, key_display_style, row_end);
+        write_str_clipped(
+            buf,
+            area.x + 1,
+            row,
+            &padded,
+            base.patch(key_cell_style),
+            row_end,
+        );
+
+        let name = entry.def.name();
         let name_col = area.x + 1 + key_col_width as u16 + 2;
         if name_col < row_end {
-            write_str_clipped(buf, name_col, row, entry.def.name(), base, row_end);
+            write_str_clipped(buf, name_col, row, name, base, row_end);
+            for col in needle_span(name, help.needle()).unwrap_or_default() {
+                let col = name_col + col as u16;
+                if col < row_end {
+                    buf[(col, row)].set_style(match_style);
+                }
+            }
         }
-        let name_w = entry.def.name().chars().count() as u16;
+        let name_w = name.chars().count() as u16;
         let desc_col = name_col + name_w + 2;
         if desc_col < row_end {
-            let desc_style = if is_selected { base } else { muted };
             write_str_clipped(
                 buf,
                 desc_col,
                 row,
                 entry.def.short_desc(),
-                desc_style,
+                base.patch(desc_style),
                 row_end,
             );
         }
     }
 }
 
+/// The chars of `name` where `needle`, already lowercase, first occurs in the
+/// name read in lowercase, or `None` for an empty needle or a name without it.
+fn needle_span(name: &str, needle: &str) -> Option<Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let lower = name.to_lowercase();
+    let byte = lower.find(needle)?;
+    let start = lower[..byte].chars().count();
+    Some(start..start + needle.chars().count())
+}
+
+/// One row of the help detail, as spans painted left to right from the pane's
+/// first column, and a status that ends one cell from its right edge.
+#[derive(Default)]
+struct DetailLine {
+    spans: Vec<(String, Style)>,
+    status: Option<(&'static str, Style)>,
+}
+
+impl DetailLine {
+    fn text(text: impl Into<String>, style: Style) -> Self {
+        Self {
+            spans: vec![(text.into(), style)],
+            status: None,
+        }
+    }
+}
+
 /// Paint the selected help entry's detail into `area` starting at line
-/// `start_row`: name, binding, description, parameters, and example.
+/// `start_row`, on the `ui.surface.raised` fill.
+///
+/// The detail reads as the entry's name and palette command, its short and long
+/// descriptions, a `bindings` table, and its parameters. A table row is a
+/// binding's key, its predicates, and whether it is live where help opened.
 ///
 /// Shared by the live detail pane, which derives `start_row` from
 /// `detail_scroll`, and the smooth-scroll pool, which paints absolute pages.
@@ -286,10 +351,12 @@ pub(crate) fn paint_help_detail_rows(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
 ) {
-    let heading = theme.get(crate::theme::scope::UI_HEADING);
-    let body_style = theme.get(crate::theme::scope::UI_TEXT);
-    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let raised = theme.get(crate::theme::scope::UI_SURFACE_RAISED);
+    for y in area.y..area.y + area.height {
+        for x in area.x..area.x + area.width {
+            buf[(x, y)].set_char(' ').set_style(raised);
+        }
+    }
 
     let Some(entry) = help.selected_entry() else {
         return;
@@ -299,65 +366,151 @@ pub(crate) fn paint_help_detail_rows(
         return;
     }
 
-    let mut lines: Vec<(String, Style)> = Vec::new();
-    lines.push((entry.def.name().to_string(), heading));
+    let rows = area.height as usize;
+    let end_x = area.x + area.width;
+    let lines = detail_lines(help, entry, width, theme);
+    for (row_idx, line) in lines.iter().skip(start_row).take(rows).enumerate() {
+        let row = area.y + row_idx as u16;
+        let mut spans_end = end_x;
+        if let Some((status, style)) = line.status {
+            let x = end_x.saturating_sub(1 + status.width() as u16);
+            write_str_clipped(buf, x, row, status, style, end_x);
+            spans_end = x.saturating_sub(1);
+        }
+        let mut x = area.x + 1;
+        for (text, style) in &line.spans {
+            write_str_clipped(buf, x, row, text, *style, spans_end);
+            x = x.saturating_add(text.width() as u16);
+        }
+    }
+}
 
+/// The detail's rows for `entry`, wrapping its long description and parameters
+/// at `width`.
+fn detail_lines(
+    help: &Help,
+    entry: &HelpEntry,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> Vec<DetailLine> {
+    let text = theme.get(crate::theme::scope::UI_TEXT);
+    let bold = text.add_modifier(Modifier::BOLD);
+
+    let mut title = vec![(entry.def.name().to_owned(), bold)];
+    if let Some(command) = registry::lookup(entry.def.name()) {
+        title.push((
+            format!(" :{}", command.command_name),
+            theme.get(crate::theme::scope::UI_TEXT_MUTED),
+        ));
+    }
+    let mut lines = vec![
+        DetailLine {
+            spans: title,
+            status: None,
+        },
+        DetailLine::text(entry.def.short_desc(), text),
+        DetailLine::default(),
+    ];
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    for wrapped in wrap_text(entry.def.long_desc(), width) {
+        lines.push(DetailLine::text(wrapped, dim));
+    }
+
+    lines.push(DetailLine::default());
+    lines.push(DetailLine::text("bindings", bold));
+    lines.extend(binding_lines(help, entry, theme));
+
+    let params = entry.def.params();
+    if !params.is_empty() {
+        lines.push(DetailLine::default());
+        lines.push(DetailLine::text(
+            "Parameters:",
+            theme.get(crate::theme::scope::UI_HEADING),
+        ));
+        for p in params {
+            let required = if p.required { "*" } else { "" };
+            let head = format!("  {}{}: {}: {}", p.name, required, p.kind, p.description);
+            for wrapped in wrap_text(&head, width) {
+                lines.push(DetailLine::text(wrapped, text));
+            }
+        }
+    }
+    lines
+}
+
+/// The `bindings` table's rows for `entry`, one per binding with its key
+/// right-aligned, its first predicate, and its status.
+///
+/// A further predicate takes a row of its own under the key column. So does a
+/// binding's action sequence when it says more than the action's name, which
+/// is what keeps `AutoReload(follow)` apart from `AutoReload(on)`.
+fn binding_lines(help: &Help, entry: &HelpEntry, theme: &crate::theme::Theme) -> Vec<DetailLine> {
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let bindings = help.bindings_for(entry.def.name());
     if bindings.is_empty() {
-        lines.push(("(unbound)".to_string(), muted));
-    } else {
-        lines.push(("Bindings:".to_string(), heading));
-        for binding in bindings {
+        return vec![DetailLine::text("(unbound)", muted)];
+    }
+
+    let dim = theme.get(crate::theme::scope::UI_TEXT_DIM);
+    let live_key = theme
+        .get(crate::theme::scope::UI_KEY_LABEL)
+        .add_modifier(Modifier::BOLD);
+    let off_key = theme
+        .get(crate::theme::scope::UI_TEXT_DISABLED)
+        .add_modifier(Modifier::BOLD);
+    let live = (
+        "\u{25CF} live",
+        theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE),
+    );
+    let not_here = ("\u{25CB} not here", muted);
+    let key_width = bindings
+        .iter()
+        .map(|binding| binding.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(KEY_COLUMNS);
+    let indent = " ".repeat(key_width + 2);
+
+    let mut lines = Vec::new();
+    for binding in bindings {
+        let (key_style, predicate_style, status) = match binding.active {
+            true => (live_key, dim, live),
+            false => (off_key, muted, not_here),
+        };
+        let mut predicates = binding.predicates.iter().map(|predicate| {
+            predicate_line(predicate, help.context())
+                .trim_start()
+                .to_owned()
+        });
+        lines.push(DetailLine {
+            spans: vec![
+                (format!("{:>key_width$}  ", binding.label), key_style),
+                (predicates.next().unwrap_or_default(), predicate_style),
+            ],
+            status: Some(status),
+        });
+        for predicate in predicates {
+            lines.push(DetailLine {
+                spans: vec![(indent.clone(), muted), (predicate, predicate_style)],
+                status: None,
+            });
+        }
+        let says_more = binding.actions.len() > 1
+            || binding.actions.iter().any(|action| !action.args.is_empty());
+        if says_more {
             let sequence = binding
                 .actions
                 .iter()
                 .map(format_action)
                 .collect::<Vec<_>>()
                 .join(", ");
-            let head = format!("  {}  {sequence}", binding.label);
-            let head_style = if binding.active { key_style } else { muted };
-            for wrapped in wrap_text(&head, width) {
-                lines.push((wrapped, head_style));
-            }
-            for predicate in &binding.predicates {
-                for wrapped in wrap_text(&predicate_line(predicate, help.context()), width) {
-                    lines.push((wrapped, muted));
-                }
-            }
+            lines.push(DetailLine {
+                spans: vec![(indent.clone(), muted), (sequence, muted)],
+                status: None,
+            });
         }
     }
-
-    lines.push((entry.def.short_desc().to_string(), body_style));
-    lines.push((String::new(), body_style));
-
-    for wrapped in wrap_text(entry.def.long_desc(), width) {
-        lines.push((wrapped, body_style));
-    }
-
-    let params = entry.def.params();
-    if !params.is_empty() {
-        lines.push((String::new(), body_style));
-        lines.push(("Parameters:".to_string(), heading));
-        for p in params {
-            let required = if p.required { "*" } else { "" };
-            let head = format!("  {}{}: {}: {}", p.name, required, p.kind, p.description);
-            for wrapped in wrap_text(&head, width) {
-                lines.push((wrapped, body_style));
-            }
-        }
-    }
-
-    lines.push((String::new(), body_style));
-    lines.push(("Example:".to_string(), heading));
-    let example = format_example(entry);
-    lines.push((format!("  {example}"), muted));
-
-    let rows = area.height as usize;
-    let end_x = area.x + area.width;
-    for (row_idx, (text, style)) in lines.iter().skip(start_row).take(rows).enumerate() {
-        let row = area.y + row_idx as u16;
-        write_str_clipped(buf, area.x + 1, row, text, *style, end_x);
-    }
+    lines
 }
 
 /// Render one action of a binding's sequence as `name(arg, ...)`, or bare `name`
@@ -411,9 +564,9 @@ fn display_state_value(value: &StateValue) -> String {
     }
 }
 
-/// Summarize the captured help context for the status row. Each set string field
-/// renders as `field value` and each true boolean as the bare field, joined by
-/// ` · `.
+/// Summarize the captured help context for the footer's note. Each set string
+/// field renders as `field value` and each true boolean as the bare field,
+/// joined by ` · `.
 fn context_summary(context: &SnapshotState) -> String {
     let mut parts = Vec::new();
     for field in ["view", "pane", "modal", "token", "lang"] {
@@ -427,20 +580,6 @@ fn context_summary(context: &SnapshotState) -> String {
         }
     }
     parts.join(" · ")
-}
-
-fn format_example(entry: &crate::help::HelpEntry) -> String {
-    let name = entry.def.name();
-    let params = entry.def.params();
-    if params.is_empty() {
-        return format!("{name}()");
-    }
-    if !entry.bound_args.is_empty() {
-        let args: Vec<String> = entry.bound_args.iter().filter_map(format_arg).collect();
-        return format!("{name}({})", args.join(", "));
-    }
-    let placeholders: Vec<String> = params.iter().map(|p| p.name.to_string()).collect();
-    format!("{name}({})", placeholders.join(", "))
 }
 
 #[cfg(test)]
@@ -512,7 +651,7 @@ mod tests {
     #[test]
     fn a_long_entry_list_grows_the_box_to_show_every_row() {
         let laid = help_layout(Rect::new(0, 0, 200, 60), 50, 0).expect("the area hosts help");
-        assert_eq!(laid.modal.height, 54, "fifty entries plus four chrome rows");
+        assert_eq!(laid.modal.height, 55, "fifty entries plus five chrome rows");
         assert_eq!(
             laid.list.height, 50,
             "and the body then holds all fifty without scrolling"
@@ -537,6 +676,42 @@ mod tests {
         assert!(
             help_layout(Rect::new(0, 0, 200, 13), 5, 0).is_none(),
             "so does a height under the 12-row minimum plus its thinnest margin"
+        );
+    }
+
+    /// The footer row ends in its note, which names the mode help opened from and
+    /// then the context it captured there.
+    #[test]
+    fn the_footer_ends_in_the_mode_and_context_note() {
+        let mut h = crate::test_harness::TestHarness::with_size(200, 40);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
+        let help = h.stoat.help.take().expect("help is open");
+        let theme = h.stoat.theme.clone();
+        let chrome = crate::render::editor::ResolvedChrome::resolve(&theme);
+        let area = Rect::new(0, 0, 200, 40);
+        let mut buf = Buffer::empty(area);
+        render_help(
+            &help,
+            "insert",
+            h.stoat.active_workspace_mut(),
+            &theme,
+            &chrome,
+            area,
+            0,
+            &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
+        );
+
+        let footer = help_layout(area, help_content_rows(&help), 0)
+            .expect("help fits")
+            .footer;
+        h.stoat.help = Some(help);
+        let text: String = (footer.x..footer.x + footer.width)
+            .map(|x| buf[(x, footer.y)].symbol())
+            .collect();
+        assert!(
+            text.ends_with("normal \u{00B7} view file \u{00B7} pane editor "),
+            "the footer reads {text:?}"
         );
     }
 }

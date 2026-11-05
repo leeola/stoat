@@ -306,6 +306,29 @@ fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     }
 }
 
+/// The help modal's detail pane fills with the raised surface.
+///
+/// The pane spans most rows of the box's right side, so its raised cells reach
+/// many rows, where the footer alone raises only one.
+#[test]
+fn the_help_detail_draws_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "?<Settle>");
+
+    let mut rows: Vec<u16> = cells_of(&shot, RAISED)
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect();
+    rows.dedup();
+    if rows.len() < 10 {
+        let frame = keep_frame(&shot, &mut home, "help_detail");
+        panic!(
+            "the raised cells reach rows {rows:?}, too few for a detail pane; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A hover ends in a footer row on the raised surface, inside the overlay box.
 ///
 /// The server loads the crate before it answers, so the hover key plays again

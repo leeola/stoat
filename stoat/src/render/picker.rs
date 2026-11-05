@@ -164,17 +164,21 @@ fn paint_header_row(
     Rect::new(query_x, y, right.saturating_sub(query_x), 1)
 }
 
-/// Paint a modal's footer row into `rect`, with its key hints from the left and
-/// its page dots at the right.
+/// Paint a modal's footer row into `rect`, with its key hints from the left, a
+/// note right of them, and its page dots at the right.
 ///
 /// Each hint is a key in `ui.key_label` and the word it does in
 /// `ui.text.muted`. The first hint that does not fit, and every hint after it,
-/// is left out. `pages` is the selection's page and the page count, as
-/// [`page_of`] gives them, and its dots draw only under a live scene.
+/// is left out. `note` ends one cell from the dots or the right edge, in
+/// `ui.text.muted`, and is left out when it does not clear the hints. `pages`
+/// is the selection's page and the page count, as [`page_of`] gives them, and
+/// its dots draw only under a live scene.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn modal_footer(
     buf: &mut Buffer,
     rect: Rect,
     hints: &[(&str, &str)],
+    note: Option<&str>,
     pages: Option<(usize, usize)>,
     theme: &Theme,
     scene: &mut stoat_widgets::ApcScene,
@@ -196,6 +200,14 @@ pub(crate) fn modal_footer(
         write_str(buf, x, rect.y, key, key_style);
         write_str(buf, x + key.width() as u16 + 1, rect.y, word, word_style);
         x += width + 2;
+    }
+
+    let note_x = note.and_then(|note| {
+        let x_end = hints_end.saturating_sub(1);
+        Some((note, x_end.checked_sub(note.width() as u16)?))
+    });
+    if let Some((note, note_x)) = note_x.filter(|&(_, note_x)| note_x >= x) {
+        write_str(buf, note_x, rect.y, note, word_style);
     }
 }
 
@@ -692,7 +704,11 @@ mod tests {
 
     /// The text of a footer painted `width` columns wide in a live scene, and
     /// the bar frames its dots send.
-    fn footer_row(width: u16, pages: Option<(usize, usize)>) -> (String, Vec<u8>) {
+    fn footer_row(
+        width: u16,
+        note: Option<&str>,
+        pages: Option<(usize, usize)>,
+    ) -> (String, Vec<u8>) {
         let src = r##"theme t {
             ui.border.focused.fg = "#010203";
             ui.surface.overlay.fg = "#040506";
@@ -704,7 +720,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         let hints = [("Enter", "open"), ("C-f/C-b", "page")];
-        modal_footer(&mut buf, area, &hints, pages, &theme, &mut scene);
+        modal_footer(&mut buf, area, &hints, note, pages, &theme, &mut scene);
         (test_support::row_text(&buf, 0), scene.buffer().clone())
     }
 
@@ -731,9 +747,9 @@ mod tests {
         let (lit, dim) = ([1, 2, 3], [4, 5, 6]);
         assert_eq!(
             [
-                footer_row(40, Some((1, 3))),
-                footer_row(20, Some((0, 2))),
-                footer_row(40, Some((3, 7)))
+                footer_row(40, None, Some((1, 3))),
+                footer_row(20, None, Some((0, 2))),
+                footer_row(40, None, Some((3, 7)))
             ],
             [
                 (
@@ -753,6 +769,28 @@ mod tests {
                         (604, 6, dim),
                         (618, 6, dim),
                     ]),
+                ),
+            ],
+        );
+    }
+
+    /// A note ends one cell from the right edge. A note that does not clear the
+    /// hints by two cells is left out.
+    #[test]
+    fn the_footer_sets_its_note_right_of_the_hints() {
+        assert_eq!(
+            [
+                footer_row(40, Some("normal"), None),
+                footer_row(30, Some("normal"), None),
+            ],
+            [
+                (
+                    format!(" Enter open  C-f/C-b page{}normal ", " ".repeat(8)),
+                    Vec::new(),
+                ),
+                (
+                    format!(" Enter open  C-f/C-b page{}", " ".repeat(5)),
+                    Vec::new(),
                 ),
             ],
         );

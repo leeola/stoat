@@ -234,7 +234,7 @@ pub(crate) fn render_file_finder(
             list.filtered.len(),
             layout.list.height as usize,
         );
-        crate::render::picker::modal_footer(buf, footer, &FINDER_HINTS, pages, theme, scene);
+        crate::render::picker::modal_footer(buf, footer, &FINDER_HINTS, None, pages, theme, scene);
     }
 }
 
