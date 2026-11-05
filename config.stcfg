@@ -84,6 +84,10 @@ theme default_dark {
     ui.badge.complete.fg = success;
     ui.badge.error.fg = danger;
 
+    ui.tag.rust.fg     = warning;
+    ui.tag.markdown.fg = info;
+    ui.tag.config.fg   = special;
+
     ui.walkthrough.focus.fg = danger;
     ui.walkthrough.card = { fg: warning, bg: subtle };
     ui.walkthrough.marker1.fg = primary;
@@ -265,6 +269,10 @@ theme ermine_night inherits default_dark {
 
     ui.key_label.fg    = info;
     ui.badge.active.fg = warning;
+
+    ui.tag.rust.fg     = warning;
+    ui.tag.markdown.fg = info;
+    ui.tag.config.fg   = special;
 
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
