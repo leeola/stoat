@@ -164,35 +164,54 @@ fn paint_header_row(
     Rect::new(query_x, y, right.saturating_sub(query_x), 1)
 }
 
-/// Paint a modal's footer row into `rect`, with its key hints from the left, a
-/// note right of them, and its page dots at the right.
+/// What a modal's footer row shows, from its left edge to its right.
+#[derive(Default)]
+pub(crate) struct Footer<'a> {
+    /// Styled spans painted first, such as a legend of the row marks.
+    pub(crate) lead: &'a [(&'a str, Style)],
+    /// Key hints, each a bound key and the word for what it does.
+    pub(crate) hints: &'a [(&'a str, &'a str)],
+    /// A note set near the right edge, such as the context a modal opened in.
+    pub(crate) note: Option<&'a str>,
+    /// The selection's page and the page count, as [`page_of`] gives them.
+    pub(crate) pages: Option<(usize, usize)>,
+}
+
+/// Paint a modal's footer row into `rect`, with its lead and key hints from the
+/// left, a note right of them, and its page dots at the right.
 ///
-/// Each hint is a key in `ui.key_label` and the word it does in
-/// `ui.text.muted`. The first hint that does not fit, and every hint after it,
-/// is left out. `note` ends one cell from the dots or the right edge, in
-/// `ui.text.muted`, and is left out when it does not clear the hints. `pages`
-/// is the selection's page and the page count, as [`page_of`] gives them, and
-/// its dots draw only under a live scene.
-#[allow(clippy::too_many_arguments)]
+/// The lead's spans paint in their own styles, two cells before the hints. Each
+/// hint is a key in `ui.key_label` and the word it does in `ui.text.muted`. The
+/// first hint that does not fit, and every hint after it, is left out. The
+/// note ends one cell from the dots or the right edge, in `ui.text.muted`, and
+/// is left out when it does not clear the hints. The page dots draw only under
+/// a live scene.
 pub(crate) fn modal_footer(
     buf: &mut Buffer,
     rect: Rect,
-    hints: &[(&str, &str)],
-    note: Option<&str>,
-    pages: Option<(usize, usize)>,
+    footer: &Footer<'_>,
     theme: &Theme,
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let style = theme.get(scope::UI_MODAL_FOOTER);
-    for x in rect.x..rect.x + rect.width {
+    let row_end = rect.x + rect.width;
+    for x in rect.x..row_end {
         buf[(x, rect.y)].set_char(' ').set_style(style);
     }
 
-    let hints_end = paint_page_dots(rect, pages, theme, buf, scene);
+    let hints_end = paint_page_dots(rect, footer.pages, theme, buf, scene);
+    let mut x = rect.x + 1;
+    for (text, span_style) in footer.lead {
+        write_str_clipped(buf, x, rect.y, text, *span_style, row_end);
+        x = x.saturating_add(text.width() as u16);
+    }
+    if !footer.lead.is_empty() {
+        x = x.saturating_add(2);
+    }
+
     let key_style = theme.get(scope::UI_KEY_LABEL);
     let word_style = theme.get(scope::UI_TEXT_MUTED);
-    let mut x = rect.x + 1;
-    for (key, word) in hints {
+    for (key, word) in footer.hints {
         let width = (key.width() + 1 + word.width()) as u16;
         if x + width > hints_end {
             break;
@@ -202,13 +221,22 @@ pub(crate) fn modal_footer(
         x += width + 2;
     }
 
-    let note_x = note.and_then(|note| {
+    let note_x = footer.note.and_then(|note| {
         let x_end = hints_end.saturating_sub(1);
         Some((note, x_end.checked_sub(note.width() as u16)?))
     });
     if let Some((note, note_x)) = note_x.filter(|&(_, note_x)| note_x >= x) {
         write_str(buf, note_x, rect.y, note, word_style);
     }
+}
+
+/// The color of a strong line on an overlay, which is the `ui.surface.overlay`
+/// stroke, or `ui.border.inactive` in a theme that sets no overlay stroke.
+pub(crate) fn line_strong(theme: &Theme) -> Option<[u8; 3]> {
+    theme
+        .try_get(scope::UI_SURFACE_OVERLAY)
+        .and_then(|style| style_rgb(style.fg))
+        .or_else(|| style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg))
 }
 
 /// Draw the page dots of `pages` at the right of `rect`, and return the column
@@ -228,11 +256,7 @@ fn paint_page_dots(
         return end;
     };
     let lit_color = style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg);
-    let dim_color = theme
-        .try_get(scope::UI_SURFACE_OVERLAY)
-        .and_then(|style| style_rgb(style.fg))
-        .or_else(|| style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg));
-    let (Some(lit_color), Some(dim_color)) = (lit_color, dim_color) else {
+    let (Some(lit_color), Some(dim_color)) = (lit_color, line_strong(theme)) else {
         return end;
     };
 
@@ -720,7 +744,13 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         let hints = [("Enter", "open"), ("C-f/C-b", "page")];
-        modal_footer(&mut buf, area, &hints, note, pages, &theme, &mut scene);
+        let footer = Footer {
+            hints: &hints,
+            note,
+            pages,
+            ..Footer::default()
+        };
+        modal_footer(&mut buf, area, &footer, &theme, &mut scene);
         (test_support::row_text(&buf, 0), scene.buffer().clone())
     }
 

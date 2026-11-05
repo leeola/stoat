@@ -2,7 +2,7 @@ use crate::{
     help::{format_arg, Help, HelpEntry, SnapshotState},
     keymap::{collect_predicate_fields, evaluate, KeymapState, ResolvedAction, StateValue},
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::{wrap_text, write_str_clipped},
     },
 };
@@ -178,15 +178,12 @@ pub(crate) fn render_help(
     );
 
     let note = footer_note(help);
-    crate::render::picker::modal_footer(
-        buf,
-        layout.footer,
-        &HELP_HINTS,
-        Some(&note),
-        None,
-        theme,
-        scene,
-    );
+    let parts = Footer {
+        hints: &HELP_HINTS,
+        note: Some(&note),
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, layout.footer, &parts, theme, scene);
 }
 
 /// The footer's note, which is the mode help opened from and the context it

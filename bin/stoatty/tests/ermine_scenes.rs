@@ -293,14 +293,35 @@ fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     );
 
     let raised = cells_of(&shot, RAISED);
-    let one_run = raised.first().is_some_and(|&(first, row)| {
-        let run = first..first + raised.len() as u16;
-        raised == run.map(|col| (col, row)).collect::<Vec<_>>()
-    });
-    if !one_run || raised.len() < 40 {
+    if !one_run_in_one_row(&raised) || raised.len() < 40 {
         let frame = keep_frame(&shot, &mut home, "finder_footer");
         panic!(
             "the raised cells {raised:?} are not one footer run in one row; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
+/// The session picker ends in a footer row on the raised surface.
+///
+/// No other surface of the frame is raised, so the raised cells form one run
+/// in one row. The box holds its recommended 112 columns, so the footer spans
+/// the 110 cells inside its border.
+#[test]
+fn the_session_picker_ends_in_a_footer_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<C-a><C-f><Settle>",
+    );
+
+    let raised = cells_of(&shot, RAISED);
+    if !one_run_in_one_row(&raised) || raised.len() != 110 {
+        let frame = keep_frame(&shot, &mut home, "session_footer");
+        panic!(
+            "the raised cells {raised:?} are not one footer run across the box; the frame is {}",
             frame.display(),
         );
     }
@@ -514,6 +535,14 @@ fn cells_of(shot: &Snapshot, color: [u8; 3]) -> Vec<(u16, u16)> {
         .flat_map(|row| (0..COLS).map(move |col| (col, row)))
         .filter(|&(col, row)| dominant_color(shot, cell_rect(col, row, 1, 1)) == color)
         .collect()
+}
+
+/// Whether `cells`, row by row, form one unbroken run in one row.
+fn one_run_in_one_row(cells: &[(u16, u16)]) -> bool {
+    cells.first().is_some_and(|&(first, row)| {
+        let run = first..first + cells.len() as u16;
+        cells == run.map(|col| (col, row)).collect::<Vec<_>>()
+    })
 }
 
 /// The RGB color that the most pixels of `rect` in `shot` hold.

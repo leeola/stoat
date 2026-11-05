@@ -1,6 +1,7 @@
 use crate::{
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        paint::style_rgb,
+        picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::{write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -9,10 +10,12 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
-    widgets::{Block, Borders},
+    style::{Color, Style},
+    widgets::{Block, Borders, StatefulWidget},
 };
 use std::path::Path;
+use stoat_widgets::bar::Bar;
+use unicode_width::UnicodeWidthStr;
 
 /// Rows of workspaces the modal shows at once. A longer list scrolls under the
 /// selection rather than growing the box past a readable height.
@@ -22,16 +25,47 @@ const MAX_ENTRY_ROWS: u16 = 10;
 /// filter input, its separator, and the column header.
 const HEADER_ROWS: u16 = 3;
 
+/// Rows the chrome takes inside the border below the list, which is the footer
+/// of the status legend and the bound keys.
+const FOOTER_ROWS: u16 = 1;
+
+/// Columns the box asks for, which hold the footer's legend and all of its key
+/// hints in whole cells.
+const RECOMMENDED_COLUMNS: u16 = 112;
+
+/// The footer's hints, each a bound key and the word for what it does.
+const SESSION_HINTS: [(&str, &str); 6] = [
+    ("Enter", "switch"),
+    ("A-Enter", "sub-session"),
+    ("C-r", "rename"),
+    ("C-x", "close"),
+    ("Del", "delete"),
+    ("S-Tab", "scope"),
+];
+
+/// A status dot's geometry in sixteenths of the marker cell. The cell is twice
+/// as tall as it is wide, so the dot is twice as wide as tall to read square.
+const DOT_X: i16 = 5;
+const DOT_Y: i16 = 6;
+const DOT_WIDTH: u16 = 6;
+const DOT_HEIGHT: u16 = 3;
+
 /// Lay the workspace picker's modal out within `area`, returning its outer box
-/// and the inner rect holding the header and rows, or [`None`] when `area` is
-/// too small to host it or there is nothing to list.
+/// and the inner rect holding the header, the rows, and the footer, or
+/// [`None`] when `area` is too small to host it or there is nothing to list.
 pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
     if entries_len == 0 {
         return None;
     }
     let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
-    let content_height = 2 + HEADER_ROWS + entry_rows;
-    let modal = crate::render::chrome::modal_box(area, (0, content_height), (90, 6), (60, 6), 0)?;
+    let content_height = 2 + HEADER_ROWS + entry_rows + FOOTER_ROWS;
+    let modal = crate::render::chrome::modal_box(
+        area,
+        (0, content_height),
+        (RECOMMENDED_COLUMNS, 6),
+        (60, 6),
+        0,
+    )?;
     Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
 }
 
@@ -64,7 +98,10 @@ pub(crate) fn render_workspace_picker(
             label: &label,
             prompt: FILTER_PROMPT,
             count: Some((picker.filtered().len(), picker.entries().len())),
-            chip: None,
+            chip: Some(match picker.family_title() {
+                Some(_) => "family",
+                None => "all",
+            }),
         },
         &picker.input,
         ws,
@@ -93,6 +130,11 @@ pub(crate) fn render_workspace_picker(
     let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let match_style = theme.list_match();
+    let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let parent_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let disabled_style = theme.get(crate::theme::scope::UI_TEXT_DISABLED);
+    let run_style = theme.get(crate::theme::scope::UI_STATUSLINE_RUN);
+    let edit_style = theme.get(crate::theme::scope::UI_TEXT_DIM);
 
     let query = picker.input.text(ws);
     let query = query.trim();
@@ -102,15 +144,22 @@ pub(crate) fn render_workspace_picker(
     if creating {
         // Alt-Enter makes a root session too when the create leaves the fresh
         // launch workspace, as `workspace_picker_create_sub` decides.
-        let hint = match picker.omitted_workspace == Some(ws.id) && ws.is_fresh() {
-            true => "Enter: new session".to_owned(),
-            false => format!(
-                "Enter: new session   Alt-Enter: new sub-session of {}",
-                picker.family_name()
-            ),
-        };
+        let sub_session = picker.omitted_workspace != Some(ws.id) || !ws.is_fresh();
+        let family = format!(" new sub-session of {}", picker.family_name());
+        let mut hint = vec![("Enter", key_style), (" new session", header_style)];
+        if sub_session {
+            hint.extend([
+                ("   ", header_style),
+                ("Alt-Enter", key_style),
+                (family.as_str(), header_style),
+            ]);
+        }
         let end_x = inner.x + inner.width;
-        write_str_clipped(buf, name_x, header_row, &hint, header_style, end_x);
+        let mut x = name_x;
+        for (text, style) in hint {
+            write_str_clipped(buf, x, header_row, text, style, end_x);
+            x = x.saturating_add(text.width() as u16);
+        }
     } else {
         write_str(buf, name_x, header_row, "name", header_style);
         write_str(buf, path_x, header_row, "path", header_style);
@@ -138,7 +187,7 @@ pub(crate) fn render_workspace_picker(
     }
 
     let entries_top = inner.y + HEADER_ROWS;
-    let rows = inner.height.saturating_sub(HEADER_ROWS) as usize;
+    let rows = inner.height.saturating_sub(HEADER_ROWS + FOOTER_ROWS) as usize;
     picker.viewport_rows = Some(rows);
     let selected = picker.selected();
     let entries = picker.entries();
@@ -171,12 +220,7 @@ pub(crate) fn render_workspace_picker(
             crate::render::chrome::selection_bar(inner.x, row, theme, buf, scene);
         }
 
-        let marker = match entry.status {
-            WorkspaceStatus::Active => "*",
-            WorkspaceStatus::Background => " ",
-            WorkspaceStatus::Inactive => "\u{00b7}",
-        };
-        write_str(buf, marker_x, row, marker, base_style);
+        paint_marker(entry.status, marker_x, row, base_style, theme, buf, scene);
 
         let label = picker.display_label(idx);
         // The label ends with the row's own name, where the haystack's match
@@ -184,6 +228,14 @@ pub(crate) fn render_workspace_picker(
         let prefix = label.chars().count() - entry.basename.chars().count();
         let name: String = label.chars().take(NAME_W as usize).collect();
         write_str(buf, name_x, row, &name, base_style);
+        for j in 0..prefix.min(name.chars().count()) {
+            let style = if j + 1 == prefix {
+                disabled_style
+            } else {
+                parent_style
+            };
+            buf[(name_x + j as u16, row)].set_style(style);
+        }
         for j in prefix..name.chars().count() {
             if indices.binary_search(&((j - prefix) as u32)).is_ok() {
                 buf[(name_x + j as u16, row)].set_style(match_style);
@@ -196,12 +248,24 @@ pub(crate) fn render_workspace_picker(
             .as_deref()
             .map(|h| format!("{h}:"))
             .unwrap_or_default();
-        paint_root(buf, path_x, row, path_w, &host, &path, base_style);
+        paint_root(
+            buf,
+            path_x,
+            row,
+            path_w,
+            (&host, base_style.patch(run_style)),
+            &path,
+            base_style,
+        );
 
         // An inactive row has no live runs or editors, so those counts blank
         // rather than reading a misleading zero.
         let inactive = entry.status == WorkspaceStatus::Inactive;
         let count = |n: usize, blank: bool| if blank { String::new() } else { n.to_string() };
+        let runs_style = match entry.run_count {
+            0 => disabled_style,
+            _ => run_style,
+        };
         write_str(
             buf,
             buf_col_x,
@@ -214,14 +278,14 @@ pub(crate) fn render_workspace_picker(
             run_col_x,
             row,
             &right_pad(&count(entry.run_count, inactive), RUN_W),
-            base_style,
+            base_style.patch(runs_style),
         );
         write_str(
             buf,
             edit_col_x,
             row,
             &right_pad(&count(entry.editor_count, inactive), EDIT_W),
-            base_style,
+            base_style.patch(edit_style),
         );
     }
 
@@ -243,12 +307,90 @@ pub(crate) fn render_workspace_picker(
         );
 
         let root = crate::paths::display_relative(&ws.git_root, Path::new(""));
-        paint_root(buf, path_x, entries_top, path_w, "", &root, selected_style);
+        paint_root(
+            buf,
+            path_x,
+            entries_top,
+            path_w,
+            ("", selected_style),
+            &root,
+            selected_style,
+        );
+    }
+
+    let footer = Rect::new(
+        inner.x,
+        inner.y + inner.height.saturating_sub(FOOTER_ROWS),
+        inner.width,
+        FOOTER_ROWS,
+    );
+    let legend = [
+        ("\u{2022}", status_style(WorkspaceStatus::Active, theme)),
+        (" active  ", header_style),
+        ("\u{2022}", status_style(WorkspaceStatus::Background, theme)),
+        (" open  ", header_style),
+        ("\u{2022}", status_style(WorkspaceStatus::Inactive, theme)),
+        (" saved", header_style),
+    ];
+    let parts = Footer {
+        lead: &legend,
+        hints: &SESSION_HINTS,
+        ..Footer::default()
+    };
+    crate::render::picker::modal_footer(buf, footer, &parts, theme, scene);
+}
+
+/// The color a row's status dot takes, as a style whose foreground is the dot.
+///
+/// The active session reads in `ui.toggle.active`, a session open in the
+/// background in `ui.text.dim`, and a saved one in the overlay's strong line.
+fn status_style(status: WorkspaceStatus, theme: &crate::theme::Theme) -> Style {
+    match status {
+        WorkspaceStatus::Active => theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE),
+        WorkspaceStatus::Background => theme.get(crate::theme::scope::UI_TEXT_DIM),
+        WorkspaceStatus::Inactive => crate::render::picker::line_strong(theme)
+            .map_or_else(Style::default, |[r, g, b]| {
+                Style::default().fg(Color::Rgb(r, g, b))
+            }),
     }
 }
 
-/// Paints `host` and then `path` into the `width` cells of the path column
-/// from `x`.
+/// Paint the mark of `status` into the marker cell at `(x, row)`.
+///
+/// Under a live scene the mark is a square dot in [`status_style`]'s color.
+/// Otherwise, or when the theme gives the status no RGB color, it is a glyph
+/// in `glyph_style`, `*` for the active session and U+00B7 for a saved one.
+fn paint_marker(
+    status: WorkspaceStatus,
+    x: u16,
+    row: u16,
+    glyph_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let dot = style_rgb(status_style(status, theme).fg).filter(|_| scene.live());
+    if let Some(color) = dot {
+        Bar {
+            x: DOT_X,
+            y: DOT_Y,
+            width: DOT_WIDTH,
+            height: DOT_HEIGHT,
+            color,
+        }
+        .render(Rect::new(x, row, 1, 1), buf, scene);
+        return;
+    }
+    let glyph = match status {
+        WorkspaceStatus::Active => "*",
+        WorkspaceStatus::Background => " ",
+        WorkspaceStatus::Inactive => "\u{00b7}",
+    };
+    write_str(buf, x, row, glyph, glyph_style);
+}
+
+/// Paints `host` in its style and then `path` into the `width` cells of the
+/// path column from `x`.
 ///
 /// A path too wide for what `host` leaves gives up its head to an ellipsis,
 /// per [`tail_within`].
@@ -257,12 +399,12 @@ fn paint_root(
     x: u16,
     row: u16,
     width: u16,
-    host: &str,
+    (host, host_style): (&str, Style),
     path: &str,
     style: Style,
 ) {
     let end = x + width;
-    write_str_clipped(buf, x, row, host, style, end);
+    write_str_clipped(buf, x, row, host, host_style, end);
 
     let host_w = host.chars().count();
     let path_x = x + host_w as u16;
@@ -297,7 +439,10 @@ fn tail_within(path: &str, room: usize) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_workspace_picker, workspace_picker_layout, HEADER_ROWS, MAX_ENTRY_ROWS};
+    use super::{
+        render_workspace_picker, workspace_picker_layout, DOT_HEIGHT, DOT_WIDTH, DOT_X, DOT_Y,
+        FOOTER_ROWS, HEADER_ROWS, MAX_ENTRY_ROWS,
+    };
     use crate::{
         buffer::BufferId,
         editor_state::EditorId,
@@ -305,14 +450,21 @@ mod tests {
         render::picker::test_support::{
             match_theme, row_text, selected_rows, selection_theme, MATCH_FG,
         },
+        run::RunState,
+        ssh::{RemoteTarget, Transport},
         theme::Theme,
-        workspace::{Workspace, WorkspaceId, WorkspaceUid},
+        workspace::{
+            registry::{RegistryEntry, WorkspaceMeta},
+            Workspace, WorkspaceId, WorkspaceUid,
+        },
         workspace_picker::WorkspacePicker,
     };
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use slotmap::SlotMap;
-    use std::{path::PathBuf, sync::Arc};
+    use std::{path::PathBuf, sync::Arc, time::UNIX_EPOCH};
     use stoat_scheduler::{Executor, TestScheduler};
+    use stoat_widgets::ApcScene;
+    use stoatty_protocol::command::{self, BarCommand, Command};
 
     /// A picker over `count` workspaces named `ws00`..., the first of them
     /// active, alongside the slotmap the renderer paints its input through.
@@ -353,14 +505,19 @@ mod tests {
         workspaces: &SlotMap<WorkspaceId, Workspace>,
         active: WorkspaceId,
     ) -> WorkspacePicker {
-        // The picker renders through the active workspace's editors, and a null
-        // editor key resolves to nothing, so the input row paints blank.
-        let input = InputView {
+        WorkspacePicker::new(workspaces, active, Vec::new(), null_input())
+    }
+
+    /// An input over the null editor key.
+    ///
+    /// The picker renders through the active workspace's editors, and a null
+    /// editor key resolves to nothing, so the input row paints blank.
+    fn null_input() -> InputView {
+        InputView {
             editor_id: EditorId::default(),
             buffer_id: BufferId::new(0),
             target: SubmitTarget::WorkspacePicker,
-        };
-        WorkspacePicker::new(workspaces, active, Vec::new(), input)
+        }
     }
 
     fn render(
@@ -370,7 +527,16 @@ mod tests {
         buf: &mut Buffer,
         area: Rect,
     ) {
-        render_with(&selection_theme(), picker, workspaces, active, buf, area);
+        let theme = selection_theme();
+        render_with(
+            &theme,
+            picker,
+            workspaces,
+            active,
+            buf,
+            area,
+            &mut ApcScene::new(),
+        );
     }
 
     fn render_with(
@@ -380,6 +546,7 @@ mod tests {
         active: WorkspaceId,
         buf: &mut Buffer,
         area: Rect,
+        scene: &mut ApcScene,
     ) {
         render_workspace_picker(
             picker,
@@ -388,7 +555,7 @@ mod tests {
             &crate::render::editor::ResolvedChrome::resolve(theme),
             area,
             buf,
-            &mut stoat_widgets::ApcScene::new(),
+            scene,
         );
     }
 
@@ -396,11 +563,11 @@ mod tests {
     fn layout_holds_the_header_above_one_row_per_workspace() {
         let (modal, inner) =
             workspace_picker_layout(Rect::new(0, 0, 120, 40), 3).expect("the area hosts the modal");
-        assert_eq!(modal.width, 90, "the box holds at its recommended width");
+        assert_eq!(modal.width, 112, "the box holds at its recommended width");
         assert_eq!(
             inner.height,
-            HEADER_ROWS + 3,
-            "the filter, separator, and column labels sit above the rows"
+            HEADER_ROWS + 3 + FOOTER_ROWS,
+            "the filter, separator, and column labels sit above the rows, and the footer below"
         );
     }
 
@@ -408,7 +575,7 @@ mod tests {
     fn layout_caps_the_rows_it_shows() {
         let (_, inner) = workspace_picker_layout(Rect::new(0, 0, 120, 40), 30)
             .expect("the area hosts the modal");
-        assert_eq!(inner.height, HEADER_ROWS + MAX_ENTRY_ROWS);
+        assert_eq!(inner.height, HEADER_ROWS + MAX_ENTRY_ROWS + FOOTER_ROWS);
     }
 
     #[test]
@@ -504,6 +671,7 @@ mod tests {
             active,
             &mut buf,
             area,
+            &mut ApcScene::new(),
         );
 
         let label: Vec<char> = "ws00/ws01".chars().collect();
@@ -541,6 +709,34 @@ mod tests {
             "the header names the family by its root:\n{}",
             painted.join("\n")
         );
+    }
+
+    /// The header's chip names the scope the list shows, `all` until S-Tab
+    /// narrows it to the active session's family.
+    #[test]
+    fn the_header_chip_names_the_scope() {
+        let chip = |family: bool| {
+            let (mut picker, mut workspaces, active) = picker_over(2);
+            if family {
+                picker.toggle_scope();
+            }
+            let area = Rect::new(0, 0, 120, 30);
+            let mut buf = Buffer::empty(area);
+            render(&mut picker, &mut workspaces, active, &mut buf, area);
+
+            let (_, inner) = workspace_picker_layout(area, 2).expect("the area hosts the modal");
+            let header: String = row_text(&buf, inner.y)
+                .chars()
+                .skip(inner.x as usize)
+                .take(inner.width as usize)
+                .collect();
+            header
+                .split_whitespace()
+                .last()
+                .unwrap_or_default()
+                .to_owned()
+        };
+        assert_eq!([chip(false), chip(true)], ["all", "family"]);
     }
 
     #[test]
@@ -647,6 +843,25 @@ mod tests {
     /// [`painted_with_query`] with `adjust` run on the picker as it opens,
     /// before the query ranks.
     fn painted_with(query: &str, adjust: impl FnOnce(&mut WorkspacePicker)) -> (Buffer, Rect) {
+        let (mut picker, mut workspaces, active) = picker_with(query, adjust);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        render(&mut picker, &mut workspaces, active, &mut buf, area);
+        let (_, inner) = workspace_picker_layout(area, picker.entries().len())
+            .expect("the area hosts the modal");
+        (buf, inner)
+    }
+
+    /// The picker over three workspaces with `query` typed into a real input
+    /// and ranked, after `adjust` runs on the picker as it opens.
+    fn picker_with(
+        query: &str,
+        adjust: impl FnOnce(&mut WorkspacePicker),
+    ) -> (
+        WorkspacePicker,
+        SlotMap<WorkspaceId, Workspace>,
+        WorkspaceId,
+    ) {
         let (mut workspaces, active) =
             workspaces_over(3, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
         let executor: Executor = Arc::new(TestScheduler::new()).executor();
@@ -660,13 +875,7 @@ mod tests {
         let mut picker = WorkspacePicker::new(&workspaces, active, Vec::new(), input);
         adjust(&mut picker);
         picker.refilter(query);
-
-        let area = Rect::new(0, 0, 100, 30);
-        let mut buf = Buffer::empty(area);
-        render(&mut picker, &mut workspaces, active, &mut buf, area);
-        let (_, inner) = workspace_picker_layout(area, picker.entries().len())
-            .expect("the area hosts the modal");
-        (buf, inner)
+        (picker, workspaces, active)
     }
 
     /// The column header row's text inside the modal's border.
@@ -685,7 +894,7 @@ mod tests {
         let (buf, inner) = painted_with_query("notes");
         assert_eq!(
             header_text(&buf, inner).trim(),
-            "Enter: new session   Alt-Enter: new sub-session of ws00"
+            "Enter new session   Alt-Enter new sub-session of ws00"
         );
     }
 
@@ -694,7 +903,7 @@ mod tests {
     #[test]
     fn a_create_row_from_a_fresh_launch_hints_enter_alone() {
         let (buf, inner) = painted_with("notes", WorkspacePicker::omit_active);
-        assert_eq!(header_text(&buf, inner).trim(), "Enter: new session");
+        assert_eq!(header_text(&buf, inner).trim(), "Enter new session");
     }
 
     /// The words of each selected row inside the modal's border, top first.
@@ -721,8 +930,8 @@ mod tests {
         let (mut workspaces, active) =
             workspaces_over(2, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
         let remote = workspaces.keys().find(|id| *id != active).unwrap();
-        workspaces[remote].remote = Some(crate::ssh::RemoteTarget {
-            transport: crate::ssh::Transport::Ssh,
+        workspaces[remote].remote = Some(RemoteTarget {
+            transport: Transport::Ssh,
             host: "box".to_owned(),
             args: Vec::new(),
         });
@@ -799,5 +1008,240 @@ mod tests {
             tail.ends_with("/leaf") && root.to_string_lossy().ends_with(tail),
             "an ellipsis leads the root's tail: {row:?}",
         );
+    }
+
+    /// The foregrounds [`parts_theme`] gives the parts of a row.
+    const ACTIVE: Color = Color::Rgb(0, 0, 1);
+    const DIM: Color = Color::Rgb(0, 0, 2);
+    const SAVED: Color = Color::Rgb(0, 0, 3);
+    const MUTED: Color = Color::Rgb(0, 0, 4);
+    const DISABLED: Color = Color::Rgb(0, 0, 5);
+    const RUN: Color = Color::Rgb(0, 0, 6);
+    const PROMPT: Color = Color::Rgb(0, 0, 7);
+    const SELECTED: Color = Color::Rgb(0, 0, 8);
+    const KEY: Color = Color::Rgb(0, 0, 9);
+
+    fn parts_theme() -> Theme {
+        let src = r##"theme t {
+            ui.toggle.active.fg = "#000001";
+            ui.text.dim.fg = "#000002";
+            ui.surface.overlay.fg = "#000003";
+            ui.text.muted.fg = "#000004";
+            ui.text.disabled.fg = "#000005";
+            ui.statusline.run.fg = "#000006";
+            ui.prompt.fg = "#000007";
+            ui.selection.fg = "#000008";
+            ui.key_label.fg = "#000009";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// `picker` painted at 120 by 30 with [`parts_theme`] under a scene that is
+    /// `live` or not, alongside that scene and the modal's inner rect.
+    fn painted(
+        picker: &mut WorkspacePicker,
+        workspaces: &mut SlotMap<WorkspaceId, Workspace>,
+        active: WorkspaceId,
+        live: bool,
+    ) -> (Buffer, ApcScene, Rect) {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        scene.set_live(live);
+        let theme = parts_theme();
+        render_with(
+            &theme, picker, workspaces, active, &mut buf, area, &mut scene,
+        );
+
+        let (_, inner) = workspace_picker_layout(area, picker.entries().len())
+            .expect("the area hosts the modal");
+        (buf, scene, inner)
+    }
+
+    /// The picker over the active session, an open one, and a saved one, top
+    /// to bottom, [`painted`] under a scene that is `live` or not.
+    fn painted_statuses(live: bool) -> (Buffer, ApcScene, Rect) {
+        let (mut workspaces, active) =
+            workspaces_over(2, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        let saved = RegistryEntry {
+            meta: WorkspaceMeta {
+                uid: WorkspaceUid(9),
+                name: "ws02".to_owned(),
+                git_root: PathBuf::from("/tmp/ws02"),
+                buffer_count: 1,
+                remote_host: None,
+                parent: None,
+            },
+            state_path: PathBuf::from("/tmp/ws02.ron"),
+            mtime: UNIX_EPOCH,
+        };
+        let mut picker = WorkspacePicker::new(&workspaces, active, vec![saved], null_input());
+        painted(&mut picker, &mut workspaces, active, live)
+    }
+
+    #[test]
+    fn each_status_marks_its_row_with_a_dot_in_its_color() {
+        let (_, mut scene, inner) = painted_statuses(true);
+        let dots: Vec<(i16, i16, Color)> = command::decode_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(BarCommand {
+                    x,
+                    y,
+                    width: DOT_WIDTH,
+                    height: DOT_HEIGHT,
+                    color: [r, g, b],
+                }) => Some((x, y, Color::Rgb(r, g, b))),
+                _ => None,
+            })
+            .collect();
+
+        let sixteenths = |cell: u16| cell as i16 * 16;
+        let dot = |row: u16, color: Color| {
+            let y = sixteenths(inner.y + HEADER_ROWS + row) + DOT_Y;
+            (sixteenths(inner.x + 1) + DOT_X, y, color)
+        };
+        assert_eq!(
+            dots,
+            [dot(0, ACTIVE), dot(1, DIM), dot(2, SAVED)],
+            "the active, open, and saved rows each carry one dot"
+        );
+    }
+
+    /// A scene that is not live draws no dots, so a row marks its status with
+    /// a glyph, which an open session leaves blank.
+    #[test]
+    fn without_a_live_scene_each_status_marks_its_row_with_a_glyph() {
+        let (buf, _, inner) = painted_statuses(false);
+        let marks: Vec<&str> = (0..3)
+            .map(|row| buf[(inner.x + 1, inner.y + HEADER_ROWS + row)].symbol())
+            .collect();
+        assert_eq!(marks, ["*", " ", "\u{00b7}"]);
+    }
+
+    /// The footer leads with a legend of the three status dots, then lists the
+    /// bound keys.
+    #[test]
+    fn the_footer_leads_with_the_status_legend() {
+        let (buf, _, inner) = painted_statuses(true);
+        let row = inner.y + inner.height - 1;
+        let text: String = row_text(&buf, row)
+            .chars()
+            .skip(inner.x as usize)
+            .take(inner.width as usize)
+            .collect();
+        assert_eq!(
+            text.trim_end(),
+            " \u{2022} active  \u{2022} open  \u{2022} saved  Enter switch  A-Enter sub-session  \
+             C-r rename  C-x close  Del delete  S-Tab scope"
+        );
+
+        let dots: Vec<Color> = (inner.x..inner.x + inner.width)
+            .filter(|&x| buf[(x, row)].symbol() == "\u{2022}")
+            .map(|x| buf[(x, row)].fg)
+            .collect();
+        assert_eq!(
+            dots,
+            [ACTIVE, DIM, SAVED],
+            "each legend dot takes its status color"
+        );
+    }
+
+    /// A sub-session's parent prefix paints muted with a disabled slash. A
+    /// host and a live run count paint in the run color, a zero run count
+    /// disabled, and the edit count dim.
+    #[test]
+    fn a_row_paints_each_part_in_its_own_color() {
+        let (mut workspaces, root) =
+            workspaces_over(2, |i| PathBuf::from(format!("/tmp/ws{i:02}")));
+        let sub = workspaces.keys().find(|&id| id != root).unwrap();
+        workspaces[root].uid = WorkspaceUid(1);
+        workspaces[sub].uid = WorkspaceUid(2);
+        workspaces[sub].parent = Some(WorkspaceUid(1));
+        workspaces[sub].remote = Some(RemoteTarget {
+            transport: Transport::Ssh,
+            host: "box".to_owned(),
+            args: Vec::new(),
+        });
+        let executor: Executor = Arc::new(TestScheduler::new()).executor();
+        let run = RunState::new(PathBuf::from("/tmp/ws01"), &mut workspaces[sub], executor);
+        workspaces[sub].runs.insert(run);
+
+        let mut picker = picker_for(&workspaces, sub);
+        let (buf, _, inner) = painted(&mut picker, &mut workspaces, sub, true);
+
+        let top = inner.y + HEADER_ROWS;
+        assert_eq!(
+            [pieces(&buf, inner, top), pieces(&buf, inner, top + 1)],
+            [
+                owned(&[
+                    ("ws00", MUTED),
+                    ("/", DISABLED),
+                    ("ws01", PROMPT),
+                    ("box:", RUN),
+                    ("/tmp/ws01", PROMPT),
+                    ("2", PROMPT),
+                    ("1", RUN),
+                    ("2", DIM),
+                ]),
+                owned(&[
+                    ("ws00", SELECTED),
+                    ("/tmp/ws00", SELECTED),
+                    ("1", SELECTED),
+                    ("0", DISABLED),
+                    ("1", DIM),
+                ]),
+            ],
+            "the active sub-session row, then the selected root row"
+        );
+    }
+
+    #[test]
+    fn a_create_row_hints_each_key_in_the_key_color() {
+        let (mut picker, mut workspaces, active) = picker_with("notes", |_| {});
+        let (buf, _, inner) = painted(&mut picker, &mut workspaces, active, true);
+        assert_eq!(
+            pieces(&buf, inner, inner.y + HEADER_ROWS - 1),
+            owned(&[
+                ("Enter", KEY),
+                ("new", MUTED),
+                ("session", MUTED),
+                ("Alt-Enter", KEY),
+                ("new", MUTED),
+                ("sub-session", MUTED),
+                ("of", MUTED),
+                ("ws00", MUTED),
+            ])
+        );
+    }
+
+    /// `expected` as owned text, to compare with what [`pieces`] reads.
+    fn owned(expected: &[(&str, Color)]) -> Vec<(String, Color)> {
+        expected
+            .iter()
+            .map(|&(text, fg)| (text.to_owned(), fg))
+            .collect()
+    }
+
+    /// The text of `row` inside the modal's border past the selection bar, cut
+    /// at every space and every change of foreground, each piece with its
+    /// foreground.
+    fn pieces(buf: &Buffer, inner: Rect, row: u16) -> Vec<(String, Color)> {
+        let mut pieces: Vec<(String, Color)> = Vec::new();
+        let mut joined = false;
+        for x in inner.x + 1..inner.x + inner.width {
+            let cell = &buf[(x, row)];
+            if cell.symbol() == " " {
+                joined = false;
+                continue;
+            }
+            match pieces.last_mut() {
+                Some((text, fg)) if joined && *fg == cell.fg => text.push_str(cell.symbol()),
+                _ => pieces.push((cell.symbol().to_owned(), cell.fg)),
+            }
+            joined = true;
+        }
+        pieces
     }
 }

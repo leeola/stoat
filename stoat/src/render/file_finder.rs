@@ -4,7 +4,7 @@ use crate::{
     file_finder::{FileFinder, FinderScope},
     picker::{write_row_display, PreviewSource},
     render::{
-        picker::{FilterHeader, FILTER_PROMPT},
+        picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::write_str_clipped,
     },
     workspace::Workspace,
@@ -234,7 +234,12 @@ pub(crate) fn render_file_finder(
             list.filtered.len(),
             layout.list.height as usize,
         );
-        crate::render::picker::modal_footer(buf, footer, &FINDER_HINTS, None, pages, theme, scene);
+        let parts = Footer {
+            hints: &FINDER_HINTS,
+            pages,
+            ..Footer::default()
+        };
+        crate::render::picker::modal_footer(buf, footer, &parts, theme, scene);
     }
 }
 
