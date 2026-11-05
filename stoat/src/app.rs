@@ -43,6 +43,7 @@ use crate::{
     rebase::RebasePause,
     register,
     render::{
+        paint,
         pane_cache::PaneCacheEntry,
         review::DiffDials,
         sanitize,
@@ -221,6 +222,13 @@ const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
 /// presses at that pace still paint into blanked buffers. Each job costs one
 /// more screen buffer.
 const BLANK_JOBS_IN_FLIGHT: usize = 2;
+
+/// The protocol version that reads border style code 4, which draws no line.
+///
+/// The island halo is a borderless panel, and an earlier terminal reads the
+/// code as a light line around each pane, so such a terminal keeps the flush
+/// layout.
+const BORDERLESS_PANEL_PROTOCOL: u32 = 15;
 
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
 /// to read as motion, slow enough not to churn repaints while progress streams.
@@ -3980,6 +3988,10 @@ impl Stoat {
     /// columns off. The stamped `single_minimap_rect` records what that paint
     /// reserved.
     ///
+    /// While islands are on, the area also stops [`Self::island_margin`]
+    /// columns short of each side of the window, so the window ground shows
+    /// along both edges.
+    ///
     /// Centered modals do not lay out here. They take the full [`Self::size`]
     /// and the strip yields to them, so their paint, pools, and mouse hit-tests
     /// derive from `size` instead.
@@ -3991,6 +4003,12 @@ impl Stoat {
             },
             None => self.size,
         };
+        let margin = self.island_margin();
+        let size = Rect {
+            x: size.x + margin,
+            width: size.width.saturating_sub(2 * margin),
+            ..size
+        };
         if !self.tab_bar_visible() {
             return size;
         }
@@ -3999,6 +4017,32 @@ impl Stoat {
             height: size.height.saturating_sub(1),
             ..size
         }
+    }
+
+    /// Whether the panes lay out as islands on the window ground.
+    ///
+    /// The island look needs the borderless halo panel that only stoatty draws,
+    /// from [`BORDERLESS_PANEL_PROTOCOL`] on, so a plain terminal and an older
+    /// stoatty keep the flush layout. A theme with no RGB chrome surface sets no
+    /// ground apart from the panes, so it keeps the flush layout too.
+    pub(crate) fn islands_on(&self) -> bool {
+        self.stoatty
+            && self.stoatty_protocol >= BORDERLESS_PANEL_PROTOCOL
+            && paint::style_rgb(
+                self.theme
+                    .try_get(crate::theme::scope::UI_SURFACE_CHROME)
+                    .and_then(|style| style.bg),
+            )
+            .is_some()
+    }
+
+    /// The chrome columns between each side of the window and the pane tree,
+    /// one while islands are on and none otherwise.
+    ///
+    /// A whole cell carries the gap the Ermine boards draw as 4 px, because the
+    /// panes lay out in whole cells.
+    pub(crate) fn island_margin(&self) -> u16 {
+        u16::from(self.islands_on())
     }
 
     /// Whether the tab bar occupies the window's top row this frame.

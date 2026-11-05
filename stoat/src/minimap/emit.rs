@@ -1279,6 +1279,32 @@ mod tests {
         );
     }
 
+    /// Under islands the band sits inside the window's right margin, so the
+    /// window reads margin, panes, band, margin.
+    #[test]
+    fn under_islands_the_band_sits_inside_the_right_margin() {
+        use stoat_config::MinimapMode;
+
+        let mut h = Stoat::test();
+        h.stoat.stoatty_protocol = stoatty_protocol::PROTOCOL_VERSION;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+        let _ = h.stoat.render();
+
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        let panes = h.stoat.layout_size();
+        assert_eq!(
+            [panes.x, panes.x + panes.width, band.x + band.width],
+            [1, band.x, 199],
+            "a margin, the panes up to the band, then the band one column short of the edge",
+        );
+    }
+
     #[test]
     fn single_minimap_band_leaves_the_bottom_status_row_full_width() {
         use stoat_config::MinimapMode;

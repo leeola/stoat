@@ -6617,7 +6617,10 @@ fn a_margin_follow_refills_the_pages_its_move_composites() {
     h.stoat.active_workspace_mut().git_root = root;
     action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
     h.settle();
-    let size = h.stoat.size();
+    // The paints the keys trigger lay out in the island margins this protocol
+    // turns on, so the first emit takes the same rect, and the pool region
+    // stays put.
+    let size = h.stoat.layout_size();
     h.stoat.active_workspace_mut().layout(size);
 
     let line = |n: usize| body.find(&format!("line {n}\n")).expect("the line exists");

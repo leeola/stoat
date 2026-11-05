@@ -57,7 +57,7 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
     expect_region(
         &shot,
         &mut home,
-        cell_rect(1, ROWS - 1, 1, 1),
+        cell_rect(2, ROWS - 1, 1, 1),
         ACCENT,
         "mode_chip",
     );
@@ -73,22 +73,45 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
 /// The modified row's git lanes sit left of its number, the hunk lane in the
 /// modified color and the state lane in the unstaged color.
 ///
-/// At 9-pixel cells the two 3/16 lanes snap to pixel columns 0 and 1, and 2
-/// and 3. The changed row is row 3, `4 four changed`.
+/// The pane starts one column in, past the window's chrome margin. At 9-pixel
+/// cells the two 3/16 lanes snap to the first two pixel columns of that cell,
+/// and the next two. The changed row is row 3, `4 four changed`.
 #[test]
 fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
-    let (_, y, _, height) = cell_rect(0, 3, 1, 1);
+    let (x, y, _, height) = cell_rect(1, 3, 1, 1);
 
     expect_region(
         &shot,
         &mut home,
-        (0, y, 2, height),
+        (x, y, 2, height),
         UNREFINED_WARNING,
         "hunk_lane",
     );
-    expect_region(&shot, &mut home, (2, y, 2, height), DISABLED, "state_lane");
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 2, y, 2, height),
+        DISABLED,
+        "state_lane",
+    );
+}
+
+/// The panes sit one chrome column in from each window edge, and a blank text
+/// cell inside them stays on the base surface.
+#[test]
+fn the_panes_sit_one_chrome_column_in_from_each_window_edge() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+
+    for (col, want, what) in [
+        (0, CHROME, "left_margin"),
+        (COLS - 1, CHROME, "right_margin"),
+        (80, BASE, "blank_text_cell"),
+    ] {
+        expect_region(&shot, &mut home, cell_rect(col, 3, 1, 1), want, what);
+    }
 }
 
 /// The status row sits on chrome, and its hairline takes the bar's own color,

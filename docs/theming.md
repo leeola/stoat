@@ -136,7 +136,7 @@ ui.type.ui.scale = 240;
 
 | Scope              | Ermine value                     |
 | ------------------ | -------------------------------- |
-| `ui.panel.island`  | radius 2, `tucked`, inset_x 4    |
+| `ui.panel.island`  | radius 2, `tucked`, inset_x 0    |
 | `ui.panel.popout`  | radius 1, `overhang`             |
 | `ui.panel.overlay` | radius 2, `drop`, above_pools    |
 | `ui.type.title`    | 320                              |
@@ -144,6 +144,11 @@ ui.type.ui.scale = 240;
 | `ui.type.ui`       | 232                              |
 | `ui.type.small`    | 208                              |
 | `ui.type.mode`     | 208                              |
+
+The island frame is flush with a pane's cells, at inset_x 0. Inside stoatty, a
+theme that sets `ui.surface.chrome` lays the panes out one chrome column in from
+each side of the window. That whole-cell margin carries the gap around a pane,
+and an inset hides the outer pixels of the pane's first and last column.
 
 The popout cards over the status bar and the diff view's sides bar draw in the
 `popout` frame. Every modal and cursor popup, the key hints box, the docks, and

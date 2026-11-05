@@ -296,7 +296,7 @@ theme ermine_night inherits default_dark {
     syntax.punctuation.fg = muted;
     syntax.number.fg      = number;
 
-    ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 4 };
+    ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 0 };
     ui.panel.popout  = { radius: 1, shadow: overhang };
     ui.panel.overlay = { radius: 2, shadow: drop, above_pools: true };
     ui.type.ui       = { scale: 232 };

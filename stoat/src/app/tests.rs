@@ -11835,6 +11835,40 @@ fn single_band_click_scrubs_the_focused_editor_not_the_pane_under_it() {
     );
 }
 
+/// A stoatty that reads a borderless panel, under a theme with a chrome
+/// surface, lays the panes out one column in from each window edge. An older
+/// stoatty, a plain terminal, and a theme with no chrome surface keep the
+/// flush layout.
+#[test]
+fn islands_inset_the_pane_layout_one_column_from_each_edge() {
+    let default_dark = {
+        let (config, _) = stoat_config::parse(DEFAULT_KEYMAP);
+        let config = config.expect("the shipped config parses");
+        Arc::new(crate::theme::Theme::from_config(&config, "default_dark").expect("theme loads"))
+    };
+    let layout = |stoatty: bool, protocol: u32, theme: Option<&Arc<crate::theme::Theme>>| {
+        let mut h = Stoat::test();
+        h.stoat.stoatty = stoatty;
+        h.stoat.stoatty_protocol = protocol;
+        if let Some(theme) = theme {
+            h.stoat.theme = theme.clone();
+        }
+        h.stoat.layout_size()
+    };
+
+    let full = Rect::new(0, 0, 80, 24);
+    assert_eq!(
+        [
+            layout(true, BORDERLESS_PANEL_PROTOCOL, None),
+            layout(true, BORDERLESS_PANEL_PROTOCOL - 1, None),
+            layout(false, BORDERLESS_PANEL_PROTOCOL, None),
+            layout(true, BORDERLESS_PANEL_PROTOCOL, Some(&default_dark)),
+        ],
+        [Rect::new(1, 0, 78, 24), full, full, full],
+        "ermine_night under islands, then an older stoatty, a plain terminal, and default_dark",
+    );
+}
+
 #[test]
 fn divider_drag_resizes_the_split() {
     let mut h = Stoat::test();

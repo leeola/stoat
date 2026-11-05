@@ -1129,6 +1129,7 @@ pub(crate) fn frame(
     emit::ensure_minimap_content_ids(stoat);
 
     let tab_bar_rows = u16::from(stoat.tab_bar_visible());
+    let margin = stoat.island_margin();
 
     // Single mode reserves a strip band at the window's right edge and shrinks
     // the pane layout by the strip width, so the panes never overlap the strip.
@@ -1136,11 +1137,12 @@ pub(crate) fn frame(
     // the full window width, and starts one row down when the tab bar holds the
     // top, since the band derives its own rect instead of going through
     // `layout_size`. The band is stamped on Stoat for the mouse handler, then
-    // read back for this paint.
+    // read back for this paint. It sits inside the island margin, so the
+    // window reads margin, panes, band, margin.
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
         && full.width >= editor::MINIMAP_MIN_PANE_COLS)
         .then(|| Rect {
-            x: full.x + full.width - editor::MINIMAP_STRIP_COLS,
+            x: full.x + full.width - editor::MINIMAP_STRIP_COLS - margin,
             y: full.y + tab_bar_rows,
             width: editor::MINIMAP_STRIP_COLS,
             height: full.height.saturating_sub(1 + tab_bar_rows),
