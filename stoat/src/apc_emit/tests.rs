@@ -1400,6 +1400,89 @@ fn the_hint_rows_back_their_runs_with_the_modal_fill() {
     );
 }
 
+/// A theme whose window ground, `#010203`, differs from its editor surface,
+/// `#102030`.
+fn chrome_ground_theme() -> crate::theme::Theme {
+    let src = r##"theme chromeground {
+            ui.background.bg = "#102030";
+            ui.surface.chrome.bg = "#010203";
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    crate::theme::Theme::from_config(&config.expect("theme parses"), "chromeground")
+        .expect("theme loads")
+}
+
+/// Split panes sit on the window ground. The gap between them shows the chrome
+/// surface, and each pane's content clears to the editor surface.
+#[test]
+fn split_panes_clear_to_the_surface_over_a_chrome_ground() {
+    let mut h = Stoat::test();
+    h.stoat.theme = Arc::new(chrome_ground_theme());
+    h.type_action("SplitRight()");
+    h.settle();
+
+    let size = h.stoat.size();
+    let mut buf = Buffer::empty(size);
+    app::paint_frame(&mut h.stoat, &mut buf);
+
+    let mut panes: Vec<Rect> = h
+        .stoat
+        .active_workspace()
+        .panes
+        .split_panes()
+        .map(|(_, pane)| pane.area)
+        .collect();
+    panes.sort_by_key(|area| area.x);
+    let [left, right] = panes[..] else {
+        panic!("two side by side panes, got {panes:?}");
+    };
+    let middle = |area: Rect| (area.x + area.width / 2, area.y + area.height / 2);
+    let gap = (left.x + left.width, left.y + left.height / 2);
+
+    let base = Color::Rgb(0x10, 0x20, 0x30);
+    assert_eq!(
+        [gap, middle(left), middle(right)].map(|cell| buf[cell].bg),
+        [Color::Rgb(1, 2, 3), base, base],
+        "the gap on the chrome ground, then each pane's content on the background",
+    );
+}
+
+/// An open dock holds an editor, so its interior clears to the editor surface
+/// over the chrome ground, as a pane's content does.
+#[test]
+fn an_open_dock_clears_to_the_surface_over_a_chrome_ground() {
+    use crate::pane::{DockPanel, DockSide, DockVisibility, View};
+
+    let mut h = Stoat::test();
+    h.stoat.theme = Arc::new(chrome_ground_theme());
+    h.stoat.active_workspace_mut().docks.insert(DockPanel {
+        view: View::Label("dock".into()),
+        side: DockSide::Right,
+        visibility: DockVisibility::Open { width: 30 },
+        default_width: 30,
+        area: Rect::default(),
+    });
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+
+    let mut buf = Buffer::empty(size);
+    app::paint_frame(&mut h.stoat, &mut buf);
+
+    let dock = h
+        .stoat
+        .active_workspace()
+        .docks
+        .values()
+        .next()
+        .expect("the dock")
+        .area;
+    assert_eq!(
+        buf[(dock.x + dock.width / 2, dock.y + dock.height / 2)].bg,
+        Color::Rgb(0x10, 0x20, 0x30),
+        "the dock's interior on the background",
+    );
+}
+
 #[test]
 fn the_hints_box_anchors_to_the_bottom_right_corner() {
     use stoatty_protocol::command::Command;

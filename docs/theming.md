@@ -199,10 +199,13 @@ a few leaves.
 
 The typed UI scopes, by group (syntax scopes are open-ended):
 
-- `ui.background` -- the editor's base background.
+- `ui.background` -- the editor's base background, which every pane's content
+  clears to.
 - `ui.surface.chrome`, `ui.surface.overlay` -- the surface tokens for the window
   chrome and for floating overlays (foreground the stroke, background the
-  fill).
+  fill). The background of `ui.surface.chrome` is the window ground that every
+  frame blanks to, which shows in the gaps between panes. A theme that leaves
+  it unset grounds the window on `ui.background`.
 - `ui.surface.raised` -- the fill of a row raised inside a floating box, such
   as the hover popup's footer of goto keys. A theme that leaves it unset
   fills the row with the box's own fill.
@@ -227,8 +230,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,
   `ui.modal.run` -- per floating modal, the border hue (foreground) and the box
-  surface (background). A modal style with no background keeps
-  `ui.background`.
+  surface (background). A modal style with no background keeps the window
+  ground.
 - `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
   chrome accents.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a

@@ -837,7 +837,7 @@ pub(crate) fn zoom_target_kind(stoat: &Stoat) -> Option<ModalKind> {
     active_modal(stoat).and_then(ActiveModal::zoom_kind)
 }
 
-/// The blank cell a themed surface starts from.
+/// The blank cell of the window ground, which every frame starts from.
 ///
 /// A cell left at `Color::Reset` is resolved by whatever terminal stoat runs
 /// inside, against *that* terminal's theme rather than stoat's, so a surface
@@ -896,16 +896,41 @@ pub(crate) fn themed_fg(theme: &crate::theme::Theme) -> Color {
         .unwrap_or(Color::Reset)
 }
 
-/// The background the theme gives the editor surface, for a caller that has
-/// nothing more specific to fall back to.
+/// The background of the window ground, for a caller that has nothing more
+/// specific to fall back to.
+///
+/// The ground is `ui.surface.chrome`, and it shows in the gaps between panes,
+/// since each pane clears its content to [`surface_blank`]. A theme with no
+/// chrome surface grounds the window on the editor surface, `ui.background`.
 pub(crate) fn themed_bg(theme: &crate::theme::Theme) -> Color {
-    theme
-        .try_get(crate::theme::scope::UI_BACKGROUND)
-        .and_then(|s| s.bg)
-        .unwrap_or(Color::Reset)
+    [
+        crate::theme::scope::UI_SURFACE_CHROME,
+        crate::theme::scope::UI_BACKGROUND,
+    ]
+    .into_iter()
+    .find_map(|scope| theme.try_get(scope).and_then(|s| s.bg))
+    .unwrap_or(Color::Reset)
 }
 
-/// Blank `area` to the themed cell, wiping whatever was painted under it.
+/// The blank cell a pane's content starts from, which is the themed text color
+/// over the editor surface, `ui.background`.
+///
+/// A channel the theme does not define stays at Reset, as in [`themed_blank`].
+///
+/// See also:
+/// - [`clear_surface`] to blank a pane's content to it.
+/// - [`themed_blank`] for the window ground around the panes.
+pub(crate) fn surface_blank(theme: &crate::theme::Theme) -> Cell {
+    let mut cell = Cell::EMPTY;
+    cell.fg = themed_fg(theme);
+    cell.bg = theme
+        .try_get(crate::theme::scope::UI_BACKGROUND)
+        .and_then(|s| s.bg)
+        .unwrap_or(Color::Reset);
+    cell
+}
+
+/// Blank `area` to the window ground, wiping whatever was painted under it.
 ///
 /// This is what a surface lays down before it paints, in place of ratatui's
 /// [`Clear`](ratatui::widgets::Clear). A cell left at Reset shows the
@@ -913,9 +938,21 @@ pub(crate) fn themed_bg(theme: &crate::theme::Theme) -> Color {
 /// theme's colors.
 ///
 /// See also:
+/// - [`clear_surface`] for a pane's content, which blanks to the editor surface.
 /// - [`clear_modal`] for a modal box, which blanks to its own background.
 pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::Theme) {
     fill_cells(area, buf, &themed_blank(theme));
+}
+
+/// Blank `area` to the editor surface, wiping whatever was painted under it.
+///
+/// A pane clears its content to this before its view paints. A view paints only
+/// the cells it has content for, and the frame blanks to the window ground.
+///
+/// See also:
+/// - [`clear_themed`] to blank to the window ground.
+pub(crate) fn clear_surface(area: Rect, buf: &mut Buffer, theme: &crate::theme::Theme) {
+    fill_cells(area, buf, &surface_blank(theme));
 }
 
 /// Blank a modal box's `area` to the modal's own blank, wiping whatever was
@@ -931,7 +968,7 @@ pub(crate) fn clear_modal(area: Rect, buf: &mut Buffer, theme: &crate::theme::Th
 /// background.
 ///
 /// A style that sets no background keeps the themed blank, so a theme that
-/// gives its modals no surface of their own draws them on the editor's.
+/// gives its modals no surface of their own draws them on the window ground.
 pub(crate) fn modal_blank(theme: &crate::theme::Theme, style: Style) -> Cell {
     let mut cell = themed_blank(theme);
     if let Some(bg) = style.bg {
@@ -941,17 +978,12 @@ pub(crate) fn modal_blank(theme: &crate::theme::Theme, style: Style) -> Cell {
 }
 
 /// The RGB color of a modal box's surface, which is `style`'s background, or the
-/// theme background where it sets none.
+/// window ground where it sets none, as [`modal_blank`] blanks to.
 ///
 /// A text run over the box backs itself in this color, because a run backed in
 /// any other color shows as a band behind its line.
 pub(crate) fn modal_fill(theme: &crate::theme::Theme, style: Style) -> Option<[u8; 3]> {
-    let bg = style.bg.or_else(|| {
-        theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
-            .and_then(|s| s.bg)
-    });
-    paint::style_rgb(bg)
+    paint::style_rgb(Some(style.bg.unwrap_or_else(|| themed_bg(theme))))
 }
 
 fn fill_cells(area: Rect, buf: &mut Buffer, blank: &Cell) {
@@ -1449,9 +1481,6 @@ pub(crate) fn frame(
             continue;
         }
 
-        if let Some(hold) = &hold {
-            clear_themed(hold.rect, buf, &stoat.theme);
-        }
         let lane = content_lane(pane.index);
         let mark = pane_cache::PaintMark::take(scene, lane, undercurls);
         scene.set_lane(lane);
@@ -1504,6 +1533,13 @@ pub(crate) fn frame(
         .pane_cache
         .retain(|(ws_id, pane_id), _| *ws_id == workspace && live.contains(pane_id));
 
+    // The band shows a buffer's minimap, which sits on the editor surface as a
+    // pane's content does, so the band clears to that surface and not to the
+    // window ground.
+    if let Some(band) = single_minimap_rect {
+        clear_surface(band, buf, &stoat.theme);
+    }
+
     // Single mode declares one strip over the reserved right-edge band for the
     // focused split pane's buffer or changes view. The scene re-stamps every
     // paint, so a focus switch to another buffer redeclares it. Any other view
@@ -1541,6 +1577,13 @@ pub(crate) fn frame(
     if let Some(pane_id) = overlay_pane {
         let pane = ws.panes.pane(pane_id);
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == pane_id;
+        // The screen paints over its pane in place of the pane's view, so its
+        // content clears to the editor surface as `render_pane` clears a view.
+        clear_surface(
+            pane::pane_areas(pane.area, frame.minimap_band).0,
+            buf,
+            &stoat.theme,
+        );
         if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_mut() {
                 rebase::render_rebase(pane, is_focused, state, frame, buf, &mut *scene);
@@ -2543,7 +2586,10 @@ mod perf_tests {
 
 #[cfg(test)]
 mod themed_blank_tests {
-    use super::{blank_buffer, clear_modal, clear_themed, themed_blank, Hold};
+    use super::{
+        blank_buffer, clear_modal, clear_surface, clear_themed, modal_blank, modal_fill,
+        themed_blank, Hold,
+    };
     use crate::{app::Stoat, pane::PaneId, theme::Theme, workspace::WorkspaceId};
     use ratatui::{
         buffer::{Buffer, Cell},
@@ -2653,6 +2699,75 @@ mod themed_blank_tests {
             [Color::Rgb(1, 2, 3), Color::Rgb(0x10, 0x20, 0x30)],
             "the style's background, then the theme's for a style with none",
         );
+    }
+
+    /// The window ground is the chrome surface where a theme sets one, and the
+    /// editor surface where it does not.
+    #[test]
+    fn the_themed_blank_takes_the_chrome_surface_over_the_background() {
+        let chrome = load_theme(
+            r##"theme t { ui.background.bg = "#102030"; ui.surface.chrome.bg = "#010203"; }"##,
+        );
+        let plain = load_theme(r##"theme t { ui.background.bg = "#102030"; }"##);
+
+        assert_eq!(
+            [themed_blank(&chrome).bg, themed_blank(&plain).bg],
+            [Color::Rgb(1, 2, 3), Color::Rgb(0x10, 0x20, 0x30)],
+            "the chrome surface, then the background for a theme with no chrome",
+        );
+    }
+
+    /// A pane's content clears to the editor surface, so a cleared cell under a
+    /// chrome window takes the background while its neighbor keeps the ground.
+    #[test]
+    fn clear_surface_takes_the_background_under_a_chrome_window() {
+        let theme = load_theme(
+            r##"theme t {
+                ui.background.bg = "#102030";
+                ui.surface.chrome.bg = "#010203";
+                ui.text.fg = "#405060";
+            }"##,
+        );
+        let mut buf = Buffer::filled(Rect::new(0, 0, 2, 1), themed_blank(&theme));
+        buf[(0u16, 0u16)].set_char('x');
+
+        clear_surface(Rect::new(0, 0, 1, 1), &mut buf, &theme);
+
+        let text = Color::Rgb(0x40, 0x50, 0x60);
+        assert_eq!(
+            [&buf[(0u16, 0u16)], &buf[(1u16, 0u16)]].map(|cell| (cell.symbol(), cell.fg, cell.bg)),
+            [
+                (" ", text, Color::Rgb(0x10, 0x20, 0x30)),
+                (" ", text, Color::Rgb(1, 2, 3)),
+            ],
+            "the cleared cell on the background, beside a cell of the ground",
+        );
+    }
+
+    /// A modal style with no background fills its box with the window ground,
+    /// the color its blank cells take, so a box reads one surface inside and
+    /// outside stoatty.
+    #[test]
+    fn a_modal_with_no_background_fills_with_the_window_ground() {
+        let theme = load_theme(
+            r##"theme t { ui.background.bg = "#102030"; ui.surface.chrome.bg = "#010203"; }"##,
+        );
+        let border_only = Style::new().fg(Color::Rgb(9, 9, 9));
+
+        assert_eq!(
+            (
+                modal_fill(&theme, border_only),
+                modal_blank(&theme, border_only).bg
+            ),
+            (Some([1, 2, 3]), Color::Rgb(1, 2, 3)),
+            "the box's fill and its blank cells agree on the chrome ground",
+        );
+    }
+
+    /// The theme `t` that `src` declares.
+    fn load_theme(src: &str) -> Theme {
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
     /// A cell that reaches the terminal at Reset is resolved against the

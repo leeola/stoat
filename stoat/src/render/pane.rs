@@ -81,6 +81,11 @@ pub(crate) fn render_pane(
         diff_changes_views,
     } = ctx;
 
+    // The frame blanks to the window ground, and a view paints only the cells
+    // it has content for, so the content area clears to the editor surface
+    // first.
+    crate::render::clear_surface(content_area, buf, theme);
+
     match &pane.view {
         View::Image { path, px } => {
             render_image_pane(
@@ -176,9 +181,7 @@ pub(crate) fn render_pane(
             // the page.
             let pooled =
                 pane.placement == Placement::Split && term_pool_grids.contains_key(term_id);
-            if pooled {
-                crate::render::clear_themed(content_area, buf, theme);
-            } else if let Some(term) = terms.get(*term_id) {
+            if !pooled && let Some(term) = terms.get(*term_id) {
                 render_term_pane(term, theme, content_area, is_focused, buf);
             }
         },

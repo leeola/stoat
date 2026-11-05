@@ -122,11 +122,11 @@ pub(crate) fn render_term_rows(
 /// that `rows` marks, with the fade an unfocused pane takes.
 ///
 /// The cursor's row joins `rows` first, since a focused pane draws its block
-/// on every paint. Each row clears to the theme's blank before it paints,
+/// on every paint. Each row clears to the editor surface before it paints,
 /// because a cell in the terminal's default colors keeps the colors and the
-/// modifiers under it, and a whole paint starts from a blank frame. The clear
-/// and the fade cover the columns the paint writes and no more, since a cell
-/// past the emulator's grid keeps its faded capture.
+/// modifiers under it, and a whole paint starts from a pane cleared to that
+/// surface. The clear and the fade cover the columns the paint writes and no
+/// more, since a cell past the emulator's grid keeps its faded capture.
 pub(crate) fn repaint_term_rows(
     agent: &TermSession,
     frame: FrameCtx<'_>,
@@ -158,7 +158,7 @@ pub(crate) fn repaint_term_rows(
     };
 
     for line in lines() {
-        render::clear_themed(line, buf, frame.theme);
+        render::clear_surface(line, buf, frame.theme);
     }
     render_term_rows(agent, frame.theme, area, is_focused, buf, rows);
     for line in lines() {

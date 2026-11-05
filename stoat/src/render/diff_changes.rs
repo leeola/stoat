@@ -458,7 +458,7 @@ mod tests {
             layout::split_pane_status,
             paint,
             review::{self, DiffColumns, DiffDials, DiffLayout},
-            themed_blank,
+            surface_blank,
             undercurl::UndercurlBatch,
             FrameCtx, SINGLE_MINIMAP_STRIP_ID,
         },
@@ -1254,7 +1254,7 @@ mod tests {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
         let (buf, reserved, declared) = paint_strips(&mut h, &mut rx);
         let strip = Rect::new(113, 0, 7, 23);
-        let blank = themed_blank(&h.stoat.theme);
+        let blank = surface_blank(&h.stoat.theme);
         let painted: Vec<_> = strip
             .positions()
             .filter(|&cell| buf[cell] != blank)

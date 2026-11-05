@@ -49,7 +49,9 @@ pub(crate) fn render_dock_open(
         theme.get(crate::theme::scope::UI_BORDER_INACTIVE)
     };
 
-    crate::render::clear_themed(area, buf, theme);
+    // The dock holds an editor, so it clears to the editor surface as a pane
+    // does, not to the window ground.
+    crate::render::clear_surface(area, buf, theme);
     let inner = crate::render::chrome::modal_frame(buf, area, None, border_style, theme, scene);
 
     let PaneCtx { editors, .. } = ctx;

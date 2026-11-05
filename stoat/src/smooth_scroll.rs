@@ -997,13 +997,13 @@ pub(crate) fn render_commit_picker_preview_page(
     )
 }
 
-/// A page-sized buffer blanked to the theme's own colors.
+/// A page-sized buffer blanked to the editor surface.
 ///
-/// A page is composited beside the live grid, which starts from the same blank.
-/// A page left at Reset paints the hosting terminal's background next to
-/// stoat's, and the two disagree for as long as the glide runs.
+/// A page is composited beside the live grid, whose panes clear their content to
+/// the same blank. A page left at Reset paints the hosting terminal's background
+/// next to stoat's, and the two disagree for as long as the glide runs.
 pub(crate) fn page_buffer(area: Rect, theme: &crate::theme::Theme) -> Buffer {
-    Buffer::filled(area, crate::render::themed_blank(theme))
+    Buffer::filled(area, crate::render::surface_blank(theme))
 }
 
 #[cfg(test)]

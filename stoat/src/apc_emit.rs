@@ -3170,7 +3170,7 @@ fn render_terminal_page(
 ) {
     let area = Rect::new(0, 0, cols, rows);
     buf.resize(area);
-    buf.content.fill(crate::render::themed_blank(theme));
+    buf.content.fill(crate::render::surface_blank(theme));
     crate::render::term_pane::render_term_pane(term, theme, area, pane.is_focused, buf);
     if pane.dim > 0.0
         && let Some(bg) = crate::render::paint::style_rgb(
@@ -3213,7 +3213,7 @@ fn render_terminal_rows(
     };
 
     let width = usize::from(area.width);
-    let blank = crate::render::themed_blank(theme);
+    let blank = crate::render::surface_blank(theme);
     for row in marked() {
         buf.content[row * width..(row + 1) * width].fill(blank.clone());
     }
