@@ -8,7 +8,11 @@
 //!
 //! The token constants restate the `ermine_night` theme block in config.stcfg.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
 use stoatty_bin::{
     config,
     headless::{script, HeadlessSession, Scene, Snapshot},
@@ -27,7 +31,12 @@ const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
+const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
+
+/// The wait for rust-analyzer to load the fixture crate and answer, the bound
+/// the live LSP tests allow.
+const LSP_DEADLINE: Duration = Duration::from_secs(90);
 
 /// The warning token #e8bd6a faded halfway to base, the color a hunk lane takes
 /// on a row the tree pass leaves unrefined, as it leaves every row of a text
@@ -143,11 +152,66 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
     );
 }
 
+/// A hover ends in a footer row on the raised surface, inside the overlay box.
+///
+/// The server loads the crate before it answers, so the hover key plays again
+/// until a raised row shows. The server's progress spinner keeps the screen
+/// moving, so each try waits a fixed time in place of a settle. The raised
+/// cells form one run in one row, and the box's fill surrounds that run.
+#[test]
+fn a_hover_ends_in_a_footer_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let mut session = spawn_settled(home.path(), "rust-lsp", "src/main.rs");
+    play(&mut session, "/Greeter<Enter>");
+
+    let deadline = Instant::now() + LSP_DEADLINE;
+    let (shot, raised) = loop {
+        play(&mut session, "<Esc><Space>li<Wait:2000>");
+        let shot = session.snapshot().expect("a snapshot");
+        let raised = cells_of(&shot, RAISED);
+        if !raised.is_empty() {
+            break (shot, raised);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no hover opened before the deadline"
+        );
+    };
+
+    let (first, row) = raised[0];
+    let last = raised[raised.len() - 1].0;
+    if raised != (first..=last).map(|col| (col, row)).collect::<Vec<_>>() {
+        let frame = keep_frame(&shot, &mut home, "footer_run");
+        panic!(
+            "the raised cells {raised:?} are not one run in one row; the frame is {}",
+            frame.display(),
+        );
+    }
+
+    let middle = (first + last) / 2;
+    for (col, row, what) in [
+        (first - 1, row, "box_left_edge"),
+        (last + 1, row, "box_right_edge"),
+        (middle, row - 1, "box_body"),
+        (middle, row + 1, "box_bottom_edge"),
+    ] {
+        expect_region(&shot, &mut home, cell_rect(col, row, 1, 1), OVERLAY, what);
+    }
+}
+
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.
 ///
 /// The session ends before this returns, so the child is gone before its
 /// scratch home is.
 fn settled_frame(home: &Path, fixture: &str, file: &str, keys: &str) -> Snapshot {
+    let mut session = spawn_settled(home, fixture, file);
+    play(&mut session, keys);
+    session.snapshot().expect("a snapshot")
+}
+
+/// A session of the `fixture` scene with `file` open, once its first frame
+/// settles.
+fn spawn_settled(home: &Path, fixture: &str, file: &str) -> HeadlessSession {
     let mut session =
         HeadlessSession::spawn(ermine_scene(fixture, file, home)).unwrap_or_else(|error| {
             panic!(
@@ -160,9 +224,13 @@ fn settled_frame(home: &Path, fixture: &str, file: &str, keys: &str) -> Snapshot
         .wait_settled(support::SETTLE, support::STARTUP_TIMEOUT)
         .expect("the first frame settles; a stoat built without its fixture feature exits at once");
     session
+}
+
+/// Play the key script `keys` into `session`.
+fn play(session: &mut HeadlessSession, keys: &str) {
+    session
         .type_keys(&script::parse(keys).expect("a key script"))
         .expect("the keys play");
-    session.snapshot().expect("a snapshot")
 }
 
 /// The `fixture` scene with `file` open on the `ermine_night` theme, at
@@ -218,9 +286,7 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         return;
     }
 
-    let frame = home.path().join(format!("{what}.png"));
-    support::save(shot, &frame);
-    home.disable_cleanup(true);
+    let frame = keep_frame(shot, home, what);
     panic!(
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
@@ -245,9 +311,7 @@ fn expect_row_runs(shot: &Snapshot, home: &mut TempDir, row: u16, want: &[[u8; 3
         return;
     }
 
-    let frame = home.path().join(format!("{what}.png"));
-    support::save(shot, &frame);
-    home.disable_cleanup(true);
+    let frame = keep_frame(shot, home, what);
     let colors = |colors: &[[u8; 3]]| colors.iter().map(|&color| hex(color)).collect::<Vec<_>>();
     panic!(
         "{what}: row {row} reads {:?}, not {:?}; the frame is {}",
@@ -255,6 +319,24 @@ fn expect_row_runs(shot: &Snapshot, home: &mut TempDir, row: u16, want: &[[u8; 3
         colors(want),
         frame.display(),
     );
+}
+
+/// Save `shot` as `<what>.png` in `home` and keep `home` past the test, so the
+/// frame a failure names is there to open.
+fn keep_frame(shot: &Snapshot, home: &mut TempDir, what: &str) -> PathBuf {
+    let frame = home.path().join(format!("{what}.png"));
+    support::save(shot, &frame);
+    home.disable_cleanup(true);
+    frame
+}
+
+/// The `(col, row)` of every cell whose dominant color in `shot` is `color`,
+/// row by row.
+fn cells_of(shot: &Snapshot, color: [u8; 3]) -> Vec<(u16, u16)> {
+    (0..ROWS)
+        .flat_map(|row| (0..COLS).map(move |col| (col, row)))
+        .filter(|&(col, row)| dominant_color(shot, cell_rect(col, row, 1, 1)) == color)
+        .collect()
 }
 
 /// The RGB color that the most pixels of `rect` in `shot` hold.

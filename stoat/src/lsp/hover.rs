@@ -14,6 +14,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     editor_state::EditorId,
     host::LanguageServerFeature,
+    keymap_state::StoatKeymapState,
     lsp::{hosts, session, sync, util},
     markdown,
     render::hover::HoverPopup,
@@ -259,11 +260,9 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
             } else {
                 markdown::render_markdown(&response.text, &stoat.theme, &stoat.language_registry)
             };
-            stoat.pending_hover = Some(HoverPopup::new(
-                lines,
-                response.anchor_offset,
-                response.editor_id,
-            ));
+            let mut popup = HoverPopup::new(lines, response.anchor_offset, response.editor_id);
+            popup.footer = goto_keys(stoat);
+            stoat.pending_hover = Some(popup);
             true
         },
         HoverOutcome::Empty => {
@@ -295,15 +294,33 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     }
 }
 
+/// The goto keys a hover's footer names, each with the word for where it goes.
+///
+/// The keys come from the keymap in the state the hover lands in, so a
+/// rebound goto key shows as its own key. An action no key reaches from that
+/// state is left out.
+fn goto_keys(stoat: &Stoat) -> Vec<(String, &'static str)> {
+    let state = StoatKeymapState::from_stoat(stoat);
+    [
+        ("GotoDefinition", "definition"),
+        ("GotoReferences", "references"),
+    ]
+    .into_iter()
+    .filter_map(|(action, word)| Some((stoat.keymap.key_for_action(&state, action)?, word)))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         test_fixture::{open_buffer, seed},
         test_harness::TestHarness,
+        theme::scope,
     };
     use crossterm::event::{Event, KeyModifiers, MouseEvent, MouseEventKind};
     use futures::FutureExt;
+    use ratatui::buffer::Buffer;
     use std::{path::PathBuf, time::Duration};
 
     #[test]
@@ -1049,5 +1066,80 @@ mod tests {
         action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         h.assert_snapshot("snapshot_hover_popup");
+    }
+
+    /// A hover's box ends in a footer row that names the goto keys on the
+    /// raised surface, below the body. The row reads the same in a scene that
+    /// draws text runs and in a plain terminal's cells.
+    #[test]
+    fn a_hover_footer_names_the_goto_keys_on_the_raised_surface() {
+        let mut h = TestHarness::with_size(40, 12);
+        hover_over_main(&mut h, "fn foo() -> u32");
+        let rows_and_fills = |h: &TestHarness, buf: &Buffer| {
+            let area = h.stoat.pending_hover.as_ref().expect("popup").area;
+            let mut fills: Vec<_> = (area.x + 1..area.right() - 1)
+                .map(|x| buf[(x, area.bottom() - 2)].bg)
+                .collect();
+            fills.dedup();
+            (box_rows(h, buf), fills)
+        };
+
+        let rich = {
+            let buf = h.render_composited();
+            rows_and_fills(&h, &buf)
+        };
+        h.stoat.stoatty = false;
+        let plain = h.stoat.render();
+
+        let raised = h.stoat.theme.get(scope::UI_SURFACE_RAISED).bg;
+        let want = (
+            vec![
+                format!("{:<28}", "fn foo() -> u32"),
+                "gd definition  gr references".to_string(),
+            ],
+            vec![raised.expect("the theme sets a raised fill")],
+        );
+        assert_eq!([rich, rows_and_fills(&h, &plain)], [want.clone(), want]);
+    }
+
+    /// A box too short for the footer and three body rows gives the body every
+    /// row.
+    #[test]
+    fn a_squeezed_hover_box_drops_its_footer() {
+        let mut h = TestHarness::with_size(40, 8);
+        let body = (0..20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        hover_over_main(&mut h, &body);
+
+        let buf = h.render_composited();
+        assert_eq!(
+            box_rows(&h, &buf),
+            [format!("{:<28}", "line 0"), format!("{:<28}", "line 1")],
+        );
+    }
+
+    /// Open a hover with `body` over the first line of a one-line `main.rs`.
+    fn hover_over_main(h: &mut TestHarness, body: &str) {
+        enable_hover(h);
+        let root = seed(h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(h, path.clone());
+        h.fake_lsp().set_hover(path.to_str().unwrap(), 0, 0, body);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+    }
+
+    /// The text of each row inside the open hover box's border in `buf`.
+    fn box_rows(h: &TestHarness, buf: &Buffer) -> Vec<String> {
+        let area = h.stoat.pending_hover.as_ref().expect("popup").area;
+        (area.y + 1..area.bottom() - 1)
+            .map(|y| {
+                (area.x + 1..area.right() - 1)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            })
+            .collect()
     }
 }

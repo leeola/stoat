@@ -588,6 +588,34 @@ fn a_gliding_pane_freezes_the_hover_region_at_the_stamped_rect() {
     );
 }
 
+/// The hover pool covers the body alone, so a glide never draws the body over
+/// the footer row under it.
+#[test]
+fn the_hover_pool_leaves_out_the_footer_row() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx, _) = hover_harness();
+    h.stoat.pending_hover.as_mut().expect("popup").footer = vec![("gd".to_string(), "definition")];
+    h.snapshot();
+    let area = h.stoat.pending_hover.as_ref().expect("popup").area;
+
+    emit_smooth_scroll(&mut h.stoat);
+    let region = drain_apc(&mut rx)
+        .iter()
+        .find_map(|cmd| match cmd {
+            Command::PoolRegion(r) if r.pool == crate::smooth_scroll::non_pane_pool::HOVER => {
+                Some(*r)
+            },
+            _ => None,
+        })
+        .expect("the hover pool is declared");
+    assert_eq!(
+        (region.top, region.left, region.width, region.height),
+        (area.y + 1, area.x + 1, area.width - 2, 1),
+        "the region is the one body row above the footer"
+    );
+}
+
 #[test]
 fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
     let mut h = Stoat::test();

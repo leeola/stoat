@@ -203,6 +203,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.surface.chrome`, `ui.surface.overlay` -- the surface tokens for the window
   chrome and for floating overlays (foreground the stroke, background the
   fill).
+- `ui.surface.raised` -- the fill of a row raised inside a floating box, such
+  as the hover popup's footer of goto keys. A theme that leaves it unset
+  fills the row with the box's own fill.
 - `ui.text`, `ui.text.muted`, `ui.text.dim`, `ui.text.disabled` -- body text at
   descending emphasis.
 - `ui.cursor`, `ui.cursor.input` -- the block cursor in a buffer and in an input

@@ -245,6 +245,7 @@ theme ermine_night inherits default_dark {
     ui.background.bg      = base;
     ui.surface.chrome.bg  = chrome;
     ui.surface.overlay    = { fg: strong, bg: overlay };
+    ui.surface.raised.bg  = raised;
     ui.text.disabled.fg   = disabled;
     ui.border.focused.fg  = accent;
     ui.border.inactive.fg = hairline;

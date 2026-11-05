@@ -927,6 +927,50 @@ impl Keymap {
             .collect()
     }
 
+    /// Returns the label of the keys that run the action `name` from `state`.
+    ///
+    /// A key bound to `name` in `state` answers alone. Otherwise a chord
+    /// answers. A chord is a key whose only action enters another mode, then a
+    /// key in that mode that runs `name`, such as `gd`. The search goes one
+    /// chord deep. The chord's mode replaces only the state's `mode`, so a
+    /// guard on any other field still applies inside the chord.
+    ///
+    /// Among the keys a press reaches, as [`Self::active_keys`] lists them,
+    /// the first in config order wins. A wheel notch or a side button is not a
+    /// key, so neither answers. `None` when no key reaches the action.
+    pub(crate) fn key_for_action(&self, state: &dyn KeymapState, name: &str) -> Option<String> {
+        let is_key = |binding: &CompiledBinding| {
+            binding.key.wheel.is_none() && binding.key.side_button.is_none()
+        };
+        let runs = |binding: &CompiledBinding| {
+            is_key(binding) && binding.actions.iter().any(|action| action.name == name)
+        };
+
+        let reached = self.effective_bindings(state);
+        if let Some(binding) = reached.iter().find(|binding| runs(binding)) {
+            return Some(binding.key.display_label());
+        }
+
+        reached
+            .iter()
+            .filter(|enter| is_key(enter))
+            .find_map(|enter| {
+                let mode = chord_mode(enter)?;
+                let inside = ChordState {
+                    under: state,
+                    mode: StateValue::String(mode.into()),
+                };
+                let binding = self
+                    .effective_bindings(&inside)
+                    .into_iter()
+                    .find(|binding| runs(binding))?;
+                Some(chord_label(
+                    &enter.key.display_label(),
+                    &binding.key.display_label(),
+                ))
+            })
+    }
+
     /// Returns `(key_label, actions)` for every key a press reaches in
     /// `state`. Uses the same evaluator and ranking as [`Keymap::lookup`].
     pub fn active_bindings(&self, state: &dyn KeymapState) -> Vec<(String, &[ResolvedAction])> {
@@ -1009,6 +1053,26 @@ impl Keymap {
     }
 }
 
+/// A state inside a chord, which [`Keymap::key_for_action`] reads the chord's
+/// keys against.
+///
+/// It answers `mode` with the chord's mode and every other field from the
+/// state under it. A chord key then reads as bound exactly when a press
+/// inside the chord reaches it.
+struct ChordState<'a> {
+    under: &'a dyn KeymapState,
+    mode: StateValue,
+}
+
+impl KeymapState for ChordState<'_> {
+    fn get(&self, field: &str) -> Option<&StateValue> {
+        match field {
+            "mode" => Some(&self.mode),
+            _ => self.under.get(field),
+        }
+    }
+}
+
 /// Reports whether `name` is an action name nothing will run.
 ///
 /// `SetMode` and `SetVar` are known despite being absent from the registry:
@@ -1061,6 +1125,32 @@ fn value_str(value: &Value) -> Option<&str> {
     match value {
         Value::String(s) | Value::Ident(s) => Some(s),
         _ => None,
+    }
+}
+
+/// The mode `binding` enters, when entering it is the binding's only action.
+///
+/// A key that does more than switch modes is no chord key. Its other actions
+/// run on the way in, so a label that names it promises a press that edits.
+fn chord_mode(binding: &CompiledBinding) -> Option<&str> {
+    let [action] = &*binding.actions else {
+        return None;
+    };
+    if action.name != "SetMode" {
+        return None;
+    }
+    action.args.first().and_then(|arg| value_str(&arg.value))
+}
+
+/// The label of a chord, from the key that enters its mode and the key
+/// inside it.
+///
+/// Two one-character labels read as one word, such as `gd`. A longer label
+/// keeps a space beside it, so `C-w v` reads as two presses.
+fn chord_label(enter: &str, inside: &str) -> String {
+    match enter.chars().count() == 1 && inside.chars().count() == 1 {
+        true => format!("{enter}{inside}"),
+        false => format!("{enter} {inside}"),
     }
 }
 
@@ -4631,6 +4721,85 @@ mod tests {
                 ("d".to_string(), "GotoDefinition".to_string()),
             ],
             "the editor key, the primary-mode entry, and the unguarded toggle stay out",
+        );
+    }
+
+    /// A key bound in the state answers alone, and a chord answers with the
+    /// key that enters its mode joined to the key inside it. A key that edits
+    /// on its way into a mode is no chord, and a wheel notch or a side button
+    /// is no key.
+    #[test]
+    fn key_for_action_follows_one_chord() {
+        let config = parse_config(
+            r#"on key {
+                mode == normal {
+                    ? -> OpenHelp();
+                    g -> SetMode(goto);
+                    Ctrl-w -> SetMode(window);
+                    c -> [ChangeSelection(), SetMode(insert)];
+                    WheelUp -> ScrollViewUp();
+                    MouseBack -> JumpBackward();
+                }
+                mode == goto {
+                    d -> [GotoDefinition(), SetMode(normal)];
+                }
+                mode == window {
+                    v -> SplitRight();
+                }
+                mode == insert {
+                    Enter -> InsertNewline();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let normal = TestState::new().set("mode", StateValue::String("normal".into()));
+
+        let keys = [
+            "OpenHelp",
+            "GotoDefinition",
+            "SplitRight",
+            "InsertNewline",
+            "ScrollViewUp",
+            "JumpBackward",
+        ]
+        .map(|name| keymap.key_for_action(&normal, name));
+        assert_eq!(
+            keys,
+            [
+                Some("?".to_string()),
+                Some("gd".to_string()),
+                Some("C-w v".to_string()),
+                None,
+                None,
+                None,
+            ],
+        );
+    }
+
+    /// Inside a chord only the mode changes, so a guard on another field still
+    /// decides whether the chord's key is bound.
+    #[test]
+    fn key_for_action_keeps_the_state_inside_a_chord() {
+        let config = parse_config(
+            r#"on key {
+                mode == normal {
+                    g -> SetMode(goto);
+                }
+                mode == goto && lsp {
+                    d -> GotoDefinition();
+                }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+        let state = |lsp| {
+            TestState::new()
+                .set("mode", StateValue::String("normal".into()))
+                .set("lsp", StateValue::Bool(lsp))
+        };
+
+        assert_eq!(
+            [false, true].map(|lsp| keymap.key_for_action(&state(lsp), "GotoDefinition")),
+            [None, Some("gd".to_string())],
         );
     }
 }

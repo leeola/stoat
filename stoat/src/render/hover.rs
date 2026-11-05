@@ -54,6 +54,12 @@ pub(crate) enum HoverFrame {
 pub(crate) struct HoverPopup {
     /// Rendered content, one line per entry, each a list of styled spans.
     pub(crate) lines: Vec<Vec<(String, Style)>>,
+    /// The goto keys the popup's last row names, as `(key, word)` pairs such
+    /// as `("gd", "definition")`.
+    ///
+    /// Only an LSP hover fills it. A walkthrough card leaves it empty and
+    /// takes no footer row.
+    pub(crate) footer: Vec<(String, &'static str)>,
     pub(crate) anchor_offset: usize,
     /// The editor that requested this hover. Set from the response's
     /// [`HoverResponse::editor_id`] once focus is confirmed unchanged.
@@ -67,8 +73,8 @@ pub(crate) struct HoverPopup {
     /// a wheel over the popup scrolls it rather than the pane beneath. Empty
     /// ([`Rect::default`]) until the first render.
     pub(crate) area: Rect,
-    /// Interior rect (inside the border) the body last painted over, stamped by
-    /// [`render_hover`]. The selection hit-test maps a
+    /// Rect the body last painted over, inside the border and above any footer
+    /// row, stamped by [`render_hover`]. The selection hit-test maps a
     /// pointer through this. Empty until the first render.
     pub(crate) inner: Rect,
     /// The pane pool this popup rides and the document top row its layout was
@@ -128,6 +134,7 @@ impl HoverPopup {
         Self {
             max_line_width: lines.iter().map(|line| line_width(line)).max().unwrap_or(0),
             lines,
+            footer: Vec::new(),
             anchor_offset,
             editor_id,
             anchor: None,
@@ -219,6 +226,12 @@ fn sketch_frame(
 const MAX_HEIGHT: u16 = 26;
 const MAX_WIDTH: u16 = 120;
 
+/// The body rows a footer leaves above itself in a squeezed box.
+///
+/// A box with fewer interior rows drops the footer, since the body is what the
+/// hover is for. A shorter body needs only its own lines.
+const FOOTER_BODY_ROWS: u16 = 3;
+
 /// A rect pushed into `bounds`, shrunk first when it does not fit.
 ///
 /// A placement handed in from elsewhere was computed against a pane, and the
@@ -244,7 +257,8 @@ fn clamp_into(rect: Rect, bounds: Rect) -> Rect {
 /// when its content fits there, and otherwise on the side with more room,
 /// shrunk to that side's free space so it never renders past the window.
 /// Content that overflows scrolls, and lines wider than the popup interior are
-/// truncated.
+/// truncated. A popup with a footer ends in a row of its goto keys on the
+/// raised surface, below the body.
 ///
 /// No-op when [`Stoat::pending_hover`] is `None`, when the focused
 /// pane is not an editor, or when the cursor is off-screen. Returns whether it
@@ -311,6 +325,10 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             sketch_frame(popup_area, card, anchor, buf, scene)
         },
     };
+    let (inner, footer_row) = split_footer(
+        stoat.pending_hover.as_ref().expect("layout placed a popup"),
+        inner,
+    );
 
     // A card's body fades in with the box that holds it, so the text arrives as
     // the pen closes rather than sitting there while it draws.
@@ -372,8 +390,12 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|line| clip_line(line, inner.width as usize))
     };
 
-    match (scene.live(), modal_fg, run_bg) {
-        (true, Some(modal_fg), Some(run_bg)) => {
+    let rich = match (scene.live(), modal_fg, run_bg) {
+        (true, Some(modal_fg), Some(run_bg)) => Some((modal_fg, run_bg)),
+        _ => None,
+    };
+    match rich {
+        Some((modal_fg, run_bg)) => {
             for (row_idx, line) in visible().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let selection = sel_rgb.and_then(|rgb| {
@@ -449,7 +471,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                 }
             }
         },
-        _ => {
+        None => {
             for (row_idx, line) in visible().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let mut x = inner.x;
@@ -471,10 +493,114 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         },
     }
 
+    if let Some(row) = footer_row {
+        let row = Rect {
+            y: row,
+            height: 1,
+            ..inner
+        };
+        paint_footer(&popup.footer, row, &stoat.theme, rich, anchor, buf, scene);
+    }
+
     if let Some(run) = stoat.active_workspace_mut().walkthrough.as_mut() {
         run.last_parts.runs.extend(card_runs);
     }
     true
+}
+
+/// Paint a hover footer's goto keys across `row` on the raised surface.
+///
+/// `rich` holds the modal's foreground and fill while the scene draws text
+/// runs. The fill and the keys then ride `anchor` as the body does, so the
+/// footer glides with its box. A run backs only its own glyphs, and the box's
+/// panel fill covers the cells, so a full-scale run of spaces fills the row.
+/// Without `rich` the footer paints cells.
+///
+/// Each piece starts on a whole cell, as a status row segment does. A theme
+/// with no raised surface fills the row with the modal's own fill.
+fn paint_footer(
+    footer: &[(String, &'static str)],
+    row: Rect,
+    theme: &crate::theme::Theme,
+    rich: Option<([u8; 3], [u8; 3])>,
+    anchor: Option<(u32, f32)>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let raised = theme
+        .try_get(crate::theme::scope::UI_SURFACE_RAISED)
+        .and_then(|style| style.bg);
+    let key = theme.get(crate::theme::scope::UI_KEY_LABEL);
+    let word = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let end_x = row.x + row.width;
+
+    let Some((modal_fg, modal_bg)) = rich else {
+        let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
+        let fill = raised.map_or(modal_style, |bg| modal_style.bg(bg));
+        for x in row.x..end_x {
+            buf[(x, row.y)].set_char(' ').set_style(fill);
+        }
+        let mut x = row.x;
+        for (text, is_key) in footer_pieces(footer) {
+            if x >= end_x {
+                break;
+            }
+            let style = fill.patch(if is_key { key } else { word });
+            let (next_x, _) = buf.set_stringn(x, row.y, text, (end_x - x) as usize, style);
+            x = next_x;
+        }
+        return;
+    };
+
+    let fill = crate::render::paint::style_rgb(raised).unwrap_or(modal_bg);
+    let mut emit = |x: u16, text: String, scale: u16, color: [u8; 3]| {
+        let command = TextRunCommand {
+            col: x as i16 * 16,
+            row: row.y as i16 * 16,
+            scale,
+            color,
+            bg: Some(fill),
+            text,
+            follow: 0,
+            anchor,
+        };
+        command::encode_text_run_into(scene.buffer(), &command);
+    };
+    emit(row.x, " ".repeat(row.width as usize), 256, modal_fg);
+
+    let scale = theme.type_scale(TypeRole::Ui);
+    let key_rgb = crate::render::paint::style_rgb(key.fg).unwrap_or(modal_fg);
+    let word_rgb = crate::render::paint::style_rgb(word.fg).unwrap_or(modal_fg);
+    let mut x = row.x;
+    for (text, is_key) in footer_pieces(footer) {
+        let room = end_x.saturating_sub(x) as usize;
+        if room == 0 {
+            break;
+        }
+        if !text.trim().is_empty() {
+            let color = if is_key { key_rgb } else { word_rgb };
+            emit(x, text.chars().take(room).collect(), scale, color);
+        }
+        x += text.chars().count() as u16;
+    }
+}
+
+/// A hover footer's text in paint order, each piece marked when it is a key.
+///
+/// An entry reads as its key, a space, and its word. Two spaces part one entry
+/// from the next.
+fn footer_pieces<'a>(
+    footer: &'a [(String, &'static str)],
+) -> impl Iterator<Item = (&'a str, bool)> {
+    footer.iter().enumerate().flat_map(|(index, (key, word))| {
+        let gap = if index == 0 { "" } else { "  " };
+        [
+            (gap, false),
+            (key.as_str(), true),
+            (" ", false),
+            (*word, false),
+        ]
+    })
 }
 
 /// The half-open char range selected on content `line`, bounded to the line's
@@ -625,7 +751,11 @@ fn host_anchor(stoat: &Stoat, popup_area: Rect) -> Option<(u32, f32)> {
         .then_some((pane.index, editor.scroll_row as f32))
 }
 
-/// Compute the hover popup's screen rect and its interior rect.
+/// Compute the hover popup's screen rect and the rect its body paints in.
+///
+/// The body rect is the interior less the footer row when the popup shows one,
+/// per [`split_footer`]. The pooled body takes this rect, so a glide never
+/// draws the body over the footer.
 ///
 /// Returns [`None`] when no popup is anchorable, which happens with no pending
 /// hover, non-editor focus, an off-screen cursor, or a terminal too narrow for
@@ -659,13 +789,20 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
 
     // A truncated line's width is its content width capped at the interior, and
     // truncation is one-to-one per line, so the geometry never rebuilds a body.
-    // Every line meets the same cap, so capping the widest gives what capping
-    // each and taking the widest would.
+    // Every line meets the same cap, so capping the widest gives the same width
+    // as capping each line and taking the widest. A footer counts as one more
+    // line.
     let popup = stoat.pending_hover.as_ref()?;
-    let max_line_width = popup.max_line_width.min(interior_width as usize) as u16;
-    let body_len = popup.lines.len();
+    let footer_width: usize = footer_pieces(&popup.footer)
+        .map(|(text, _)| text.chars().count())
+        .sum();
+    let content_width = popup
+        .max_line_width
+        .max(footer_width)
+        .min(interior_width as usize) as u16;
+    let content_rows = popup.lines.len() + usize::from(!popup.footer.is_empty());
 
-    let popup_width = (max_line_width + 2).clamp(3, frame.width.clamp(3, MAX_WIDTH));
+    let popup_width = (content_width + 2).clamp(3, frame.width.clamp(3, MAX_WIDTH));
 
     let rel_y = cursor_screen.1.saturating_sub(frame.y);
     let room_below = frame.height.saturating_sub(rel_y + 1);
@@ -674,13 +811,15 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
     // bound that actually shrinks a large hover on a small window. Both bounds
     // hold a 3-row minimum box.
     let half_frame = (frame.height / 2).max(3);
-    let wanted = (body_len as u16 + 2).clamp(3, MAX_HEIGHT).min(half_frame);
+    let wanted = (content_rows as u16 + 2)
+        .clamp(3, MAX_HEIGHT)
+        .min(half_frame);
     // Below whenever the content fits there, so a short hover keeps its place
     // under the cursor. Otherwise the side with more room, ties going below.
     let below = room_below >= wanted || room_below >= room_above;
     let side_room = if below { room_below } else { room_above };
     let height_cap = side_room.clamp(3, MAX_HEIGHT).min(half_frame);
-    let popup_height = (body_len as u16 + 2).min(height_cap);
+    let popup_height = (content_rows as u16 + 2).min(height_cap);
 
     let popup_x = cursor_screen
         .0
@@ -704,7 +843,27 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
         },
     };
     let inner = Block::default().borders(Borders::ALL).inner(popup_area);
-    Some((popup_area, inner))
+    let (body, _) = split_footer(stoat.pending_hover.as_ref()?, inner);
+    Some((popup_area, body))
+}
+
+/// The rect the body paints in, from the popup's interior `inner`, and the row
+/// below it that the footer takes.
+///
+/// The footer takes the interior's last row while the body keeps the lesser of
+/// its line count and [`FOOTER_BODY_ROWS`] above it. A popup with no footer, or
+/// a box too short for both, gives the body the whole interior.
+fn split_footer(popup: &HoverPopup, inner: Rect) -> (Rect, Option<u16>) {
+    let body_rows = popup.lines.len().clamp(1, usize::from(FOOTER_BODY_ROWS)) as u16;
+    if popup.footer.is_empty() || inner.height <= body_rows {
+        return (inner, None);
+    }
+
+    let body = Rect {
+        height: inner.height - 1,
+        ..inner
+    };
+    (body, Some(body.y + body.height))
 }
 
 /// Render hover body page `page` as a self-contained VT plus APC byte stream for

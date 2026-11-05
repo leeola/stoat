@@ -711,6 +711,7 @@ pub mod scope {
     pub const UI_BACKGROUND: &str = "ui.background";
     pub const UI_SURFACE_CHROME: &str = "ui.surface.chrome";
     pub const UI_SURFACE_OVERLAY: &str = "ui.surface.overlay";
+    pub const UI_SURFACE_RAISED: &str = "ui.surface.raised";
     pub const UI_TEXT: &str = "ui.text";
     pub const UI_TEXT_MUTED: &str = "ui.text.muted";
     pub const UI_TEXT_DIM: &str = "ui.text.dim";
