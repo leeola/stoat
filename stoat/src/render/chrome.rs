@@ -218,6 +218,7 @@ pub(crate) fn modal_frame_anchored(
         shadow: frame.shadow,
         inset_x: frame.inset_x,
         above_pools: true,
+        backdrop: false,
         anchor: Some(anchor),
     }
     .draw_components(area, scene);
@@ -251,6 +252,7 @@ fn modal_frame_inner(
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
                 above_pools,
+                backdrop: false,
                 anchor: None,
             }
             .draw_components(area, scene);
@@ -296,6 +298,7 @@ fn cover_cells(area: Rect, above_pools: bool, scene: &mut ApcScene) {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools,
+        backdrop: false,
         anchor: None,
     }
     .draw_components(area, scene);
@@ -341,6 +344,7 @@ pub(crate) fn popout_frame(
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             }
             .draw_components(area, scene);
@@ -716,6 +720,7 @@ mod tests {
             shadow: frame.shadow,
             inset_x: frame.inset_x,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         });
         // The title run carries no background box and anchors one cell into the
@@ -761,6 +766,7 @@ mod tests {
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
                 above_pools: true,
+                backdrop: false,
                 anchor: None,
             }),
             "the flag is the only difference from modal_frame's frame"
@@ -791,6 +797,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: true,
+            backdrop: false,
             anchor: None,
         });
         assert_eq!(
@@ -828,6 +835,7 @@ mod tests {
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             })
         );
@@ -859,6 +867,7 @@ mod tests {
                 shadow: PanelShadow::None_,
                 inset_x: 0,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             })
         );
@@ -892,6 +901,7 @@ mod tests {
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             })
         );
@@ -943,6 +953,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: true,
+            backdrop: false,
             anchor: Some((3, 1.5)),
         });
         let popout = encode_panel(&PanelCommand {
@@ -957,6 +968,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 3,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         });
         assert_eq!(scene.buffer(), &[hover, popout].concat());
@@ -998,6 +1010,7 @@ mod tests {
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             }),
         );
@@ -1037,6 +1050,7 @@ mod tests {
                 shadow: PanelShadow::None_,
                 inset_x: 0,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             })
         };

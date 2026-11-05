@@ -679,6 +679,7 @@ mod tests {
             shadow,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         };
@@ -742,6 +743,7 @@ mod tests {
             shadow: PanelShadow::Tucked,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }]);
@@ -802,6 +804,7 @@ mod tests {
                 shadow,
                 inset_x: 0,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
                 seq: 0,
             }]);
@@ -862,6 +865,7 @@ mod tests {
                 shadow,
                 inset_x: 0,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
                 seq: 0,
             }]);
@@ -896,6 +900,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }]);
@@ -941,6 +946,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }];
@@ -975,6 +981,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }];
@@ -1008,6 +1015,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }];
@@ -1041,6 +1049,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }];
@@ -1067,6 +1076,7 @@ mod tests {
             shadow: PanelShadow::Tucked,
             inset_x: 4,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }];
@@ -1098,6 +1108,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         };

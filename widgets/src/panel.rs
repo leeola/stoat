@@ -29,6 +29,12 @@ pub struct Panel {
     /// composite covering the same cells draws over it. The fallback border
     /// ignores it (a plain terminal has no pools).
     pub above_pools: bool,
+    /// The panel sits under everything it overlaps, so no pool composite and no
+    /// decoration takes its rect as an occluder, as a pane's island halo needs.
+    /// A terminal before
+    /// [`BACKDROP_PANEL_PROTOCOL`](stoatty_protocol::BACKDROP_PANEL_PROTOCOL)
+    /// reads it as [`Self::above_pools`]. The fallback border ignores it.
+    pub backdrop: bool,
     /// The host pool this panel rides and the document top row its layout
     /// assumed, or `None` for a panel fixed to the screen.
     ///
@@ -68,6 +74,7 @@ impl Panel {
                 shadow: self.shadow,
                 inset_x: self.inset_x,
                 above_pools: self.above_pools,
+                backdrop: self.backdrop,
                 anchor: self.anchor,
             },
         );
@@ -118,6 +125,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         }
         .render(area, &mut buf, &mut scene);
@@ -134,6 +142,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
@@ -153,6 +162,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         }
         .render(area, &mut buf, &mut scene);
@@ -179,6 +189,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         }
         .render(area, &mut buf, &mut scene);
@@ -202,6 +213,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         }
         .draw_fallback(area, &mut buf);
@@ -223,6 +235,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         };
 

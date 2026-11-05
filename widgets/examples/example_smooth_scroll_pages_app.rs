@@ -511,6 +511,7 @@ fn write_overlay_chrome(out: &mut Vec<u8>, anchor: Option<(u32, f32)>) {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: true,
+            backdrop: false,
             anchor,
         },
     );

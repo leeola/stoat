@@ -78,6 +78,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 100,
     }]);
@@ -268,6 +269,7 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 100,
     }];
@@ -399,6 +401,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools,
+        backdrop: false,
         anchor: None,
         seq,
     };
@@ -599,6 +602,7 @@ fn a_box_riding_a_pool_stops_occluding_it() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: Some((host, 0.0)),
         seq: 100,
     }]);

@@ -127,6 +127,7 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
                         false => 0,
                     },
                     above_pools: false,
+                    backdrop: false,
                     anchor: None,
                 },
                 panel,

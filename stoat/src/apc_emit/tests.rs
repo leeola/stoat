@@ -3258,6 +3258,7 @@ fn a_panel_over_a_stack_pool_leaves_the_mask() {
             shadow: command::PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         },
     );

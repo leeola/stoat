@@ -137,6 +137,7 @@ fn add_chrome(grid: &mut Grid) {
         shadow: PanelShadow::Drop,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 0,
     }]);

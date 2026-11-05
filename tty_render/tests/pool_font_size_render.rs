@@ -158,6 +158,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 100,
     }];

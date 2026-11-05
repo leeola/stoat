@@ -1349,6 +1349,7 @@ fn a_later_filled_box_hides_the_stroke_beneath_it() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 2,
     };

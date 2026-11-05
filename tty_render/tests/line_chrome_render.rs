@@ -133,6 +133,7 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 0,
     }]);
@@ -276,6 +277,7 @@ fn the_style_with_no_line_paints_nothing() {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }]);

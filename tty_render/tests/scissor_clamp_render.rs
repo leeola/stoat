@@ -164,6 +164,7 @@ fn an_oversized_riding_scissor_is_clamped_not_validated() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: Some((7, 0.0)),
         seq: 0,
     }]);

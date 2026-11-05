@@ -1662,6 +1662,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 0,
         }

@@ -10,6 +10,13 @@ use super::{
 use crate::frame;
 use memchr::memmem;
 
+/// The bit of a panel's flags byte that floats it above every pooled surface.
+const ABOVE_POOLS: u8 = 1;
+
+/// The bit of a panel's flags byte that makes it a backdrop, which nothing
+/// takes as an occluder.
+const BACKDROP: u8 = 2;
+
 /// How a panel's shadow is drawn.
 ///
 /// [`PanelShadow::None_`] draws no shadow. [`PanelShadow::Drop`] is a displaced,
@@ -60,6 +67,15 @@ pub struct PanelCommand {
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.
     pub above_pools: bool,
+    /// The panel sits under everything it overlaps, so no pool composite and no
+    /// decoration takes its rect as an occluder.
+    ///
+    /// This is a pane's island halo, whose box is the pane's own pool region. A
+    /// pane pool takes every other panel as an occluder, and the halo must stay
+    /// out of that list to keep its pane's glide visible. A terminal before
+    /// [`BACKDROP_PANEL_PROTOCOL`](crate::BACKDROP_PANEL_PROTOCOL) reads the
+    /// flag as `above_pools`.
+    pub backdrop: bool,
     /// The host pool this panel rides and the document top row its layout
     /// assumed, or `None` for a panel fixed to the screen.
     ///
@@ -93,7 +109,7 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
         w.write_all(&[shadow_code(command.shadow)])?;
         w.write_all(&[command.inset_x])?;
-        w.write_all(&[command.above_pools as u8])?;
+        w.write_all(&[flags(command)])?;
         // Trailing and optional, so a receiver built before the anchor existed
         // reads the frame whole and treats the panel as screen-fixed.
         if let Some((host, top_rows)) = command.anchor {
@@ -141,7 +157,10 @@ pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
         shadow: decode_shadow(arg[17]),
         inset_x: arg[18],
-        above_pools: arg.get(19).is_some_and(|byte| *byte != 0),
+        // A bit this decoder does not know reads as above pools, the layer every
+        // nonzero byte meant before the flags had more than one bit.
+        above_pools: arg.get(19).is_some_and(|byte| byte & !BACKDROP != 0),
+        backdrop: arg.get(19).is_some_and(|byte| byte & BACKDROP != 0),
         anchor: arg.get(20..28).map(|tail| {
             (
                 u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]),
@@ -149,6 +168,13 @@ pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
             )
         }),
     })
+}
+
+/// The flags byte that carries `command`'s layering bits.
+fn flags(command: &PanelCommand) -> u8 {
+    let above = if command.above_pools { ABOVE_POOLS } else { 0 };
+    let backdrop = if command.backdrop { BACKDROP } else { 0 };
+    above | backdrop
 }
 
 fn shadow_code(shadow: PanelShadow) -> u8 {
@@ -190,6 +216,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         };
 
@@ -213,6 +240,33 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: true,
+            backdrop: false,
+            anchor: None,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    /// A backdrop panel keeps its flag apart from the above-pools one through
+    /// the shared flags byte.
+    #[test]
+    fn panel_backdrop_round_trips() {
+        let command = PanelCommand {
+            top: 3,
+            left: 12,
+            width: 40,
+            height: 10,
+            style: BorderStyle::None_,
+            border: [18, 20, 24],
+            corner_radius: 2,
+            fill: None,
+            shadow: PanelShadow::Tucked,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: true,
             anchor: None,
         };
 
@@ -236,6 +290,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         };
 
@@ -259,6 +314,7 @@ mod tests {
             shadow: PanelShadow::Tucked,
             inset_x: 4,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         };
 
@@ -282,6 +338,7 @@ mod tests {
             shadow: PanelShadow::Overhang,
             inset_x: 4,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         };
 
@@ -315,6 +372,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor,
         };
         let (first, second) = (panel(1, None), panel(9, Some((3, 1.5))));
@@ -369,6 +427,7 @@ mod tests {
                 shadow: PanelShadow::Drop,
                 inset_x: 0,
                 above_pools: true,
+                backdrop: false,
                 anchor: None,
             })
         );
@@ -388,6 +447,7 @@ mod tests {
             shadow: PanelShadow::Drop,
             inset_x: 4,
             above_pools: true,
+            backdrop: false,
             anchor: Some((7, 12.5)),
         };
 
@@ -456,6 +516,7 @@ mod tests {
                 shadow: PanelShadow::Tucked,
                 inset_x: 4,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             })
         );

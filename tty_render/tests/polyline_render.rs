@@ -118,6 +118,7 @@ fn a_later_panel_hides_the_line_beneath_it() {
         shadow: PanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
         seq: 100,
     }]);

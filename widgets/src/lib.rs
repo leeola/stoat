@@ -1139,6 +1139,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
         };
         let mut scene = ApcScene::new();

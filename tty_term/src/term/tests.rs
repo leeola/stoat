@@ -1651,6 +1651,7 @@ fn panel_apc_frame_sets_a_grid_panel() {
         shadow: ProtoPanelShadow::Drop,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
     });
 
@@ -1673,6 +1674,7 @@ fn panel_apc_frame_sets_a_grid_panel() {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: false,
+            backdrop: false,
             anchor: None,
             seq: 1,
         }]
@@ -1693,6 +1695,7 @@ fn panel_apc_frame_carries_the_above_pools_flag() {
         shadow: ProtoPanelShadow::Drop,
         inset_x: 0,
         above_pools: true,
+        backdrop: false,
         anchor: None,
     });
 
@@ -1715,6 +1718,53 @@ fn panel_apc_frame_carries_the_above_pools_flag() {
             shadow: PanelShadow::Drop,
             inset_x: 0,
             above_pools: true,
+            backdrop: false,
+            anchor: None,
+            seq: 1,
+        }]
+    );
+}
+
+/// A backdrop panel reaches the grid with its flag, which the renderer reads to
+/// leave the panel out of every occluder list.
+#[test]
+fn panel_apc_frame_carries_the_backdrop_flag() {
+    let frame = encode_panel(&PanelCommand {
+        top: 1,
+        left: 2,
+        width: 4,
+        height: 3,
+        style: ProtoBorderStyle::None_,
+        border: [18, 20, 24],
+        corner_radius: 2,
+        fill: None,
+        shadow: ProtoPanelShadow::Tucked,
+        inset_x: 0,
+        above_pools: false,
+        backdrop: true,
+        anchor: None,
+    });
+
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(&frame);
+    terminal.project(&mut grid);
+
+    assert_eq!(
+        grid.panels(),
+        [Panel {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            style: BorderStyle::None_,
+            border: Rgb::new(18, 20, 24),
+            corner_radius: 2,
+            fill: None,
+            shadow: PanelShadow::Tucked,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: true,
             anchor: None,
             seq: 1,
         }]
@@ -1735,6 +1785,7 @@ fn reset_clears_accumulated_panels() {
         shadow: ProtoPanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
     });
 
@@ -1761,6 +1812,7 @@ fn decoration_seq_stamps_declaration_order_and_resets() {
         shadow: ProtoPanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
     });
     stream.extend_from_slice(&encode_icon(&IconCommand {
@@ -1826,6 +1878,7 @@ fn panel_change_damages_its_rows() {
         shadow: ProtoPanelShadow::None_,
         inset_x: 0,
         above_pools: false,
+        backdrop: false,
         anchor: None,
     });
 

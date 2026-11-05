@@ -1807,6 +1807,10 @@ pub struct Panel {
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.
     pub above_pools: bool,
+    /// The panel sits under everything it overlaps, so the renderer takes it as
+    /// no occluder, for a pool composite or for a decoration. Carried from the
+    /// panel command.
+    pub backdrop: bool,
     /// The host pool this panel rides and the document top row its layout
     /// assumed, or `None` for a panel fixed to the screen.
     ///

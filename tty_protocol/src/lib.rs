@@ -139,9 +139,14 @@
 /// terminal that predates it drops such an icon, so an emitter sends page icons
 /// only to a terminal at [`PAGE_ICONS_PROTOCOL`] or later.
 ///
+/// Version 20 reads bit 1 of a `panel`'s flags byte as a backdrop, a panel that
+/// no pool composite and no decoration takes as an occluder. A terminal that
+/// predates it reads the bit as above pools, so an emitter sends a backdrop
+/// only to a terminal at [`BACKDROP_PANEL_PROTOCOL`] or later.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -156,6 +161,13 @@ pub const BATCHED_DECORATIONS_PROTOCOL: u32 = 18;
 /// An emitter facing an earlier terminal marks a page's diagnostics with
 /// something other than an icon, since that terminal drops the icon.
 pub const PAGE_ICONS_PROTOCOL: u32 = 19;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal reads a backdrop `panel`.
+///
+/// An emitter facing an earlier terminal sends no backdrop, since that terminal
+/// takes the panel as one above every pool, and a pane's halo then hides the
+/// pane's own glide.
+pub const BACKDROP_PANEL_PROTOCOL: u32 = 20;
 
 pub mod command;
 pub mod detect;

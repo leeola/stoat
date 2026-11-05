@@ -835,7 +835,8 @@ pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
 /// A filled box hides what it covers whether it was declared as a panel or
 /// drawn by hand, so both go in the list. An open sketch does not: its stroke
 /// leaves the cells inside it showing, which is the point of drawing a circle
-/// around code rather than a box over it.
+/// around code rather than a box over it. A backdrop panel does not either,
+/// since it sits under everything it overlaps.
 ///
 /// `cell_width` is the live cell width in physical pixels, which a sketch box's
 /// corner radius is stated against.
@@ -850,7 +851,7 @@ pub(crate) fn build_occluders_into(
     out.extend(
         panels
             .iter()
-            .filter(|panel| !rides(panel, riding))
+            .filter(|panel| !panel.backdrop && !rides(panel, riding))
             .map(panel_occluder),
     );
     out.extend(
@@ -934,7 +935,9 @@ const SKETCH_CELL_FRACTION: f32 = 16.0;
 /// a function of a single bool. A pane pool sits beneath every box, so it takes
 /// them all. A pool that is a box's own content is drawn where a box already
 /// sits, so nothing occludes it except chrome floating above every pooled
-/// surface, which is exactly the panels flagged [`Panel::above_pools`].
+/// surface, which is exactly the panels flagged [`Panel::above_pools`]. A
+/// [`Panel::backdrop`] is in neither list, because a pane's island halo boxes
+/// that pane's own pool region.
 ///
 /// Those lead the list, which makes the second a prefix of the first: one
 /// upload serves both, and a pool names how much of it to read. Where a panel
@@ -949,7 +952,7 @@ pub(crate) fn pool_occluders_into(
     out: &mut Vec<Occluder>,
 ) -> usize {
     out.clear();
-    let covers = |panel: &&Panel| !rides(panel, riding);
+    let covers = |panel: &&Panel| !panel.backdrop && !rides(panel, riding);
     out.extend(
         panels
             .iter()
@@ -1604,6 +1607,7 @@ mod tests {
             shadow: PanelShadow::None_,
             inset_x: 0,
             above_pools,
+            backdrop: false,
             anchor: None,
             seq,
         }
@@ -1665,6 +1669,30 @@ mod tests {
             PoolOccluders::new(&occluders, above, false).globals(),
             (0, 0),
             "so the pool walks none of them and is occluded by nothing"
+        );
+    }
+
+    /// A backdrop panel sits under everything it overlaps, so neither a pool
+    /// composite nor a live decoration takes it as an occluder. A pane's halo
+    /// boxes that pane's own pool region, and the pool must stay visible.
+    #[test]
+    fn a_backdrop_panel_occludes_nothing() {
+        let backdrop = Panel {
+            backdrop: true,
+            ..panel(2, false)
+        };
+        let panels = [panel(1, false), backdrop, panel(3, true)];
+
+        let mut pool = Vec::new();
+        let above = pool_occluders_into(&panels, &[], &mut pool);
+        let mut live = Vec::new();
+        build_occluders_into(&panels, &[], &[], 8.0, &mut live);
+
+        let seqs = |occluders: &[Occluder]| occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
+        assert_eq!(
+            (seqs(&pool), above, seqs(&live)),
+            (vec![3, 1], 1, vec![1, 3]),
+            "both lists keep the two other panels and leave the backdrop out",
         );
     }
 

@@ -271,6 +271,7 @@ fn render_single_badge(
                 shadow: PanelShadow::None_,
                 inset_x: 0,
                 above_pools: false,
+                backdrop: false,
                 anchor: None,
             }
             .draw_components(Rect::new(x, y, w, h), scene);
@@ -597,6 +598,7 @@ mod tests {
                         shadow: PanelShadow::None_,
                         inset_x: 0,
                         above_pools: false,
+                        backdrop: false,
                         anchor: None,
                     }),
                     Command::TextRun(TextRunCommand {

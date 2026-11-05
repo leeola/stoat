@@ -208,6 +208,7 @@ pub(crate) fn panel_grid(command: &PanelCommand, seq: u32) -> Panel {
         shadow: grid_panel_shadow(command.shadow),
         inset_x: command.inset_x,
         above_pools: command.above_pools,
+        backdrop: command.backdrop,
         anchor: command.anchor,
         seq,
     }
