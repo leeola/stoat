@@ -3,14 +3,30 @@ use crate::{
     badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray, StackDirection},
     code_index::nav::TrailState,
     render::{
-        paint::style_rgb,
+        paint::{blend, style_rgb},
         text::{write_cell, write_str},
     },
+    theme::TypeRole,
     walkthrough::run::WalkthroughRun,
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-use stoat_widgets::{panel::Panel, ApcScene};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Style},
+    widgets::StatefulWidget,
+};
+use std::borrow::Cow;
+use stoat_widgets::{panel::Panel, text_run::TextRun, ApcScene};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
+
+/// The mark an active badge's text leads with.
+const ACTIVE_MARK: &str = "\u{25cf} ";
+
+/// The percent of a badge's semantic color in its chip's fill.
+///
+/// The rest is the chrome surface, so a chip reads as a tint of the bar it sits
+/// on rather than as a block of the semantic color.
+const TINT_PERCENT: u16 = 12;
 
 /// Paint each visible badge of the workspace and global trays over `area`.
 ///
@@ -19,7 +35,6 @@ pub(crate) fn render_badges(
     workspace: &BadgeTray,
     global: &BadgeTray,
     area: Rect,
-    render_tick: u64,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -31,7 +46,7 @@ pub(crate) fn render_badges(
     let mut painted = false;
     for anchor in Anchor::ALL {
         for (badge, rect) in placements(workspace, global, anchor, area) {
-            render_single_badge(badge, rect.x, rect.y, render_tick, theme, buf, scene);
+            render_single_badge(badge, rect.x, rect.y, theme, buf, scene);
             painted = true;
         }
     }
@@ -41,10 +56,10 @@ pub(crate) fn render_badges(
 /// The columns the bottom-right badges cover on `area`'s bottom row, as a
 /// one-row rect.
 ///
-/// A bottom-right badge draws the lower edge of its box on the window's last
-/// row, which is where the bottom panes draw their status bars. A status bar
-/// keeps its segments left of this span, since the box paints over whatever
-/// the bar put there. `None` when no badge reaches the row.
+/// A bottom-right badge draws its chip on the window's last row, which is where
+/// the bottom panes draw their status bars. A status bar keeps its segments
+/// left of this span, since the chip paints over whatever the bar put there.
+/// `None` when no badge reaches the row.
 pub(crate) fn bottom_right_cover(
     workspace: &BadgeTray,
     global: &BadgeTray,
@@ -208,22 +223,35 @@ pub(crate) fn sync_pinned_badge(tray: &mut BadgeTray, pinned: bool) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Paint `badge` as a one-row chip from the cell at `x` and `y`.
+///
+/// The chip fills with its tint and its text reads in the badge's semantic
+/// color. Both arms blank the chip's cells in the tint first. A cell glyph
+/// draws above a panel's fill, so a glyph left under the chip shows through it.
 fn render_single_badge(
     badge: &Badge,
     x: u16,
     y: u16,
-    render_tick: u64,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
     let (w, h) = badge_size(badge);
-    let border_style = badge_border_style(badge.state, theme);
+    let semantic = badge_border_style(badge.state, theme);
+    let tint = chip_tint(semantic, theme);
+    let text = chip_text(badge);
 
-    match style_rgb(border_style.fg).filter(|_| scene.live()) {
+    let style = match tint {
+        Some([r, g, b]) => semantic.bg(Color::Rgb(r, g, b)),
+        None => semantic,
+    };
+    for col in x..x + w {
+        write_cell(buf, col, y, ' ', style);
+    }
+
+    match style_rgb(semantic.fg).filter(|_| scene.live()) {
         // A badge anchored to a screen edge overhangs the pane behind it, and
-        // that pane's pool composite would erase the overhanging rows on every
+        // that pane's pool composite erases the overhanging cells on every
         // glide frame. A panel over the rect punches it out of the composite.
         //
         // above_pools stays false because a pane pool occludes against every
@@ -232,130 +260,71 @@ fn render_single_badge(
         // badges.
         //
         // The panel's seq occludes lower-seq main-pass runs and bars inside the
-        // rect. A status bar keeps its segments out of the badge's bottom row
-        // (see bottom_right_cover), so only its hairline runs under the panel.
-        Some(border) => {
+        // rect. A status bar keeps its segments out of a bottom-right chip's
+        // row (see bottom_right_cover), so only its hairline runs under it.
+        Some(color) => {
             Panel {
-                style: BorderStyle::Rounded,
-                border,
-                corner_radius: 6,
-                fill: None,
+                style: BorderStyle::None_,
+                border: color,
+                corner_radius: 1,
+                fill: tint,
                 shadow: PanelShadow::None_,
                 inset_x: 0,
                 above_pools: false,
                 anchor: None,
             }
             .draw_components(Rect::new(x, y, w, h), scene);
+            TextRun {
+                col: 0,
+                row: 0,
+                scale: theme.type_scale(TypeRole::Ui),
+                color,
+                bg: None,
+                text: &text,
+                follow: 0,
+                anchor: None,
+            }
+            .render(Rect::new(x + 1, y, 1, 1), buf, scene);
         },
-        None => {
-            for col in x..x + w {
-                write_cell(buf, col, y, border_char_at(col - x, 0, w, h), border_style);
-            }
-            for col in x..x + w {
-                write_cell(
-                    buf,
-                    col,
-                    y + h - 1,
-                    border_char_at(col - x, h - 1, w, h),
-                    border_style,
-                );
-            }
-            for row in y + 1..y + h - 1 {
-                write_cell(buf, x, row, border_char_at(0, row - y, w, h), border_style);
-                write_cell(
-                    buf,
-                    x + w - 1,
-                    row,
-                    border_char_at(w - 1, row - y, w, h),
-                    border_style,
-                );
-            }
-        },
+        None => write_str(buf, x + 1, y, &text, style),
     }
-
-    let perimeter_len = 2 * (w as usize) + 2 * (h as usize) - 4;
-    let spinner_pos = if badge.state == BadgeState::Active {
-        Some(render_tick as usize % perimeter_len)
-    } else {
-        None
-    };
-
-    if let Some(pos) = spinner_pos {
-        let (sc, sr) = perimeter_position(pos, w, h);
-        let ch = spinner_char_at(sc, sr, w, h);
-        write_cell(buf, x + sc, y + sr, ch, border_style);
-    }
-
-    let content_style = theme.get(crate::theme::scope::UI_TEXT);
-    write_str(buf, x + 1, y + 1, &badge.label, content_style);
 }
 
+/// The cells a badge's chip takes: its text with one cell of padding at each
+/// end, on one row.
 fn badge_size(badge: &Badge) -> (u16, u16) {
-    let label_w = badge.label.chars().count() as u16;
-    (label_w + 2, 3)
+    (chip_text(badge).chars().count() as u16 + 2, 1)
 }
 
-fn border_char_at(col: u16, row: u16, w: u16, h: u16) -> char {
-    let top = row == 0;
-    let bot = row == h - 1;
-    let left = col == 0;
-    let right = col == w - 1;
-    match (top, bot, left, right) {
-        (true, _, true, _) => '\u{256d}',
-        (true, _, _, true) => '\u{256e}',
-        (_, true, true, _) => '\u{2570}',
-        (_, true, _, true) => '\u{256f}',
-        (true, _, _, _) | (_, true, _, _) => '\u{2500}',
-        _ => '\u{2502}',
+/// The text a badge's chip shows, which leads with [`ACTIVE_MARK`] while the
+/// badge is active.
+fn chip_text(badge: &Badge) -> Cow<'_, str> {
+    match badge.state {
+        BadgeState::Active => Cow::Owned(format!("{ACTIVE_MARK}{}", badge.label)),
+        BadgeState::Complete | BadgeState::Error => Cow::Borrowed(&badge.label),
     }
 }
 
-/// Braille character that visually traces the box-drawing line at this
-/// border position. Dot placement matches the line direction:
+/// A chip's fill, which is the chrome surface with [`TINT_PERCENT`] of the
+/// badge's semantic color mixed in.
 ///
-/// ```text
-///   braille grid        used for
-///   1 4                 ╭ → ⣰  (bottom-right quadrant: right then down)
-///   2 5                 ╮ → ⣆  (bottom-left quadrant: left then down)
-///   3 6                 ╰ → ⠙  (top-right quadrant: right then up)
-///   7 8                 ╯ → ⠋  (top-left quadrant: left then up)
-///                       ─ top  → ⠉  (dots 1,4)
-///                       ─ bot  → ⣀  (dots 7,8)
-///                       │ left → ⡇  (dots 1,2,3,7)
-///                       │ right→ ⢸  (dots 4,5,6,8)
-/// ```
-fn spinner_char_at(col: u16, row: u16, w: u16, h: u16) -> char {
-    let top = row == 0;
-    let bot = row == h - 1;
-    let left = col == 0;
-    let right = col == w - 1;
-    match (top, bot, left, right) {
-        (true, _, true, _) => '\u{28f0}',
-        (true, _, _, true) => '\u{28c6}',
-        (_, true, true, _) => '\u{2819}',
-        (_, true, _, true) => '\u{280b}',
-        (true, _, _, _) => '\u{2809}',
-        (_, true, _, _) => '\u{28c0}',
-        (_, _, true, _) => '\u{2847}',
-        _ => '\u{28b8}',
-    }
-}
-
-fn perimeter_position(index: usize, w: u16, h: u16) -> (u16, u16) {
-    let w = w as usize;
-    let h = h as usize;
-    let top = w;
-    let right = top + h.saturating_sub(2);
-    let bottom = right + w;
-    if index < top {
-        (index as u16, 0)
-    } else if index < right {
-        ((w - 1) as u16, (index - top + 1) as u16)
-    } else if index < bottom {
-        ((w - 1 - (index - right)) as u16, (h - 1) as u16)
-    } else {
-        (0, (h - 1 - (index - bottom + 1)) as u16)
-    }
+/// The surface is `ui.surface.chrome`, or `ui.background` where a theme sets no
+/// chrome. `None` when either color has no RGB value, and the chip then keeps
+/// the surface under it.
+fn chip_tint(semantic: Style, theme: &crate::theme::Theme) -> Option<[u8; 3]> {
+    let surface = theme
+        .try_get(crate::theme::scope::UI_SURFACE_CHROME)
+        .and_then(|style| style.bg)
+        .or_else(|| {
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|style| style.bg)
+        });
+    Some(blend(
+        style_rgb(surface)?,
+        style_rgb(semantic.fg)?,
+        TINT_PERCENT,
+    ))
 }
 
 fn anchor_origin(anchor: Anchor, area: Rect) -> (u16, u16) {
@@ -389,7 +358,7 @@ fn badge_border_style(state: BadgeState, theme: &crate::theme::Theme) -> Style {
 mod tests {
     use super::*;
     use crate::{agent_status::AgentHookEvent, Stoat};
-    use stoatty_protocol::command::{encode_panel, PanelCommand};
+    use stoatty_protocol::command::{self, Command, PanelCommand, TextRunCommand};
 
     #[test]
     fn snapshot_agent_badge_active() {
@@ -400,6 +369,30 @@ mod tests {
         });
         h.stoat.active_workspace_mut().agent = Some(status);
         h.assert_snapshot("agent_badge_active");
+    }
+
+    /// With the tab bar up, the agent's top-right chip sits in the bar's row
+    /// rather than on the first pane row under it.
+    #[test]
+    fn the_agent_chip_sits_in_the_tab_bar_row() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+        h.type_action("NewTab()");
+        let mut status = AgentStatus::new();
+        status.apply(AgentHookEvent::PreToolUse {
+            tool: "Bash".into(),
+        });
+        h.stoat.active_workspace_mut().agent = Some(status);
+
+        let buf = h.render_composited();
+        let chip_rows: Vec<u16> = (0..buf.area.height)
+            .filter(|&y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("claude")
+            })
+            .collect();
+        assert_eq!((h.stoat.tab_bar_visible(), chip_rows), (true, vec![0]));
     }
 
     #[test]
@@ -414,7 +407,7 @@ mod tests {
         let id = tray
             .find_by_source(BadgeSource::Agent)
             .expect("agent badge present");
-        assert_eq!(tray.get(id).unwrap().label, "claude: Bash");
+        assert_eq!(tray.get(id).unwrap().label, "claude \u{b7} Bash");
         assert_eq!(tray.get(id).unwrap().state, BadgeState::Active);
 
         status.apply(AgentHookEvent::Notification);
@@ -422,7 +415,10 @@ mod tests {
         let replaced = tray
             .find_by_source(BadgeSource::Agent)
             .expect("agent badge still present");
-        assert_eq!(tray.get(replaced).unwrap().label, "claude: awaiting input");
+        assert_eq!(
+            tray.get(replaced).unwrap().label,
+            "claude \u{b7} awaiting input"
+        );
 
         status.apply(AgentHookEvent::SessionEnd);
         sync_agent_badge(&mut tray, Some(&status));
@@ -513,16 +509,38 @@ mod tests {
     }
 
     /// A theme whose badge colors resolve to RGB, which is what selects the rich
-    /// arm once the scene is live.
+    /// arm once the scene is live. The badge color is (200, 100, 50) over a gray
+    /// (100, 100, 100) chrome surface, so the tint works out by hand.
     fn rgb_badge_theme() -> crate::theme::Theme {
         let src = r##"theme rgbbadge {
-            ui.badge.active.fg = "#010203";
-            ui.badge.complete.fg = "#010203";
+            ui.badge.active.fg = "#c86432";
+            ui.badge.complete.fg = "#c86432";
+            ui.surface.chrome.bg = "#646464";
             ui.text.fg = "#c8ccd4";
         }"##;
         let (config, _) = stoat_config::parse(src);
         crate::theme::Theme::from_config(&config.expect("theme config parses"), "rgbbadge")
             .expect("rgb theme builds")
+    }
+
+    /// The badge color of [`rgb_badge_theme`].
+    const BADGE_RGB: [u8; 3] = [200, 100, 50];
+
+    /// The chip fill of [`rgb_badge_theme`], 88 percent of its chrome and 12
+    /// percent of its badge color.
+    const TINT: [u8; 3] = [112, 100, 94];
+
+    /// The buffer a chip at the origin of [`paint`]'s buffer leaves, with `row`
+    /// in the badge color over the tint.
+    fn chip_buffer(row: &str) -> Buffer {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 5));
+        let [r, g, b] = BADGE_RGB;
+        let [tr, tg, tb] = TINT;
+        let style = Style::default()
+            .fg(Color::Rgb(r, g, b))
+            .bg(Color::Rgb(tr, tg, tb));
+        buf.set_string(0, 0, row, style);
+        buf
     }
 
     fn badge(state: BadgeState) -> Badge {
@@ -536,8 +554,8 @@ mod tests {
     }
 
     /// Paint one badge at the buffer origin and hand back what it wrote to each
-    /// surface. `live` picks the arm the way a stoatty host would.
-    fn paint(state: BadgeState, render_tick: u64, live: bool) -> (Buffer, Vec<u8>) {
+    /// surface. `live` picks the arm, as a stoatty host does.
+    fn paint(state: BadgeState, live: bool) -> (Buffer, Vec<u8>) {
         let mut buf = Buffer::empty(Rect::new(0, 0, 8, 5));
         let mut scene = ApcScene::new();
         scene.set_live(live);
@@ -546,7 +564,6 @@ mod tests {
             &badge(state),
             0,
             0,
-            render_tick,
             &rgb_badge_theme(),
             &mut buf,
             &mut scene,
@@ -556,85 +573,100 @@ mod tests {
         (buf, bytes)
     }
 
-    fn box_glyphs(buf: &Buffer) -> Vec<String> {
-        buf.content()
-            .iter()
-            .map(|cell| cell.symbol().to_owned())
-            .filter(|s| "╭╮╰╯─│".contains(s.as_str()))
-            .collect()
-    }
-
-    /// The badge's own w-by-h panel is what a pane pool occludes against, which
-    /// is what keeps the badge painted through a glide.
+    /// The rich arm declares one borderless panel filled with the tint, which a
+    /// pane pool occludes against so the chip stays painted through a glide.
+    /// Over it goes one run of the text in the badge color, and the cells under
+    /// it go blank in the tint.
     #[test]
-    fn rich_arm_emits_a_panel_and_no_border_glyphs() {
-        let (buf, bytes) = paint(BadgeState::Complete, 0, true);
+    fn rich_arm_emits_a_tinted_panel_and_the_text_run() {
+        let (buf, bytes) = paint(BadgeState::Complete, true);
 
         assert_eq!(
-            bytes,
-            encode_panel(&PanelCommand {
-                top: 0,
-                left: 0,
-                width: 4,
-                height: 3,
-                style: BorderStyle::Rounded,
-                border: [1, 2, 3],
-                corner_radius: 6,
-                fill: None,
-                shadow: PanelShadow::None_,
-                inset_x: 0,
-                above_pools: false,
-                anchor: None,
-            }),
-            "one panel over the badge rect, unflagged"
-        );
-        assert_eq!(
-            box_glyphs(&buf),
-            Vec::<String>::new(),
-            "the panel is the border, so no glyph border is drawn"
-        );
-        assert_eq!(
-            buf.cell((1, 1)).unwrap().symbol(),
-            "a",
-            "label still paints"
-        );
-    }
-
-    /// A foreign terminal renders no panel, so the badge keeps the glyph border
-    /// it has always drawn there.
-    #[test]
-    fn fallback_arm_paints_the_glyph_border_and_no_panel() {
-        let (buf, bytes) = paint(BadgeState::Complete, 0, false);
-
-        assert_eq!(bytes, Vec::<u8>::new(), "a dead scene emits nothing");
-        assert_eq!(
-            box_glyphs(&buf),
-            ["╭", "─", "─", "╮", "│", "│", "╰", "─", "─", "╯"],
-            "the full rounded perimeter"
-        );
-        assert_eq!(
-            buf.cell((1, 1)).unwrap().symbol(),
-            "a",
-            "label still paints"
+            (command::decode_stream(&bytes), buf),
+            (
+                vec![
+                    Command::Panel(PanelCommand {
+                        top: 0,
+                        left: 0,
+                        width: 4,
+                        height: 1,
+                        style: BorderStyle::None_,
+                        border: BADGE_RGB,
+                        corner_radius: 1,
+                        fill: Some(TINT),
+                        shadow: PanelShadow::None_,
+                        inset_x: 0,
+                        above_pools: false,
+                        anchor: None,
+                    }),
+                    Command::TextRun(TextRunCommand {
+                        col: 16,
+                        row: 0,
+                        scale: 256,
+                        color: BADGE_RGB,
+                        bg: None,
+                        text: "ab".to_string(),
+                        follow: 0,
+                        anchor: None,
+                    }),
+                    Command::TextRunEnd,
+                ],
+                chip_buffer("    "),
+            ),
         );
     }
 
-    /// The spinner is content rather than border, so it survives the arm that
-    /// drops the border glyphs.
+    /// A foreign terminal renders no panel, so the chip paints its text in the
+    /// badge color over the tint in its one row of cells.
     #[test]
-    fn both_arms_paint_the_active_spinner() {
-        let (rich, _) = paint(BadgeState::Active, 0, true);
-        let (fallback, _) = paint(BadgeState::Active, 0, false);
+    fn cell_arm_paints_the_text_over_the_tint() {
+        let (buf, bytes) = paint(BadgeState::Complete, false);
+
+        assert_eq!((bytes, buf), (Vec::new(), chip_buffer(" ab ")));
+    }
+
+    /// The chip tints the chrome surface, or the background where a theme sets
+    /// no chrome. A theme with neither leaves the chip untinted.
+    #[test]
+    fn the_tint_falls_back_from_chrome_to_the_background() {
+        let tint = |settings: &str| {
+            let src = format!("theme t {{ {settings} }}");
+            let (config, _) = stoat_config::parse(&src);
+            let theme = crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
+                .expect("theme builds");
+            let [r, g, b] = BADGE_RGB;
+            chip_tint(Style::default().fg(Color::Rgb(r, g, b)), &theme)
+        };
 
         assert_eq!(
-            rich.cell((0, 0)).unwrap().symbol(),
-            "⣰",
-            "the spinner draws over the panel"
+            [
+                tint(r##"ui.surface.chrome.bg = "#646464"; ui.background.bg = "#000000";"##),
+                tint(r##"ui.background.bg = "#646464";"##),
+                tint(""),
+            ],
+            [Some(TINT), Some(TINT), None],
         );
+    }
+
+    /// An active badge's text leads with a dot in both arms, and the chip widens
+    /// to hold it.
+    #[test]
+    fn an_active_badge_leads_with_a_dot() {
+        let (_, rich) = paint(BadgeState::Active, true);
+        let (cells, _) = paint(BadgeState::Active, false);
+        let run_text = command::decode_stream(&rich)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                Command::TextRun(run) => Some(run.text),
+                _ => None,
+            });
+
         assert_eq!(
-            fallback.cell((0, 0)).unwrap().symbol(),
-            "⣰",
-            "and over the glyph corner it replaces"
+            (run_text, cells),
+            (
+                Some("\u{25cf} ab".to_string()),
+                chip_buffer(" \u{25cf} ab ")
+            ),
         );
     }
 
@@ -648,8 +680,8 @@ mod tests {
         }
     }
 
-    /// A status bar clear of the cover has to be clear of the box itself, so
-    /// the cover is checked against the cells the box paints.
+    /// A status bar clear of the cover has to be clear of the chip itself, so
+    /// the cover is checked against the cells the chip tints.
     #[test]
     fn the_cover_is_the_row_a_corner_badge_paints() {
         let mut tray = BadgeTray::new();
@@ -663,19 +695,21 @@ mod tests {
             &tray,
             &BadgeTray::new(),
             area,
-            0,
             &rgb_badge_theme(),
             &mut buf,
             &mut scene,
         );
 
-        let painted: Vec<u16> = (0..80).filter(|&x| buf[(x, 23)].symbol() != " ").collect();
+        let [r, g, b] = TINT;
+        let tinted: Vec<u16> = (0..80)
+            .filter(|&x| buf[(x, 23)].bg == Color::Rgb(r, g, b))
+            .collect();
         assert_eq!(
             bottom_right_cover(&tray, &BadgeTray::new(), area),
             Some(Rect::new(69, 23, 10, 1)),
-            "a 10-wide box one column in from the right edge"
+            "a 10-wide chip one column in from the right edge"
         );
-        assert_eq!(painted, (69..79).collect::<Vec<_>>());
+        assert_eq!(tinted, (69..79).collect::<Vec<_>>());
     }
 
     /// The tray stacks bottom-right badges upward, so only the lowest one's box

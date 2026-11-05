@@ -2166,7 +2166,7 @@ mod tests {
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
         agent_ipc::AgentControl,
-        agent_status::{AgentHookEvent, AgentStatus},
+        badge::{Anchor, Badge, BadgeSource, BadgeState},
         buffer::{BufferId, TextBuffer},
         diff_map::{DiffMap, MarkKind},
         editor_state::EditorState,
@@ -3565,13 +3565,9 @@ mod tests {
         );
     }
 
-    /// A bottom-right badge draws the lower edge of its box on the status row,
-    /// and whatever the bar put under the box is painted over. A message loses
-    /// its end there, and the cursor position goes entirely.
-    ///
-    /// The agent badge is derived from the agent status as each frame starts,
-    /// so the first frame with it up has to clear the row already. One frame
-    /// is rendered for that reason.
+    /// A bottom-right badge draws its chip on the status row, and whatever the
+    /// bar put under the chip is painted over. A message loses its end there,
+    /// and the cursor position goes entirely.
     ///
     /// The check runs for the rich bar under stoatty and for the cell fallback
     /// that a foreign terminal gets.
@@ -3583,16 +3579,12 @@ mod tests {
             h.seed_focused_buffer("hello");
             h.snapshot();
             h.stoat.set_status("walkthrough 'empty' has no stops");
-            let mut status = AgentStatus::new();
-            status.apply(AgentHookEvent::PreToolUse {
-                tool: "Bash".into(),
-            });
-            h.stoat.active_workspace_mut().agent = Some(status);
+            corner_chip(&mut h);
 
             let buf = h.render_composited();
 
-            // The "claude: Bash" box is 14 wide and sits one column in from
-            // the right edge, so it starts at column 85.
+            // The 14-wide chip sits one column in from the right edge, so it
+            // starts at column 85.
             let row = buf.area.height - 1;
             let expected = "walkthrough 'empty' has no stops 1:1 ";
             let start = 85 - expected.chars().count() as u16;
@@ -3616,15 +3608,11 @@ mod tests {
             h.seed_focused_buffer("hello");
             h.snapshot();
             h.stoat.set_status("walkthrough 'empty' has no stops");
-            let mut status = AgentStatus::new();
-            status.apply(AgentHookEvent::PreToolUse {
-                tool: "Bash".into(),
-            });
-            h.stoat.active_workspace_mut().agent = Some(status);
+            corner_chip(&mut h);
 
             let buf = h.render_composited();
 
-            // The 14-wide box starts at column 45 of 60.
+            // The 14-wide chip starts at column 45 of 60.
             let row = buf.area.height - 1;
             let left_of_the_box: String = (0..45)
                 .map(|x| buf[(x, row)].symbol())
@@ -3635,6 +3623,18 @@ mod tests {
                 "stoatty {stoatty}",
             );
         }
+    }
+
+    /// Put a 14-wide chip at the bottom right, from a 12-character label of a
+    /// source no frame sync takes down.
+    fn corner_chip(h: &mut crate::test_harness::TestHarness) {
+        h.stoat.active_workspace_mut().badges.insert(Badge {
+            source: BadgeSource::Review,
+            anchor: Anchor::BottomRight,
+            state: BadgeState::Complete,
+            label: "reviewed 1/3".to_owned(),
+            detail: None,
+        });
     }
 
     /// A read-only buffer's status row reads `name [readonly] [+]`, the

@@ -4222,7 +4222,7 @@ fn a_parked_agent_keeps_its_session_and_shows_the_exit() {
                 .and_then(AgentStatus::badge)
                 .map(|badge| badge.label),
         ),
-        (true, Some("claude: exited".to_string())),
+        (true, Some("claude \u{b7} exited".to_string())),
         "the session stays for its last frame, and the badge shows the exit",
     );
 }
@@ -16747,7 +16747,7 @@ fn agent_event_drives_owning_workspace_status() {
         .as_ref()
         .and_then(|status| status.badge())
         .map(|badge| badge.label);
-    assert_eq!(label, Some("claude: Bash".to_string()));
+    assert_eq!(label, Some("claude \u{b7} Bash".to_string()));
 }
 
 #[test]

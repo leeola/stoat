@@ -3,7 +3,7 @@ use crate::{
     commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS},
     render::{
         file_finder::file_finder_layout,
-        paint::style_rgb,
+        paint::{blend, style_rgb},
         table::{self, Column, Width},
         text::write_str_clipped,
     },
@@ -485,20 +485,6 @@ fn paint_edge_glyphs(buf: &mut Buffer, area: Rect, from: u16, to: u16, y: u16, t
             .set_char(glyph)
             .set_style(theme.get(scope::UI_TEXT_MUTED));
     }
-}
-
-/// Mix `percent` of `toward` into `color`.
-fn blend(color: [u8; 3], toward: [u8; 3], percent: u16) -> [u8; 3] {
-    let mix = |a: u8, b: u8| {
-        let a = u16::from(a) * (100 - percent);
-        let b = u16::from(b) * percent;
-        ((a + b) / 100) as u8
-    };
-    [
-        mix(color[0], toward[0]),
-        mix(color[1], toward[1]),
-        mix(color[2], toward[2]),
-    ]
 }
 
 /// The commit table's columns, in [`CommitColumn`] order.

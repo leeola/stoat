@@ -51,6 +51,20 @@ pub(crate) fn style_rgb(color: Option<Color>) -> Option<[u8; 3]> {
     }
 }
 
+/// Mix `percent` of `toward` into `color`.
+pub(crate) fn blend(color: [u8; 3], toward: [u8; 3], percent: u16) -> [u8; 3] {
+    let mix = |a: u8, b: u8| {
+        let a = u16::from(a) * (100 - percent);
+        let b = u16::from(b) * percent;
+        ((a + b) / 100) as u8
+    };
+    [
+        mix(color[0], toward[0]),
+        mix(color[1], toward[1]),
+        mix(color[2], toward[2]),
+    ]
+}
+
 /// Blend `fg` toward `bg` by `amount`, where `0.0` returns `fg` unchanged and
 /// `1.0` returns `bg`.
 ///

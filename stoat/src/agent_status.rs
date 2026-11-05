@@ -121,14 +121,14 @@ impl AgentStatus {
     pub fn badge(&self) -> Option<Badge> {
         let label = match (self.alive, self.phase) {
             (_, AgentPhase::Ended) => return None,
-            (false, _) => "claude: exited".to_string(),
-            (true, AgentPhase::Starting) => "claude: starting".to_string(),
+            (false, _) => "claude \u{b7} exited".to_string(),
+            (true, AgentPhase::Starting) => "claude \u{b7} starting".to_string(),
             (true, AgentPhase::Working) => match &self.current_tool {
-                Some(tool) => format!("claude: {tool}"),
-                None => "claude: working".to_string(),
+                Some(tool) => format!("claude \u{b7} {tool}"),
+                None => "claude \u{b7} working".to_string(),
             },
-            (true, AgentPhase::Idle) => "claude: idle".to_string(),
-            (true, AgentPhase::AwaitingInput) => "claude: awaiting input".to_string(),
+            (true, AgentPhase::Idle) => "claude \u{b7} idle".to_string(),
+            (true, AgentPhase::AwaitingInput) => "claude \u{b7} awaiting input".to_string(),
         };
 
         let state = if self.alive {
@@ -139,7 +139,7 @@ impl AgentStatus {
 
         Some(Badge {
             source: BadgeSource::Agent,
-            anchor: Anchor::BottomRight,
+            anchor: Anchor::TopRight,
             state,
             label,
             detail: None,
@@ -194,8 +194,8 @@ mod tests {
         let badge = s.badge().expect("active session has a badge");
         assert_eq!(badge.source, BadgeSource::Agent);
         assert_eq!(badge.state, BadgeState::Active);
-        assert_eq!(badge.label, "claude: Bash");
-        assert_eq!(badge.anchor, Anchor::BottomRight);
+        assert_eq!(badge.label, "claude \u{b7} Bash");
+        assert_eq!(badge.anchor, Anchor::TopRight);
     }
 
     #[test]
@@ -215,6 +215,6 @@ mod tests {
 
         let badge = s.badge().expect("crashed session still surfaces");
         assert_eq!(badge.state, BadgeState::Error);
-        assert_eq!(badge.label, "claude: exited");
+        assert_eq!(badge.label, "claude \u{b7} exited");
     }
 }
