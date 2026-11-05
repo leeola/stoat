@@ -1120,6 +1120,33 @@ mod tests {
         );
     }
 
+    /// Plain prose in the body takes the theme's text color, not the box's
+    /// border hue, in a scene that draws text runs and in a plain terminal.
+    #[test]
+    fn hover_prose_takes_the_text_color() {
+        let mut h = TestHarness::with_size(40, 12);
+        hover_over_main(&mut h, "fn foo() -> u32");
+        let prose_colors = |h: &TestHarness, buf: &Buffer| {
+            let area = h.stoat.pending_hover.as_ref().expect("popup").area;
+            let mut colors: Vec<_> = (area.x + 1..area.x + 16)
+                .map(|x| buf[(x, area.y + 1)].fg)
+                .collect();
+            colors.dedup();
+            colors
+        };
+
+        let rich = {
+            let buf = h.render_composited();
+            prose_colors(&h, &buf)
+        };
+        h.stoat.stoatty = false;
+        let plain = h.stoat.render();
+
+        let text = h.stoat.theme.get(scope::UI_TEXT).fg;
+        let want = vec![text.expect("the theme sets a text color")];
+        assert_eq!([rich, prose_colors(&h, &plain)], [want.clone(), want]);
+    }
+
     /// Open a hover with `body` over the first line of a one-line `main.rs`.
     fn hover_over_main(h: &mut TestHarness, body: &str) {
         enable_hover(h);

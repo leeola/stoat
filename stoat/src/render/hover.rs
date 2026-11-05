@@ -357,11 +357,12 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
         open.anchor = anchor;
     }
 
-    // A span's style is a delta over the modal base, so a plain span keeps the
-    // modal look. The rich arm needs an RGB modal fg and background to compose
-    // one TextRun per span at the popover text scale. Without them it paints
-    // cells.
-    let modal_fg = crate::render::paint::style_rgb(modal_style.fg);
+    // A span's style is a delta over the body base, so a plain span takes the
+    // body's text color. The rich arm needs that color and the background in
+    // RGB to compose one TextRun per span at the popover text scale. Without
+    // them it paints cells.
+    let body = body_style(&stoat.theme, modal_style);
+    let body_fg = crate::render::paint::style_rgb(body.fg);
     // A run paints its backing above the frame's fill, so the backing must match
     // that fill. A modal's panel fills with `run_bg`, and a card fills with its
     // own color. Any other color shows as a band behind each line.
@@ -390,12 +391,12 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|line| clip_line(line, inner.width as usize))
     };
 
-    let rich = match (scene.live(), modal_fg, run_bg) {
-        (true, Some(modal_fg), Some(run_bg)) => Some((modal_fg, run_bg)),
+    let rich = match (scene.live(), body_fg, run_bg) {
+        (true, Some(body_fg), Some(run_bg)) => Some((body_fg, run_bg)),
         _ => None,
     };
     match rich {
-        Some((modal_fg, run_bg)) => {
+        Some((body_fg, run_bg)) => {
             for (row_idx, line) in visible().enumerate() {
                 let row = inner.y + row_idx as u16;
                 let selection = sel_rgb.and_then(|rgb| {
@@ -418,7 +419,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
                 let mut chars_before = 0usize;
                 for (text, style) in line {
-                    let color = crate::render::paint::style_rgb(style.fg).unwrap_or(modal_fg);
+                    let color = crate::render::paint::style_rgb(style.fg).unwrap_or(body_fg);
                     let span_end = chars_before + text.chars().count();
                     let (b0, b1) = match selection {
                         Some((c0, c1, _)) => (
@@ -479,13 +480,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                     if x >= end_x {
                         break;
                     }
-                    let (next_x, _) = buf.set_stringn(
-                        x,
-                        row,
-                        text,
-                        (end_x - x) as usize,
-                        modal_style.patch(style),
-                    );
+                    let (next_x, _) =
+                        buf.set_stringn(x, row, text, (end_x - x) as usize, body.patch(style));
                     x = next_x;
                 }
             }
@@ -510,11 +506,11 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
 /// Paint a hover footer's goto keys across `row` on the raised surface.
 ///
-/// `rich` holds the modal's foreground and fill while the scene draws text
-/// runs. The fill and the keys then ride `anchor` as the body does, so the
-/// footer glides with its box. A run backs only its own glyphs, and the box's
-/// panel fill covers the cells, so a full-scale run of spaces fills the row.
-/// Without `rich` the footer paints cells.
+/// `rich` holds the body's text color and the modal's fill while the scene
+/// draws text runs. The fill and the keys then ride `anchor` as the body does,
+/// so the footer glides with its box. A run backs only its own glyphs, and the
+/// box's panel fill covers the cells, so a full-scale run of spaces fills the
+/// row. Without `rich` the footer paints cells.
 ///
 /// Each piece starts on a whole cell, as a status row segment does. A theme
 /// with no raised surface fills the row with the modal's own fill.
@@ -534,7 +530,7 @@ fn paint_footer(
     let word = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let end_x = row.x + row.width;
 
-    let Some((modal_fg, modal_bg)) = rich else {
+    let Some((text_fg, modal_bg)) = rich else {
         let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
         let fill = raised.map_or(modal_style, |bg| modal_style.bg(bg));
         for x in row.x..end_x {
@@ -566,11 +562,11 @@ fn paint_footer(
         };
         command::encode_text_run_into(scene.buffer(), &command);
     };
-    emit(row.x, " ".repeat(row.width as usize), 256, modal_fg);
+    emit(row.x, " ".repeat(row.width as usize), 256, text_fg);
 
     let scale = theme.type_scale(TypeRole::Ui);
-    let key_rgb = crate::render::paint::style_rgb(key.fg).unwrap_or(modal_fg);
-    let word_rgb = crate::render::paint::style_rgb(word.fg).unwrap_or(modal_fg);
+    let key_rgb = crate::render::paint::style_rgb(key.fg).unwrap_or(text_fg);
+    let word_rgb = crate::render::paint::style_rgb(word.fg).unwrap_or(text_fg);
     let mut x = row.x;
     for (text, is_key) in footer_pieces(footer) {
         let room = end_x.saturating_sub(x) as usize;
@@ -892,7 +888,8 @@ pub(crate) fn render_hover_page(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let body_scale = theme.type_scale(TypeRole::Ui);
-    let modal_fg = crate::render::paint::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
+    let body_fg = crate::render::paint::style_rgb(body_style(theme, modal_style).fg)
+        .unwrap_or([255, 255, 255]);
     let (buf, run_bg) = match popup.frame {
         HoverFrame::Sketch { fill, .. } => {
             let mut cell = crate::render::themed_blank(theme);
@@ -918,7 +915,7 @@ pub(crate) fn render_hover_page(
         let mut chars_before = 0u16;
         for (text, style) in &line {
             let col = text_run::advance_sixteenths(chars_before.into(), body_scale) as i16;
-            let color = crate::render::paint::style_rgb(style.fg).unwrap_or(modal_fg);
+            let color = crate::render::paint::style_rgb(style.fg).unwrap_or(body_fg);
             TextRun {
                 col,
                 row: 0,
@@ -938,6 +935,18 @@ pub(crate) fn render_hover_page(
     let mut bytes = crate::render::serialize_buffer(&buf);
     bytes.extend_from_slice(&apc);
     bytes
+}
+
+/// The style a plain span of the hover body paints in, over `modal_style`.
+///
+/// The modal's foreground is the box's border hue, so the body takes its text
+/// color from `ui.text`, as the pickers and the help body do. A theme with no
+/// `ui.text` color keeps the modal's foreground.
+fn body_style(theme: &crate::theme::Theme, modal_style: Style) -> Style {
+    match theme.get(crate::theme::scope::UI_TEXT).fg {
+        Some(fg) => modal_style.fg(fg),
+        None => modal_style,
+    }
 }
 
 /// Byte offset of the `char_idx`-th character in `s`, or `s.len()` when
@@ -1158,6 +1167,41 @@ mod tests {
         assert!(
             page.windows(10).any(|bytes| bytes == b"48;2;1;2;3"),
             "the page's cells take the modal fill as their background"
+        );
+    }
+
+    /// A plain span on a page takes the theme's text color, apart from the
+    /// modal's foreground, which is the box's border hue. A theme with no text
+    /// color keeps the modal's foreground.
+    #[test]
+    fn a_hover_page_paints_plain_text_in_the_text_color() {
+        let popup = HoverPopup::new(
+            vec![vec![("body".to_owned(), Style::default())]],
+            0,
+            EditorId::default(),
+        );
+        let run_colors = |text_setting: &str| {
+            let src = format!(
+                r##"theme t {{
+                    ui.modal.hints = {{ fg: "#f0f1f2", bg: "#010203" }};
+                    {text_setting}
+                }}"##
+            );
+            let (config, _) = stoat_config::parse(&src);
+            let theme =
+                Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+            command::decode_stream(&render_hover_page(&popup, 0, &theme, 12, 3))
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    Command::TextRun(run) => Some(run.color),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            [run_colors(r##"ui.text.fg = "#0a0b0c";"##), run_colors("")],
+            [vec![[0x0a, 0x0b, 0x0c]], vec![[0xf0, 0xf1, 0xf2]]],
         );
     }
 }
