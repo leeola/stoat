@@ -1,6 +1,7 @@
 //! Binary entry point for the `stoatty` terminal: parses argv, opens a window
 //! running the requested command (or the user's shell), and drives the event
-//! loop until the window closes.
+//! loop until the window closes. The `shot` subcommand renders a script's shots
+//! with no window instead.
 //!
 //! This is the process's syscall boundary. Logging is configured and its
 //! directory created before anything else runs, so the environment and
@@ -8,15 +9,23 @@
 #![allow(clippy::disallowed_methods)]
 
 use clap::{CommandFactory, Parser};
-use std::{backtrace::Backtrace, panic, sync::Once};
+use std::{backtrace::Backtrace, error::Error, panic, path::Path, slice, sync::Once};
 use stoat_cli::FixtureSub;
 use stoat_log::{
     ident::{self, LogId, ProcessIdent},
     LogTarget,
 };
-use stoatty_bin::cli::{Cli, TtyCommand};
 #[cfg(unix)]
 use stoatty_bin::signals;
+use stoatty_bin::{
+    cli::{Adapter, Cli, ShotArgs, TtyCommand},
+    config,
+    headless::{
+        script::{self, Step},
+        HeadlessSession, Scene,
+    },
+    stoat_bin,
+};
 
 fn main() {
     // First, because a thread inherits the mask of the thread that spawns it,
@@ -89,6 +98,7 @@ fn main() {
             );
             return;
         },
+        Some(TtyCommand::Shot(args)) => std::process::exit(run_shot(*args)),
         None => {},
     }
 
@@ -99,6 +109,135 @@ fn main() {
         cli.terminal,
         cli.maximized,
     );
+}
+
+/// Render `args.script`'s shots with no window, and return the exit code.
+///
+/// Each failure exits 2 and is named on stderr: a script that does not parse,
+/// no wgpu adapter, a child that fails to start or exits before the last step,
+/// a termination signal, a settle that times out, and a shot not written.
+fn run_shot(args: ShotArgs) -> i32 {
+    match shoot(args) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("stoatty shot: {}", error_chain(error.as_ref()));
+            2
+        },
+    }
+}
+
+/// Play `args.script`, write each shot it names to `<out>/<name>.png`, and
+/// print each path written on stdout.
+fn shoot(args: ShotArgs) -> Result<(), Box<dyn Error>> {
+    let steps = script::parse(&args.script)?;
+
+    // The shipped config, never the user's, so two machines draw the same scene.
+    let mut config = config::embedded_default();
+    if let Some(theme) = &args.theme {
+        config.theme.clone_from(theme);
+    }
+
+    let (program, program_args, stoat_dir) = match args.command() {
+        Some((program, program_args)) => (program, program_args, None),
+        None => {
+            let stoat = stoat_bin::resolve(&config);
+            let dir = stoat
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(Path::to_path_buf);
+            (
+                stoat.to_string_lossy().into_owned(),
+                args.common.to_argv(),
+                dir,
+            )
+        },
+    };
+    let working_directory = args.working_directory.and_then(|dir| {
+        if dir.is_dir() {
+            return Some(dir);
+        }
+        eprintln!(
+            "stoatty shot: ignoring --working-dir {}: not a directory",
+            dir.display()
+        );
+        None
+    });
+
+    // Bound before the session, so the session drops first and the child is
+    // gone before its scratch home is removed.
+    let scratch = match args.user_state {
+        true => None,
+        false => Some(tempfile::tempdir()?),
+    };
+    let extra_env = match &scratch {
+        Some(home) => scratch_env(home.path())?,
+        None => Vec::new(),
+    };
+    std::fs::create_dir_all(&args.out)?;
+
+    let mut session = HeadlessSession::spawn(Scene {
+        program,
+        args: program_args,
+        working_directory,
+        stoat_dir,
+        cols: args.size.cols,
+        rows: args.size.rows,
+        font_size: args.font_size.unwrap_or(config.font_size),
+        terminal_font_size: config.terminal_font_size,
+        scale_factor: args.scale,
+        theme: config.resolve_theme(),
+        theme_name: config.theme,
+        font_family: config.font_family,
+        ligatures: config.ligatures,
+        cursor_animation: config.cursor_animation,
+        software: args.adapter == Adapter::Software,
+        extra_env,
+    })?;
+    #[cfg(unix)]
+    session.forward_termination_signals()?;
+
+    for step in &steps {
+        let Step::Shot(name) = step else {
+            session.type_keys(slice::from_ref(step))?;
+            continue;
+        };
+        let shot = session.snapshot()?;
+        let path = args.out.join(format!("{name}.png"));
+        image::RgbaImage::from_raw(shot.width, shot.height, shot.rgba)
+            .expect("the readback is width by height")
+            .save(&path)?;
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
+/// The XDG entries that point a child's config, data, and state at directories
+/// made under `home`.
+fn scratch_env(home: &Path) -> std::io::Result<Vec<(String, String)>> {
+    [
+        ("XDG_CONFIG_HOME", "config"),
+        ("XDG_DATA_HOME", "data"),
+        ("XDG_STATE_HOME", "state"),
+    ]
+    .into_iter()
+    .map(|(var, dir)| {
+        let path = home.join(dir);
+        std::fs::create_dir_all(&path)?;
+        Ok((var.to_owned(), path.to_string_lossy().into_owned()))
+    })
+    .collect()
+}
+
+/// `error` and each error behind it, joined with ": ".
+fn error_chain(error: &dyn Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        text.push_str(": ");
+        text.push_str(&next.to_string());
+        cause = next.source();
+    }
+    text
 }
 
 /// The log file for `stem` under the shared stoat log directory, at

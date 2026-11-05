@@ -4355,6 +4355,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "etcetera",
+ "image",
  "libc",
  "portable-pty",
  "rustc-hash 2.1.3",

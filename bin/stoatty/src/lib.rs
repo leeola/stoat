@@ -14,4 +14,4 @@ mod input;
 pub mod pty;
 #[cfg(unix)]
 pub mod signals;
-mod stoat_bin;
+pub mod stoat_bin;

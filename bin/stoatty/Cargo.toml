@@ -39,9 +39,8 @@ serde.workspace = true
 toml.workspace = true
 etcetera.workspace = true
 snafu.workspace = true
+image.workspace = true
+tempfile.workspace = true
 
 [build-dependencies]
 stoat_build_stamp = { path = "../../build_stamp" }
-
-[dev-dependencies]
-tempfile.workspace = true

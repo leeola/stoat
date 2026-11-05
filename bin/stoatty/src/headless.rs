@@ -46,6 +46,11 @@ use stoatty_term::{
     theme::Theme,
 };
 use winit::window::{UserAttentionType, WindowId};
+#[cfg(unix)]
+use {
+    crate::signals,
+    std::{sync::mpsc::Sender, thread},
+};
 
 /// The pace frames draw at while one is wanted, the rate a 60 Hz display holds
 /// the window path to.
@@ -107,6 +112,10 @@ pub struct HeadlessSession {
     /// [`Self::wait_settled`] whether the screen moved in a slice.
     redraws_seen: u64,
     exit: Option<ExitStatus>,
+    /// A sender onto [`Self::events`], for the thread that
+    /// [`Self::forward_termination_signals`] starts.
+    #[cfg(unix)]
+    wake: Sender<PtyEvent>,
 }
 
 /// One frame read back from a session's texture.
@@ -144,6 +153,13 @@ pub enum HeadlessError {
     #[snafu(display("the child exited before the script ended"))]
     ChildExited {
         status: Option<ExitStatus>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("interrupted by signal {signal}"))]
+    Interrupted {
+        signal: i32,
         #[snafu(implicit)]
         location: Location,
     },
@@ -239,10 +255,13 @@ impl HeadlessSession {
                 ingest_at.clone(),
                 ingest_epoch,
             ),
-            move || {
-                let _ = wake.send(PtyEvent::Exited {
-                    last_output: String::new(),
-                });
+            {
+                let wake = wake.clone();
+                move || {
+                    let _ = wake.send(PtyEvent::Exited {
+                        last_output: String::new(),
+                    });
+                }
             },
         )
         .context(SpawnSnafu)?;
@@ -276,6 +295,8 @@ impl HeadlessSession {
             last_tick: None,
             redraws_seen: 0,
             exit: None,
+            #[cfg(unix)]
+            wake,
         })
     }
 
@@ -283,9 +304,9 @@ impl HeadlessSession {
     /// `until`.
     ///
     /// A frame draws at most once per [`FRAME_TICK`], and only while one is
-    /// wanted. Fails with [`HeadlessError::ChildExited`] once the child exits or
-    /// a termination signal arrives. Returns early once the reader and the exit
-    /// waiter are both gone, since nothing is left to wait for.
+    /// wanted. Fails with [`HeadlessError::ChildExited`] once the child exits,
+    /// and with [`HeadlessError::Interrupted`] once a forwarded termination
+    /// signal arrives.
     pub fn pump(&mut self, until: Instant) -> Result<(), HeadlessError> {
         loop {
             let now = Instant::now();
@@ -407,6 +428,27 @@ impl HeadlessSession {
         self.exit.clone()
     }
 
+    /// Make a termination signal end the next pump with
+    /// [`HeadlessError::Interrupted`].
+    ///
+    /// Starts a thread that takes the first SIGHUP, SIGINT, or SIGTERM. Call it
+    /// only in a process that blocks those signals on every thread, as
+    /// [`signals::block_termination`] does at the start of the stoatty binary.
+    /// In a process that does not, a signal's default action ends the process
+    /// first.
+    #[cfg(unix)]
+    pub fn forward_termination_signals(&self) -> io::Result<()> {
+        let wake = self.wake.clone();
+        thread::Builder::new()
+            .name("signals".to_owned())
+            .spawn(move || {
+                if let Ok(signal) = signals::wait_termination() {
+                    let _ = wake.send(PtyEvent::TerminationSignal(signal));
+                }
+            })
+            .map(|_| ())
+    }
+
     /// The earliest instant at which the session has work, no later than
     /// `until`.
     fn next_wake(&self, until: Instant) -> Instant {
@@ -446,7 +488,7 @@ impl HeadlessSession {
                 }
                 .fail();
             },
-            PtyEvent::TerminationSignal(_) => return ChildExitedSnafu { status: None }.fail(),
+            PtyEvent::TerminationSignal(signal) => return InterruptedSnafu { signal }.fail(),
             // A session opens no aux window and starts no font scan, so neither
             // of these arrives.
             PtyEvent::FontsScanned(_) | PtyEvent::AuxGpuReady { .. } => {},

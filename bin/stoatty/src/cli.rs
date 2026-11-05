@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueHint};
+use clap::{Args, Parser, Subcommand, ValueEnum, ValueHint};
 use std::path::PathBuf;
 use stoat_cli::{CommonArgs, FixtureArgs};
 
@@ -95,6 +95,98 @@ pub enum TtyCommand {
         /// The shell to generate completions for.
         shell: clap_complete::Shell,
     },
+
+    /// Render a script's shots headlessly to PNG files, with no window.
+    Shot(Box<ShotArgs>),
+}
+
+/// What `stoatty shot` runs, the script it plays, and where its shots go.
+///
+/// A run draws from the shipped config, never the user's, so two machines draw
+/// the same scene.
+#[derive(Args)]
+pub struct ShotArgs {
+    /// Files to open and the session-restore flags, forwarded to the stoat
+    /// editor when it is the child. Ignored under `-e`/`--command`.
+    #[command(flatten)]
+    pub common: CommonArgs,
+
+    /// Run PROGRAM (with any following arguments) instead of the stoat editor.
+    /// Every argument after it goes to PROGRAM, so give it last.
+    #[arg(
+        short = 'e',
+        long = "command",
+        value_name = "PROGRAM",
+        allow_hyphen_values = true,
+        num_args = 1..,
+    )]
+    command: Vec<String>,
+
+    /// The child's working directory. Defaults to stoatty's own.
+    #[arg(
+        short = 'd',
+        long = "working-dir",
+        value_name = "DIR",
+        value_hint = ValueHint::DirPath
+    )]
+    pub working_directory: Option<PathBuf>,
+
+    /// The terminal grid, in cells.
+    #[arg(
+        long,
+        value_name = "COLSxROWS",
+        default_value = "120x40",
+        value_parser = parse_grid_size
+    )]
+    pub size: GridSize,
+
+    /// The editor font size in points. Defaults to the shipped config's.
+    #[arg(long)]
+    pub font_size: Option<u32>,
+
+    /// Physical pixels per point.
+    #[arg(long, default_value_t = 1.0)]
+    pub scale: f64,
+
+    /// The theme to draw with. Defaults to the shipped config's.
+    #[arg(long)]
+    pub theme: Option<String>,
+
+    /// The GPU adapter that draws.
+    #[arg(long, value_enum, default_value_t = Adapter::Software)]
+    pub adapter: Adapter,
+
+    /// The key script to play, in the grammar `stoat --inputs` reads, with
+    /// `<Settle>` and `<Shot:name>` added.
+    #[arg(long, default_value = "<Settle><Shot:final>")]
+    pub script: String,
+
+    /// The directory each `<Shot:name>` writes `name.png` into, made when it
+    /// does not exist.
+    #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
+    pub out: PathBuf,
+
+    /// Give the child the user's own config, data, and state directories,
+    /// instead of a scratch home that the run removes.
+    #[arg(long)]
+    pub user_state: bool,
+}
+
+/// A terminal grid size in cells, parsed from `COLSxROWS`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridSize {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// The GPU adapter a headless run draws on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Adapter {
+    /// A CPU adapter such as lavapipe, which draws the same pixels on every
+    /// machine.
+    Software,
+    /// The machine's own GPU.
+    Hardware,
 }
 
 impl Cli {
@@ -102,8 +194,38 @@ impl Cli {
     /// when the flag was not given. The first token is the program, the rest
     /// its arguments.
     pub fn command(&self) -> Option<(String, Vec<String>)> {
-        let (program, args) = self.command.split_first()?;
-        Some((program.clone(), args.to_vec()))
+        split_command(&self.command)
+    }
+}
+
+impl ShotArgs {
+    /// The program and its arguments from `-e`/`--command`, or `None` when the
+    /// flag was not given, as [`Cli::command`] reads them.
+    pub fn command(&self) -> Option<(String, Vec<String>)> {
+        split_command(&self.command)
+    }
+}
+
+/// The program and its arguments from the tokens of a `-e`/`--command` flag.
+fn split_command(command: &[String]) -> Option<(String, Vec<String>)> {
+    let (program, args) = command.split_first()?;
+    Some((program.clone(), args.to_vec()))
+}
+
+/// Parse a `COLSxROWS` grid size, such as `120x40`.
+///
+/// Each side is a whole number of cells above zero, since a grid with no cells
+/// has no texture to draw into.
+fn parse_grid_size(text: &str) -> Result<GridSize, String> {
+    let side = |side: &str| side.parse::<u16>().ok().filter(|&cells| cells > 0);
+    match text
+        .split_once(['x', 'X'])
+        .map(|(cols, rows)| (side(cols), side(rows)))
+    {
+        Some((Some(cols), Some(rows))) => Ok(GridSize { cols, rows }),
+        _ => Err(format!(
+            "expected COLSxROWS with whole numbers above zero, such as 120x40, not '{text}'"
+        )),
     }
 }
 
@@ -231,5 +353,92 @@ mod tests {
             script.contains("rust-lsp"),
             "generated completions must offer the fixture names"
         );
+    }
+
+    #[test]
+    fn shot_parses_size_script_and_out() {
+        use super::{Adapter, GridSize, ShotArgs, TtyCommand};
+        use std::path::PathBuf;
+
+        let shot = |argv: &[&str]| -> ShotArgs {
+            match Cli::parse_from(["stoatty", "shot"].iter().chain(argv)).command_sub {
+                Some(TtyCommand::Shot(args)) => *args,
+                _ => panic!("expected the shot subcommand"),
+            }
+        };
+
+        let given = shot(&[
+            "--size",
+            "80x24",
+            "--script",
+            "jj<Shot:a>",
+            "--out",
+            "shots",
+            "--adapter",
+            "hardware",
+            "--user-state",
+            "-e",
+            "sh",
+            "-c",
+            "true",
+        ]);
+        assert_eq!(
+            (
+                given.size,
+                given.script.as_str(),
+                given.out.clone(),
+                given.adapter,
+                given.user_state,
+                given.command(),
+            ),
+            (
+                GridSize { cols: 80, rows: 24 },
+                "jj<Shot:a>",
+                PathBuf::from("shots"),
+                Adapter::Hardware,
+                true,
+                Some(("sh".to_owned(), vec!["-c".to_owned(), "true".to_owned()])),
+            ),
+            "every flag as given, with -e last taking the rest",
+        );
+
+        let defaults = shot(&["--out", "shots"]);
+        assert_eq!(
+            (
+                defaults.size,
+                defaults.script.as_str(),
+                defaults.adapter,
+                defaults.scale,
+                defaults.user_state,
+                defaults.command(),
+            ),
+            (
+                GridSize {
+                    cols: 120,
+                    rows: 40
+                },
+                "<Settle><Shot:final>",
+                Adapter::Software,
+                1.0,
+                false,
+                None,
+            ),
+            "the defaults when only --out is given",
+        );
+    }
+
+    #[test]
+    fn shot_rejects_a_malformed_size() {
+        use clap::error::ErrorKind;
+
+        let kinds: Vec<_> = ["80", "80x", "x24", "0x24", "80x0", "80x24x2", "wide"]
+            .into_iter()
+            .map(|size| {
+                Cli::try_parse_from(["stoatty", "shot", "--out", "shots", "--size", size])
+                    .err()
+                    .map(|error| error.kind())
+            })
+            .collect();
+        assert_eq!(kinds, [Some(ErrorKind::ValueValidation); 7]);
     }
 }
