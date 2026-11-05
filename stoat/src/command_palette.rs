@@ -73,13 +73,14 @@ pub struct CommandPalette {
     /// [`Self::generation`] so it bumps only on a real filter change, not on
     /// every per-frame refilter.
     last_filter_key: u64,
-    /// Commands the current scope offers before any query narrows them, which
-    /// the renderer sizes the modal's list against.
+    /// Commands the current scope offers before any query narrows them. The
+    /// renderer sizes the modal's list against it, and the header counts the
+    /// filtered commands out of it.
     ///
     /// Captured from the unfiltered set rather than [`Self::filtered`], so
     /// typing a query cannot resize the box out from under the user typing it.
     /// Only a scope flip changes it.
-    command_rows: u16,
+    pub(crate) offering: usize,
 }
 
 /// The inline value-picker the palette shows while collecting an argument
@@ -614,7 +615,7 @@ impl CommandPalette {
         );
         // The empty-query refilter above leaves `filtered` holding the scope's
         // whole offering, which is exactly the base the box sizes to.
-        let command_rows = rows_of(filtered.len());
+        let offering = filtered.len();
         Self {
             input,
             filtered,
@@ -629,7 +630,7 @@ impl CommandPalette {
             arg_picker: None,
             generation: picker::next_generation(),
             last_filter_key: 0,
-            command_rows,
+            offering,
         }
     }
 
@@ -642,7 +643,7 @@ impl CommandPalette {
     pub(crate) fn list_rows_hint(&self) -> u16 {
         match self.arg_picker.as_ref().filter(|_| self.command.is_some()) {
             Some(picker) => rows_of(picker.active_core_ref().picklist.base.len()),
-            None => self.command_rows,
+            None => rows_of(self.offering),
         }
     }
 
@@ -665,7 +666,7 @@ impl CommandPalette {
             PaletteScope::Active => PaletteScope::All,
             PaletteScope::All => PaletteScope::Active,
         };
-        self.command_rows = rows_of(scope_offering(self.scope, &self.availability));
+        self.offering = scope_offering(self.scope, &self.availability);
         self.refilter_from_input(ws);
     }
 

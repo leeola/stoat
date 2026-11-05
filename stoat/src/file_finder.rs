@@ -542,7 +542,7 @@ impl FileFinder {
     /// The file scopes cycle All -> Modified -> each named scope (alphabetical)
     /// -> AllWorkspaces -> All. A finder over a diff has Diff in Modified's
     /// place. Buffers and ModifiedBuffers flip with each other.
-    fn next_scope(&self) -> FinderScope {
+    pub(crate) fn next_scope(&self) -> FinderScope {
         match &self.scope {
             FinderScope::All if self.diff_paths.is_some() => FinderScope::Diff,
             FinderScope::All => FinderScope::Modified,
@@ -1290,8 +1290,8 @@ mod tests {
             (FinderScope::Diff, repo_paths(&["a.txt", "b.txt"]))
         );
         assert!(
-            h.snapshot().content.contains("file finder (diff)"),
-            "the title names the diff scope"
+            h.snapshot().content.contains("Files \u{00B7} diff"),
+            "the header names the diff scope"
         );
     }
 
@@ -3026,8 +3026,8 @@ mod tests {
         let content = h.snapshot().content.clone();
 
         assert!(
-            content.contains("(browse)"),
-            "browse title missing:\n{content}"
+            content.contains("Files \u{00B7} browse"),
+            "browse label missing:\n{content}"
         );
         assert_eq!(browse_root(&h), home);
         let finder = h.stoat.file_finder.as_ref().expect("finder open");

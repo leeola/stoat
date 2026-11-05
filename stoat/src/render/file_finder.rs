@@ -1,5 +1,6 @@
 use crate::{
     file_finder::{FileFinder, FinderScope},
+    render::picker::{FilterHeader, FILTER_PROMPT},
     workspace::Workspace,
 };
 use ratatui::{
@@ -97,49 +98,30 @@ pub(crate) fn render_file_finder(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    let label = if finder.browse.is_some() {
-        "browse"
-    } else {
-        match finder.scope() {
-            FinderScope::All => "all",
-            FinderScope::Modified => "modified",
-            FinderScope::Diff => "diff",
-            FinderScope::Buffers => "buffers",
-            FinderScope::ModifiedBuffers => "modified buffers",
-            FinderScope::Named(name) => name.as_str(),
-            FinderScope::AllWorkspaces => "all workspaces",
-        }
-    };
-    let suffix = if finder.fallback_active() {
-        ", ignored"
-    } else if finder.diff_paths.is_some()
-        && matches!(
-            finder.scope(),
-            FinderScope::Buffers | FinderScope::ModifiedBuffers
-        )
-    {
-        ", diff"
-    } else {
-        ""
-    };
-    let title = format!(" file finder ({label}{suffix}) ");
     crate::render::clear_modal(layout.modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
-        buf,
-        layout.modal,
-        Some(&title),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    crate::render::chrome::modal_frame(buf, layout.modal, None, modal_style, theme, &mut *scene);
 
     let inner = layout.inner;
     let separator_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
 
+    let label = finder_label(finder);
+    let chip = finder
+        .browse
+        .is_none()
+        .then(|| format!("S-Tab \u{00B7} {}", scope_words(&finder.next_scope())));
+    let count = {
+        let list = &finder.active_core_ref().picklist;
+        (list.filtered.len(), list.base.len())
+    };
     crate::render::picker::filter_header(
         buf,
         inner,
-        ">",
+        &FilterHeader {
+            label: &label,
+            prompt: FILTER_PROMPT,
+            count: Some(count),
+            chip: chip.as_deref(),
+        },
         &finder.input,
         ws,
         theme,
@@ -161,6 +143,50 @@ pub(crate) fn render_file_finder(
 
     finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
     render_list(finder, home, layout.list, theme, buf, scene);
+}
+
+/// The finder's header label, which names the list on show unless it is the
+/// plain list of every file.
+///
+/// The words after `Files` name the scope or browse mode, and then a fallback
+/// of ignored files or buffers listed over a diff.
+fn finder_label(finder: &FileFinder) -> String {
+    let scope = match (finder.browse.is_some(), finder.scope()) {
+        (true, _) => Some("browse"),
+        (false, FinderScope::All) => None,
+        (false, scope) => Some(scope_words(scope)),
+    };
+    let suffix = if finder.fallback_active() {
+        Some("ignored")
+    } else if finder.diff_paths.is_some()
+        && matches!(
+            finder.scope(),
+            FinderScope::Buffers | FinderScope::ModifiedBuffers
+        )
+    {
+        Some("diff")
+    } else {
+        None
+    };
+    match (scope, suffix) {
+        (None, None) => "Files".to_owned(),
+        (Some(words), None) | (None, Some(words)) => format!("Files \u{00B7} {words}"),
+        (Some(scope), Some(suffix)) => format!("Files \u{00B7} {scope}, {suffix}"),
+    }
+}
+
+/// The words the finder's header gives `scope`, in its label and in the chip
+/// that names where Shift-Tab goes next.
+fn scope_words(scope: &FinderScope) -> &str {
+    match scope {
+        FinderScope::All => "all files",
+        FinderScope::Modified => "git only",
+        FinderScope::Diff => "diff",
+        FinderScope::Buffers => "buffers",
+        FinderScope::ModifiedBuffers => "modified buffers",
+        FinderScope::Named(name) => name.as_str(),
+        FinderScope::AllWorkspaces => "all workspaces",
+    }
 }
 
 fn render_list(

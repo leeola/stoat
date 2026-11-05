@@ -231,6 +231,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   that leaves `ui.list.match` unset paints the matches with
   `ui.search.match`. Inside stoatty the selected row also carries an accent
   bar at its left edge, in the `ui.border.focused` color.
+- `ui.chip` -- the chip at the right end of a filter modal's header row, such
+  as the file finder's note of what Shift-Tab switches its list to.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,

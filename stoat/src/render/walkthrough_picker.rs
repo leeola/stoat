@@ -1,5 +1,8 @@
 use crate::{
-    render::table::{self, Column, Width},
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        table::{self, Column, Width},
+    },
     walkthrough_picker::WalkthroughPicker,
 };
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -59,7 +62,15 @@ pub(crate) fn render_walkthrough_picker(
     crate::render::picker::filter_header(
         buf,
         layout.inner,
-        ">",
+        &FilterHeader {
+            label: "walkthroughs",
+            prompt: FILTER_PROMPT,
+            count: Some((
+                picker.picker.filtered().len(),
+                picker.picker.entries().len(),
+            )),
+            chip: None,
+        },
         &picker.picker.input,
         ws,
         theme,

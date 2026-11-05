@@ -4,6 +4,7 @@ use crate::{
     render::{
         file_finder::file_finder_layout,
         paint::{blend, style_rgb},
+        picker::{FilterHeader, FILTER_PROMPT},
         table::{self, Column, Width},
         text::write_str_clipped,
     },
@@ -194,7 +195,12 @@ pub(crate) fn render_commit_picker(
     crate::render::picker::filter_header(
         buf,
         inner,
-        ">",
+        &FilterHeader {
+            label: "commits",
+            prompt: FILTER_PROMPT,
+            count: Some((picker.filtered.len(), picker.commits.len())),
+            chip: None,
+        },
         &picker.input,
         ws,
         theme,

@@ -19,20 +19,43 @@ use crate::{
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, Borders},
 };
 use std::{collections::BTreeMap, path::Path};
 use unicode_width::UnicodeWidthStr;
 
-/// Paint a filter modal's header, which is the prompt glyph, the live input
-/// beside it, and the separator ruling both off from the body.
+/// The glyph before a filter modal's query. The command palette keeps `:` in
+/// its place, the command-line prompt that its commands follow.
+pub(crate) const FILTER_PROMPT: &str = "\u{203A}";
+
+/// Columns the query keeps on a filter modal's header row. A row too narrow
+/// for the query and the words right of it drops the chip first, then the
+/// count.
+const MIN_QUERY_COLUMNS: u16 = 12;
+
+/// The words a filter modal's header row shows around its query.
+pub(crate) struct FilterHeader<'a> {
+    /// The modal's name, painted first.
+    pub(crate) label: &'a str,
+    /// The glyph before the query, [`FILTER_PROMPT`] in all but the palette.
+    pub(crate) prompt: &'a str,
+    /// How many entries the query keeps, and how many the list holds.
+    pub(crate) count: Option<(usize, usize)>,
+    /// A note at the row's right end, such as the key that switches the list's
+    /// scope.
+    pub(crate) chip: Option<&'a str>,
+}
+
+/// Paint a filter modal's header, which is the label, the prompt glyph, the
+/// live input, the count and chip right of it, and the separator ruling the
+/// row off from the body.
 ///
 /// `inner` is the modal's rect inside its border. The header claims its first
-/// two rows, so a caller's body begins at `inner.y + 2`.
+/// two rows, so a caller's body starts at `inner.y + 2`.
 ///
-/// The input starts one column past `prompt`, so a longer prompt such as a
-/// rename field's pushes the input right.
+/// The input starts one column past the prompt, so a longer label or prompt
+/// pushes the input right.
 ///
 /// Every filter modal opens this way, and each lays its body rects out from
 /// that same two-row assumption. One painter is what keeps the assumption true
@@ -41,22 +64,14 @@ use unicode_width::UnicodeWidthStr;
 pub(crate) fn filter_header(
     buf: &mut Buffer,
     inner: Rect,
-    prompt: &str,
+    header: &FilterHeader<'_>,
     input: &InputView,
     ws: &mut Workspace,
     theme: &Theme,
     chrome: &ResolvedChrome,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    write_str(buf, inner.x, inner.y, prompt, theme.get(scope::UI_PROMPT));
-
-    let offset = prompt.width() as u16 + 1;
-    let input_area = Rect::new(
-        inner.x + offset,
-        inner.y,
-        inner.width.saturating_sub(offset),
-        1,
-    );
+    let input_area = paint_header_row(buf, inner, header, theme);
     input.render(
         &mut ws.editors,
         input_area,
@@ -76,6 +91,59 @@ pub(crate) fn filter_header(
         theme.get(scope::UI_BORDER_INACTIVE),
         scene,
     );
+}
+
+/// Paint the words of the header row into `inner`'s first row, and return the
+/// rect left for the query.
+///
+/// The count and the chip sit flush with the row's right end, one column apart,
+/// and one column clear of the query.
+fn paint_header_row(
+    buf: &mut Buffer,
+    inner: Rect,
+    header: &FilterHeader<'_>,
+    theme: &Theme,
+) -> Rect {
+    let (y, end) = (inner.y, inner.x + inner.width);
+
+    let mut x = inner.x;
+    if !header.label.is_empty() {
+        let style = theme.get(scope::UI_TEXT_DIM).add_modifier(Modifier::BOLD);
+        write_str_clipped(buf, x, y, header.label, style, end);
+        x = x.saturating_add(header.label.width() as u16 + 1);
+    }
+    write_str_clipped(buf, x, y, header.prompt, theme.get(scope::UI_PROMPT), end);
+    let query_x = x.saturating_add(header.prompt.width() as u16 + 1).min(end);
+
+    let mut count = header
+        .count
+        .map(|(shown, total)| format!("{shown} of {total}"));
+    let mut chip = header.chip.map(|chip| format!(" {chip} "));
+    let fits = |count: &Option<String>, chip: &Option<String>| {
+        let trailing: u16 = [count, chip]
+            .into_iter()
+            .flatten()
+            .map(|part| part.width() as u16 + 1)
+            .sum();
+        query_x + MIN_QUERY_COLUMNS + trailing <= end
+    };
+    if !fits(&count, &chip) {
+        chip = None;
+    }
+    if !fits(&count, &chip) {
+        count = None;
+    }
+
+    let mut right = end;
+    for (part, style) in [(chip, scope::UI_CHIP), (count, scope::UI_TEXT_MUTED)] {
+        let Some(part) = part else {
+            continue;
+        };
+        right -= part.width() as u16;
+        write_str(buf, right, y, &part, theme.get(style));
+        right -= 1;
+    }
+    Rect::new(query_x, y, right.saturating_sub(query_x), 1)
 }
 
 /// First entry visible when `selected` is showing, given `rows` on screen.
@@ -381,6 +449,48 @@ mod tests {
     use crate::picker::INDEXED_ROWS;
     use ratatui::style::Color;
     use std::path::PathBuf;
+
+    /// The text of a finder-like header painted `width` columns wide, and the
+    /// rect it leaves the query.
+    fn header_row(width: u16) -> (String, Rect) {
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        let header = FilterHeader {
+            label: "Files",
+            prompt: FILTER_PROMPT,
+            count: Some((14, 890)),
+            chip: Some("S-Tab \u{00B7} git only"),
+        };
+        let query = paint_header_row(&mut buf, area, &header, &Theme::empty());
+        (test_support::row_text(&buf, 0), query)
+    }
+
+    #[test]
+    fn the_header_sets_its_count_and_chip_flush_right() {
+        assert_eq!(
+            header_row(60),
+            (
+                format!(
+                    "Files \u{203A} {}14 of 890  S-Tab \u{00B7} git only ",
+                    " ".repeat(24)
+                ),
+                Rect::new(8, 0, 23, 1),
+            ),
+            "the chip ends the row, and the count stands one column left of it",
+        );
+    }
+
+    /// The query's width tells which words stayed. At 49 columns both fit with
+    /// the query at its floor, at 48 only the count does, at 30 the count fits
+    /// at the floor again, and at 29 neither does.
+    #[test]
+    fn a_narrow_header_drops_its_chip_and_then_its_count() {
+        assert_eq!(
+            [49, 48, 30, 29].map(|width| header_row(width).1.width),
+            [12, 30, 12, 21],
+            "the chip goes first, then the count, so the query keeps its floor",
+        );
+    }
 
     #[test]
     fn the_window_holds_the_selection_on_the_last_row() {

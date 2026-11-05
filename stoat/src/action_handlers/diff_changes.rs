@@ -1836,7 +1836,10 @@ mod tests {
         h.settle();
 
         dispatch(&mut h.stoat, &stoat_action::OpenBufferPicker);
-        let titled = h.snapshot().content.contains("file finder (buffers, diff)");
+        let titled = h
+            .snapshot()
+            .content
+            .contains("Files \u{00B7} buffers, diff");
         h.type_keys("b enter");
         h.settle();
         assert_eq!(

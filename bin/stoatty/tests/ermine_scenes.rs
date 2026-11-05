@@ -30,6 +30,7 @@ const FONT_SIZE: u32 = 15;
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
+const HOVER: [u8; 3] = [0x2c, 0x30, 0x39];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
@@ -245,6 +246,34 @@ fn the_finder_marks_its_selected_row_with_the_select_fill_and_the_accent_bar() {
     let (x, y, _, height) = cell_rect(col, row, 1, 1);
     for (offset, what) in [(0, "selection_bar_left"), (1, "selection_bar_right")] {
         expect_region(&shot, &mut home, (x + offset, y, 1, height), ACCENT, what);
+    }
+}
+
+/// The finder's header ends in its scope chip on the hover surface.
+///
+/// The chip reads `S-Tab`, a middle dot, and `git only`, with one cell of
+/// padding at each end. So its cells form one run of 18 in one row, and no
+/// other cell of the frame takes the hover color.
+#[test]
+fn the_finder_header_ends_in_a_chip_on_the_hover_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>p<Settle>",
+    );
+
+    let chip = cells_of(&shot, HOVER);
+    let one_run = chip.first().is_some_and(|&(col, row)| {
+        chip == (col..col + 18).map(|col| (col, row)).collect::<Vec<_>>()
+    });
+    if !one_run {
+        let frame = keep_frame(&shot, &mut home, "header_chip");
+        panic!(
+            "the hover cells {chip:?} are not one 18-cell run in one row; the frame is {}",
+            frame.display(),
+        );
     }
 }
 

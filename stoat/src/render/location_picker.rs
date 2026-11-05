@@ -1,6 +1,9 @@
 use crate::{
     location_picker::LocationPicker,
-    render::table::{self, Column, Width},
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        table::{self, Column, Width},
+    },
     workspace::Workspace,
 };
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -58,7 +61,12 @@ pub(crate) fn render_location_picker(
     crate::render::picker::filter_header(
         buf,
         layout.inner,
-        ">",
+        &FilterHeader {
+            label: "locations",
+            prompt: FILTER_PROMPT,
+            count: Some((picker.filtered().len(), picker.entries().len())),
+            chip: None,
+        },
         &picker.input,
         ws,
         theme,

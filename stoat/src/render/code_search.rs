@@ -1,7 +1,10 @@
 use crate::{
     code_search::{CodeSearchFinder, SearchMode},
     paths,
-    render::text::{write_str, write_str_clipped},
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        text::{write_str, write_str_clipped},
+    },
     theme::{scope, Theme},
     workspace::Workspace,
 };
@@ -51,7 +54,12 @@ pub(crate) fn render_code_search(
     crate::render::picker::filter_header(
         buf,
         inner,
-        ">",
+        &FilterHeader {
+            label: "search",
+            prompt: FILTER_PROMPT,
+            count: None,
+            chip: None,
+        },
         &finder.input,
         ws,
         theme,

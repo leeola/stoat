@@ -761,6 +761,9 @@ pub mod scope {
     /// The characters a list's query matched. A theme that leaves it unset
     /// paints them with [`UI_SEARCH_MATCH`].
     pub const UI_LIST_MATCH: &str = "ui.list.match";
+    /// The chip at the right end of a filter modal's header row, such as the
+    /// file finder's note of what Shift-Tab switches its list to.
+    pub const UI_CHIP: &str = "ui.chip";
 
     pub const UI_HIGHLIGHT_READ: &str = "ui.highlight.read";
     pub const UI_HIGHLIGHT_WRITE: &str = "ui.highlight.write";

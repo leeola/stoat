@@ -1,6 +1,9 @@
 use crate::{
     diagnostics_picker::{DiagnosticsPicker, PickerScope},
-    render::table::{self, Column, Width},
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        table::{self, Column, Width},
+    },
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -77,7 +80,15 @@ pub(crate) fn render_diagnostics_picker(
     crate::render::picker::filter_header(
         buf,
         inner,
-        ">",
+        &FilterHeader {
+            label: "diagnostics",
+            prompt: FILTER_PROMPT,
+            count: Some((
+                picker.picker.filtered().len(),
+                picker.picker.entries().len(),
+            )),
+            chip: None,
+        },
         &picker.picker.input,
         ws,
         theme,

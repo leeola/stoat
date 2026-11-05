@@ -1,6 +1,9 @@
 use crate::{
     pane_finder::PaneFinder,
-    render::table::{self, Column, Width},
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        table::{self, Column, Width},
+    },
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -54,7 +57,15 @@ pub(crate) fn render_pane_finder(
     crate::render::picker::filter_header(
         buf,
         layout.inner,
-        ">",
+        &FilterHeader {
+            label: "panes",
+            prompt: FILTER_PROMPT,
+            count: Some((
+                finder.picker.filtered().len(),
+                finder.picker.entries().len(),
+            )),
+            chip: None,
+        },
         &finder.picker.input,
         ws,
         theme,

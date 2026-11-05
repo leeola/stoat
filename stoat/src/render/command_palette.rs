@@ -2,7 +2,7 @@ use crate::{
     command_palette::{CommandPalette, PaletteScope},
     input_view::InputView,
     render::{
-        picker::DEFAULT_LIST_PERCENT,
+        picker::{FilterHeader, DEFAULT_LIST_PERCENT},
         text::{wrap_text, write_str, write_str_clipped},
     },
     workspace::Workspace,
@@ -176,6 +176,7 @@ pub(crate) fn render_command_palette(
     render_palette_filter(
         &palette.input,
         &palette.filtered,
+        palette.offering,
         &palette.match_indices,
         palette.selected,
         scope,
@@ -220,9 +221,14 @@ fn render_palette_arg_picker(
     } else {
         format!(" {} ", entry.command_name)
     };
+    let count = palette.arg_picker.as_ref().map(|picker| {
+        let list = &picker.active_core_ref().picklist;
+        (list.filtered.len(), list.base.len())
+    });
     let Some(layout) = render_palette_prelude(
         &palette.input,
         &title,
+        count,
         palette.list_rows_hint(),
         ws,
         theme,
@@ -314,6 +320,7 @@ fn render_palette_free_arg(
     let Some(layout) = render_palette_prelude(
         &palette.input,
         &title,
+        None,
         palette.list_rows_hint(),
         ws,
         theme,
@@ -368,7 +375,8 @@ fn render_palette_free_arg(
 }
 
 /// Render the chrome every palette modal shares, which is the titled frame,
-/// the `:` prompt with the live input, and the separator beneath it.
+/// the header row with the `:` prompt and the live input, and the separator
+/// beneath it.
 ///
 /// Returns the modal layout so the caller paints its body -- the command list,
 /// an inline picker, or the free-typed argument hint -- or `None` when the
@@ -376,6 +384,9 @@ fn render_palette_free_arg(
 ///
 /// `content_rows` sizes the box, and the argument modals derive it from
 /// [`CommandPalette::list_rows_hint`] while the filter modal is handed it.
+///
+/// `count` is the header's count of the listed candidates, `None` for the
+/// free-typed argument, which lists none.
 ///
 /// See also:
 /// - [`render_palette_filter`] for the command-list body.
@@ -385,6 +396,7 @@ fn render_palette_free_arg(
 fn render_palette_prelude(
     input: &InputView,
     title: &str,
+    count: Option<(usize, usize)>,
     content_rows: u16,
     ws: &mut Workspace,
     theme: &crate::theme::Theme,
@@ -407,7 +419,21 @@ fn render_palette_prelude(
         &mut *scene,
     );
 
-    crate::render::picker::filter_header(buf, layout.inner, ":", input, ws, theme, chrome, scene);
+    crate::render::picker::filter_header(
+        buf,
+        layout.inner,
+        &FilterHeader {
+            label: "palette",
+            prompt: ":",
+            count,
+            chip: None,
+        },
+        input,
+        ws,
+        theme,
+        chrome,
+        scene,
+    );
 
     Some(layout)
 }
@@ -416,6 +442,7 @@ fn render_palette_prelude(
 fn render_palette_filter(
     input: &InputView,
     filtered: &[&'static RegistryEntry],
+    offering: usize,
     match_indices: &[Vec<u32>],
     selected: usize,
     scope: PaletteScope,
@@ -438,6 +465,7 @@ fn render_palette_filter(
     let Some(layout) = render_palette_prelude(
         input,
         &title,
+        Some((filtered.len(), offering)),
         content_rows,
         ws,
         theme,

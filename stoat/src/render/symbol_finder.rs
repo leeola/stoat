@@ -1,7 +1,10 @@
 use crate::{
     markdown::StyledLine,
     paths,
-    render::text::write_str_clipped,
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        text::write_str_clipped,
+    },
     symbol_finder::{SymbolFinder, SymbolFinderScope, SymbolTarget},
     theme::{scope, Theme},
     workspace::Workspace,
@@ -96,7 +99,12 @@ pub(crate) fn render_symbol_finder(
     crate::render::picker::filter_header(
         buf,
         inner,
-        ">",
+        &FilterHeader {
+            label: "symbols",
+            prompt: FILTER_PROMPT,
+            count: Some((finder.filtered.len(), finder.entries.len())),
+            chip: None,
+        },
         &finder.input,
         ws,
         theme,
