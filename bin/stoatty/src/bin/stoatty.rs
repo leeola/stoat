@@ -152,16 +152,21 @@ fn shoot(args: ShotArgs) -> Result<(), Box<dyn Error>> {
             )
         },
     };
-    let working_directory = args.working_directory.and_then(|dir| {
-        if dir.is_dir() {
-            return Some(dir);
-        }
-        eprintln!(
-            "stoatty shot: ignoring --working-dir {}: not a directory",
-            dir.display()
-        );
-        None
-    });
+    // A session given no directory starts the child in the home directory, and
+    // the flag's default is stoatty's own.
+    let working_directory = args
+        .working_directory
+        .and_then(|dir| {
+            if dir.is_dir() {
+                return Some(dir);
+            }
+            eprintln!(
+                "stoatty shot: ignoring --working-dir {}: not a directory",
+                dir.display()
+            );
+            None
+        })
+        .or_else(|| std::env::current_dir().ok());
 
     // Bound before the session, so the session drops first and the child is
     // gone before its scratch home is removed.
