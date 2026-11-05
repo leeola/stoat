@@ -1483,6 +1483,192 @@ fn an_open_dock_clears_to_the_surface_over_a_chrome_ground() {
     );
 }
 
+/// Under islands, each split pane declares a backdrop halo over its content,
+/// and the gap between the panes draws no divider hairline. A theme with no
+/// chrome surface keeps the flush layout, with no halo and the gap hairline.
+#[test]
+fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
+    use stoatty_protocol::{
+        command::{BorderStyle, Command, PanelCommand, PanelShadow},
+        BACKDROP_PANEL_PROTOCOL,
+    };
+
+    let paint = |chrome: &str| {
+        let src = format!(
+            r##"theme t {{
+                ui.background.bg = "#102030";
+                ui.border.focused.fg = "#aabbcc";
+                ui.border.inactive.fg = "#556677";
+                {chrome}
+            }}"##
+        );
+        let (config, _) = stoat_config::parse(&src);
+        let mut h = Stoat::test();
+        h.stoat.theme = Arc::new(
+            crate::theme::Theme::from_config(&config.expect("theme parses"), "t")
+                .expect("theme loads"),
+        );
+        h.stoat.stoatty_protocol = BACKDROP_PANEL_PROTOCOL;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+        h.type_action("SplitRight()");
+        h.settle();
+
+        let mut buf = Buffer::empty(h.stoat.size());
+        app::paint_frame(&mut h.stoat, &mut buf);
+        emit_apc_scene(&mut h.stoat);
+
+        let mut contents: Vec<Rect> = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .map(|(_, pane)| crate::render::pane::pane_areas(pane.area, None).0)
+            .collect();
+        contents.sort_by_key(|area| area.x);
+        let gap = (contents[0].x + contents[0].width) as i16 * 16 + 8;
+
+        let cmds = drain_apc(&mut rx);
+        let mut halos: Vec<PanelCommand> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::Panel(panel) if panel.backdrop => Some(*panel),
+                _ => None,
+            })
+            .collect();
+        halos.sort_by_key(|panel| panel.left);
+        let gap_bars: Vec<(i16, u16)> = cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) if bar.x == gap => Some((bar.x, bar.width)),
+                _ => None,
+            })
+            .collect();
+        (contents, halos, gap_bars, gap)
+    };
+    let halo = |area: Rect| PanelCommand {
+        top: area.y,
+        left: area.x,
+        width: area.width,
+        height: area.height,
+        style: BorderStyle::None_,
+        border: [1, 2, 3],
+        corner_radius: 2,
+        fill: None,
+        shadow: PanelShadow::Tucked,
+        inset_x: 0,
+        above_pools: false,
+        backdrop: true,
+        anchor: None,
+    };
+
+    let (contents, island_halos, island_bars, _) = paint(r##"ui.surface.chrome.bg = "#010203";"##);
+    let (_, flush_halos, flush_bars, gap) = paint("");
+    assert_eq!(
+        (island_halos, island_bars, flush_halos, flush_bars),
+        (
+            contents.into_iter().map(halo).collect::<Vec<_>>(),
+            vec![],
+            vec![],
+            vec![(gap, 1)],
+        ),
+        "a halo per pane and no gap hairline under islands, the hairline alone without",
+    );
+}
+
+/// A pane flush against the minimap band, over the band's rows, takes the band
+/// into its island. Stacked panes leave the band outside, since neither spans
+/// the band's rows.
+#[test]
+fn a_pane_beside_the_minimap_band_takes_the_band_into_its_island() {
+    let halos = |split_down: bool| {
+        let (mut h, mut rx) = islands_harness();
+        h.stoat.settings.editor_minimap = Some(MinimapMode::Single);
+        h.resize(200, 24);
+        if split_down {
+            h.type_action("SplitDown()");
+            h.settle();
+        }
+        let spans: Vec<(u16, u16)> = island_halos(&mut h, &mut rx)
+            .into_iter()
+            .map(|halo| (halo.x, halo.x + halo.width))
+            .collect();
+        let band = h
+            .stoat
+            .single_minimap_rect
+            .expect("single mode reserves a band");
+        (spans, band.x, band.x + band.width)
+    };
+
+    let (single, band_x, band_end) = halos(false);
+    let (stacked, ..) = halos(true);
+    assert_eq!(
+        (single, stacked),
+        (vec![(1, band_end)], vec![(1, band_x), (1, band_x)]),
+        "one pane's island reaches over the band, and stacked islands stop at it",
+    );
+}
+
+/// The rebase screen paints over its pane in place of the pane's view, and the
+/// pane keeps its island halo over the content.
+#[test]
+fn a_rebase_screen_keeps_its_pane_island() {
+    let (mut h, mut rx) = islands_harness();
+    h.stoat.active_workspace_mut().rebase = Some(crate::rebase::RebaseState::new(
+        PathBuf::from("/islands"),
+        "onto".into(),
+        vec![],
+    ));
+
+    let halos = island_halos(&mut h, &mut rx);
+    let (_, pane) = h
+        .stoat
+        .active_workspace()
+        .panes
+        .split_panes()
+        .next()
+        .expect("the pane under the screen");
+    assert_eq!(
+        halos,
+        vec![crate::render::pane::pane_areas(pane.area, None).0],
+        "one halo, over the pane's content",
+    );
+}
+
+/// A harness at the protocol that turns islands on under the shipped theme,
+/// with its APC channel open.
+fn islands_harness() -> (
+    crate::test_harness::TestHarness,
+    tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    let mut h = Stoat::test();
+    h.stoat.stoatty_protocol = stoatty_protocol::BACKDROP_PANEL_PROTOCOL;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    (h, rx)
+}
+
+/// The rects of the backdrop panels that one painted frame of `h` declares.
+fn island_halos(
+    h: &mut crate::test_harness::TestHarness,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+) -> Vec<Rect> {
+    use stoatty_protocol::command::Command;
+
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+    drain_apc(rx)
+        .into_iter()
+        .filter_map(|cmd| match cmd {
+            Command::Panel(panel) if panel.backdrop => {
+                Some(Rect::new(panel.left, panel.top, panel.width, panel.height))
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn the_hints_box_anchors_to_the_bottom_right_corner() {
     use stoatty_protocol::command::Command;

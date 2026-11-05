@@ -24,7 +24,7 @@ use crate::{
         FrameCtx, MinimapChrome, PaneCtx,
     },
     term_session::{TermId, TermSession},
-    theme::{TypeRole, FULL_CELL_SCALE},
+    theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
         diff::{self, DiffBase, HunkPosition},
         Workspace,
@@ -46,9 +46,11 @@ use std::{
 };
 use stoat_widgets::{
     minimap::Minimap,
+    panel::Panel,
     status_bar::{StatusBar, StatusSegment},
     text_run, ApcScene,
 };
+use stoatty_protocol::command::BorderStyle;
 
 /// Buffer lines the minimap strip draws per vertical cell.
 pub(super) const MINIMAP_LINES_PER_CELL: u8 = 8;
@@ -85,6 +87,9 @@ pub(crate) fn render_pane(
     // it has content for, so the content area clears to the editor surface
     // first.
     crate::render::clear_surface(content_area, buf, theme);
+    if frame.islands && scene.live() {
+        render_island(content_area, frame, scene);
+    }
 
     match &pane.view {
         View::Image { path, px } => {
@@ -340,6 +345,51 @@ pub(crate) fn render_pane(
             }
         }
     }
+}
+
+/// Declare the island halo of a pane whose content fills `content_area`.
+///
+/// The halo is a backdrop panel with no border and no fill over the content, so
+/// it draws only the island role's shadow around the content, and the pane's
+/// pool composite still draws inside it. A pane flush against the
+/// single-minimap band, over the band's own rows, takes the band into its
+/// island, so the band sits inside an island and not on the window ground.
+pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut ApcScene) {
+    let theme = frame.theme;
+    let Some(chrome) = style_rgb(
+        theme
+            .try_get(crate::theme::scope::UI_SURFACE_CHROME)
+            .and_then(|style| style.bg),
+    ) else {
+        return;
+    };
+    let area = match frame.minimap_band {
+        Some(band)
+            if band.x == content_area.right()
+                && band.y == content_area.y
+                && band.height == content_area.height =>
+        {
+            Rect {
+                width: content_area.width + band.width,
+                ..content_area
+            }
+        },
+        _ => content_area,
+    };
+
+    let role = theme.panel(PanelRole::Island);
+    Panel {
+        style: BorderStyle::None_,
+        border: chrome,
+        corner_radius: role.corner_radius,
+        fill: None,
+        shadow: role.shadow,
+        inset_x: role.inset_x,
+        above_pools: false,
+        backdrop: true,
+        anchor: None,
+    }
+    .draw_components(area, scene);
 }
 
 /// The per-pane minimap strip that `pane` declares over content store

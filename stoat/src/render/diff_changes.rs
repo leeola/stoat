@@ -809,6 +809,7 @@ mod tests {
             minimap_enabled: false,
             minimap_chrome: None,
             minimap_band: None,
+            islands: false,
             badge_cover: None,
             hover_cell: None,
             home: None,

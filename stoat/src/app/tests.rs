@@ -11859,10 +11859,10 @@ fn islands_inset_the_pane_layout_one_column_from_each_edge() {
     let full = Rect::new(0, 0, 80, 24);
     assert_eq!(
         [
-            layout(true, BORDERLESS_PANEL_PROTOCOL, None),
-            layout(true, BORDERLESS_PANEL_PROTOCOL - 1, None),
-            layout(false, BORDERLESS_PANEL_PROTOCOL, None),
-            layout(true, BORDERLESS_PANEL_PROTOCOL, Some(&default_dark)),
+            layout(true, BACKDROP_PANEL_PROTOCOL, None),
+            layout(true, BACKDROP_PANEL_PROTOCOL - 1, None),
+            layout(false, BACKDROP_PANEL_PROTOCOL, None),
+            layout(true, BACKDROP_PANEL_PROTOCOL, Some(&default_dark)),
         ],
         [Rect::new(1, 0, 78, 24), full, full, full],
         "ermine_night under islands, then an older stoatty, a plain terminal, and default_dark",

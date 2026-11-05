@@ -114,6 +114,41 @@ fn the_panes_sit_one_chrome_column_in_from_each_window_edge() {
     }
 }
 
+/// Each pane's island halo shades the margin beside it, darkest at the pane's
+/// edge and gone a few pixels out.
+///
+/// The pane starts at pixel column 9, past the one-column margin. The tucked
+/// halo reaches 6 pixels out, so pixel column 8 takes a shade darker than the
+/// ground in every channel, and columns 0 and 1 keep the chrome ground.
+#[test]
+fn the_island_halo_shades_the_margin_beside_the_pane() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+    let (_, y, _, height) = cell_rect(0, 3, 1, 1);
+
+    expect_region(
+        &shot,
+        &mut home,
+        (0, y, 2, height),
+        CHROME,
+        "margin_past_the_halo",
+    );
+    let shade = dominant_color(&shot, (8, y, 1, height));
+    if shade
+        .iter()
+        .zip(CHROME)
+        .any(|(&shade, chrome)| shade >= chrome)
+    {
+        let frame = keep_frame(&shot, &mut home, "halo_edge");
+        panic!(
+            "the margin's last pixel column reads {}, not darker than {}; the frame is {}",
+            hex(shade),
+            hex(CHROME),
+            frame.display(),
+        );
+    }
+}
+
 /// The status row sits on chrome, and its hairline takes the bar's own color,
 /// so no line shows above the bar.
 ///

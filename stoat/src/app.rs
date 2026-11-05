@@ -91,7 +91,7 @@ use stoat_text::{
 use stoat_widgets::{pool::SmoothScrollState, ApcScene};
 use stoatty_protocol::{
     window_ipc::{MouseButton as IpcMouseButton, MouseKind, WindowIpcEvent},
-    BATCHED_DECORATIONS_PROTOCOL,
+    BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL,
 };
 use tokio::{
     io::AsyncBufReadExt,
@@ -222,13 +222,6 @@ const PTY_TURN_BUDGET_BYTES: usize = 1 << 20;
 /// presses at that pace still paint into blanked buffers. Each job costs one
 /// more screen buffer.
 const BLANK_JOBS_IN_FLIGHT: usize = 2;
-
-/// The protocol version that reads border style code 4, which draws no line.
-///
-/// The island halo is a borderless panel, and an earlier terminal reads the
-/// code as a light line around each pane, so such a terminal keeps the flush
-/// layout.
-const BORDERLESS_PANEL_PROTOCOL: u32 = 15;
 
 /// Frame interval for the LSP work-done spinner popout, about 10 fps. Fast enough
 /// to read as motion, slow enough not to churn repaints while progress streams.
@@ -4021,13 +4014,13 @@ impl Stoat {
 
     /// Whether the panes lay out as islands on the window ground.
     ///
-    /// The island look needs the borderless halo panel that only stoatty draws,
-    /// from [`BORDERLESS_PANEL_PROTOCOL`] on, so a plain terminal and an older
-    /// stoatty keep the flush layout. A theme with no RGB chrome surface sets no
-    /// ground apart from the panes, so it keeps the flush layout too.
+    /// The island look needs the halo, a borderless backdrop panel that only
+    /// stoatty draws, from [`BACKDROP_PANEL_PROTOCOL`] on. A plain terminal and
+    /// an older stoatty keep the flush layout. A theme with no RGB chrome surface
+    /// sets no ground apart from the panes, so it keeps the flush layout too.
     pub(crate) fn islands_on(&self) -> bool {
         self.stoatty
-            && self.stoatty_protocol >= BORDERLESS_PANEL_PROTOCOL
+            && self.stoatty_protocol >= BACKDROP_PANEL_PROTOCOL
             && paint::style_rgb(
                 self.theme
                     .try_get(crate::theme::scope::UI_SURFACE_CHROME)

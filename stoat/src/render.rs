@@ -444,6 +444,10 @@ pub(crate) struct FrameCtx<'a> {
     /// status bar sits on that freed row flush against the band reclaims its
     /// width and runs edge to edge.
     pub(crate) minimap_band: Option<Rect>,
+    /// Whether the panes lay out as islands this frame, as
+    /// [`Stoat::islands_on`] answers. Each pane then declares its island halo,
+    /// and the gaps draw no divider hairline.
+    pub(crate) islands: bool,
     /// The span of the window's bottom row under a bottom-right badge's chip,
     /// from [`badges::bottom_right_cover`]. A status bar on that row keeps its
     /// segments left of it, since the chip paints over the bar.
@@ -1129,6 +1133,7 @@ pub(crate) fn frame(
     emit::ensure_minimap_content_ids(stoat);
 
     let tab_bar_rows = u16::from(stoat.tab_bar_visible());
+    let islands = stoat.islands_on();
     let margin = stoat.island_margin();
 
     // Single mode reserves a strip band at the window's right edge and shrinks
@@ -1348,6 +1353,7 @@ pub(crate) fn frame(
         minimap_enabled: minimap_enabled && minimap_mode == MinimapMode::PerPane,
         minimap_chrome,
         minimap_band: single_minimap_rect,
+        islands,
         badge_cover,
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
@@ -1569,7 +1575,11 @@ pub(crate) fn frame(
     // repaints and never draw over an overlay covering a diagnostic.
     undercurl::snapshot_cells(buf, undercurls.spans_mut());
 
-    pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, &mut *scene);
+    // An island's halo marks where one pane ends and the next starts, so the gap
+    // between islands draws no hairline. A drag in the gap still resizes.
+    if !frame.islands {
+        pane::render_pane_dividers(&ws.panes.dividers(), &stoat.theme, buf, &mut *scene);
+    }
 
     // A paint from here on writes over the panes wherever its box falls, so
     // each one reports whether it wrote, and a frame where one did lists no
@@ -1580,12 +1590,13 @@ pub(crate) fn frame(
         let pane = ws.panes.pane(pane_id);
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && ws.panes.focus() == pane_id;
         // The screen paints over its pane in place of the pane's view, so its
-        // content clears to the editor surface as `render_pane` clears a view.
-        clear_surface(
-            pane::pane_areas(pane.area, frame.minimap_band).0,
-            buf,
-            &stoat.theme,
-        );
+        // content clears to the editor surface and takes the pane's island, as
+        // `render_pane` does for a view.
+        let content = pane::pane_areas(pane.area, frame.minimap_band).0;
+        clear_surface(content, buf, &stoat.theme);
+        if frame.islands && scene.live() {
+            pane::render_island(content, frame, scene);
+        }
         if screen == Some("rebase") {
             if let Some(state) = ws.rebase.as_mut() {
                 rebase::render_rebase(pane, is_focused, state, frame, buf, &mut *scene);
