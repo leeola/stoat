@@ -287,6 +287,7 @@ fn render_palette_arg_picker(
         theme,
         row_style,
         buf,
+        scene,
     );
 }
 
@@ -463,6 +464,7 @@ fn render_palette_filter(
         scroll,
         theme,
         buf,
+        &mut *scene,
     );
 
     let doc = layout.doc;
@@ -548,7 +550,7 @@ fn usage_line(entry: &RegistryEntry) -> String {
 ///
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
-/// identical rows.
+/// identical rows. The selected row's accent bar goes into `scene`.
 ///
 /// Each name leaves out its first `name_offset` bytes, the group token and
 /// space a grouped list's title already shows. A match position indexes the
@@ -563,6 +565,7 @@ pub(crate) fn paint_palette_rows(
     start_row: usize,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
@@ -597,6 +600,9 @@ pub(crate) fn paint_palette_rows(
 
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
 
         let name = shown_name(entry, name_offset);
@@ -669,6 +675,7 @@ mod tests {
             0,
             &Theme::empty(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let pristine = Buffer::empty(area);

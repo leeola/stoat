@@ -32,6 +32,7 @@ const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
+const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
@@ -150,6 +151,43 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
         OVERLAY,
         "finder_box",
     );
+}
+
+/// The finder's selected row fills with the select surface and carries the
+/// accent bar at its left edge.
+///
+/// The select cells form one run in one row. At 9-pixel cells the 3/16 bar
+/// snaps to the first two pixel columns of the run's first cell. Each column is
+/// read alone, because the renderer keeps a thinner bar one pixel wide, and a
+/// two-column read of that bar ties.
+#[test]
+fn the_finder_marks_its_selected_row_with_the_select_fill_and_the_accent_bar() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>p<Settle>",
+    );
+
+    let selected = cells_of(&shot, SELECT);
+    let first = selected.first().copied();
+    let one_run = first.is_some_and(|(col, row)| {
+        let run = col..col + selected.len() as u16;
+        selected == run.map(|col| (col, row)).collect::<Vec<_>>()
+    });
+    let Some((col, row)) = first.filter(|_| one_run) else {
+        let frame = keep_frame(&shot, &mut home, "selected_row");
+        panic!(
+            "the select cells {selected:?} are not one run in one row; the frame is {}",
+            frame.display(),
+        );
+    };
+
+    let (x, y, _, height) = cell_rect(col, row, 1, 1);
+    for (offset, what) in [(0, "selection_bar_left"), (1, "selection_bar_right")] {
+        expect_region(&shot, &mut home, (x + offset, y, 1, height), ACCENT, what);
+    }
 }
 
 /// A hover ends in a footer row on the raised surface, inside the overlay box.

@@ -169,6 +169,9 @@ pub(crate) fn render_workspace_picker(
         for col in inner.x..inner.x + inner.width {
             buf[(col, row)].set_char(' ').set_style(base_style);
         }
+        if is_selected {
+            crate::render::chrome::selection_bar(inner.x, row, theme, buf, scene);
+        }
 
         let marker = match entry.status {
             WorkspaceStatus::Active => "*",
@@ -230,6 +233,7 @@ pub(crate) fn render_workspace_picker(
                 .set_char(' ')
                 .set_style(selected_style);
         }
+        crate::render::chrome::selection_bar(inner.x, entries_top, theme, buf, scene);
         write_str(buf, marker_x, entries_top, "+", selected_style);
         write_str_clipped(
             buf,

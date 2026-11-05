@@ -78,6 +78,7 @@ pub(crate) fn render_rebase(
             for x in inner.x..inner.x + inner.width {
                 buf[(x, y)].set_style(sel_style);
             }
+            crate::render::chrome::selection_bar(inner.x, y, theme, buf, scene);
         }
         let (label, op_style) = match entry.op {
             RebaseTodoOp::Pick => ("pick  ", pick_style),

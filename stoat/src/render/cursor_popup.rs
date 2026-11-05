@@ -14,9 +14,11 @@
 use crate::{
     app::Stoat,
     pane::{FocusTarget, View},
-    render::{layout::split_pane_status, screen},
+    render::{chrome, layout::split_pane_status, screen},
+    theme::{scope, Theme},
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use stoat_widgets::ApcScene;
 
 /// The focused editor's content area and the screen cell holding
 /// `anchor_offset`, or `None` when no cursor popup should appear.
@@ -127,15 +129,20 @@ pub(crate) fn content_size(body: &[String], footer: Option<&String>) -> (u16, u1
 /// the bottom of `inner` and characters past its right edge are dropped, which
 /// is what lets a caller hand over a full window it measured before the box
 /// was clamped.
+///
+/// The rows paint in `ui.modal.hints`, and the selected one in the list's
+/// selected style with its accent bar in `scene`.
 pub(crate) fn paint_numbered_rows(
     body: &[String],
     footer: Option<&String>,
     selected: Option<usize>,
     inner: Rect,
-    styles: (Style, Style),
+    theme: &Theme,
     buf: &mut Buffer,
+    scene: &mut ApcScene,
 ) {
-    let (base_style, selected_style) = styles;
+    let base_style = theme.get(scope::UI_MODAL_HINTS);
+    let selected_style = theme.list_selected(scope::UI_SELECTION);
 
     for (row_idx, line) in body.iter().enumerate() {
         let row = inner.y + row_idx as u16;
@@ -143,6 +150,7 @@ pub(crate) fn paint_numbered_rows(
             break;
         }
         let style = if selected == Some(row_idx) {
+            chrome::selection_bar(inner.x, row, theme, buf, scene);
             selected_style
         } else {
             base_style
@@ -171,8 +179,36 @@ fn paint_row(line: &str, inner: Rect, row: u16, style: Style, buf: &mut Buffer) 
 
 #[cfg(test)]
 mod tests {
-    use super::{content_size, popup_rect};
-    use ratatui::layout::Rect;
+    use super::{content_size, paint_numbered_rows, popup_rect};
+    use crate::theme::Theme;
+    use ratatui::{buffer::Buffer, layout::Rect};
+    use stoat_widgets::ApcScene;
+    use stoatty_protocol::command::{decode_stream, BarCommand, Command};
+
+    /// A numbered popup marks its selected row, and that row alone, with the
+    /// accent bar at the row's first cell.
+    #[test]
+    fn the_selected_numbered_row_carries_the_accent_bar() {
+        let (config, _) = stoat_config::parse(r##"theme t { ui.border.focused.fg = "#7fb0ff"; }"##);
+        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+        let body = ["1. one", "2. two", "3. three"].map(String::from);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        let mut scene = ApcScene::new();
+
+        let inner = Rect::new(2, 3, 12, 3);
+        paint_numbered_rows(&body, None, Some(1), inner, &theme, &mut buf, &mut scene);
+
+        assert_eq!(
+            decode_stream(scene.buffer()),
+            [Command::Bar(BarCommand {
+                x: 2 * 16,
+                y: 4 * 16,
+                width: 3,
+                height: 16,
+                color: [0x7f, 0xb0, 0xff],
+            })],
+        );
+    }
 
     /// Room on both sides of the cursor, so only the preference decides.
     #[test]

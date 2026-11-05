@@ -221,7 +221,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   unset paints each list's row with `ui.selection`, or with
   `ui.selection.reversed` in the commits, rebase, and conflict views. A theme
   that leaves `ui.list.match` unset paints the matches with
-  `ui.search.match`.
+  `ui.search.match`. Inside stoatty the selected row also carries an accent
+  bar at its left edge, in the `ui.border.focused` color.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,

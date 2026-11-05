@@ -160,7 +160,7 @@ pub(crate) fn render_file_finder(
     }
 
     finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
-    render_list(finder, home, layout.list, theme, buf);
+    render_list(finder, home, layout.list, theme, buf, scene);
 }
 
 fn render_list(
@@ -169,11 +169,12 @@ fn render_list(
     area: Rect,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows = area.height as usize;
     let start_row =
         crate::render::picker::window_start(finder.active_core_ref().picklist.selected, rows);
-    paint_finder_rows(finder, home, area, start_row, theme, buf);
+    paint_finder_rows(finder, home, area, start_row, theme, buf, scene);
 }
 
 /// Paint finder result rows into `area` starting at `start_row`.
@@ -190,6 +191,7 @@ pub(crate) fn paint_finder_rows(
     start_row: usize,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let core = finder.active_core_ref();
     let prefix = finder
@@ -212,6 +214,7 @@ pub(crate) fn paint_finder_rows(
         theme,
         row_style,
         buf,
+        scene,
     );
 }
 

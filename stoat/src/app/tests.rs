@@ -15869,7 +15869,8 @@ fn the_walkthrough_picker_rows_show_slug_count_and_title() {
     let rows = target_picker_rows(&h, ModalKind::WalkthroughPicker);
     assert_eq!(
         [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)],
-        ["alpha 1 Alpha tour", "zebra 2 Zebra tour"],
+        ["\u{2502} alpha 1 Alpha tour", "zebra 2 Zebra tour"],
+        "the selected first row leads with its accent bar",
     );
 }
 
@@ -15887,7 +15888,8 @@ fn the_pane_finder_rows_show_kind_title_and_place() {
     let rows = target_picker_rows(&h, ModalKind::PaneFinder);
     assert_eq!(
         [row_words(&h, rows, rows.y), row_words(&h, rows, rows.y + 1)],
-        ["buffer buf.txt tab 1", "term term tab 2"],
+        ["\u{2502}buffer buf.txt tab 1", "term term tab 2"],
+        "the selected first row leads with its accent bar",
     );
 }
 

@@ -255,6 +255,7 @@ pub(crate) fn render_completion(
         layout.inner,
         &stoat.theme,
         buf,
+        scene,
     );
 
     if let Some(detail) = &layout.detail {
@@ -280,7 +281,8 @@ pub(crate) fn render_completion(
 ///
 /// Shared by the live popup, which derives `start_row` from the viewport, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
-/// identical rows.
+/// identical rows. The selected row's accent bar goes into `scene`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_completion_rows(
     popup: &CompletionPopup,
     selected_idx: usize,
@@ -289,6 +291,7 @@ pub(crate) fn paint_completion_rows(
     area: Rect,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
@@ -314,6 +317,9 @@ pub(crate) fn paint_completion_rows(
             } else {
                 modal_style
             };
+            if item_idx == selected_idx {
+                crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
+            }
 
             indices_buf.clear();
             if let Some(p) = &pattern {

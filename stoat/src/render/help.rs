@@ -186,7 +186,7 @@ pub(crate) fn render_help(
 
     let list_scroll =
         crate::render::picker::window_start(help.selected(), list_rect.height as usize);
-    paint_help_list_rows(help, list_rect, list_scroll, theme, buf);
+    paint_help_list_rows(help, list_rect, list_scroll, theme, buf, scene);
     paint_help_detail_rows(help, detail_rect, help.detail_scroll() as usize, theme, buf);
 }
 
@@ -195,13 +195,14 @@ pub(crate) fn render_help(
 ///
 /// Shared by the live list, which derives `start_row` from the selection, and
 /// the smooth-scroll pool, which paints absolute pages, so both render identical
-/// rows.
+/// rows. The selected row's accent bar goes into `scene`.
 pub(crate) fn paint_help_list_rows(
     help: &Help,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
@@ -244,6 +245,9 @@ pub(crate) fn paint_help_list_rows(
 
         for col in area.x..row_end {
             buf[(col, row)].set_char(' ').set_style(base);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
 
         let key_text = entry.key_label.as_deref().unwrap_or("");

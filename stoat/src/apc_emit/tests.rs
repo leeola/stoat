@@ -4563,6 +4563,61 @@ fn typing_in_the_finder_defers_its_pool_refill_until_the_list_scrolls() {
     );
 }
 
+/// The finder's selected row carries the accent bar at its first cell, in the
+/// live frame and on the pool page that holds the row.
+#[test]
+fn the_finder_marks_its_selected_row_with_the_accent_bar() {
+    use stoat_action::OpenFileFinder;
+    use stoatty_protocol::command::{BarCommand, Command};
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/finder-bar");
+    for name in ["a.rs", "b.rs"] {
+        h.fake_fs().insert_file(root.join(name), b"x\n");
+    }
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFileFinder);
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+
+    let list = finder_layout(&h).list;
+    let bar = |col: u16, row: u16| BarCommand {
+        x: col as i16 * 16,
+        y: row as i16 * 16,
+        width: 3,
+        height: 16,
+        color: [0x7f, 0xb0, 0xff],
+    };
+    // The header's hairline starts at the list's column too, half a row above
+    // the list, so only the bars from the list's top row down count.
+    let list_bars = |bytes: &[u8], col: u16, top: u16| -> Vec<BarCommand> {
+        command::decode_stream(bytes)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(found) if found.x == col as i16 * 16 && found.y >= top as i16 * 16 => {
+                    Some(found)
+                },
+                _ => None,
+            })
+            .collect()
+    };
+
+    h.stoat.render();
+    let live = list_bars(&h.stoat.apc_scene.all_bytes(), list.x, list.y);
+    let pooled = emit_raw(&mut h, &mut rx);
+    let page = fill_payload(&pooled, crate::smooth_scroll::non_pane_pool::FINDER, 0);
+
+    assert_eq!(
+        [live, list_bars(page, 0, 0)],
+        [vec![bar(list.x, list.y)], vec![bar(0, 0)]],
+        "one bar on the selected first row, live at the list's first cell and on the page at its origin",
+    );
+}
+
 #[test]
 fn finder_pool_region_spans_the_full_window_over_the_band() {
     use stoat_action::OpenFileFinder;

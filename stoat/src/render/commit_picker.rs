@@ -219,7 +219,15 @@ pub(crate) fn render_commit_picker(
     picker.viewport_rows = Some(layout.list.height as usize);
     let start_row =
         crate::render::picker::window_start(picker.selected, layout.list.height as usize);
-    paint_commit_picker_rows(picker, start_row, layout.header, layout.list, theme, buf);
+    paint_commit_picker_rows(
+        picker,
+        start_row,
+        layout.header,
+        layout.list,
+        theme,
+        buf,
+        &mut *scene,
+    );
     if let Some(graph_rect) = layout.graph {
         paint_commit_graph(picker, start_row, graph_rect, theme, buf, scene);
     }
@@ -550,6 +558,8 @@ pub(crate) fn clamped_preview_scroll(scroll: usize, doc: &DiffDocument, height: 
 /// window agrees on where the columns sit. Match highlights are translated out
 /// of each row's joined haystack onto the column showing them, and one whose
 /// cell truncated it away is dropped.
+///
+/// The selected row's accent bar goes into `scene`.
 pub(crate) fn paint_commit_picker_rows(
     picker: &CommitPicker,
     start_row: usize,
@@ -557,6 +567,7 @@ pub(crate) fn paint_commit_picker_rows(
     area: Rect,
     theme: &Theme,
     buf: &mut Buffer,
+    scene: &mut ApcScene,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
@@ -604,6 +615,9 @@ pub(crate) fn paint_commit_picker_rows(
         };
         for col in area.x..end_x {
             buf[(col, y)].set_char(' ').set_style(style);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, y, theme, buf, scene);
         }
 
         let bounds = Rect::new(text_x, y, table_width, 1);

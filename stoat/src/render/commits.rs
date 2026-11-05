@@ -55,7 +55,7 @@ pub(crate) fn render_commits(
 
     state.viewport_rows = left_area.height as usize;
     state.ensure_selected_visible(state.viewport_rows);
-    render_commit_list_pane(state, theme, left_area, buf);
+    render_commit_list_pane(state, theme, left_area, buf, &mut *scene);
 
     if let Some(right_area) = commits_detail_rect(pane.area, frame.commits_split) {
         render_commit_detail_pane(
@@ -149,9 +149,10 @@ fn render_commit_list_pane(
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let top = state.scroll_top.min(state.commits.len().saturating_sub(1));
-    paint_commit_rows(state, area, top, theme, buf);
+    paint_commit_rows(state, area, top, theme, buf, scene);
 }
 
 /// Paint the commit list into `area` starting at row `start_row`, with the
@@ -159,13 +160,14 @@ fn render_commit_list_pane(
 ///
 /// Shared by the live list, which derives `start_row` from `scroll_top`, and the
 /// smooth-scroll pool, which paints absolute pages, so both render identical
-/// rows.
+/// rows. The selected row's accent bar goes into `scene`.
 pub(crate) fn paint_commit_rows(
     state: &CommitListState,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     use crate::theme::scope as s;
     let dim = theme.get(s::VCS_COMMIT_METADATA);
@@ -200,6 +202,7 @@ pub(crate) fn paint_commit_rows(
             for x in area.x..area.x + area.width {
                 buf[(x, y)].set_style(sel_style);
             }
+            crate::render::chrome::selection_bar(area.x, y, theme, buf, scene);
         }
 
         let sha_x = area.x;

@@ -30,7 +30,6 @@ pub(crate) fn render_code_action(
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let selected_style = stoat.theme.list_selected(crate::theme::scope::UI_SELECTION);
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
@@ -85,8 +84,9 @@ pub(crate) fn render_code_action(
         footer.as_ref(),
         picker.selected_idx.checked_sub(viewport_top),
         inner,
-        (modal_style, selected_style),
+        &stoat.theme,
         buf,
+        scene,
     );
     true
 }

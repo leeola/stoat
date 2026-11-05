@@ -128,6 +128,7 @@ pub(crate) fn render_conflict(
             for x in inner.x..inner.x + left_w {
                 buf[(x, y)].set_style(sel_style);
             }
+            crate::render::chrome::selection_bar(inner.x, y, theme, buf, scene);
         }
         let marker = match resolutions.get(&file.path).copied() {
             Some(ConflictResolution::TakeOurs) => 'O',

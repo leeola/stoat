@@ -208,7 +208,8 @@ pub(crate) mod test_support {
 ///
 /// `row_style` paints every row but the selected one, which takes
 /// [`Theme::list_selected`]. A caller passes its own style to set a whole
-/// list apart, such as a list of ignored files.
+/// list apart, such as a list of ignored files. The selected row's accent bar
+/// goes into `scene`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
@@ -220,6 +221,7 @@ pub(crate) fn paint_path_rows(
     theme: &Theme,
     row_style: Style,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
@@ -255,6 +257,9 @@ pub(crate) fn paint_path_rows(
         };
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
         label.clear();
         label.push_str(prefix);
@@ -463,6 +468,7 @@ mod tests {
             &Theme::empty(),
             Style::default(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let text = row_text(&buf, 0, area);
@@ -496,6 +502,7 @@ mod tests {
             &match_theme(),
             Style::default(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let match_fg = Color::Rgb(255, 0, 0);
@@ -528,6 +535,7 @@ mod tests {
                 &Theme::empty(),
                 Style::default(),
                 &mut buf,
+                &mut stoat_widgets::ApcScene::new(),
             );
             row_text(&buf, 0, area).trim().to_string()
         };
@@ -556,6 +564,7 @@ mod tests {
             &Theme::empty(),
             Style::default(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let text = row_text(&buf, 0, area);
@@ -590,6 +599,7 @@ mod tests {
             &match_theme(),
             Style::default(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let match_fg = Color::Rgb(255, 0, 0);
@@ -634,6 +644,7 @@ mod tests {
             &match_theme(),
             Style::default(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let match_fg = Color::Rgb(255, 0, 0);
@@ -676,6 +687,7 @@ mod tests {
             &match_theme(),
             Style::default(),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let match_fg = Color::Rgb(255, 0, 0);
@@ -709,6 +721,7 @@ mod tests {
             &Theme::empty(),
             Style::default().fg(muted),
             &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
         );
 
         let fg = |row: u16| -> Vec<Color> {

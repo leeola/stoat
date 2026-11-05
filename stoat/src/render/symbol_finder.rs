@@ -131,15 +131,15 @@ pub(crate) fn render_symbol_finder(
     let git_root = ws.git_root.clone();
     finder.viewport_rows = Some(list.height as usize);
     let start_row = crate::render::picker::window_start(finder.selected, list.height as usize);
-    paint_symbol_rows(finder, list, start_row, &git_root, theme, buf);
+    paint_symbol_rows(finder, list, start_row, &git_root, theme, buf, scene);
 }
 
 /// Paint the symbol list into `area`, starting at symbol `start_row`.
 ///
 /// Each row shows the title with fuzzy-match highlighting on the left and a dim
 /// kind and 1-based line suffix on the right. The caller picks the window
-/// rather than the painter deriving it, so a pooled page can paint rows the
-/// selection is nowhere near.
+/// rather than the painter deriving it, so a pooled page paints rows the
+/// selection is nowhere near. The selected row's accent bar goes into `scene`.
 pub(crate) fn paint_symbol_rows(
     finder: &SymbolFinder,
     area: Rect,
@@ -147,6 +147,7 @@ pub(crate) fn paint_symbol_rows(
     git_root: &Path,
     theme: &Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
@@ -183,6 +184,9 @@ pub(crate) fn paint_symbol_rows(
         };
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
 
         let entry = &finder.entries[idx];

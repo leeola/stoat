@@ -32,6 +32,10 @@ const LIST_MODAL_WIDTH_PERCENT: u32 = 80;
 /// the area, so a step feels the same size on a small screen and a large one.
 const ZOOM_STEP_DIVISOR: u16 = 10;
 
+/// The width of the accent bar on a list's selected row, in sixteenths of a
+/// cell.
+const SELECTION_BAR_WIDTH: u16 = 3;
+
 /// Size and center a modal box over `area` for content of `content` cells,
 /// returning `None` when `area` is too small to host `min`.
 ///
@@ -436,6 +440,27 @@ pub(crate) fn vline(
             }
         },
     }
+}
+
+/// Draw the accent bar that marks a list's selected row, at the left edge of
+/// the cell at column `x` and row `y`.
+///
+/// The bar takes the foreground of `ui.border.focused`, the theme's accent. A
+/// dead scene or an accent that is not RGB draws no bar, and the row's
+/// `ui.list.selected` fill marks the row alone.
+pub(crate) fn selection_bar(x: u16, y: u16, theme: &Theme, buf: &mut Buffer, scene: &mut ApcScene) {
+    let Some(color) = style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg) else {
+        return;
+    };
+
+    Bar {
+        x: 0,
+        y: 0,
+        width: SELECTION_BAR_WIDTH,
+        height: 16,
+        color,
+    }
+    .render(Rect::new(x, y, 1, 1), buf, scene);
 }
 
 /// Draw the on or off mark of a toggle beside its key, where `(x, y)` is the

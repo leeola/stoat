@@ -82,14 +82,15 @@ pub(crate) fn render_code_search(
     finder.preview_rows = layout.preview.map(|rect| rect.height as usize);
     let start_row =
         crate::render::picker::window_start(finder.selected, layout.list.height as usize);
-    paint_match_rows(finder, layout.list, start_row, &git_root, theme, buf);
+    paint_match_rows(finder, layout.list, start_row, &git_root, theme, buf, scene);
 }
 
 /// Paint the match list into `area`, starting at match `start_row`.
 ///
 /// Each row shows a dim `path:line:col` location and the matched line's
 /// snippet. The caller picks the window rather than the painter deriving it,
-/// so a pooled page can paint rows the selection is nowhere near.
+/// so a pooled page paints rows the selection is nowhere near. The selected
+/// row's accent bar goes into `scene`.
 pub(crate) fn paint_match_rows(
     finder: &CodeSearchFinder,
     area: Rect,
@@ -97,6 +98,7 @@ pub(crate) fn paint_match_rows(
     git_root: &Path,
     theme: &Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
@@ -125,6 +127,9 @@ pub(crate) fn paint_match_rows(
         };
         for col in area.x..end_x {
             buf[(col, row)].set_char(' ').set_style(style);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
 
         let location = format!(

@@ -1731,6 +1731,7 @@ mod tests {
             table,
             &h.stoat.theme,
             &mut live,
+            &mut stoat_widgets::ApcScene::new(),
         );
         let live_bytes = crate::render::serialize_buffer(&live);
 

@@ -88,7 +88,7 @@ pub(crate) fn render_jumplist_picker(
         );
     }
 
-    paint_jump_rows(picker, layout.list, theme, buf);
+    paint_jump_rows(picker, layout.list, theme, buf, scene);
 }
 
 /// Paint the surviving jumps into `area`, following the selection.
@@ -101,6 +101,7 @@ fn paint_jump_rows(
     area: Rect,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     let rows = area.height as usize;
     if rows == 0 {
@@ -143,6 +144,9 @@ fn paint_jump_rows(
 
         for col in area.x..area.x + area.width {
             buf[(col, row)].set_char(' ').set_style(base_style);
+        }
+        if is_selected {
+            crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
 
         let marker = match is_current {

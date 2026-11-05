@@ -1687,8 +1687,9 @@ mod tests {
             .lines()
             .any(|line| line.contains("\u{250c} git \u{2500}"));
         let subcommand = &top.command_name["git ".len()..];
+        // The top row is the selected one, so the accent bar leads its name.
         let shown = (
-            row.contains(&format!(" {subcommand} ")),
+            row.contains(&format!("\u{2502}{subcommand} ")),
             row.contains(top.command_name.as_str()),
         );
 
