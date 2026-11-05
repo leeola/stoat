@@ -72,11 +72,14 @@ ui.cursor  = { fg: black, bg: text, modifiers: [reversed] };   # map form
 ```
 
 Use the dotted form to set one field; use the map form to set several at once.
-Each scope carries up to three fields:
+A style scope carries up to three fields:
 
 - `fg` -- foreground color.
 - `bg` -- background color.
 - `modifiers` -- an array of text attributes.
+
+The `ui.panel.*` and `ui.type.*` scopes take other fields, which
+[Panel and type metrics](#panel-and-type-metrics) describes.
 
 ### Colors
 
@@ -104,6 +107,50 @@ The `modifiers` field takes an array of text attributes: `bold`, `italic`,
 ui.heading = { fg: warning, modifiers: [bold] };
 syntax.comment = { fg: muted, modifiers: [italic] };
 ```
+
+### Panel and type metrics
+
+Two scope groups shape the chrome instead of coloring it. A `ui.panel.<role>`
+scope sets the frame of one kind of floating panel:
+
+- `radius` -- the corner radius in logical pixels, a whole number from 0 to
+  255.
+- `shadow` -- the shadow, one of `none`, `drop`, `tucked`, or `overhang`.
+- `inset_x` -- the logical pixels taken off each side edge, a whole number from
+  0 to 255.
+- `above_pools` -- `true` or `false`, whether the role's panels draw above
+  every pooled surface. Each frame in stoat sets this flag itself, so the field
+  changes no frame.
+
+A `ui.type.<role>` scope sets one text size in its `scale` field, a whole number
+from 1 to 65535 in 256ths of a cell, so 256 fills a cell.
+
+A field that a theme leaves unset takes the Ermine value below, so a theme that
+sets none of them draws the Ermine chrome. A value that its field does not hold,
+such as `radius: 2.5` or an unknown shadow name, fails the theme load.
+
+```
+ui.panel.overlay = { radius: 4, shadow: drop };
+ui.type.ui.scale = 240;
+```
+
+| Scope              | Ermine value                     |
+| ------------------ | -------------------------------- |
+| `ui.panel.island`  | radius 2, `tucked`, inset_x 4    |
+| `ui.panel.popout`  | radius 1, `overhang`             |
+| `ui.panel.overlay` | radius 2, `drop`, above_pools    |
+| `ui.type.title`    | 320                              |
+| `ui.type.body`     | 256                              |
+| `ui.type.ui`       | 232                              |
+| `ui.type.small`    | 208                              |
+| `ui.type.mode`     | 208                              |
+
+The popout cards over the status bar and the diff view's sides bar draw in the
+`popout` frame. Every modal and cursor popup, the key hints box, the docks, and
+the run pane draw in the `overlay` frame. Tabs, the status bar, the popout
+cards, the sides bar, the key hints box, hover text, and walkthrough labels draw
+at `ui.type.ui`, gutter numbers at `ui.type.small`, and modal titles at
+`ui.type.body`.
 
 ## Semantic palette groups: the primary knob
 
@@ -153,6 +200,9 @@ a few leaves.
 The typed UI scopes, by group (syntax scopes are open-ended):
 
 - `ui.background` -- the editor's base background.
+- `ui.surface.chrome`, `ui.surface.overlay` -- the surface tokens for the window
+  chrome and for floating overlays (foreground the stroke, background the
+  fill).
 - `ui.text`, `ui.text.muted`, `ui.text.dim`, `ui.text.disabled` -- body text at
   descending emphasis.
 - `ui.cursor`, `ui.cursor.input` -- the block cursor in a buffer and in an input
@@ -165,13 +215,19 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,
-  `ui.modal.run` -- the border hue per floating modal.
+  `ui.modal.run` -- per floating modal, the border hue (foreground) and the box
+  surface (background). A modal style with no background keeps
+  `ui.background`.
 - `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
   chrome accents.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
   toggle's key in the key hints box.
 - `ui.badge.active`, `ui.badge.complete`, `ui.badge.error` -- transient status
   badges.
+- `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config` -- the file-type tag colors
+  for Rust, Markdown, and config files.
+- `ui.panel.*`, `ui.type.*` -- panel frames and text sizes, set by the fields in
+  [Panel and type metrics](#panel-and-type-metrics).
 - `ui.walkthrough.focus`, `ui.walkthrough.card`, `ui.walkthrough.marker1`
   through `marker6` -- a walkthrough stop's hand-drawn marks: the focus mark and its
   connector, the narration card and label boxes (foreground the stroke,
