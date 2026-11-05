@@ -2621,11 +2621,6 @@ impl GpuContext {
     }
 }
 
-/// The (rows, cols) that fill `width`x`height` physical pixels at `metrics`.
-///
-/// Floors each axis with a one-cell minimum so a sub-cell sliver still yields a
-/// usable grid. A larger font (bigger cell) yields fewer cells for the same
-/// pixel size.
 /// Choose the surface format and the format its views render through, from a
 /// surface's supported formats.
 ///
