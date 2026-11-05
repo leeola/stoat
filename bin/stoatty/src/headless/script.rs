@@ -10,10 +10,10 @@
 //! (`<C-w>`, `<C-S-w>`, `<A-Left>`), or type a literal `<` (`<lt>`).
 //!
 //! Three directives hold or capture rather than type. `<Wait:N>` pauses for N
-//! whole milliseconds. `<Settle>` waits until the child draws nothing new for
-//! 250 ms, and `<Settle:N>` for N ms. `<Shot:name>` marks where the caller
-//! takes a shot called `name`. A modifier prefix applies to none of them, so
-//! `<C-Wait:5>` is an unknown key.
+//! whole milliseconds. `<Settle>` waits until the screen shows content and the
+//! child draws nothing new for 250 ms, and `<Settle:N>` for N ms. `<Shot:name>`
+//! marks where the caller takes a shot called `name`. A modifier prefix applies
+//! to none of them, so `<C-Wait:5>` is an unknown key.
 
 use crate::input::{KeyEventKind, KeyPress};
 use snafu::{Location, Snafu};

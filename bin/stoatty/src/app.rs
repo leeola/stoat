@@ -666,7 +666,7 @@ pub(crate) struct State {
     /// parser, so [`App::about_to_wait`] arms a wait until the update's timeout
     /// and flushes it if no ESU arrives. Cleared once the update flushes.
     pub(crate) sync_pending: Arc<AtomicBool>,
-    grid: Grid,
+    pub(crate) grid: Grid,
     pub(crate) pty: Pty,
     /// The live font size in logical points, seeded from the config and stepped
     /// by the platform zoom combo. Drives the renderer's cell metrics on each

@@ -8,7 +8,7 @@ use std::{
     collections::HashSet,
     ffi::OsString,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use stoatty_bin::{
     config,
@@ -26,9 +26,6 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The quiet that counts as a settled screen.
 const SETTLE: Duration = Duration::from_millis(250);
-
-/// How often the wait for stoat's first frame looks at the screen.
-const FIRST_DRAW_POLL: Duration = Duration::from_millis(50);
 
 /// The scene's editor font size, which also sizes the status row the golden
 /// comparison leaves out.
@@ -61,7 +58,9 @@ fn the_basic_diff_frame_changes_when_the_cursor_moves() {
             )
         });
 
-    wait_for_first_draw(&mut session);
+    session
+        .wait_settled(SETTLE, STARTUP_TIMEOUT)
+        .expect("the first frame settles; a stoat built without its fixture feature exits at once");
     let before = session.snapshot().expect("a snapshot");
     session
         .type_keys(&script::parse("jj").expect("a key script"))
@@ -102,28 +101,6 @@ fn the_basic_diff_frame_changes_when_the_cursor_moves() {
     .filter_map(|(shot, name)| golden_mismatch(shot, &goldens.join(name)))
     .collect();
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
-}
-
-/// Pump until stoat draws more than the cursor over the background, then wait
-/// for the screen to settle.
-///
-/// A settle alone counts stoat's terminal setup as its first draw. Right after
-/// a build, stoat sometimes takes longer than the hold between that setup and
-/// its first frame, and the settle then ends on a blank screen.
-fn wait_for_first_draw(session: &mut HeadlessSession) {
-    let give_up = Instant::now() + STARTUP_TIMEOUT;
-    while distinct_colors(&session.snapshot().expect("a snapshot")) <= 2 {
-        assert!(
-            Instant::now() < give_up,
-            "stoat draws its first frame within {STARTUP_TIMEOUT:?}",
-        );
-        session
-            .pump(Instant::now() + FIRST_DRAW_POLL)
-            .expect("stoat runs; a stoat built without its fixture feature exits at once");
-    }
-    session
-        .wait_settled(SETTLE, STARTUP_TIMEOUT)
-        .expect("the first frame settles");
 }
 
 /// Why `shot` does not match the golden PNG at `golden`, or `None` when it

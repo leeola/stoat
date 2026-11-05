@@ -41,7 +41,7 @@ use stoat_log::ident;
 use stoatty_protocol::{command::IdentReply, PROTOCOL_VERSION};
 use stoatty_render::gpu::{headless_gpu, FontConfig, GpuContext};
 use stoatty_term::{
-    grid::Grid,
+    grid::{Grid, Rgb},
     term::{TermEvent, Terminal},
     theme::Theme,
 };
@@ -348,18 +348,20 @@ impl HeadlessSession {
 
     /// Pump in slices of `hold` until one slice passes with the screen at rest.
     ///
-    /// At rest means the child has drawn at least once in this session, and the
+    /// At rest means the last frame drawn shows content. It also means the
     /// slice saw no redraw wakeup, left no synchronized update pending, and
-    /// ended with no frame wanted. Without the first condition, a child slower
-    /// to start than `hold` reads as at rest before it draws anything. Fails
-    /// with [`HeadlessError::Timeout`] when the screen still moves after
-    /// `timeout`.
+    /// ended with no frame wanted. Without content, a blank frame reads as at
+    /// rest when a child starts slower than `hold`. The same happens when a
+    /// child's terminal setup only clears the screen, as stoat's does before
+    /// its first frame. Fails with [`HeadlessError::Timeout`] when the screen
+    /// still moves, or shows nothing, after `timeout`.
     pub fn wait_settled(&mut self, hold: Duration, timeout: Duration) -> Result<(), HeadlessError> {
         let give_up = Instant::now() + timeout;
         loop {
             let seen = self.redraws_seen;
             self.pump(Instant::now() + hold)?;
-            let at_rest = self.redraws_seen > 0
+            let background = self.state.terminal.lock().default_background();
+            let at_rest = shows_content(&self.state.grid, background)
                 && self.redraws_seen == seen
                 && !self.state.sync_pending.load(Ordering::Relaxed)
                 && !self.host.redraw_wanted.load(Ordering::Relaxed);
@@ -600,9 +602,21 @@ impl Host for HeadlessHost {
     }
 }
 
+/// Whether `grid` holds anything an erased screen does not.
+///
+/// That is a cell with a character other than a space, or a cell drawn on a
+/// background other than `background`, the terminal's default.
+fn shows_content(grid: &Grid, background: Rgb) -> bool {
+    (0..grid.rows()).any(|row| {
+        grid.row(row)
+            .iter()
+            .any(|cell| cell.ch != ' ' || cell.draw_colors().1 != background)
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{HeadlessError, HeadlessHost, HeadlessSession, Scene};
+    use super::{shows_content, HeadlessError, HeadlessHost, HeadlessSession, Scene};
     use crate::{
         app::{grid_pixels, Host},
         config::CursorAnimation,
@@ -611,7 +625,10 @@ mod tests {
         path::Path,
         time::{Duration, Instant},
     };
-    use stoatty_term::theme::Theme;
+    use stoatty_term::{
+        grid::{Cell, Flags, Grid, Rgb},
+        theme::Theme,
+    };
 
     /// A frame asks the host for the next frame and sets the title through it,
     /// so the host keeps both for the session to read.
@@ -648,13 +665,15 @@ mod tests {
     /// paints with a truecolor background reads back in that color, and a
     /// resize reads back at the new size.
     ///
-    /// The child prints only after a pause longer than the hold, so the wait
-    /// has to see the child draw before it takes a quiet slice for rest.
+    /// The child enters and clears the alternate screen at once, which draws
+    /// nothing, and paints only after a pause longer than the hold. So the wait
+    /// has to see content on the screen before it takes a quiet slice for rest.
     #[test]
     fn a_session_renders_the_child_s_background_fill() {
         let dir = tempfile::tempdir().expect("a scratch working directory");
         let mut session = spawn(shell_scene(
-            "sleep 0.3; printf '\\033]0;scene\\007\\033[48;2;200;40;40m  '; sleep 60",
+            "printf '\\033[?1049h\\033[2J'; sleep 0.3; \
+             printf '\\033]0;scene\\007\\033[48;2;200;40;40m  '; sleep 60",
             dir.path(),
         ));
 
@@ -680,6 +699,34 @@ mod tests {
                 usize::from(width) * usize::from(height) * 4,
             ),
             "a resized session reads back at the new size",
+        );
+    }
+
+    /// A grid shows content once one cell holds a character or draws a
+    /// background other than the default, and an erased grid shows none.
+    #[test]
+    fn a_grid_shows_content_by_character_or_background() {
+        let background = Rgb::new(0x28, 0x2c, 0x34);
+        let shows = |paint: fn(&mut Cell)| {
+            let mut grid = Grid::new(2, 3);
+            for row in 0..2 {
+                grid.row_mut(row).fill(Cell {
+                    bg: background,
+                    ..Cell::default()
+                });
+            }
+            paint(grid.get_mut(1, 2));
+            shows_content(&grid, background)
+        };
+        assert_eq!(
+            [
+                shows(|_| {}),
+                shows(|cell| cell.ch = 'x'),
+                shows(|cell| cell.bg = Rgb::new(200, 40, 40)),
+                shows(|cell| cell.flags = Flags::INVERSE),
+            ],
+            [false, true, true, true],
+            "an erased grid, a character, a painted background, reverse video",
         );
     }
 
