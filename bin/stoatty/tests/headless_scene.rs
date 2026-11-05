@@ -3,16 +3,18 @@
 //! The scene runs the `stoat` binary beside this test executable, built with
 //! stoat's own fixture feature, over a scratch home on the software adapter.
 
-use image::RgbaImage;
+use image::{ImageFormat, RgbaImage};
 use std::{
     collections::HashSet,
+    ffi::OsString,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stoatty_bin::{
     config,
     headless::{script, HeadlessSession, Scene, Snapshot},
 };
+use stoatty_render::render;
 use tempfile::TempDir;
 
 /// The wait for stoat's first frame. A cold start of the debug binary on a
@@ -25,11 +27,29 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 /// The quiet that counts as a settled screen.
 const SETTLE: Duration = Duration::from_millis(250);
 
-/// Two cursor moves in the basic-diff fixture change the frame, and the first
-/// frame draws text over the background.
+/// How often the wait for stoat's first frame looks at the screen.
+const FIRST_DRAW_POLL: Duration = Duration::from_millis(50);
+
+/// The scene's editor font size, which also sizes the status row the golden
+/// comparison leaves out.
+const FONT_SIZE: u32 = 14;
+
+/// The largest channel difference at which a pixel still matches its golden.
+///
+/// It and [`MISMATCH_LIMIT`] absorb the anti-aliasing drift that a mesa update
+/// brings to lavapipe.
+const CHANNEL_TOLERANCE: u8 = 8;
+
+/// The largest share of the compared pixels that fail to match in a frame that
+/// still matches its golden.
+const MISMATCH_LIMIT: f64 = 0.005;
+
+/// Two cursor moves in the basic-diff fixture change the frame, the first
+/// frame draws text over the background, and both frames match their goldens.
 ///
 /// Both frames are written into the scratch home, which a failing check keeps
-/// and names, so the frames are there to open.
+/// and names, so the frames are there to open. A frame that does not match its
+/// golden is written beside it as `.png.new` instead.
 #[test]
 fn the_basic_diff_frame_changes_when_the_cursor_moves() {
     let home = scratch_home();
@@ -41,9 +61,7 @@ fn the_basic_diff_frame_changes_when_the_cursor_moves() {
             )
         });
 
-    session
-        .wait_settled(SETTLE, STARTUP_TIMEOUT)
-        .expect("stoat draws its first frame; a stoat built without its fixture feature exits");
+    wait_for_first_draw(&mut session);
     let before = session.snapshot().expect("a snapshot");
     session
         .type_keys(&script::parse("jj").expect("a key script"))
@@ -74,6 +92,103 @@ fn the_basic_diff_frame_changes_when_the_cursor_moves() {
          in {}",
         frames.display(),
     );
+
+    let goldens = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens");
+    let mismatches: Vec<String> = [
+        (&before, "basic_diff_before.png"),
+        (&after, "basic_diff_after.png"),
+    ]
+    .into_iter()
+    .filter_map(|(shot, name)| golden_mismatch(shot, &goldens.join(name)))
+    .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
+
+/// Pump until stoat draws more than the cursor over the background, then wait
+/// for the screen to settle.
+///
+/// A settle alone counts stoat's terminal setup as its first draw. Right after
+/// a build, stoat sometimes takes longer than the hold between that setup and
+/// its first frame, and the settle then ends on a blank screen.
+fn wait_for_first_draw(session: &mut HeadlessSession) {
+    let give_up = Instant::now() + STARTUP_TIMEOUT;
+    while distinct_colors(&session.snapshot().expect("a snapshot")) <= 2 {
+        assert!(
+            Instant::now() < give_up,
+            "stoat draws its first frame within {STARTUP_TIMEOUT:?}",
+        );
+        session
+            .pump(Instant::now() + FIRST_DRAW_POLL)
+            .expect("stoat runs; a stoat built without its fixture feature exits at once");
+    }
+    session
+        .wait_settled(SETTLE, STARTUP_TIMEOUT)
+        .expect("the first frame settles");
+}
+
+/// Why `shot` does not match the golden PNG at `golden`, or `None` when it
+/// does.
+///
+/// The comparison leaves out the bottom grid row, the status row, because it
+/// holds the workspace name, which stoat draws from the clock. A pixel matches
+/// when no channel differs by more than [`CHANNEL_TOLERANCE`], and the frame
+/// matches when at most [`MISMATCH_LIMIT`] of the compared pixels do not. A
+/// missing golden or a frame that does not match writes the whole frame to
+/// `<golden>.new`, which a reviewer moves over the golden to accept it.
+fn golden_mismatch(shot: &Snapshot, golden: &Path) -> Option<String> {
+    let fresh = {
+        let mut fresh = OsString::from(golden.as_os_str());
+        fresh.push(".new");
+        PathBuf::from(fresh)
+    };
+
+    if !golden.is_file() {
+        save(shot, &fresh);
+        return Some(format!(
+            "no golden at {}; review {} and move it over",
+            golden.display(),
+            fresh.display(),
+        ));
+    }
+
+    let expected = image::open(golden).expect("decode the golden").to_rgba8();
+    if expected.dimensions() != (shot.width, shot.height) {
+        save(shot, &fresh);
+        return Some(format!(
+            "{} is {:?} and the frame is {:?}; review {} and move it over",
+            golden.display(),
+            expected.dimensions(),
+            (shot.width, shot.height),
+            fresh.display(),
+        ));
+    }
+
+    let status_row = render::cell_size(FONT_SIZE, 1.0)[1] as u32;
+    let compared = (shot.width * (shot.height - status_row)) as usize;
+    let differing = expected
+        .as_raw()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(shot.rgba.as_chunks::<4>().0)
+        .take(compared)
+        .filter(|(want, got)| {
+            want.iter()
+                .zip(got.iter())
+                .any(|(want, got)| want.abs_diff(*got) > CHANNEL_TOLERANCE)
+        })
+        .count();
+    if differing as f64 <= compared as f64 * MISMATCH_LIMIT {
+        return None;
+    }
+
+    save(shot, &fresh);
+    Some(format!(
+        "{differing} of {compared} pixels above the status row differ from {} by more than \
+         {CHANNEL_TOLERANCE}; review {} and move it over",
+        golden.display(),
+        fresh.display(),
+    ))
 }
 
 /// The basic-diff fixture with its unstaged file open, at 100 by 30 cells on the
@@ -92,7 +207,7 @@ fn basic_diff_scene(home: &Path) -> Scene {
         stoat_dir: None,
         cols: 100,
         rows: 30,
-        font_size: 14,
+        font_size: FONT_SIZE,
         terminal_font_size: 12,
         scale_factor: 1.0,
         theme: config.resolve_theme(),
@@ -118,11 +233,22 @@ fn basic_diff_scene(home: &Path) -> Scene {
 
 /// A scratch home holding the `config`, `data`, and `state` directories the
 /// scene points the child's XDG variables at.
+///
+/// Its stoat config turns direnv off. The direnv message names the fixture's
+/// temporary directory, a new path on every run, so a frame with the message
+/// never matches its golden.
+// The scratch home is this test's own disk state, set up before the child runs.
+#[allow(clippy::disallowed_methods)]
 fn scratch_home() -> TempDir {
     let home = tempfile::tempdir().expect("a scratch home");
-    for dir in ["config", "data", "state"] {
+    for dir in ["config", "config/stoat", "data", "state"] {
         std::fs::create_dir(home.path().join(dir)).expect("a scratch home directory");
     }
+    std::fs::write(
+        home.path().join("config/stoat/config.stcfg"),
+        "on init {\n    direnv.load = false;\n}\n",
+    )
+    .expect("the scratch stoat config");
     home
 }
 
@@ -149,11 +275,11 @@ fn stoat_binary() -> PathBuf {
     binary
 }
 
-/// Write `shot` to `path` as a PNG.
+/// Write `shot` to `path` as a PNG, whatever extension `path` has.
 fn save(shot: &Snapshot, path: &Path) {
     RgbaImage::from_raw(shot.width, shot.height, shot.rgba.clone())
         .expect("the readback is width by height")
-        .save(path)
+        .save_with_format(path, ImageFormat::Png)
         .expect("write the frame");
 }
 
