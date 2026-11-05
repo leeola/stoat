@@ -22,7 +22,10 @@ use ratatui::{
     style::{Modifier, Style},
     widgets::{Block, Borders},
 };
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 use unicode_width::UnicodeWidthStr;
 
 /// The glyph before a filter modal's query. The command palette keeps `:` in
@@ -278,12 +281,22 @@ pub(crate) mod test_support {
 /// [`Theme::list_selected`]. A caller passes its own style to set a whole
 /// list apart, such as a list of ignored files. The selected row's accent bar
 /// goes into `scene`.
+///
+/// A path row keeps columns 1 and 2 for its [`chrome::type_tag`], so tagged and
+/// untagged rows align, and a wider tag pushes only its own row's label right.
+/// Its directory paints in `ui.text.muted` and its name in the row's style. A
+/// path found in `marks`, which is sorted, ends in an `M` in the
+/// `diff.modified` color. A relative entry, such as a branch name, gets none
+/// of these.
+///
+/// [`chrome::type_tag`]: crate::render::chrome::type_tag
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
     git_root: &Path,
     home: Option<&Path>,
     prefix: &str,
+    marks: &[PathBuf],
     area: Rect,
     start_row: usize,
     theme: &Theme,
@@ -297,9 +310,10 @@ pub(crate) fn paint_path_rows(
     }
     let selected_style = theme.list_selected(scope::UI_SELECTION);
     let match_style = theme.list_match();
+    let dir_style = theme.get(scope::UI_TEXT_MUTED);
+    let mark_style = theme.get(scope::DIFF_MODIFIED);
 
-    let end_x = area.x + area.width;
-    let label_x = area.x + 1;
+    let area_end = area.x + area.width;
     let prefix_len = prefix.chars().count() as u32;
     let mut label = String::new();
 
@@ -323,21 +337,38 @@ pub(crate) fn paint_path_rows(
         } else {
             row_style
         };
-        for col in area.x..end_x {
+        for col in area.x..area_end {
             buf[(col, row)].set_char(' ').set_style(style);
         }
         if is_selected {
             crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
         }
+
+        let path = &picklist.base[idx];
+        let is_path = path.is_absolute();
+        let label_x = match is_path {
+            true => paint_type_tag(path, area.x + 1, row, style, theme, buf, area_end),
+            false => area.x + 1,
+        };
+        let marked = is_path && area_end >= label_x + 3 && marks.binary_search(path).is_ok();
+        let end_x = match marked {
+            true => {
+                buf[(area_end - 1, row)].set_char('M').set_style(mark_style);
+                area_end - 2
+            },
+            false => area_end,
+        };
+
         label.clear();
         label.push_str(prefix);
         write_row_display(
             &mut label,
-            &picklist.base[idx],
+            path,
             git_root,
             picklist.display_roots.as_deref(),
             home,
         );
+        let name_col = if is_path { name_start(&label) } else { 0 };
         let width = end_x.saturating_sub(label_x) as usize;
         let label_len = label.chars().count();
 
@@ -348,7 +379,7 @@ pub(crate) fn paint_path_rows(
         // palette's argument list, and its head names it, so its tail goes
         // instead.
         let (dropped, text_x, text_end) = if label_len > width && width > 1 {
-            if picklist.base[idx].is_absolute() {
+            if is_path {
                 let dropped = label_len - (width - 1);
                 buf[(label_x, row)].set_char('\u{2026}').set_style(style);
                 let tail_start = label
@@ -373,6 +404,9 @@ pub(crate) fn paint_path_rows(
             if col >= text_end {
                 break;
             }
+            if label_col < name_col {
+                buf[(col, row)].set_style(dir_style);
+            }
             let label_col = label_col as u32;
             // The literal `prefix` is never matched. The picklist's indices are
             // offsets into the part after it, so shift them past the prefix.
@@ -380,6 +414,43 @@ pub(crate) fn paint_path_rows(
                 buf[(col, row)].set_style(match_style);
             }
         }
+    }
+}
+
+/// Columns a path row keeps for its type tag, which fit a two-letter tag such
+/// as `rs`.
+const TAG_COLUMNS: u16 = 2;
+
+/// Paint `path`'s type tag from column `x` of `row`, and return the column its
+/// label starts at.
+///
+/// The label starts one blank column past [`TAG_COLUMNS`], or past a tag wider
+/// than them.
+fn paint_type_tag(
+    path: &Path,
+    x: u16,
+    row: u16,
+    style: Style,
+    theme: &Theme,
+    buf: &mut Buffer,
+    end_x: u16,
+) -> u16 {
+    let width = match crate::render::chrome::type_tag(path) {
+        Some((tag, tag_scope)) => {
+            write_str_clipped(buf, x, row, tag, style.patch(theme.get(tag_scope)), end_x);
+            tag.width() as u16
+        },
+        None => 0,
+    };
+    x + width.max(TAG_COLUMNS) + 1
+}
+
+/// The char index where `label`'s last path component starts, which is the
+/// name a row or the preview header paints apart from its directory.
+pub(crate) fn name_start(label: &str) -> usize {
+    match label.rfind('/') {
+        Some(slash) => label[..=slash].chars().count(),
+        None => 0,
     }
 }
 
@@ -565,7 +636,8 @@ mod tests {
             )],
             vec![vec![]],
         );
-        // Column width 20 leaves a 19-cell label area after the one-cell pad.
+        // Column width 20 leaves a 16-cell label area after the pad and the tag
+        // slot.
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
         paint_path_rows(
@@ -573,6 +645,7 @@ mod tests {
             git_root,
             None,
             "",
+            &[],
             area,
             0,
             &Theme::empty(),
@@ -581,14 +654,10 @@ mod tests {
             &mut stoat_widgets::ApcScene::new(),
         );
 
-        let text = row_text(&buf, 0, area);
-        assert!(
-            text.trim_start().starts_with('\u{2026}'),
-            "an ellipsis stands in for the dropped head: {text:?}"
-        );
-        assert!(
-            text.ends_with("file_name.rs"),
-            "the file name at the tail stays visible: {text:?}"
+        assert_eq!(
+            row_text(&buf, 0, area),
+            " rs \u{2026}le/file_name.rs",
+            "an ellipsis stands in for the dropped head, and the file name at the tail stays",
         );
     }
 
@@ -607,6 +676,7 @@ mod tests {
             Path::new("/r"),
             None,
             "",
+            &[],
             area,
             0,
             &match_theme(),
@@ -640,6 +710,7 @@ mod tests {
                 git_root,
                 home,
                 "",
+                &[],
                 area,
                 0,
                 &Theme::empty(),
@@ -650,10 +721,10 @@ mod tests {
             row_text(&buf, 0, area).trim().to_string()
         };
 
-        assert_eq!(paint(Some(Path::new("/fixture-home"))), "~/a.rs");
+        assert_eq!(paint(Some(Path::new("/fixture-home"))), "rs ~/a.rs");
         assert_eq!(
             paint(None),
-            "/fixture-home/a.rs",
+            "rs /fixture-home/a.rs",
             "and stays whole with no home to measure against"
         );
     }
@@ -669,6 +740,7 @@ mod tests {
             git_root,
             None,
             "",
+            &[],
             area,
             0,
             &Theme::empty(),
@@ -682,15 +754,16 @@ mod tests {
             !text.contains('\u{2026}'),
             "no ellipsis for a path that fits: {text:?}"
         );
-        assert_eq!(text.trim(), "a.rs", "the whole path renders: {text:?}");
+        assert_eq!(text.trim(), "rs a.rs", "the whole path renders: {text:?}");
     }
 
     #[test]
     fn match_highlight_follows_the_truncated_tail() {
         let git_root = Path::new("/r");
-        // The 42-char label loses its leading 24 chars in a 19-cell area, so the
-        // tail begins at char 24. Match offset 0 lands in the dropped head and
-        // offset 30 (the `f` of `file_name`) in the visible tail.
+        // The 42-char label loses its leading 27 chars in the 16-cell area past
+        // the tag slot, so the tail starts at char 27. Match offset 0 lands in
+        // the dropped head and offset 30 (the `f` of `file_name`) in the
+        // visible tail.
         let list = list_of(
             vec![PathBuf::from(
                 "/r/very/deeply/nested/dir/module/file_name.rs",
@@ -704,6 +777,7 @@ mod tests {
             git_root,
             None,
             "",
+            &[],
             area,
             0,
             &match_theme(),
@@ -749,6 +823,7 @@ mod tests {
             git_root,
             None,
             "",
+            &[],
             area,
             deep,
             &match_theme(),
@@ -792,6 +867,7 @@ mod tests {
             git_root,
             None,
             "",
+            &[],
             area,
             550,
             &match_theme(),
@@ -806,7 +882,7 @@ mod tests {
             .collect();
         assert_eq!(
             highlighted,
-            vec![1, 2, 3, 4],
+            vec![4, 5, 6, 7],
             "the anchor's four characters highlight on a row past the block"
         );
     }
@@ -826,6 +902,7 @@ mod tests {
             Path::new("/r"),
             None,
             "",
+            &[],
             area,
             0,
             &Theme::empty(),

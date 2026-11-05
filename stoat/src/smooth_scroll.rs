@@ -805,6 +805,7 @@ pub(crate) fn render_arg_page(
                 &core.git_root,
                 home,
                 prefix,
+                &[],
                 area,
                 start_row,
                 theme,

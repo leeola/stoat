@@ -1,6 +1,12 @@
 use crate::{
+    display_map::DisplayPoint,
+    editor_state::EditorState,
     file_finder::{FileFinder, FinderScope},
-    render::picker::{FilterHeader, FILTER_PROMPT},
+    picker::{write_row_display, PreviewSource},
+    render::{
+        picker::{FilterHeader, FILTER_PROMPT},
+        text::write_str_clipped,
+    },
     workspace::Workspace,
 };
 use ratatui::{
@@ -9,9 +15,10 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 use std::path::Path;
+use unicode_width::UnicodeWidthStr;
 
 /// The on-screen rectangles of the file finder modal, derived from a terminal
-/// `area` by [`file_finder_layout`].
+/// `area` by [`file_finder_layout`] or [`file_finder_layout_with_header`].
 ///
 /// Shared by the renderer and the smooth-scroll emit so the pooled list region
 /// matches the painted one exactly.
@@ -22,9 +29,16 @@ pub(crate) struct FinderLayout {
     pub(crate) inner: Rect,
     /// The result list, also the smooth-scroll pool region.
     pub(crate) list: Rect,
-    /// The preview pane, present only when the body is wide enough.
+    /// The preview pane's editor, present only when the body is wide enough.
     pub(crate) preview: Option<Rect>,
+    /// The path header over the preview and the rule under it, which only
+    /// [`file_finder_layout_with_header`] sets. The preview starts below it.
+    pub(crate) preview_header: Option<Rect>,
 }
+
+/// Rows the finder's preview gives its path header, the header row and the
+/// rule under it.
+const PREVIEW_HEADER_ROWS: u16 = 2;
 
 /// Lay out the file finder modal within `area`, or `None` when `area` is too
 /// small to host it.
@@ -77,7 +91,35 @@ pub(crate) fn file_finder_layout(
         inner,
         list,
         preview,
+        preview_header: None,
     })
+}
+
+/// Lay out the file finder as [`file_finder_layout`] does, with the preview's
+/// first rows given to its path header.
+///
+/// The preview then covers only the editor below the header, which is the rect
+/// the pooled preview page fills and a wheel scrolls. A preview too short to
+/// keep an editor row under the header gets no header.
+pub(crate) fn file_finder_layout_with_header(
+    area: Rect,
+    content: (u16, u16),
+    zoom: i8,
+    list_percent: u16,
+) -> Option<FinderLayout> {
+    let mut layout = file_finder_layout(area, content, zoom, list_percent)?;
+    if let Some(preview) = layout.preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
+        layout.preview_header = Some(Rect {
+            height: PREVIEW_HEADER_ROWS,
+            ..preview
+        });
+        layout.preview = Some(Rect {
+            y: preview.y + PREVIEW_HEADER_ROWS,
+            height: preview.height - PREVIEW_HEADER_ROWS,
+            ..preview
+        });
+    }
+    Some(layout)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -93,7 +135,9 @@ pub(crate) fn render_file_finder(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) = file_finder_layout(area, finder.content_size, zoom, list_percent) else {
+    let Some(layout) =
+        file_finder_layout_with_header(area, finder.content_size, zoom, list_percent)
+    else {
         return;
     };
 
@@ -138,7 +182,17 @@ pub(crate) fn render_file_finder(
             separator_style,
             scene,
         );
-        render_preview(finder, preview_rect, theme, chrome, ws, buf);
+        crate::render::picker::render_picker_preview(
+            &finder.active_core_ref().preview,
+            preview_rect,
+            theme,
+            chrome,
+            ws,
+            buf,
+        );
+        if let Some(header) = layout.preview_header {
+            paint_preview_header(finder, header, home, theme, ws, buf, scene);
+        }
     }
 
     finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
@@ -220,11 +274,7 @@ pub(crate) fn paint_finder_rows(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let core = finder.active_core_ref();
-    let prefix = finder
-        .browse
-        .as_ref()
-        .map(|browse| browse.typed_dir.as_str())
-        .unwrap_or_default();
+    let prefix = row_prefix(finder);
     let row_style = if finder.fallback_active() {
         theme.get(crate::theme::scope::UI_TEXT_MUTED)
     } else {
@@ -235,6 +285,7 @@ pub(crate) fn paint_finder_rows(
         &core.git_root,
         home,
         prefix,
+        &finder.modified_paths,
         area,
         start_row,
         theme,
@@ -244,22 +295,105 @@ pub(crate) fn paint_finder_rows(
     );
 }
 
-fn render_preview(
+/// The typed directory that browse-mode rows start with, empty outside browse.
+fn row_prefix(finder: &FileFinder) -> &str {
+    finder
+        .browse
+        .as_ref()
+        .map(|browse| browse.typed_dir.as_str())
+        .unwrap_or_default()
+}
+
+/// Paint the path header over the finder's preview into `header`, which is the
+/// shown source's directory and name, the lines the pane shows at the right,
+/// and the rule under them.
+///
+/// The header keeps the modal's fill, which the preview below it shares. A
+/// blank pane leaves the header row empty, and a source with no path shows
+/// only its lines.
+fn paint_preview_header(
     finder: &FileFinder,
-    area: Rect,
+    header: Rect,
+    home: Option<&Path>,
     theme: &crate::theme::Theme,
-    chrome: &crate::render::editor::ResolvedChrome,
     ws: &mut Workspace,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
-    crate::render::picker::render_picker_preview(
-        &finder.active_core_ref().preview,
-        area,
-        theme,
-        chrome,
-        ws,
+    let (y, end) = (header.y, header.x + header.width);
+    let core = finder.active_core_ref();
+    let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+
+    let mut path_end = end.saturating_sub(1);
+    let lines = core
+        .preview
+        .source()
+        .and_then(|_| ws.editors.get_mut(core.preview.editor))
+        .and_then(shown_lines);
+    if let Some((top, bottom)) = lines {
+        let text = format!("lines {top}\u{2013}{bottom}");
+        let x = path_end.saturating_sub(text.width() as u16);
+        write_str_clipped(buf, x, y, &text, muted, end);
+        path_end = x.saturating_sub(2);
+    }
+
+    let path = core.preview.source().and_then(|source| match source {
+        PreviewSource::File(path) | PreviewSource::Directory(path) => Some(path.as_path()),
+        PreviewSource::Buffer(id) => ws.buffers.path_for(*id),
+        PreviewSource::Terminal(_) | PreviewSource::Markdown(_) | PreviewSource::Text(_) => None,
+    });
+    if let Some(path) = path {
+        let mut label = row_prefix(finder).to_owned();
+        write_row_display(
+            &mut label,
+            path,
+            &core.git_root,
+            core.picklist.display_roots.as_deref(),
+            home,
+        );
+        let split = label
+            .char_indices()
+            .nth(crate::render::picker::name_start(&label))
+            .map_or(label.len(), |(byte, _)| byte);
+        let (dir, name) = label.split_at(split);
+
+        let text = theme.get(crate::theme::scope::UI_TEXT);
+        let x = header.x + 1;
+        // The name is what the header is for, so a row too narrow for both
+        // keeps it and drops the directory.
+        let fits = x as usize + dir.width() + 1 + name.width() <= path_end as usize;
+        match dir.is_empty() || !fits {
+            true => write_str_clipped(buf, x, y, name, text, path_end),
+            false => {
+                write_str_clipped(buf, x, y, dir, muted, path_end);
+                let name_x = x + dir.width() as u16 + 1;
+                write_str_clipped(buf, name_x, y, name, text, path_end);
+            },
+        }
+    }
+
+    crate::render::chrome::hline(
         buf,
+        header.x,
+        y + 1,
+        header.width,
+        theme.get(crate::theme::scope::UI_BORDER_INACTIVE),
+        scene,
     );
+}
+
+/// The first and last buffer lines, counted from 1, that `editor` showed in
+/// its last frame, or `None` before its first layout.
+fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
+    let rows = editor.viewport_rows?;
+    let snapshot = editor.display_map.snapshot();
+    let last = editor
+        .scroll_row
+        .saturating_add(rows.saturating_sub(1))
+        .min(snapshot.max_point().row);
+    let top = snapshot.display_to_buffer(DisplayPoint::new(editor.scroll_row, 0))?;
+    let bottom = snapshot.display_to_buffer(DisplayPoint::new(last, 0))?;
+    Some((top.row + 1, bottom.row + 1))
 }
 
 #[cfg(test)]

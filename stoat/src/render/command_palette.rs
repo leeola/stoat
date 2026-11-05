@@ -288,6 +288,7 @@ fn render_palette_arg_picker(
         &core.git_root,
         home,
         &prefix,
+        &[],
         list,
         start_row,
         theme,

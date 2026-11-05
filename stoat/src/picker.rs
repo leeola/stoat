@@ -1887,6 +1887,11 @@ impl Preview {
         self.rendered_for = Some(source);
     }
 
+    /// The source the pane shows, or `None` while it is blank.
+    pub(crate) fn source(&self) -> Option<&PreviewSource> {
+        self.rendered_for.as_ref()
+    }
+
     /// Blank the preview when nothing is selected. No-op when already empty.
     pub(crate) fn clear(&mut self, ws: &mut Workspace) {
         if self.rendered_for.is_some() {

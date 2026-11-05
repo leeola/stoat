@@ -3190,12 +3190,99 @@ mod tests {
         let select = Color::Rgb(0x23, 0x32, 0x4a);
 
         assert_eq!(
-            [style(2), style(5)],
+            [style(12), style(8)],
             [
                 (Color::Rgb(0xdf, 0xe2, 0xe8), select, Modifier::empty()),
                 (Color::Rgb(0xe8, 0xbd, 0x6a), select, Modifier::BOLD),
             ],
-            "the r and the f of src/foo.rs on the selected first row",
+            "the r of .rs and the f of foo.rs on the selected first row",
+        );
+    }
+
+    /// A row shows its type tag in the tag color, its directory muted, and its
+    /// name in the text color, and a modified file's row ends in an `M`. A file
+    /// with no tag keeps the slot blank, so both rows start their names in the
+    /// same column.
+    #[test]
+    fn a_row_shows_its_type_tag_directory_name_and_modified_mark() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(&mut h, &[("src/a.rs", "v2\n"), ("b.txt", "b\n")]);
+        h.fake_git()
+            .add_repo(&root)
+            .with_fs(h.fake_fs())
+            .modified("src/a.rs", "v1\n", "v2\n")
+            .head_file("b.txt", "b\n");
+        h.type_keys("space p");
+        h.settle();
+
+        let list = test_fixture::finder_layout(&h).list;
+        let buf = h.render_composited();
+        let text = |y: u16| -> String {
+            (list.x..list.x + list.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect()
+        };
+        let row_of = |name: &str| {
+            (list.y..list.y + list.height)
+                .find(|&y| text(y).contains(name))
+                .expect("the file lists")
+        };
+        let (a, b) = (row_of("src/a.rs"), row_of("b.txt"));
+        let glyph = |col: u16, y: u16| {
+            let cell = &buf[(list.x + col, y)];
+            (cell.symbol().to_owned(), cell.fg)
+        };
+
+        let warning = Color::Rgb(0xe8, 0xbd, 0x6a);
+        let muted = Color::Rgb(0x83, 0x8a, 0x98);
+        let body = Color::Rgb(0xdf, 0xe2, 0xe8);
+        let last = list.width - 1;
+        assert_eq!(
+            [
+                glyph(1, a),
+                glyph(4, a),
+                glyph(8, a),
+                glyph(last, a),
+                glyph(1, b),
+                glyph(4, b),
+                glyph(last, b),
+            ],
+            [
+                ("r".to_owned(), warning),
+                ("s".to_owned(), muted),
+                ("a".to_owned(), body),
+                ("M".to_owned(), warning),
+                (" ".to_owned(), body),
+                ("b".to_owned(), body),
+                (" ".to_owned(), body),
+            ],
+            "the tag, the s of src/, the a of a.rs, and the mark, then the untagged clean row",
+        );
+    }
+
+    /// The preview opens with the shown file's directory and name, and the
+    /// lines the pane shows one column from its right edge.
+    #[test]
+    fn the_preview_header_names_the_file_and_its_shown_lines() {
+        let mut h = TestHarness::with_size(120, 30);
+        seed_finder_workspace(&mut h, &[("src/a.rs", "one\ntwo\nthree")]);
+        h.type_keys("space p");
+        h.settle();
+
+        let header = test_fixture::finder_layout(&h)
+            .preview_header
+            .expect("the preview has a header");
+        let buf = h.render_composited();
+        let text: String = (header.x..header.x + header.width)
+            .map(|x| buf[(x, header.y)].symbol())
+            .collect();
+        assert_eq!(
+            (
+                text.split_whitespace().collect::<Vec<_>>(),
+                text.ends_with("1\u{2013}3 ")
+            ),
+            (vec!["src/", "a.rs", "lines", "1\u{2013}3"], true),
+            "the header row reads {text:?}",
         );
     }
 

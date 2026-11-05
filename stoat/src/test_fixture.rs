@@ -66,7 +66,7 @@ pub(crate) fn palette_sizing(h: &TestHarness) -> (u16, i8) {
 /// renderer would read, so a test rect matches the painted one.
 pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::FinderLayout {
     let finder = h.stoat.file_finder.as_ref().expect("the finder is open");
-    crate::render::file_finder::file_finder_layout(
+    crate::render::file_finder::file_finder_layout_with_header(
         h.stoat.size(),
         finder.content_size,
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),

@@ -391,7 +391,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     match active_modal(stoat)? {
         ActiveModal::FileFinder => {
             let finder = stoat.file_finder.as_ref()?;
-            let layout = crate::render::file_finder::file_finder_layout(
+            let layout = crate::render::file_finder::file_finder_layout_with_header(
                 size,
                 finder.content_size,
                 zoom(ModalKind::FileFinder),
