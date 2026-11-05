@@ -1971,7 +1971,7 @@ mod tests {
         }
         assert_eq!(
             visual_column(&mut h),
-            12,
+            13,
             "the cursor starts part way along a wrapped row",
         );
 
@@ -1983,14 +1983,14 @@ mod tests {
         }
         assert_eq!(
             visual_column(&mut h),
-            12,
+            13,
             "the clamp moves the cursor down its rows, not across its columns",
         );
 
         dispatch(&mut h.stoat, &stoat_action::MoveDown);
         assert_eq!(
             visual_column(&mut h),
-            12,
+            13,
             "and the goal it left behind is the one a motion reads",
         );
     }

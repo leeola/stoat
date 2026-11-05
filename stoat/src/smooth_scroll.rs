@@ -31,8 +31,7 @@ use crate::{
         conflict_view::render_conflict_rows,
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity, PLAIN_DIFF_BARS,
-            PLAIN_DIFF_BAR_WIDTH,
+            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity, PLAIN_STRUCTURAL_BARS,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -504,7 +503,7 @@ fn paint_page_gutter(
 
     match &gutter.rich {
         Some(rich) => {
-            let lines = gutter_component_lines(
+            let mut lines = gutter_component_lines(
                 &folded,
                 &gutter.severity,
                 &diff_marks,
@@ -513,13 +512,19 @@ fn paint_page_gutter(
                 &rich.colors,
                 gutter.current_line,
             );
+            // FIXME: Pool pages carry no icon commands, and an icon inside a
+            // page fill lands on the live grid at page coordinates. So a page
+            // marks each diagnostic with the hint's dot, a run, instead of its
+            // icon.
+            for diagnostic in lines.iter_mut().filter_map(|line| line.diagnostic.as_mut()) {
+                diagnostic.kind = None;
+            }
             let widget = rich_gutter(
                 &lines,
                 width_digits,
                 (rich.number_fg, rich.separator, rich.bg),
                 rich.number_scale,
-                PLAIN_DIFF_BARS,
-                PLAIN_DIFF_BAR_WIDTH,
+                PLAIN_STRUCTURAL_BARS,
             );
             let mut scene = gutter.scene();
             // The components write only the scene, so `buf` keeps its cells.
@@ -2115,11 +2120,11 @@ mod tests {
         );
     }
 
-    /// A pooled page's rich gutter draws the plain editor's one diff bar at the
-    /// first slot, where the live gutter draws it, and no state bar. A row the
-    /// tree pass has not reached takes the bar faded toward the gutter background.
+    /// A pooled page's rich gutter draws the plain editor's hunk and state
+    /// lanes where the live gutter draws them. A row the tree pass has not
+    /// reached takes its hunk bar faded toward the gutter background.
     #[test]
-    fn a_pooled_page_gutter_draws_one_diff_bar() {
+    fn a_pooled_page_gutter_draws_the_hunk_and_state_lanes() {
         use super::{render_page_decorations, PageGutter};
         use crate::{
             action_handlers::{self, dispatch},
@@ -2214,7 +2219,7 @@ mod tests {
             let command = encode_bar(&BarCommand {
                 x,
                 y,
-                width: 5,
+                width: 3,
                 height: 16,
                 color,
             });
@@ -2222,16 +2227,79 @@ mod tests {
                 .windows(command.len())
                 .any(|window| window == command.as_slice())
         };
-        let modified = color(scope::DIFF_MODIFIED);
+        let (modified, unstaged) = (color(scope::DIFF_MODIFIED), color(scope::DIFF_UNSTAGED));
         assert_eq!(
             [
-                bar(50, 16, modified),
-                bar(57, 16, color(scope::DIFF_UNSTAGED)),
-                bar(50, 32, dim_rgb(modified, bg, TREE_FADE)),
+                bar(0, 16, modified),
+                bar(4, 16, unstaged),
+                bar(0, 32, dim_rgb(modified, bg, TREE_FADE)),
+                bar(4, 32, unstaged),
             ],
-            [true, false, true],
-            "the change bar at the first slot of row 1, no state bar, and row 2's bar faded",
+            [true; 4],
+            "both lanes on rows 1 and 2, and row 2's hunk bar faded",
         );
+    }
+
+    /// A pool fill carries no icon commands, so a pooled page marks an error
+    /// with the hint's dot run where the live gutter draws an icon.
+    #[test]
+    fn a_pooled_page_marks_a_diagnostic_with_a_dot() {
+        use super::render_page_decorations;
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::{resolve_rich_gutter, RowSeverity},
+            theme::scope,
+            Stoat,
+        };
+        use lsp_types::DiagnosticSeverity;
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::command::decode_stream;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/pooled-dot");
+        let path = root.join("doc.txt");
+        h.fake_fs().insert_file(&path, b"a\nb\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::for_rows([(0, DiagnosticSeverity::ERROR)])),
+            theme.clone(),
+            Some(rich),
+            None,
+        );
+        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let decorations = render_page_decorations(
+            &editor.display_map.snapshot(),
+            3,
+            0,
+            12,
+            4,
+            &gutter,
+            false,
+            fallback,
+            0.0,
+            DiffDials::shipped(),
+            None,
+        );
+
+        let commands = decode_stream(&decorations);
+        let dots = commands
+            .iter()
+            .filter(|command| matches!(command, Command::TextRun(run) if run.text == "\u{b7}"))
+            .count();
+        let icons = commands
+            .iter()
+            .filter(|command| matches!(command, Command::Icon(_)))
+            .count();
+        assert_eq!((dots, icons), (1, 0), "one dot for the error, and no icon");
     }
 
     #[test]

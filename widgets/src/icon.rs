@@ -66,7 +66,7 @@ impl Icon {
 
 /// The fallback cell letter for each severity, matching the editor gutter's
 /// severity marks so a diagnostics scene degrades the same way.
-fn sigil(kind: IconKind) -> &'static str {
+pub(crate) fn sigil(kind: IconKind) -> &'static str {
     match kind {
         IconKind::Error => "E",
         IconKind::Warning => "W",

@@ -666,12 +666,13 @@ impl DiffLayout {
     /// the cell after them. A `rich` gutter, given as the scale its numbers
     /// draw at, spans the sub-cell gutter's
     /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) with
-    /// three bars of three sixteenths, the bars [`draw_diff_status`] paints,
-    /// and places its parts at that gutter's sixteenth offsets.
+    /// one structural lane, and places its parts at that gutter's sixteenth
+    /// offsets. The git and state bars [`draw_diff_status`] paints take the
+    /// lanes left of the number, and the tree bar the structural lane.
     pub(crate) fn diff_view(digits: u16, rich: Option<u16>) -> Self {
         let rich = rich.map(|number_scale| {
             let gutter =
-                editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale, 3, 3);
+                editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale, 1);
             let offsets = RichGutterOffsets {
                 number_right: gutter.number_right_edge(),
                 bars: [0, 1, 2].map(|slot| gutter.bar_x(slot)),
@@ -2904,9 +2905,11 @@ fn draw_diff_status(
 /// Emit the removal tick (rich) or paint its ASCII glyphs in the right status
 /// column of block row `y`.
 ///
-/// The tick spans the three status bars at the top edge of the row, where the
-/// removed lines left the live side. It takes the deleted color and no staged
-/// color, because the left column already shows the removal's staged state.
+/// The tick marks the top edge of the row, where the removed lines left the
+/// live side. A rich tick spans the git and state lanes, which sit left of the
+/// number, so it stays out of the number field. It takes the deleted color and
+/// no staged color, because the left column already shows the removal's
+/// staged state.
 ///
 /// `side_x` is the side's first cell, which the rich offsets count from, and
 /// `status_x` the cell gutter's status column.
@@ -2930,7 +2933,7 @@ fn draw_removal_tick(
                 Bar {
                     x: ((side_x - inner.x) * 16 + bars[0]) as i16,
                     y: y0,
-                    width: bars[2] + rg.offsets.bar_width - bars[0],
+                    width: bars[1] + rg.offsets.bar_width - bars[0],
                     height: 2,
                     color,
                 },
@@ -3104,15 +3107,15 @@ mod tests {
         assert_eq!(
             DiffColumns::compute(wide, DiffLayout::diff_view(2, Some(FULL_CELL_SCALE))),
             DiffColumns {
-                left_text_x: 7,
-                left_content_w: 56,
-                right_text_x: 68,
-                right_content_w: 56,
+                left_text_x: 8,
+                left_content_w: 55,
+                right_text_x: 69,
+                right_content_w: 55,
                 rich: Some(RichGutterOffsets {
-                    number_right: 38,
-                    bars: [42, 47, 52],
+                    number_right: 44,
+                    bars: [0, 4, 68],
                     bar_width: 3,
-                    separator_x: 59,
+                    separator_x: 75,
                 }),
                 ..cell
             },
@@ -3157,7 +3160,7 @@ mod tests {
     #[test]
     fn a_diff_side_reserves_the_three_bar_widgets_width() {
         let widget = |digits| {
-            editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), FULL_CELL_SCALE, 3, 3)
+            editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), FULL_CELL_SCALE, 1)
                 .cell_width()
         };
         assert_eq!(
@@ -3873,7 +3876,7 @@ mod tests {
     /// A cell gutter writes the number into its field at `num_x`. A rich
     /// gutter's run ends at its sixteenth offset and composites from the cell
     /// it starts in, so a number of up to two digits lands in the cells before
-    /// the offset's own cell, where the change bar composites.
+    /// the offset's own cell. The first of those cells also holds the lanes.
     fn number_cells(cols: &DiffColumns, side_x: u16, num_x: u16) -> std::ops::Range<u16> {
         match cols.rich {
             Some(rich) => side_x..side_x + rich.number_right / 16,
@@ -4448,22 +4451,22 @@ mod tests {
         );
     }
 
-    /// A pure removal's rich tick runs from the git bar's left edge through the
-    /// tree bar.
+    /// A pure removal's rich tick runs from the git lane's left edge through
+    /// the state lane, and stays out of the number field right of them.
     #[test]
-    fn a_pure_removal_ticks_across_the_three_rich_bars() {
+    fn a_pure_removal_ticks_across_the_rich_git_and_state_lanes() {
         let (bytes, columns, _) = rich_scene(&mut diff_editor("a\nx\ny\nb\n", "a\nb\n"));
         let offsets = columns.rich.expect("a rich layout");
         let tick = BarCommand {
             x: (columns.right_x * 16 + offsets.bars[0]) as i16,
             y: 16,
-            width: 13,
+            width: 7,
             height: 2,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
         };
         assert!(
             holds_bar(&bytes, tick),
-            "the tick on the first removed row spans the three right bars",
+            "the tick on the first removed row spans the two right lanes",
         );
     }
 
@@ -5451,8 +5454,18 @@ mod tests {
     }
 
     /// Row `y`'s trimmed glyphs across each of `cols`.
+    ///
+    /// A rich side's lanes and removal tick replay as `│` and `─` in the side's
+    /// first cell, ahead of its line number. A leading one is left out, so a
+    /// range over the number reads the number alone.
     fn cells<const N: usize>(buf: &Buffer, y: u16, cols: [std::ops::Range<u16>; N]) -> [String; N] {
-        cols.map(|cols| line_text(buf, y, cols).trim().to_string())
+        cols.map(|cols| {
+            line_text(buf, y, cols)
+                .trim()
+                .trim_start_matches(['│', '─'])
+                .trim()
+                .to_string()
+        })
     }
 
     /// At width 120 the right column wraps at 51, the narrower side's width,

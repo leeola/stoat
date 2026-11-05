@@ -1,15 +1,18 @@
 use crate::{
     bar::{Bar, BarBatch},
     cells,
+    icon::{self, Icon},
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::StatefulWidget};
+use stoatty_protocol::command::IconKind;
 
-/// Sixteenths between the line number's right edge and the separator hairline.
+/// Sixteenths between the line number's right edge and the icon cell, and
+/// between the structural lane and the separator hairline.
 ///
-/// A quarter cell, twice the inter-bar pad, so every gutter gap stays a clean
-/// division of the cell regardless of digit count.
+/// A quarter cell, so every gutter gap stays a clean division of the cell
+/// regardless of digit count.
 const NUMBER_GAP: u16 = 4;
 
 /// Sixteenths between the separator hairline and the editor body text.
@@ -17,14 +20,21 @@ const NUMBER_GAP: u16 = 4;
 /// Matches [`NUMBER_GAP`] so the hairline reads centered in balanced gaps.
 const TEXT_GAP: u16 = 4;
 
-/// An editor gutter composed of sub-cell line numbers, status bars, and a
-/// separator.
+/// The mark a hint draws in the icon cell, since a hint has no icon of its own.
+const HINT_DOT: &str = "\u{b7}";
+
+/// An editor gutter composed of git lanes, sub-cell line numbers, diagnostic
+/// icons, and a separator.
 ///
-/// The showcase composite: it packs smaller-than-grid line numbers (fractional
-/// [`TextRun`]s), thin git and diagnostic [`Bar`]s, and a hairline separator into
-/// a few columns off the cell grid, and writes a degraded cell gutter (a
-/// right-aligned line number and a one-column severity mark) into the buffer for
-/// any other terminal.
+/// The widget is the showcase composite. It packs smaller-than-grid line
+/// numbers (fractional [`TextRun`]s), thin git [`Bar`]s, diagnostic [`Icon`]s,
+/// and a hairline separator into a few columns off the cell grid. For any other
+/// terminal, it writes a degraded cell gutter (a right-aligned line number and
+/// a one-column severity mark) into the buffer.
+///
+/// Left to right, the gutter holds the hunk and state lanes, the right-aligned
+/// number, the icon cell, the structural lane, and the hairline. The icon cell
+/// is a whole grid cell, because an icon anchors to a cell.
 ///
 /// The geometry knobs are in **sixteenths of a cell** (16 = one cell), so the
 /// gutter tracks live font zoom. The widget positions every element at an
@@ -36,15 +46,19 @@ const TEXT_GAP: u16 = 4;
 pub struct Gutter<'a> {
     /// The lines to draw, top to bottom.
     pub lines: &'a [GutterLine],
-    /// Diagnostic bar width, in sixteenths.
-    pub bar_width: u16,
-    /// How many diff bar slots sit right of the number, one to three.
+    /// How many git lanes sit left of the number, zero to two: the hunk lane,
+    /// then the state lane.
+    pub left_bars: u16,
+    /// Each left lane's width, in sixteenths.
+    pub left_bar_width: u16,
+    /// How many structural lanes sit right of the icon cell, zero or one.
     pub diff_bars: u16,
-    /// Each diff bar's width, in sixteenths.
+    /// Each structural lane's width, in sixteenths.
     pub diff_bar_width: u16,
-    /// Inter-element padding, in sixteenths.
+    /// Padding between adjacent lanes, in sixteenths.
     pub pad: u16,
-    /// Line-number glyph size, in 256ths of a cell.
+    /// Line-number glyph size, in 256ths of a cell. A hint's dot draws at it
+    /// too.
     pub number_scale: u16,
     /// Digit count of the widest line number, sizing the number column.
     pub width_digits: u16,
@@ -62,23 +76,28 @@ pub struct Gutter<'a> {
     /// and emits physical rows.
     ///
     /// [`Self::lines`] carries the heights either way. A bar's height is never
-    /// resolved through the layout, so a diagnostic spanning an expanded line
-    /// needs the emitter to measure it.
+    /// resolved through the layout, so a state bar spanning an expanded line
+    /// needs the emitter to measure it. The terminal folds no icon, so an icon
+    /// takes its physical row in both models.
     pub bound_to_line_layout: bool,
 }
 
-/// A line's diff marks, one bar color per slot right of the line number, and
-/// whether the change is a deletion seam.
+/// A line's git marks, one bar color per lane, and whether the change is a
+/// deletion seam.
 ///
-/// The gutter reads the first [`Gutter::diff_bars`] slots. Slots 0 and 2 carry
-/// change kinds. A seam draws each of those as a short top-aligned bar, since a
+/// Each slot has a fixed lane. Slot 0 is the hunk kind and slot 1 the state,
+/// both left of the number. Slot 2 is the structural change, right of the icon
+/// cell. A gutter draws a slot only where it reserves the slot's lane, per
+/// [`Gutter::left_bars`] and [`Gutter::diff_bars`].
+///
+/// A seam draws the two change slots as short top-aligned bars, since a
 /// deletion occupies no line of its own and marks the row that now sits below
-/// the removed content, while a normal change fills the code row. Slot 1
-/// carries a state and always spans the line height.
+/// the removed content, while a normal change fills the code row. The state
+/// slot always spans the line height.
 #[derive(Clone, Copy)]
 pub struct GitMark {
-    /// The bar color per slot, left to right, `None` for a slot that paints
-    /// nothing on this row.
+    /// The bar color per slot, `None` for a slot that paints nothing on this
+    /// row.
     pub slots: [Option<[u8; 3]>; 3],
     pub seam: bool,
 }
@@ -91,16 +110,18 @@ pub struct GutterLine {
     pub height: u16,
     /// Git-diff mark, or `None` for an unchanged line.
     pub git: Option<GitMark>,
-    /// Diagnostic severity bar spanning the line's full [`Self::height`], or
+    /// The diagnostic drawn in the icon cell of the line's first row, or
     /// `None` for a line without one.
     pub diagnostic: Option<Diagnostic>,
 }
 
-/// A line's diagnostic: the bar color and the cell-fallback severity letter.
+/// A line's diagnostic: the mark color and the icon kind.
+///
+/// `kind` is `None` for a hint, which has no icon and draws a small dot.
 #[derive(Clone, Copy)]
 pub struct Diagnostic {
     pub color: [u8; 3],
-    pub mark: char,
+    pub kind: Option<IconKind>,
 }
 
 impl StatefulWidget for Gutter<'_> {
@@ -115,27 +136,69 @@ impl StatefulWidget for Gutter<'_> {
 impl Gutter<'_> {
     /// The whole-cell columns the gutter reserves, from its sixteenth layout.
     ///
-    /// Sized to fit the diagnostic bar, the number column, the diff bars right
-    /// of the number, and a quarter-cell gap on each side of the hairline.
-    /// [`Self::separator_x`] and [`Self::number_right_edge`] derive backward
-    /// from this, so the rounding slack lands in the blank field left of the
-    /// right-aligned numbers rather than around the bars.
+    /// The cells before the icon cell fit the left lanes, the number column,
+    /// and a quarter-cell gap. The cells after it fit the structural lanes and
+    /// a quarter-cell gap on each side of the hairline. Each part rounds up on
+    /// its own, so the slack lands left of the right-aligned numbers and left
+    /// of the structural lanes rather than around the hairline.
     pub fn cell_width(&self) -> u16 {
-        (self.bar_width
-            + self.diff_bars_span()
+        let tail = self.diff_bars_span() + NUMBER_GAP + 1 + TEXT_GAP;
+        self.icon_x() / 16 + 1 + tail.div_ceil(16)
+    }
+
+    /// The icon cell's left edge, in sixteenths from the gutter's left edge.
+    ///
+    /// Always a whole cell, because an icon anchors to a grid cell.
+    pub fn icon_x(&self) -> u16 {
+        let lead = self.left_bars_span()
             + self.number_advance(usize::from(self.width_digits))
-            + 2 * NUMBER_GAP
-            + 1
-            + TEXT_GAP)
-            .div_ceil(16)
+            + NUMBER_GAP;
+        lead.div_ceil(16) * 16
     }
 
-    /// Diff bar `slot`'s left edge, in sixteenths from the gutter's left edge.
+    /// Slot `slot`'s left edge, in sixteenths from the gutter's left edge.
+    ///
+    /// Slots 0 and 1 are the hunk and state lanes at the gutter's left edge.
+    /// Slot 2 is the structural lane, right of the icon cell.
     pub fn bar_x(&self, slot: u16) -> u16 {
-        self.number_right_edge() + NUMBER_GAP + slot * (self.diff_bar_width + self.pad)
+        match slot {
+            0 | 1 => slot * (self.left_bar_width + self.pad),
+            _ => self.separator_x() - NUMBER_GAP - self.diff_bars_span(),
+        }
     }
 
-    /// Sixteenths the diff bars and the pads between them span.
+    /// Where a right-aligned line number ends, in sixteenths from the gutter's left edge.
+    pub fn number_right_edge(&self) -> u16 {
+        self.icon_x() - NUMBER_GAP
+    }
+
+    /// The separator hairline's left edge, in sixteenths from the gutter's left edge.
+    pub fn separator_x(&self) -> u16 {
+        self.cell_width() * 16 - 1 - TEXT_GAP
+    }
+
+    /// Whether the gutter reserves slot `slot`'s lane.
+    fn reserves(&self, slot: u16) -> bool {
+        match slot {
+            0 | 1 => slot < self.left_bars,
+            _ => self.diff_bars > 0,
+        }
+    }
+
+    /// Slot `slot`'s bar width, in sixteenths.
+    fn slot_width(&self, slot: u16) -> u16 {
+        match slot {
+            0 | 1 => self.left_bar_width,
+            _ => self.diff_bar_width,
+        }
+    }
+
+    /// Sixteenths the left lanes and the pad between them span.
+    fn left_bars_span(&self) -> u16 {
+        self.left_bars * self.left_bar_width + self.left_bars.saturating_sub(1) * self.pad
+    }
+
+    /// Sixteenths the structural lanes and the pads between them span.
     fn diff_bars_span(&self) -> u16 {
         self.diff_bars * self.diff_bar_width + self.diff_bars.saturating_sub(1) * self.pad
     }
@@ -145,30 +208,22 @@ impl Gutter<'_> {
         text_run::advance_sixteenths(digits, self.number_scale)
     }
 
-    /// Where a right-aligned line number ends, in sixteenths from the gutter's left edge.
-    pub fn number_right_edge(&self) -> u16 {
-        self.separator_x() - 2 * NUMBER_GAP - self.diff_bars_span()
-    }
-
-    /// The separator hairline's left edge, in sixteenths from the gutter's left edge.
-    pub fn separator_x(&self) -> u16 {
-        self.cell_width() * 16 - 1 - TEXT_GAP
-    }
-
     fn total_rows(&self) -> u16 {
         self.lines.iter().map(|line| line.height).sum()
     }
 
-    /// Draw only the off-grid components (sub-cell numbers, bars, separator).
+    /// Draw only the off-grid components (sub-cell numbers, bars, icons, and
+    /// the separator).
     ///
     /// An app that composites rich chrome itself calls this instead of the
-    /// [`StatefulWidget`] render, which also lays down the degraded cell gutter
-    /// and would double under the components inside a rich terminal.
+    /// [`StatefulWidget`] render, which also lays down the degraded cell
+    /// gutter. Inside a rich terminal, that gutter doubles under the
+    /// components.
     pub fn draw_components(&self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
-        // The numbers sit right of the diagnostic bar and left of the diff bars
-        // and the separator. Nothing overlaps, so a batch that groups by style
-        // leaves what shows as it is.
+        // The lanes sit left of the numbers, the icon cell right of them, and
+        // the structural lane and the separator right of that. Nothing
+        // overlaps, so a batch that groups by style leaves what shows as it is.
         let mut numbers = TextRunBatch::default();
         let mut bars = BarBatch::default();
 
@@ -210,21 +265,11 @@ impl Gutter<'_> {
             );
 
             if let Some(diag) = line.diagnostic {
-                bars.push(
-                    area,
-                    Bar {
-                        x: 0,
-                        y: row,
-                        width: self.bar_width,
-                        height: cells::span_sixteenths(line.height).min(remaining),
-                        color: diag.color,
-                    },
-                );
+                self.draw_diagnostic(diag, area, (top, row), &mut numbers, scene);
             }
             if let Some(git) = line.git {
-                let slots = (0u16..).zip(git.slots).take(usize::from(self.diff_bars));
-                for (slot, color) in slots {
-                    let Some(color) = color else {
+                for (slot, color) in (0u16..).zip(git.slots) {
+                    let Some(color) = color.filter(|_| self.reserves(slot)) else {
                         continue;
                     };
                     let height = match slot {
@@ -237,7 +282,7 @@ impl Gutter<'_> {
                         Bar {
                             x: cells::signed_sixteenths(self.bar_x(slot)),
                             y: row,
-                            width: self.diff_bar_width,
+                            width: self.slot_width(slot),
                             height: height.min(remaining),
                             color,
                         },
@@ -263,14 +308,63 @@ impl Gutter<'_> {
         bars.flush(scene);
     }
 
+    /// Draw `diag` in the icon cell of the line whose first row sits `top`
+    /// rows into `area`, and whose runs draw at sixteenth row `row`.
+    ///
+    /// An icon command names an absolute grid cell, so the icon takes the
+    /// physical row. A hint's dot is a run, so it takes `row` as the numbers
+    /// do.
+    fn draw_diagnostic(
+        &self,
+        diag: Diagnostic,
+        area: Rect,
+        (top, row): (u16, i16),
+        numbers: &mut TextRunBatch,
+        scene: &mut ApcScene,
+    ) {
+        let icon_x = self.icon_x();
+        match diag.kind {
+            Some(kind) => Icon {
+                kind,
+                color: diag.color,
+                size: 1,
+                offset: [0, 0],
+            }
+            .draw_components(
+                Rect {
+                    x: area.x + icon_x / 16,
+                    y: area.y + top,
+                    width: 1,
+                    height: 1,
+                },
+                scene,
+            ),
+            None => {
+                let advance = text_run::advance_sixteenths(1, self.number_scale);
+                numbers.push(
+                    area,
+                    TextRun {
+                        col: cells::signed_sixteenths(icon_x + 16u16.saturating_sub(advance) / 2),
+                        row,
+                        scale: self.number_scale,
+                        color: diag.color,
+                        bg: Some(self.bg),
+                        text: HINT_DOT,
+                        follow: 0,
+                        anchor: None,
+                    },
+                );
+            },
+        }
+    }
+
     /// Draw only the degraded cell gutter (a right-aligned number and a
     /// one-column severity mark) into the buffer, for a terminal without the
     /// off-grid components.
+    ///
+    /// The mark takes the icon cell, and the number ends against it.
     pub fn draw_fallback(&self, area: Rect, buf: &mut Buffer) {
-        let width = self.cell_width();
-        if width == 0 {
-            return;
-        }
+        let icon_col = area.x + self.icon_x() / 16;
 
         let mut top = 0u16;
         for line in self.lines {
@@ -280,22 +374,19 @@ impl Gutter<'_> {
             let y = area.y + top;
 
             if let Some(diag) = line.diagnostic {
-                let mut mark = [0u8; 4];
                 cells::put(
                     buf,
-                    area.x,
+                    icon_col,
                     y,
-                    diag.mark.encode_utf8(&mut mark),
+                    diag.kind.map_or("H", icon::sigil),
                     Style::default().fg(cells::rgb(diag.color)),
                 );
             }
 
             let mut digits = [0u8; 10];
             let text = format_u32(&mut digits, line.number);
-            let start = (area.x + width)
-                .saturating_sub(text.len() as u16)
-                .max(area.x + 1);
-            let max = (area.x + width).saturating_sub(start) as usize;
+            let start = icon_col.saturating_sub(text.len() as u16).max(area.x);
+            let max = icon_col.saturating_sub(start) as usize;
             buf.set_stringn(
                 start,
                 y,
@@ -332,16 +423,28 @@ mod tests {
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{
-        decode_stream, encode_bar, encode_text_run, BarCommand, Command, TextRunCommand,
+        decode_stream, encode_bar, encode_icon, encode_text_run, BarCommand, Command, IconCommand,
+        IconKind, TextRunCommand,
     };
 
+    const RED: [u8; 3] = [224, 108, 117];
+    const GREEN: [u8; 3] = [152, 195, 121];
+    const GRAY: [u8; 3] = [80, 90, 100];
+    const BLUE: [u8; 3] = [97, 175, 239];
+
+    /// The full lane set at scale 160 and two digits. The icon cell lands at
+    /// cell 2 (the lanes 7, the number 20, and the gap 4 round up to 32
+    /// sixteenths), so the number ends at 28. The tail (one 3/16 lane, two
+    /// gaps, and the hairline) rounds up to one cell, so the gutter is four
+    /// cells wide, the hairline sits at 59, and the structural lane at 52.
     fn config(lines: &[GutterLine]) -> Gutter<'_> {
         Gutter {
             lines,
-            bar_width: 5,
-            diff_bars: 3,
+            left_bars: 2,
+            left_bar_width: 3,
+            diff_bars: 1,
             diff_bar_width: 3,
-            pad: 2,
+            pad: 1,
             number_scale: 160,
             width_digits: 2,
             number_fg: [99, 109, 131],
@@ -351,6 +454,55 @@ mod tests {
         }
     }
 
+    fn line(number: u32, git: Option<GitMark>, diagnostic: Option<Diagnostic>) -> GutterLine {
+        GutterLine {
+            number,
+            height: 1,
+            git,
+            diagnostic,
+        }
+    }
+
+    fn marks(slots: [Option<[u8; 3]>; 3], seam: bool) -> Option<GitMark> {
+        Some(GitMark { slots, seam })
+    }
+
+    fn error() -> Option<Diagnostic> {
+        Some(Diagnostic {
+            color: RED,
+            kind: Some(IconKind::Error),
+        })
+    }
+
+    fn bar(x: i16, y: i16, width: u16, height: u16, color: [u8; 3]) -> Vec<u8> {
+        encode_bar(&BarCommand {
+            x,
+            y,
+            width,
+            height,
+            color,
+        })
+    }
+
+    fn icon_at(top: u16, left: u16, kind: IconKind, color: [u8; 3]) -> Vec<u8> {
+        encode_icon(&IconCommand {
+            top,
+            left,
+            kind,
+            color,
+            size: 1,
+            offset: [0, 0],
+        })
+    }
+
+    /// The scene `gutter` emits into an `area` of `rows` rows.
+    fn emit(gutter: &Gutter<'_>, rows: u16) -> Vec<u8> {
+        let area = Rect::new(0, 0, 10, rows);
+        let mut scene = ApcScene::new();
+        gutter.draw_components(area, &mut Buffer::empty(area), &mut scene);
+        scene.buffer().to_vec()
+    }
+
     /// Whether every run and bar `needle` encodes is among those `haystack`
     /// draws, a batch read as the runs or bars it stands for.
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -358,6 +510,17 @@ mod tests {
         singles(needle)
             .iter()
             .all(|command| drawn.contains(command))
+    }
+
+    /// The bars `bytes` draw, in emit order.
+    fn bars(bytes: &[u8]) -> Vec<BarCommand> {
+        singles(bytes)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) => Some(bar),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The commands `bytes` decode to, each batch expanded into the single
@@ -406,16 +569,8 @@ mod tests {
     /// per-run frames draw.
     #[test]
     fn a_batching_host_takes_one_frame_per_style() {
-        let line = |number| GutterLine {
-            number,
-            height: 1,
-            git: Some(GitMark {
-                slots: [Some([152, 195, 121]), None, None],
-                seam: false,
-            }),
-            diagnostic: None,
-        };
-        let lines = [line(1), line(2)];
+        let lines =
+            [1, 2].map(|number| line(number, marks([Some(GREEN), None, None], false), None));
         let emit = |batches: bool| {
             let area = Rect::new(0, 0, 10, 2);
             let mut scene = ApcScene::new();
@@ -436,191 +591,188 @@ mod tests {
         assert_eq!(
             frames,
             ["text_runs", "bars", "bars"],
-            "both numbers in one frame, then the diff bars and the separator by color",
+            "both numbers in one frame, then the hunk bars and the separator by color",
         );
         assert_eq!(singles(&batched), singles(&emit(false)));
     }
 
     #[test]
-    fn cell_width_derives_from_the_sixteenth_layout() {
-        // number_advance(2) = 2*160/16 = 20; content = 5 + 9 + 4 + 20 + 8 + 1 + 4 = 51
-        // (bar + 3 diff bars + 2 pads + number + 2*NUMBER_GAP + separator + TEXT_GAP);
-        // cell_width = ceil(51/16) = 4.
-        assert_eq!(config(&[]).cell_width(), 4);
+    fn cell_width_counts_the_lead_the_icon_cell_and_the_tail() {
+        let gutter = config(&[]);
+        assert_eq!(
+            [
+                gutter.cell_width(),
+                Gutter {
+                    width_digits: 4,
+                    ..config(&[])
+                }
+                .cell_width(),
+            ],
+            [4, 6],
+            "a 31-sixteenth lead fits two cells, and four digits (a 51-sixteenth lead) take four",
+        );
     }
 
     #[test]
-    fn the_offsets_derive_backward_from_the_cell_width() {
-        // separator_x = 4*16 - 1 - TEXT_GAP = 59;
-        // number_right_edge = 59 - 2*NUMBER_GAP - (3 diff bars + 2 pads) = 59 - 8 - 13 = 38;
-        // bar_x(slot) = 38 + NUMBER_GAP + slot * (diff bar + pad) = 42, 47, 52.
+    fn the_offsets_derive_from_the_icon_cell_and_the_cell_width() {
         let gutter = config(&[]);
         assert_eq!(
             (
+                gutter.icon_x(),
                 gutter.number_right_edge(),
                 [0, 1, 2].map(|slot| gutter.bar_x(slot)),
                 gutter.separator_x(),
             ),
-            (38, [42, 47, 52], 59),
+            (32, 28, [0, 4, 52], 59),
         );
     }
 
-    /// The plain editor's gutter draws one diff bar, so the number moves right
-    /// to sit a gap from it, and a slot past the bar count paints nothing.
+    /// The plain editor reserves no structural lane, so slot 2 paints nothing
+    /// and the tail keeps one cell.
     #[test]
-    fn a_one_bar_gutter_packs_the_number_against_its_single_slot() {
-        // content = 5 + 5 + 20 + 8 + 1 + 4 = 43, so cell_width = ceil(43/16) = 3;
-        // separator_x = 3*16 - 1 - TEXT_GAP = 43; bar_x(0) = 43 - 8 - 5 + NUMBER_GAP = 34.
-        let lines = [GutterLine {
-            number: 1,
-            height: 1,
-            git: Some(GitMark {
-                slots: [Some([152, 195, 121]), Some([80, 90, 100]), None],
-                seam: false,
-            }),
-            diagnostic: None,
-        }];
+    fn a_gutter_without_a_structural_lane_draws_only_the_left_lanes() {
+        let lines = [line(
+            1,
+            marks([Some(GREEN), Some(GRAY), Some(BLUE)], false),
+            None,
+        )];
         let gutter = Gutter {
-            diff_bars: 1,
-            diff_bar_width: 5,
+            diff_bars: 0,
             ..config(&lines)
         };
-        let area = Rect::new(0, 0, 10, 1);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
-        gutter.draw_components(area, &mut buf, &mut scene);
 
-        let bar_at = |x, color| {
-            encode_bar(&BarCommand {
-                x,
-                y: 0,
-                width: 5,
-                height: 16,
-                color,
-            })
-        };
         assert_eq!(
             (
-                (gutter.cell_width(), gutter.separator_x(), gutter.bar_x(0)),
-                contains(scene.buffer(), &bar_at(34, [152, 195, 121])),
-                contains(scene.buffer(), &bar_at(41, [80, 90, 100])),
+                (gutter.cell_width(), gutter.separator_x()),
+                bars(&emit(&gutter, 1)),
             ),
-            ((3, 43, 34), true, false),
-            "the width, the hairline and the bar, then slot 0 drawn and slot 1 not",
+            (
+                (4, 59),
+                vec![
+                    BarCommand {
+                        x: 0,
+                        y: 0,
+                        width: 3,
+                        height: 16,
+                        color: GREEN,
+                    },
+                    BarCommand {
+                        x: 4,
+                        y: 0,
+                        width: 3,
+                        height: 16,
+                        color: GRAY,
+                    },
+                    BarCommand {
+                        x: 59,
+                        y: 0,
+                        width: 1,
+                        height: 16,
+                        color: [60, 66, 77],
+                    },
+                ],
+            ),
         );
     }
 
     #[test]
-    fn fallback_draws_mark_and_right_aligned_number() {
-        let lines = [GutterLine {
-            number: 7,
-            height: 1,
-            git: None,
-            diagnostic: Some(Diagnostic {
-                color: [224, 108, 117],
-                mark: 'E',
-            }),
-        }];
+    fn fallback_draws_the_mark_in_the_icon_column_after_the_number() {
+        let lines = [
+            line(7, None, error()),
+            line(
+                12,
+                None,
+                Some(Diagnostic {
+                    color: BLUE,
+                    kind: None,
+                }),
+            ),
+        ];
         let gutter = config(&lines);
-        let area = Rect::new(0, 0, gutter.cell_width(), 1);
+        let area = Rect::new(0, 0, gutter.cell_width(), 2);
         let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
 
-        gutter.render(area, &mut buf, &mut scene);
+        gutter.render(area, &mut buf, &mut ApcScene::new());
 
-        assert_eq!(buf.cell((0u16, 0u16)).expect("cell").symbol(), "E");
-        assert_eq!(buf.cell((3u16, 0u16)).expect("cell").symbol(), "7");
+        let row = |y: u16| -> String {
+            (0..area.width)
+                .map(|x| buf.cell((x, y)).expect("cell").symbol())
+                .collect()
+        };
+        assert_eq!([row(0), row(1)], [" 7E ", "12H "]);
     }
 
     #[test]
-    fn components_emit_separator_and_diagnostic_bar() {
-        let lines = [GutterLine {
-            number: 1,
-            height: 1,
-            git: None,
-            diagnostic: Some(Diagnostic {
-                color: [224, 108, 117],
-                mark: 'E',
+    fn components_emit_the_separator_and_the_diagnostic_icon() {
+        let lines = [line(1, None, error())];
+        let scene = emit(&config(&lines), 1);
+
+        assert!(
+            contains(&scene, &bar(59, 0, 1, 16, [60, 66, 77])),
+            "separator bar frame"
+        );
+        assert!(
+            contains(&scene, &icon_at(0, 2, IconKind::Error, RED)),
+            "an error icon in the icon cell"
+        );
+    }
+
+    /// A hint has no icon, so it draws a dot run centered in the icon cell.
+    #[test]
+    fn a_hint_draws_a_dot_in_the_icon_cell() {
+        let lines = [line(
+            1,
+            None,
+            Some(Diagnostic {
+                color: BLUE,
+                kind: None,
             }),
-        }];
-        let gutter = config(&lines);
-        let area = Rect::new(0, 0, 10, 1);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
+        )];
+        let scene = emit(&config(&lines), 1);
 
-        gutter.render(area, &mut buf, &mut scene);
-
-        let separator = encode_bar(&BarCommand {
-            x: 59,
-            y: 0,
-            width: 1,
-            height: 16,
-            color: [60, 66, 77],
+        // The dot advances 10 sixteenths at scale 160, so it starts 3 into the
+        // cell at 32.
+        let dot = encode_text_run(&TextRunCommand {
+            col: 35,
+            row: 0,
+            scale: 160,
+            color: BLUE,
+            bg: Some([40, 44, 52]),
+            follow: 0,
+            anchor: None,
+            text: "\u{b7}".to_owned(),
         });
-        let diag_bar = encode_bar(&BarCommand {
-            x: 0,
-            y: 0,
-            width: 5,
-            height: 16,
-            color: [224, 108, 117],
-        });
-        assert!(contains(scene.buffer(), &separator), "separator bar frame");
-        assert!(contains(scene.buffer(), &diag_bar), "diagnostic bar frame");
+        assert_eq!(
+            (
+                contains(&scene, &dot),
+                singles(&scene)
+                    .iter()
+                    .any(|command| matches!(command, Command::Icon(_))),
+            ),
+            (true, false),
+            "the dot draws, and no icon does",
+        );
     }
 
     #[test]
-    fn diagnostic_bar_spans_the_line_height() {
+    fn the_state_lane_spans_the_line_height() {
         let lines = [GutterLine {
-            number: 1,
             height: 2,
-            git: Some(GitMark {
-                slots: [Some([152, 195, 121]), Some([80, 90, 100]), None],
-                seam: false,
-            }),
-            diagnostic: Some(Diagnostic {
-                color: [224, 108, 117],
-                mark: 'E',
-            }),
+            ..line(1, marks([Some(GREEN), Some(GRAY), None], false), error())
         }];
-        let gutter = config(&lines);
-        let area = Rect::new(0, 0, 10, 2);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
+        let scene = emit(&config(&lines), 2);
 
-        gutter.render(area, &mut buf, &mut scene);
-
-        let diag_bar = encode_bar(&BarCommand {
-            x: 0,
-            y: 0,
-            width: 5,
-            height: 32,
-            color: [224, 108, 117],
-        });
-        let git_bar = encode_bar(&BarCommand {
-            x: 42,
-            y: 0,
-            width: 3,
-            height: 16,
-            color: [152, 195, 121],
-        });
-        let staged_bar = encode_bar(&BarCommand {
-            x: 47,
-            y: 0,
-            width: 3,
-            height: 32,
-            color: [80, 90, 100],
-        });
         assert!(
-            contains(scene.buffer(), &diag_bar),
-            "diagnostic bar spans the two-row line"
+            contains(&scene, &bar(0, 0, 3, 16, GREEN)),
+            "the hunk bar marks only the code row"
         );
         assert!(
-            contains(scene.buffer(), &git_bar),
-            "change-kind bar marks only the code row"
+            contains(&scene, &bar(4, 0, 3, 32, GRAY)),
+            "the state bar spans the full line height"
         );
         assert!(
-            contains(scene.buffer(), &staged_bar),
-            "staged-state bar spans the full line height"
+            contains(&scene, &icon_at(0, 2, IconKind::Error, RED)),
+            "the icon marks the line's first row"
         );
     }
 
@@ -630,49 +782,28 @@ mod tests {
     fn a_bound_gutter_emits_logical_rows() {
         let lines = [
             GutterLine {
-                number: 1,
                 height: 2,
-                git: None,
-                diagnostic: None,
+                ..line(1, None, None)
             },
-            GutterLine {
-                number: 2,
-                height: 1,
-                git: None,
-                diagnostic: Some(Diagnostic {
-                    color: [224, 108, 117],
-                    mark: 'E',
-                }),
-            },
+            line(2, marks([Some(RED), None, None], false), error()),
         ];
-        let area = Rect::new(0, 0, 10, 3);
-
-        let bar_at = |y| {
-            encode_bar(&BarCommand {
-                x: 0,
-                y,
-                width: 5,
-                height: 16,
-                color: [224, 108, 117],
-            })
-        };
         let emit = |bound| {
             let mut gutter = config(&lines);
             gutter.bound_to_line_layout = bound;
-            let mut buf = Buffer::empty(area);
-            let mut scene = ApcScene::new();
-
-            gutter.draw_components(area, &mut buf, &mut scene);
-            scene.buffer().to_vec()
+            emit(&gutter, 3)
         };
+        let icon = icon_at(2, 2, IconKind::Error, RED);
 
         assert!(
-            contains(&emit(false), &bar_at(32)),
+            contains(
+                &emit(false),
+                &[bar(0, 32, 3, 16, RED), icon.clone()].concat()
+            ),
             "unbound, the widget folds the expansion into a physical row"
         );
         assert!(
-            contains(&emit(true), &bar_at(16)),
-            "bound, the terminal folds it, so the widget emits the logical row"
+            contains(&emit(true), &[bar(0, 16, 3, 16, RED), icon].concat()),
+            "bound, the terminal folds the bar, and the icon keeps its physical cell"
         );
     }
 
@@ -681,57 +812,31 @@ mod tests {
     /// out-of-buffer row, and the components clip nowhere at all.
     #[test]
     fn lines_below_the_area_are_dropped() {
-        let lines = [1, 2, 3].map(|number| GutterLine {
-            number,
-            height: 1,
-            git: None,
-            diagnostic: None,
-        });
-        let gutter = config(&lines);
-        let area = Rect::new(0, 0, 10, 2);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
+        let lines = [1, 2, 3].map(|number| line(number, None, None));
+        let scene = emit(&config(&lines), 2);
 
-        gutter.render(area, &mut buf, &mut scene);
-
-        let third_number = encode_text_run(&TextRunCommand {
-            col: 28,
-            row: 32,
-            scale: 160,
-            color: [99, 109, 131],
-            bg: Some([40, 44, 52]),
-            follow: 0,
-            anchor: None,
-            text: "3".to_owned(),
-        });
-        let second_number = encode_text_run(&TextRunCommand {
-            col: 28,
-            row: 16,
-            scale: 160,
-            color: [99, 109, 131],
-            bg: Some([40, 44, 52]),
-            follow: 0,
-            anchor: None,
-            text: "2".to_owned(),
-        });
+        let number_at = |row, text: &str| {
+            encode_text_run(&TextRunCommand {
+                col: 18,
+                row,
+                scale: 160,
+                color: [99, 109, 131],
+                bg: Some([40, 44, 52]),
+                follow: 0,
+                anchor: None,
+                text: text.to_owned(),
+            })
+        };
         assert!(
-            contains(scene.buffer(), &second_number),
+            contains(&scene, &number_at(16, "2")),
             "the last line inside the area still draws"
         );
         assert!(
-            !contains(scene.buffer(), &third_number),
+            !contains(&scene, &number_at(32, "3")),
             "the line past the bottom draws nothing"
         );
-
-        let separator = encode_bar(&BarCommand {
-            x: 59,
-            y: 0,
-            width: 1,
-            height: 32,
-            color: [60, 66, 77],
-        });
         assert!(
-            contains(scene.buffer(), &separator),
+            contains(&scene, &bar(59, 0, 1, 32, [60, 66, 77])),
             "the separator spans the area, not the line total"
         );
     }
@@ -741,53 +846,21 @@ mod tests {
     #[test]
     fn a_line_straddling_the_bottom_clamps_its_bars() {
         let lines = [
+            line(1, None, None),
             GutterLine {
-                number: 1,
-                height: 1,
-                git: None,
-                diagnostic: None,
-            },
-            GutterLine {
-                number: 2,
                 height: 2,
-                git: Some(GitMark {
-                    slots: [Some([152, 195, 121]), Some([80, 90, 100]), None],
-                    seam: false,
-                }),
-                diagnostic: Some(Diagnostic {
-                    color: [224, 108, 117],
-                    mark: 'E',
-                }),
+                ..line(2, marks([Some(GREEN), Some(GRAY), None], false), error())
             },
         ];
-        let gutter = config(&lines);
-        let area = Rect::new(0, 0, 10, 2);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
+        let scene = emit(&config(&lines), 2);
 
-        gutter.render(area, &mut buf, &mut scene);
-
-        let diag_bar = encode_bar(&BarCommand {
-            x: 0,
-            y: 16,
-            width: 5,
-            height: 16,
-            color: [224, 108, 117],
-        });
-        let staged_bar = encode_bar(&BarCommand {
-            x: 47,
-            y: 16,
-            width: 3,
-            height: 16,
-            color: [80, 90, 100],
-        });
         assert!(
-            contains(scene.buffer(), &diag_bar),
-            "the diagnostic bar stops at the area bottom"
+            contains(&scene, &bar(4, 16, 3, 16, GRAY)),
+            "the state bar stops at the area bottom"
         );
         assert!(
-            contains(scene.buffer(), &staged_bar),
-            "and so does the staged-state bar"
+            contains(&scene, &icon_at(1, 2, IconKind::Error, RED)),
+            "the icon still marks the line's first row"
         );
     }
 
@@ -795,43 +868,18 @@ mod tests {
     /// them keeps its full height.
     #[test]
     fn seam_git_mark_draws_a_short_top_aligned_bar() {
-        let lines = [GutterLine {
-            number: 4,
-            height: 1,
-            git: Some(GitMark {
-                slots: [
-                    Some([224, 108, 117]),
-                    Some([80, 90, 100]),
-                    Some([97, 175, 239]),
-                ],
-                seam: true,
-            }),
-            diagnostic: None,
-        }];
-        let gutter = config(&lines);
-        let area = Rect::new(0, 0, 10, 1);
-        let mut buf = Buffer::empty(area);
-        let mut scene = ApcScene::new();
+        let lines = [line(
+            4,
+            marks([Some(RED), Some(GRAY), Some(BLUE)], true),
+            None,
+        )];
+        let scene = emit(&config(&lines), 1);
 
-        gutter.render(area, &mut buf, &mut scene);
-
-        let bar = |x, height, color| {
-            contains(
-                scene.bytes(),
-                &encode_bar(&BarCommand {
-                    x,
-                    y: 0,
-                    width: 3,
-                    height,
-                    color,
-                }),
-            )
-        };
         assert_eq!(
             [
-                bar(42, 6, [224, 108, 117]),
-                bar(47, 16, [80, 90, 100]),
-                bar(52, 6, [97, 175, 239]),
+                contains(&scene, &bar(0, 0, 3, 6, RED)),
+                contains(&scene, &bar(4, 0, 3, 16, GRAY)),
+                contains(&scene, &bar(52, 0, 3, 6, BLUE)),
             ],
             [true; 3],
             "slots 0 and 2 draw the short seam bar, and slot 1 fills the row"

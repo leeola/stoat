@@ -3,10 +3,10 @@
 //! compressed, then padded -- so the gutter geometry reads as just sub-cell
 //! coordinates the emitter places.
 //!
-//! Each pane is framed by a [`Border`] widget; its [`Gutter`] packs
-//! smaller-than-grid line numbers, thin git and diagnostic color bars, and a
-//! hairline separator into a few columns off the cell grid, while the code stays
-//! on the uniform grid. One line carries an integer-cell inline expansion (an
+//! A [`Border`] widget frames each pane. Its [`Gutter`] packs smaller-than-grid
+//! line numbers, thin git color lanes, diagnostic icons, and a hairline
+//! separator into a few columns off the cell grid, while the code stays on the
+//! uniform grid. One line carries an integer-cell inline expansion (an
 //! inline diagnostic) that pushes the lines below it down.
 //!
 //! The panes declare that expansion once, as a surface line layout, and every
@@ -35,7 +35,7 @@ use stoat_widgets::{
     gutter::{Diagnostic, GitMark, Gutter, GutterLine},
     ApcScene, ApcSession, SessionOptions,
 };
-use stoatty_protocol::command::BorderStyle;
+use stoatty_protocol::command::{BorderStyle, IconKind};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so erased cells share a known
@@ -63,7 +63,7 @@ enum Git {
     Modified,
 }
 
-/// Diagnostic severity flagged by a gutter bar.
+/// Diagnostic severity flagged by a gutter icon.
 #[derive(Clone, Copy)]
 enum Diag {
     Error,
@@ -83,7 +83,7 @@ struct Line {
 /// gutter at a different size.
 #[derive(Clone, Copy)]
 struct GutterConfig {
-    /// Color-bar width.
+    /// Git lane width.
     bar_width: u16,
     /// Inter-element padding.
     pad: u16,
@@ -301,8 +301,9 @@ fn draw_body(frame: &mut Frame<'_>, pane: &Pane, cell_width: u16) {
 fn pane_gutter<'a>(pane: &Pane, lines: &'a [GutterLine]) -> Gutter<'a> {
     Gutter {
         lines,
-        bar_width: pane.gutter.bar_width,
-        diff_bars: 2,
+        left_bars: 2,
+        left_bar_width: pane.gutter.bar_width,
+        diff_bars: 0,
         diff_bar_width: pane.gutter.bar_width,
         pad: pane.gutter.pad,
         number_scale: NUMBER_SCALE,
@@ -329,7 +330,7 @@ fn gutter_lines() -> Vec<GutterLine> {
             }),
             diagnostic: line.diag.map(|diag| Diagnostic {
                 color: diag_color(diag),
-                mark: diag_mark(diag),
+                kind: Some(diag_kind(diag)),
             }),
         })
         .collect()
@@ -373,7 +374,7 @@ fn line_height(line: &Line) -> u16 {
     1 + line.expand.len() as u16
 }
 
-/// The severity bar's color: red for an error, yellow for a warning.
+/// The severity icon's color: red for an error, yellow for a warning.
 fn diag_color(diag: Diag) -> [u8; 3] {
     match diag {
         Diag::Error => [224, 108, 117],
@@ -381,11 +382,10 @@ fn diag_color(diag: Diag) -> [u8; 3] {
     }
 }
 
-/// The severity letter shown in the cell fallback.
-fn diag_mark(diag: Diag) -> char {
+fn diag_kind(diag: Diag) -> IconKind {
     match diag {
-        Diag::Error => 'E',
-        Diag::Warning => 'W',
+        Diag::Error => IconKind::Error,
+        Diag::Warning => IconKind::Warning,
     }
 }
 

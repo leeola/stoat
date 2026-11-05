@@ -1342,28 +1342,49 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
 /// bar reads as a change whose tree reading is still to come.
 pub(crate) const TREE_FADE: f32 = 0.5;
 
-/// The four diff-status colors the gutter mark uses, resolved the way the
-/// minimap edge lane resolves them. Each is `theme.get(diff.*)` under
-/// [`crate::theme::Theme::get`]'s progressive scope-broadening fallback, so a
-/// theme omitting `diff.modified` or `diff.moved` still yields a color that
-/// agrees with the minimap lane.
+/// The diff colors the gutter's hunk and state lanes use.
+///
+/// The four status colors resolve the way the minimap edge lane resolves them.
+/// Each is `theme.get(diff.*)` under [`crate::theme::Theme::get`]'s progressive
+/// scope-broadening fallback, so a theme omitting `diff.modified` or
+/// `diff.moved` still yields a color that agrees with the minimap lane. The four
+/// state colors resolve through [`mark_state_scope`], as the diff view's state
+/// bar does.
 #[derive(Clone, Copy, Hash)]
 pub(crate) struct DiffMarkColors {
     added: [u8; 3],
     modified: [u8; 3],
     moved: [u8; 3],
     deleted: [u8; 3],
+    staged: [u8; 3],
+    unstaged: [u8; 3],
+    approved: [u8; 3],
+    unapproved: [u8; 3],
 }
 
 impl DiffMarkColors {
     fn resolve(theme: &Theme) -> Self {
         use crate::theme::scope as s;
         let get = |scope| color_to_rgb(theme.get(scope).fg.unwrap_or(Color::White));
+        let state = |state| get(mark_state_scope(theme, state));
         Self {
             added: get(s::DIFF_ADDED),
             modified: get(s::DIFF_MODIFIED),
             moved: get(s::DIFF_MOVED),
             deleted: get(s::DIFF_DELETED),
+            staged: state(MarkState::Staged),
+            unstaged: state(MarkState::Unstaged),
+            approved: state(MarkState::Approved),
+            unapproved: state(MarkState::Unapproved),
+        }
+    }
+
+    fn for_state(&self, state: MarkState) -> [u8; 3] {
+        match state {
+            MarkState::Staged => self.staged,
+            MarkState::Unstaged => self.unstaged,
+            MarkState::Approved => self.approved,
+            MarkState::Unapproved => self.unapproved,
         }
     }
 
@@ -1396,6 +1417,10 @@ impl DiffMarkColors {
             modified: dim_rgb(self.modified, bg, amount),
             moved: dim_rgb(self.moved, bg, amount),
             deleted: dim_rgb(self.deleted, bg, amount),
+            staged: dim_rgb(self.staged, bg, amount),
+            unstaged: dim_rgb(self.unstaged, bg, amount),
+            approved: dim_rgb(self.approved, bg, amount),
+            unapproved: dim_rgb(self.unapproved, bg, amount),
         }
     }
 }
@@ -1613,6 +1638,15 @@ fn severity_mark(sev: DiagnosticSeverity) -> char {
     }
 }
 
+/// The icon the rich gutter draws for a severity, or `None` for a hint, which
+/// the gutter marks with a dot instead.
+fn gutter_icon(sev: DiagnosticSeverity) -> Option<IconKind> {
+    match sev {
+        DiagnosticSeverity::HINT => None,
+        _ => Some(icon_kind(sev)),
+    }
+}
+
 /// One display row's role when folding the gutter: the first row of a buffer
 /// line, or a soft-wrap or block row belonging to the line above it.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -1718,8 +1752,7 @@ pub(crate) fn measure_gutter_width(width_digits: u16, rich: Option<u16>) -> u16 
             width_digits,
             ([0; 3], [0; 3], [0; 3]),
             number_scale,
-            PLAIN_DIFF_BARS,
-            PLAIN_DIFF_BAR_WIDTH,
+            PLAIN_STRUCTURAL_BARS,
         )
         .cell_width(),
         None => width_digits + 3,
@@ -1781,9 +1814,10 @@ pub(crate) fn gutter_diff_marks_from(
 /// Build the rich gutter's [`GutterLine`]s from `folded`, coloring each line's
 /// diagnostic mark from `colors`.
 ///
-/// Each line's one diff bar is the tree bar, in its change kind's color from
-/// `diff_colors`, faded toward `bg` on a row the tree pass has not reached. A
-/// row the tree pass reached and found unchanged takes no bar.
+/// A marked line's hunk lane takes its change kind's color from `diff_colors`,
+/// faded toward `bg` on a row the tree pass has not reached. Its state lane
+/// takes the color of the hunk's staged state. A row the tree pass reached and
+/// found unchanged takes no mark.
 ///
 /// `current_line` selects relative numbering per [`gutter_display_number`]. The
 /// diagnostic mark stays keyed to the absolute buffer line.
@@ -1802,36 +1836,38 @@ pub(crate) fn gutter_component_lines(
             number: gutter_display_number(number, current_line),
             height,
             git: diff_marks.get(&(number - 1)).and_then(|mark| {
-                let color = diff_colors.for_tree(mark.status, mark.tree, bg)?;
+                let hunk = diff_colors.for_tree(mark.status, mark.tree, bg)?;
                 Some(GitMark {
-                    slots: [Some(color), None, None],
+                    slots: [Some(hunk), Some(diff_colors.for_state(mark.state)), None],
                     seam: mark.status == DiffHunkStatus::Deleted,
                 })
             }),
             diagnostic: row_severity.at(number - 1).map(|sev| Diagnostic {
                 color: severity_color(sev, colors),
-                mark: severity_mark(sev),
+                kind: gutter_icon(sev),
             }),
         })
         .collect()
 }
 
-/// How many diff bars the plain editor's gutter draws right of the number.
+/// How many structural lanes the plain editor's gutter draws right of the icon
+/// cell.
 ///
-/// The measure, the live paint and the pooled pages all read this and
-/// [`PLAIN_DIFF_BAR_WIDTH`], so the width the measure reserves is the width the
-/// paint fills.
-pub(crate) const PLAIN_DIFF_BARS: u16 = 1;
+/// The measure, the live paint and the pooled pages all read this, so the
+/// width the measure reserves is the width the paint fills. The plain editor
+/// marks no structural change of its own, so it reserves none.
+pub(crate) const PLAIN_STRUCTURAL_BARS: u16 = 0;
 
-/// The width of each of the plain editor's diff bars, in sixteenths.
-pub(crate) const PLAIN_DIFF_BAR_WIDTH: u16 = 5;
+/// The width of every rich gutter lane, in sixteenths.
+const GUTTER_LANE_WIDTH: u16 = 3;
 
 /// The sub-cell [`Gutter`] widget for `lines`, carrying the geometry the live
 /// and pooled-page renders share.
 ///
-/// `diff_bars` bars of `diff_bar_width` sixteenths sit right of the number. The
-/// plain editor passes [`PLAIN_DIFF_BARS`] and [`PLAIN_DIFF_BAR_WIDTH`], and the
-/// diff view sizes its sides from its own count.
+/// The hunk and state lanes sit left of the number, and `structural_bars`
+/// lanes sit right of the icon cell, every lane [`GUTTER_LANE_WIDTH`] wide. The
+/// plain editor passes [`PLAIN_STRUCTURAL_BARS`], and the diff view sizes its
+/// sides from its own count.
 ///
 /// The `colors` are the number, separator, and background colors. The numbers
 /// draw at `number_scale`, which also sets the gutter's width, so a measure and
@@ -1841,15 +1877,15 @@ pub(crate) fn rich_gutter(
     width_digits: u16,
     (number_fg, separator, bg): ([u8; 3], [u8; 3], [u8; 3]),
     number_scale: u16,
-    diff_bars: u16,
-    diff_bar_width: u16,
+    structural_bars: u16,
 ) -> Gutter<'_> {
     Gutter {
         lines,
-        bar_width: 5,
-        diff_bars,
-        diff_bar_width,
-        pad: 2,
+        left_bars: 2,
+        left_bar_width: GUTTER_LANE_WIDTH,
+        diff_bars: structural_bars,
+        diff_bar_width: GUTTER_LANE_WIDTH,
+        pad: 1,
         number_scale,
         width_digits,
         number_fg,
@@ -2069,8 +2105,7 @@ fn draw_rich_gutter(
         geometry.width_digits,
         colors,
         number_scale,
-        PLAIN_DIFF_BARS,
-        PLAIN_DIFF_BAR_WIDTH,
+        PLAIN_STRUCTURAL_BARS,
     );
     let cell_width = gutter.cell_width();
 
@@ -5084,12 +5119,12 @@ mod tests {
         );
     }
 
-    /// The plain editor's rich gutter draws one diff bar per marked row, in the
-    /// change kind's color at the first slot, and no state bar beside it. A
-    /// row the tree pass has not reached takes that color faded toward the
-    /// gutter background.
+    /// The plain editor's rich gutter draws two lanes per marked row, the
+    /// change kind's color in the hunk lane and the hunk's state color in the
+    /// state lane beside it. A row the tree pass has not reached takes its kind
+    /// color faded toward the gutter background.
     #[test]
-    fn the_rich_gutter_draws_one_diff_bar() {
+    fn the_rich_gutter_draws_the_hunk_and_state_lanes() {
         use stoatty_protocol::command::{encode_bar, BarCommand};
 
         let mut h = open_outside_a_repo("a\nB\nC\n");
@@ -5133,23 +5168,24 @@ mod tests {
             let command = encode_bar(&BarCommand {
                 x,
                 y,
-                width: 5,
+                width: 3,
                 height: 16,
                 color,
             });
             frame.contains(String::from_utf8_lossy(&command).as_ref())
         };
-        let modified = color(s::DIFF_MODIFIED);
-        // Two digits at the test scale end at sixteenth 46, so slot 0 sits at
-        // 50 and slot 1 at 57.
+        let (modified, unstaged) = (color(s::DIFF_MODIFIED), color(s::DIFF_UNSTAGED));
+        // The hunk lane sits at the gutter's left edge, and the state lane a
+        // 3/16 lane and a 1/16 pad right of it.
         assert_eq!(
             [
-                bar(50, 16, modified),
-                bar(57, 16, color(s::DIFF_UNSTAGED)),
-                bar(50, 32, super::dim_rgb(modified, bg, super::TREE_FADE)),
+                bar(0, 16, modified),
+                bar(4, 16, unstaged),
+                bar(0, 32, super::dim_rgb(modified, bg, super::TREE_FADE)),
+                bar(4, 32, unstaged),
             ],
-            [true, false, true],
-            "the change bar at the first slot, no state bar, and the unreached row's bar faded: {frame:?}",
+            [true; 4],
+            "both lanes on each marked row, and the unreached row's hunk bar faded: {frame:?}",
         );
     }
 
@@ -5161,6 +5197,10 @@ mod tests {
             modified: [40, 50, 60],
             moved: [70, 80, 90],
             deleted: [100, 110, 120],
+            staged: [130, 140, 150],
+            unstaged: [160, 170, 180],
+            approved: [190, 200, 210],
+            unapproved: [220, 230, 240],
         }
     }
 
@@ -5174,10 +5214,10 @@ mod tests {
         }
     }
 
-    /// The rich gutter's one bar is the tree bar. A marked row takes its kind's
-    /// full color, a row the tree pass has not reached that color faded toward
-    /// the background, and a row it found unchanged no bar. A deletion's bar is
-    /// a seam.
+    /// The rich gutter's hunk lane is the tree bar, and its state lane takes
+    /// the hunk's state color. A marked row takes its kind's full color, a row
+    /// the tree pass has not reached that color faded toward the background,
+    /// and a row it found unchanged no mark. A deletion's bars are a seam.
     #[test]
     fn rich_gutter_tree_bar_by_tree_mark() {
         let folded: Vec<(u32, u16)> = (1..=4).map(|number| (number, 1)).collect();
@@ -5206,11 +5246,11 @@ mod tests {
                 .map(|line| line.git.map(|git| (git.slots, git.seam)))
                 .collect::<Vec<_>>(),
             [
-                Some(([Some([40, 50, 60]), None, None], false)),
+                Some(([Some([40, 50, 60]), Some([160, 170, 180]), None], false)),
                 // The modified color, half way to the black background.
-                Some(([Some([20, 25, 30]), None, None], false)),
+                Some(([Some([20, 25, 30]), Some([160, 170, 180]), None], false)),
                 None,
-                Some(([Some([100, 110, 120]), None, None], true)),
+                Some(([Some([100, 110, 120]), Some([160, 170, 180]), None], true)),
             ],
         );
     }
@@ -6267,14 +6307,14 @@ mod tests {
         h.settle();
 
         h.snapshot();
-        // Column 4 is the line-number gutter width the cursor sits past.
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((4, 0)));
+        // Column 5 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((5, 0)));
 
         for _ in 0..6 {
             dispatch(&mut h.stoat, &MoveRight);
         }
         h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((10, 0)));
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((11, 0)));
     }
 
     #[test]
@@ -6288,8 +6328,8 @@ mod tests {
         h.settle();
 
         h.snapshot();
-        // Column 4 is the line-number gutter width the cursor sits past.
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((4, 0)));
+        // Column 5 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((5, 0)));
 
         dispatch(&mut h.stoat, &OpenFileFinder);
         h.settle();

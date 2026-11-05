@@ -26,6 +26,12 @@ const FONT_SIZE: u32 = 15;
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
+const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
+
+/// The warning token #e8bd6a faded halfway to base, the color a hunk lane takes
+/// on a row the tree pass leaves unrefined, as it leaves every row of a text
+/// file.
+const UNREFINED_WARNING: [u8; 3] = [0x80, 0x6b, 0x44];
 
 /// A pixel rectangle as `(x, y, width, height)`.
 type PixelRect = (u32, u32, u32, u32);
@@ -51,6 +57,27 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
         BASE,
         "blank_text_cell",
     );
+}
+
+/// The modified row's git lanes sit left of its number, the hunk lane in the
+/// modified color and the state lane in the unstaged color.
+///
+/// At 9-pixel cells the two 3/16 lanes snap to pixel columns 0 and 1, and 2
+/// and 3. The changed row is row 3, `4 four changed`.
+#[test]
+fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+    let (_, y, _, height) = cell_rect(0, 3, 1, 1);
+
+    expect_region(
+        &shot,
+        &mut home,
+        (0, y, 2, height),
+        UNREFINED_WARNING,
+        "hunk_lane",
+    );
+    expect_region(&shot, &mut home, (2, y, 2, height), DISABLED, "state_lane");
 }
 
 /// The file finder's box fills with the overlay surface where no text covers
