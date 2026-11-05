@@ -8,15 +8,17 @@
 # required-features, so cargo skips them without a report.
 # scripts/check-features.sh compiles them but runs none of them. This run
 # covers the unit tests inside `stoat::fixture`, the live harness tests
-# (fixture_live), the pty test against the real binary (foreign_terminal), and
-# the fixture catalog (fixture_catalog).
+# (fixture_live), the pty test against the real binary (foreign_terminal), the
+# fixture catalog (fixture_catalog), and the headless stoatty scene over a
+# fixture (headless_scene).
 #
 # The lib's unit tests run under the `fixture::` filter, because the workspace
 # run already covers every other lib test. The binary builds first, because
-# foreign_terminal spawns the `stoat` binary beside its own test executable,
-# and a library test run does not build that binary. The LSP tests in
-# fixture_live start rust-analyzer and fail without it, so the script checks
-# for it before it compiles anything.
+# foreign_terminal and headless_scene spawn the `stoat` binary beside their own
+# test executables, and a library test run does not build that binary. The LSP
+# tests in fixture_live start rust-analyzer and fail without it, so the script
+# checks for it before it compiles anything. The headless scene draws on
+# lavapipe, which the same dev shell registers.
 #
 # A green run prints one line, because this runs before every commit and its
 # output competes with everything else a reviewer reads. A failing run prints
@@ -57,5 +59,7 @@ step "the live fixture tests fail" \
     test -p stoat --features fixture --test fixture_live --test foreign_terminal
 step "the fixture catalog tests fail" \
     test -p stoat_bin --features fixture --test fixture_catalog
+step "the headless scene tests fail" \
+    test -p stoatty_bin --features fixture --test headless_scene
 
 echo "check-fixtures: OK (the fixture tier passes)"
