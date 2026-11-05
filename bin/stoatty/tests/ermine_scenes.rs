@@ -277,6 +277,35 @@ fn the_finder_header_ends_in_a_chip_on_the_hover_surface() {
     }
 }
 
+/// The finder ends in a footer row on the raised surface.
+///
+/// No other surface of the frame is raised, so the raised cells form one run
+/// in one row, the footer across the box. The docked key hints box covers the
+/// footer's right end, so the run stops short of the box's border.
+#[test]
+fn the_finder_ends_in_a_footer_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "many-files",
+        "src/alpha.txt",
+        "<Space>p<Settle>",
+    );
+
+    let raised = cells_of(&shot, RAISED);
+    let one_run = raised.first().is_some_and(|&(first, row)| {
+        let run = first..first + raised.len() as u16;
+        raised == run.map(|col| (col, row)).collect::<Vec<_>>()
+    });
+    if !one_run || raised.len() < 40 {
+        let frame = keep_frame(&shot, &mut home, "finder_footer");
+        panic!(
+            "the raised cells {raised:?} are not one footer run in one row; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// A hover ends in a footer row on the raised surface, inside the overlay box.
 ///
 /// The server loads the crate before it answers, so the hover key plays again

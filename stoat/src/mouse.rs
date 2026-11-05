@@ -391,7 +391,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     match active_modal(stoat)? {
         ActiveModal::FileFinder => {
             let finder = stoat.file_finder.as_ref()?;
-            let layout = crate::render::file_finder::file_finder_layout_with_header(
+            let layout = crate::render::file_finder::file_finder_layout_with_chrome(
                 size,
                 finder.content_size,
                 zoom(ModalKind::FileFinder),
@@ -806,7 +806,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
     // runs down the body and a drag redistributes columns.
     let (kind, inner, list, preview) = if let Some(finder) = stoat.file_finder.as_ref() {
         let kind = ModalKind::FileFinder;
-        let layout = crate::render::file_finder::file_finder_layout(
+        let layout = crate::render::file_finder::file_finder_layout_with_chrome(
             size,
             finder.content_size,
             modal_zoom_steps(&stoat.modal_zoom, kind),

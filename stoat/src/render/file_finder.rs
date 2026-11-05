@@ -18,7 +18,7 @@ use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
 /// The on-screen rectangles of the file finder modal, derived from a terminal
-/// `area` by [`file_finder_layout`] or [`file_finder_layout_with_header`].
+/// `area` by [`file_finder_layout`] or [`file_finder_layout_with_chrome`].
 ///
 /// Shared by the renderer and the smooth-scroll emit so the pooled list region
 /// matches the painted one exactly.
@@ -32,13 +32,25 @@ pub(crate) struct FinderLayout {
     /// The preview pane's editor, present only when the body is wide enough.
     pub(crate) preview: Option<Rect>,
     /// The path header over the preview and the rule under it, which only
-    /// [`file_finder_layout_with_header`] sets. The preview starts below it.
+    /// [`file_finder_layout_with_chrome`] sets. The preview starts below it.
     pub(crate) preview_header: Option<Rect>,
+    /// The footer row of key hints and page dots, which only
+    /// [`file_finder_layout_with_chrome`] sets. The list and the preview end
+    /// above it.
+    pub(crate) footer: Option<Rect>,
 }
 
 /// Rows the finder's preview gives its path header, the header row and the
 /// rule under it.
 const PREVIEW_HEADER_ROWS: u16 = 2;
+
+/// The finder's footer hints, each a bound key and the word for what it does.
+const FINDER_HINTS: [(&str, &str); 4] = [
+    ("Enter", "open"),
+    ("C-d/C-u", "preview"),
+    ("C-f/C-b", "page"),
+    ("S-Tab", "scope"),
+];
 
 /// Lay out the file finder modal within `area`, or `None` when `area` is too
 /// small to host it.
@@ -92,22 +104,39 @@ pub(crate) fn file_finder_layout(
         list,
         preview,
         preview_header: None,
+        footer: None,
     })
 }
 
-/// Lay out the file finder as [`file_finder_layout`] does, with the preview's
-/// first rows given to its path header.
+/// Lay out the file finder as [`file_finder_layout`] does, plus the rows only
+/// the finder shows, which are its footer and the path header over its
+/// preview.
 ///
-/// The preview then covers only the editor below the header, which is the rect
-/// the pooled preview page fills and a wheel scrolls. A preview too short to
-/// keep an editor row under the header gets no header.
-pub(crate) fn file_finder_layout_with_header(
+/// The footer takes the inner rect's last row, so the list and the preview end
+/// above it. The preview then covers only the editor below its header, which is
+/// the rect the pooled preview page fills and a wheel scrolls. A body of one row
+/// keeps no footer, and a preview too short to keep an editor row under the
+/// header gets no header.
+pub(crate) fn file_finder_layout_with_chrome(
     area: Rect,
     content: (u16, u16),
     zoom: i8,
     list_percent: u16,
 ) -> Option<FinderLayout> {
     let mut layout = file_finder_layout(area, content, zoom, list_percent)?;
+    if layout.list.height > 1 {
+        let inner = layout.inner;
+        layout.footer = Some(Rect::new(
+            inner.x,
+            inner.y + inner.height - 1,
+            inner.width,
+            1,
+        ));
+        layout.list.height -= 1;
+        if let Some(preview) = layout.preview.as_mut() {
+            preview.height -= 1;
+        }
+    }
     if let Some(preview) = layout.preview.filter(|p| p.height > PREVIEW_HEADER_ROWS) {
         layout.preview_header = Some(Rect {
             height: PREVIEW_HEADER_ROWS,
@@ -136,7 +165,7 @@ pub(crate) fn render_file_finder(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let Some(layout) =
-        file_finder_layout_with_header(area, finder.content_size, zoom, list_percent)
+        file_finder_layout_with_chrome(area, finder.content_size, zoom, list_percent)
     else {
         return;
     };
@@ -197,6 +226,16 @@ pub(crate) fn render_file_finder(
 
     finder.active_core().picklist.viewport_rows = Some(layout.list.height as usize);
     render_list(finder, home, layout.list, theme, buf, scene);
+
+    if let Some(footer) = layout.footer {
+        let list = &finder.active_core_ref().picklist;
+        let pages = crate::render::picker::page_of(
+            list.selected,
+            list.filtered.len(),
+            layout.list.height as usize,
+        );
+        crate::render::picker::modal_footer(buf, footer, &FINDER_HINTS, pages, theme, scene);
+    }
 }
 
 /// The finder's header label, which names the list on show unless it is the

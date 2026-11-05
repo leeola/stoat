@@ -777,7 +777,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .then_some(stoat.file_finder.as_ref())
         .flatten()
         .and_then(|finder| {
-            crate::render::file_finder::file_finder_layout(
+            crate::render::file_finder::file_finder_layout_with_chrome(
                 stoat.size(),
                 finder.content_size,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),

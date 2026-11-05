@@ -11,6 +11,7 @@ use crate::{
     picker::{write_row_display, PickList, Preview},
     render::{
         editor::{render_editor, ResolvedChrome},
+        paint::style_rgb,
         text::{write_str, write_str_clipped},
     },
     theme::{scope, Theme},
@@ -20,12 +21,13 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
-    widgets::{Block, Borders},
+    widgets::{Block, Borders, StatefulWidget},
 };
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+use stoat_widgets::bar::Bar;
 use unicode_width::UnicodeWidthStr;
 
 /// The glyph before a filter modal's query. The command palette keeps `:` in
@@ -36,6 +38,19 @@ pub(crate) const FILTER_PROMPT: &str = "\u{203A}";
 /// for the query and the words right of it drops the chip first, then the
 /// count.
 const MIN_QUERY_COLUMNS: u16 = 12;
+
+/// Page dots a modal footer draws at most. A longer list maps its pages onto
+/// these, so the dots keep clear of the hints however long the list grows.
+const MAX_PAGE_DOTS: usize = 5;
+
+/// The page dots' geometry in sixteenths of a cell: the current page's width,
+/// any other page's width, the gap between two dots, a dot's height, and its
+/// top edge in the row.
+const CURRENT_DOT_WIDTH: u16 = 24;
+const PAGE_DOT_WIDTH: u16 = 6;
+const PAGE_DOT_GAP: u16 = 8;
+const PAGE_DOT_HEIGHT: u16 = 4;
+const PAGE_DOT_TOP: i16 = 6;
 
 /// The words a filter modal's header row shows around its query.
 pub(crate) struct FilterHeader<'a> {
@@ -147,6 +162,103 @@ fn paint_header_row(
         right -= 1;
     }
     Rect::new(query_x, y, right.saturating_sub(query_x), 1)
+}
+
+/// Paint a modal's footer row into `rect`, with its key hints from the left and
+/// its page dots at the right.
+///
+/// Each hint is a key in `ui.key_label` and the word it does in
+/// `ui.text.muted`. The first hint that does not fit, and every hint after it,
+/// is left out. `pages` is the selection's page and the page count, as
+/// [`page_of`] gives them, and its dots draw only under a live scene.
+pub(crate) fn modal_footer(
+    buf: &mut Buffer,
+    rect: Rect,
+    hints: &[(&str, &str)],
+    pages: Option<(usize, usize)>,
+    theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    let style = theme.get(scope::UI_MODAL_FOOTER);
+    for x in rect.x..rect.x + rect.width {
+        buf[(x, rect.y)].set_char(' ').set_style(style);
+    }
+
+    let hints_end = paint_page_dots(rect, pages, theme, buf, scene);
+    let key_style = theme.get(scope::UI_KEY_LABEL);
+    let word_style = theme.get(scope::UI_TEXT_MUTED);
+    let mut x = rect.x + 1;
+    for (key, word) in hints {
+        let width = (key.width() + 1 + word.width()) as u16;
+        if x + width > hints_end {
+            break;
+        }
+        write_str(buf, x, rect.y, key, key_style);
+        write_str(buf, x + key.width() as u16 + 1, rect.y, word, word_style);
+        x += width + 2;
+    }
+}
+
+/// Draw the page dots of `pages` at the right of `rect`, and return the column
+/// the dots start at, which is `rect`'s right edge when none draw.
+///
+/// The dots end one cell from the right edge. Past [`MAX_PAGE_DOTS`] pages the
+/// lit dot is the one at the selection's share of the list.
+fn paint_page_dots(
+    rect: Rect,
+    pages: Option<(usize, usize)>,
+    theme: &Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) -> u16 {
+    let end = rect.x + rect.width;
+    let Some((current, count)) = pages.filter(|&(_, count)| count > 0 && scene.live()) else {
+        return end;
+    };
+    let lit_color = style_rgb(theme.get(scope::UI_BORDER_FOCUSED).fg);
+    let dim_color = theme
+        .try_get(scope::UI_SURFACE_OVERLAY)
+        .and_then(|style| style_rgb(style.fg))
+        .or_else(|| style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg));
+    let (Some(lit_color), Some(dim_color)) = (lit_color, dim_color) else {
+        return end;
+    };
+
+    let dots = count.min(MAX_PAGE_DOTS);
+    let lit = current.min(count - 1) * dots / count;
+    let total = CURRENT_DOT_WIDTH + (dots as u16 - 1) * (PAGE_DOT_WIDTH + PAGE_DOT_GAP);
+    let Some(start) = (rect.width.saturating_sub(1) * 16).checked_sub(total) else {
+        return end;
+    };
+
+    let origin = Rect::new(rect.x, rect.y, 1, 1);
+    let mut x = start;
+    for dot in 0..dots {
+        let (width, color) = match dot == lit {
+            true => (CURRENT_DOT_WIDTH, lit_color),
+            false => (PAGE_DOT_WIDTH, dim_color),
+        };
+        Bar {
+            x: x as i16,
+            y: PAGE_DOT_TOP,
+            width,
+            height: PAGE_DOT_HEIGHT,
+            color,
+        }
+        .render(origin, buf, scene);
+        x += width + PAGE_DOT_GAP;
+    }
+    rect.x + start / 16
+}
+
+/// The page the selection is on and the pages a list of `len` entries spans
+/// at `rows` a page, or `None` for an empty list or a list with no rows on
+/// screen.
+pub(crate) fn page_of(selected: usize, len: usize, rows: usize) -> Option<(usize, usize)> {
+    if len == 0 || rows == 0 {
+        return None;
+    }
+    Some((selected.min(len - 1) / rows, len.div_ceil(rows)))
 }
 
 /// First entry visible when `selected` is showing, given `rows` on screen.
@@ -520,6 +632,7 @@ mod tests {
     use crate::picker::INDEXED_ROWS;
     use ratatui::style::Color;
     use std::path::PathBuf;
+    use stoatty_protocol::command::{encode_bar, BarCommand};
 
     /// The text of a finder-like header painted `width` columns wide, and the
     /// rect it leaves the query.
@@ -560,6 +673,88 @@ mod tests {
             [49, 48, 30, 29].map(|width| header_row(width).1.width),
             [12, 30, 12, 21],
             "the chip goes first, then the count, so the query keeps its floor",
+        );
+    }
+
+    #[test]
+    fn page_of_counts_pages_of_whole_rows() {
+        assert_eq!(
+            [
+                page_of(0, 30, 10),
+                page_of(29, 30, 10),
+                page_of(10, 11, 10),
+                page_of(5, 0, 10),
+                page_of(5, 9, 0),
+            ],
+            [Some((0, 3)), Some((2, 3)), Some((1, 2)), None, None],
+        );
+    }
+
+    /// The text of a footer painted `width` columns wide in a live scene, and
+    /// the bar frames its dots send.
+    fn footer_row(width: u16, pages: Option<(usize, usize)>) -> (String, Vec<u8>) {
+        let src = r##"theme t {
+            ui.border.focused.fg = "#010203";
+            ui.surface.overlay.fg = "#040506";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        let hints = [("Enter", "open"), ("C-f/C-b", "page")];
+        modal_footer(&mut buf, area, &hints, pages, &theme, &mut scene);
+        (test_support::row_text(&buf, 0), scene.buffer().clone())
+    }
+
+    /// The bar frames of page dots at `(x, width, color)`, in sixteenths.
+    fn dot_frames(dots: &[(i16, u16, [u8; 3])]) -> Vec<u8> {
+        dots.iter()
+            .flat_map(|&(x, width, color)| {
+                encode_bar(&BarCommand {
+                    x,
+                    y: 6,
+                    width,
+                    height: 4,
+                    color,
+                })
+            })
+            .collect()
+    }
+
+    /// The dots end one cell from the right edge, the lit one wide, and the
+    /// hints stop short of them. Past five pages the lit dot stands at the
+    /// selection's share of the list.
+    #[test]
+    fn the_footer_paints_its_hints_and_page_dots() {
+        let (lit, dim) = ([1, 2, 3], [4, 5, 6]);
+        assert_eq!(
+            [
+                footer_row(40, Some((1, 3))),
+                footer_row(20, Some((0, 2))),
+                footer_row(40, Some((3, 7)))
+            ],
+            [
+                (
+                    format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
+                    dot_frames(&[(572, 6, dim), (586, 24, lit), (618, 6, dim)]),
+                ),
+                (
+                    format!(" Enter open{}", " ".repeat(9)),
+                    dot_frames(&[(266, 24, lit), (298, 6, dim)]),
+                ),
+                (
+                    format!(" Enter open  C-f/C-b page{}", " ".repeat(15)),
+                    dot_frames(&[
+                        (544, 6, dim),
+                        (558, 6, dim),
+                        (572, 24, lit),
+                        (604, 6, dim),
+                        (618, 6, dim),
+                    ]),
+                ),
+            ],
         );
     }
 

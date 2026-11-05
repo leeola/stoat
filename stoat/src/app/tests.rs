@@ -11941,11 +11941,17 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
         },
         _ => {
             let size = h.stoat.size();
-            let declared = match kind {
-                ModalKind::FileFinder => h.stoat.file_finder.as_ref().expect("open").content_size,
-                _ => (u16::MAX, u16::MAX),
+            let (declared, layout_of): (_, fn(_, _, _, _) -> _) = match kind {
+                ModalKind::FileFinder => (
+                    h.stoat.file_finder.as_ref().expect("open").content_size,
+                    crate::render::file_finder::file_finder_layout_with_chrome,
+                ),
+                _ => (
+                    (u16::MAX, u16::MAX),
+                    crate::render::file_finder::file_finder_layout,
+                ),
             };
-            let layout = crate::render::file_finder::file_finder_layout(
+            let layout = layout_of(
                 size,
                 declared,
                 modal_zoom_steps(&h.stoat.modal_zoom, kind),
@@ -12012,6 +12018,28 @@ fn dragging_the_finder_vline_widens_the_list() {
     assert_eq!(
         h.stoat.modal_separator_drag, None,
         "releasing clears the arm"
+    );
+}
+
+/// The finder's vline stops above its footer, so a press on the footer row arms
+/// no drag, while a press on the list's last row does.
+#[test]
+fn the_finder_vline_ends_above_the_footer() {
+    let (list, _) = side_by_side_layout(&wide_finder_harness(), ModalKind::FileFinder);
+    let armed = |row: u16| {
+        let mut h = wide_finder_harness();
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            list.x + list.width,
+            row,
+        ));
+        h.stoat.modal_separator_drag
+    };
+    let last = list.y + list.height - 1;
+    assert_eq!(
+        [armed(last), armed(last + 1)],
+        [Some(ModalKind::FileFinder), None],
+        "the list's last row arms the drag, and the footer row under it does not",
     );
 }
 

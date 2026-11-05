@@ -239,6 +239,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `ui.modal.run` -- per floating modal, the border hue (foreground) and the box
   surface (background). A modal style with no background keeps the window
   ground.
+- `ui.modal.footer` -- the footer row a modal ends in, with its key hints and
+  page dots.
 - `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
   chrome accents.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
