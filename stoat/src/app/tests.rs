@@ -18124,3 +18124,36 @@ fn handed_to_box_over_mosh(stoat: &Stoat) -> bool {
         }) if host == "box"
     )
 }
+
+/// A second tab moves the pane a row down to make room for the tab bar, and
+/// the frame before still holds a rect over that row. The bar's row keeps the
+/// bar's own background after the frame clears the stale hold.
+#[test]
+fn the_tab_bar_paints_over_the_pane_hold_it_displaces() {
+    let mut h = Stoat::test();
+    let mut buf = Buffer::empty(h.stoat.size());
+    let (holds, _) = h.stoat.paint_into(&mut buf, None);
+    assert!(!holds.is_empty(), "the one-tab frame holds its pane");
+
+    action_handlers::dispatch(&mut h.stoat, &stoat_action::NewTab);
+    let blank = crate::render::themed_blank(&h.stoat.theme);
+    let blanked = crate::render::blank_buffer(buf, blank, holds);
+    let mut buf = blanked.buffer;
+    h.stoat
+        .paint_into(&mut buf, Some((&blanked.blank, blanked.holds)));
+
+    let bar_bg = h
+        .stoat
+        .theme
+        .get(crate::theme::scope::UI_TABBAR_INACTIVE)
+        .bg
+        .expect("the bar has a background");
+    let off_bar: Vec<u16> = (0..buf.area.width)
+        .filter(|&x| buf[(x, 0)].bg != bar_bg)
+        .collect();
+    assert_eq!(
+        off_bar,
+        Vec::<u16>::new(),
+        "row 0 cells off the bar's background"
+    );
+}

@@ -332,9 +332,10 @@ mod tests {
         );
     }
 
-    /// The moved tab takes its neighbor's number, which is what the bar shows.
+    /// The moved tab takes its neighbor's place, which is what the bar shows
+    /// after the workspace name.
     #[test]
-    fn move_tab_left_renumbers_the_bar() {
+    fn move_tab_left_moves_the_tab_left_in_the_bar() {
         let mut h = Stoat::test();
         dispatch(&mut h, &stoat_action::NewTab);
         dispatch(
@@ -348,8 +349,8 @@ mod tests {
         let buf = h.render_composited();
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         assert_eq!(
-            row.split_whitespace().take(2).collect::<Vec<_>>(),
-            ["1:two", "2:scratch"],
+            row.split_whitespace().take(3).collect::<Vec<_>>(),
+            ["(unnamed)", "two", "scratch"],
         );
     }
 
@@ -645,10 +646,10 @@ mod tests {
         );
     }
 
-    /// The row has to carry both numbered labels and distinguish the active tab
+    /// The row has to carry both tabs' labels and distinguish the active tab
     /// visually, or it reports the count without answering which one you are on.
     #[test]
-    fn the_bar_row_numbers_both_tabs_and_marks_the_active_one() {
+    fn the_bar_row_labels_both_tabs_and_marks_the_active_one() {
         let mut h = Stoat::test();
         dispatch(&mut h, &stoat_action::NewTab);
         // The bar paints as APC components, so it only reaches cells once the
@@ -656,19 +657,20 @@ mod tests {
         let buf = h.render_composited();
 
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
-        assert!(row.contains("1:"), "the first tab is numbered, got {row:?}");
+        let (first, second) = (row.find("scratch"), row.rfind("scratch"));
         assert!(
-            row.contains("2:"),
-            "the second tab is numbered, got {row:?}"
+            first.is_some() && first != second,
+            "both tabs are labeled, got {row:?}"
         );
 
-        let style_at = |needle: &str| {
-            let col = row.find(needle).expect("label painted") as u16;
+        // A cell holds one char here, so a char count is the column.
+        let bg_at = |byte: Option<usize>| {
+            let col = row[..byte.expect("label painted")].chars().count() as u16;
             *buf[(col, 0)].style().bg.as_ref().expect("a background")
         };
         assert_ne!(
-            style_at("2:"),
-            style_at("1:"),
+            bg_at(second),
+            bg_at(first),
             "the active tab reads differently from the inactive one"
         );
     }

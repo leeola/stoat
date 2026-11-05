@@ -25,6 +25,7 @@ const FONT_SIZE: u32 = 15;
 
 const ACCENT: [u8; 3] = [0x7f, 0xb0, 0xff];
 const BASE: [u8; 3] = [0x17, 0x19, 0x1e];
+const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 
@@ -78,6 +79,20 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
         "hunk_lane",
     );
     expect_region(&shot, &mut home, (2, y, 2, height), DISABLED, "state_lane");
+}
+
+/// A second tab shows the tab bar on chrome, with the active tab on the base
+/// surface.
+///
+/// The bar leads with the workspace name, whose length follows the session's
+/// random name, so the check reads row 0 as runs of color rather than at a
+/// fixed column.
+#[test]
+fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "many-files", "src/alpha.txt", "<C-a>c<Settle>");
+
+    expect_row_runs(&shot, &mut home, 0, &[CHROME, BASE, CHROME], "tab_bar");
 }
 
 /// The file finder's box fills with the overlay surface where no text covers
@@ -183,6 +198,34 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
         hex(want),
+        frame.display(),
+    );
+}
+
+/// Panics unless the dominant colors of `row`'s cells, merged into runs of one
+/// color, read `want` from left to right.
+///
+/// A miss saves the frame as [`expect_region`] does.
+fn expect_row_runs(shot: &Snapshot, home: &mut TempDir, row: u16, want: &[[u8; 3]], what: &str) {
+    let mut runs: Vec<[u8; 3]> = Vec::new();
+    for col in 0..COLS {
+        let color = dominant_color(shot, cell_rect(col, row, 1, 1));
+        if runs.last() != Some(&color) {
+            runs.push(color);
+        }
+    }
+    if runs == want {
+        return;
+    }
+
+    let frame = home.path().join(format!("{what}.png"));
+    support::save(shot, &frame);
+    home.disable_cleanup(true);
+    let colors = |colors: &[[u8; 3]]| colors.iter().map(|&color| hex(color)).collect::<Vec<_>>();
+    panic!(
+        "{what}: row {row} reads {:?}, not {:?}; the frame is {}",
+        colors(&runs),
+        colors(want),
         frame.display(),
     );
 }

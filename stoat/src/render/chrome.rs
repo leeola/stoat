@@ -1,6 +1,6 @@
 use crate::{
     render::paint::style_rgb,
-    theme::{PanelRole, Theme, TypeRole},
+    theme::{scope, PanelRole, Theme, TypeRole},
 };
 use ratatui::{
     buffer::Buffer,
@@ -8,6 +8,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
+use std::path::Path;
 use stoat_widgets::{bar::Bar, panel::Panel, text_run::TextRun, ApcScene};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
 
@@ -352,6 +353,23 @@ pub(crate) fn popout_frame(
     }
 }
 
+/// The small colored tag a tab or a finder row shows in place of a file's
+/// extension, and the theme scope that colors it.
+///
+/// `None` for a file whose extension takes no tag, so its name keeps the
+/// extension.
+pub(crate) fn type_tag(path: &Path) -> Option<(&'static str, &'static str)> {
+    let tag = match path.extension()?.to_str()? {
+        "rs" => ("rs", scope::UI_TAG_RUST),
+        "md" => ("md", scope::UI_TAG_MARKDOWN),
+        "toml" => ("toml", scope::UI_TAG_CONFIG),
+        "stcfg" => ("stcfg", scope::UI_TAG_CONFIG),
+        "cfg" => ("cfg", scope::UI_TAG_CONFIG),
+        _ => return None,
+    };
+    Some(tag)
+}
+
 /// Draw a horizontal separator across `width` cells at row `y`, starting at
 /// column `x`.
 ///
@@ -510,14 +528,15 @@ pub(crate) fn text(
 mod tests {
     use super::{
         hline, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
-        modal_frame_anchored, popout_frame, text, toggle_mark, vline,
+        modal_frame_anchored, popout_frame, text, toggle_mark, type_tag, vline,
     };
-    use crate::theme::{PanelRole, Theme};
+    use crate::theme::{scope, PanelRole, Theme};
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
         style::{Color, Style},
     };
+    use std::path::Path;
     use stoat_config::parse;
     use stoat_widgets::ApcScene;
     use stoatty_protocol::command::{
@@ -527,6 +546,19 @@ mod tests {
 
     fn rgb_style() -> Style {
         Style::default().fg(Color::Rgb(1, 2, 3))
+    }
+
+    #[test]
+    fn type_tag_names_the_rust_markdown_and_config_files() {
+        assert_eq!(
+            ["a.rs", "README.md", "config.stcfg", "Makefile"].map(|name| type_tag(Path::new(name))),
+            [
+                Some(("rs", scope::UI_TAG_RUST)),
+                Some(("md", scope::UI_TAG_MARKDOWN)),
+                Some(("stcfg", scope::UI_TAG_CONFIG)),
+                None,
+            ],
+        );
     }
 
     /// A style whose foreground does not resolve to RGB, which is what drops

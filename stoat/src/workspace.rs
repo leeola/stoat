@@ -30,7 +30,7 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
-    render::{layout::split_pane_status, text, walkthrough::SlideParts},
+    render::{chrome, layout::split_pane_status, text, walkthrough::SlideParts},
     review_approval::ApprovedRows,
     run::{RunId, RunState},
     ssh::RemoteTarget,
@@ -810,6 +810,39 @@ impl Workspace {
         }
 
         self.view_title(&tree.pane(tree.focus()).view)
+    }
+
+    /// The label tab `idx` shows in the tab bar, with the type tag that stands
+    /// in for the label's extension.
+    ///
+    /// A tab whose focused pane edits a file with a [`chrome::type_tag`] reads
+    /// as the file's stem beside that tag. Every other tab reads as
+    /// [`Self::tab_title`] names it, with no tag. So does a renamed tab, whose
+    /// name is the user's, and a diff view, which names two files.
+    pub(crate) fn tab_label(&self, idx: usize) -> (String, Option<(&'static str, &'static str)>) {
+        let tagged = self.tab_file(idx).and_then(|path| {
+            let stem = path.file_stem()?.to_string_lossy().into_owned();
+            Some((stem, chrome::type_tag(path)?))
+        });
+        match tagged {
+            Some((stem, tag)) => (stem, Some(tag)),
+            None => (self.tab_title(idx), None),
+        }
+    }
+
+    /// The file the focused editor of tab `idx` shows, or `None` for a renamed
+    /// tab, a diff view, or a pane that is no editor.
+    fn tab_file(&self, idx: usize) -> Option<&Path> {
+        let tab = self.tabs.get(idx).filter(|tab| tab.name.is_none())?;
+        let tree = match idx == self.active_tab {
+            true => &self.panes,
+            false => tab.parked.as_ref()?,
+        };
+        let View::Editor(id) = &tree.pane(tree.focus()).view else {
+            return None;
+        };
+        let editor = self.editors.get(*id).filter(|editor| !editor.diff_view)?;
+        self.buffers.path_for(editor.buffer_id)
     }
 
     /// What a pane that shows `view` calls itself in the tab bar.
@@ -2272,6 +2305,7 @@ mod tests {
         term_session::{TermId, ViewLocation},
         test_fixture::fake_term_session,
         test_harness::TestHarness,
+        theme::scope,
     };
     use ratatui::layout::Rect;
     use std::{
@@ -2645,6 +2679,35 @@ mod tests {
             ws.tab_title(0),
             derived,
             "clearing falls back to the derived title"
+        );
+    }
+
+    /// A tagged file's tab trades its extension for the tag. An untagged file
+    /// keeps its whole name, and so does a renamed tab, whose name is the
+    /// user's.
+    #[test]
+    fn tab_label_trades_a_tagged_extension_for_its_tag() {
+        let mut h = TestHarness::with_size(80, 24);
+        let label = |h: &TestHarness| h.stoat.active_workspace().tab_label(0);
+
+        let rust = h.write_file("lib.rs", "fn main() {}\n");
+        h.open_file(&rust);
+        let tagged = label(&h);
+
+        let text = h.write_file("notes.txt", "notes\n");
+        h.open_file(&text);
+        let untagged = label(&h);
+
+        h.stoat.active_workspace_mut().tabs[0].name = Some("plan.rs".to_string());
+        let renamed = label(&h);
+
+        assert_eq!(
+            [tagged, untagged, renamed],
+            [
+                ("lib".to_string(), Some(("rs", scope::UI_TAG_RUST))),
+                ("notes.txt".to_string(), None),
+                ("plan.rs".to_string(), None),
+            ],
         );
     }
 

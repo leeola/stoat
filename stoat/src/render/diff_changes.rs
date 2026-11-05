@@ -761,6 +761,7 @@ mod tests {
     fn live_frame(stoat: &Stoat) -> FrameCtx<'_> {
         FrameCtx {
             workspace_name: "",
+            tab_bar_shown: false,
             workspace_root: Path::new(""),
             mode: "normal",
             screen: None,

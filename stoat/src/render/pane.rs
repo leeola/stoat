@@ -1055,12 +1055,15 @@ fn status_scene_key(
     hasher.finish()
 }
 
-/// Paint the tab bar across `area`, one segment per tab.
+/// Paint the tab bar across `area`, the workspace name first and then one label
+/// per tab.
 ///
-/// Each segment reads ` <n>:<title> ` at its 1-based number, so a tab is
-/// addressable by what the bar shows. Painting through the status-bar segment
-/// path means the bar picks up the same scaled-run rendering under stoatty and
-/// the same cell fallback elsewhere.
+/// The name leads in bold, since the status row leaves it out while the bar
+/// shows. A tab reads as its [`Workspace::tab_label`], and a tagged file's
+/// extension follows it as a tag in the tag's color, joined by a muted dot.
+/// Painting through the status-bar segment path means the bar picks up the
+/// same scaled-run rendering under stoatty and the same cell fallback
+/// elsewhere.
 ///
 /// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
 /// from the left edge of `area`, so a pointer press resolves against the
@@ -1078,45 +1081,71 @@ pub(crate) fn render_tab_bar(
         return;
     }
 
-    let active = frame.theme.get(crate::theme::scope::UI_TABBAR_ACTIVE);
-    let inactive = frame.theme.get(crate::theme::scope::UI_TABBAR_INACTIVE);
+    let theme = frame.theme;
+    let active = theme.get(crate::theme::scope::UI_TABBAR_ACTIVE);
+    let inactive = theme.get(crate::theme::scope::UI_TABBAR_INACTIVE);
+    let tinted = |style: Style, scope: &str| match theme.get(scope).fg {
+        Some(fg) => style.fg(fg),
+        None => style,
+    };
 
     for x in area.x..area.x + area.width {
         buf[(x, area.y)].set_char(' ').set_style(inactive);
     }
 
-    let left: Vec<StatusSeg> = (0..ws.tabs.len())
-        .map(|idx| {
-            let style = if idx == ws.active_tab {
-                active
-            } else {
-                inactive
-            };
-            (format!(" {}:{} ", idx + 1, ws.tab_title(idx)), style)
-        })
-        .collect();
+    let mut left: Vec<StatusSeg> = vec![
+        (
+            format!(" {} ", frame.workspace_name),
+            inactive.add_modifier(Modifier::BOLD),
+        ),
+        (" ".to_string(), inactive),
+    ];
+    let mut owners = vec![None, None];
+    for idx in 0..ws.tabs.len() {
+        let style = if idx == ws.active_tab {
+            active
+        } else {
+            inactive
+        };
+        let (label, tag) = ws.tab_label(idx);
+        left.push((format!(" {label} "), style));
+        owners.push(Some(idx));
+        if let Some((tag, tag_scope)) = tag {
+            left.push((
+                "\u{b7}".to_string(),
+                tinted(style, crate::theme::scope::UI_TEXT_MUTED),
+            ));
+            left.push((format!(" {tag} "), tinted(style, tag_scope)));
+            owners.extend([Some(idx), Some(idx)]);
+        }
+    }
 
     let rich = render_status_segments(area, area, inactive, frame, &left, &[], buf, scene, None);
     let scale = if rich {
-        frame.theme.type_scale(TypeRole::Ui)
+        theme.type_scale(TypeRole::Ui)
     } else {
         FULL_CELL_SCALE
     };
     tab_spans(
-        left.iter().map(|(text, _)| text.chars().count()),
+        owners
+            .into_iter()
+            .zip(left.iter().map(|(text, _)| text.chars().count())),
         scale,
         area.width,
         spans,
     );
 }
 
-/// Records the extent of each tab bar segment, in sixteenths of a cell from the
-/// bar's left edge.
+/// Records the extent of each tab in the tab bar, in sixteenths of a cell from
+/// the bar's left edge.
 ///
-/// A segment cut at the bar's right edge ends there, and a segment past the edge
-/// has no entry, so the list holds only the tabs on screen.
+/// `segments` pairs each bar segment with the tab it belongs to and its
+/// character count. A segment of no tab, such as the workspace name, takes room
+/// but makes no span, so the list indexes the tabs alone. A tab cut at the
+/// bar's right edge ends there, and a tab past the edge has no entry, so the
+/// list holds only the tabs on screen.
 fn tab_spans(
-    chars: impl Iterator<Item = usize>,
+    segments: impl Iterator<Item = (Option<usize>, usize)>,
     scale: u16,
     width: u16,
     spans: &mut Vec<Range<u16>>,
@@ -1124,14 +1153,18 @@ fn tab_spans(
     spans.clear();
     let limit = (u32::from(width) * 16).min(u32::from(u16::MAX)) as u16;
     let mut cursor = 0u16;
-    for count in chars {
+    for (tab, count) in segments {
         if cursor >= limit {
             break;
         }
         let end = cursor
             .saturating_add(text_run::advance_sixteenths(count, scale))
             .min(limit);
-        spans.push(cursor..end);
+        match tab {
+            Some(tab) if tab < spans.len() => spans[tab].end = end,
+            Some(_) => spans.push(cursor..end),
+            None => {},
+        }
         cursor = end;
     }
 }
@@ -1203,13 +1236,15 @@ fn status_segments(
         if let Some(prompt) = prompt {
             push_prompt(&mut left, &mut cursor, end_x, prompt, base_style);
         } else {
-            push_left(
-                &mut left,
-                &mut cursor,
-                end_x,
-                format!(" {} ", frame.workspace_name),
-                base_style.add_modifier(Modifier::BOLD),
-            );
+            if !frame.tab_bar_shown {
+                push_left(
+                    &mut left,
+                    &mut cursor,
+                    end_x,
+                    format!(" {} ", frame.workspace_name),
+                    base_style.add_modifier(Modifier::BOLD),
+                );
+            }
             if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
                 push_left(
                     &mut left,
@@ -2642,7 +2677,11 @@ mod tests {
 
         let named = |h: &mut crate::test_harness::TestHarness| {
             h.snapshot();
-            let text = h.rendered_text().replace('─', " ");
+            // The tab bar on row 0 names a parked diff by the same two sides,
+            // so the search starts below it.
+            let rendered = h.rendered_text();
+            let rows: Vec<&str> = rendered.lines().skip(1).collect();
+            let text = rows.join("\n").replace('─', " ");
             // The text trims each row's end, which drops a card's last pad cell
             // when only blank cells follow the card.
             [
@@ -3648,7 +3687,12 @@ mod tests {
     fn tab_spans_follow_the_scale_and_stop_at_the_bar_edge() {
         let spans_at = |(scale, width): (u16, u16)| {
             let mut spans = Vec::new();
-            tab_spans([5, 7].into_iter(), scale, width, &mut spans);
+            tab_spans(
+                [(Some(0), 5), (Some(1), 7)].into_iter(),
+                scale,
+                width,
+                &mut spans,
+            );
             spans
                 .iter()
                 .map(|span| (span.start, span.end))
@@ -3663,6 +3707,64 @@ mod tests {
                 vec![(0, 50), (50, 96)],
                 vec![(0, 48)],
             ],
+        );
+    }
+
+    /// The workspace name takes room but makes no span, and a tab's label, dot,
+    /// and tag join into one span.
+    #[test]
+    fn tab_spans_skip_the_name_and_join_a_tabs_segments() {
+        let mut spans = Vec::new();
+        tab_spans(
+            [(None, 4), (Some(0), 5), (Some(0), 1), (Some(1), 7)].into_iter(),
+            160,
+            30,
+            &mut spans,
+        );
+        assert_eq!(spans, [40..100, 100..170]);
+    }
+
+    /// The bar leads with the workspace name and a one-cell gap. A tagged file's
+    /// tab trades its extension for the tag after a dot.
+    #[test]
+    fn the_tab_bar_leads_with_the_workspace_and_tags_each_file() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 8);
+        h.stoat.active_workspace_mut().name = "ws".to_string();
+        let chrome = h.write_file("chrome.rs", "fn a() {}\n");
+        h.open_file(&chrome);
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        let panel = h.write_file("panel.rs", "fn b() {}\n");
+        h.open_file(&panel);
+        h.snapshot();
+
+        let text = h.rendered_text();
+        let bar = text.lines().next().expect("the tab bar row");
+        assert_eq!(
+            bar.trim_end_matches('─'),
+            " ws   chrome \u{b7} rs  panel \u{b7} rs "
+        );
+    }
+
+    /// The status row names the workspace until a second tab shows the tab
+    /// bar, which then carries the name.
+    #[test]
+    fn the_status_row_leaves_the_workspace_name_to_the_tab_bar() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 8);
+        h.stoat.active_workspace_mut().name = "ws".to_string();
+        // The left segments, which end where the bar's hairline run starts.
+        let status_left = |h: &mut crate::test_harness::TestHarness| {
+            h.snapshot();
+            let text = h.rendered_text();
+            let row = text.lines().last().expect("the status row");
+            row.split('─').next().unwrap_or_default().to_string()
+        };
+
+        let one_tab = status_left(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        let two_tabs = status_left(&mut h);
+        assert_eq!(
+            [one_tab, two_tabs],
+            [" NOR  ws [scratch] ", " NOR [scratch] "]
         );
     }
 }

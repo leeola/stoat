@@ -434,6 +434,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
 
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
+        tab_bar_shown: false,
         workspace_root: &ws.git_root,
         mode: &mode,
         screen,
@@ -1442,6 +1443,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         // status row or chrome, so the rest stay empty.
         let frame = crate::render::FrameCtx {
             workspace_name: "",
+            tab_bar_shown: false,
             workspace_root: &ws.git_root,
             mode: &stoat.frame_mode,
             screen: None,

@@ -244,6 +244,9 @@ impl LspServerList {
 #[derive(Clone, Copy)]
 pub(crate) struct FrameCtx<'a> {
     pub(crate) workspace_name: &'a str,
+    /// Whether the tab bar takes the frame's top row. The bar then leads with
+    /// the workspace name, so a pane's status row leaves the name out.
+    pub(crate) tab_bar_shown: bool,
     pub(crate) workspace_root: &'a Path,
     pub(crate) mode: &'a str,
     /// The app screen in the foreground, from [`crate::keymap_state::view_predicate`].
@@ -1225,6 +1228,7 @@ pub(crate) fn frame(
 
     let frame = FrameCtx {
         workspace_name,
+        tab_bar_shown: tab_bar_rows == 1,
         workspace_root: &ws.git_root,
         mode,
         screen,
@@ -1284,18 +1288,6 @@ pub(crate) fn frame(
         perf: PerfSegment::capture(&stoat.perf),
     };
 
-    if tab_bar_rows == 1 {
-        let bar = Rect {
-            x: full.x,
-            y: full.y,
-            width: full.width,
-            height: 1,
-        };
-        pane::render_tab_bar(ws, bar, frame, buf, scene, &mut stoat.tab_bar_spans);
-    } else {
-        stoat.tab_bar_spans.clear();
-    }
-
     let paint_generation = stoat.paint_generation;
     let tick = stoat.render_tick;
     let workspace = stoat.active_workspace;
@@ -1324,6 +1316,20 @@ pub(crate) fn frame(
         }
     }
     let mut frame_holds = Vec::new();
+
+    // The bar paints after the stale holds clear. On the frame a second tab
+    // opens, the pane it pushes down still holds a rect over the bar's row.
+    if tab_bar_rows == 1 {
+        let bar = Rect {
+            x: full.x,
+            y: full.y,
+            width: full.width,
+            height: 1,
+        };
+        pane::render_tab_bar(ws, bar, frame, buf, scene, &mut stoat.tab_bar_spans);
+    } else {
+        stoat.tab_bar_spans.clear();
+    }
 
     for (id, pane) in ws.panes.split_panes() {
         let is_focused = matches!(ws.focus, FocusTarget::SplitPane) && id == split_focused;

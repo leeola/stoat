@@ -3814,19 +3814,25 @@ mod tests {
         );
     }
 
-    /// The column where `label` starts on the composited tab bar row.
-    fn tab_label_col(h: &mut crate::test_harness::TestHarness, label: &str) -> u16 {
+    /// The column where the `nth` `label` starts on the composited tab bar row,
+    /// counting from zero.
+    fn tab_label_col(h: &mut crate::test_harness::TestHarness, label: &str, nth: usize) -> u16 {
         let buf = h.render_composited();
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
-        row.find(label).expect("the label is painted") as u16
+        let (byte, _) = row
+            .match_indices(label)
+            .nth(nth)
+            .expect("the label is painted");
+        // A cell holds one char here, so a char count is the column.
+        row[..byte].chars().count() as u16
     }
 
     #[test]
     fn a_left_press_on_a_tab_switches_to_it() {
         let mut h = Stoat::test();
         action_handlers::dispatch(&mut h.stoat, &NewTab);
-        let active_after_press = |h: &mut crate::test_harness::TestHarness, label: &str| {
-            let column = tab_label_col(h, label);
+        let active_after_press = |h: &mut crate::test_harness::TestHarness, nth: usize| {
+            let column = tab_label_col(h, "scratch", nth);
             h.stoat.update(mouse_event(
                 MouseEventKind::Down(MouseButton::Left),
                 column,
@@ -3836,16 +3842,14 @@ mod tests {
         };
 
         assert_eq!(
-            [
-                active_after_press(&mut h, "1:"),
-                active_after_press(&mut h, "2:"),
-            ],
+            [active_after_press(&mut h, 0), active_after_press(&mut h, 1)],
             [0, 1],
         );
     }
 
     /// The bar row sits above every pane, so a press there that switches no tab
-    /// still stays off the focused pane's first row.
+    /// still stays off the focused pane's first row. The workspace name leads
+    /// the bar and names no tab.
     #[test]
     fn a_press_that_switches_no_tab_stops_at_the_bar() {
         let mut h = Stoat::test();
@@ -3859,11 +3863,13 @@ mod tests {
             )
         };
         let before = state(&mut h);
-        let first_tab = tab_label_col(&mut h, "1:");
+        let first_tab = tab_label_col(&mut h, "scratch", 0);
+        let name = tab_label_col(&mut h, "(unnamed)", 0);
         let edge = h.stoat.size().width - 1;
 
         let after = [
             (MouseButton::Left, edge),
+            (MouseButton::Left, name),
             (MouseButton::Right, first_tab),
             (MouseButton::Middle, first_tab),
         ]
@@ -3873,7 +3879,10 @@ mod tests {
             state(&mut h)
         });
 
-        assert_eq!(after, [before.clone(), before.clone(), before]);
+        assert_eq!(
+            after,
+            [before.clone(), before.clone(), before.clone(), before]
+        );
     }
 
     #[test]
