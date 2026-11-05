@@ -347,8 +347,8 @@ pub fn load() -> Result<Config, ConfigError> {
 
 /// The embedded default configuration, with no user overrides applied.
 ///
-/// The fallback when [`load`] fails. It carries the shipped defaults, a font
-/// size of 15 and the `one-dark` theme, rather than zeroed fields, so a window
+/// The fallback when [`load`] fails. It carries the shipped defaults, such as
+/// the font size and the theme, rather than zeroed fields, so a window
 /// opened after a bad user config still renders with the intended look. The
 /// embedded default ships with the binary and is trusted, so a malformed one
 /// panics.
@@ -507,7 +507,7 @@ mod tests {
         let config = embedded_default();
         assert_eq!(config.font_size, 14);
         assert_eq!(config.font_family, ["JetBrains Mono", "monospace"]);
-        assert_eq!(config.theme, "one-dark");
+        assert_eq!(config.theme, "ermine_night");
         assert_eq!(config.log_level, "debug");
     }
 
@@ -610,8 +610,42 @@ mod tests {
     }
 
     #[test]
-    fn default_theme_resolves_to_one_dark_colors() {
+    fn default_theme_resolves_to_ermine_night() {
         let mut config = settle(DEFAULT_CONFIG, None).unwrap();
+        config.vscode_themes = parse_vscode_themes(builtin_sources());
+
+        assert_eq!(
+            (config.theme.as_str(), config.resolve_theme().background),
+            ("ermine_night", Rgb::new(0x12, 0x14, 0x18)),
+        );
+    }
+
+    #[test]
+    fn ermine_night_resolves_to_its_palette() {
+        let config = settle(DEFAULT_CONFIG, Some("theme = \"ermine_night\"\n")).unwrap();
+        let rgb = |hex: u32| {
+            let [_, r, g, b] = hex.to_be_bytes();
+            Rgb::new(r, g, b)
+        };
+
+        assert_eq!(
+            config.resolve_theme(),
+            Theme {
+                foreground: rgb(0xdfe2e8),
+                background: rgb(0x121418),
+                cursor: rgb(0xdfe2e8),
+                ansi: [
+                    0x17191e, 0xf2777f, 0x8fd18a, 0xe8bd6a, 0x7fb0ff, 0xc59af0, 0x6cc7d6, 0xa3a9b5,
+                    0x838a98, 0xea858b, 0xaad581, 0xffd885, 0x85c1ff, 0xd398eb, 0x6ed5de, 0xdfe2e8,
+                ]
+                .map(rgb),
+            },
+        );
+    }
+
+    #[test]
+    fn one_dark_resolves_as_a_builtin() {
+        let mut config = settle(DEFAULT_CONFIG, Some("theme = \"one-dark\"\n")).unwrap();
         config.vscode_themes = parse_vscode_themes(builtin_sources());
         let theme = config.resolve_theme();
 

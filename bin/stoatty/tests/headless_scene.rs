@@ -193,7 +193,7 @@ fn basic_diff_scene(home: &Path) -> Scene {
         terminal_font_size: 12,
         scale_factor: 1.0,
         theme: config.resolve_theme(),
-        theme_name: "one-dark".to_owned(),
+        theme_name: config.theme,
         font_family: config.font_family,
         ligatures: config.ligatures,
         cursor_animation: config.cursor_animation,

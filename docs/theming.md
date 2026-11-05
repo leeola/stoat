@@ -227,8 +227,9 @@ config: `stoatty.toml` in the repo root as the built-in default, overlaid by
 overrides only the fields it sets; everything else keeps the default.
 
 The palette is a named `[themes.NAME]` table, selected by the top-level `theme`
-setting. The default is the built-in `one-dark`, which stoatty also exports as
-`STOAT_THEME` so a child editor follows the terminal:
+setting. The default is `ermine_night`, the name of the editor's default theme
+too, which stoatty also exports as `STOAT_THEME` so a child editor follows the
+terminal:
 
 ```toml
 # ~/.config/stoatty/config.toml

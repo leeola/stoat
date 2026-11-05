@@ -27,8 +27,9 @@ font_family = ["JetBrains Mono", "monospace"]
 #
 # The name is also exported to a child stoat as STOAT_THEME so the editor
 # follows the terminal, which works only for a name stoat resolves too: a
-# built-in, or a stem in the shared themes dir.
-theme = "one-dark"
+# built-in, or a stem in the shared themes dir. The default, ermine_night, is
+# the [themes.ermine_night] entry below and stoat's default theme of that name.
+theme = "ermine_night"
 
 # Shape contiguous same-style cell runs together so the font's ligatures (->,
 # =>, ==, ...) form across cells. Set to false to shape each cell on its own, so
@@ -56,7 +57,7 @@ log_level = "debug"
 # args = ["--login"]
 
 # An example of the hand-written palette format, carrying the same colors as the
-# built-in one-dark default. Colors are #rrggbb hex strings, and an omitted field
+# built-in one-dark theme. Colors are #rrggbb hex strings, and an omitted field
 # keeps the built-in default for that slot. Select it with theme = "zed" above.
 [themes.zed]
 background = "#282c34"
@@ -78,3 +79,28 @@ bright_blue = "#85c1ff"
 bright_magenta = "#d398eb"
 bright_cyan = "#6ed5de"
 bright_white = "#fafafa"
+
+# The terminal palette of the Ermine design language, and the default. The
+# background is the chrome surface that shows in the gaps between a stoat
+# child's panes. The design sets no bright ramp, so the bright colors other
+# than bright_black and bright_white are the zed ones above.
+[themes.ermine_night]
+background = "#121418"
+foreground = "#dfe2e8"
+cursor = "#dfe2e8"
+black = "#17191e"
+red = "#f2777f"
+green = "#8fd18a"
+yellow = "#e8bd6a"
+blue = "#7fb0ff"
+magenta = "#c59af0"
+cyan = "#6cc7d6"
+white = "#a3a9b5"
+bright_black = "#838a98"
+bright_red = "#ea858b"
+bright_green = "#aad581"
+bright_yellow = "#ffd885"
+bright_blue = "#85c1ff"
+bright_magenta = "#d398eb"
+bright_cyan = "#6ed5de"
+bright_white = "#dfe2e8"
