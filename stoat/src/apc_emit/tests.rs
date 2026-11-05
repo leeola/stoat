@@ -954,6 +954,69 @@ fn diagnostic_gutter_emits_sub_cell_bars_inside_stoatty() {
     );
 }
 
+/// A pooled editor page marks a diagnostic with its icon for a terminal that
+/// stores page icons. An earlier terminal drops a page's icons, so the page
+/// marks the diagnostic with the hint's dot run.
+#[test]
+fn a_pooled_page_marks_its_diagnostic_by_the_terminal_protocol() {
+    use stoatty_protocol::command::Command;
+
+    let marks = |protocol: u32| {
+        let mut h = Stoat::test();
+        h.stoat.stoatty_protocol = protocol;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        h.stoat.set_apc_tx(tx);
+
+        let root = PathBuf::from("/page-marks");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\nbravo\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.seed_diagnostics(
+            path,
+            vec![lsp_types::Diagnostic {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                ..Default::default()
+            }],
+        );
+        h.stoat.render();
+
+        emit_smooth_scroll(&mut h.stoat);
+        h.settle();
+        let cmds = drain_apc(&mut rx);
+        let icons = cmds
+            .iter()
+            .filter(|cmd| matches!(cmd, Command::Icon(_)))
+            .count();
+        let dots = cmds
+            .iter()
+            .filter(|cmd| match cmd {
+                Command::TextRun(run) => run.text == "\u{b7}",
+                Command::TextRuns(batch) => batch.runs.iter().any(|(_, _, text)| text == "\u{b7}"),
+                _ => false,
+            })
+            .count();
+        (icons, dots)
+    };
+
+    assert_eq!(
+        [marks(PAGE_ICONS_PROTOCOL), marks(PAGE_ICONS_PROTOCOL - 1)],
+        [(1, 0), (0, 1)],
+        "one icon at the page icon protocol, and one dot before it",
+    );
+}
+
 #[test]
 fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
     use stoatty_protocol::command::Command;

@@ -424,6 +424,10 @@ pub(crate) struct PageGutter {
     /// Whether the terminal reads `text_runs` and `bars` batches, which the
     /// scene a page paints its rich gutter into takes from [`Self::scene`].
     batch: bool,
+    /// Whether the terminal stores an icon a page declares, which a terminal
+    /// at [`stoatty_protocol::PAGE_ICONS_PROTOCOL`] or later does. A page for
+    /// an earlier one marks each diagnostic with the hint's dot.
+    icons: bool,
 }
 
 impl PageGutter {
@@ -446,6 +450,7 @@ impl PageGutter {
             theme,
             rich,
             batch: false,
+            icons: false,
         }
     }
 
@@ -455,6 +460,14 @@ impl PageGutter {
     /// loop learned that the terminal reads batches.
     pub(crate) fn batched(self, batch: bool) -> PageGutter {
         PageGutter { batch, ..self }
+    }
+
+    /// This gutter at the terminal's page icon protocol.
+    ///
+    /// Off until set, so a page marks a diagnostic with a dot unless the run
+    /// loop learned that the terminal stores page icons.
+    pub(crate) fn page_icons(self, icons: bool) -> PageGutter {
+        PageGutter { icons, ..self }
     }
 
     /// A scene for a page's rich gutter to paint into, at this gutter's batch
@@ -512,12 +525,13 @@ fn paint_page_gutter(
                 &rich.colors,
                 gutter.current_line,
             );
-            // FIXME: Pool pages carry no icon commands, and an icon inside a
-            // page fill lands on the live grid at page coordinates. So a page
-            // marks each diagnostic with the hint's dot, a run, instead of its
-            // icon.
-            for diagnostic in lines.iter_mut().filter_map(|line| line.diagnostic.as_mut()) {
-                diagnostic.kind = None;
+            // A terminal before the page icon protocol drops the icons a page
+            // declares. A page for such a terminal marks each diagnostic with
+            // the hint's dot run in place of its icon.
+            if !gutter.icons {
+                for diagnostic in lines.iter_mut().filter_map(|line| line.diagnostic.as_mut()) {
+                    diagnostic.kind = None;
+                }
             }
             let widget = rich_gutter(
                 &lines,
@@ -2240,10 +2254,11 @@ mod tests {
         );
     }
 
-    /// A pool fill carries no icon commands, so a pooled page marks an error
-    /// with the hint's dot run where the live gutter draws an icon.
+    /// A pooled page marks an error with its icon for a terminal that stores
+    /// page icons. For a terminal that drops them, it marks the error with the
+    /// hint's dot run.
     #[test]
-    fn a_pooled_page_marks_a_diagnostic_with_a_dot() {
+    fn a_pooled_page_marks_a_diagnostic_with_an_icon_or_a_dot() {
         use super::render_page_decorations;
         use crate::{
             action_handlers::{self, dispatch},
@@ -2275,31 +2290,41 @@ mod tests {
             Some(rich),
             None,
         );
-        let editor = action_handlers::focused_editor_mut(&mut h.stoat).expect("focused editor");
-        let decorations = render_page_decorations(
-            &editor.display_map.snapshot(),
-            3,
-            0,
-            12,
-            4,
-            &gutter,
-            false,
-            fallback,
-            0.0,
-            DiffDials::shipped(),
-            None,
-        );
+        let snapshot = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .display_map
+            .snapshot();
+        let marks = |gutter: &PageGutter| {
+            let decorations = render_page_decorations(
+                &snapshot,
+                3,
+                0,
+                12,
+                4,
+                gutter,
+                false,
+                fallback,
+                0.0,
+                DiffDials::shipped(),
+                None,
+            );
+            let commands = decode_stream(&decorations);
+            let dots = commands
+                .iter()
+                .filter(|command| matches!(command, Command::TextRun(run) if run.text == "\u{b7}"))
+                .count();
+            let icons = commands
+                .iter()
+                .filter(|command| matches!(command, Command::Icon(_)))
+                .count();
+            (dots, icons)
+        };
 
-        let commands = decode_stream(&decorations);
-        let dots = commands
-            .iter()
-            .filter(|command| matches!(command, Command::TextRun(run) if run.text == "\u{b7}"))
-            .count();
-        let icons = commands
-            .iter()
-            .filter(|command| matches!(command, Command::Icon(_)))
-            .count();
-        assert_eq!((dots, icons), (1, 0), "one dot for the error, and no icon");
+        assert_eq!(
+            [marks(&gutter.clone().page_icons(true)), marks(&gutter)],
+            [(0, 1), (1, 0)],
+            "an icon where the terminal stores it, and a dot where it drops it",
+        );
     }
 
     #[test]

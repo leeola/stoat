@@ -51,7 +51,7 @@ use stoat_widgets::{
 };
 use stoatty_protocol::{
     command::{FillRowsCommand, PoolAnchorCommand, PoolKind, PoolRegionCommand},
-    BATCHED_DECORATIONS_PROTOCOL,
+    BATCHED_DECORATIONS_PROTOCOL, PAGE_ICONS_PROTOCOL,
 };
 
 /// The protocol version that reads a decorations-only page fill. An older
@@ -1141,6 +1141,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         crate::render::review::resolve_diff_rich_colors(theme, fallback_style, 0.0).is_some();
     let decorate_pages = stoat.stoatty_protocol >= FILL_DECORATIONS_PROTOCOL;
     let batch_decorations = stoat.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL;
+    let page_icons = stoat.stoatty_protocol >= PAGE_ICONS_PROTOCOL;
     for (_, editor_id, region) in &panes {
         let region = *region;
         let Some(editor) = ws.editors.get_mut(*editor_id) else {
@@ -1280,7 +1281,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             base_rich.clone().map(|r| r.dim(dim)),
             current_line,
         )
-        .batched(batch_decorations);
+        .batched(batch_decorations)
+        .page_icons(page_icons);
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
         let Refill {
@@ -1843,7 +1845,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                         base_rich.clone(),
                         None,
                     )
-                    .batched(batch_decorations),
+                    .batched(batch_decorations)
+                    .page_icons(page_icons),
                     diff_view,
                     // A modal preview is not the diff view the knobs turn, so
                     // it paints at the shipped dials.
