@@ -174,7 +174,7 @@ pub(crate) fn render_hints_grouped(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let title = format!(" {mode} ");
-    crate::render::clear_themed(help_area, buf, theme);
+    crate::render::clear_modal(help_area, buf, theme, modal_style);
     // Above the pools, because this box is declared after every modal and so sits
     // over the commit picker's list and preview surfaces. Layered with the grid it
     // would vanish under their composites for the length of every glide.
@@ -192,11 +192,7 @@ pub(crate) fn render_hints_grouped(
     let toggle_off = theme.get(crate::theme::scope::UI_TOGGLE_INACTIVE);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
     let end_x = inner.x + inner.width;
-    let run_bg = crate::render::paint::style_rgb(
-        theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
-            .and_then(|s| s.bg),
-    );
+    let run_bg = crate::render::modal_fill(theme, modal_style);
 
     let mut col_x = inner.x + 1;
     for column in &layout.columns {

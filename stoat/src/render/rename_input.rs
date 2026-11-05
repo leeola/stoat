@@ -42,7 +42,7 @@ pub(crate) fn render_rename_input(
     let popup_area =
         cursor_popup::popup_rect(content_area, cursor_screen, (interior_width, 1), true);
 
-    crate::render::clear_themed(popup_area, buf, &stoat.theme);
+    crate::render::clear_modal(popup_area, buf, &stoat.theme, modal_style);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

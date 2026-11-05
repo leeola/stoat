@@ -128,10 +128,10 @@ pub(crate) fn list_modal_width(area: Rect) -> u16 {
 /// keeps every pane pool's composite off the cells the fallback drew.
 ///
 /// When the border colour resolves to RGB it instead emits a hairline `panel` APC frame in the
-/// theme's [`PanelRole::Overlay`] frame, plus, for `Some(title)`, a full-size title [`TextRun`]
-/// over the top edge. The hairline runs unbroken through the title span, and the title run
-/// carries no background box, so its glyphs blend directly over the grid cells
-/// behind them. No box-drawing glyphs are written in this arm.
+/// theme's [`PanelRole::Overlay`] frame with no fill, so the cells' own backgrounds show through,
+/// plus, for `Some(title)`, a full-size title [`TextRun`] over the top edge. The hairline runs
+/// unbroken through the title span, and the title run carries no background box, so its glyphs
+/// blend directly over the grid cells behind them. No box-drawing glyphs are written in this arm.
 ///
 /// The caller owns background clearing, and a titled caller must clear the
 /// border-row cells to the surface color so the title glyphs blend over a clean
@@ -240,6 +240,9 @@ fn modal_frame_inner(
                 style: BorderStyle::Rounded,
                 border,
                 corner_radius: frame.corner_radius,
+                // The cells carry the modal's surface, which the caller's clear
+                // lays down. A fill paints over their own backgrounds, and
+                // those hold the selected row and the match highlights.
                 fill: None,
                 shadow: frame.shadow,
                 inset_x: frame.inset_x,
@@ -799,6 +802,39 @@ mod tests {
                 fill: None,
                 shadow: PanelShadow::None_,
                 inset_x: 0,
+                above_pools: false,
+                anchor: None,
+            })
+        );
+    }
+
+    /// A fill paints over the cells' own backgrounds, which carry a picker's
+    /// selected row and its match highlights. So even a modal style with a
+    /// background leaves the frame unfilled, and the cells carry that surface.
+    #[test]
+    fn a_modal_frame_leaves_the_cell_backgrounds_showing() {
+        let area = Rect::new(2, 1, 8, 4);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 12, 6));
+        let mut scene = ApcScene::new();
+        let theme = Theme::empty();
+        let style = rgb_style().bg(Color::Rgb(4, 5, 6));
+
+        modal_frame(&mut buf, area, None, style, &theme, &mut scene);
+
+        let frame = theme.panel(PanelRole::Overlay);
+        assert_eq!(
+            scene.buffer(),
+            &encode_panel(&PanelCommand {
+                top: 1,
+                left: 2,
+                width: 8,
+                height: 4,
+                style: BorderStyle::Rounded,
+                border: [1, 2, 3],
+                corner_radius: frame.corner_radius,
+                fill: None,
+                shadow: frame.shadow,
+                inset_x: frame.inset_x,
                 above_pools: false,
                 anchor: None,
             })

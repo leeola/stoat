@@ -272,7 +272,7 @@ pub(crate) fn render_modal_run(
         format!(" {display} ")
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_RUN);
-    crate::render::clear_themed(modal_area, buf, theme);
+    crate::render::clear_modal(modal_area, buf, theme, modal_style);
     let inner = crate::render::chrome::modal_frame(
         buf,
         modal_area,

@@ -35,7 +35,7 @@ pub(crate) fn render_code_search(
     let git_root = ws.git_root.clone();
     let title = code_search_title(finder);
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
-    crate::render::clear_themed(layout.modal, buf, theme);
+    crate::render::clear_modal(layout.modal, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

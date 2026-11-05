@@ -39,7 +39,7 @@ pub(crate) fn render_quit_all_confirm(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::clear_themed(modal_area, buf, theme);
+    crate::render::clear_modal(modal_area, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         modal_area,

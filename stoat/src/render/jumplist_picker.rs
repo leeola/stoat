@@ -47,7 +47,7 @@ pub(crate) fn render_jumplist_picker(
     };
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::clear_themed(layout.modal, buf, theme);
+    crate::render::clear_modal(layout.modal, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

@@ -112,7 +112,7 @@ pub(crate) fn render_help(
         HelpScope::All => " help: all actions ".to_string(),
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HELP);
-    crate::render::clear_themed(layout.modal, buf, theme);
+    crate::render::clear_modal(layout.modal, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

@@ -64,7 +64,7 @@ pub(crate) fn render_diagnostics_picker(
         PickerScope::Local(_) => " diagnostics ",
         PickerScope::Workspace => " diagnostics (workspace) ",
     };
-    crate::render::clear_themed(modal_area, buf, theme);
+    crate::render::clear_modal(modal_area, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         modal_area,

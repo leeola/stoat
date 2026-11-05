@@ -266,12 +266,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let run_bg = crate::render::paint::style_rgb(
-        stoat
-            .theme
-            .try_get(crate::theme::scope::UI_BACKGROUND)
-            .and_then(|s| s.bg),
-    );
+    let run_bg = crate::render::modal_fill(&stoat.theme, modal_style);
     let anchor = host_anchor(stoat, popup_area);
 
     let frame_kind = stoat
@@ -296,7 +291,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
     // card's rounded corners. A dead scene sends no box to the terminal, so a
     // card there clears its cells as a modal does.
     if matches!(frame_kind, HoverFrame::Modal) || !scene.live() {
-        crate::render::clear_themed(popup_area, buf, &stoat.theme);
+        crate::render::clear_modal(popup_area, buf, &stoat.theme, modal_style);
     }
     let inner = match frame_kind {
         HoverFrame::Modal => crate::render::chrome::modal_frame_anchored(
@@ -726,9 +721,10 @@ pub(crate) fn hover_popup_layout(stoat: &mut Stoat) -> Option<(Rect, Rect)> {
 /// composites the page at the region origin.
 ///
 /// A walkthrough card's page takes the card's fill, and any other hover's page
-/// takes the theme background. The page shows inside the popup's frame, and a
-/// color other than the frame's fill shows as a band behind the body for as
-/// long as the glide runs.
+/// takes the `ui.modal.hints` background, or the theme background where that
+/// scope sets none. The page shows inside the popup's frame, and a color other
+/// than the frame's fill shows as a band behind the body for as long as the
+/// glide runs.
 pub(crate) fn render_hover_page(
     popup: &HoverPopup,
     page: u64,
@@ -747,13 +743,9 @@ pub(crate) fn render_hover_page(
             (Buffer::filled(area, cell), fill)
         },
         HoverFrame::Modal => {
-            let run_bg = crate::render::paint::style_rgb(
-                theme
-                    .try_get(crate::theme::scope::UI_BACKGROUND)
-                    .and_then(|s| s.bg),
-            )
-            .unwrap_or([0, 0, 0]);
-            (crate::smooth_scroll::page_buffer(area, theme), run_bg)
+            let run_bg = crate::render::modal_fill(theme, modal_style).unwrap_or([0, 0, 0]);
+            let blank = crate::render::modal_blank(theme, modal_style);
+            (Buffer::filled(area, blank), run_bg)
         },
     };
 
@@ -970,6 +962,45 @@ mod tests {
         assert!(
             page.windows(10).any(|bytes| bytes == b"48;2;1;2;3"),
             "the page's cells take the fill as their background"
+        );
+    }
+
+    /// A modal hover's page composites inside a frame filled with the
+    /// `ui.modal.hints` background, so the page and its runs take that color
+    /// and not the theme background.
+    #[test]
+    fn a_modal_hover_page_paints_in_the_modal_fill() {
+        let popup = HoverPopup::new(
+            vec![vec![("body".to_owned(), Style::default())]],
+            0,
+            EditorId::default(),
+        );
+        let theme = {
+            let src = r##"theme t {
+                ui.background.bg = "#101010";
+                ui.modal.hints = { fg: "#ffffff", bg: "#010203" };
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+
+        let page = render_hover_page(&popup, 0, &theme, 12, 3);
+        let run_backings: Vec<Option<[u8; 3]>> = command::decode_stream(&page)
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::TextRun(run) => Some(run.bg),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            run_backings,
+            [Some([1, 2, 3])],
+            "the body's one run is backed by the modal fill"
+        );
+        assert!(
+            page.windows(10).any(|bytes| bytes == b"48;2;1;2;3"),
+            "the page's cells take the modal fill as their background"
         );
     }
 }

@@ -430,6 +430,38 @@ fn a_hover_inside_its_pane_ships_the_pool_anchor() {
     );
 }
 
+/// A modal hover's frame fills with the `ui.modal.hints` background, the
+/// surface a theme gives its modal boxes, and not the editor background.
+#[test]
+fn a_modal_hover_fills_with_its_modal_background() {
+    use stoatty_protocol::command::Command;
+
+    let (mut h, mut rx, _) = hover_harness();
+    drain_apc(&mut rx);
+    let src = r##"theme t {
+            ui.background.bg = "#101010";
+            ui.modal.hints = { fg: "#ffffff", bg: "#010203" };
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    h.stoat.theme = Arc::new(
+        crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads"),
+    );
+
+    let size = h.stoat.size();
+    let mut buf = Buffer::empty(size);
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+
+    let fills: Vec<Option<[u8; 3]>> = drain_apc(&mut rx)
+        .into_iter()
+        .filter_map(|cmd| match cmd {
+            Command::Panel(p) if p.anchor.is_some() => Some(p.fill),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fills, [Some([1, 2, 3])], "the hover's anchored frame fill");
+}
+
 /// A walkthrough card's box and body carry the pane's anchor themselves.
 /// Its pool keeps the region for a scroll inside the card. A ride composites
 /// the page's unfaded text before the pen closes the box.
@@ -1209,6 +1241,47 @@ fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
         cmds.iter()
             .any(|c| matches!(c, Command::TextRun(t) if t.scale == 218)),
         "the hints overlay emits 0.85x hint-row text runs, got {cmds:?}"
+    );
+}
+
+/// The hint rows paint over the box's modal surface, so their runs back
+/// themselves in it. A run backed in the editor background shows as a band
+/// behind its row.
+#[test]
+fn the_hint_rows_back_their_runs_with_the_modal_fill() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    let src = r##"theme t {
+            ui.background.bg = "#282c34";
+            ui.modal.hints = { fg: "#8899aa", bg: "#010203" };
+            ui.text.fg = "#c8ccd4";
+            ui.key_label.fg = "#d19a66";
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    h.stoat.theme = Arc::new(
+        crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads"),
+    );
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.type_keys("space");
+
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+
+    let backings: Vec<Option<[u8; 3]>> = drain_apc(&mut rx)
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::TextRun(t) if t.scale == crate::render::TEXT_SCALE_POPUP => Some(t.bg),
+            _ => None,
+        })
+        .collect();
+    assert!(!backings.is_empty(), "the hint rows emit text runs");
+    assert_eq!(
+        backings,
+        vec![Some([1, 2, 3]); backings.len()],
+        "every hint run backs itself in the modal fill"
     );
 }
 

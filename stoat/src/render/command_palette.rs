@@ -396,7 +396,7 @@ fn render_palette_prelude(
     let layout = palette_filter_layout(area, content_rows, zoom)?;
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
-    crate::render::clear_themed(layout.modal, buf, theme);
+    crate::render::clear_modal(layout.modal, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         layout.modal,

@@ -50,7 +50,7 @@ pub(crate) fn render_workspace_picker(
         Some(family) => format!(" workspaces: {family} "),
     };
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    crate::render::clear_themed(picker_area, buf, theme);
+    crate::render::clear_modal(picker_area, buf, theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         picker_area,

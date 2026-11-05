@@ -70,7 +70,7 @@ pub(crate) fn render_code_action(
     let size = cursor_popup::content_size(&body, footer.as_ref());
     let popup_area = cursor_popup::popup_rect(content_area, cursor_screen, size, true);
 
-    crate::render::clear_themed(popup_area, buf, &stoat.theme);
+    crate::render::clear_modal(popup_area, buf, &stoat.theme, modal_style);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

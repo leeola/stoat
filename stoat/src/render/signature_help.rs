@@ -60,7 +60,7 @@ pub(crate) fn render_signature_help(
         true,
     );
 
-    crate::render::clear_themed(popup_area, buf, &stoat.theme);
+    crate::render::clear_modal(popup_area, buf, &stoat.theme, modal_style);
     let inner = crate::render::chrome::modal_frame(
         buf,
         popup_area,

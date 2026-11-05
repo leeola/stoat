@@ -85,7 +85,7 @@ use ratatui::{
     backend::IntoCrossterm,
     buffer::{Buffer, Cell},
     layout::Rect,
-    style::{Color, Modifier},
+    style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
 use slotmap::SlotMap;
@@ -902,12 +902,54 @@ pub(crate) fn themed_bg(theme: &crate::theme::Theme) -> Color {
 
 /// Blank `area` to the themed cell, wiping whatever was painted under it.
 ///
-/// This is what a modal lays down before its frame, in place of ratatui's
-/// [`Clear`](ratatui::widgets::Clear). `modal_frame` draws borders and never
-/// fills, so a modal's blank interior is whatever the clear left, and Reset
-/// there means the terminal's own background shows through a themed screen.
+/// This is what a surface lays down before it paints, in place of ratatui's
+/// [`Clear`](ratatui::widgets::Clear). A cell left at Reset shows the
+/// terminal's own background through a themed screen, so the blank carries the
+/// theme's colors.
+///
+/// See also:
+/// - [`clear_modal`] for a modal box, which blanks to its own background.
 pub(crate) fn clear_themed(area: Rect, buf: &mut Buffer, theme: &crate::theme::Theme) {
-    let blank = themed_blank(theme);
+    fill_cells(area, buf, &themed_blank(theme));
+}
+
+/// Blank a modal box's `area` to the modal's own blank, wiping whatever was
+/// painted under it.
+///
+/// A modal's empty rows show whatever this leaves, so `style`, the modal's
+/// `ui.modal.*` style, decides the surface a theme gives its modal boxes.
+pub(crate) fn clear_modal(area: Rect, buf: &mut Buffer, theme: &crate::theme::Theme, style: Style) {
+    fill_cells(area, buf, &modal_blank(theme, style));
+}
+
+/// The blank cell of a modal box, which is the themed blank on `style`'s
+/// background.
+///
+/// A style that sets no background keeps the themed blank, so a theme that
+/// gives its modals no surface of their own draws them on the editor's.
+pub(crate) fn modal_blank(theme: &crate::theme::Theme, style: Style) -> Cell {
+    let mut cell = themed_blank(theme);
+    if let Some(bg) = style.bg {
+        cell.bg = bg;
+    }
+    cell
+}
+
+/// The RGB color of a modal box's surface, which is `style`'s background, or the
+/// theme background where it sets none.
+///
+/// A text run over the box backs itself in this color, because a run backed in
+/// any other color shows as a band behind its line.
+pub(crate) fn modal_fill(theme: &crate::theme::Theme, style: Style) -> Option<[u8; 3]> {
+    let bg = style.bg.or_else(|| {
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|s| s.bg)
+    });
+    paint::style_rgb(bg)
+}
+
+fn fill_cells(area: Rect, buf: &mut Buffer, blank: &Cell) {
     let area = area.intersection(buf.area);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -2478,12 +2520,12 @@ mod perf_tests {
 
 #[cfg(test)]
 mod themed_blank_tests {
-    use super::{blank_buffer, clear_themed, themed_blank, Hold};
+    use super::{blank_buffer, clear_modal, clear_themed, themed_blank, Hold};
     use crate::{app::Stoat, pane::PaneId, theme::Theme, workspace::WorkspaceId};
     use ratatui::{
         buffer::{Buffer, Cell},
         layout::Rect,
-        style::Color,
+        style::{Color, Style},
     };
     use std::sync::Arc;
 
@@ -2564,6 +2606,29 @@ mod themed_blank_tests {
             buf[(0u16, 1u16)].bg,
             Color::Reset,
             "a cell outside the cleared rect is left alone",
+        );
+    }
+
+    /// A modal box blanks to its own style's background, and to the theme's
+    /// where the style sets none, as default_dark's modal scopes do.
+    #[test]
+    fn clear_modal_takes_the_style_background_or_the_themed_blank() {
+        let theme = {
+            let src = r##"theme t { ui.background.bg = "#102030"; }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+
+        let filled = Style::new().bg(Color::Rgb(1, 2, 3));
+        clear_modal(Rect::new(0, 0, 1, 1), &mut buf, &theme, filled);
+        let border_only = Style::new().fg(Color::Rgb(9, 9, 9));
+        clear_modal(Rect::new(1, 0, 1, 1), &mut buf, &theme, border_only);
+
+        assert_eq!(
+            [buf[(0u16, 0u16)].bg, buf[(1u16, 0u16)].bg],
+            [Color::Rgb(1, 2, 3), Color::Rgb(0x10, 0x20, 0x30)],
+            "the style's background, then the theme's for a style with none",
         );
     }
 

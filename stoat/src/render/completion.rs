@@ -237,7 +237,7 @@ pub(crate) fn render_completion(
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    crate::render::clear_themed(layout.popup_area, buf, &stoat.theme);
+    crate::render::clear_modal(layout.popup_area, buf, &stoat.theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
         layout.popup_area,
