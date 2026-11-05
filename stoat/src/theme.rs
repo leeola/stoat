@@ -1,19 +1,25 @@
 //! Runtime theme built from `theme NAME { ... }` blocks in the DSL config.
 //!
-//! A [`Theme`] is a palette plus a scope → [`Style`] map. Scope lookups
+//! A [`Theme`] is a palette, a scope → [`Style`] map, and the frames and text
+//! scales of the chrome's [`PanelRole`]s and [`TypeRole`]s. Style lookups
 //! use progressive-broadening fallback so tree-sitter captures like
 //! `syntax.keyword.control` inherit from `syntax.keyword` when unspecified.
 
 use ratatui::style::{Color, Modifier, Style};
 use snafu::{OptionExt, Snafu};
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::RangeInclusive};
 use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value};
+use stoatty_protocol::command::PanelShadow;
+
+/// The text_run scale of full-size text, which fills one cell.
+const FULL_CELL_SCALE: u16 = 256;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub name: String,
     palette: HashMap<String, Color>,
     styles: HashMap<String, Style>,
+    metrics: HashMap<String, HashMap<String, Metric>>,
 }
 
 impl Theme {
@@ -23,6 +29,7 @@ impl Theme {
             name: String::new(),
             palette: HashMap::new(),
             styles: HashMap::new(),
+            metrics: HashMap::new(),
         }
     }
 
@@ -54,6 +61,68 @@ impl Theme {
         }
 
         style
+    }
+
+    /// The frame a panel in `role` draws with.
+    ///
+    /// A theme sets the frame under `ui.panel.<role>` with the fields `radius`,
+    /// `shadow`, `inset_x`, and `above_pools`. Each field the theme leaves unset
+    /// answers Ermine's value, so a theme that sets none of them draws Ermine's
+    /// chrome.
+    pub fn panel(&self, role: PanelRole) -> PanelSpec {
+        let ermine = role.ermine();
+        let scope = role.scope();
+
+        // `resolve_metric` admits only whole numbers the field holds, so the
+        // casts are exact.
+        PanelSpec {
+            corner_radius: match self.metric(scope, "radius") {
+                Some(Metric::Number(n)) => n as u8,
+                _ => ermine.corner_radius,
+            },
+            shadow: match self.metric(scope, "shadow") {
+                Some(Metric::Shadow(shadow)) => shadow,
+                _ => ermine.shadow,
+            },
+            inset_x: match self.metric(scope, "inset_x") {
+                Some(Metric::Number(n)) => n as u8,
+                _ => ermine.inset_x,
+            },
+            above_pools: match self.metric(scope, "above_pools") {
+                Some(Metric::Bool(above)) => above,
+                _ => ermine.above_pools,
+            },
+        }
+    }
+
+    /// The text_run scale, in 256ths of a cell, of chrome text in `role`.
+    ///
+    /// A theme sets it as the `scale` field of `ui.type.<role>`, and an unset
+    /// field answers Ermine's scale.
+    ///
+    /// Under `cfg(test)` every role answers a full cell (256) instead. The test
+    /// compositor draws one glyph per cell, so full-cell text keeps composited
+    /// geometry exact against the fallback layout the harness scans and
+    /// snapshots.
+    pub fn type_scale(&self, role: TypeRole) -> u16 {
+        if cfg!(test) {
+            return FULL_CELL_SCALE;
+        }
+
+        self.themed_type_scale(role)
+    }
+
+    /// The scale the theme gives `role`, which [`Self::type_scale`] answers
+    /// outside the test build.
+    fn themed_type_scale(&self, role: TypeRole) -> u16 {
+        match self.metric(role.scope(), "scale") {
+            Some(Metric::Number(n)) => n as u16,
+            _ => role.ermine_scale(),
+        }
+    }
+
+    fn metric(&self, scope: &str, field: &str) -> Option<Metric> {
+        self.metrics.get(scope)?.get(field).copied()
     }
 
     /// Build the theme named `name` from all `theme` blocks in `config`.
@@ -90,9 +159,7 @@ impl Theme {
         let blocks = collect_theme_blocks(name, all_themes, &mut Vec::new())?;
 
         let mut palette: HashMap<String, Color> = HashMap::new();
-        let mut fg: HashMap<String, Color> = HashMap::new();
-        let mut bg: HashMap<String, Color> = HashMap::new();
-        let mut mods: HashMap<String, Modifier> = HashMap::new();
+        let mut fields = ScopeFields::default();
 
         for block in &blocks {
             for stmt in &block.node.statements {
@@ -106,26 +173,26 @@ impl Theme {
         for block in &blocks {
             for stmt in &block.node.statements {
                 if let Statement::Setting(s) = &stmt.node {
-                    apply_setting(s, &palette, &mut fg, &mut bg, &mut mods)?;
+                    apply_setting(s, &palette, &mut fields)?;
                 }
             }
         }
 
         let mut scope_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        scope_set.extend(fg.keys().cloned());
-        scope_set.extend(bg.keys().cloned());
-        scope_set.extend(mods.keys().cloned());
+        scope_set.extend(fields.fg.keys().cloned());
+        scope_set.extend(fields.bg.keys().cloned());
+        scope_set.extend(fields.mods.keys().cloned());
 
         let mut styles = HashMap::new();
         for scope in scope_set {
             let mut style = Style::default();
-            if let Some(&c) = fg.get(&scope) {
+            if let Some(&c) = fields.fg.get(&scope) {
                 style = style.fg(c);
             }
-            if let Some(&c) = bg.get(&scope) {
+            if let Some(&c) = fields.bg.get(&scope) {
                 style = style.bg(c);
             }
-            if let Some(&m) = mods.get(&scope)
+            if let Some(&m) = fields.mods.get(&scope)
                 && !m.is_empty()
             {
                 style = style.add_modifier(m);
@@ -137,8 +204,119 @@ impl Theme {
             name: name.to_string(),
             palette,
             styles,
+            metrics: fields.metrics,
         })
     }
+}
+
+/// An elevation of floating chrome, which a theme gives its own frame.
+///
+/// An island is the panel each pane, dock, and terminal sits on. A popout hangs
+/// off the chrome it extends, such as a tab popout or an inline expansion. An
+/// overlay floats above everything else, such as a modal, a hover card, or the
+/// completion list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PanelRole {
+    Island,
+    Popout,
+    Overlay,
+}
+
+impl PanelRole {
+    fn scope(self) -> &'static str {
+        match self {
+            PanelRole::Island => scope::UI_PANEL_ISLAND,
+            PanelRole::Popout => scope::UI_PANEL_POPOUT,
+            PanelRole::Overlay => scope::UI_PANEL_OVERLAY,
+        }
+    }
+
+    /// Ermine's frame for the role, which each field a theme leaves unset
+    /// falls back to.
+    fn ermine(self) -> PanelSpec {
+        let (corner_radius, shadow, inset_x, above_pools) = match self {
+            PanelRole::Island => (2, PanelShadow::Tucked, 4, false),
+            PanelRole::Popout => (1, PanelShadow::Overhang, 0, false),
+            PanelRole::Overlay => (2, PanelShadow::Drop, 0, true),
+        };
+        PanelSpec {
+            corner_radius,
+            shadow,
+            inset_x,
+            above_pools,
+        }
+    }
+}
+
+/// The frame a theme gives one [`PanelRole`].
+///
+/// Each field means what the same-named field of a
+/// [`PanelCommand`](stoatty_protocol::command::PanelCommand) means. The radius
+/// and the inset are logical pixels, so they keep their size under font zoom.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PanelSpec {
+    pub corner_radius: u8,
+    pub shadow: PanelShadow,
+    pub inset_x: u8,
+    pub above_pools: bool,
+}
+
+/// A step of the chrome type scale, named by the text it sizes.
+///
+/// Every glyph shares one monospace face, so chrome hierarchy comes from the
+/// scale of a text run. A theme sets each step under `ui.type.<role>`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypeRole {
+    /// Modal titles.
+    Title,
+    /// Code and other full-size text.
+    Body,
+    /// Tabs, the status bar, and chips.
+    Ui,
+    /// Gutter numbers and counts.
+    Small,
+    /// The mode label, such as `NOR`.
+    Mode,
+}
+
+impl TypeRole {
+    fn scope(self) -> &'static str {
+        match self {
+            TypeRole::Title => scope::UI_TYPE_TITLE,
+            TypeRole::Body => scope::UI_TYPE_BODY,
+            TypeRole::Ui => scope::UI_TYPE_UI,
+            TypeRole::Small => scope::UI_TYPE_SMALL,
+            TypeRole::Mode => scope::UI_TYPE_MODE,
+        }
+    }
+
+    /// Ermine's scale for the role, which an unset `scale` field falls back to.
+    fn ermine_scale(self) -> u16 {
+        match self {
+            TypeRole::Title => 320,
+            TypeRole::Body => FULL_CELL_SCALE,
+            TypeRole::Ui => 232,
+            TypeRole::Small | TypeRole::Mode => 208,
+        }
+    }
+}
+
+/// A theme field that sets a number, a shadow, or a flag instead of a color.
+#[derive(Debug, Clone, Copy)]
+enum Metric {
+    Number(f64),
+    Shadow(PanelShadow),
+    Bool(bool),
+}
+
+/// The fields a theme's settings set per scope, gathered before they resolve
+/// into a [`Theme`].
+#[derive(Default)]
+struct ScopeFields {
+    fg: HashMap<String, Color>,
+    bg: HashMap<String, Color>,
+    mods: HashMap<String, Modifier>,
+    metrics: HashMap<String, HashMap<String, Metric>>,
 }
 
 /// Flatten a theme's inheritance chain into the blocks to resolve, parent
@@ -185,23 +363,13 @@ fn collect_theme_blocks<'a>(
 fn apply_setting(
     setting: &Setting,
     palette: &HashMap<String, Color>,
-    fg: &mut HashMap<String, Color>,
-    bg: &mut HashMap<String, Color>,
-    mods: &mut HashMap<String, Modifier>,
+    fields: &mut ScopeFields,
 ) -> Result<(), ThemeError> {
     let path: Vec<&str> = setting.path.iter().map(|p| p.node.as_str()).collect();
     if let Value::Map(entries) = &setting.value.node {
         let scope = path.join(".");
         for (key, value) in entries {
-            apply_field(
-                &scope,
-                key.node.as_str(),
-                &value.node,
-                palette,
-                fg,
-                bg,
-                mods,
-            )?;
+            apply_field(&scope, key.node.as_str(), &value.node, palette, fields)?;
         }
         return Ok(());
     }
@@ -219,7 +387,7 @@ fn apply_setting(
         .fail();
     }
     let scope = scope_parts.join(".");
-    apply_field(&scope, field, &setting.value.node, palette, fg, bg, mods)
+    apply_field(&scope, field, &setting.value.node, palette, fields)
 }
 
 fn apply_field(
@@ -227,19 +395,38 @@ fn apply_field(
     field: &str,
     value: &Value,
     palette: &HashMap<String, Color>,
-    fg: &mut HashMap<String, Color>,
-    bg: &mut HashMap<String, Color>,
-    mods: &mut HashMap<String, Modifier>,
+    fields: &mut ScopeFields,
 ) -> Result<(), ThemeError> {
     match field {
         "fg" => {
-            fg.insert(scope.to_string(), resolve_color_from_value(value, palette)?);
+            fields
+                .fg
+                .insert(scope.to_string(), resolve_color_from_value(value, palette)?);
         },
         "bg" => {
-            bg.insert(scope.to_string(), resolve_color_from_value(value, palette)?);
+            fields
+                .bg
+                .insert(scope.to_string(), resolve_color_from_value(value, palette)?);
         },
         "modifiers" => {
-            mods.insert(scope.to_string(), resolve_modifiers(value)?);
+            fields
+                .mods
+                .insert(scope.to_string(), resolve_modifiers(value)?);
+        },
+        "radius" | "inset_x" | "scale" | "shadow" | "above_pools" => {
+            let Some(metric) = resolve_metric(field, value) else {
+                return InvalidMetricValueSnafu {
+                    scope: scope.to_string(),
+                    field: field.to_string(),
+                    value: format!("{value:?}"),
+                }
+                .fail();
+            };
+            fields
+                .metrics
+                .entry(scope.to_string())
+                .or_default()
+                .insert(field.to_string(), metric);
         },
         other => {
             return UnknownFieldSnafu {
@@ -395,6 +582,38 @@ fn named_modifier(s: &str) -> Result<Modifier, ThemeError> {
     })
 }
 
+/// The metric that `value` sets `field` to, or [`None`] when the value does
+/// not fit the field.
+fn resolve_metric(field: &str, value: &Value) -> Option<Metric> {
+    match (field, value) {
+        ("radius" | "inset_x", &Value::Number(n)) => {
+            whole_number_in(n, 0.0..=f64::from(u8::MAX)).map(Metric::Number)
+        },
+        // A scale of zero draws no text, and the text width math divides by
+        // the scale.
+        ("scale", &Value::Number(n)) => {
+            whole_number_in(n, 1.0..=f64::from(u16::MAX)).map(Metric::Number)
+        },
+        ("shadow", Value::Ident(name)) => named_shadow(name).map(Metric::Shadow),
+        ("above_pools", &Value::Bool(b)) => Some(Metric::Bool(b)),
+        _ => None,
+    }
+}
+
+fn whole_number_in(n: f64, range: RangeInclusive<f64>) -> Option<f64> {
+    (n.fract() == 0.0 && range.contains(&n)).then_some(n)
+}
+
+fn named_shadow(name: &str) -> Option<PanelShadow> {
+    Some(match name {
+        "none" => PanelShadow::None_,
+        "drop" => PanelShadow::Drop,
+        "tucked" => PanelShadow::Tucked,
+        "overhang" => PanelShadow::Overhang,
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ThemeError {
@@ -435,6 +654,16 @@ pub enum ThemeError {
     },
     #[snafu(display("invalid color value: {value}"))]
     InvalidColorValue {
+        value: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    /// A panel or type field holds a value of the wrong kind, an unknown shadow
+    /// name, or a number that is not a whole number in the field's range.
+    #[snafu(display("invalid value for theme field '{field}' at scope '{scope}': {value}"))]
+    InvalidMetricValue {
+        scope: String,
+        field: String,
         value: String,
         #[snafu(implicit)]
         location: snafu::Location,
@@ -500,6 +729,16 @@ pub mod scope {
 
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";
     pub const UI_BORDER_INACTIVE: &str = "ui.border.inactive";
+
+    pub const UI_PANEL_ISLAND: &str = "ui.panel.island";
+    pub const UI_PANEL_POPOUT: &str = "ui.panel.popout";
+    pub const UI_PANEL_OVERLAY: &str = "ui.panel.overlay";
+
+    pub const UI_TYPE_TITLE: &str = "ui.type.title";
+    pub const UI_TYPE_BODY: &str = "ui.type.body";
+    pub const UI_TYPE_UI: &str = "ui.type.ui";
+    pub const UI_TYPE_SMALL: &str = "ui.type.small";
+    pub const UI_TYPE_MODE: &str = "ui.type.mode";
 
     pub const UI_MODAL_HELP: &str = "ui.modal.help";
     pub const UI_MODAL_HINTS: &str = "ui.modal.hints";
@@ -636,6 +875,15 @@ mod tests {
         Theme::from_config(&config, name).expect_err("expected theme load error")
     }
 
+    fn spec(corner_radius: u8, shadow: PanelShadow, inset_x: u8, above_pools: bool) -> PanelSpec {
+        PanelSpec {
+            corner_radius,
+            shadow,
+            inset_x,
+            above_pools,
+        }
+    }
+
     #[test]
     fn missing_theme_errors() {
         let src = "theme dark { ui.cursor.fg = red; }";
@@ -709,6 +957,95 @@ mod tests {
         assert_eq!(
             load(map_src, "t").try_get("ui.cursor"),
             load(dotted_src, "t").try_get("ui.cursor")
+        );
+    }
+
+    #[test]
+    fn panel_role_fields_parse_into_a_spec() {
+        let src = r##"theme t {
+            ui.panel.popout = { radius: 3, shadow: drop, inset_x: 5, above_pools: true };
+        }"##;
+        assert_eq!(
+            load(src, "t").panel(PanelRole::Popout),
+            spec(3, PanelShadow::Drop, 5, true)
+        );
+    }
+
+    #[test]
+    fn an_unset_panel_role_answers_ermine_defaults() {
+        let theme = load("theme t { ui.panel.island.radius = 7; }", "t");
+        assert_eq!(
+            [PanelRole::Island, PanelRole::Popout, PanelRole::Overlay]
+                .map(|role| theme.panel(role)),
+            [
+                spec(7, PanelShadow::Tucked, 4, false),
+                spec(1, PanelShadow::Overhang, 0, false),
+                spec(2, PanelShadow::Drop, 0, true),
+            ],
+            "the island takes its set radius, and every unset field answers Ermine's"
+        );
+    }
+
+    #[test]
+    fn a_bad_shadow_name_errors() {
+        let src = "theme t { ui.panel.island = { shadow: fuzzy }; }";
+        assert!(matches!(
+            load_err(src, "t"),
+            ThemeError::InvalidMetricValue { scope, field, .. }
+                if scope == "ui.panel.island" && field == "shadow"
+        ));
+    }
+
+    #[test]
+    fn type_scale_reads_the_scale_field() {
+        let src = "theme t { ui.type.title = { scale: 300 }; ui.type.small.scale = 190; }";
+        let theme = load(src, "t");
+        let roles = [
+            TypeRole::Title,
+            TypeRole::Body,
+            TypeRole::Ui,
+            TypeRole::Small,
+            TypeRole::Mode,
+        ];
+
+        assert_eq!(
+            roles.map(|role| theme.themed_type_scale(role)),
+            [300, 256, 232, 190, 208],
+            "a set scale wins, and every unset role answers Ermine's"
+        );
+        assert_eq!(
+            roles.map(|role| theme.type_scale(role)),
+            [256; 5],
+            "the test build draws every role at a full cell"
+        );
+    }
+
+    #[test]
+    fn a_metric_value_outside_its_field_errors() {
+        let accepted: Vec<&str> = [
+            "radius: red",
+            "radius: 2.5",
+            "radius: 256",
+            "inset_x: -1",
+            "scale: 0",
+            "scale: 65536",
+            "shadow: 1",
+            "above_pools: 1",
+        ]
+        .into_iter()
+        .filter(|entry| {
+            let src = format!("theme t {{ ui.panel.island = {{ {entry} }}; }}");
+            !matches!(
+                Theme::from_config(&parse(&src).0.expect("parses"), "t"),
+                Err(ThemeError::InvalidMetricValue { .. })
+            )
+        })
+        .collect();
+
+        assert_eq!(
+            accepted,
+            Vec::<&str>::new(),
+            "values that load without an error"
         );
     }
 
