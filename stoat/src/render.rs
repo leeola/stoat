@@ -115,6 +115,12 @@ pub(crate) const SINGLE_MINIMAP_STRIP_ID: u32 = u32::MAX;
 /// every pane's to cover them, and the highest id stays above any pane index.
 pub(crate) const OVERLAY_LANE: u32 = u32::MAX;
 
+/// The opacity of the minimap's viewport thumb, nine percent of 255.
+///
+/// The thumb takes the focus accent, so a light wash marks the viewport and
+/// leaves the strip's lines readable under it.
+const MINIMAP_THUMB_ALPHA: u8 = 23;
+
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
@@ -1126,9 +1132,9 @@ pub(crate) fn frame(
     // The palettes exist exactly while the minimap is on, per the refresh above.
     let minimap_chrome = stoat.minimap_palettes.as_ref().map(|palettes| {
         let thumb = {
-            let bar = stoat.theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
-            let [r, g, b] = paint::style_rgb(bar.bg).unwrap_or([90, 90, 110]);
-            [r, g, b, 96]
+            let focused = stoat.theme.get(crate::theme::scope::UI_BORDER_FOCUSED);
+            let [r, g, b] = paint::style_rgb(focused.fg).unwrap_or([90, 90, 110]);
+            [r, g, b, MINIMAP_THUMB_ALPHA]
         };
         // A terminal before the population palette drops a declaration past 64
         // entries, so it receives the prefix it reads.
@@ -2817,6 +2823,32 @@ mod pane_badge_tests {
     /// Every cell position inside `rect`, row by row.
     fn rect_cells(rect: Rect) -> impl Iterator<Item = (u16, u16)> {
         (rect.y..rect.bottom()).flat_map(move |y| (rect.x..rect.right()).map(move |x| (x, y)))
+    }
+}
+
+#[cfg(test)]
+mod minimap_chrome_tests {
+    use crate::{render::paint::style_rgb, test_harness::TestHarness, theme::scope};
+    use stoatty_protocol::command::{self, Command};
+
+    /// A pane's minimap strip is seven cells wide, and its viewport thumb
+    /// washes the focus accent at nine percent.
+    #[test]
+    fn the_strip_is_seven_cells_with_an_accent_thumb() {
+        let mut h = TestHarness::with_size(120, 24);
+        h.seed_focused_buffer(&"line\n".repeat(60));
+        h.stoat.render();
+
+        let strip = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                Command::Minimap(strip) => Some(strip),
+                _ => None,
+            })
+            .expect("the pane declares a strip");
+        let [r, g, b] = style_rgb(h.stoat.theme.get(scope::UI_BORDER_FOCUSED).fg)
+            .expect("the theme's focus accent is RGB");
+        assert_eq!((strip.width, strip.thumb), (7, [r, g, b, 23]));
     }
 }
 

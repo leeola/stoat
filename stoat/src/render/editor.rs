@@ -53,7 +53,7 @@ use stoatty_protocol::command::IconKind;
 
 /// Columns reserved on a pane's right edge for the minimap strip, matching the
 /// width the terminal's GPU minimap pass paints there.
-pub(super) const MINIMAP_STRIP_COLS: u16 = 8;
+pub(super) const MINIMAP_STRIP_COLS: u16 = 7;
 
 /// Widest display row [`WrapMode::None`] produces, in columns.
 ///
@@ -4841,7 +4841,7 @@ mod tests {
         let (rect, strip) = render_minimap(&mut h.stoat, true, 120, 3);
         assert_eq!(
             rect,
-            Some(Rect::new(112, 0, super::MINIMAP_STRIP_COLS, 3)),
+            Some(Rect::new(113, 0, super::MINIMAP_STRIP_COLS, 3)),
             "strip pins to the right edge at full width"
         );
         assert!(
@@ -4870,8 +4870,8 @@ mod tests {
         assert_eq!(
             (rect, text_end),
             (
-                Some(Rect::new(112, 0, super::MINIMAP_STRIP_COLS, 3)),
-                Some(112)
+                Some(Rect::new(113, 0, super::MINIMAP_STRIP_COLS, 3)),
+                Some(113)
             ),
             "the strip pins to the right edge, and the live column ends where it starts"
         );

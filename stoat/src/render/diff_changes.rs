@@ -1253,7 +1253,7 @@ mod tests {
     fn a_per_pane_changes_view_declares_its_strip_in_the_diff_palette() {
         let (mut h, mut rx) = strip_harness(MinimapMode::PerPane);
         let (buf, reserved, declared) = paint_strips(&mut h, &mut rx);
-        let strip = Rect::new(112, 0, 8, 23);
+        let strip = Rect::new(113, 0, 7, 23);
         let blank = themed_blank(&h.stoat.theme);
         let painted: Vec<_> = strip
             .positions()
