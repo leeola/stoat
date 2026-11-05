@@ -957,6 +957,8 @@ pub(crate) struct StatusSceneCache {
 ///
 /// The segments go inside `segments`, the part of the row `area` that
 /// [`status_segments_area`] leaves them, while the hairline runs all of `area`.
+/// The hairline takes `ui.statusbar.separator`, or `ui.border.inactive` where
+/// the theme leaves that unset.
 ///
 /// With a `cache`, a repaint whose segments, rects, and colors all hold splices
 /// the recorded frame. Splicing is only sound because
@@ -979,7 +981,13 @@ fn render_status_segments(
 ) -> bool {
     let colors = (|| {
         scene.live().then_some(())?;
-        let separator = style_rgb(frame.theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg)?;
+        let theme = frame.theme;
+        let separator = style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_STATUSBAR_SEPARATOR)
+                .and_then(|style| style.fg)
+                .or_else(|| theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg),
+        )?;
         let base_bg = style_rgb(base_style.bg)?;
         Some((separator, base_bg))
     })();
@@ -1084,11 +1092,6 @@ pub(crate) fn render_tab_bar(
     let theme = frame.theme;
     let active = theme.get(crate::theme::scope::UI_TABBAR_ACTIVE);
     let inactive = theme.get(crate::theme::scope::UI_TABBAR_INACTIVE);
-    let tinted = |style: Style, scope: &str| match theme.get(scope).fg {
-        Some(fg) => style.fg(fg),
-        None => style,
-    };
-
     for x in area.x..area.x + area.width {
         buf[(x, area.y)].set_char(' ').set_style(inactive);
     }
@@ -1113,9 +1116,9 @@ pub(crate) fn render_tab_bar(
         if let Some((tag, tag_scope)) = tag {
             left.push((
                 "\u{b7}".to_string(),
-                tinted(style, crate::theme::scope::UI_TEXT_MUTED),
+                tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED),
             ));
-            left.push((format!(" {tag} "), tinted(style, tag_scope)));
+            left.push((format!(" {tag} "), tinted(style, theme, tag_scope)));
             owners.extend([Some(idx), Some(idx)]);
         }
     }
@@ -1171,6 +1174,15 @@ fn tab_spans(
 
 /// One built status-bar segment pairing painted text with its cell style.
 type StatusSeg = (String, Style);
+
+/// `style` with the foreground of the theme's `scope`, or `style` unchanged
+/// when the scope sets no foreground.
+fn tinted(style: Style, theme: &crate::theme::Theme, scope: &str) -> Style {
+    match theme.get(scope).fg {
+        Some(fg) => style.fg(fg),
+        None => style,
+    }
+}
 
 /// Resolve the style for the transient status message segment from the bar's
 /// base style plus the theme's `ui.message.error` override.
@@ -1276,6 +1288,21 @@ fn status_segments(
         let text = format!("{left_pad}{name}{read_only}{modified} ");
         push_left(&mut left, &mut cursor, end_x, text, base_style);
     }
+    // A lone cursor paints no count, since the count only answers how many
+    // places an edit lands once there is more than one.
+    if let Some((_, count)) = status.selections
+        && count > 1
+        && prompt.is_none()
+    {
+        let muted = tinted(base_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+        push_left(
+            &mut left,
+            &mut cursor,
+            end_x,
+            format!(" {count} sel "),
+            muted,
+        );
+    }
     if let Some((_, label)) = status
         .buffer_id
         .and_then(|id| frame.held_buffers.iter().find(|(held, _)| *held == id))
@@ -1301,33 +1328,30 @@ fn status_segments(
             right_anchor = start;
         }
     }
-    // A lone cursor paints nothing here, since the count only answers how many
-    // places an edit lands once there is more than one.
-    if let Some((primary, count)) = status.selections
-        && count > 1
-    {
-        let text = format!(" {primary}/{count} sels ");
-        let width = text.chars().count() as u16;
-        let start = right_anchor.saturating_sub(width);
-        if start >= cursor {
-            right.push((text, base_style));
-            right_anchor = start;
-        }
-    }
     if is_focused {
         let badge_right = right_anchor;
-        for server in frame.lsp_servers {
-            if !server.busy {
-                continue;
-            }
-            let text = format!(
-                " {} {} ",
-                SPINNER_FRAMES[frame.spinner_phase as usize], server.short
-            );
+        let muted = tinted(base_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+        // The block reads left to right as the servers and then the sources the
+        // file's diagnostics name, and right segments push leftward, so the
+        // sources push first.
+        let sources = focused_diagnostic_sources(view, editors, buffers, frame.diagnostics);
+        let sources = (!sources.is_empty()).then(|| format!(" {} ", sources.join(" \u{b7} ")));
+        let servers = frame
+            .lsp_servers
+            .iter()
+            .rev()
+            .map(|server| match server.busy {
+                true => format!(
+                    " {} {} ",
+                    SPINNER_FRAMES[frame.spinner_phase as usize], server.name
+                ),
+                false => format!(" {} ", server.name),
+            });
+        for text in sources.into_iter().chain(servers) {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                right.push((text, base_style));
+                right.push((text, muted));
                 right_anchor = start;
             }
         }
@@ -1336,8 +1360,9 @@ fn status_segments(
             // badge_right, so they cover fewer cells than their char count.
             // Record the hover rect over that scaled extent (dropping the leftmost
             // pad space, which carries no glyph) so hover matches the drawn glyphs.
-            let chars = badge_right - right_anchor;
-            let width = ((chars - 1) * theme.type_scale(TypeRole::Ui)).div_ceil(FULL_CELL_SCALE);
+            let chars = u32::from(badge_right - right_anchor);
+            let width = ((chars - 1) * u32::from(theme.type_scale(TypeRole::Ui)))
+                .div_ceil(u32::from(FULL_CELL_SCALE)) as u16;
             *badge_rect = Some(Rect::new(badge_right - width, area.y, width, area.height));
         }
         if frame.diff_warm_busy {
@@ -1367,18 +1392,17 @@ fn status_segments(
                 right_anchor = start;
             }
         }
-        if let Some((text, worst)) =
-            focused_diagnostic_label(view, editors, buffers, frame.diagnostics)
-        {
+        // The severities push from hint to error, so they read error first.
+        let severities =
+            focused_diagnostic_label(view, editors, buffers, frame.diagnostics, base_style, theme);
+        for (text, style) in severities.into_iter().rev() {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
-            if start >= cursor {
-                let badge_style = base_style
-                    .add_modifier(Modifier::BOLD)
-                    .patch(theme.get(diagnostic_severity_scope(worst)));
-                right.push((text, badge_style));
-                right_anchor = start;
+            if start < cursor {
+                break;
             }
+            right.push((text, style));
+            right_anchor = start;
         }
         // A status message answers what the reader just did and expires after a
         // few seconds, while the staged summary stays on the bar. The summary
@@ -1391,17 +1415,21 @@ fn status_segments(
             .and_then(|id| buffers.path_for(id))
             .and_then(|path| frame.pair_sides.get(path))
             .map(|(from, _)| format!("diff vs {from}"));
-        if let Some(text) = focused_staged_label(
+        if let Some(segments) = focused_staged_label(
             status.mark_kind,
             pair_lead.as_deref().or(frame.diff_base),
             frame.repo_change_counts,
             status.staged_counts,
             frame.hunk_position.as_ref(),
+            (base_style, theme),
         ) {
-            let width = text.chars().count() as u16;
+            let width: u16 = segments
+                .iter()
+                .map(|(text, _)| text.chars().count() as u16)
+                .sum();
             let start = right_anchor.saturating_sub(width);
             if start >= cursor && usize::from(start - cursor) >= message_chars {
-                right.push((text, base_style));
+                right.extend(segments.into_iter().rev());
                 right_anchor = start;
             }
         }
@@ -1555,38 +1583,78 @@ fn resolve_rich_segments(segments: &[StatusSeg], base: Style) -> Option<Vec<Stat
         .collect()
 }
 
-/// Builds the status-bar diagnostic label for the focused pane's
-/// editor along with its worst severity, or `None` when the pane is
-/// not an editor, has no path, or has no diagnostics. Format:
-/// ` Ee Ww Ii Hh ` showing each present severity's count; the worst
-/// severity drives the badge's foreground color at the call site.
+/// The status-bar diagnostic segments for the focused pane's editor, one per
+/// severity it has, from error to hint.
+///
+/// Each reads a glyph and the count, ` ● 2`, ` ▲ 1`, ` i 3`, or ` · 4`, in the
+/// severity's color over `base_style`, and a pad closes the run. The list is
+/// empty when the pane is not an editor, has no path, or has no diagnostics.
 fn focused_diagnostic_label(
     view: &View,
     editors: &SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     diagnostics: &crate::diagnostics::DiagnosticSet,
-) -> Option<(String, DiagnosticSeverity)> {
+    base_style: Style,
+    theme: &crate::theme::Theme,
+) -> Vec<StatusSeg> {
+    let Some(path) = focused_editor_path(view, editors, buffers) else {
+        return Vec::new();
+    };
+    let summary = diagnostics.summarize(path);
+    let mut segments: Vec<StatusSeg> = [
+        (summary.error, '\u{25cf}', DiagnosticSeverity::ERROR),
+        (summary.warning, '\u{25b2}', DiagnosticSeverity::WARNING),
+        (summary.information, 'i', DiagnosticSeverity::INFORMATION),
+        (summary.hint, '\u{b7}', DiagnosticSeverity::HINT),
+    ]
+    .into_iter()
+    .filter(|&(count, _, _)| count > 0)
+    .map(|(count, glyph, severity)| {
+        let style = tinted(base_style, theme, diagnostic_severity_scope(severity));
+        (format!(" {glyph} {count}"), style)
+    })
+    .collect();
+    if !segments.is_empty() {
+        segments.push((" ".to_string(), base_style));
+    }
+    segments
+}
+
+/// The distinct sources the focused pane's diagnostics name, such as a
+/// compiler and a linter, in the order they first appear.
+fn focused_diagnostic_sources<'a>(
+    view: &View,
+    editors: &SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    diagnostics: &'a crate::diagnostics::DiagnosticSet,
+) -> Vec<&'a str> {
+    let Some(path) = focused_editor_path(view, editors, buffers) else {
+        return Vec::new();
+    };
+    let mut sources: Vec<&str> = Vec::new();
+    for source in diagnostics
+        .get(path)
+        .iter()
+        .filter_map(|diag| diag.source.as_deref())
+    {
+        if !sources.contains(&source) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
+/// The file the editor in `view` shows, or `None` for a pane that is no editor
+/// or an editor with no file.
+fn focused_editor_path<'a>(
+    view: &View,
+    editors: &SlotMap<EditorId, EditorState>,
+    buffers: &'a BufferRegistry,
+) -> Option<&'a Path> {
     let View::Editor(editor_id) = view else {
         return None;
     };
-    let editor = editors.get(*editor_id)?;
-    let path = buffers.path_for(editor.buffer_id)?;
-    let summary = diagnostics.summarize(path);
-    let worst = summary.worst?;
-    let mut parts = Vec::new();
-    if summary.error > 0 {
-        parts.push(format!("E{}", summary.error));
-    }
-    if summary.warning > 0 {
-        parts.push(format!("W{}", summary.warning));
-    }
-    if summary.information > 0 {
-        parts.push(format!("I{}", summary.information));
-    }
-    if summary.hint > 0 {
-        parts.push(format!("H{}", summary.hint));
-    }
-    Some((format!(" {} ", parts.join(" ")), worst))
+    buffers.path_for(editors.get(*editor_id)?.buffer_id)
 }
 
 /// Statusline label leading with the repo's hunk counts and appending the
@@ -1613,78 +1681,127 @@ fn focused_diagnostic_label(
 /// nothing behind it. The position rides on a label the counts produced, so a
 /// scope with nothing to count shows nothing at all.
 ///
-/// The file's counts take their words from `kind`, so a range review's counts
-/// read `approved / unapproved`. The repo pair counts what git status reports
-/// under any base and keeps `staged / unstaged`.
+/// The file's counts follow the text as two segments, the pencil count of
+/// unstaged hunks in `ui.statusbar.unstaged` and the plus count of staged hunks
+/// in `ui.statusbar.staged`, so each count reads in its own color. A range
+/// review's counts keep their words inside the text, `approved / unapproved`,
+/// since the glyphs name git states. The repo pair counts what git status
+/// reports under any base and keeps `staged / unstaged`.
 fn focused_staged_label(
     kind: MarkKind,
     base_lead: Option<&str>,
     repo: Option<(usize, usize)>,
     file: Option<(usize, usize)>,
     position: Option<&HunkPosition>,
-) -> Option<String> {
+    (base_style, theme): (Style, &crate::theme::Theme),
+) -> Option<Vec<StatusSeg>> {
     let place = position.map(|position| (position.file_at, position.file_total));
-    let body = staged_label_body(kind, base_lead, repo, file, place)?;
-    let Some(position) = position else {
-        return Some(format!(" {body} "));
-    };
+    let StagedBody { text, counts } = staged_label_body(kind, base_lead, repo, file, place)?;
 
-    let at = position
-        .hunk_at
-        .map_or_else(|| "-".to_string(), |k| k.to_string());
-    Some(format!(" {body} · hunk {at}/{} ", position.hunk_total))
+    let mut segments = Vec::new();
+    if let Some(text) = text {
+        let joint = if counts.is_some() { " \u{b7}" } else { "" };
+        segments.push((format!(" {text}{joint}"), base_style));
+    }
+    if let Some((staged, unstaged)) = counts {
+        segments.push((
+            format!(" \u{270e}{unstaged}"),
+            tinted(
+                base_style,
+                theme,
+                crate::theme::scope::UI_STATUSBAR_UNSTAGED,
+            ),
+        ));
+        segments.push((
+            format!(" \u{271a}{staged}"),
+            tinted(base_style, theme, crate::theme::scope::UI_STATUSBAR_STAGED),
+        ));
+    }
+    let close = match position {
+        Some(position) => {
+            let at = position
+                .hunk_at
+                .map_or_else(|| "-".to_string(), |k| k.to_string());
+            format!(" \u{b7} hunk {at}/{} ", position.hunk_total)
+        },
+        None => " ".to_string(),
+    };
+    segments.push((close, base_style));
+    Some(segments)
 }
 
-/// The counts half of [`focused_staged_label`], unpadded so the hunk position
-/// appends behind it.
+/// What [`staged_label_body`] answers for [`focused_staged_label`].
+struct StagedBody {
+    /// The unpadded text, or `None` when only the counts show.
+    text: Option<String>,
+    /// The file's git hunk counts as `(staged, unstaged)`, which follow the
+    /// text as glyph segments. `None` for a review, whose counts stay words in
+    /// the text, and for a file with no hunks.
+    counts: Option<(usize, usize)>,
+}
+
+/// The text half of [`focused_staged_label`], with the file's git counts that
+/// follow it.
 ///
 /// `place` is the focused file's `(at, total)` among the changed files. With
-/// it, the file part reads `file {at}/{total}` and then the file's counts, and
-/// a file with no counts keeps its place alone.
+/// it, the text reads `file {at}/{total}` after the repo pair or the base. A
+/// file with no counts keeps its place alone.
 fn staged_label_body(
     kind: MarkKind,
     base_lead: Option<&str>,
     repo: Option<(usize, usize)>,
     file: Option<(usize, usize)>,
     place: Option<(usize, usize)>,
-) -> Option<String> {
-    let (staged_word, unstaged_word) = match kind {
-        MarkKind::Staged => ("staged", "unstaged"),
-        MarkKind::Approved => ("approved", "unapproved"),
-    };
+) -> Option<StagedBody> {
     let file = file.filter(|&(staged, unstaged)| staged > 0 || unstaged > 0);
-    let file_part = match (place, file) {
-        (Some((at, total)), Some((staged, unstaged))) => Some(format!(
-            "file {at}/{total} · {staged} {staged_word} / {unstaged} {unstaged_word}"
-        )),
+    let (counts, worded) = match kind {
+        MarkKind::Staged => (file, None),
+        MarkKind::Approved => (None, file),
+    };
+    let words = |(approved, unapproved): (usize, usize)| {
+        format!("{approved} approved / {unapproved} unapproved")
+    };
+    let file_part = match (place, worded) {
+        (Some((at, total)), Some(pair)) => {
+            Some(format!("file {at}/{total} \u{b7} {}", words(pair)))
+        },
         (Some((at, total)), None) => Some(format!("file {at}/{total}")),
-        (None, Some((staged, unstaged))) => Some(format!(
-            "file {staged} {staged_word} / {unstaged} {unstaged_word}"
-        )),
+        (None, Some(pair)) => Some(format!("file {}", words(pair))),
         (None, None) => None,
+    };
+    let joined = |head: String| match &file_part {
+        Some(part) => format!("{head} \u{b7} {part}"),
+        None => head,
     };
 
     if let Some(lead) = base_lead {
-        return Some(match file_part {
-            Some(part) => format!("{lead} · {part}"),
-            None => lead.to_string(),
+        return Some(StagedBody {
+            text: Some(joined(lead.to_string())),
+            counts,
         });
     }
 
     let Some((repo_staged, repo_unstaged)) = repo else {
-        let (staged, unstaged) = file?;
-        return Some(format!(
-            "{staged} {staged_word} / {unstaged} {unstaged_word}"
-        ));
+        let pair = file?;
+        return Some(match kind {
+            MarkKind::Staged => StagedBody {
+                text: None,
+                counts: Some(pair),
+            },
+            MarkKind::Approved => StagedBody {
+                text: Some(words(pair)),
+                counts: None,
+            },
+        });
     };
     if repo_staged == 0 && repo_unstaged == 0 && file.is_none() {
         return None;
     }
 
     let repo_part = format!("repo {repo_staged} staged / {repo_unstaged} unstaged");
-    Some(match file_part {
-        Some(part) => format!("{repo_part} · {part}"),
-        None => repo_part,
+    Some(StagedBody {
+        text: Some(joined(repo_part)),
+        counts,
     })
 }
 
@@ -2263,19 +2380,48 @@ mod tests {
         h.drain_lsp();
     }
 
+    /// After the servers, the bar names each source the file's diagnostics come
+    /// from, once, in the order they first appear.
     #[test]
-    fn lsp_badge_hidden_when_idle() {
+    fn the_status_row_names_each_diagnostic_source_once() {
+        let mut h = Stoat::test();
+        h.install_lsp_server("rust", "rust-analyzer");
+        open_rust(&mut h);
+        let sourced = |source: &str| Diagnostic {
+            source: Some(source.to_string()),
+            ..diag(DiagnosticSeverity::WARNING)
+        };
+        h.seed_diagnostics(
+            "/lsp/a.rs",
+            vec![sourced("rustc"), sourced("clippy"), sourced("rustc")],
+        );
+
+        let bar = bar_row(&h.render_composited());
+        assert!(
+            bar.contains(" rust-analyzer  rustc \u{b7} clippy "),
+            "the server, then each source once:\n{bar}"
+        );
+    }
+
+    /// An attached server shows its name while idle, with no spinner, and
+    /// stamps the hover rect that opens its status.
+    #[test]
+    fn lsp_badge_names_an_idle_server() {
         let mut h = Stoat::test();
         h.install_lsp_server("rust", "rust-analyzer");
         open_rust(&mut h);
 
         let buf = h.render_composited();
         let bar = bar_row(&buf);
-        assert!(
-            !bar.contains("RA"),
-            "an idle server paints no badge:\n{bar}"
+        assert_eq!(
+            (
+                bar.contains(" rust-analyzer "),
+                bar.contains('⠋'),
+                h.stoat.lsp_badge_rect.is_some(),
+            ),
+            (true, false, true),
+            "the name, no spinner, and the hover rect:\n{bar}"
         );
-        assert!(h.stoat.lsp_badge_rect.is_none(), "and stamps no hover rect");
     }
 
     #[test]
@@ -2288,12 +2434,8 @@ mod tests {
         let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
-            bar.contains('⠋'),
-            "busy badge shows the spinner glyph:\n{bar}"
-        );
-        assert!(
-            bar.contains("RA"),
-            "busy badge keeps the short name:\n{bar}"
+            bar.contains("⠋ rust-analyzer "),
+            "a busy server shows the spinner before its name:\n{bar}"
         );
     }
 
@@ -2336,13 +2478,16 @@ mod tests {
         open_rust(&mut h);
 
         let bar = bar_row(&h.render_composited());
-        assert!(!bar.contains("RA"), "no server is up yet:\n{bar}");
+        assert!(
+            !bar.contains("rust-analyzer"),
+            "no server is up yet:\n{bar}"
+        );
 
         let fake = h.install_lsp_server("rust", "rust-analyzer");
         mark_busy(&mut h, &fake);
         let bar = bar_row(&h.render_composited());
         assert!(
-            bar.contains("RA"),
+            bar.contains("rust-analyzer"),
             "the newly installed server badges on the next paint:\n{bar}"
         );
     }
@@ -2357,14 +2502,14 @@ mod tests {
 
         let bar = bar_row(&h.render_composited());
         assert!(
-            !bar.contains("RA"),
-            "an idle server paints no badge:\n{bar}"
+            bar.contains(" rust-analyzer ") && !bar.contains('⠋'),
+            "an idle server paints its name with no spinner:\n{bar}"
         );
 
         mark_busy(&mut h, &fake);
         let bar = bar_row(&h.render_composited());
         assert!(
-            bar.contains("RA"),
+            bar.contains("⠋ rust-analyzer "),
             "the flag refreshes without the names being rebuilt:\n{bar}"
         );
     }
@@ -2381,7 +2526,7 @@ mod tests {
         let buf = h.render_composited();
         let bar = bar_row(&buf);
         assert!(
-            bar.contains("RA") && bar.contains("SS"),
+            bar.contains("rust-analyzer") && bar.contains("second-server"),
             "each running server gets its own badge:\n{bar}"
         );
     }
@@ -2426,7 +2571,7 @@ mod tests {
             .map(|(x, y)| buf[(x, y)].symbol().to_string())
             .collect();
         assert_eq!(
-            rendered.matches("RA").count(),
+            rendered.matches("rust-analyzer").count(),
             1,
             "only the focused pane paints a badge:\n{rendered}"
         );
@@ -2445,14 +2590,14 @@ mod tests {
             .map(|x| buf[(x, rect.y)].symbol())
             .collect();
         // Under cfg(test) every type role is a full cell, so the busy badge
-        // (spinner + " RA " = 6 chars) covers (6 - 1) = 5 cells; the leftmost pad
+        // (" ⠋ rust-analyzer ", 17 chars) covers 16 cells. The leftmost pad
         // space carries no glyph and is dropped.
         assert_eq!(
-            rect.width, 5,
+            rect.width, 16,
             "the rect is the scaled extent of the drawn glyphs, not their full char span"
         );
         assert!(
-            span.contains("RA"),
+            span.contains("rust-analyzer"),
             "and covers the drawn badge glyph columns:\n{span}"
         );
     }
@@ -2616,44 +2761,94 @@ mod tests {
         h.assert_snapshot("status_bar_diagnostic_badge_warning_color");
     }
 
+    /// The text the staged label's segments read, styles left out.
+    fn staged_label(
+        kind: MarkKind,
+        base_lead: Option<&str>,
+        repo: Option<(usize, usize)>,
+        file: Option<(usize, usize)>,
+        position: Option<&HunkPosition>,
+    ) -> Option<String> {
+        use ratatui::style::Style;
+
+        let theme = crate::theme::Theme::empty();
+        focused_staged_label(
+            kind,
+            base_lead,
+            repo,
+            file,
+            position,
+            (Style::default(), &theme),
+        )
+        .map(|segments| segments.into_iter().map(|(text, _)| text).collect())
+    }
+
+    /// The pencil count takes `ui.statusbar.unstaged` and the plus count
+    /// `ui.statusbar.staged`, which the shipped theme reads as its accent and
+    /// teal.
+    #[test]
+    fn the_staged_label_colors_each_count() {
+        use ratatui::style::{Color, Style};
+
+        let h = Stoat::test();
+        let segments = focused_staged_label(
+            MarkKind::Staged,
+            None,
+            None,
+            Some((1, 4)),
+            None,
+            (Style::default(), &*h.stoat.theme),
+        )
+        .expect("a label");
+        let colors: Vec<(String, Option<Color>)> = segments
+            .into_iter()
+            .map(|(text, style)| (text, style.fg))
+            .collect();
+        assert_eq!(
+            colors,
+            [
+                (" \u{270e}4".to_string(), Some(Color::Rgb(0x7f, 0xb0, 0xff))),
+                (" \u{271a}1".to_string(), Some(Color::Rgb(0x6c, 0xc7, 0xd6))),
+                (" ".to_string(), None),
+            ],
+        );
+    }
+
     #[test]
     fn the_staged_label_pairs_the_repo_hunks_with_the_focused_file() {
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, Some((2, 3)), Some((1, 4)), None)
-                .as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 1 staged / 4 unstaged "),
+            staged_label(MarkKind::Staged, None, Some((2, 3)), Some((1, 4)), None).as_deref(),
+            Some(" repo 2 staged / 3 unstaged · \u{270e}4 \u{271a}1 "),
             "both pairs read side by side"
         );
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, Some((2, 3)), None, None).as_deref(),
+            staged_label(MarkKind::Staged, None, Some((2, 3)), None, None).as_deref(),
             Some(" repo 2 staged / 3 unstaged "),
             "a file with no diff map drops its half"
         );
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, Some((2, 3)), Some((0, 0)), None)
-                .as_deref(),
+            staged_label(MarkKind::Staged, None, Some((2, 3)), Some((0, 0)), None).as_deref(),
             Some(" repo 2 staged / 3 unstaged "),
             "and so does a file whose diff map holds no hunks"
         );
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, None, Some((1, 4)), None).as_deref(),
-            Some(" 1 staged / 4 unstaged "),
+            staged_label(MarkKind::Staged, None, None, Some((1, 4)), None).as_deref(),
+            Some(" \u{270e}4 \u{271a}1 "),
             "no repo tally yet falls back to the file's own counts"
         );
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, None, None, None),
+            staged_label(MarkKind::Staged, None, None, None, None),
             None,
             "nothing to say without either"
         );
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, Some((0, 0)), Some((0, 0)), None),
+            staged_label(MarkKind::Staged, None, Some((0, 0)), Some((0, 0)), None),
             None,
             "a clean repo and an unchanged file hide the segment"
         );
         assert_eq!(
-            focused_staged_label(MarkKind::Staged, None, Some((0, 0)), Some((1, 0)), None)
-                .as_deref(),
-            Some(" repo 0 staged / 0 unstaged · file 1 staged / 0 unstaged "),
+            staged_label(MarkKind::Staged, None, Some((0, 0)), Some((1, 0)), None).as_deref(),
+            Some(" repo 0 staged / 0 unstaged · \u{270e}0 \u{271a}1 "),
             "a stale zero tally still shows against a file that has hunks"
         );
     }
@@ -2718,7 +2913,7 @@ mod tests {
     fn the_staged_label_closes_with_the_hunk_under_the_cursor() {
         let at_second_file = hunk_position(2, 4, Some(2), 7);
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 None,
                 Some((2, 3)),
@@ -2726,11 +2921,11 @@ mod tests {
                 Some(&at_second_file)
             )
             .as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 2/4 · 1 staged / 4 unstaged · hunk 2/7 "),
+            Some(" repo 2 staged / 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk 2/7 "),
             "the file's place leads its counts, and the hunk position closes the label"
         );
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 None,
                 Some((2, 3)),
@@ -2742,7 +2937,7 @@ mod tests {
             "a file with no hunks keeps its place and drops its counts"
         );
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 None,
                 Some((2, 3)),
@@ -2750,11 +2945,11 @@ mod tests {
                 Some(&hunk_position(2, 4, None, 7))
             )
             .as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 2/4 · 1 staged / 4 unstaged · hunk -/7 "),
+            Some(" repo 2 staged / 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk -/7 "),
             "a cursor above the first hunk stands at no position"
         );
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 Some("diff vs abc1234"),
                 None,
@@ -2762,11 +2957,11 @@ mod tests {
                 Some(&hunk_position(2, 4, Some(5), 13))
             )
             .as_deref(),
-            Some(" diff vs abc1234 · file 2/4 · 1 staged / 4 unstaged · hunk 5/13 "),
+            Some(" diff vs abc1234 · file 2/4 · \u{270e}4 \u{271a}1 · hunk 5/13 "),
             "a named base carries the position too"
         );
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 None,
                 None,
@@ -2781,7 +2976,7 @@ mod tests {
     #[test]
     fn a_diff_base_takes_the_repo_tally_s_place_in_the_label() {
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 Some("diff vs abc1234"),
                 Some((2, 3)),
@@ -2789,11 +2984,11 @@ mod tests {
                 None
             )
             .as_deref(),
-            Some(" diff vs abc1234 · file 1 staged / 4 unstaged "),
+            Some(" diff vs abc1234 · \u{270e}4 \u{271a}1 "),
             "the base replaces the repo pair rather than joining it"
         );
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 Some("diff vs abc1234"),
                 Some((2, 3)),
@@ -2805,7 +3000,7 @@ mod tests {
             "a file with no hunks still says what is under review"
         );
         assert_eq!(
-            focused_staged_label(
+            staged_label(
                 MarkKind::Staged,
                 Some("diff vs abc1234"),
                 None,
@@ -2825,21 +3020,21 @@ mod tests {
     fn a_review_s_file_counts_read_as_approvals() {
         assert_eq!(
             [
-                focused_staged_label(
+                staged_label(
                     MarkKind::Approved,
                     Some("diff vs main base0"),
                     None,
                     Some((1, 4)),
                     None
                 ),
-                focused_staged_label(
+                staged_label(
                     MarkKind::Approved,
                     None,
                     Some((2, 3)),
                     Some((1, 4)),
                     Some(&hunk_position(2, 4, Some(1), 5))
                 ),
-                focused_staged_label(MarkKind::Approved, None, None, Some((1, 4)), None),
+                staged_label(MarkKind::Approved, None, None, Some((1, 4)), None),
             ],
             [
                 Some(" diff vs main base0 · file 1 approved / 4 unapproved ".to_string()),
@@ -2955,7 +3150,7 @@ mod tests {
         assert!(
             rendered
                 .replace('─', " ")
-                .contains("repo 1 staged / 1 unstaged · file 1 staged / 1 unstaged"),
+                .contains("repo 1 staged / 1 unstaged · \u{270e}1 \u{271a}1"),
             "statusline reports the repo's files and the focused file's hunks:\n{rendered}"
         );
     }
@@ -3002,7 +3197,7 @@ mod tests {
     #[test]
     fn the_staged_summary_gives_way_to_a_message_it_leaves_no_room_for() {
         for stoatty in [true, false] {
-            let mut h = crate::test_harness::TestHarness::with_size(112, 12);
+            let mut h = crate::test_harness::TestHarness::with_size(96, 12);
             h.stoat.stoatty = stoatty;
             h.stage_index_scenario(
                 "/repo",
@@ -3026,7 +3221,7 @@ mod tests {
             assert_eq!(
                 [bar("saved"), bar("follow changes off")],
                 [
-                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · 1 staged / 1 unstaged · hunk -/1 1:1",
+                    "NOR repo diff f.txt saved repo 0 staged / 1 unstaged · file 1/1 · \u{270e}1 \u{271a}1 · hunk -/1 1:1",
                     "NOR repo diff f.txt follow changes off 1:1",
                 ],
                 "stoatty {stoatty}",
@@ -3058,8 +3253,8 @@ mod tests {
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
             format!(
-                "NOR repo changes f.txt repo 0 staged / 1 unstaged · file 1/1 · 1 staged / 1 \
-                 unstaged · hunk 1/1 {}:{}",
+                "NOR repo changes f.txt repo 0 staged / 1 unstaged · file 1/1 · \u{270e}1 \
+                 \u{271a}1 · hunk 1/1 {}:{}",
                 point.row + 1,
                 point.column + 1,
             ),
@@ -3462,9 +3657,8 @@ mod tests {
             .replace('─', " ")
     }
 
-    /// Several cursors show as `{primary}/{count} sels` left of the position,
-    /// with the primary counted in start order, and a lone cursor shows no
-    /// count.
+    /// Several cursors show as `{count} sel` after the file name, and a lone
+    /// cursor shows no count.
     #[test]
     fn the_status_row_counts_the_cursors() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 12);
@@ -3480,7 +3674,7 @@ mod tests {
         assert_eq!(
             [two, status_row(&buf, buf.area)],
             [
-                format!("{:<46}2/2 sels  2:1 ", " NOR  (unnamed) [scratch] [+]"),
+                format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]  2 sel "),
                 format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]"),
             ],
         );
@@ -3488,9 +3682,6 @@ mod tests {
 
     /// An unfocused pane keeps its cursors and shows its position, so it shows
     /// its cursor count too.
-    ///
-    /// The added cursor sits above, so the primary is the first of two, which
-    /// tells the primary's place apart from the count.
     #[test]
     fn an_unfocused_pane_counts_its_cursors() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 12);
@@ -3503,13 +3694,11 @@ mod tests {
         let buf = h.render_composited();
         let ws = h.stoat.active_workspace();
         let bar = status_row(&buf, ws.panes.pane(counted).area);
+        let width = bar.chars().count() - "1:1 ".len();
         assert_eq!(
-            (
-                ws.panes.focus() != counted,
-                bar.ends_with(" 1/2 sels  1:1 ")
-            ),
-            (true, true),
-            "the split moves the focus away, and the pane keeps its count:\n{bar}",
+            (ws.panes.focus() != counted, bar.clone()),
+            (true, format!("{:<width$}1:1 ", " [scratch] [+]  2 sel ")),
+            "the split moves the focus away, and the pane keeps its count",
         );
     }
 

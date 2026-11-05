@@ -81,6 +81,33 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     expect_region(&shot, &mut home, (2, y, 2, height), DISABLED, "state_lane");
 }
 
+/// The status row sits on chrome, and its hairline takes the bar's own color,
+/// so no line shows above the bar.
+///
+/// The hairline is the top pixel row of the status row, read here over a
+/// blank cell of the bar.
+#[test]
+fn the_status_row_sits_on_chrome_with_no_hairline() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
+    let (x, y, width, _) = cell_rect(80, ROWS - 1, 1, 1);
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(20, ROWS - 1, 1, 1),
+        CHROME,
+        "status_text_cell",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y, width, 1),
+        CHROME,
+        "status_hairline",
+    );
+}
+
 /// A second tab shows the tab bar on chrome, with the active tab on the base
 /// surface.
 ///

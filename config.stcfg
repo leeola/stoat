@@ -102,6 +102,10 @@ theme default_dark {
     ui.mode_label          = { fg: black, modifiers: [bold] };
     ui.message.error.fg    = danger;
 
+    ui.statusbar.separator.fg = muted;
+    ui.statusbar.unstaged.fg  = accent;
+    ui.statusbar.staged.fg    = info;
+
     ui.tabbar.active       = { fg: text, bg: muted };
     ui.tabbar.inactive     = { fg: dim, bg: subtle };
 
@@ -256,6 +260,7 @@ theme ermine_night inherits default_dark {
     ui.statusbar.focused   = { fg: dim, bg: chrome };
     ui.statusbar.unfocused = { fg: muted, bg: chrome };
     ui.mode_label          = { fg: chrome, modifiers: [bold] };
+    ui.statusbar.separator.fg = chrome;
 
     ui.statusline.normal.fg  = accent;
     ui.statusline.submode.fg = muted;

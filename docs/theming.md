@@ -236,6 +236,10 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   reader is on it.
 - `ui.statusbar.focused`, `ui.statusbar.unfocused`, `ui.mode_label` -- the
   docked status bar and its mode chip.
+- `ui.statusbar.separator` -- the hairline along the top of the status bar
+  and the tab bar. A theme that leaves it unset draws `ui.border.inactive`.
+- `ui.statusbar.unstaged`, `ui.statusbar.staged` -- the status bar's counts of
+  the focused file's unstaged and staged hunks.
 - `ui.statusline.<mode>` -- the mode chip color per editor mode (`normal`,
   `insert`, `select`, `prompt`, `run`, `commits`, `rebase`, `reword`,
   `conflict`, `review`, `submode`, `default`).

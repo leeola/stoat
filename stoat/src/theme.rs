@@ -805,6 +805,13 @@ pub mod scope {
 
     pub const UI_STATUSBAR_FOCUSED: &str = "ui.statusbar.focused";
     pub const UI_STATUSBAR_UNFOCUSED: &str = "ui.statusbar.unfocused";
+    /// The hairline along the top of a status bar and the tab bar. A theme
+    /// that leaves it unset draws the hairline in [`UI_BORDER_INACTIVE`].
+    pub const UI_STATUSBAR_SEPARATOR: &str = "ui.statusbar.separator";
+    /// The color of the focused file's unstaged change count in the status
+    /// bar. [`UI_STATUSBAR_STAGED`] is its sibling for the staged count.
+    pub const UI_STATUSBAR_UNSTAGED: &str = "ui.statusbar.unstaged";
+    pub const UI_STATUSBAR_STAGED: &str = "ui.statusbar.staged";
     pub const UI_MODE_LABEL: &str = "ui.mode_label";
 
     pub const UI_STATUSLINE_NORMAL: &str = "ui.statusline.normal";

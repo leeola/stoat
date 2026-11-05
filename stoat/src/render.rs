@@ -169,11 +169,12 @@ pub(crate) struct MinimapChrome<'a> {
 
 /// One language server as the status bar shows it.
 pub(crate) struct StatusServer {
-    /// The abbreviation the badge paints, from [`pane::lsp_short_name`].
+    /// The abbreviation the server status popout paints, from
+    /// [`pane::lsp_short_name`].
     pub(crate) short: String,
-    /// The server's own name. Kept because the busy lookup is keyed by it while
-    /// the bar paints the abbreviation, so refreshing the flag needs both.
-    name: String,
+    /// The server's own name, which the status bar paints and the busy lookup
+    /// is keyed by.
+    pub(crate) name: String,
     /// Whether the server has work-done progress in flight, which drives the
     /// badge's spinner glyph.
     pub(crate) busy: bool,
