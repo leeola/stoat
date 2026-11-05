@@ -204,7 +204,7 @@ pub(crate) fn paint_help_list_rows(
     buf: &mut Buffer,
 ) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
 

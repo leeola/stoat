@@ -256,6 +256,11 @@ theme ermine_night inherits default_dark {
     ui.cursor              = { fg: base, bg: cursor_secondary, modifiers: [] };
     ui.virtual.inlay       = { fg: dim, bg: hover, modifiers: [italic] };
 
+    # Every list reads these two. default_dark leaves them unset, so its lists
+    # keep their own selection scopes and ui.search.match.
+    ui.list.selected = { fg: text, bg: select };
+    ui.list.match    = { fg: warning, modifiers: [bold] };
+
     ui.tabbar.active       = { fg: text, bg: base };
     ui.tabbar.inactive     = { fg: dim, bg: chrome };
     ui.statusbar.focused   = { fg: dim, bg: chrome };

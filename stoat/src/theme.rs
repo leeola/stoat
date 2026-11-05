@@ -66,6 +66,28 @@ impl Theme {
         style
     }
 
+    /// The style a list paints its selected row with.
+    ///
+    /// Every list reads `ui.list.selected`, so a theme that sets it gives all
+    /// lists one selected row. A theme that leaves it unset paints a list's row
+    /// with `fallback`, the selection scope that list names for itself.
+    pub(crate) fn list_selected(&self, fallback: &str) -> Style {
+        self.try_get(scope::UI_LIST_SELECTED)
+            .unwrap_or_else(|| self.get(fallback))
+    }
+
+    /// The style a list paints the characters its query matched with.
+    ///
+    /// A theme that leaves `ui.list.match` unset paints them with
+    /// `ui.search.match`.
+    pub(crate) fn list_match(&self) -> Style {
+        // A theme inherits its parent's scopes field by field, and a list match
+        // that a parent sets with a background keeps that background in every
+        // child. The fallback lets a parent leave the list scopes unset.
+        self.try_get(scope::UI_LIST_MATCH)
+            .unwrap_or_else(|| self.get(scope::UI_SEARCH_MATCH))
+    }
+
     /// The frame a panel in `role` draws with.
     ///
     /// A theme sets the frame under `ui.panel.<role>` with the fields `radius`,
@@ -730,6 +752,13 @@ pub mod scope {
 
     pub const UI_SEARCH_MATCH: &str = "ui.search.match";
 
+    /// The selected row of every list. A theme that leaves it unset paints each
+    /// list's row with the selection scope that list names for itself.
+    pub const UI_LIST_SELECTED: &str = "ui.list.selected";
+    /// The characters a list's query matched. A theme that leaves it unset
+    /// paints them with [`UI_SEARCH_MATCH`].
+    pub const UI_LIST_MATCH: &str = "ui.list.match";
+
     pub const UI_HIGHLIGHT_READ: &str = "ui.highlight.read";
     pub const UI_HIGHLIGHT_WRITE: &str = "ui.highlight.write";
 
@@ -1387,6 +1416,45 @@ mod tests {
                 Style::default().fg(rgb(0xdfe2e8)).bg(rgb(0x23324a)),
                 Style::default().fg(rgb(0xc59af0)),
             ]
+        );
+    }
+
+    /// A theme that sets the list scopes gives every list one look, as
+    /// ermine_night does. A theme that leaves them unset, as default_dark does,
+    /// paints a list with the selection scope it names and with
+    /// `ui.search.match`.
+    #[test]
+    fn the_list_scopes_fall_back_to_the_lists_own_scopes() {
+        let [ermine, dark] = shipped_themes();
+        let custom = load(
+            "theme t { ui.selection.bg = red; ui.list.selected.bg = blue; }",
+            "t",
+        );
+        let styles = |theme: &Theme| {
+            (
+                theme.list_selected(scope::UI_SELECTION_REVERSED),
+                theme.list_match(),
+            )
+        };
+
+        assert_eq!(
+            [styles(&custom), styles(&ermine), styles(&dark)],
+            [
+                (Style::default().bg(Color::Blue), Style::default()),
+                (
+                    Style::default().fg(rgb(0xdfe2e8)).bg(rgb(0x23324a)),
+                    Style::default()
+                        .fg(rgb(0xe8bd6a))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                (
+                    Style::default()
+                        .fg(rgb(0x282c34))
+                        .bg(rgb(0xfafafa))
+                        .add_modifier(Modifier::REVERSED),
+                    Style::default().fg(rgb(0x282c34)).bg(rgb(0xe5c07b)),
+                ),
+            ],
         );
     }
 

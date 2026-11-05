@@ -108,9 +108,9 @@ fn paint_candidate_rows(
     picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let match_style = theme.list_match();
 
     // The table sits a column in from the border, and the path column carries
     // the whole width it asks for so a long path truncates rather than pushing

@@ -126,9 +126,9 @@ fn paint_diagnostic_rows(
     picker.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let match_style = theme.list_match();
 
     let workspace_scope = matches!(picker.scope(), PickerScope::Workspace);
     let columns: &[Column] = match workspace_scope {

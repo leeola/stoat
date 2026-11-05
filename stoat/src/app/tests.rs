@@ -15615,7 +15615,10 @@ fn location_picker_renders_a_selection_past_the_visible_rows() {
         row_text(last_row)
     );
 
-    let selection = h.stoat.theme.get(crate::theme::scope::UI_SELECTION);
+    let selection = h
+        .stoat
+        .theme
+        .list_selected(crate::theme::scope::UI_SELECTION);
     assert_eq!(
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,
@@ -15843,7 +15846,10 @@ fn diagnostics_picker_renders_a_selection_past_the_visible_rows() {
         row_text(last_row)
     );
 
-    let selection = h.stoat.theme.get(crate::theme::scope::UI_SELECTION);
+    let selection = h
+        .stoat
+        .theme
+        .list_selected(crate::theme::scope::UI_SELECTION);
     assert_eq!(
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,
@@ -16191,7 +16197,10 @@ fn jumplist_picker_renders_a_selection_past_the_visible_rows() {
         row_text(last_row)
     );
 
-    let selection = h.stoat.theme.get(crate::theme::scope::UI_SELECTION);
+    let selection = h
+        .stoat
+        .theme
+        .list_selected(crate::theme::scope::UI_SELECTION);
     assert_eq!(
         h.rendered_buffer()[(rows.x + 1, last_row)].style().bg,
         selection.bg,

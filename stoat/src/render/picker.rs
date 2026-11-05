@@ -206,9 +206,9 @@ pub(crate) mod test_support {
 /// both render identical rows. Rows are read from `picklist.base`, which every
 /// caller keeps in sync with its display set on refilter.
 ///
-/// `row_style` paints every row but the selected one, which takes the theme's
-/// selection style. A caller passes its own style to set a whole list apart,
-/// such as a list of ignored files.
+/// `row_style` paints every row but the selected one, which takes
+/// [`Theme::list_selected`]. A caller passes its own style to set a whole
+/// list apart, such as a list of ignored files.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_path_rows(
     picklist: &PickList,
@@ -225,8 +225,8 @@ pub(crate) fn paint_path_rows(
     if rows == 0 {
         return;
     }
-    let selected_style = theme.get(scope::UI_SELECTION);
-    let match_style = theme.get(scope::UI_SEARCH_MATCH);
+    let selected_style = theme.list_selected(scope::UI_SELECTION);
+    let match_style = theme.list_match();
 
     let end_x = area.x + area.width;
     let label_x = area.x + 1;

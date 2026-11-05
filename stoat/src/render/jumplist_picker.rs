@@ -109,9 +109,9 @@ fn paint_jump_rows(
     picker.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let match_style = theme.list_match();
 
     let cursor_idx = picker.cursor_idx();
     let selected = picker.selected();

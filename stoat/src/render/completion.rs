@@ -291,8 +291,8 @@ pub(crate) fn paint_completion_rows(
     buf: &mut Buffer,
 ) {
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
+    let match_style = theme.list_match();
 
     let pattern = fuzzy::parse_query(prefix);
     let mut hay_buf: Vec<char> = Vec::new();
@@ -326,8 +326,10 @@ pub(crate) fn paint_completion_rows(
                 if col >= area.x + area.width {
                     break;
                 }
+                // A match style with no background keeps the row's own fill, so
+                // the selected row stays whole under a matched char.
                 let style = if indices_buf.contains(&(col_idx as u32)) {
-                    match_style
+                    row_style.patch(match_style)
                 } else {
                     row_style
                 };

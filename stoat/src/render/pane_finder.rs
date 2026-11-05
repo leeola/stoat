@@ -101,8 +101,8 @@ fn paint_view_rows(
     finder.picker.viewport_rows = Some(rows);
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
+    let match_style = theme.list_match();
 
     let selected = finder.selected();
 

@@ -110,7 +110,7 @@ pub(crate) fn paint_match_rows(
     }
 
     let row_style = theme.get(scope::UI_TEXT);
-    let selected_style = theme.get(scope::UI_SELECTION);
+    let selected_style = theme.list_selected(scope::UI_SELECTION);
 
     let end_x = area.x + area.width;
     let label_x = area.x + 1;

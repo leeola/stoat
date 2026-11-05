@@ -945,8 +945,9 @@ pub(crate) fn query_modified(git_host: &dyn GitHost, git_root: &Path) -> Vec<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_harness::keys;
+    use crate::{test_fixture, test_harness::keys};
     use crossterm::event::{Event, KeyCode};
+    use ratatui::style::{Color, Modifier};
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -3168,6 +3169,34 @@ mod tests {
         h.type_keys("space p");
         h.type_text(".rs foo");
         h.assert_snapshot("file_finder_multi_token_highlight");
+    }
+
+    /// Under ermine_night the finder's selected row fills with the select
+    /// surface, and a matched char reads warning in bold over that fill.
+    #[test]
+    fn the_finder_paints_its_rows_in_the_list_scopes() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("src/foo.rs", "fn foo() {}")]);
+        h.type_keys("space p");
+        h.type_text("foo");
+        h.settle();
+
+        let list = test_fixture::finder_layout(&h).list;
+        let buf = h.render_composited();
+        let style = |col: u16| {
+            let cell = &buf[(list.x + col, list.y)];
+            (cell.fg, cell.bg, cell.modifier)
+        };
+        let select = Color::Rgb(0x23, 0x32, 0x4a);
+
+        assert_eq!(
+            [style(2), style(5)],
+            [
+                (Color::Rgb(0xdf, 0xe2, 0xe8), select, Modifier::empty()),
+                (Color::Rgb(0xe8, 0xbd, 0x6a), select, Modifier::BOLD),
+            ],
+            "the r and the f of src/foo.rs on the selected first row",
+        );
     }
 
     /// The finder modal is opaque, so a short preview file's blank rows render

@@ -179,7 +179,7 @@ pub(crate) fn paint_commit_rows(
         return;
     }
 
-    let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
+    let sel_style = theme.list_selected(crate::theme::scope::UI_SELECTION_REVERSED);
     let sha_style = theme.get(s::VCS_COMMIT_SHA);
     let summary_style = theme.get(s::VCS_COMMIT_SUMMARY);
 

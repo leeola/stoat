@@ -49,7 +49,7 @@ pub(crate) fn render_rebase(
     };
 
     use crate::theme::scope as s;
-    let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
+    let sel_style = theme.list_selected(crate::theme::scope::UI_SELECTION_REVERSED);
     let pick_style = theme.get(s::VCS_REBASE_PICK);
     let squash_style = theme.get(s::VCS_REBASE_SQUASH);
     let fixup_style = theme.get(s::VCS_REBASE_FIXUP);

@@ -90,7 +90,7 @@ pub(crate) fn render_conflict(
     use crate::theme::scope as s;
     let dim = theme.get(s::UI_TEXT_MUTED);
     let header_style = theme.get(s::VCS_CONFLICT_HEADER);
-    let sel_style = theme.get(crate::theme::scope::UI_SELECTION_REVERSED);
+    let sel_style = theme.list_selected(crate::theme::scope::UI_SELECTION_REVERSED);
     let ours_style = theme.get(s::VCS_CONFLICT_OURS);
     let theirs_style = theme.get(s::VCS_CONFLICT_THEIRS);
     let file_style = theme.get(s::UI_TEXT);

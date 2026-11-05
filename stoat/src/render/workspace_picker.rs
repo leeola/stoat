@@ -92,9 +92,9 @@ pub(crate) fn render_workspace_picker(
 
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let current_style = theme.get(crate::theme::scope::UI_PROMPT);
-    let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
     let header_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
-    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+    let match_style = theme.list_match();
 
     let query = picker.input.text(ws);
     let query = query.trim();

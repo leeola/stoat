@@ -154,8 +154,8 @@ pub(crate) fn paint_symbol_rows(
     }
 
     let row_style = theme.get(scope::UI_TEXT);
-    let selected_style = theme.get(scope::UI_SELECTION);
-    let match_style = theme.get(scope::UI_SEARCH_MATCH);
+    let selected_style = theme.list_selected(scope::UI_SELECTION);
+    let match_style = theme.list_match();
     let dim_style = theme.get(scope::UI_TEXT_MUTED);
 
     let end_x = area.x + area.width;

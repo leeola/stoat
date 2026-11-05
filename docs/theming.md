@@ -214,7 +214,14 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   ranges. The editor lifts text under the `ui.selection.editor` wash toward
   white or black when the two are close in brightness, so selected text stays
   legible in a theme that pairs them.
-- `ui.search.match` -- the characters a picker's query matched.
+- `ui.search.match` -- the characters a picker's query matched, in a theme
+  that sets no `ui.list.match`.
+- `ui.list.selected`, `ui.list.match` -- the selected row of every list and
+  the characters its query matched. A theme that leaves `ui.list.selected`
+  unset paints each list's row with `ui.selection`, or with
+  `ui.selection.reversed` in the commits, rebase, and conflict views. A theme
+  that leaves `ui.list.match` unset paints the matches with
+  `ui.search.match`.
 - `ui.highlight.read`, `ui.highlight.write` -- symbol-occurrence highlights.
 - `ui.border.focused`, `ui.border.inactive` -- pane and modal borders.
 - `ui.modal.help`, `ui.modal.hints`, `ui.modal.palette`, `ui.modal.picker`,
