@@ -15730,6 +15730,18 @@ fn typing_narrows_the_diagnostics() {
     );
 }
 
+/// A list of every path's diagnostics names its scope in the header's label.
+#[test]
+fn the_workspace_diagnostics_header_names_its_scope() {
+    let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+    open_diagnostics_picker(&mut h, 2);
+    let text = h.rendered_text();
+    assert!(
+        text.contains("diagnostics \u{00B7} workspace \u{203A}"),
+        "the label carries the workspace scope:\n{text}"
+    );
+}
+
 /// The preview shows the selected diagnostic's file, scrolled to the line it
 /// points at, so a reader sees the offending code before jumping to it.
 #[test]

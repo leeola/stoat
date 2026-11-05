@@ -1032,6 +1032,26 @@ mod tests {
         );
     }
 
+    /// The header's label names the mode, and in AST mode the language too.
+    #[test]
+    fn the_header_names_the_search_mode() {
+        fn named_modes(h: &mut TestHarness) -> [bool; 2] {
+            h.snapshot();
+            let text = h.rendered_text();
+            ["ast (rust)", "regex"]
+                .map(|mode| text.contains(&format!("search \u{00B7} {mode} \u{203A}")))
+        }
+
+        let mut h = open_ast_over(&[("a.rs", "fn a() {}\n")], "a.rs");
+        let ast = named_modes(&mut h);
+        h.type_keys("backtab");
+        assert_eq!(
+            (ast, named_modes(&mut h)),
+            ([true, false], [false, true]),
+            "the label names AST with its language, then regex after the toggle",
+        );
+    }
+
     #[test]
     fn ast_mode_matches_target_language_and_skips_others() {
         let mut h = open_ast_over(

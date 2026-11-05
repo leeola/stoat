@@ -50,14 +50,7 @@ pub(crate) fn render_walkthrough_picker(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
     crate::render::clear_modal(layout.modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
-        buf,
-        layout.modal,
-        Some(" walkthroughs "),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    crate::render::chrome::modal_frame(buf, layout.modal, None, modal_style, theme, &mut *scene);
 
     crate::render::picker::filter_header(
         buf,

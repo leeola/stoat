@@ -86,13 +86,13 @@ pub(crate) fn render_symbol_finder(
         return;
     };
 
-    let title = match finder.scope {
-        SymbolFinderScope::Document => " symbols (document) ",
-        SymbolFinderScope::Workspace => " symbols (workspace) ",
+    let label = match finder.scope {
+        SymbolFinderScope::Document => "symbols \u{00B7} document",
+        SymbolFinderScope::Workspace => "symbols \u{00B7} workspace",
     };
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     crate::render::clear_modal(modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(buf, modal, Some(title), modal_style, theme, &mut *scene);
+    crate::render::chrome::modal_frame(buf, modal, None, modal_style, theme, &mut *scene);
 
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
 
@@ -100,7 +100,7 @@ pub(crate) fn render_symbol_finder(
         buf,
         inner,
         &FilterHeader {
-            label: "symbols",
+            label,
             prompt: FILTER_PROMPT,
             count: Some((finder.filtered.len(), finder.entries.len())),
             chip: None,

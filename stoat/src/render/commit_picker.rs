@@ -165,29 +165,23 @@ pub(crate) fn render_commit_picker(
         return;
     };
 
-    // The same rows serve every role, so the title is what tells the user
+    // The same rows serve every role, so the label is what tells the user
     // whether picking one starts a review, closes the listing, or pops a stash.
     // A drilled scope names itself instead, since which commits are listed
     // matters more there than which role listed them.
-    let title = match &picker.scope_label {
-        Some(label) => format!(" {label} "),
+    let state = match &picker.scope_label {
+        Some(label) => label.as_str(),
         None => match picker.role {
-            CommitPickerRole::PickBase => " review from commit ".to_string(),
-            CommitPickerRole::Browse => " git log ".to_string(),
-            CommitPickerRole::PickRange => " review from ".to_string(),
-            CommitPickerRole::Stash => " git stash list ".to_string(),
+            CommitPickerRole::PickBase => "review from commit",
+            CommitPickerRole::Browse => "git log",
+            CommitPickerRole::PickRange => "review from",
+            CommitPickerRole::Stash => "git stash list",
         },
     };
+    let label = format!("commits \u{00B7} {state}");
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     crate::render::clear_modal(layout.modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
-        buf,
-        layout.modal,
-        Some(&title),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    crate::render::chrome::modal_frame(buf, layout.modal, None, modal_style, theme, &mut *scene);
 
     let inner = layout.inner;
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
@@ -196,7 +190,7 @@ pub(crate) fn render_commit_picker(
         buf,
         inner,
         &FilterHeader {
-            label: "commits",
+            label: &label,
             prompt: FILTER_PROMPT,
             count: Some((picker.filtered.len(), picker.commits.len())),
             chip: None,

@@ -1417,16 +1417,16 @@ mod tests {
         );
     }
 
-    /// The two roles share every row, so the title is the only thing telling
-    /// the user whether picking a commit starts a review or just closes the
-    /// listing.
+    /// The two roles share every row, so the header's label is the only thing
+    /// telling the user whether picking a commit starts a review or just closes
+    /// the listing.
     #[test]
-    fn the_title_names_the_role_the_picker_was_opened_for() {
+    fn the_header_names_the_role_the_picker_was_opened_for() {
         let mut h = seeded_picker_harness();
         h.snapshot();
         let pick_base = h.rendered_text();
         assert!(
-            pick_base.contains(" review from commit "),
+            pick_base.contains("commits \u{00B7} review from commit"),
             "a base picker says what selecting a row will start:\n{pick_base}"
         );
         assert!(
@@ -1441,7 +1441,7 @@ mod tests {
         h.snapshot();
         let browse = h.rendered_text();
         assert!(
-            browse.contains(" git log "),
+            browse.contains("commits \u{00B7} git log"),
             "a browser names itself for what it shows:\n{browse}"
         );
         assert!(

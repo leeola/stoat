@@ -63,25 +63,18 @@ pub(crate) fn render_diagnostics_picker(
     let (modal_area, inner) = (layout.modal, layout.inner);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PICKER);
-    let title = match picker.scope() {
-        PickerScope::Local(_) => " diagnostics ",
-        PickerScope::Workspace => " diagnostics (workspace) ",
+    let label = match picker.scope() {
+        PickerScope::Local(_) => "diagnostics",
+        PickerScope::Workspace => "diagnostics \u{00B7} workspace",
     };
     crate::render::clear_modal(modal_area, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
-        buf,
-        modal_area,
-        Some(title),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    crate::render::chrome::modal_frame(buf, modal_area, None, modal_style, theme, &mut *scene);
 
     crate::render::picker::filter_header(
         buf,
         inner,
         &FilterHeader {
-            label: "diagnostics",
+            label,
             prompt: FILTER_PROMPT,
             count: Some((
                 picker.picker.filtered().len(),

@@ -216,10 +216,10 @@ fn render_palette_arg_picker(
         .arg_picker
         .as_ref()
         .is_some_and(|picker| picker.fallback_active());
-    let title = if fallback_active {
-        format!(" {} (ignored) ", entry.command_name)
+    let label = if fallback_active {
+        format!("palette \u{00B7} {}, ignored", entry.command_name)
     } else {
-        format!(" {} ", entry.command_name)
+        format!("palette \u{00B7} {}", entry.command_name)
     };
     let count = palette.arg_picker.as_ref().map(|picker| {
         let list = &picker.active_core_ref().picklist;
@@ -227,7 +227,7 @@ fn render_palette_arg_picker(
     });
     let Some(layout) = render_palette_prelude(
         &palette.input,
-        &title,
+        &label,
         count,
         palette.list_rows_hint(),
         ws,
@@ -316,10 +316,10 @@ fn render_palette_free_arg(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let title = format!(" {} ", entry.command_name);
+    let label = format!("palette \u{00B7} {}", entry.command_name);
     let Some(layout) = render_palette_prelude(
         &palette.input,
-        &title,
+        &label,
         None,
         palette.list_rows_hint(),
         ws,
@@ -374,13 +374,16 @@ fn render_palette_free_arg(
     }
 }
 
-/// Render the chrome every palette modal shares, which is the titled frame,
-/// the header row with the `:` prompt and the live input, and the separator
+/// Render the chrome every palette modal shares, which is the frame, the header
+/// row with its label, the `:` prompt, and the live input, and the separator
 /// beneath it.
 ///
 /// Returns the modal layout so the caller paints its body -- the command list,
 /// an inline picker, or the free-typed argument hint -- or `None` when the
 /// modal does not fit `area`.
+///
+/// `label` names the palette and its state, which is the scope, the group, or
+/// the command that takes the argument.
 ///
 /// `content_rows` sizes the box, and the argument modals derive it from
 /// [`CommandPalette::list_rows_hint`] while the filter modal is handed it.
@@ -395,7 +398,7 @@ fn render_palette_free_arg(
 #[allow(clippy::too_many_arguments)]
 fn render_palette_prelude(
     input: &InputView,
-    title: &str,
+    label: &str,
     count: Option<(usize, usize)>,
     content_rows: u16,
     ws: &mut Workspace,
@@ -410,20 +413,13 @@ fn render_palette_prelude(
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_PALETTE);
     crate::render::clear_modal(layout.modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
-        buf,
-        layout.modal,
-        Some(title),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    crate::render::chrome::modal_frame(buf, layout.modal, None, modal_style, theme, &mut *scene);
 
     crate::render::picker::filter_header(
         buf,
         layout.inner,
         &FilterHeader {
-            label: "palette",
+            label,
             prompt: ":",
             count,
             chip: None,
@@ -456,15 +452,15 @@ fn render_palette_filter(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let title: Cow<'static, str> = match (group, scope) {
-        (Some(group), _) => Cow::Owned(format!(" {group} ")),
-        (None, PaletteScope::Active) => Cow::Borrowed(" command palette (applicable) "),
-        (None, PaletteScope::All) => Cow::Borrowed(" command palette (all) "),
+    let label: Cow<'static, str> = match (group, scope) {
+        (Some(group), _) => Cow::Owned(format!("palette \u{00B7} {group}")),
+        (None, PaletteScope::Active) => Cow::Borrowed("palette \u{00B7} applicable"),
+        (None, PaletteScope::All) => Cow::Borrowed("palette \u{00B7} all"),
     };
     let name_offset = group.map_or(0, |group| group.len() + 1);
     let Some(layout) = render_palette_prelude(
         input,
-        &title,
+        &label,
         Some((filtered.len(), offering)),
         content_rows,
         ws,

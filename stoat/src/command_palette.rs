@@ -1656,11 +1656,11 @@ mod tests {
         );
     }
 
-    /// A group titles the list with its token and lists each command by its
+    /// A group names itself in the header's label and lists each command by its
     /// subcommand token alone. Narrowed to `l`, the row paints the `l` of `log`
     /// as a match and the `o` beside it as plain text.
     #[test]
-    fn a_group_titles_the_list_and_drops_its_token_from_each_row() {
+    fn a_group_labels_the_header_and_drops_its_token_from_each_row() {
         let mut h = repo_harness();
         h.type_text(":git ");
         let _ = h.snapshot();
@@ -1684,9 +1684,9 @@ mod tests {
             .lines()
             .find(|line| line.contains(top.def.short_desc()))
             .unwrap_or_default();
-        let titled = text
+        let labeled = text
             .lines()
-            .any(|line| line.contains("\u{250c} git \u{2500}"));
+            .any(|line| line.contains("palette \u{00B7} git :"));
         let subcommand = &top.command_name["git ".len()..];
         // The top row is the selected one, so the accent bar leads its name.
         let shown = (
@@ -1708,7 +1708,7 @@ mod tests {
         let buf = h.rendered_buffer();
         let style = |x: usize| buf[(x as u16, y as u16)].style();
         assert_eq!(
-            (titled, shown, style(x) == style(x + 1)),
+            (labeled, shown, style(x) == style(x + 1)),
             (true, (true, false), false),
         );
     }
@@ -4079,6 +4079,28 @@ mod tests {
 
         h.type_keys("enter");
         assert_eq!(editor::focused_buffer_path(&h.stoat), toml);
+    }
+
+    /// While ignored files stand in for the list, the header's label says so.
+    #[test]
+    fn an_open_tail_fallback_marks_the_label_ignored() {
+        let mut h = Stoat::test();
+        seed_palette_workspace(
+            &mut h,
+            &[
+                ("src/main.rs", ""),
+                (".gitignore", "out/\n"),
+                ("out/main.toml", ""),
+            ],
+        );
+        h.type_text(":o main.toml");
+        settle_arg_fallback(&mut h);
+        let _ = h.snapshot();
+        let text = h.rendered_text();
+        assert!(
+            text.contains("palette \u{00B7} open, ignored :"),
+            "the label names the fallback:\n{text}"
+        );
     }
 
     #[test]

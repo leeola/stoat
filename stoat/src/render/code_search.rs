@@ -36,17 +36,10 @@ pub(crate) fn render_code_search(
     };
 
     let git_root = ws.git_root.clone();
-    let title = code_search_title(finder);
+    let label = code_search_label(finder);
     let modal_style = theme.get(scope::UI_MODAL_PALETTE);
     crate::render::clear_modal(layout.modal, buf, theme, modal_style);
-    crate::render::chrome::modal_frame(
-        buf,
-        layout.modal,
-        Some(&title),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    crate::render::chrome::modal_frame(buf, layout.modal, None, modal_style, theme, &mut *scene);
 
     let inner = layout.inner;
     let separator_style = theme.get(scope::UI_BORDER_INACTIVE);
@@ -55,7 +48,7 @@ pub(crate) fn render_code_search(
         buf,
         inner,
         &FilterHeader {
-            label: "search",
+            label: &label,
             prompt: FILTER_PROMPT,
             count: None,
             chip: None,
@@ -156,13 +149,14 @@ pub(crate) fn paint_match_rows(
     }
 }
 
-/// Modal title carrying the active search mode, and for AST the target language.
-fn code_search_title(finder: &CodeSearchFinder) -> String {
+/// The header label, carrying the active search mode, and for AST the target
+/// language.
+fn code_search_label(finder: &CodeSearchFinder) -> String {
     match finder.mode {
-        SearchMode::Regex => " code search: regex ".to_string(),
+        SearchMode::Regex => "search \u{00B7} regex".to_string(),
         SearchMode::Ast => {
             let lang = finder.target_lang.as_ref().map(|l| l.name).unwrap_or("?");
-            format!(" code search: ast ({lang}) ")
+            format!("search \u{00B7} ast ({lang})")
         },
     }
 }
