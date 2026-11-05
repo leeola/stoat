@@ -12,7 +12,10 @@ use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value}
 use stoatty_protocol::command::PanelShadow;
 
 /// The text_run scale of full-size text, which fills one cell.
-const FULL_CELL_SCALE: u16 = 256;
+///
+/// It is also the unit a scale counts in, so the cells a run of scaled text
+/// spans are its scaled width over this.
+pub(crate) const FULL_CELL_SCALE: u16 = 256;
 
 #[derive(Debug, Clone)]
 pub struct Theme {
@@ -1324,6 +1327,7 @@ mod tests {
                 theme.get(scope::UI_STATUSLINE_NORMAL).fg,
                 theme.panel(PanelRole::Island),
                 theme.themed_type_scale(TypeRole::Small),
+                theme.themed_type_scale(TypeRole::Ui),
             ),
             (
                 Some(rgb(0x17191e)),
@@ -1331,6 +1335,7 @@ mod tests {
                 Some(rgb(0x7fb0ff)),
                 spec(2, PanelShadow::Tucked, 4, false),
                 208,
+                232,
             )
         );
     }

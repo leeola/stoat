@@ -1,4 +1,3 @@
-use super::TEXT_SCALE_COMPACT;
 use crate::{
     action_handlers::view,
     auto_reload::ReloadFlash,
@@ -23,7 +22,7 @@ use crate::{
         },
         undercurl::UndercurlBatch,
     },
-    theme::Theme,
+    theme::{Theme, TypeRole},
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
@@ -193,7 +192,7 @@ pub(crate) fn render_editor_with_overlay(
     if editor.diff_view {
         let inner = reserve_minimap_strip(editor, inner, minimap_enabled);
         let digits = review::diff_gutter_digits_for(editor);
-        let rich = review::diff_gutter_is_rich(scene.is_some(), theme, fallback_style);
+        let rich = review::diff_rich_gutter_scale(scene.is_some(), theme, fallback_style);
         fit_diff_view(editor, inner, wrap, wrap_column, digits, rich);
         view::apply_held_screen_row(editor);
         view::clamp_scroll_to_display(editor, scrolloff);
@@ -250,10 +249,14 @@ pub(crate) fn render_editor_with_overlay(
     // questions, so they run off a buffer snapshot. A display snapshot taken
     // here would be wasted work, since set_wrap_width below invalidates it and
     // the one the gutter and text paint from re-syncs the wrap from scratch.
-    let gutter_is_rich = scene.is_some() && chrome.rich_gutter.is_some();
+    let rich_number_scale = chrome
+        .rich_gutter
+        .as_ref()
+        .filter(|_| scene.is_some())
+        .map(|rich| rich.number_scale);
     let measured_gutter_w = if line_numbers != LineNumbers::Off {
         let buffer = editor.display_map.buffer_snapshot();
-        measure_gutter_width(gutter_digits(buffer.line_count()), gutter_is_rich)
+        measure_gutter_width(gutter_digits(buffer.line_count()), rich_number_scale)
     } else {
         match diagnostic_info {
             Some((path, set)) if !set.get(path).is_empty() => 1,
@@ -623,14 +626,15 @@ pub(crate) fn render_editor_with_overlay(
 /// the side that shows it. A width that fits two columns pairs each modified
 /// line with the base line it replaced, on one row.
 ///
-/// `digits` and `rich` size the gutters, as the paint that follows sizes them.
+/// `digits` and `rich`, the rich gutter's number scale or `None` for a cell
+/// gutter, size the gutters, as the paint that follows sizes them.
 pub(crate) fn fit_diff_view(
     editor: &mut EditorState,
     inner: Rect,
     wrap: WrapMode,
     wrap_column: u32,
     digits: u16,
-    rich: bool,
+    rich: Option<u16>,
 ) {
     let cols = DiffColumns::compute(inner, DiffLayout::diff_view(digits, rich));
     let text_width = cols.left_content_w.min(cols.right_content_w) as u32;
@@ -1425,6 +1429,9 @@ pub(crate) struct RichGutterColors {
     pub(crate) number_fg: [u8; 3],
     pub(crate) separator: [u8; 3],
     pub(crate) bg: [u8; 3],
+    /// The scale the line numbers draw at, the theme's [`TypeRole::Small`]
+    /// size. The gutter's width follows it, so the layout reads it too.
+    pub(crate) number_scale: u16,
 }
 
 impl RichGutterColors {
@@ -1437,6 +1444,7 @@ impl RichGutterColors {
             number_fg: dim_rgb(self.number_fg, self.bg, amount),
             separator: dim_rgb(self.separator, self.bg, amount),
             bg: self.bg,
+            number_scale: self.number_scale,
         }
     }
 }
@@ -1466,6 +1474,7 @@ pub(crate) fn resolve_rich_gutter(
         number_fg,
         separator,
         bg,
+        number_scale: theme.type_scale(TypeRole::Small),
     })
 }
 
@@ -1697,25 +1706,23 @@ pub(crate) fn gutter_digits(line_count: u32) -> u16 {
 
 /// The cell columns the line-number gutter reserves, measured without painting.
 ///
-/// `rich` selects the sub-cell [`Gutter::cell_width`] layout. The degraded
-/// gutter instead reserves a mark column, the digits, one tree glyph, and a
-/// gap. The result matches what [`draw_line_number_gutter`] paints for the same
-/// digit count, so the paint resolves the wrap width before the wrapped
-/// snapshot exists.
-pub(crate) fn measure_gutter_width(width_digits: u16, rich: bool) -> u16 {
-    if rich {
-        rich_gutter(
+/// `rich` is the number scale of a sub-cell [`Gutter::cell_width`] layout, or
+/// `None` for the degraded gutter, which reserves a mark column, the digits,
+/// one tree glyph, and a gap. The result matches what
+/// [`draw_line_number_gutter`] paints for the same digit count, so the paint
+/// resolves the wrap width before the wrapped snapshot exists.
+pub(crate) fn measure_gutter_width(width_digits: u16, rich: Option<u16>) -> u16 {
+    match rich {
+        Some(number_scale) => rich_gutter(
             &[],
             width_digits,
-            [0; 3],
-            [0; 3],
-            [0; 3],
+            ([0; 3], [0; 3], [0; 3]),
+            number_scale,
             PLAIN_DIFF_BARS,
             PLAIN_DIFF_BAR_WIDTH,
         )
-        .cell_width()
-    } else {
-        width_digits + 3
+        .cell_width(),
+        None => width_digits + 3,
     }
 }
 
@@ -1825,12 +1832,15 @@ pub(crate) const PLAIN_DIFF_BAR_WIDTH: u16 = 5;
 /// `diff_bars` bars of `diff_bar_width` sixteenths sit right of the number. The
 /// plain editor passes [`PLAIN_DIFF_BARS`] and [`PLAIN_DIFF_BAR_WIDTH`], and the
 /// diff view sizes its sides from its own count.
+///
+/// The `colors` are the number, separator, and background colors. The numbers
+/// draw at `number_scale`, which also sets the gutter's width, so a measure and
+/// the paint it sizes pass the same scale.
 pub(crate) fn rich_gutter(
     lines: &[GutterLine],
     width_digits: u16,
-    number_fg: [u8; 3],
-    separator: [u8; 3],
-    bg: [u8; 3],
+    (number_fg, separator, bg): ([u8; 3], [u8; 3], [u8; 3]),
+    number_scale: u16,
     diff_bars: u16,
     diff_bar_width: u16,
 ) -> Gutter<'_> {
@@ -1840,7 +1850,7 @@ pub(crate) fn rich_gutter(
         diff_bars,
         diff_bar_width,
         pad: 2,
-        number_scale: TEXT_SCALE_COMPACT,
+        number_scale,
         width_digits,
         number_fg,
         separator,
@@ -1910,11 +1920,13 @@ fn gutter_scene_key(
     lines_key: Option<u64>,
     inner: Rect,
     colors: ([u8; 3], [u8; 3], [u8; 3]),
+    number_scale: u16,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     lines_key.hash(&mut hasher);
     (inner.x, inner.y, inner.width, inner.height).hash(&mut hasher);
     colors.hash(&mut hasher);
+    number_scale.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -1955,9 +1967,15 @@ fn draw_line_number_gutter(
 
     // Rich mode needs a scene and every gutter color as RGB, which is exactly
     // when the chrome resolved a rich set at all.
-    let gutter_rgb = dimmed
-        .as_ref()
-        .map(|rich| (&rich.colors, rich.number_fg, rich.separator, rich.bg));
+    let gutter_rgb = dimmed.as_ref().map(|rich| {
+        (
+            &rich.colors,
+            rich.number_fg,
+            rich.separator,
+            rich.bg,
+            rich.number_scale,
+        )
+    });
     let rich = scene.zip(gutter_rgb);
 
     let geometry_key = gutter_geometry_key(
@@ -1991,7 +2009,7 @@ fn draw_line_number_gutter(
 
     // Only the rich path paints from the lines, so the fallback never builds
     // them and its cache keeps the empty vec the geometry rebuild left.
-    if let Some((colors, _, _, bg)) = gutter_rgb {
+    if let Some((colors, _, _, bg, _)) = gutter_rgb {
         let lines_key = gutter_lines_key(geometry_key, current_line, (bg, diff_colors, colors));
         if geometry.lines_key != Some(lines_key) {
             geometry.lines = gutter_component_lines(
@@ -2008,9 +2026,14 @@ fn draw_line_number_gutter(
     }
 
     match rich {
-        Some((scene, (_colors, number_fg, separator, bg))) => {
-            draw_rich_gutter(geometry, inner, (number_fg, separator, bg), buf, scene)
-        },
+        Some((scene, (_colors, number_fg, separator, bg, number_scale))) => draw_rich_gutter(
+            geometry,
+            inner,
+            (number_fg, separator, bg),
+            number_scale,
+            buf,
+            scene,
+        ),
         None => draw_fallback_line_numbers(
             &geometry.folded,
             geometry.width_digits,
@@ -2035,18 +2058,17 @@ fn draw_rich_gutter(
     geometry: &mut GutterGeometryCache,
     inner: Rect,
     colors: ([u8; 3], [u8; 3], [u8; 3]),
+    number_scale: u16,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) -> u16 {
-    let (number_fg, separator, bg) = colors;
-    let scene_key = gutter_scene_key(geometry.lines_key, inner, colors);
+    let scene_key = gutter_scene_key(geometry.lines_key, inner, colors, number_scale);
 
     let gutter = rich_gutter(
         &geometry.lines,
         geometry.width_digits,
-        number_fg,
-        separator,
-        bg,
+        colors,
+        number_scale,
         PLAIN_DIFF_BARS,
         PLAIN_DIFF_BAR_WIDTH,
     );
@@ -3438,7 +3460,7 @@ mod tests {
             "120 lines need three digits",
         );
         assert_eq!(
-            super::measure_gutter_width(super::gutter_width_digits(&snapshot), false),
+            super::measure_gutter_width(super::gutter_width_digits(&snapshot), None),
             editor.gutter_width,
             "the measured fallback width matches the painted gutter",
         );
@@ -4663,7 +4685,7 @@ mod tests {
                 .display_map
                 .snapshot(),
         );
-        let x = DiffColumns::compute(area, DiffLayout::diff_view(digits, false)).right_num_x;
+        let x = DiffColumns::compute(area, DiffLayout::diff_view(digits, None)).right_num_x;
         (0..rows)
             .map(|y| {
                 (x..x + digits)

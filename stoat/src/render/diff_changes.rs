@@ -153,7 +153,7 @@ pub(crate) fn render_diff_changes(
     }
 
     state.viewport_rows = inner.height as usize;
-    let rich = review::diff_gutter_is_rich(scene.live(), frame.theme, text_style);
+    let rich = review::diff_rich_gutter_scale(scene.live(), frame.theme, text_style);
     // Every excerpt sizes its gutters for the widest count among them, so the
     // text column lines up down the stack across files of different sizes.
     let digits = state
@@ -524,7 +524,7 @@ mod tests {
     /// stack's gutters take `digits`, rich as the harness's theme resolves it.
     fn excerpt_columns(h: &TestHarness, inner: Rect, digits: u16) -> DiffColumns {
         let theme = &h.stoat.theme;
-        let rich = review::diff_gutter_is_rich(true, theme, theme.get(scope::UI_TEXT));
+        let rich = review::diff_rich_gutter_scale(true, theme, theme.get(scope::UI_TEXT));
         DiffColumns::compute(inner, DiffLayout::diff_view(digits, rich))
     }
 

@@ -1,7 +1,6 @@
-use super::TEXT_SCALE_FULL;
 use crate::{
     render::paint::style_rgb,
-    theme::{PanelRole, Theme},
+    theme::{PanelRole, Theme, TypeRole},
 };
 use ratatui::{
     buffer::Buffer,
@@ -254,7 +253,7 @@ fn modal_frame_inner(
                 TextRun {
                     col: 16,
                     row: 0,
-                    scale: TEXT_SCALE_FULL,
+                    scale: theme.type_scale(TypeRole::Body),
                     color: border,
                     bg: None,
                     text: title,

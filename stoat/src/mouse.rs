@@ -25,6 +25,7 @@ use crate::{
     render::commit_picker::MIN_LIST_ROWS,
     run::GridSelection,
     term_session::TermId,
+    theme::TypeRole,
     workspace::Workspace,
 };
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -1331,6 +1332,7 @@ fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<
                 stoat.pending_hover.as_ref()?,
                 mouse.column,
                 mouse.row,
+                stoat.theme.type_scale(TypeRole::Ui),
             );
             if let Some(popup) = stoat.pending_hover.as_mut() {
                 popup.selection = Some(crate::render::hover::HoverSelection {
@@ -1349,6 +1351,7 @@ fn handle_hover_selection_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> Option<
                 stoat.pending_hover.as_ref()?,
                 mouse.column,
                 mouse.row,
+                stoat.theme.type_scale(TypeRole::Ui),
             );
             if let Some(sel) = stoat
                 .pending_hover

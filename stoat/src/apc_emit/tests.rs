@@ -1220,10 +1220,35 @@ fn help_separator_emits_a_hairline_bar_inside_stoatty() {
     );
 }
 
+/// The text runs on the interior rows of the hints box, the one panel drawn
+/// above the pools.
+///
+/// Every type role draws at a full cell under `cfg(test)`, so the box's rect,
+/// not a scale, picks its runs out.
+fn hints_box_runs(cmds: &[command::Command]) -> Vec<&command::TextRunCommand> {
+    let Some(panel) = cmds.iter().find_map(|cmd| match cmd {
+        command::Command::Panel(p) if p.above_pools => Some(p),
+        _ => None,
+    }) else {
+        return Vec::new();
+    };
+    let rows = (panel.top + 1)..(panel.top + panel.height).saturating_sub(1);
+    let cols = panel.left..panel.left + panel.width;
+    cmds.iter()
+        .filter_map(|cmd| match cmd {
+            command::Command::TextRun(t)
+                if rows.contains(&((t.row / 16) as u16))
+                    && cols.contains(&((t.col / 16) as u16)) =>
+            {
+                Some(t)
+            },
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
-    use stoatty_protocol::command::Command;
-
     let mut h = Stoat::test();
     h.stoat.theme = Arc::new(rgb_modal_theme());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -1237,10 +1262,16 @@ fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
     emit_apc_scene(&mut h.stoat);
 
     let cmds = drain_apc(&mut rx);
+    let scales: Vec<u16> = hints_box_runs(&cmds).iter().map(|t| t.scale).collect();
+    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui);
     assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Command::TextRun(t) if t.scale == 218)),
-        "the hints overlay emits 0.85x hint-row text runs, got {cmds:?}"
+        !scales.is_empty(),
+        "the hints overlay emits hint-row text runs"
+    );
+    assert_eq!(
+        scales,
+        vec![ui; scales.len()],
+        "every hint row draws at the theme's Ui scale"
     );
 }
 
@@ -1249,8 +1280,6 @@ fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
 /// behind its row.
 #[test]
 fn the_hint_rows_back_their_runs_with_the_modal_fill() {
-    use stoatty_protocol::command::Command;
-
     let mut h = Stoat::test();
     let src = r##"theme t {
             ui.background.bg = "#282c34";
@@ -1270,13 +1299,8 @@ fn the_hint_rows_back_their_runs_with_the_modal_fill() {
     app::paint_frame(&mut h.stoat, &mut buf);
     emit_apc_scene(&mut h.stoat);
 
-    let backings: Vec<Option<[u8; 3]>> = drain_apc(&mut rx)
-        .into_iter()
-        .filter_map(|c| match c {
-            Command::TextRun(t) if t.scale == crate::render::TEXT_SCALE_POPUP => Some(t.bg),
-            _ => None,
-        })
-        .collect();
+    let cmds = drain_apc(&mut rx);
+    let backings: Vec<Option<[u8; 3]>> = hints_box_runs(&cmds).iter().map(|t| t.bg).collect();
     assert!(!backings.is_empty(), "the hint rows emit text runs");
     assert_eq!(
         backings,
@@ -1381,10 +1405,13 @@ fn hover_body_emits_scaled_text_runs_inside_stoatty() {
     emit_apc_scene(&mut h.stoat);
 
     let cmds = drain_apc(&mut rx);
+    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui);
     assert!(
-        cmds.iter()
-            .any(|c| matches!(c, Command::TextRun(t) if t.scale == 218)),
-        "the hover body emits 0.85x scaled text runs under stoatty, got {cmds:?}"
+        cmds.iter().any(|c| matches!(
+            c,
+            Command::TextRun(t) if t.scale == ui && t.text == "fn foo() -> u32"
+        )),
+        "the hover body emits its text runs at the theme's Ui scale, got {cmds:?}"
     );
 }
 
@@ -6423,7 +6450,7 @@ fn a_margin_follow_refills_the_pages_its_move_composites() {
 
 #[test]
 fn error_popout_emits_scaled_runs_under_stoatty() {
-    use crate::render::TEXT_SCALE_COMPACT;
+    use crate::theme::TypeRole;
     use lsp_types::MessageType;
     use stoatty_protocol::command::Command;
 
@@ -6455,14 +6482,15 @@ fn error_popout_emits_scaled_runs_under_stoatty() {
     );
 
     // The popout's bottom line paints directly above the bar at the bar's
-    // compact scale.
+    // Ui scale.
     let popout_bottom = (buf.area.height - 2) as i16 * 16;
+    let ui = h.stoat.theme.type_scale(TypeRole::Ui);
     assert!(
         cmds.iter().any(|c| matches!(
             c,
-            Command::TextRun(t) if t.scale == TEXT_SCALE_COMPACT && t.row == popout_bottom
+            Command::TextRun(t) if t.scale == ui && t.row == popout_bottom
         )),
-        "the popout paints as a compact-scale run above the bar"
+        "the popout paints as a Ui-scale run above the bar"
     );
 
     // The rich arm keeps the text off the cell grid, unlike the fallback.
@@ -6474,8 +6502,8 @@ fn error_popout_emits_scaled_runs_under_stoatty() {
 }
 
 #[test]
-fn diff_sides_bar_emits_a_compact_run_under_stoatty() {
-    use crate::render::TEXT_SCALE_COMPACT;
+fn diff_sides_bar_emits_a_ui_scale_run_under_stoatty() {
+    use crate::theme::TypeRole;
     use stoatty_protocol::command::Command;
 
     let mut h = crate::test_harness::TestHarness::with_size(120, 10);
@@ -6505,7 +6533,7 @@ fn diff_sides_bar_emits_a_compact_run_under_stoatty() {
         (
             cmds.iter().any(|c| matches!(
                 c,
-                Command::TextRun(t) if t.scale == TEXT_SCALE_COMPACT
+                Command::TextRun(t) if t.scale == h.stoat.theme.type_scale(TypeRole::Ui)
                     && t.row == 0
                     && t.text.contains("HEAD → working tree")
             )),
@@ -6514,7 +6542,7 @@ fn diff_sides_bar_emits_a_compact_run_under_stoatty() {
             top_row.contains("working tree"),
         ),
         (true, true, false),
-        "the bar streams as a compact run on a panel, with no grid text",
+        "the bar streams as a Ui-scale run on a panel, with no grid text",
     );
 }
 

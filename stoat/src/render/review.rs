@@ -3,7 +3,6 @@ use super::{
     paint::{
         brighten_rgb, brighten_style, dim_rgb, luma, paint_style_runs, render_side_num, style_rgb,
     },
-    TEXT_SCALE_COMPACT,
 };
 use crate::{
     app::Stoat,
@@ -19,7 +18,7 @@ use crate::{
     editor_state::EditorState,
     host::DiffStatus,
     minimap::{self, ClassTable},
-    theme::scope as s,
+    theme::{scope as s, TypeRole},
 };
 use ratatui::{
     buffer::Buffer,
@@ -227,7 +226,10 @@ pub(crate) fn render_diff_view(
         .unwrap_or_else(|| diff_gutter_digits(&snapshot));
     let cols = DiffColumns::compute(
         inner,
-        DiffLayout::diff_view(digits, diff_gutter_is_rich(stoatty, theme, fallback_style)),
+        DiffLayout::diff_view(
+            digits,
+            diff_rich_gutter_scale(stoatty, theme, fallback_style),
+        ),
     );
     editor.text_rect = Some(Rect {
         x: cols.right_text_x,
@@ -661,13 +663,15 @@ impl DiffLayout {
     /// A cell gutter leaves its first cell blank, where the plain gutter
     /// draws its mark column, right-aligns the number in the next `digits`
     /// cells, puts the three status glyphs after it, and draws the rule in
-    /// the cell after them. A `rich` gutter spans the sub-cell gutter's
+    /// the cell after them. A `rich` gutter, given as the scale its numbers
+    /// draw at, spans the sub-cell gutter's
     /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) with
     /// three bars of three sixteenths, the bars [`draw_diff_status`] paints,
     /// and places its parts at that gutter's sixteenth offsets.
-    pub(crate) fn diff_view(digits: u16, rich: bool) -> Self {
-        let rich = rich.then(|| {
-            let gutter = editor::rich_gutter(&[], digits, [0; 3], [0; 3], [0; 3], 3, 3);
+    pub(crate) fn diff_view(digits: u16, rich: Option<u16>) -> Self {
+        let rich = rich.map(|number_scale| {
+            let gutter =
+                editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale, 3, 3);
             let offsets = RichGutterOffsets {
                 number_right: gutter.number_right_edge(),
                 bars: [0, 1, 2].map(|slot| gutter.bar_x(slot)),
@@ -870,19 +874,23 @@ pub(crate) fn paint_diff_rows(
     // threaded and every gutter color resolves to RGB, so the two paths never
     // mix within one frame. `dim` fades the bars toward the background for a
     // pooled unfocused page, matching the cell dimming.
-    let layout = DiffLayout::diff_view(
-        digits,
-        diff_gutter_is_rich(scene.is_some(), theme, fallback_style),
-    );
-    let mut rich = layout.rich.zip(scene).and_then(|(offsets, scene)| {
-        resolve_diff_rich_colors(theme, fallback_style, dim).map(|colors| DiffRichGutter {
-            scene,
-            colors,
-            offsets,
-            numbers: TextRunBatch::default(),
-            bars: BarBatch::default(),
-        })
-    });
+    let number_scale = diff_rich_gutter_scale(scene.is_some(), theme, fallback_style);
+    let layout = DiffLayout::diff_view(digits, number_scale);
+    let mut rich =
+        layout
+            .rich
+            .zip(number_scale)
+            .zip(scene)
+            .and_then(|((offsets, number_scale), scene)| {
+                resolve_diff_rich_colors(theme, fallback_style, dim).map(|colors| DiffRichGutter {
+                    scene,
+                    colors,
+                    offsets,
+                    number_scale,
+                    numbers: TextRunBatch::default(),
+                    bars: BarBatch::default(),
+                })
+            });
 
     let DiffColumns {
         left_x,
@@ -2671,6 +2679,9 @@ struct DiffRichGutter<'a> {
     scene: &'a mut ApcScene,
     colors: DiffRichColors,
     offsets: RichGutterOffsets,
+    /// The scale the line numbers draw at, the one [`Self::offsets`] were laid
+    /// out for.
+    number_scale: u16,
     /// The numbers and bars the paint gathers row by row, flushed into
     /// [`Self::scene`] after the last row so each style goes out as one batch.
     ///
@@ -2717,7 +2728,7 @@ impl DiffRichColors {
 /// numbers out as runs only when these colors resolve.
 ///
 /// See also:
-/// - [`diff_gutter_is_rich`] for the layout's half of the same decision.
+/// - [`diff_rich_gutter_scale`] for the layout's half of the same decision.
 pub(crate) fn resolve_diff_rich_colors(
     theme: &crate::theme::Theme,
     fallback_style: Style,
@@ -2765,18 +2776,20 @@ pub(crate) fn resolve_diff_rich_colors(
     })
 }
 
-/// Whether a diff view paints its gutter with the rich sub-cell components,
-/// which also sets how wide the gutter is.
+/// The number scale of a diff view's rich sub-cell gutter, or `None` when
+/// the gutter paints cells. The answer also sets how wide the gutter is.
 ///
 /// Rich takes a scene to append into and every gutter color as RGB, the test
-/// [`resolve_diff_rich_colors`] runs. The layout and the paint ask the same
-/// question, so the text column and the gutter it sits past always agree.
-pub(crate) fn diff_gutter_is_rich(
+/// [`resolve_diff_rich_colors`] runs. Its numbers draw at the theme's
+/// [`TypeRole::Small`] size. The layout and the paint ask the same question,
+/// so the text column and the gutter it sits past always agree.
+pub(crate) fn diff_rich_gutter_scale(
     has_scene: bool,
     theme: &crate::theme::Theme,
     fallback_style: Style,
-) -> bool {
-    has_scene && resolve_diff_rich_colors(theme, fallback_style, 0.0).is_some()
+) -> Option<u16> {
+    (has_scene && resolve_diff_rich_colors(theme, fallback_style, 0.0).is_some())
+        .then(|| theme.type_scale(TypeRole::Small))
 }
 
 /// Emit a right-aligned diff line number as a sub-cell run (rich) or paint the
@@ -2800,14 +2813,14 @@ fn draw_diff_num(
     write!(scratch, "{num}").expect("writing to a String is infallible");
     match rich {
         Some(rg) => {
-            let advance = text_run::advance_sixteenths(scratch.len(), TEXT_SCALE_COMPACT);
+            let advance = text_run::advance_sixteenths(scratch.len(), rg.number_scale);
             let right_edge = (side_x - inner.x) * 16 + rg.offsets.number_right;
             rg.numbers.push(
                 inner,
                 TextRun {
                     col: right_edge.saturating_sub(advance) as i16,
                     row: ((y - inner.y) * 16) as i16,
-                    scale: TEXT_SCALE_COMPACT,
+                    scale: rg.number_scale,
                     color: rg.colors.dim,
                     bg: Some(rg.colors.bg),
                     text: scratch,
@@ -2990,7 +3003,7 @@ mod tests {
         diff_map::{self, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, MarkKind, TokenDetail},
         display_map::InlayKind,
         render::paint::FAINT_CONTRAST_FLOOR,
-        theme::{scope::UI_SELECTION_EDITOR, Theme},
+        theme::{scope::UI_SELECTION_EDITOR, Theme, FULL_CELL_SCALE},
         workspace::diff::WorktreeBase,
     };
     use std::sync::{Arc, RwLock};
@@ -3066,7 +3079,7 @@ mod tests {
     #[test]
     fn the_diff_view_layout_rules_off_its_gutter_and_unifies_when_narrow() {
         let wide = Rect::new(3, 0, 121, 10);
-        let cell = DiffColumns::compute(wide, DiffLayout::diff_view(2, false));
+        let cell = DiffColumns::compute(wide, DiffLayout::diff_view(2, None));
         assert_eq!(
             cell,
             DiffColumns {
@@ -3089,7 +3102,7 @@ mod tests {
         );
 
         assert_eq!(
-            DiffColumns::compute(wide, DiffLayout::diff_view(2, true)),
+            DiffColumns::compute(wide, DiffLayout::diff_view(2, Some(FULL_CELL_SCALE))),
             DiffColumns {
                 left_text_x: 7,
                 left_content_w: 56,
@@ -3107,7 +3120,7 @@ mod tests {
         );
 
         assert_eq!(
-            DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::diff_view(2, false)),
+            DiffColumns::compute(Rect::new(0, 0, 40, 5), DiffLayout::diff_view(2, None)),
             DiffColumns {
                 left_x: 0,
                 left_num_x: 1,
@@ -3143,12 +3156,13 @@ mod tests {
     /// side reserves a blank cell, the digits, three status glyphs and the rule.
     #[test]
     fn a_diff_side_reserves_the_three_bar_widgets_width() {
-        let widget =
-            |digits| editor::rich_gutter(&[], digits, [0; 3], [0; 3], [0; 3], 3, 3).cell_width();
+        let widget = |digits| {
+            editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), FULL_CELL_SCALE, 3, 3)
+                .cell_width()
+        };
         assert_eq!(
-            [2, 4].map(
-                |digits| [false, true].map(|rich| DiffLayout::diff_view(digits, rich).gutter_w)
-            ),
+            [2, 4].map(|digits| [None, Some(FULL_CELL_SCALE)]
+                .map(|rich| DiffLayout::diff_view(digits, rich).gutter_w)),
             [[2 + 5, widget(2)], [4 + 5, widget(4)]],
             "two and four digits, cell then rich",
         );
@@ -3613,7 +3627,7 @@ mod tests {
             .fold(vec![Point::new(1, 2)..Point::new(2, 5)]);
         let area = Rect::new(0, 0, 120, 6);
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
-        editor::fit_diff_view(&mut editor, area, WrapMode::EditorWidth, 80, digits, false);
+        editor::fit_diff_view(&mut editor, area, WrapMode::EditorWidth, 80, digits, None);
         let mut buf = Buffer::empty(area);
         render_diff_view(
             &mut editor,
@@ -3812,7 +3826,7 @@ mod tests {
     /// The cell columns a diff view paints over `area` for files under a
     /// hundred lines, whose gutters take two digits.
     fn two_digit_columns(area: Rect) -> DiffColumns {
-        DiffColumns::compute(area, DiffLayout::diff_view(2, false))
+        DiffColumns::compute(area, DiffLayout::diff_view(2, None))
     }
 
     /// The cell columns of a 120-wide diff view of files under a hundred
@@ -3825,7 +3839,7 @@ mod tests {
     /// lines out in, rich as the harness's theme resolves it under stoatty.
     fn harness_columns(h: &crate::test_harness::TestHarness) -> DiffColumns {
         let theme = &h.stoat.theme;
-        let rich = diff_gutter_is_rich(
+        let rich = diff_rich_gutter_scale(
             h.stoat.stoatty,
             theme,
             theme.get(crate::theme::scope::UI_TEXT),
@@ -4095,7 +4109,7 @@ mod tests {
             false,
         );
 
-        let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, false));
+        let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, None));
         let cell = |x: u16, y: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
         let (left, right) = (columns.status_left_x, columns.status_right_x);
         (0..area.height)
@@ -4229,7 +4243,8 @@ mod tests {
             false,
         );
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
-        let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, true));
+        let columns =
+            DiffColumns::compute(area, DiffLayout::diff_view(digits, Some(FULL_CELL_SCALE)));
         let offsets = columns.rich.expect("a rich layout");
         let bytes = scene.buffer();
         let bars = |row: u16, scope: &str| {
@@ -4551,7 +4566,7 @@ mod tests {
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         (
             scene.buffer().clone(),
-            DiffColumns::compute(area, DiffLayout::diff_view(digits, true)),
+            DiffColumns::compute(area, DiffLayout::diff_view(digits, Some(FULL_CELL_SCALE))),
             buf,
         )
     }
@@ -4664,7 +4679,7 @@ mod tests {
         let rows = ((area.height as u32).min(total.saturating_sub(scroll))) as u16;
         let dim = [128, 128, 128];
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
-        let cols = DiffColumns::compute(area, DiffLayout::diff_view(digits, true));
+        let cols = DiffColumns::compute(area, DiffLayout::diff_view(digits, Some(FULL_CELL_SCALE)));
         let offsets = cols.rich.expect("a rich layout");
 
         // Each side's gutter separator and the mid divider paint as hairlines,

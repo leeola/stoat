@@ -21,9 +21,10 @@ use crate::{
         status_lane,
         term_pane::render_term_pane,
         undercurl::UndercurlBatch,
-        FrameCtx, MinimapChrome, PaneCtx, TEXT_SCALE_COMPACT, TEXT_SCALE_FULL,
+        FrameCtx, MinimapChrome, PaneCtx,
     },
     term_session::{TermId, TermSession},
+    theme::{TypeRole, FULL_CELL_SCALE},
     workspace::{
         diff::{self, DiffBase, HunkPosition},
         Workspace,
@@ -268,7 +269,8 @@ pub(crate) fn render_pane(
                 .unwrap_or_else(|| crate::render::themed_fg(theme));
             let content = paint_popout_card(buf, area, bg, border, theme, &mut *scene);
 
-            let cap = scaled_char_capacity(content.width as usize, TEXT_SCALE_COMPACT);
+            let scale = theme.type_scale(TypeRole::Ui);
+            let cap = scaled_char_capacity(content.width as usize, scale);
             let style = theme
                 .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
                 .add_modifier(Modifier::ITALIC);
@@ -282,7 +284,7 @@ pub(crate) fn render_pane(
                     &text,
                     style,
                     style_rgb(Some(bg)),
-                    TEXT_SCALE_COMPACT,
+                    scale,
                     &mut *scene,
                 );
             }
@@ -303,7 +305,8 @@ pub(crate) fn render_pane(
             .width
             .saturating_sub(inset * 2)
             .saturating_sub(2) as usize;
-        let width = scaled_char_capacity(cell_width, TEXT_SCALE_COMPACT);
+        let scale = theme.type_scale(TypeRole::Ui);
+        let width = scaled_char_capacity(cell_width, scale);
         let lines = wrap_popout_lines(msg, width, 4);
         if !lines.is_empty()
             && let Some(area) =
@@ -328,7 +331,7 @@ pub(crate) fn render_pane(
                     line,
                     style,
                     style_rgb(Some(bg)),
-                    TEXT_SCALE_COMPACT,
+                    scale,
                     &mut *scene,
                 );
             }
@@ -448,11 +451,13 @@ fn paint_diff_sides_bar(
         .fg
         .unwrap_or_else(|| crate::render::themed_fg(theme));
 
-    // A run draws at the compact scale, so it spans fewer cells than it has
-    // chars. The fallback writes one char per cell.
+    // A run draws at the Ui scale, so it spans fewer cells than it has chars
+    // when that scale is below a full cell. The fallback writes one char per
+    // cell.
+    let scale = theme.type_scale(TypeRole::Ui);
     let rich = scene.live() && style_rgb(style.fg).is_some() && style_rgb(Some(bg)).is_some();
     let cells = |chars: usize| match rich {
-        true => (chars * TEXT_SCALE_COMPACT as usize).div_ceil(TEXT_SCALE_FULL as usize) as u16,
+        true => (chars * scale as usize).div_ceil(FULL_CELL_SCALE as usize) as u16,
         false => chars as u16,
     };
     let lead_cells = cells(lead_chars);
@@ -471,7 +476,7 @@ fn paint_diff_sides_bar(
         &text,
         style,
         style_rgb(Some(bg)),
-        TEXT_SCALE_COMPACT,
+        scale,
         scene,
     );
 }
@@ -1012,7 +1017,7 @@ fn render_status_segments(
     StatusBar {
         left: &left_rich,
         right: &right_rich,
-        scale: TEXT_SCALE_COMPACT,
+        scale: frame.theme.type_scale(TypeRole::Ui),
         separator,
         bg: base_bg,
     }
@@ -1093,9 +1098,9 @@ pub(crate) fn render_tab_bar(
 
     let rich = render_status_segments(area, area, inactive, frame, &left, &[], buf, scene, None);
     let scale = if rich {
-        TEXT_SCALE_COMPACT
+        frame.theme.type_scale(TypeRole::Ui)
     } else {
-        TEXT_SCALE_FULL
+        FULL_CELL_SCALE
     };
     tab_spans(
         left.iter().map(|(text, _)| text.chars().count()),
@@ -1292,12 +1297,12 @@ fn status_segments(
             }
         }
         if right_anchor < badge_right {
-            // The bar paints the badge glyphs at TEXT_SCALE_COMPACT, right-anchored
-            // at badge_right, so they cover fewer cells than their char count.
+            // The bar paints the badge glyphs at its Ui scale, right-anchored at
+            // badge_right, so they cover fewer cells than their char count.
             // Record the hover rect over that scaled extent (dropping the leftmost
             // pad space, which carries no glyph) so hover matches the drawn glyphs.
             let chars = badge_right - right_anchor;
-            let width = ((chars - 1) * TEXT_SCALE_COMPACT).div_ceil(TEXT_SCALE_FULL);
+            let width = ((chars - 1) * theme.type_scale(TypeRole::Ui)).div_ceil(FULL_CELL_SCALE);
             *badge_rect = Some(Rect::new(badge_right - width, area.y, width, area.height));
         }
         if frame.diff_warm_busy {
@@ -2404,7 +2409,7 @@ mod tests {
         let span: String = (rect.x..rect.x + rect.width)
             .map(|x| buf[(x, rect.y)].symbol())
             .collect();
-        // Under cfg(test) TEXT_SCALE_COMPACT is a full cell, so the busy badge
+        // Under cfg(test) every type role is a full cell, so the busy badge
         // (spinner + " RA " = 6 chars) covers (6 - 1) = 5 cells; the leftmost pad
         // space carries no glyph and is dropped.
         assert_eq!(
@@ -3637,8 +3642,8 @@ mod tests {
         );
     }
 
-    /// The scale is a literal, because `TEXT_SCALE_COMPACT` equals the full
-    /// scale under `cfg(test)`.
+    /// The scale is a literal, because every type role answers a full cell
+    /// under `cfg(test)`.
     #[test]
     fn tab_spans_follow_the_scale_and_stop_at_the_bar_edge() {
         let spans_at = |(scale, width): (u16, u16)| {

@@ -21,8 +21,8 @@ use crate::{
     buffer_lifecycle,
     editor_state::EditorId,
     pane::View,
-    render::{layout, screen, TEXT_SCALE_POPUP},
-    theme::scope,
+    render::{layout, screen},
+    theme::{scope, TypeRole},
     walkthrough::{
         run::{part, WalkthroughRun},
         slide::{
@@ -171,6 +171,7 @@ pub(crate) fn render_slide(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
             .map(|annotation| (annotation.key, annotation.label_lines.clone()))
             .collect(),
         anchor: pool_anchor(stoat),
+        label_scale: stoat.theme.type_scale(TypeRole::Ui),
         protocol: stoat.stoatty_protocol,
         now,
         opening: last_declared.is_empty(),
@@ -443,6 +444,8 @@ struct Painter {
     /// The pool the marks ride, so they glide with the pane rather than
     /// staying pinned to the screen.
     anchor: Option<(u32, f32)>,
+    /// The scale the label text draws at, the theme's [`TypeRole::Ui`] size.
+    label_scale: u16,
     /// The terminal's protocol version, which decides whether a connector
     /// that bends goes out as the shape its route names or as a straight line.
     protocol: u32,
@@ -776,7 +779,7 @@ impl Painter {
                 TextRunCommand {
                     col: (box_.x as i16 + 1) * 16,
                     row: row as i16 * 16,
-                    scale: TEXT_SCALE_POPUP,
+                    scale: self.label_scale,
                     color: stroke.color,
                     bg: None,
                     text: line.clone(),

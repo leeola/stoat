@@ -529,7 +529,7 @@ fn diff_right_text(h: &crate::test_harness::TestHarness) -> Range<u16> {
 /// out in, rich as its theme resolves under stoatty.
 fn diff_columns(h: &crate::test_harness::TestHarness) -> DiffColumns {
     let theme = &h.stoat.theme;
-    let rich = crate::render::review::diff_gutter_is_rich(
+    let rich = crate::render::review::diff_rich_gutter_scale(
         h.stoat.stoatty,
         theme,
         theme.get(crate::theme::scope::UI_TEXT),
@@ -8945,8 +8945,9 @@ fn hover_drag_copies_and_leaves_the_editor_untouched() {
     h.stoat.pending_hover = Some(hover_sel_popup(&["hello world", "second line"], 0));
 
     // Down at inner (10,2) resolves to (line 0, col 0). The drag to (13,2) is
-    // three cells in, which the 0.85x popover scale maps to char column 4, so
-    // the copied span is "hell".
+    // three cells in, which the body's Ui scale maps to the copied span's end.
+    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui) as usize;
+    let end = (3 * 256 + 128) / ui;
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
     h.stoat
@@ -8954,7 +8955,7 @@ fn hover_drag_copies_and_leaves_the_editor_untouched() {
     h.stoat
         .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 13, 2));
 
-    assert_eq!(h.fake_clipboard().writes(), vec!["hell"]);
+    assert_eq!(h.fake_clipboard().writes(), vec![&"hello world"[..end]]);
     assert!(
         h.stoat.editor_drag.is_none(),
         "a hover drag never arms the editor selection",
@@ -9094,9 +9095,9 @@ fn hover_hit_test_inverts_the_stoatty_scale() {
         height: 3,
     };
     for cell in 0..40u16 {
-        let (line, col) = crate::render::hover::hover_hit_test(&popup, cell, 0);
+        let (line, col) = crate::render::hover::hover_hit_test(&popup, cell, 0, 232);
         assert_eq!(line, 0);
-        assert_eq!(col, (cell as usize * 256 + 128) / 218);
+        assert_eq!(col, (cell as usize * 256 + 128) / 232);
     }
 }
 
@@ -9241,18 +9242,19 @@ fn hover_drag_under_stoatty_maps_through_the_apc_scale() {
     let long = "x".repeat(40);
     h.stoat.pending_hover = Some(hover_sel_popup(&[&long], 0));
 
-    // inner.x is 10. A pointer 10 cells in maps through the 0.85x scale.
+    // inner.x is 10. A pointer 10 cells in maps through the body's Ui scale.
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 10, 2));
     h.stoat
         .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 20, 2));
 
+    let ui = h.stoat.theme.type_scale(crate::theme::TypeRole::Ui) as usize;
     let sel = h.stoat.pending_hover.as_ref().unwrap().selection.unwrap();
     assert_eq!(sel.anchor, (0, 0));
     assert_eq!(
         sel.head.1,
-        (10 * 256 + 128) / 218,
-        "the drag column maps through the stoatty 256/218 inverse",
+        (10 * 256 + 128) / ui,
+        "the drag column maps through the inverse of the body's Ui scale",
     );
 }
 

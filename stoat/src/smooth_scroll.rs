@@ -516,9 +516,8 @@ fn paint_page_gutter(
             let widget = rich_gutter(
                 &lines,
                 width_digits,
-                rich.number_fg,
-                rich.separator,
-                rich.bg,
+                (rich.number_fg, rich.separator, rich.bg),
+                rich.number_scale,
                 PLAIN_DIFF_BARS,
                 PLAIN_DIFF_BAR_WIDTH,
             );

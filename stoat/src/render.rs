@@ -102,21 +102,6 @@ use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
 use stoatty_protocol::BATCHED_DECORATIONS_PROTOCOL;
 use unicode_width::UnicodeWidthStr;
 
-/// Full-cell text scale under stoatty, in 256ths of a cell, for grid-size modal
-/// titles.
-pub(crate) const TEXT_SCALE_FULL: u16 = 256;
-/// Popup body text scale under stoatty, 0.85x a cell, for hint rows and hover
-/// bodies.
-pub(crate) const TEXT_SCALE_POPUP: u16 = 218;
-/// Compact chrome text scale under stoatty, 0.625x a cell, for line numbers and
-/// the status bar.
-///
-/// Under `cfg(test)` it resolves to a full cell (256) instead: the test
-/// compositor draws one glyph per cell, so running compact text at cell scale
-/// keeps composited geometry exact against the fallback layout the harness scans
-/// and snapshots.
-pub(crate) const TEXT_SCALE_COMPACT: u16 = if cfg!(test) { 256 } else { 160 };
-
 /// Strip id for the single-mode minimap, reserved above every pane index (which
 /// are small and dense from zero). stoatty keys minimap strips in a namespace
 /// separate from scroll pools, so `u32::MAX` never collides.

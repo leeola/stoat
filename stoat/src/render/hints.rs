@@ -1,5 +1,7 @@
-use super::TEXT_SCALE_POPUP;
-use crate::toggle::{Toggle, ToggleStates};
+use crate::{
+    theme::TypeRole,
+    toggle::{Toggle, ToggleStates},
+};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::collections::HashMap;
 
@@ -193,6 +195,7 @@ pub(crate) fn render_hints_grouped(
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
     let end_x = inner.x + inner.width;
     let run_bg = crate::render::modal_fill(theme, modal_style);
+    let row_scale = theme.type_scale(TypeRole::Ui);
 
     let mut col_x = inner.x + 1;
     for column in &layout.columns {
@@ -209,7 +212,7 @@ pub(crate) fn render_hints_grouped(
                 &cell.key,
                 key_style,
                 run_bg,
-                TEXT_SCALE_POPUP,
+                row_scale,
                 &mut *scene,
             );
 
@@ -221,7 +224,7 @@ pub(crate) fn render_hints_grouped(
                 &cell.action,
                 action_style,
                 run_bg,
-                TEXT_SCALE_POPUP,
+                row_scale,
                 &mut *scene,
             );
 
@@ -271,7 +274,7 @@ pub(crate) fn render_hints_grouped(
                 &text,
                 footer.style,
                 run_bg,
-                TEXT_SCALE_POPUP,
+                row_scale,
                 scene,
             );
         }

@@ -1,8 +1,5 @@
-use super::{
-    walkthrough::{card_style, sketch_corner_radius},
-    TEXT_SCALE_POPUP,
-};
-use crate::{app::Stoat, editor_state::EditorId, pane::View};
+use super::walkthrough::{card_style, sketch_corner_radius};
+use crate::{app::Stoat, editor_state::EditorId, pane::View, theme::TypeRole};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -267,6 +264,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
     let run_bg = crate::render::modal_fill(&stoat.theme, modal_style);
+    let body_scale = stoat.theme.type_scale(TypeRole::Ui);
     let anchor = host_anchor(stoat, popup_area);
 
     let frame_kind = stoat
@@ -386,8 +384,8 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                 // band spans full cell height. Chars map to cells through the
                 // scale, floored at the start and ceiled at the end.
                 if let Some((c0, c1, rgb)) = selection {
-                    let cell0 = c0 * TEXT_SCALE_POPUP as usize / 256;
-                    let cell1 = (c1 * TEXT_SCALE_POPUP as usize).div_ceil(256);
+                    let cell0 = c0 * body_scale as usize / 256;
+                    let cell1 = (c1 * body_scale as usize).div_ceil(256);
                     let x0 = inner.x + (cell0 as u16).min(inner.width);
                     let x1 = inner.x + (cell1 as u16).min(inner.width);
                     let color = Color::Rgb(rgb[0], rgb[1], rgb[2]);
@@ -422,7 +420,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                         if seg_text.is_empty() {
                             continue;
                         }
-                        let col = text_run::advance_sixteenths(seg_start, TEXT_SCALE_POPUP) as i16;
+                        let col = text_run::advance_sixteenths(seg_start, body_scale) as i16;
                         let bg = if selected {
                             selection.map_or(run_bg, |(_, _, rgb)| rgb)
                         } else {
@@ -435,7 +433,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                         let command = TextRunCommand {
                             col: inner.x as i16 * 16 + col,
                             row: row as i16 * 16,
-                            scale: TEXT_SCALE_POPUP,
+                            scale: body_scale,
                             color,
                             bg: Some(bg),
                             text: seg_text.to_string(),
@@ -533,10 +531,9 @@ fn highlight_grid_selection(
 /// Map a screen pointer over the hover body to a `(content line, char column)`
 /// position, clamped to the popup interior and the target line's length.
 ///
-/// Replays [`render_hover`]'s scroll clamp to resolve the line, and inverts the
-/// 0.85x popover scale (256ths of a cell over [`TEXT_SCALE_POPUP`]) to resolve
-/// the column.
-pub(crate) fn hover_hit_test(popup: &HoverPopup, col: u16, row: u16) -> (usize, usize) {
+/// Replays [`render_hover`]'s scroll clamp to resolve the line, and inverts
+/// `scale`, the 256ths of a cell the body draws at, to resolve the column.
+pub(crate) fn hover_hit_test(popup: &HoverPopup, col: u16, row: u16, scale: u16) -> (usize, usize) {
     let inner = popup.inner;
     let clamped_col = col.clamp(inner.x, inner.x + inner.width.saturating_sub(1));
     let clamped_row = row.clamp(inner.y, inner.y + inner.height.saturating_sub(1));
@@ -551,7 +548,7 @@ pub(crate) fn hover_hit_test(popup: &HoverPopup, col: u16, row: u16) -> (usize, 
     let line = (scroll + (clamped_row - inner.y) as usize).min(popup.lines.len().saturating_sub(1));
 
     let cell = (clamped_col - inner.x) as usize;
-    let char_col = (cell * 256 + 128) / TEXT_SCALE_POPUP as usize;
+    let char_col = (cell * 256 + 128) / scale as usize;
     let max_col = popup.lines.get(line).map(|l| line_width(l)).unwrap_or(0);
     (line, char_col.min(max_col))
 }
@@ -735,6 +732,7 @@ pub(crate) fn render_hover_page(
     let area = Rect::new(0, 0, region_width, region_height);
 
     let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let body_scale = theme.type_scale(TypeRole::Ui);
     let modal_fg = crate::render::paint::style_rgb(modal_style.fg).unwrap_or([255, 255, 255]);
     let (buf, run_bg) = match popup.frame {
         HoverFrame::Sketch { fill, .. } => {
@@ -760,12 +758,12 @@ pub(crate) fn render_hover_page(
         let line = truncate_line(line, region_width as usize);
         let mut chars_before = 0u16;
         for (text, style) in &line {
-            let col = text_run::advance_sixteenths(chars_before.into(), TEXT_SCALE_POPUP) as i16;
+            let col = text_run::advance_sixteenths(chars_before.into(), body_scale) as i16;
             let color = crate::render::paint::style_rgb(style.fg).unwrap_or(modal_fg);
             TextRun {
                 col,
                 row: 0,
-                scale: TEXT_SCALE_POPUP,
+                scale: body_scale,
                 color,
                 bg: Some(run_bg),
                 text,

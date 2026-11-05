@@ -1,6 +1,6 @@
 use crate::{
-    render::{chrome, paint, TEXT_SCALE_FULL},
-    theme::{scope, Theme},
+    render::{chrome, paint},
+    theme::{scope, Theme, FULL_CELL_SCALE},
 };
 use ratatui::{
     buffer::Buffer,
@@ -140,12 +140,12 @@ pub(crate) fn wrap_popout_lines(msg: &str, width: usize, max_rows: usize) -> Vec
 
 /// The number of glyphs a row of `cells` cells fits at `scale`.
 ///
-/// A glyph at `scale` (256ths of a cell) advances `scale`/[`TEXT_SCALE_FULL`] of a
+/// A glyph at `scale` (256ths of a cell) advances `scale`/[`FULL_CELL_SCALE`] of a
 /// cell, so a sub-cell scale fits more glyphs than the row has cells. Popout text
 /// derives its wrap width and truncation from this so scaled lines fill the card
 /// rather than stopping short at the cell count.
 pub(crate) fn scaled_char_capacity(cells: usize, scale: u16) -> usize {
-    cells * TEXT_SCALE_FULL as usize / scale as usize
+    cells * FULL_CELL_SCALE as usize / scale as usize
 }
 
 #[cfg(test)]
