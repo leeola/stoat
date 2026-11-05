@@ -702,6 +702,36 @@ impl ActiveModal {
         }
     }
 
+    /// The name the focused status row gives this modal while it is open.
+    ///
+    /// Only the pickers have a name. A text input paints its query in the
+    /// status row or in a popup of its own. The run and quit boxes take no
+    /// query. Under these modals the row keeps its mode chip and its screen
+    /// label.
+    pub(crate) fn label(self) -> Option<&'static str> {
+        match self {
+            Self::FileFinder => Some("find file"),
+            Self::Help => Some("help"),
+            Self::WorkspacePicker => Some("sessions"),
+            Self::Palette => Some("palette"),
+            Self::SymbolFinder => Some("symbols"),
+            Self::CodeSearch => Some("search"),
+            Self::PaneFinder => Some("panes"),
+            Self::Diagnostics => Some("diagnostics"),
+            Self::CommitPicker => Some("commits"),
+            Self::Location => Some("locations"),
+            Self::Jumplist => Some("jumps"),
+            Self::WalkthroughPicker => Some("walkthroughs"),
+            Self::Run
+            | Self::QuitConfirm
+            | Self::Rename
+            | Self::Search
+            | Self::SplitSelection
+            | Self::FilterSelections
+            | Self::ShellInput => None,
+        }
+    }
+
     /// Whether this modal's box covers the minimap band, so the strip is not
     /// worth drawing beneath it.
     ///

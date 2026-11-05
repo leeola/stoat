@@ -655,6 +655,9 @@ pub(crate) fn render_overlay_status(
 /// unconditionally, left-padded when it leads. The screen segment differs from
 /// the pane status's focus-gated one. The end column stops at the right edge of
 /// `area`, and the right segments fit between it and that edge.
+///
+/// A focused bar names an open picker modal in place of the screen, as the
+/// pane status does. The label then agrees with the prompt chip beside it.
 fn overlay_status_segments(
     is_focused: bool,
     area: Rect,
@@ -689,14 +692,19 @@ fn overlay_status_segments(
             base_style.add_modifier(Modifier::BOLD),
         );
     }
-    if let Some((screen_label, screen_color)) = screen_segment(screen, theme) {
+    let label = match frame.modal_label.filter(|_| is_focused) {
+        Some(modal_label) => Some((modal_label, base_style)),
+        None => screen_segment(screen, theme)
+            .map(|(screen_label, screen_color)| (screen_label, base_style.fg(screen_color))),
+    };
+    if let Some((label, style)) = label {
         let left_pad = if cursor == area.x { " " } else { "" };
         push_left(
             &mut left,
             &mut cursor,
             end_x,
-            format!("{left_pad}{screen_label} "),
-            base_style.fg(screen_color),
+            format!("{left_pad}{label} "),
+            style,
         );
     }
     (left, cursor)
@@ -1257,7 +1265,15 @@ fn status_segments(
                     base_style.add_modifier(Modifier::BOLD),
                 );
             }
-            if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
+            if let Some(modal_label) = frame.modal_label {
+                push_left(
+                    &mut left,
+                    &mut cursor,
+                    end_x,
+                    format!(" {modal_label} "),
+                    base_style,
+                );
+            } else if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
                 push_left(
                     &mut left,
                     &mut cursor,
@@ -2156,7 +2172,8 @@ mod tests {
         editor_state::EditorState,
         host::LspNotification,
         lsp::drain,
-        pane::View,
+        pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
+        rebase::RebaseState,
         term_session::TermId,
         workspace::diff::{DiffBase, HunkPosition, WorktreeBase},
         Stoat,
@@ -3676,6 +3693,74 @@ mod tests {
             [
                 format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]  2 sel "),
                 format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]"),
+            ],
+        );
+    }
+
+    /// An open picker shows the prompt chip and its own name where a screen
+    /// label sits. A closed picker gives the row back to the mode. The search
+    /// input has no name, so its row keeps the mode chip.
+    #[test]
+    fn the_status_row_names_an_open_picker() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.seed_focused_buffer("foo\nbar\n");
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
+
+        h.type_keys("space p");
+        let open = row(&mut h);
+        h.type_keys("escape");
+        let closed = row(&mut h);
+        dispatch(&mut h.stoat, &OpenSearchInput);
+        assert_eq!(
+            [open, closed, row(&mut h)],
+            [
+                format!("{:<56}1:1 ", " PMT  (unnamed)  find file [scratch] [+]"),
+                format!("{:<56}1:1 ", " NOR  (unnamed) [scratch] [+]"),
+                format!("{:<56}1:1 ", " INS /"),
+            ],
+        );
+    }
+
+    /// A focused overlay bar names an open picker in place of its screen, and
+    /// names the screen again once the picker closes. An unfocused bar shows no
+    /// prompt chip, so it keeps its screen under an open picker.
+    #[test]
+    fn the_overlay_bar_names_an_open_picker() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.stoat.active_workspace_mut().rebase = Some(RebaseState::new(
+            PathBuf::from("/overlay"),
+            "onto".into(),
+            vec![],
+        ));
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
+
+        h.type_keys(":");
+        let open = row(&mut h);
+        h.type_keys("escape");
+        let closed = row(&mut h);
+
+        h.type_keys(":");
+        let ws = h.stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Rect::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+        assert_eq!(
+            [open, closed, row(&mut h)],
+            [
+                format!("{:<60}", " PMT  (unnamed) palette"),
+                format!("{:<60}", " NOR  (unnamed) rebase"),
+                format!("{:<60}", " rebase"),
             ],
         );
     }

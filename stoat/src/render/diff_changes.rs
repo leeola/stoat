@@ -793,6 +793,7 @@ mod tests {
             status_message: None,
             goto_word_labels: None,
             mode_label: ("", Color::Reset),
+            modal_label: None,
             diagnostics: &stoat.diagnostics,
             status_prompt: None,
             terminal_cursor_editor: stoat.focused_editor_ids().map(|(id, _)| id),

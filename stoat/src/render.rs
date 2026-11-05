@@ -352,15 +352,25 @@ pub(crate) struct FrameCtx<'a> {
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
     pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, (usize, usize)>>,
-    /// [`Self::mode`]'s status-line label and colour, resolved once for the
+    /// The status-line mode chip's label and color, resolved once for the
     /// frame by [`pane::mode_segment`].
     ///
+    /// The chip shows [`Self::mode`], except while a modal with a
+    /// [`Self::modal_label`] is open. It then shows the `prompt` chip, since
+    /// keys go to the modal's query and not to the mode under it.
+    ///
     /// Resolving it builds a `ui.statusline.{mode}` scope string to probe the
-    /// theme with, which the panes would otherwise repeat for a mode that is
-    /// the same for all of them. The label is a per-mode override from
+    /// theme with, which each pane otherwise repeats for a mode that is the
+    /// same for all of them. The label is a per-mode override from
     /// `Settings` when one exists, so a user-defined mode shows something more
     /// meaningful than `---`.
     pub(crate) mode_label: (&'a str, Color),
+    /// The name of the picker modal open over the frame, from
+    /// [`ActiveModal::label`], which the focused status row shows in place of
+    /// its screen label.
+    ///
+    /// `None` while no modal is open, and while the open modal has no name.
+    pub(crate) modal_label: Option<&'static str>,
     /// Workspace-wide LSP diagnostic store. The status bar reads the
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
@@ -1158,6 +1168,7 @@ pub(crate) fn frame(
     // the end of the function. Nothing between here and the chain opens or closes
     // a modal, so the value still holds there.
     let painted_modal = active_modal(stoat);
+    let modal_label = painted_modal.and_then(ActiveModal::label);
     // Resolved here for the same reason. Both constructors read the whole
     // &Stoat, and the dials are separate fields on it.
     let diff_dials = DiffDials::from_stoat(stoat);
@@ -1266,7 +1277,15 @@ pub(crate) fn frame(
             .map(|(typ, message)| (*typ, message.as_str())),
         status_message: stoat.pending_message.as_deref(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
-        mode_label: pane::mode_segment(mode, &stoat.theme, &stoat.settings.mode_badges),
+        mode_label: pane::mode_segment(
+            match modal_label {
+                Some(_) => "prompt",
+                None => mode,
+            },
+            &stoat.theme,
+            &stoat.settings.mode_badges,
+        ),
+        modal_label,
         diagnostics: &stoat.diagnostics,
         status_prompt: status_prompt.as_ref(),
         terminal_cursor_editor,
