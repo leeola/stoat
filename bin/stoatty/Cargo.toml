@@ -56,3 +56,10 @@ stoat_build_stamp = { path = "../../build_stamp" }
 name = "headless_scene"
 path = "tests/headless_scene.rs"
 required-features = ["fixture"]
+
+# Renders stoat fixtures headlessly on the ermine_night theme, so it needs the
+# stoat binary built with its fixture feature, as headless_scene does.
+[[test]]
+name = "ermine_scenes"
+path = "tests/ermine_scenes.rs"
+required-features = ["fixture"]
