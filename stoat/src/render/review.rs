@@ -1143,9 +1143,10 @@ pub(crate) fn paint_diff_rows(
                     );
                 }
                 if !continuation && let Some(mark) = mark {
+                    // A modified row's live side is the text its change added,
+                    // as its base side is the text the change removed.
                     let change_scope = match status {
-                        DiffStatus::Added => s::DIFF_ADDED,
-                        DiffStatus::Modified => s::DIFF_MODIFIED,
+                        DiffStatus::Added | DiffStatus::Modified => s::DIFF_ADDED,
                         DiffStatus::Moved => s::DIFF_MOVED,
                         DiffStatus::Unchanged => s::DIFF_CONTEXT,
                     };
@@ -2951,12 +2952,14 @@ fn draw_removal_tick(
 }
 
 /// The scope a staged mark of `status` paints its change bar in.
+///
+/// The mark sits in the base column, where a modified line is the text the
+/// change removed, so it paints as a deletion.
 fn staged_mark_scope(status: DiffHunkStatus) -> &'static str {
     match status {
         DiffHunkStatus::Added => s::DIFF_ADDED,
-        DiffHunkStatus::Modified => s::DIFF_MODIFIED,
+        DiffHunkStatus::Modified | DiffHunkStatus::Deleted => s::DIFF_DELETED,
         DiffHunkStatus::Moved => s::DIFF_MOVED,
-        DiffHunkStatus::Deleted => s::DIFF_DELETED,
     }
 }
 
@@ -4152,9 +4155,9 @@ mod tests {
             (cells[1][..3].to_vec(), symbols(&cells[1][3..])),
             (
                 vec![
-                    glyph("▎", s::DIFF_MODIFIED),
+                    glyph("▎", s::DIFF_DELETED),
                     glyph("▎", s::DIFF_STAGED),
-                    glyph("\u{258F}", s::DIFF_MODIFIED),
+                    glyph("\u{258F}", s::DIFF_DELETED),
                 ],
                 vec![" ", " ", " "],
             ),
@@ -4166,9 +4169,9 @@ mod tests {
                 glyph("▎", s::DIFF_DELETED),
                 glyph("▎", s::DIFF_UNSTAGED),
                 glyph("\u{258F}", s::DIFF_DELETED),
-                glyph("▎", s::DIFF_MODIFIED),
+                glyph("▎", s::DIFF_ADDED),
                 glyph("▎", s::DIFF_UNSTAGED),
-                glyph("\u{258F}", s::DIFF_MODIFIED),
+                glyph("\u{258F}", s::DIFF_ADDED),
             ],
             "the removed d keeps the removal's bars beside the live D's: {cells:?}",
         );
@@ -4217,9 +4220,9 @@ mod tests {
                 glyph("▎", s::DIFF_DELETED),
                 glyph("▎", state),
                 glyph("\u{258F}", s::DIFF_DELETED),
-                glyph("▎", s::DIFF_MODIFIED),
+                glyph("▎", s::DIFF_ADDED),
                 glyph("▎", state),
-                glyph("\u{258F}", s::DIFF_MODIFIED),
+                glyph("\u{258F}", s::DIFF_ADDED),
             ]
         };
         assert_eq!(
@@ -4440,7 +4443,7 @@ mod tests {
             glyph("▎", s::DIFF_DELETED),
             glyph("▎", s::DIFF_UNSTAGED),
             blank(),
-            glyph("▎", s::DIFF_MODIFIED),
+            glyph("▎", s::DIFF_ADDED),
             glyph("▎", s::DIFF_UNSTAGED),
             blank(),
         ];
@@ -4511,9 +4514,9 @@ mod tests {
             height,
             color,
         };
-        // The rgb test theme's modified and deleted colors, faded toward its
-        // #282c34 background.
-        let modified = [255, 255, 0];
+        // The rgb test theme's added color, which a live modified row's bars
+        // take, and `faded` blends it toward the theme's #282c34 background.
+        let added = [0, 255, 0];
         let faded = |color| dim_rgb(color, [40, 44, 52], editor::TREE_FADE);
         let right = columns.right_x;
         // The diff view stacks base rows, so each screen row is found by its text.
@@ -4525,10 +4528,10 @@ mod tests {
         let (a, b, d) = (row_of("A"), row_of("B"), row_of("D"));
         assert_eq!(
             [
-                holds_bar(&bytes, tree_bar(right, a, 16, modified)),
-                holds_bar(&bytes, tree_bar(right, b, 16, modified)),
-                holds_bar(&bytes, tree_bar(right, b, 16, faded(modified))),
-                holds_bar(&bytes, tree_bar(right, d, 16, faded(modified))),
+                holds_bar(&bytes, tree_bar(right, a, 16, added)),
+                holds_bar(&bytes, tree_bar(right, b, 16, added)),
+                holds_bar(&bytes, tree_bar(right, b, 16, faded(added))),
+                holds_bar(&bytes, tree_bar(right, d, 16, faded(added))),
             ],
             [true, false, false, true],
             "the marked row's bar, none on the unmarked row, and the unreached row's faded",

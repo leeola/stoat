@@ -36,6 +36,9 @@ const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
+const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
+const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
+const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
@@ -98,6 +101,40 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
         DISABLED,
         "state_lane",
     );
+}
+
+/// A modified row's git bar reads removed on the base side and added on the
+/// live side of the split diff.
+///
+/// The changed row is row 3, `4 four` on the left and `4 four changed` on the
+/// right. A bar is too narrow to lead its cell's colors, so the check finds the
+/// pixel columns the color fills over the row's whole height, which a glyph
+/// never does.
+#[test]
+fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let (_, y, _, height) = cell_rect(0, 3, 1, 1);
+    let [removed, added, modified] =
+        [DANGER, SUCCESS, WARNING].map(|color| bar_columns(&shot, (y, height), color));
+
+    let apart = removed
+        .last()
+        .zip(added.first())
+        .is_some_and(|(left, right)| left < right);
+    if !apart || !modified.is_empty() {
+        let frame = keep_frame(&shot, &mut home, "diff_git_bars");
+        panic!(
+            "the bars sit at {removed:?} removed, {added:?} added, and {modified:?} modified; the \
+             frame is {}",
+            frame.display(),
+        );
+    }
 }
 
 /// The panes sit one chrome column in from each window edge, and a blank text
@@ -595,6 +632,19 @@ fn cells_of(shot: &Snapshot, color: [u8; 3]) -> Vec<(u16, u16)> {
     (0..ROWS)
         .flat_map(|row| (0..COLS).map(move |col| (col, row)))
         .filter(|&(col, row)| dominant_color(shot, cell_rect(col, row, 1, 1)) == color)
+        .collect()
+}
+
+/// The pixel columns of `shot` that `color` fills over the whole band of rows
+/// from `y`, left to right.
+fn bar_columns(shot: &Snapshot, (y, height): (u32, u32), color: [u8; 3]) -> Vec<u32> {
+    (0..shot.width)
+        .filter(|&x| {
+            (y..y + height).all(|row| {
+                let at = ((row * shot.width + x) * 4) as usize;
+                shot.rgba[at..at + 3] == color
+            })
+        })
         .collect()
 }
 
