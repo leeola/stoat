@@ -1235,7 +1235,7 @@ mod tests {
                 "normal".to_string(),
                 "space".to_string(),
                 Some("space".to_string()),
-                1
+                2
             ),
         );
     }

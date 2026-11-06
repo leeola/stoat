@@ -137,6 +137,33 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     }
 }
 
+/// The base side of the split diff recedes as a whole behind the live side.
+///
+/// Row 5, `6 six`, is context on both sides. The left text starts at column 6
+/// and the right at column 82. The base side paints the context color, which
+/// alone reaches about two thirds of the live text, so only the fade brings the
+/// left text's peak below three fifths of the right's.
+#[test]
+fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let base = brightest(&shot, cell_rect(6, 5, 5, 1));
+    let live = brightest(&shot, cell_rect(82, 5, 5, 1));
+
+    if u16::from(base) * 5 >= u16::from(live) * 3 {
+        let frame = keep_frame(&shot, &mut home, "diff_base_side");
+        panic!(
+            "the base text peaks at {base} beside the live text's {live}; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The panes sit one chrome column in from each window edge, and a blank text
 /// cell inside them stays on the base surface.
 #[test]

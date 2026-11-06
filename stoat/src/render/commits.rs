@@ -388,12 +388,12 @@ impl PreviewDials {
         }
     }
 
-    /// The values a session starts at, which paint exactly what the preview
-    /// painted before any dial existed.
+    /// The values a session starts at with the tint off, for a test of a paint
+    /// that the tint dial recolors.
     #[cfg(test)]
-    fn shipped() -> Self {
+    fn untinted() -> Self {
         Self {
-            paint: DiffDials::shipped(),
+            paint: DiffDials::untinted(),
             syntax: true,
         }
     }
@@ -864,7 +864,7 @@ mod tests {
 
     /// Render into a wide buffer so both columns fit, and hand back the grid.
     fn rendered(doc: &DiffDocument, theme: &Theme) -> Buffer {
-        rendered_with(doc, theme, PreviewDials::shipped())
+        rendered_with(doc, theme, PreviewDials::untinted())
     }
 
     /// [`rendered`] at a chosen dial setting, for the cases that step one.
@@ -887,7 +887,7 @@ mod tests {
             theme,
             area,
             skip_rows,
-            PreviewDials::shipped(),
+            PreviewDials::untinted(),
             &mut buf,
             &mut scene,
         );
@@ -1105,9 +1105,9 @@ mod tests {
         let dials = PreviewDials {
             paint: DiffDials {
                 tint_amount: 0.5,
-                ..DiffDials::shipped()
+                ..DiffDials::untinted()
             },
-            ..PreviewDials::shipped()
+            ..PreviewDials::untinted()
         };
         let buf = rendered_with(&session, &rgb_theme(), dials);
 
@@ -1129,9 +1129,9 @@ mod tests {
         let dials = PreviewDials {
             paint: DiffDials {
                 soften_scale: 2.0,
-                ..DiffDials::shipped()
+                ..DiffDials::untinted()
             },
-            ..PreviewDials::shipped()
+            ..PreviewDials::untinted()
         };
         let buf = rendered_with(&session, &rgb_theme(), dials);
 
@@ -1152,7 +1152,7 @@ mod tests {
         let theme = rgb_theme();
         let off = PreviewDials {
             syntax: false,
-            ..PreviewDials::shipped()
+            ..PreviewDials::untinted()
         };
 
         let softened = dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN);
@@ -1181,9 +1181,9 @@ mod tests {
         let dials = PreviewDials {
             paint: DiffDials {
                 tint_amount: 1.0,
-                ..DiffDials::shipped()
+                ..DiffDials::untinted()
             },
-            ..PreviewDials::shipped()
+            ..PreviewDials::untinted()
         };
         let buf = rendered_with(&session, &rgb_theme(), dials);
 

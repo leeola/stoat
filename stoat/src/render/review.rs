@@ -55,6 +55,15 @@ pub(crate) const CONTEXT_SOFTEN: f32 = 0.40;
 /// refinement marks pop hardest inside their own line.
 pub(crate) const MODIFIED_ROW_SOFTEN: f32 = 0.25;
 
+/// Fraction every cell of the base column blends toward the editor background
+/// after the rest of its styling, leaving 60% of its color.
+///
+/// The live column is where the reader edits, so the base column recedes
+/// behind it as a whole, its changed chars with the rest. The fade keeps each
+/// char's weight, so a replacement still bolds on both sides for the char by
+/// char read.
+pub(crate) const BASE_SIDE_SOFTEN: f32 = 0.40;
+
 /// Furthest the diff view's soften may be turned down. Lands the scale on zero,
 /// which disables softening outright and restores the paint from before it.
 pub(crate) const DIFF_SOFTEN_MIN: i8 = -2;
@@ -98,10 +107,10 @@ pub(crate) const DIFF_TINT_MAX: i8 = 2;
 /// Fraction a changed char's foreground shifts toward its status color at
 /// `level`.
 ///
-/// Level 0 is off and paints exactly the colors from before the dial, which is
-/// where a session starts. Level 1 leans the syntax color halfway toward the
-/// status hue, and level 2 replaces it. A level below zero is the same as off,
-/// so the dial's bottom needs no separate floor.
+/// Level 0 is off and paints exactly the colors from before the dial. Level 1
+/// leans the syntax color halfway toward the status hue, which is where a
+/// session starts, and level 2 replaces it. A level below zero is the same as
+/// off, so the dial's bottom needs no separate floor.
 ///
 /// The same fraction drains the color out of an unchanged row, so one dial
 /// trades color between the two populations rather than only adding it.
@@ -154,9 +163,19 @@ impl DiffDials {
     pub(crate) fn shipped() -> Self {
         Self {
             soften_scale: 1.0,
-            tint_amount: 0.0,
+            tint_amount: diff_tint_amount(1),
             bold: false,
             underline: false,
+        }
+    }
+
+    /// The shipped dials with the tint off, for a test of a paint that the tint
+    /// dial recolors.
+    #[cfg(test)]
+    pub(crate) fn untinted() -> Self {
+        Self {
+            tint_amount: 0.0,
+            ..Self::shipped()
         }
     }
 }
@@ -1254,6 +1273,7 @@ pub(crate) fn paint_diff_rows(
                             None,
                             dials,
                             None,
+                            tints.as_ref().map(|t| t.bg),
                         );
                     }
                     if !continuation {
@@ -1533,14 +1553,20 @@ fn mark_span(
 /// a softened run that keeps its bold still competes with the changed content
 /// it sits behind.
 fn soften_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
-    let style = match style_rgb(style.fg) {
+    fade_style(style, bg, amount).remove_modifier(Modifier::BOLD)
+}
+
+/// Blend `style`'s foreground toward `bg` by `amount`, keeping its weight.
+///
+/// A non-RGB foreground comes back unblended, for [`soften_style`]'s reason.
+fn fade_style(style: Style, bg: [u8; 3], amount: f32) -> Style {
+    match style_rgb(style.fg) {
         Some(fg) => {
             let [r, g, b] = dim_rgb(fg, bg, amount);
             style.fg(Color::Rgb(r, g, b))
         },
         None => style,
-    };
-    style.remove_modifier(Modifier::BOLD)
+    }
 }
 
 /// Shift `style`'s foreground toward `target` by `amount`, keeping its weight.
@@ -1745,6 +1771,7 @@ pub(crate) fn paint_base_row(
         soften_gaps,
         dials,
         tint_row,
+        None,
     );
 }
 
@@ -1764,6 +1791,11 @@ pub(crate) fn paint_base_row(
 /// as the mirror of an unchanged line does. `moved_fallback` takes the place of
 /// `fallback` inside a moved span. A removed line that the tree pass relocated
 /// in part then shows the move without token colors.
+///
+/// `side_fade` is the background the whole segment fades toward by
+/// [`BASE_SIDE_SOFTEN`], after the rest of its styling. The split diff's base
+/// column passes it, and any other column passes `None`. The soften dial
+/// scales the fade, so a zero `dials.soften_scale` turns it off.
 #[allow(clippy::too_many_arguments)]
 fn paint_base_segment(
     buf: &mut Buffer,
@@ -1785,6 +1817,7 @@ fn paint_base_segment(
     soften_gaps: Option<[u8; 3]>,
     dials: DiffDials,
     tint_row: Option<Color>,
+    side_fade: Option<[u8; 3]>,
 ) {
     debug_assert!(
         token_spans.is_sorted_by_key(|(range, _)| range.start),
@@ -1796,6 +1829,7 @@ fn paint_base_segment(
     );
 
     let soften_gaps = soften_gaps.filter(|_| !change_spans.is_empty());
+    let side_amount = (BASE_SIDE_SOFTEN * dials.soften_scale).min(SOFTEN_CAP);
     let span_tints = tints.filter(|_| dials.tint_amount > 0.0);
     // Only a changed char lifts, and only against a receding surround: with
     // softening off nothing recedes, so nothing has to stand off it.
@@ -1882,7 +1916,10 @@ fn paint_base_segment(
             },
         }
 
-        style
+        match side_fade {
+            Some(bg) => fade_style(style, bg, side_amount),
+            None => style,
+        }
     };
 
     let start = window.start;
@@ -2168,6 +2205,7 @@ fn paint_base_side(
             tints.map(|t| t.bg),
             dials,
             tint_row,
+            tints.map(|t| t.bg),
         );
     }
 
@@ -5150,7 +5188,7 @@ mod tests {
             true,
             DiffDials {
                 soften_scale: 0.0,
-                ..DiffDials::shipped()
+                ..DiffDials::untinted()
             },
             BufferNumbering::Absolute,
             &[],
@@ -5337,6 +5375,16 @@ mod tests {
     /// 59. [`harness_columns`] gives the columns either side of it.
     fn diff_harness(base: &str, buffer: &str) -> crate::test_harness::TestHarness {
         diff_harness_sized(120, base, buffer)
+    }
+
+    /// [`diff_harness`] with the tint dial off, for a soften check. The tint
+    /// drains the color out of unchanged rows, which recolors what the check
+    /// reads.
+    fn untinted_diff_harness(base: &str, buffer: &str) -> crate::test_harness::TestHarness {
+        let mut h = diff_harness(base, buffer);
+        h.stoat.diff_tint = 0;
+        h.snapshot();
+        h
     }
 
     /// [`diff_harness`] at `width` columns. Below [`DIFF_TWO_COLUMN_MIN`] both
@@ -6243,7 +6291,7 @@ mod tests {
         // `main` becomes `other` on the first line, so that line is refined.
         // The second is a pure insertion, which nothing refines, so its
         // identical `fn` keyword stays at full strength to compare against.
-        let h = diff_harness("fn main() {}\n", "fn other() {}\nfn extra() {}\n");
+        let h = untinted_diff_harness("fn main() {}\n", "fn other() {}\nfn extra() {}\n");
 
         let bg = style_rgb(
             h.stoat
@@ -6527,12 +6575,55 @@ mod tests {
         );
     }
 
+    /// The base column recedes as a whole, so a removed line's text sits
+    /// [`BASE_SIDE_SOFTEN`] of the way from the removed color toward the
+    /// background. With syntax off, the removed color is the whole line's.
+    ///
+    /// The soften dial scales the fade, so the dial's bottom turns it off and
+    /// its top lands it on [`SOFTEN_CAP`].
+    #[test]
+    fn diff_view_fades_a_removed_base_row_toward_the_background() {
+        let mut h = diff_harness("fn keep() {}\nfn gone() {}\n", "fn keep() {}\n");
+        h.stoat.diff_syntax = false;
+        let removed_fg = |h: &mut crate::test_harness::TestHarness, soften| {
+            h.stoat.diff_soften = soften;
+            h.snapshot();
+            let buf = h.rendered_buffer();
+            let cols = harness_columns(h);
+            let y = (0..buf.area.height)
+                .find(|&y| line_text(buf, y, left_text(&cols)).contains("fn gone"))
+                .expect("the removed line renders in the left column");
+            let x = left_text(&cols)
+                .find(|&x| !buf[(x, y)].symbol().trim().is_empty())
+                .expect("a glyph on the removed row");
+            buf[(x, y)].fg
+        };
+        let fgs = [DIFF_SOFTEN_MIN, 0, DIFF_SOFTEN_MAX].map(|soften| removed_fg(&mut h, soften));
+
+        let theme = &h.stoat.theme;
+        let bg = style_rgb(theme.get(crate::theme::scope::UI_BACKGROUND).bg).expect("rgb bg");
+        let deleted = style_rgb(theme.get(s::DIFF_DELETED).fg).expect("rgb deleted color");
+        let faded = |amount| {
+            let [r, g, b] = dim_rgb(deleted, bg, amount);
+            Color::Rgb(r, g, b)
+        };
+        assert_eq!(fgs, [0.0, BASE_SIDE_SOFTEN, SOFTEN_CAP].map(faded));
+    }
+
+    /// The shipped dials are the ones a fresh session paints with, so a modal
+    /// preview and a plain pane paint as a fresh diff view does.
+    #[test]
+    fn the_shipped_dials_are_a_fresh_sessions() {
+        let h = crate::test_harness::TestHarness::with_size(40, 10);
+        assert_eq!(DiffDials::from_stoat(&h.stoat), DiffDials::shipped());
+    }
+
     #[test]
     fn diff_view_softens_context_row_foregrounds() {
         // The first line is untouched, so it renders as a context row. The
         // second is a pure insertion, which nothing softens, so its identical
         // `fn` keyword is the full-strength reference.
-        let h = diff_harness("fn keep() {}\n", "fn keep() {}\nfn add() {}\n");
+        let h = untinted_diff_harness("fn keep() {}\n", "fn keep() {}\nfn add() {}\n");
 
         let bg = style_rgb(
             h.stoat
@@ -6579,7 +6670,7 @@ mod tests {
     /// makes it a knob rather than a field.
     #[test]
     fn the_soften_level_scales_how_far_a_context_row_recedes() {
-        let mut h = diff_harness("fn keep() {}\n", "fn keep() {}\nfn add() {}\n");
+        let mut h = untinted_diff_harness("fn keep() {}\n", "fn keep() {}\nfn add() {}\n");
 
         let bg = style_rgb(
             h.stoat
@@ -7154,6 +7245,7 @@ mod tests {
             None,
             DiffDials::shipped(),
             None,
+            None,
         );
 
         assert_eq!(
@@ -7205,7 +7297,7 @@ mod tests {
                 None,
                 DiffDials {
                     soften_scale,
-                    ..DiffDials::shipped()
+                    ..DiffDials::untinted()
                 },
                 None,
             );
@@ -7261,7 +7353,7 @@ mod tests {
             Some(&tints),
             None,
             None,
-            DiffDials::shipped(),
+            DiffDials::untinted(),
             Some(tints.deleted),
         );
 
@@ -7337,7 +7429,7 @@ mod tests {
             Some(&tints),
             None,
             None,
-            DiffDials::shipped(),
+            DiffDials::untinted(),
             None,
         );
 
@@ -7754,7 +7846,7 @@ mod tests {
             true,
             DiffDials {
                 soften_scale: 0.0,
-                ..DiffDials::shipped()
+                ..DiffDials::untinted()
             },
             BufferNumbering::Absolute,
             &[],
@@ -7827,7 +7919,7 @@ mod tests {
                 None,
                 DiffDials {
                     soften_scale: scale,
-                    ..DiffDials::shipped()
+                    ..DiffDials::untinted()
                 },
                 None,
             );
@@ -7929,7 +8021,7 @@ mod tests {
 
     #[test]
     fn a_minimap_block_takes_the_colors_its_diff_rows_paint() {
-        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::shipped(), true);
+        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::untinted(), true);
         let lifted = |head| blended_block(&table, head, |c| brighten_rgb(c, MINIMAP_BG));
         let receded = blended_block(&table, table.palette()[0], |c| {
             dim_rgb(c, MINIMAP_BG, CONTEXT_SOFTEN)
@@ -7983,7 +8075,7 @@ mod tests {
     fn the_minimap_palette_blends_nothing_the_diff_paint_leaves_unblended() {
         let soften_off = DiffDials {
             soften_scale: 0.0,
-            ..DiffDials::shipped()
+            ..DiffDials::untinted()
         };
         let top_tint = DiffDials {
             tint_amount: 1.0,
@@ -8011,7 +8103,7 @@ mod tests {
 
     #[test]
     fn syntax_off_paints_each_minimap_block_in_its_row_color() {
-        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::shipped(), false);
+        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::untinted(), false);
         let stride = usize::from(table.stride());
         let flat = |row| vec![brighten_rgb(row, MINIMAP_BG); stride];
         assert_eq!(

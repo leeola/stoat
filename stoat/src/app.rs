@@ -956,7 +956,9 @@ pub struct Stoat {
     /// How far the diff view shifts a changed row toward its status color, as
     /// a level [`crate::render::review::diff_tint_amount`] turns into a
     /// fraction. Level 0 is off, and [`stoat_action::DiffTintDown`] and
-    /// [`stoat_action::DiffTintUp`] step it.
+    /// [`stoat_action::DiffTintUp`] step it. A session starts at level
+    /// 1, as [`DiffDials::shipped`](crate::render::review::DiffDials::shipped)
+    /// paints.
     ///
     /// The whole row moves, not only the chars the refinement matched, so an
     /// unchanged token on an added line reads added rather than keeping the
@@ -2672,7 +2674,7 @@ impl Stoat {
             imported_themes,
             modal_zoom: std::collections::BTreeMap::new(),
             diff_soften: 0,
-            diff_tint: 0,
+            diff_tint: 1,
             diff_syntax: true,
             diff_bold: false,
             diff_underline: false,

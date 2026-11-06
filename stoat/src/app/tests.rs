@@ -704,7 +704,10 @@ fn the_syntax_chord_drops_both_diff_columns_to_one_color() {
 #[test]
 fn the_nine_and_zero_chords_step_the_tint_dial() {
     let mut h = diff_syntax_harness();
-    assert_eq!(h.stoat.diff_tint, 0, "a session opens with the tint off");
+    assert_eq!(
+        h.stoat.diff_tint, 1,
+        "a session opens with the tint at its first step"
+    );
 
     for _ in 0..5 {
         assert_eq!(h.stoat.handle_window_ipc(chord('0')), UpdateEffect::Redraw);
@@ -712,7 +715,7 @@ fn the_nine_and_zero_chords_step_the_tint_dial() {
     assert_eq!(
         h.stoat.diff_tint,
         crate::render::review::DIFF_TINT_MAX,
-        "two presses reach the top and the rest hold there",
+        "a press reaches the top and the rest hold there",
     );
 
     for _ in 0..5 {
@@ -749,14 +752,14 @@ fn the_tint_and_syntax_chords_answer_on_the_commits_screen() {
 
     assert_eq!(
         (h.stoat.diff_tint, h.stoat.diff_syntax),
-        (0, true),
-        "a session opens with the tint off and syntax on",
+        (1, true),
+        "a session opens with the tint at its first step and syntax on",
     );
 
     assert_eq!(h.stoat.handle_window_ipc(chord('0')), UpdateEffect::Redraw);
-    assert_eq!(h.stoat.diff_tint, 1, "ctrl-0 steps the dial up");
+    assert_eq!(h.stoat.diff_tint, 2, "ctrl-0 steps the dial up");
     assert_eq!(h.stoat.handle_window_ipc(chord('9')), UpdateEffect::Redraw);
-    assert_eq!(h.stoat.diff_tint, 0, "ctrl-9 steps it back down");
+    assert_eq!(h.stoat.diff_tint, 1, "ctrl-9 steps it back down");
 
     assert_eq!(h.stoat.handle_window_ipc(chord('8')), UpdateEffect::Redraw);
     assert!(!h.stoat.diff_syntax, "ctrl-8 flips the syntax coloring");
@@ -770,14 +773,14 @@ fn the_in_band_super_digits_step_the_tint_dial() {
     let mut h = diff_syntax_harness();
     assert_eq!(
         (h.stoat.diff_tint, h.stoat.diff_syntax),
-        (0, true),
-        "a session opens with the tint off and syntax on",
+        (1, true),
+        "a session opens with the tint at its first step and syntax on",
     );
 
     h.stoat.update(inband_chord('0'));
-    assert_eq!(h.stoat.diff_tint, 1, "super-0 steps the dial up");
+    assert_eq!(h.stoat.diff_tint, 2, "super-0 steps the dial up");
     h.stoat.update(inband_chord('9'));
-    assert_eq!(h.stoat.diff_tint, 0, "super-9 steps it back down");
+    assert_eq!(h.stoat.diff_tint, 1, "super-9 steps it back down");
     h.stoat.update(inband_chord('8'));
     assert!(!h.stoat.diff_syntax, "super-8 flips the syntax coloring");
     h.stoat.update(inband_chord('7'));
@@ -8074,7 +8077,7 @@ fn a_dial_turn_repaints_an_unfocused_diff_pane() {
 
     let turns: [fn(&mut Stoat); 4] = [
         |stoat| stoat.diff_soften = 1,
-        |stoat| stoat.diff_tint = 1,
+        |stoat| stoat.diff_tint = 2,
         |stoat| stoat.diff_bold = true,
         |stoat| stoat.diff_underline = true,
     ];
