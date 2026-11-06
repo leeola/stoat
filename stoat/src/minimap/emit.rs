@@ -108,8 +108,9 @@ pub(crate) const POPULATION_PALETTE_PROTOCOL: u32 = 13;
 /// A plain strip whose pane does not fade declares the class table's palette
 /// as it is. A strip whose pane fades declares its palette blended toward the
 /// background at the frame's fade, the deeper of the inactive dim and a boxed
-/// modal's dim. A diff view's strip declares [`review::diff_minimap_palette`],
-/// so a dial step reaches the strip through its declaration alone.
+/// modal's dim. The strip of a split diff or a changes view declares its scroll
+/// overview, the row marks of [`review::diff_minimap_palette`] on the window
+/// ground.
 ///
 /// Every strip of a kind declares the same palette, so the frame builds them
 /// once and keeps them until the theme, the dim, the dials, or the diff view's
@@ -123,13 +124,9 @@ pub(crate) struct MinimapPalettes {
     /// applies or the background is not RGB, where a fading strip declares the
     /// palette undimmed.
     pub(crate) dimmed: Option<Vec<[u8; 3]>>,
-    /// The diff view's palette under the dials and the syntax flag.
-    pub(crate) diff: Vec<[u8; 3]>,
-    /// [`Self::diff`] at the frame's fade, `None` where [`Self::dimmed`] is.
-    pub(crate) diff_dimmed: Option<Vec<[u8; 3]>>,
-    /// The palette a diff view's scroll overview declares, as
-    /// [`review::diff_overview_palette`] builds it over [`Self::diff`] on the
-    /// window ground.
+    /// The palette a scroll overview declares, as
+    /// [`review::diff_overview_palette`] builds it over the diff palette under
+    /// the dials and the syntax flag, on the window ground.
     pub(crate) overview: Vec<[u8; 3]>,
     /// [`Self::overview`] at the frame's fade, `None` where [`Self::dimmed`] is.
     pub(crate) overview_dimmed: Option<Vec<[u8; 3]>>,
@@ -177,8 +174,6 @@ impl MinimapPalettes {
             dials,
             syntax,
             dimmed: blend(table.palette()),
-            diff_dimmed,
-            diff,
             overview,
             overview_dimmed,
         }

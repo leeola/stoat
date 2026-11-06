@@ -1687,21 +1687,24 @@ pub(crate) fn diff_minimap_palette(
     palette
 }
 
-/// The palette of a diff view's scroll overview: `palette` with every class
-/// but the edge marks in `ground`.
+/// Returns the palette of a diff screen's scroll overview, `palette` with
+/// every class but the row marks in `ground`.
 ///
-/// The overview shows each row's change mark and none of its text. Its strip
-/// lays the mark lane over the cell's left half and the text's first columns
-/// over the right half, so those columns take the strip's own color and
-/// vanish. `palette` is a diff view's strip palette at some fade, and `ground`
-/// the strip's color at the same fade.
+/// The overview shows each row's change or diagnostic mark and none of its
+/// text. Its strip lays the mark lane over the cell's left half and the text's
+/// first columns over the right half, so those columns take the strip's own
+/// color and vanish. `palette` is a diff screen's strip palette at some fade,
+/// and `ground` the strip's color at the same fade.
+///
+/// The changes view's file headers take the ground as well. Each one is a bar
+/// across the whole strip, and the overview marks rows, not file boundaries.
 pub(crate) fn diff_overview_palette(
     table: &ClassTable,
     palette: &[[u8; 3]],
     ground: [u8; 3],
 ) -> Vec<[u8; 3]> {
     let marks = usize::from(table.edge_class(EdgeClass::Added))
-        ..=usize::from(table.edge_class(EdgeClass::Header));
+        ..usize::from(table.edge_class(EdgeClass::Header));
     palette
         .iter()
         .enumerate()
@@ -8739,15 +8742,16 @@ mod tests {
         );
     }
 
-    /// The overview palette keeps the diff palette's edge marks and paints every
-    /// other class in the ground, so a row shows its mark and none of its text.
+    /// The overview palette keeps the diff palette's row marks and paints every
+    /// other class in the ground, the file header's bar among them, so a row
+    /// shows its mark and none of its text.
     #[test]
-    fn the_overview_palette_keeps_the_edge_marks_and_grounds_the_rest() {
+    fn the_overview_palette_keeps_the_row_marks_and_grounds_the_rest() {
         let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::shipped(), true);
         let ground = [1, 2, 3];
         let overview = diff_overview_palette(&table, &palette, ground);
         let first_mark = usize::from(table.edge_class(EdgeClass::Added));
-        let past_marks = usize::from(table.edge_class(EdgeClass::Header)) + 1;
+        let past_marks = usize::from(table.edge_class(EdgeClass::Header));
 
         assert_eq!(
             (

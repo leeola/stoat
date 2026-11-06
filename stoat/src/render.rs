@@ -160,13 +160,9 @@ pub(crate) struct MinimapChrome<'a> {
     /// does it once rather than each pane doing it again. Aliases
     /// [`Self::palette`] when no dim applies.
     pub(crate) dimmed_palette: &'a [[u8; 3]],
-    /// The palette a diff view's strip declares, which follows the diff dials.
-    pub(crate) diff_palette: &'a [[u8; 3]],
-    /// [`Self::diff_palette`] at the frame's fade, for the strip of a diff view
-    /// that fades. Aliases [`Self::diff_palette`] when no dim applies.
-    pub(crate) dimmed_diff_palette: &'a [[u8; 3]],
-    /// The palette a diff view's scroll overview declares, the diff palette
-    /// with every class but the change marks in the window ground's color.
+    /// The palette the scroll overview of a split diff or a changes view
+    /// declares, the diff palette with every class but the row marks in the
+    /// window ground's color.
     pub(crate) overview_palette: &'a [[u8; 3]],
     /// [`Self::overview_palette`] at the frame's fade. Aliases
     /// [`Self::overview_palette`] when no dim applies.
@@ -1173,9 +1169,9 @@ pub(crate) fn frame(
     // top, since the band derives its own rect instead of going through
     // `layout_size`. The band is stamped on Stoat for the mouse handler, then
     // read back for this paint. It sits inside the island margin, so the
-    // window reads margin, panes, band, margin. A split diff in focus narrows
-    // the band to the one cell of its scroll overview.
-    let band_cols = editor::strip_cols(single_band_overview(stoat.active_workspace()));
+    // window reads margin, panes, band, margin. A widened split diff or changes
+    // view in focus narrows the band to the one cell of its scroll overview.
+    let band_cols = editor::strip_cols(single_band_narrows(stoat.active_workspace()));
     stoat.single_minimap_rect = (minimap_mode == MinimapMode::Single
         && full.width >= editor::MINIMAP_MIN_PANE_COLS)
         .then(|| Rect {
@@ -1218,7 +1214,6 @@ pub(crate) fn frame(
             false => table.legacy_palette().len(),
         };
         let palette = &table.palette()[..declared];
-        let diff_palette = &palettes.diff[..declared];
         let overview_palette = &palettes.overview[..declared];
         MinimapChrome {
             workspace: stoat.active_workspace,
@@ -1228,11 +1223,6 @@ pub(crate) fn frame(
                 .dimmed
                 .as_deref()
                 .map_or(palette, |dimmed| &dimmed[..declared]),
-            diff_palette,
-            dimmed_diff_palette: palettes
-                .diff_dimmed
-                .as_deref()
-                .map_or(diff_palette, |dimmed| &dimmed[..declared]),
             overview_palette,
             dimmed_overview_palette: palettes
                 .overview_dimmed
@@ -2315,7 +2305,7 @@ pub(crate) fn frame(
 ///
 /// An editor's strip shows its buffer, in the overview palette while the diff
 /// view is on. A changes view's strip shows the workspace's changes view
-/// document, always in the diff palette.
+/// document, always in the overview palette.
 fn single_band_content<'a>(
     ws: &Workspace,
     chrome: MinimapChrome<'a>,
@@ -2330,23 +2320,36 @@ fn single_band_content<'a>(
             };
             Some((content.content_id(), palette))
         },
-        View::DiffChanges(_) => Some((chrome.diff_changes_content?, chrome.diff_palette)),
+        View::DiffChanges(_) => Some((chrome.diff_changes_content?, chrome.overview_palette)),
         _ => None,
     }
 }
 
-/// Reports whether the single band over `ws` is a diff view's scroll overview.
+/// Reports whether the single band over `ws` is a scroll overview.
 ///
 /// It is while the focused split pane, the pane [`single_band_content`] reads,
-/// shows an editor in the diff view. The band is then one cell wide.
+/// shows an editor in the diff view or a changes view.
 fn single_band_overview(ws: &Workspace) -> bool {
     match ws.panes.pane(ws.panes.focus()).view {
         View::Editor(editor_id) => ws
             .editors
             .get(editor_id)
             .is_some_and(|editor| editor.diff_view),
+        View::DiffChanges(_) => true,
         _ => false,
     }
+}
+
+/// Reports whether the single band over `ws` narrows to the one cell of a
+/// scroll overview.
+///
+/// It narrows while the overview's pane is the widened one, which both diff
+/// screens are once they open. Over a diff screen beside other panes the band
+/// keeps its text width and shows the overview across it. The band's width
+/// sets every pane's width, so a focus move between side-by-side panes then
+/// never reflows them.
+fn single_band_narrows(ws: &Workspace) -> bool {
+    single_band_overview(ws) && ws.panes.widened() == Some(ws.panes.focus())
 }
 
 /// The scene lane of a pane's content, which holds its gutter, its minimap

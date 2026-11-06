@@ -55,7 +55,8 @@ use stoatty_protocol::command::IconKind;
 /// width the terminal's GPU minimap pass paints there.
 pub(super) const MINIMAP_STRIP_COLS: u16 = 7;
 
-/// Columns the scroll overview at a diff view's right edge takes.
+/// Columns the scroll overview at the right edge of a split diff or a changes
+/// view takes.
 ///
 /// The overview draws the diff's change marks and the viewport and no text, so
 /// one cell holds it. The diff's two sides keep the other columns that a text

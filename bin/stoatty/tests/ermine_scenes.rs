@@ -211,7 +211,7 @@ fn the_split_diff_frames_its_base_column() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 2, 79, "diff_base_frame");
+    expect_base_frame_sides(&shot, &mut home, 2, "diff_base_frame");
 }
 
 /// The split diff ends in a one-cell scroll overview on the window ground.
@@ -252,7 +252,30 @@ fn the_changes_view_frames_its_base_column_across_the_headers() {
         "unstaged.txt",
         "<Space>dc<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 0, 76, "changes_base_frame");
+    expect_base_frame_sides(&shot, &mut home, 0, "changes_base_frame");
+}
+
+/// The changes view ends in the same one-cell scroll overview on the window
+/// ground that the split diff ends in.
+///
+/// The single band narrows to the overview at column 158, as it does over the
+/// split diff, so the column reads as chrome.
+#[test]
+fn the_changes_view_ends_in_a_scroll_overview_on_chrome() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>dc<Settle>",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(158, 0, 1, 49),
+        CHROME,
+        "changes_overview",
+    );
 }
 
 /// The changes view heads each file with a row on the raised surface, between
@@ -780,16 +803,10 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
 /// split diff's base column, and no other base-tint pixel.
 ///
 /// The left side lies in the pane's first cell, column 1. The right one lies
-/// in the divider column `divider`, left of the hairline: 79 beside a diff
-/// view's one-cell overview, 76 beside a changes view's text strip. A miss
-/// saves the frame as [`expect_region`] does.
-fn expect_base_frame_sides(
-    shot: &Snapshot,
-    home: &mut TempDir,
-    row: u16,
-    divider: u16,
-    what: &str,
-) {
+/// in the divider column, 79, left of the hairline, which both diff screens
+/// place beside their one-cell overview. A miss saves the frame as
+/// [`expect_region`] does.
+fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
     let columns = bar_columns(shot, (y, height), SIDE_BASE);
 
@@ -797,7 +814,7 @@ fn expect_base_frame_sides(
         let (x, _, width, _) = cell_rect(col, row, 1, 1);
         x..x + width
     };
-    let (left, right) = (cell(1), cell(divider));
+    let (left, right) = (cell(1), cell(79));
     let sides = [&left, &right].map(|side| columns.iter().any(|x| side.contains(x)));
     let stray = columns
         .iter()
