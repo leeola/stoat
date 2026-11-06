@@ -97,6 +97,22 @@ fn spanned_ident<'src, E: ConfigExtra<'src>>(
     ident().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
+/// A setting path's segment after its first, of letters, digits, and `_` in
+/// any order.
+///
+/// A theme scope carries an index this way, such as the `1` of `vcs.lane.1`.
+/// Only a segment after a dot takes a leading digit, so a statement still
+/// opens on an identifier and no other statement form reads the same text.
+fn path_segment<'src, E: ConfigExtra<'src>>(
+) -> impl Parser<'src, &'src str, Spanned<String>, E> + Clone {
+    any()
+        .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_')
+        .repeated()
+        .at_least(1)
+        .collect::<String>()
+        .map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
+}
+
 fn string_literal<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, String, E> + Clone {
     just('"')
         .ignore_then(
@@ -479,7 +495,7 @@ fn setting<'src, E: ConfigExtra<'src>>() -> impl Parser<'src, &'src str, Setting
     spanned_ident()
         .then(
             just('.')
-                .ignore_then(spanned_ident())
+                .ignore_then(path_segment())
                 .repeated()
                 .collect::<Vec<_>>(),
         )

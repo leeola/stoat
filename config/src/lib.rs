@@ -887,6 +887,30 @@ mod tests {
         assert_eq!(theme.statements.len(), 1);
     }
 
+    /// A segment after a dot takes a leading digit, so a scope carries an
+    /// index in both the dotted form and the map form.
+    #[test]
+    fn a_setting_path_segment_takes_a_leading_digit() {
+        let config =
+            parse_ok(r##"theme t { vcs.lane.1.fg = "#7aa2f7"; vcs.lane.2 = { fg: red }; }"##);
+        let paths: Vec<Vec<String>> = config.themes[0]
+            .node
+            .statements
+            .iter()
+            .map(|stmt| {
+                assert_setting(stmt)
+                    .path
+                    .iter()
+                    .map(|segment| segment.node.clone())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            paths,
+            [vec!["vcs", "lane", "1", "fg"], vec!["vcs", "lane", "2"]],
+        );
+    }
+
     #[test]
     fn theme_block_with_palette_lets() {
         let config = parse_ok(
