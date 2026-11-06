@@ -1415,7 +1415,8 @@ fn status_message_style(base_style: Style, theme: &crate::theme::Theme) -> Style
 /// target of a diff. A split row is two runs. The lead segments fill the base
 /// half, and the trailing ones fill the target half. A diff's row leaves out
 /// the workspace name, the file name, and the staged label, since the tab
-/// names the file, and its lead names the hunk the cursor stands in.
+/// names the file, and its lead names the hunk the cursor stands in. A changes
+/// view's lead then counts its stack, as [`stack_summary`] describes.
 #[allow(clippy::too_many_arguments)]
 fn status_segments(
     view: &View,
@@ -1500,11 +1501,21 @@ fn status_segments(
                 let at = position
                     .hunk_at
                     .map_or_else(|| "-".to_string(), |k| k.to_string());
+                let stack = match view {
+                    View::DiffChanges(id) => changes
+                        .get(*id)
+                        .map_or_else(Vec::new, |state| stack_summary(state, buffers)),
+                    _ => Vec::new(),
+                };
+                let lead: Vec<String> =
+                    std::iter::once(format!("hunk {at} / {}", position.hunk_total))
+                        .chain(stack)
+                        .collect();
                 push_left(
                     &mut left,
                     &mut cursor,
                     lead_end,
-                    format!(" hunk {at} / {} ", position.hunk_total),
+                    format!(" {} ", lead.join(" \u{b7} ")),
                     lead_style,
                 );
             }
@@ -1794,6 +1805,25 @@ fn status_segments(
             hairline: true,
         }],
     }
+}
+
+/// The parts a changes view's status row puts after the hunk position: how
+/// many files `state` lists, then the lines their hunks add and remove.
+///
+/// A line count of zero takes no place, as in the file headers. The row shows
+/// no hunk position for an empty stack, so the parts never count zero files.
+fn stack_summary(state: &DiffChangesState, buffers: &BufferRegistry) -> Vec<String> {
+    let files = state.excerpts.len();
+    let noun = if files == 1 { "file" } else { "files" };
+    let (added, removed) = state.line_counts(buffers);
+    let lines: Vec<String> = [('+', added), ('\u{2212}', removed)]
+        .into_iter()
+        .filter(|&(_, count)| count > 0)
+        .map(|(mark, count)| format!("{mark}{count}"))
+        .collect();
+    std::iter::once(format!("{files} {noun}"))
+        .chain((!lines.is_empty()).then(|| lines.join(" ")))
+        .collect()
 }
 
 /// The base half and the target half of status row `row` split at
@@ -3694,8 +3724,9 @@ mod tests {
     }
 
     /// A changes view's status row is the diff view's row with the screen
-    /// named `changes`, read through the focused excerpt. A walk puts the
-    /// cursor on the first chunk, so the hunk reads `1 / 1`.
+    /// named `changes` and the stack's counts after the hunk, read through the
+    /// focused excerpt. A walk puts the cursor on the first chunk, so the hunk
+    /// reads `1 / 1`.
     #[test]
     fn the_changes_view_bar_reads_the_focused_excerpts_hunks() {
         let mut h = crate::test_harness::TestHarness::with_size(112, 12);
@@ -3717,10 +3748,42 @@ mod tests {
         assert_eq!(
             row.split_whitespace().collect::<Vec<_>>().join(" "),
             format!(
-                "NOR changes hunk 1 / 1 \u{2212} index + working tree {}:{}",
+                "NOR changes hunk 1 / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} index + working \
+                 tree {}:{}",
                 point.row + 1,
                 point.column + 1,
             ),
+        );
+    }
+
+    /// A changes view's status row counts the files its stack lists and sums
+    /// the lines their hunks add and remove. A line count of zero takes no
+    /// place.
+    #[test]
+    fn the_changes_view_bar_counts_the_stack_s_files_and_lines() {
+        let bar = |files: &[(&str, &str, &str)]| {
+            let mut h = crate::test_harness::TestHarness::with_size(140, 12);
+            h.stage_review_scenario("/repo", files);
+            h.open_file(&Path::new("/repo").join(files[0].0));
+            h.cover_with_diff_changes(false);
+            h.settle();
+            let row = bar_row(&h.render_composited()).replace('─', " ");
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        assert_eq!(
+            [
+                bar(&[
+                    ("a.txt", "a\nx\n", "A\nx\n"),
+                    ("b.txt", "b\nd\ne\n", "b\ne\n")
+                ]),
+                bar(&[("c.txt", "c\n", "c\nC\nD\n")]),
+            ],
+            [
+                "NOR changes hunk 1 / 2 \u{b7} 2 files \u{b7} +1 \u{2212}2 \u{2212} HEAD + working \
+                 tree 1:1",
+                "NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +2 \u{2212} HEAD + working tree 1:1",
+            ],
         );
     }
 

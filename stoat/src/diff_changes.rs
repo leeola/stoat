@@ -211,6 +211,19 @@ impl DiffChangesState {
     pub(crate) fn focused_excerpt(&self) -> Option<&Excerpt> {
         self.excerpts.get(self.focused)
     }
+
+    /// The lines the stack's hunks add and remove, as `(added, removed)`.
+    ///
+    /// Each count is the sum of [`ExcerptStats`] over the excerpts, so the
+    /// stack counts what its file headers count.
+    pub(crate) fn line_counts(&self, buffers: &BufferRegistry) -> (u32, u32) {
+        self.excerpts
+            .iter()
+            .map(|excerpt| excerpt_stats(excerpt, buffers))
+            .fold((0, 0), |(added, removed), stats| {
+                (added + stats.added, removed + stats.removed)
+            })
+    }
 }
 
 impl Default for DiffChangesState {
