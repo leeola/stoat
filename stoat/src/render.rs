@@ -161,8 +161,8 @@ pub(crate) struct MinimapChrome<'a> {
     /// [`Self::palette`] when no dim applies.
     pub(crate) dimmed_palette: &'a [[u8; 3]],
     /// The palette the scroll overview of a split diff or a changes view
-    /// declares, the diff palette with every class but the row marks in the
-    /// window ground's color.
+    /// declares, the class table's palette with every class but the row marks
+    /// in the window ground's color.
     pub(crate) overview_palette: &'a [[u8; 3]],
     /// [`Self::overview_palette`] at the frame's fade. Aliases
     /// [`Self::overview_palette`] when no dim applies.

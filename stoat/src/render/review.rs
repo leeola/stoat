@@ -1,8 +1,6 @@
 use super::{
     editor,
-    paint::{
-        brighten_rgb, brighten_style, dim_rgb, luma, paint_style_runs, render_side_num, style_rgb,
-    },
+    paint::{brighten_style, dim_rgb, luma, paint_style_runs, render_side_num, style_rgb},
     text::write_str_clipped,
 };
 use crate::{
@@ -18,7 +16,7 @@ use crate::{
     },
     editor_state::EditorState,
     host::DiffStatus,
-    minimap::{self, ClassTable, EdgeClass},
+    minimap::{ClassTable, EdgeClass},
     theme::{scope as s, TypeRole},
 };
 use ratatui::{
@@ -1603,117 +1601,14 @@ pub(crate) fn resolve_diff_tints(theme: &crate::theme::Theme) -> Option<DiffTint
     })
 }
 
-/// Derive the palette of a diff view's minimap strip from the colors the diff
-/// paint gives its rows.
-///
-/// Each block holds the colors a diff row of its status paints each class in.
-/// The strip keeps one summary per buffer, whatever view shows it, so the dials
-/// reach the strip through this palette alone. A dial step declares a palette
-/// and summarizes no row.
-///
-/// `syntax` is whether the diff paint shows syntax colors. Without them, every
-/// class of a block takes the color of the block's uncovered text.
-///
-/// An entry blends as [`paint_highlighted_row`] blends a row with no refined
-/// spans, through its `recede` and [`gap_style`]. A refined row's lighter gap
-/// soften and its span colors are below the strip's resolution. So the modified
-/// block takes the paint of an unrefined modified row, whose uncovered text
-/// takes the added color.
-///
-/// The deleted block paints a base line as the base column paints a removed
-/// line. Its uncovered text takes the deleted color, and its tokens tint toward
-/// that color.
-///
-/// The edge classes stay as `table` gives them. A theme color that is not RGB
-/// enters as its [`minimap::color_to_rgb`] approximation and blends like any
-/// other, where the painter does not blend it.
-pub(crate) fn diff_minimap_palette(
-    table: &ClassTable,
-    theme: &crate::theme::Theme,
-    dials: DiffDials,
-    syntax: bool,
-) -> Vec<[u8; 3]> {
-    let base = table.palette();
-    let stride = usize::from(table.stride());
-    let tints = resolve_diff_tints(theme);
-    let soften_bg = tints
-        .as_ref()
-        .map(|t| t.bg)
-        .filter(|_| dials.soften_scale > 0.0);
-    let mut palette = base.to_vec();
-
-    let context_soften = (CONTEXT_SOFTEN * dials.soften_scale).min(SOFTEN_CAP);
-    for (k, entry) in palette[..stride].iter_mut().enumerate() {
-        let mut color = match syntax {
-            true => base[k],
-            false => base[0],
-        };
-        if let Some(bg) = soften_bg {
-            color = dim_rgb(color, bg, context_soften);
-        }
-        // The gray answers the tint dial rather than the soften one, so it
-        // holds with softening off.
-        if tints.is_some() {
-            color = desaturate_rgb(color, dials.tint_amount);
-        }
-        *entry = color;
-    }
-
-    let row_fg = |scope: &str| theme.get(scope).fg.map_or(base[0], minimap::color_to_rgb);
-    let added_fg = row_fg(s::DIFF_ADDED);
-    let blocks = [
-        (
-            table.population_base(DiffStatus::Added),
-            added_fg,
-            tints.as_ref().map(|t| t.added),
-        ),
-        (
-            table.population_base(DiffStatus::Modified),
-            added_fg,
-            tints.as_ref().map(|t| t.modified),
-        ),
-        (
-            table.population_base(DiffStatus::Moved),
-            row_fg(s::DIFF_MOVED),
-            tints.as_ref().map(|t| t.moved),
-        ),
-        (
-            table.deleted_base(),
-            row_fg(s::DIFF_DELETED),
-            tints.as_ref().map(|t| t.deleted),
-        ),
-    ];
-    for (start, row_fallback, tint_row) in blocks {
-        for (k, entry) in palette[usize::from(start)..][..stride]
-            .iter_mut()
-            .enumerate()
-        {
-            let mut color = match syntax && k > 0 {
-                true => base[k],
-                false => row_fallback,
-            };
-            if let Some(target) = tint_row {
-                color = tint_rgb(color, minimap::color_to_rgb(target), dials.tint_amount);
-            }
-            // A changed row lifts only off a receding surround, so softening
-            // off turns the lift off too.
-            if let Some(bg) = soften_bg {
-                color = brighten_rgb(color, bg);
-            }
-            *entry = color;
-        }
-    }
-    palette
-}
-
 /// Returns the palette of a diff screen's scroll overview, `palette` with
 /// every class but the row marks in `ground`.
 ///
 /// The overview shows each row's change or diagnostic mark and none of its
 /// text. Its strip lays the mark lane over the cell's left half and the text's
 /// first columns over the right half, so those columns take the strip's own
-/// color and vanish. `palette` is a diff screen's strip palette at some fade,
-/// and `ground` the strip's color at the same fade.
+/// color and vanish. `palette` is the class table's palette at some fade, and
+/// `ground` the strip's color at the same fade.
 ///
 /// The changes view's file headers take the ground as well. Each one is a bar
 /// across the whole strip, and the overview marks rows, not file boundaries.
@@ -8699,143 +8594,15 @@ mod tests {
         );
     }
 
-    /// The background of [`minimap_palette_theme`], as a theme source writes it
-    /// and as the blends read it, and the theme's diff colors.
-    const MINIMAP_BG_SOURCE: &str = "\"#282c34\"";
-    const MINIMAP_BG: [u8; 3] = [0x28, 0x2c, 0x34];
-    const MINIMAP_ADDED: [u8; 3] = [0x00, 0xff, 0x00];
-    const MINIMAP_MODIFIED: [u8; 3] = [0xff, 0xff, 0x00];
-    const MINIMAP_DELETED: [u8; 3] = [0xff, 0x00, 0x00];
-    const MINIMAP_MOVED: [u8; 3] = [0x00, 0x00, 0xff];
-
-    /// A theme with the diff colors above over `background`, a text color, and
-    /// three syntax colors. The comment color is near the background, so every
-    /// blend of the minimap palette moves some entry.
-    fn minimap_palette_theme(background: &str) -> Theme {
-        let src = format!(
-            r##"theme t {{
-                diff.added.fg     = "#00ff00";
-                diff.modified.fg  = "#ffff00";
-                diff.deleted.fg   = "#ff0000";
-                diff.moved.fg     = "#0000ff";
-                ui.background.bg  = {background};
-                ui.text.fg        = "#abb2bf";
-                syntax.keyword.fg = "#c678dd";
-                syntax.comment.fg = "#5c6370";
-                syntax.string.fg  = "#98c379";
-            }}"##
-        );
-        let (config, errors) = stoat_config::parse(&src);
-        assert!(errors.is_empty(), "parse errors: {errors:?}");
-        Theme::from_config(&config.expect("the theme parses"), "t").expect("theme t exists")
-    }
-
-    /// The class table of [`minimap_palette_theme`] over `background`, and the
-    /// diff minimap palette derived from it under `dials`.
-    fn minimap_palette(
-        background: &str,
-        dials: DiffDials,
-        syntax: bool,
-    ) -> (ClassTable, Vec<[u8; 3]>) {
-        let theme = minimap_palette_theme(background);
-        let table = ClassTable::from_theme(&theme);
-        let palette = diff_minimap_palette(&table, &theme, dials, syntax);
-        (table, palette)
-    }
-
-    /// `table`'s syntax block with its uncovered-text entry set to `head`, and
-    /// every entry passed through `blend`.
-    fn blended_block(
-        table: &ClassTable,
-        head: [u8; 3],
-        blend: impl Fn([u8; 3]) -> [u8; 3],
-    ) -> Vec<[u8; 3]> {
-        let mut block = table.palette()[..usize::from(table.stride())].to_vec();
-        block[0] = head;
-        block.into_iter().map(blend).collect()
-    }
-
-    /// `table`'s own palette with its unchanged block set to `unchanged`, and
-    /// its added, modified, moved, and deleted blocks set to `changed`. A test
-    /// then asserts every entry, the edge classes among them, at once.
-    fn palette_with_blocks(
-        table: &ClassTable,
-        unchanged: Vec<[u8; 3]>,
-        changed: [Vec<[u8; 3]>; 4],
-    ) -> Vec<[u8; 3]> {
-        let stride = usize::from(table.stride());
-        let mut palette = table.palette().to_vec();
-        palette[..stride].copy_from_slice(&unchanged);
-        let starts = [
-            table.population_base(DiffStatus::Added),
-            table.population_base(DiffStatus::Modified),
-            table.population_base(DiffStatus::Moved),
-            table.deleted_base(),
-        ];
-        for (start, block) in starts.into_iter().zip(changed) {
-            palette[usize::from(start)..][..stride].copy_from_slice(&block);
-        }
-        palette
-    }
-
-    #[test]
-    fn a_minimap_block_takes_the_colors_its_diff_rows_paint() {
-        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::untinted(), true);
-        let lifted = |head| blended_block(&table, head, |c| brighten_rgb(c, MINIMAP_BG));
-        let receded = blended_block(&table, table.palette()[0], |c| {
-            dim_rgb(c, MINIMAP_BG, CONTEXT_SOFTEN)
-        });
-        assert_eq!(
-            palette,
-            palette_with_blocks(
-                &table,
-                receded,
-                [
-                    lifted(MINIMAP_ADDED),
-                    lifted(MINIMAP_ADDED),
-                    lifted(MINIMAP_MOVED),
-                    lifted(MINIMAP_DELETED),
-                ],
-            ),
-            "an unchanged block recedes, a changed block lifts its tokens and its \
-             row color, and a modified row's uncovered text takes the added color",
-        );
-    }
-
-    #[test]
-    fn the_top_tint_paints_changed_minimap_blocks_flat_and_drains_the_rest() {
-        let dials = DiffDials {
-            tint_amount: 1.0,
-            ..DiffDials::shipped()
-        };
-        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, dials, true);
-        let flat = |status| vec![brighten_rgb(status, MINIMAP_BG); usize::from(table.stride())];
-        let gray = blended_block(&table, table.palette()[0], |c| {
-            [(luma(dim_rgb(c, MINIMAP_BG, CONTEXT_SOFTEN)) * 255.0).round() as u8; 3]
-        });
-        assert_eq!(
-            palette,
-            palette_with_blocks(
-                &table,
-                gray,
-                [
-                    flat(MINIMAP_ADDED),
-                    flat(MINIMAP_MODIFIED),
-                    flat(MINIMAP_MOVED),
-                    flat(MINIMAP_DELETED),
-                ],
-            ),
-        );
-    }
-
-    /// The overview palette keeps the diff palette's row marks and paints every
-    /// other class in the ground, the file header's bar among them, so a row
-    /// shows its mark and none of its text.
+    /// The overview palette keeps the row marks of the palette it reads and
+    /// paints every other class in the ground, the file header's bar among
+    /// them, so a row shows its mark and none of its text.
     #[test]
     fn the_overview_palette_keeps_the_row_marks_and_grounds_the_rest() {
-        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::shipped(), true);
+        let table = ClassTable::from_theme(&Theme::empty());
+        let palette = table.palette();
         let ground = [1, 2, 3];
-        let overview = diff_overview_palette(&table, &palette, ground);
+        let overview = diff_overview_palette(&table, palette, ground);
         let first_mark = usize::from(table.edge_class(EdgeClass::Added));
         let past_marks = usize::from(table.edge_class(EdgeClass::Header));
 
@@ -8849,58 +8616,6 @@ mod tests {
                 &vec![ground; first_mark][..],
                 &palette[first_mark..past_marks],
                 &vec![ground; palette.len() - past_marks][..]
-            ),
-        );
-    }
-
-    /// Softening off with the tint dial off blends nothing in the diff paint, and
-    /// so does a background with no RGB at any dial.
-    #[test]
-    fn the_minimap_palette_blends_nothing_the_diff_paint_leaves_unblended() {
-        let soften_off = DiffDials {
-            soften_scale: 0.0,
-            ..DiffDials::untinted()
-        };
-        let top_tint = DiffDials {
-            tint_amount: 1.0,
-            ..DiffDials::shipped()
-        };
-        for (background, dials) in [(MINIMAP_BG_SOURCE, soften_off), ("blue", top_tint)] {
-            let (table, palette) = minimap_palette(background, dials, true);
-            let raw = |head| blended_block(&table, head, |c| c);
-            assert_eq!(
-                palette,
-                palette_with_blocks(
-                    &table,
-                    raw(table.palette()[0]),
-                    [
-                        raw(MINIMAP_ADDED),
-                        raw(MINIMAP_ADDED),
-                        raw(MINIMAP_MOVED),
-                        raw(MINIMAP_DELETED),
-                    ],
-                ),
-                "over {background}",
-            );
-        }
-    }
-
-    #[test]
-    fn syntax_off_paints_each_minimap_block_in_its_row_color() {
-        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::untinted(), false);
-        let stride = usize::from(table.stride());
-        let flat = |row| vec![brighten_rgb(row, MINIMAP_BG); stride];
-        assert_eq!(
-            palette,
-            palette_with_blocks(
-                &table,
-                vec![dim_rgb(table.palette()[0], MINIMAP_BG, CONTEXT_SOFTEN); stride],
-                [
-                    flat(MINIMAP_ADDED),
-                    flat(MINIMAP_ADDED),
-                    flat(MINIMAP_MOVED),
-                    flat(MINIMAP_DELETED),
-                ],
             ),
         );
     }

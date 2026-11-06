@@ -1594,27 +1594,23 @@ mod tests {
     }
 
     /// The workspace's changes view strip as `strip_id` declares it, the
-    /// scroll overview of the diff palette that the dials derive, blended
-    /// toward the background by `dim`.
+    /// scroll overview of the class table's palette, blended toward the
+    /// background by `dim`.
     fn diff_changes_strip(h: &TestHarness, strip_id: u32, dim: f32) -> Declared {
         let bg = paint::style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg)
             .expect("the test theme has an rgb background");
         let table = &h.stoat.minimap_class_table;
-        let diff: Vec<_> = review::diff_minimap_palette(
-            table,
-            &h.stoat.theme,
-            DiffDials::from_stoat(&h.stoat),
-            h.stoat.diff_syntax,
-        )
-        .into_iter()
-        .map(|color| paint::dim_rgb(color, bg, dim))
-        .collect();
+        let palette: Vec<_> = table
+            .palette()
+            .iter()
+            .map(|&color| paint::dim_rgb(color, bg, dim))
+            .collect();
         let ground = paint::dim_rgb(minimap::color_to_rgb(themed_bg(&h.stoat.theme)), bg, dim);
         let content_id = h.stoat.diff_changes_strips[&h.stoat.active_workspace].content_id();
         (
             strip_id,
             content_id,
-            review::diff_overview_palette(table, &diff, ground),
+            review::diff_overview_palette(table, &palette, ground),
         )
     }
 

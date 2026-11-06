@@ -22,11 +22,7 @@ use crate::{
         BuildWindow, EdgeSource, RowMark, LINES_PER_CELL,
     },
     pane::View,
-    render::{
-        paint,
-        review::{self, DiffDials},
-        SINGLE_MINIMAP_STRIP_ID,
-    },
+    render::{paint, review, SINGLE_MINIMAP_STRIP_ID},
     theme::Theme,
     workspace::WorkspaceId,
 };
@@ -109,40 +105,29 @@ pub(crate) const POPULATION_PALETTE_PROTOCOL: u32 = 13;
 /// as it is. A strip whose pane fades declares its palette blended toward the
 /// background at the frame's fade, the deeper of the inactive dim and a boxed
 /// modal's dim. The strip of a split diff or a changes view declares its scroll
-/// overview, the row marks of [`review::diff_minimap_palette`] on the window
-/// ground.
+/// overview, the class table's row marks on the window ground.
 ///
 /// Every strip of a kind declares the same palette, so the frame builds them
-/// once and keeps them until the theme, the dim, the dials, or the diff view's
-/// syntax flag moves. See [`Stoat::refresh_minimap_palettes`].
+/// once and keeps them until the theme or the dim moves. See
+/// [`Stoat::refresh_minimap_palettes`].
 pub(crate) struct MinimapPalettes {
     theme: Arc<Theme>,
     dim: f32,
-    dials: DiffDials,
-    syntax: bool,
     /// The class table's palette at the frame's fade. `None` when no fade
     /// applies or the background is not RGB, where a fading strip declares the
     /// palette undimmed.
     pub(crate) dimmed: Option<Vec<[u8; 3]>>,
     /// The palette a scroll overview declares, as
-    /// [`review::diff_overview_palette`] builds it over the diff palette under
-    /// the dials and the syntax flag, on the window ground.
+    /// [`review::diff_overview_palette`] builds it over the class table's
+    /// palette on the window ground.
     pub(crate) overview: Vec<[u8; 3]>,
     /// [`Self::overview`] at the frame's fade, `None` where [`Self::dimmed`] is.
     pub(crate) overview_dimmed: Option<Vec<[u8; 3]>>,
 }
 
 impl MinimapPalettes {
-    /// Build the palettes for `table` under `theme`, with the diff palette under
-    /// `dials` and `syntax`.
-    pub(crate) fn new(
-        table: &crate::minimap::ClassTable,
-        theme: &Arc<Theme>,
-        dim: f32,
-        dials: DiffDials,
-        syntax: bool,
-    ) -> Self {
-        let diff = review::diff_minimap_palette(table, theme, dials, syntax);
+    /// Build the palettes for `table` under `theme` at the fade `dim`.
+    pub(crate) fn new(table: &crate::minimap::ClassTable, theme: &Arc<Theme>, dim: f32) -> Self {
         let dim_bg = (dim > 0.0)
             .then(|| {
                 paint::style_rgb(
@@ -161,19 +146,17 @@ impl MinimapPalettes {
             })
         };
 
-        let diff_dimmed = blend(&diff);
+        let dimmed = blend(table.palette());
         let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(theme));
-        let overview = review::diff_overview_palette(table, &diff, ground);
-        let overview_dimmed = dim_bg.zip(diff_dimmed.as_deref()).map(|(bg, dimmed)| {
+        let overview = review::diff_overview_palette(table, table.palette(), ground);
+        let overview_dimmed = dim_bg.zip(dimmed.as_deref()).map(|(bg, dimmed)| {
             review::diff_overview_palette(table, dimmed, paint::dim_rgb(ground, bg, dim))
         });
 
         Self {
             theme: theme.clone(),
             dim,
-            dials,
-            syntax,
-            dimmed: blend(table.palette()),
+            dimmed,
             overview,
             overview_dimmed,
         }
@@ -181,17 +164,8 @@ impl MinimapPalettes {
 
     /// Whether these palettes were built from these inputs, so a frame that
     /// passes the same ones keeps them.
-    pub(crate) fn built_from(
-        &self,
-        theme: &Arc<Theme>,
-        dim: f32,
-        dials: DiffDials,
-        syntax: bool,
-    ) -> bool {
-        Arc::ptr_eq(&self.theme, theme)
-            && self.dim == dim
-            && self.dials == dials
-            && self.syntax == syntax
+    pub(crate) fn built_from(&self, theme: &Arc<Theme>, dim: f32) -> bool {
+        Arc::ptr_eq(&self.theme, theme) && self.dim == dim
     }
 }
 
@@ -2121,13 +2095,13 @@ mod tests {
     }
 
     /// The single band follows its editor into the diff view. It declares the
-    /// scroll overview of the palette the dials derive, again at a theme
-    /// switch, and the buffer's lines sync with their status blocks.
+    /// scroll overview of the class table's palette, again at a theme switch,
+    /// and the buffer's lines sync with their status blocks.
     ///
-    /// A dial step sends neither the band nor a line. The overview keeps only
-    /// the mark classes, which no dial moves, and the summaries hold no dial.
+    /// A dial step sends neither the band nor a line, since neither the
+    /// overview nor the summaries hold a dial.
     #[test]
-    fn a_diff_view_strip_declares_the_dial_palette() {
+    fn a_diff_view_band_declares_the_overview_palette() {
         use crate::{host::DiffStatus, minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
         use stoat_action::SetTheme;
         use stoatty_protocol::command::Command;
@@ -2157,19 +2131,15 @@ mod tests {
         h.stoat.diff_syntax = false;
         let flat = emit_frame(&mut h, &mut rx);
 
-        let table = &h.stoat.minimap_class_table;
-        let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme));
-        let overview_at = |tint: i8, syntax: bool| {
-            let dials = DiffDials {
-                tint_amount: review::diff_tint_amount(tint),
-                ..DiffDials::from_stoat(&h.stoat)
-            };
-            let palette = review::diff_minimap_palette(table, &h.stoat.theme, dials, syntax);
-            review::diff_overview_palette(table, &palette, ground)
+        let overview = |h: &crate::test_harness::TestHarness| {
+            let table = &h.stoat.minimap_class_table;
+            let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme));
+            review::diff_overview_palette(table, table.palette(), ground)
         };
-        let flat_palette = overview_at(1, false);
+        let table = &h.stoat.minimap_class_table;
+        let first_overview = overview(&h);
         assert_ne!(
-            overview_at(2, true),
+            first_overview,
             table.palette(),
             "the overview moves the palette"
         );
@@ -2182,7 +2152,7 @@ mod tests {
                 (splices(&stepped), splices(&flat)),
             ),
             (
-                Some(overview_at(2, true)),
+                Some(first_overview.clone()),
                 Some(vec![
                     table.edge_class(EdgeClass::Modified),
                     table.population_base(DiffStatus::Modified),
@@ -2191,9 +2161,8 @@ mod tests {
                 None,
                 (0, 0),
             ),
-            "the band declares the overview of the dial palette over the diff view's \
-             synced lines, and a tint step and a syntax toggle send neither the band \
-             nor a line",
+            "the band declares the overview over the diff view's synced lines, and \
+             a tint step and a syntax toggle send neither the band nor a line",
         );
 
         action_handlers::dispatch(
@@ -2208,31 +2177,27 @@ mod tests {
             .set_diff_view(false);
         let plain = emit_frame(&mut h, &mut rx);
 
-        let table = &h.stoat.minimap_class_table;
-        let themed_palette = review::diff_overview_palette(
-            table,
-            &review::diff_minimap_palette(
-                table,
-                &h.stoat.theme,
-                DiffDials::from_stoat(&h.stoat),
-                false,
-            ),
-            crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme)),
+        let themed_palette = overview(&h);
+        assert_ne!(
+            themed_palette, first_overview,
+            "the theme moves the palette"
         );
-        assert_ne!(themed_palette, flat_palette, "the theme moves the palette");
         assert_eq!(
             (band(&themed), band(&plain)),
-            (Some(themed_palette), Some(table.palette().to_vec())),
+            (
+                Some(themed_palette),
+                Some(h.stoat.minimap_class_table.palette().to_vec())
+            ),
             "a theme switch declares the overview under the new theme, and the \
              class table's own palette once the view is plain",
         );
     }
 
     /// A strip declares the palette for its view and its focus. A diff view's
-    /// overview takes the dial palette with its text classes on the window
-    /// ground, and an unfocused strip takes its palette at the inactive dim. A
-    /// terminal before the population palette receives each one cut to the
-    /// legacy prefix.
+    /// overview takes the class table's palette with its text classes on the
+    /// window ground, and an unfocused strip takes its palette at the inactive
+    /// dim. A terminal before the population palette receives each one cut to
+    /// the legacy prefix.
     #[test]
     fn a_strip_declares_the_palette_for_its_view_and_focus() {
         use stoatty_protocol::command::Command;
@@ -2245,7 +2210,6 @@ mod tests {
             h.stoat.set_apc_tx(tx);
             h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
             h.stoat.stoatty_protocol = protocol;
-            h.stoat.diff_tint = 2;
             // Wide enough that each vertical split clears the minimap min-width
             // gate.
             h.resize(260, 24);
@@ -2301,18 +2265,11 @@ mod tests {
                     .collect()
             };
             let plain = table.palette()[..len].to_vec();
-            let mut diff = review::diff_minimap_palette(
-                table,
-                &h.stoat.theme,
-                DiffDials::from_stoat(&h.stoat),
-                true,
-            );
-            diff.truncate(len);
             let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme));
-            let overview = review::diff_overview_palette(table, &diff, ground);
+            let overview = review::diff_overview_palette(table, &plain, ground);
             let dimmed_overview = review::diff_overview_palette(
                 table,
-                &dimmed(&diff),
+                &dimmed(&plain),
                 paint::dim_rgb(ground, bg, dim),
             );
             let sorted = |mut pair: Vec<Vec<[u8; 3]>>| {

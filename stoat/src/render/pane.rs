@@ -2700,19 +2700,13 @@ mod tests {
                 let thumb = super::style_rgb(theme.get(crate::theme::scope::UI_BORDER_FOCUSED).fg)
                     .expect("an rgb thumb");
                 let table = &h.stoat.minimap_class_table;
-                let diff = crate::render::review::diff_minimap_palette(
-                    table,
-                    theme,
-                    crate::render::review::DiffDials::from_stoat(&h.stoat),
-                    h.stoat.syntax_highlight && h.stoat.diff_syntax,
-                );
                 let declared = (
                     1,
                     4,
                     [ground[0], ground[1], ground[2], 255],
                     [thumb[0], thumb[1], thumb[2], 31],
                     super::dim_rgb(ground, thumb, 31.0 / 255.0),
-                    crate::render::review::diff_overview_palette(table, &diff, ground),
+                    crate::render::review::diff_overview_palette(table, table.palette(), ground),
                 );
                 assert_eq!(strips.last(), Some(&declared), "{screen} in {mode:?}");
             }

@@ -45,7 +45,6 @@ use crate::{
     render::{
         paint,
         pane_cache::PaneCacheEntry,
-        review::DiffDials,
         sanitize,
         undercurl::{self, UndercurlBatch},
         BlankedBuffer, Hold, PRIMARY_MODES,
@@ -3938,8 +3937,7 @@ impl Stoat {
         }
     }
 
-    /// Settle [`Self::minimap_palettes`] for the dim, the dials, and the diff
-    /// view's syntax flag now in force.
+    /// Settle [`Self::minimap_palettes`] for the theme and the dim now in force.
     ///
     /// Separate from reading them for the same reason [`Self::refresh_chrome`]
     /// is. A caller passes `wanted` as `false` to keep them from being built at
@@ -3949,14 +3947,10 @@ impl Stoat {
             self.minimap_palettes = None;
             return;
         }
-        let dials = DiffDials::from_stoat(self);
-        // A diff view paints syntax colors only under both toggles, as the
-        // frame's sync of each display map applies them.
-        let syntax = self.syntax_highlight && self.diff_syntax;
         let fresh = self
             .minimap_palettes
             .as_ref()
-            .is_some_and(|palettes| palettes.built_from(&self.theme, dim, dials, syntax));
+            .is_some_and(|palettes| palettes.built_from(&self.theme, dim));
         if fresh {
             return;
         }
@@ -3965,8 +3959,6 @@ impl Stoat {
             &self.minimap_class_table,
             &self.theme,
             dim,
-            dials,
-            syntax,
         ));
     }
 
