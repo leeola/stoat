@@ -892,6 +892,9 @@ pub mod scope {
     /// The fill of a changes view's fold row, the row that stands for the
     /// unchanged lines a fold hides.
     pub const DIFF_FOLD: &str = "diff.fold";
+    /// The fill of a split diff row's empty half, where the row holds a line
+    /// on the other side alone, such as a removed line's live half.
+    pub const DIFF_ABSENT: &str = "diff.absent";
     /// The base half of a split diff view's status row, its text on its tint.
     ///
     /// The `name` scope colors the base's name. Each channel the theme leaves

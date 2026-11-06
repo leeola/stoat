@@ -280,6 +280,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `diff.fold` -- the fill (background) of a changes view's fold row, the row
   that names how many unchanged lines a fold hides. The row's text takes
   `ui.text.muted`.
+- `diff.absent` -- the fill (background) of a split diff row's empty half,
+  where the row holds a line on the other side alone: a removed line's live
+  half, or an added line's base half.
 - `diff.sides.base`, `diff.sides.base.name`, `diff.sides.target`,
   `diff.sides.target.name` -- the two halves of a split diff view's status
   row, its text (foreground) on its tint (background), and the color of the

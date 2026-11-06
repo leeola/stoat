@@ -931,6 +931,10 @@ fn divider_x(inner: Rect) -> u16 {
 /// them are unchanged text, so they keep `fallback_style` and take no row
 /// tint. An unchanged row keeps `fallback_style` whole.
 ///
+/// In the two-column layout, a row that holds a line on one side alone fills
+/// the other half with `diff.absent`'s background, gutter and all. That is a
+/// removed line's live half and the base half of an added or moved line.
+///
 /// Shared by the live [`render_diff_view`] and the off-loop smooth-scroll page
 /// so both paint an identical grid. It takes owned parts and paints no cursor,
 /// letting a pooled page render it on a blocking worker.
@@ -1023,6 +1027,12 @@ pub(crate) fn paint_diff_rows(
     let add_style = fallback_style.patch(theme.get(s::DIFF_ADDED));
     let moved_style = fallback_style.patch(theme.get(s::DIFF_MOVED));
     let inlay_style = fallback_style.patch(theme.get(s::UI_VIRTUAL_INLAY));
+    // The unified layout has no second half to fill, and a decorations-only
+    // page keeps the cells the terminal holds.
+    let absent_bg = theme
+        .get(s::DIFF_ABSENT)
+        .bg
+        .filter(|_| sep_x.is_some() && !decorations_only);
 
     let tints = resolve_diff_tints(theme);
     let base_changes = snapshot
@@ -1132,6 +1142,11 @@ pub(crate) fn paint_diff_rows(
                     dials,
                     decorations_only,
                 );
+                if let Some(bg) = absent_bg {
+                    for x in right_x..inner.x + inner.width {
+                        buf[(x, y)].set_bg(bg);
+                    }
+                }
                 // The unified layout paints this row's bars in its one status
                 // column already, so only the two-column layout has a gap.
                 if row_state.removal_tick && sep_x.is_some() {
@@ -1432,6 +1447,10 @@ pub(crate) fn paint_diff_rows(
                     );
                     if !continuation {
                         base_line += 1;
+                    }
+                } else if let (Some(bg), Some(sep)) = (absent_bg, sep_x) {
+                    for x in left_x..sep {
+                        buf[(x, y)].set_bg(bg);
                     }
                 }
             },
@@ -7336,6 +7355,73 @@ mod tests {
         assert_ne!(
             context_fg, added_fg,
             "the blend moves the context color off the full-strength one"
+        );
+    }
+
+    /// The base text and live text of the one-sided rows tests, a removed
+    /// line, a context line, and an added line.
+    const ONE_SIDED: (&str, &str) = ("keep\ngone\nstay\n", "keep\nstay\nadded\n");
+
+    /// The absent tint and the editor background of `h`'s theme.
+    fn absent_and_editor_bg(h: &crate::test_harness::TestHarness) -> (Color, Color) {
+        let theme = &h.stoat.theme;
+        let bg = |scope| theme.try_get(scope).and_then(|style| style.bg);
+        (
+            bg(crate::theme::scope::DIFF_ABSENT).expect("the theme tints an absent half"),
+            bg(crate::theme::scope::UI_BACKGROUND).expect("an editor background"),
+        )
+    }
+
+    /// The backgrounds across cells `xs` of row `y`, one per run of equal
+    /// cells, left to right.
+    fn bg_runs(buf: &Buffer, y: u16, xs: std::ops::Range<u16>) -> Vec<Color> {
+        let mut bgs: Vec<Color> = xs.map(|x| buf[(x, y)].bg).collect();
+        bgs.dedup();
+        bgs
+    }
+
+    /// A split row that holds a line on one side alone fills the other half
+    /// with the absent tint, gutter and all. A context row keeps the editor
+    /// background on both halves.
+    #[test]
+    fn a_one_sided_row_fills_its_empty_half_with_the_absent_tint() {
+        let h = diff_harness(ONE_SIDED.0, ONE_SIDED.1);
+        let (absent, editor) = absent_and_editor_bg(&h);
+        let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
+        let sep = cols.sep_x.expect("two columns");
+        let (base, live) = (cols.left_x..sep, cols.right_x..buf.area.x + buf.area.width);
+
+        let gone = row_holding(buf, left_text(&cols), "gone");
+        let added = row_holding(buf, right_text(&cols), "added");
+        let stay = row_holding(buf, right_text(&cols), "stay");
+        assert_eq!(
+            [
+                bg_runs(buf, gone, live.clone()),
+                bg_runs(buf, added, base.clone()),
+                bg_runs(buf, stay, base),
+                bg_runs(buf, stay, live)
+            ],
+            [vec![absent], vec![absent], vec![editor], vec![editor]],
+        );
+    }
+
+    /// The unified layout shows a removed line in its one column, so no half
+    /// of the row is empty and the row keeps the editor background.
+    #[test]
+    fn a_unified_removed_row_takes_no_absent_tint() {
+        let h = diff_harness_sized(DIFF_TWO_COLUMN_MIN - 1, ONE_SIDED.0, ONE_SIDED.1);
+        let (_, editor) = absent_and_editor_bg(&h);
+        let buf = h.rendered_buffer();
+        let cols = harness_columns(&h);
+
+        let gone = row_holding(buf, left_text(&cols), "gone");
+        assert_eq!(
+            (
+                cols.sep_x,
+                bg_runs(buf, gone, buf.area.x..buf.area.x + buf.area.width)
+            ),
+            (None, vec![editor]),
         );
     }
 
