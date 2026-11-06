@@ -63,7 +63,8 @@ use crate::{
     keymap::KeymapState,
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
-        pane_predicate, ActiveModal, AppFlags, Flags, FocusFlags, StoatKeymapState,
+        only_enters_primary_mode, pane_predicate, ActiveModal, AppFlags, Flags, FocusFlags,
+        StoatKeymapState,
     },
     lsp::{progress::LspProgressMap, registry::LspRegistry},
     minimap::{emit, MinimapContent},
@@ -2264,12 +2265,15 @@ pub(crate) fn frame(
 ///
 /// The conflict screen rides on normal mode, so it scopes to its own `view ==
 /// conflict` bindings. A terminal or agent pane at rest sends every other key
-/// to its child, so it scopes to the bindings that name its pane kind. The
-/// walkthrough mode lasts a whole tour, and the reader reads code under its
-/// box, so it scopes to its own mode's bindings. A primary mode narrows to the
-/// chord entries and the context-bound keys, because the whole editor keymap
-/// is what the help screen is for. A chord sub-mode owns its whole mode, so it
-/// takes them all.
+/// to its child, so it scopes to the bindings that name its pane kind. A
+/// primary mode narrows to the chord entries and the context-bound keys,
+/// because the whole editor keymap is what the help screen is for. A chord
+/// sub-mode, the walkthrough's among them, lists the keys its own mode binds,
+/// so the root keys every mode answers stay off its box.
+///
+/// A chord's binding that only returns to a primary mode is its exit, the
+/// Escape every chord binds, so it makes no row. In a primary mode such a
+/// binding is an entry, as `v` enters select mode, and keeps its row.
 fn hint_rows(
     keymap: &crate::keymap::Keymap,
     state: &dyn KeymapState,
@@ -2277,30 +2281,29 @@ fn hint_rows(
     screen: Option<&str>,
     pane: Option<&str>,
 ) -> Vec<hints::HintRow> {
-    let raw = if screen == Some("conflict") {
-        keymap.scoped_bindings(state, "view", "conflict")
+    let (raw, chord) = if screen == Some("conflict") {
+        (keymap.scoped_bindings(state, "view", "conflict"), false)
     } else if let Some(kind @ ("terminal" | "agent")) = pane.filter(|_| mode == "normal") {
-        keymap.scoped_bindings(state, "pane", kind)
-    } else if mode == "walkthrough" {
-        keymap.scoped_bindings(state, "mode", "walkthrough")
-    } else {
-        let keys = if PRIMARY_MODES.contains(&mode) {
-            keymap.context_bindings(state, PRIMARY_MODES)
-        } else {
-            keymap.active_keys(state)
-        };
+        (keymap.scoped_bindings(state, "pane", kind), false)
+    } else if PRIMARY_MODES.contains(&mode) {
         // Wheel gestures are left out. This overlay affords pressing one of the
         // keys it lists, which a notch is not. Width is also the scarce
         // resource here, because a large chord already fills two columns and a
         // third overflows any ordinary terminal. The help screen reads the
         // unfiltered set, so nothing is hidden from a reader looking for it.
-        keys.into_iter()
+        let keys = keymap
+            .context_bindings(state, PRIMARY_MODES)
+            .into_iter()
             .filter(|(key, _)| key.wheel.is_none())
             .map(|(key, actions)| (key.display_label(), actions))
-            .collect()
+            .collect();
+        (keys, false)
+    } else {
+        (keymap.scoped_bindings(state, "mode", mode), true)
     };
     let bindings: Vec<(&str, String, Option<Toggle>)> = raw
         .iter()
+        .filter(|(_, actions)| !(chord && only_enters_primary_mode(actions)))
         .map(|(key, actions)| {
             (
                 key.as_str(),
@@ -3469,8 +3472,8 @@ mod lsp_filter_tests {
             .short_desc();
         assert_eq!(
             (
-                text.contains("space mode"),
-                text.contains("goto mode"),
+                text.contains("+space"),
+                text.contains("+goto"),
                 text.contains(move_down),
             ),
             (true, true, false),
@@ -3547,15 +3550,15 @@ mod lsp_filter_tests {
         h.stoat.key_hints_visible = true;
         let chords = [
             "select mode",
-            "goto mode",
-            "z mode",
-            "bracket_next mode",
-            "bracket_prev mode",
-            "match mode",
+            "+goto",
+            "+z",
+            "+bracket next",
+            "+bracket prev",
+            "+match",
         ];
         let menu_rows = [
             ("space", short_desc("SaveSelection")),
-            ("space", "space_clipboard mode"),
+            ("space", "+clipboard"),
             ("space b", short_desc("CloseBuffer")),
             ("space l", short_desc("GotoReferences")),
             ("space l", short_desc("GotoImplementors")),
@@ -3611,6 +3614,39 @@ mod lsp_filter_tests {
             (alone.contains(row), paired.contains(row)),
             (false, true),
             "the pair diff row follows the layout:\n{paired}",
+        );
+    }
+
+    /// The space box lists the keys the space mode binds, `?` among them, and
+    /// leaves out the root keys every mode answers and the Escape that leaves
+    /// the mode. A submenu row reads `+name`.
+    #[test]
+    fn a_chord_mode_box_omits_root_keys() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.type_keys("space");
+        h.render_composited();
+        let rows: Vec<(String, String)> = h
+            .stoat
+            .hints_cache
+            .as_ref()
+            .expect("the space box laid out its rows")
+            .rows
+            .iter()
+            .map(|row| (row.keys.clone(), row.action.clone()))
+            .collect();
+        let lists_key = |key: &str| {
+            rows.iter()
+                .any(|(keys, _)| keys.split(", ").any(|listed| listed == key))
+        };
+
+        assert_eq!(
+            (
+                ["C-?", "C-:", "C-;", "C-+", "C-_", "Esc"].map(lists_key),
+                lists_key("?"),
+                rows.contains(&("b".to_string(), "+buffer".to_string())),
+            ),
+            ([false; 6], true, true),
+            "the box rows: {rows:?}",
         );
     }
 
@@ -3971,7 +4007,7 @@ mod lsp_filter_tests {
             ]
             .map(short_desc)
             .into_iter()
-            .chain(["space_pane_nav_new mode", "space_pane_display mode"])
+            .chain(["+pane nav new", "+pane display"])
             .all(|text| lists(rows, text))
         };
         let gated = |rows: &[String]| {

@@ -812,6 +812,10 @@ pub mod scope {
     /// [`UI_TOGGLE_INACTIVE`] is its sibling for a toggle that is off.
     pub const UI_TOGGLE_ACTIVE: &str = "ui.toggle.active";
     pub const UI_TOGGLE_INACTIVE: &str = "ui.toggle.inactive";
+    /// The label of a key hints row whose keys open a submenu, the row that
+    /// reads `+name`. A theme that leaves it unset paints the label in
+    /// [`UI_KEY_LABEL`].
+    pub const UI_HINTS_SUBMENU: &str = "ui.hints.submenu";
     pub const UI_HEADING: &str = "ui.heading";
     pub const UI_ERROR: &str = "ui.error";
     pub const UI_MESSAGE_ERROR: &str = "ui.message.error";

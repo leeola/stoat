@@ -1937,17 +1937,15 @@ mod tests {
         open(&mut h.stoat, "tour");
         assert_eq!(
             [before, w_row(&mut h)],
-            [
-                Some("open the walkthrough picker"),
-                Some("walkthrough mode")
-            ]
-            .map(|action| action.map(str::to_owned)),
+            [Some("open the walkthrough picker"), Some("+walkthrough")]
+                .map(|action| action.map(str::to_owned)),
             "W picks a tour with none open, and enters the mode with one",
         );
     }
 
-    /// The walkthrough box lists only the mode's own keys, so it stays one
-    /// column over the code the reader reads through the tour.
+    /// The walkthrough box lists only the mode's own keys, and not the Escape
+    /// that leaves the mode, so it covers little of the code the reader reads
+    /// through the tour.
     #[test]
     fn the_walkthrough_box_lists_the_modes_own_keys() {
         let mut h = harness_with_tour();
@@ -1965,7 +1963,6 @@ mod tests {
             .map(|row| (row.keys.clone(), row.action.clone()))
             .collect();
         let expected = [
-            ("Esc", "normal mode"),
             ("n, Dn", "go to the next walkthrough stop"),
             ("p, Up", "go to the previous walkthrough stop"),
             ("a", "go to the next annotation of this stop"),

@@ -254,6 +254,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   chrome accents.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
   toggle's key in the key hints box.
+- `ui.hints.submenu` -- the label of a key hints row whose keys open a
+  submenu, the row that reads `+name`. Unset, the label takes
+  `ui.key_label`.
 - `ui.badge.active`, `ui.badge.complete`, `ui.badge.error` -- transient status
   badges.
 - `ui.tag.rust`, `ui.tag.markdown`, `ui.tag.config` -- the file-type tag colors

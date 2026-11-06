@@ -8,6 +8,7 @@ use crate::{
     lsp::{registry::LspRegistry, LspSymbolKind},
     pane::{FocusTarget, Placement, View},
     rebase::RebasePause,
+    render::PRIMARY_MODES,
     workspace::{self, Workspace},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -1113,13 +1114,41 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
 /// mode reset rather than the key's purpose. The label therefore names the
 /// first action that is not a mode switch, and falls back to the first action
 /// for a binding that only switches modes.
+///
+/// A binding that only switches modes opens a submenu when the mode it ends in
+/// is not a primary one, so it reads `+name`, the mode's name less its
+/// `space_` prefix and with spaces for underscores, such as `+pane nav`. A
+/// switch back to a primary mode keeps its `normal mode` label.
 pub(crate) fn binding_display_desc(actions: &[ResolvedAction]) -> String {
+    if let Some(action) = actions.iter().find(|action| action.name != "SetMode") {
+        return action_display_desc(action);
+    }
+    match entered_mode(actions) {
+        Some(mode) if !PRIMARY_MODES.contains(&mode.as_str()) => format!(
+            "+{}",
+            mode.strip_prefix("space_")
+                .unwrap_or(&mode)
+                .replace('_', " ")
+        ),
+        _ => actions.first().map(action_display_desc).unwrap_or_default(),
+    }
+}
+
+/// Reports whether `actions` only switch to a primary mode, as every chord's
+/// Escape does.
+pub(crate) fn only_enters_primary_mode(actions: &[ResolvedAction]) -> bool {
+    actions.iter().all(|action| action.name == "SetMode")
+        && entered_mode(actions).is_some_and(|mode| PRIMARY_MODES.contains(&mode.as_str()))
+}
+
+/// The mode a binding of `SetMode` actions ends in, the last one's target.
+fn entered_mode(actions: &[ResolvedAction]) -> Option<String> {
     actions
-        .iter()
-        .find(|action| action.name != "SetMode")
-        .or_else(|| actions.first())
-        .map(action_display_desc)
-        .unwrap_or_default()
+        .last()
+        .filter(|action| action.name == "SetMode")?
+        .args
+        .first()
+        .and_then(arg_as_str)
 }
 
 /// Build the action `name` with `args`, or `None` if unknown or an argument
@@ -2004,10 +2033,33 @@ mod tests {
     }
 
     #[test]
-    fn binding_desc_of_a_bare_prefix_switch_names_the_prefix_mode() {
+    fn a_submenu_binding_reads_plus_name() {
         assert_eq!(
-            binding_display_desc(&[set_mode("prefix_tab")]),
-            "prefix_tab mode"
+            [
+                binding_display_desc(&[set_mode("space_buffer")]),
+                binding_display_desc(&[set_mode("space_pane_nav")]),
+                binding_display_desc(&[set_mode("prefix_tab")]),
+            ],
+            ["+buffer", "+pane nav", "+prefix tab"],
+        );
+    }
+
+    /// A chord's Escape only enters a primary mode, which no box lists. A
+    /// submenu key does more, and so does an action key that returns to
+    /// normal mode once its action runs. A binding that switches modes twice
+    /// ends in the second mode.
+    #[test]
+    fn only_a_switch_to_a_primary_mode_enters_only_a_primary_mode() {
+        assert_eq!(
+            [
+                only_enters_primary_mode(&[set_mode("normal")]),
+                only_enters_primary_mode(&[set_mode("space_buffer")]),
+                only_enters_primary_mode(&[set_mode("normal"), resolved("PrevTab", vec![])]),
+                only_enters_primary_mode(&[resolved("PrevTab", vec![]), set_mode("normal")]),
+                only_enters_primary_mode(&[]),
+                only_enters_primary_mode(&[set_mode("space_buffer"), set_mode("normal")]),
+            ],
+            [true, false, false, false, false, true],
         );
     }
 

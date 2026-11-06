@@ -75,6 +75,7 @@ theme default_dark {
     ui.key_label.fg = accent;
     ui.toggle.active.fg = success;
     ui.toggle.inactive.fg = danger;
+    ui.hints.submenu.fg = primary;
     ui.heading = { fg: warning, modifiers: [bold] };
     ui.error.fg = danger;
     ui.text.fg = text;
@@ -308,6 +309,7 @@ theme ermine_night inherits default_dark {
 
     ui.prompt.fg       = accent;
     ui.key_label.fg    = info;
+    ui.hints.submenu.fg = accent;
     ui.badge.active.fg = warning;
 
     ui.tag.rust.fg     = warning;

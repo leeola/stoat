@@ -68,6 +68,9 @@ pub(crate) struct HintRow {
     pub(crate) keys: String,
     pub(crate) action: String,
     pub(crate) toggle: Option<Toggle>,
+    /// Whether the row's keys open a submenu, which its label names as
+    /// `+name` and the box paints in `ui.hints.submenu`.
+    pub(crate) submenu: bool,
 }
 
 /// A frame's grouped hint rows kept for reuse across frames.
@@ -158,6 +161,7 @@ struct LaidCell {
     key: String,
     action: String,
     toggle: Option<Toggle>,
+    submenu: bool,
 }
 
 /// Paint the hints box from pre-grouped [`HintRow`]s.
@@ -234,6 +238,11 @@ pub(crate) fn render_hints_grouped(
     let toggle_on = theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE);
     let toggle_off = theme.get(crate::theme::scope::UI_TOGGLE_INACTIVE);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
+    // A theme with no submenu style still sets the submenus apart, in the keys'
+    // color.
+    let submenu_style = theme
+        .try_get(crate::theme::scope::UI_HINTS_SUBMENU)
+        .unwrap_or(key_style);
     let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let rule_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
     let end_x = inner.x + inner.width;
@@ -304,7 +313,10 @@ pub(crate) fn render_hints_grouped(
                 row,
                 end_x,
                 &cell.action,
-                action_style,
+                match cell.submenu {
+                    true => submenu_style,
+                    false => action_style,
+                },
                 run_bg,
                 row_scale,
                 &mut *scene,
@@ -540,6 +552,7 @@ fn lay_out_columns(rows: &[HintRow], rows_cap: usize, area_width: u16) -> (Vec<L
                     key: format!("{:>key_width$}", row.keys),
                     action: format!("   {}", clip(&row.action, cap)),
                     toggle: row.toggle,
+                    submenu: row.submenu,
                 })
                 .collect();
             LaidColumn {
@@ -621,6 +634,7 @@ pub(crate) fn group_by_action(bindings: &[(&str, String, Option<Toggle>)]) -> Ve
                 keys: key.to_string(),
                 action: action.to_string(),
                 toggle: *toggle,
+                submenu: action.starts_with('+'),
             });
         }
     }
@@ -762,6 +776,7 @@ mod tests {
                 keys: format!("k{i:02}"),
                 action: "x".repeat(label),
                 toggle: None,
+                submenu: false,
             })
             .collect();
         let key = LayoutKey {
@@ -993,21 +1008,17 @@ mod tests {
         );
     }
 
-    /// A cell frame's border rules the title row off by itself, so the row's
-    /// dashes keep the frame's color rather than taking the card hairline's.
-    #[test]
-    fn a_cell_frame_keeps_its_border_color_across_the_title_row() {
-        let (config, errors) = stoat_config::parse(
-            r##"theme t {
-                ui.modal.hints.card = { fg: "#010203", bg: "#040506" };
-                ui.border.inactive.fg = "#0a0b0c";
-            }"##,
-        );
+    /// The theme `t` that `body` defines.
+    fn theme_t(body: &str) -> Theme {
+        let (config, errors) = stoat_config::parse(&format!("theme t {{ {body} }}"));
         assert!(errors.is_empty(), "parse errors: {errors:?}");
-        let theme = Theme::from_config(&config.expect("the theme parses"), "t").expect("theme t");
-        let bindings = vec![("k", "act".to_string())];
-        let mut cache =
-            HintsCache::new(0, group_by_action(&plain(&bindings)), FooterKeys::default());
+        Theme::from_config(&config.expect("the theme parses"), "t").expect("theme t")
+    }
+
+    /// Paint `bindings` in `theme` as cells, on a scene that draws no
+    /// components.
+    fn render_cells(bindings: &[(&str, String, Option<Toggle>)], theme: &Theme) -> Buffer {
+        let mut cache = HintsCache::new(0, group_by_action(bindings), FooterKeys::default());
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
@@ -1018,21 +1029,62 @@ mod tests {
             &mut cache,
             None,
             ToggleStates::default(),
-            &theme,
+            theme,
             area,
             &mut buf,
             &mut scene,
         );
+        buf
+    }
 
-        let top = (0..area.height)
+    /// A cell frame's border rules the title row off by itself, so the row's
+    /// dashes keep the frame's color rather than taking the card hairline's.
+    #[test]
+    fn a_cell_frame_keeps_its_border_color_across_the_title_row() {
+        let theme = theme_t(
+            r##"ui.modal.hints.card = { fg: "#010203", bg: "#040506" };
+                ui.border.inactive.fg = "#0a0b0c";"##,
+        );
+        let buf = render_cells(&plain(&[("k", "act".to_string())]), &theme);
+
+        let top = (0..buf.area.height)
             .find(|&y| row_text(&buf, y).contains('┌'))
             .expect("a cell frame");
-        let mut dashes: Vec<Color> = (area.x..area.x + area.width)
+        let mut dashes: Vec<Color> = (buf.area.x..buf.area.x + buf.area.width)
             .filter(|&x| buf[(x, top)].symbol() == "─")
             .map(|x| buf[(x, top)].fg)
             .collect();
         dashes.dedup();
         assert_eq!(dashes, [Color::Rgb(1, 2, 3)]);
+    }
+
+    /// A submenu row's label takes the submenu style. A theme that sets none
+    /// paints it in the keys' color, so it still stands apart from the plain
+    /// labels.
+    #[test]
+    fn a_submenu_label_takes_the_submenu_style() {
+        let label_colors = |body: &str| {
+            let bindings = plain(&[("b", "+buffer".to_string()), ("k", "zzz".to_string())]);
+            let buf = render_cells(&bindings, &theme_t(body));
+            let fg_of = |glyph: &str| {
+                buf.content
+                    .iter()
+                    .find(|cell| cell.symbol() == glyph)
+                    .map(|cell| cell.fg)
+            };
+            (fg_of("+"), fg_of("z"))
+        };
+        let colors = r##"ui.text.fg = "#010101"; ui.key_label.fg = "#020202";"##;
+        assert_eq!(
+            [
+                label_colors(&format!(r##"{colors} ui.hints.submenu.fg = "#030303";"##)),
+                label_colors(colors),
+            ],
+            [
+                (Some(Color::Rgb(3, 3, 3)), Some(Color::Rgb(1, 1, 1))),
+                (Some(Color::Rgb(2, 2, 2)), Some(Color::Rgb(1, 1, 1))),
+            ],
+        );
     }
 
     /// A long action text is cut to fit the area, and its key stays on screen.

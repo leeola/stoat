@@ -4654,6 +4654,7 @@ fn hints_cache_reuses_rows_across_unchanged_frames() {
         keys: "SENTINEL".into(),
         action: "SENTINEL".into(),
         toggle: None,
+        submenu: false,
     });
 
     h.stoat.paint_into(&mut buf, None);
@@ -4707,14 +4708,8 @@ fn the_git_chord_marks_its_toggles() {
         .collect();
     assert_eq!(
         marks,
-        [
-            (4, inactive),
-            (4, inactive),
-            (10, active),
-            (10, active),
-            (4, inactive)
-        ],
-        "the key hints toggle, d, and R are off, and c and f are on",
+        [(4, inactive), (10, active), (10, active), (4, inactive)],
+        "d and R are off, and c and f are on",
     );
 }
 
@@ -4825,8 +4820,8 @@ fn select_mode_auto_shows_no_hints_box() {
     keys.sort();
     assert_eq!(
         keys,
-        ["C-?", "z"],
-        "a select chord sub-mode still auto-shows its whole mode"
+        ["z"],
+        "a select chord sub-mode still auto-shows its box, of its own keys alone"
     );
 }
 
