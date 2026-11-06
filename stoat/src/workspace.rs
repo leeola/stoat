@@ -73,8 +73,7 @@ new_key_type! {
     pub struct WorkspaceId;
 }
 
-/// The widest a terminal title, an agent title, or a diff's two sides get as a
-/// tab's name.
+/// The widest a terminal title or an agent title gets as a tab's name.
 ///
 /// A shell commonly titles itself with its user, host, and directory, and a
 /// few such titles uncut take the whole tab bar. 24 columns holds a typical
@@ -774,10 +773,11 @@ impl Workspace {
     /// What tab `idx` calls itself in the tab bar, taken from its focused
     /// pane's view.
     ///
-    /// A pane in the diff view names the diff by its two sides, as the sides
-    /// bar does, cut to [`TAB_TITLE_MAX_COLS`]. A file measured against
-    /// another file names the two files there. Any other pane reads as
-    /// [`Self::view_title`] names its view. An out-of-range index is empty.
+    /// A pane in the diff view names its file after a `±`, as `± main.rs`. A
+    /// file measured against another file names the file the pane edits. A
+    /// changes view counts the files its stack holds, as `± changes · 2
+    /// files`. Any other pane reads as [`Self::view_title`] names its view.
+    /// An out-of-range index is empty.
     ///
     /// A `RenameTab` override wins over the derived name, so a renamed tab keeps
     /// its title no matter what its focused pane shows.
@@ -795,21 +795,21 @@ impl Workspace {
             return String::new();
         };
 
-        if let View::Editor(id) = &tree.pane(tree.focus()).view
-            && let Some(editor) = self.editors.get(*id).filter(|editor| editor.diff_view)
-        {
-            let pair = self
-                .buffers
-                .path_for(editor.buffer_id)
-                .and_then(|path| Some((path, self.pair_for(path)?)));
-            let (left, right) = match pair {
-                Some((path, pair)) => diff::pair_names(&pair.base_path, path),
-                None => diff::diff_sides(self.diff_base()),
-            };
-            return text::truncate_to_cols(&format!("{left} → {right}"), TAB_TITLE_MAX_COLS);
+        let view = &tree.pane(tree.focus()).view;
+        match view {
+            View::Editor(id) if self.editors.get(*id).is_some_and(|editor| editor.diff_view) => {
+                format!("\u{b1} {}", self.view_title(view))
+            },
+            View::DiffChanges(id) => {
+                let files = self
+                    .diff_changes_views
+                    .get(*id)
+                    .map_or(0, |state| state.excerpts.len());
+                let noun = if files == 1 { "file" } else { "files" };
+                format!("\u{b1} changes \u{b7} {files} {noun}")
+            },
+            _ => self.view_title(view),
         }
-
-        self.view_title(&tree.pane(tree.focus()).view)
     }
 
     /// The label tab `idx` shows in the tab bar, with the type tag that stands
@@ -818,7 +818,7 @@ impl Workspace {
     /// A tab whose focused pane edits a file with a [`chrome::type_tag`] reads
     /// as the file's stem beside that tag. Every other tab reads as
     /// [`Self::tab_title`] names it, with no tag. So does a renamed tab, whose
-    /// name is the user's, and a diff view, which names two files.
+    /// name is the user's, and a diff view, whose `±` takes the tag's place.
     pub(crate) fn tab_label(&self, idx: usize) -> (String, Option<(&'static str, &'static str)>) {
         let tagged = self.tab_file(idx).and_then(|path| {
             let stem = path.file_stem()?.to_string_lossy().into_owned();
@@ -2679,6 +2679,35 @@ mod tests {
             ws.tab_title(0),
             derived,
             "clearing falls back to the derived title"
+        );
+    }
+
+    /// A changes view's tab counts the files its stack holds, with one file in
+    /// the singular and an empty stack at zero.
+    #[test]
+    fn a_changes_view_s_tab_counts_its_files() {
+        let title = |files: &[(&str, &str, &str)]| {
+            let mut h = TestHarness::with_size(120, 24);
+            if let Some((first, _, _)) = files.first() {
+                h.stage_review_scenario("/repo", files);
+                h.open_file(&Path::new("/repo").join(first));
+            }
+            h.cover_with_diff_changes(false);
+            h.settle();
+            h.stoat.active_workspace().tab_title(0)
+        };
+
+        assert_eq!(
+            [
+                title(&[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]),
+                title(&[("a.txt", "a\n", "A\n")]),
+                title(&[]),
+            ],
+            [
+                "\u{b1} changes \u{b7} 2 files",
+                "\u{b1} changes \u{b7} 1 file",
+                "\u{b1} changes \u{b7} 0 files",
+            ],
         );
     }
 

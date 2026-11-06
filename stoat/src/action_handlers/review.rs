@@ -3015,9 +3015,9 @@ mod tests {
             (
                 Some(("/repo/a.txt".into(), "one\ntwo\n".into())),
                 Some(("/repo/c2.txt".into(), "x\ny\n".into())),
-                ["a.txt → b.txt".to_string(), "c2.txt → d.txt".to_string()],
+                ["\u{b1} b.txt".to_string(), "\u{b1} d.txt".to_string()],
             ),
-            "each tab measures and names its own pair",
+            "each tab measures its own pair and names the file it edits",
         );
     }
 

@@ -693,11 +693,11 @@ mod tests {
         assert_eq!(ws.tab_title(9), "", "an out-of-range index is empty");
     }
 
-    /// A pane in the diff view names the diff by its two sides, as the sides
-    /// bar over it does. The view lives on the editor, so a parked tab keeps
-    /// the name, and closing the view gives the tab back to its file.
+    /// A pane in the diff view names its file after a `±`. The view lives on
+    /// the editor, so a parked tab keeps the name, and closing the view gives
+    /// the tab back to its plain file name.
     #[test]
-    fn a_tab_in_the_diff_view_is_named_by_the_diffs_sides() {
+    fn a_tab_in_the_diff_view_is_named_by_its_file() {
         let mut h = Stoat::test();
         h.stage_review_scenario("/repo", &[("a.rs", "fn a() {}\n", "fn a() { 1 }\n")]);
         dispatch(&mut h, &stoat_action::NewTab);
@@ -709,7 +709,7 @@ mod tests {
         let ws = h.stoat.active_workspace();
         assert_eq!(
             [ws.tab_title(1), ws.tab_title(2)],
-            ["HEAD → working tree", "scratch"],
+            ["\u{b1} a.rs", "scratch"],
             "a parked diff tab keeps the diff's name and the fresh tab reads scratch",
         );
 
