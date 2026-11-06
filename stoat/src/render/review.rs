@@ -104,6 +104,14 @@ pub(crate) fn diff_soften_scale(level: i8) -> f32 {
 /// `diff.*` colors for, so nothing above it would say more.
 pub(crate) const DIFF_TINT_MAX: i8 = 2;
 
+/// Width of each bar in the frame that marks a split diff's base half, in
+/// sixteenths of a cell.
+const BASE_FRAME_WIDTH: u16 = 3;
+
+/// Where the mid divider's hairline sits in the divider column, which is the
+/// column's middle, in sixteenths of a cell from its left edge.
+const DIVIDER_RULE_X: u16 = 8;
+
 /// Fraction a changed char's foreground shifts toward its status color at
 /// `level`.
 ///
@@ -820,6 +828,51 @@ pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
     (inner.width >= DIFF_TWO_COLUMN_MIN).then(|| divider_x(inner))
 }
 
+/// Emit the frame that marks the base half of the split diff over `inner`, in
+/// `color`.
+///
+/// A bar runs down the half's left edge, where the status row's base half
+/// starts below, and one down its right edge, which ends at the divider's
+/// hairline. Each is the height of `inner`. With `top`, a third bar runs from
+/// the left bar to the hairline just above `inner`'s first row.
+///
+/// The right bar sits in the divider column rather than the half's last cell,
+/// so it covers no base text.
+///
+/// Emit the frame ahead of the gutter, so the gutter's hunk lane, which shares
+/// the left bar's place, draws over it. A unified layout has no base half, so
+/// it emits nothing.
+///
+/// See also:
+/// - [`PageGutter::framed`](crate::smooth_scroll::PageGutter::framed), which carries the side bars
+///   onto a gliding pane's pages.
+pub(crate) fn emit_base_frame(inner: Rect, color: [u8; 3], top: bool, scene: &mut ApcScene) {
+    let Some(divider) = diff_divider_x(inner) else {
+        return;
+    };
+
+    let rule = (divider - inner.x) * 16 + DIVIDER_RULE_X;
+    let height = inner.height * 16;
+    let width = BASE_FRAME_WIDTH;
+    let sides = [0, rule - width].map(|x| (x as i16, 0, width, height));
+    let top_bar = top.then_some((0, -(width as i16), rule, width));
+
+    let mut bars = BarBatch::default();
+    for (x, y, width, height) in sides.into_iter().chain(top_bar) {
+        bars.push(
+            inner,
+            Bar {
+                x,
+                y,
+                width,
+                height,
+                color,
+            },
+        );
+    }
+    bars.flush(scene);
+}
+
 /// The column that splits `inner` into two sides, the left one the narrower
 /// when the width is even.
 fn divider_x(inner: Rect) -> u16 {
@@ -1328,12 +1381,12 @@ pub(crate) fn paint_diff_rows(
 
     // One hairline per gutter spanning the visible rows, replacing the per-row
     // glyph. A gutter's hairline sits at the rich gutter's separator offset,
-    // and the mid divider centers in its cell at +8 sixteenths.
+    // and the mid divider centers in its cell at `DIVIDER_RULE_X`.
     if let Some(rg) = rich.as_mut() {
         let height = (end_row - scroll_row) as u16 * 16;
         let gutter_rules =
             [left_x, right_x].map(|side| (side - inner.x) * 16 + rg.offsets.separator_x);
-        let divider = sep_x.map(|sep| (sep - inner.x) * 16 + 8);
+        let divider = sep_x.map(|sep| (sep - inner.x) * 16 + DIVIDER_RULE_X);
         for x in gutter_rules.into_iter().chain(divider) {
             if x / 16 < inner.width {
                 rg.bars.push(
@@ -3055,7 +3108,7 @@ mod tests {
     use stoat_language::structural_diff;
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::Bias;
-    use stoatty_protocol::command::{encode_bar, BarCommand};
+    use stoatty_protocol::command::{decode_stream, encode_bar, BarCommand, Command};
 
     fn buffer_text(buf: &Buffer, y: u16) -> String {
         (buf.area.x..buf.area.x + buf.area.width)
@@ -4685,6 +4738,42 @@ mod tests {
         );
     }
 
+    /// The frame bars the base half's two sides, the full height of the body,
+    /// and on request its top, just above the first row. A unified diff has no
+    /// base half to frame.
+    #[test]
+    fn the_base_frame_bars_the_base_half_s_sides_and_top() {
+        let bars = |inner: Rect, top: bool| {
+            let mut scene = ApcScene::new();
+            emit_base_frame(inner, [1, 2, 3], top, &mut scene);
+            decode_stream(scene.buffer())
+                .into_iter()
+                .map(|command| match command {
+                    Command::Bar(bar) => (bar.x, bar.y, bar.width, bar.height, bar.color),
+                    other => panic!("the frame draws only bars, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // The divider of a 120-wide body at column 2 sits at column 61, and its
+        // hairline sits 952 sixteenths from the body's left edge.
+        let wide = Rect::new(2, 1, 120, 10);
+        let left = (32, 16, 3, 160, [1, 2, 3]);
+        let right = (32 + 952 - 3, 16, 3, 160, [1, 2, 3]);
+        assert_eq!(
+            [
+                bars(wide, true),
+                bars(wide, false),
+                bars(Rect::new(2, 1, 80, 10), true)
+            ],
+            [
+                vec![left, right, (32, 13, 952, 3, [1, 2, 3])],
+                vec![left, right],
+                vec![],
+            ],
+        );
+    }
+
     #[test]
     fn diff_view_rich_gutter_emits_bars_and_suppresses_ascii() {
         fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -5545,6 +5634,64 @@ mod tests {
             !h.rendered_text().contains("working tree"),
             "{}",
             h.rendered_text()
+        );
+    }
+
+    /// A split diff pane paints its base frame ahead of the rest of its
+    /// content, in the base tint. A unified diff and a plain pane paint none.
+    #[test]
+    fn a_split_diff_pane_leads_its_content_with_the_base_frame() {
+        use crate::render::content_lane;
+
+        let content_bars = |h: &mut crate::test_harness::TestHarness| {
+            let _ = h.stoat.render();
+            let ws = h.stoat.active_workspace();
+            let index = ws.panes.pane(ws.panes.focus()).index;
+            decode_stream(h.stoat.apc_scene.lane_bytes(content_lane(index)))
+                .into_iter()
+                .flat_map(|command| match command {
+                    Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+                    Command::Bars(group) => group
+                        .bars
+                        .into_iter()
+                        .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                        .collect(),
+                    _ => Vec::new(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let tint = [0x2a, 0x1d, 0x20];
+        let tinted = |bars: Vec<(i16, i16, u16, u16, [u8; 3])>| {
+            bars.into_iter().filter(|bar| bar.4 == tint).count()
+        };
+
+        let mut split = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        let bars = content_bars(&mut split);
+        let mut unified = diff_harness_sized(80, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        let mut plain = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        crate::action_handlers::focused_editor_mut(&mut plain.stoat)
+            .expect("editor")
+            .set_diff_view(false);
+
+        // The body spans the 120 columns and 9 rows above the status row, and
+        // the divider's hairline sits 952 sixteenths in.
+        assert_eq!(
+            (
+                bars[..3].to_vec(),
+                tinted(bars),
+                tinted(content_bars(&mut unified)),
+                tinted(content_bars(&mut plain)),
+            ),
+            (
+                vec![
+                    (0, 0, 3, 144, tint),
+                    (949, 0, 3, 144, tint),
+                    (0, -3, 952, 3, tint)
+                ],
+                3,
+                0,
+                0,
+            ),
         );
     }
 

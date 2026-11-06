@@ -119,6 +119,14 @@ pub(crate) fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
+                if editor.diff_view
+                    && scene.live()
+                    && let Some(tint) = diff_base_tint(theme)
+                {
+                    let (inner, _) = split_minimap_strip(content_area, frame.minimap_enabled);
+                    review::emit_base_frame(inner, tint, true, scene);
+                }
+
                 let labels = if is_focused {
                     frame.goto_word_labels
                 } else {
@@ -516,13 +524,18 @@ struct DiffSidesColors {
 }
 
 impl DiffSidesColors {
-    /// The halves' colors in `theme` for a status bar styled `bar`.
+    /// The halves' colors in `theme`.
     ///
-    /// Each channel a `diff.sides` scope sets wins. An unset one tints the bar
-    /// toward the side's status color, and an unset name lifts that color
-    /// toward white.
-    fn resolve(theme: &crate::theme::Theme, bar: Style) -> Self {
+    /// Each channel a `diff.sides` scope sets wins. An unset one tints the
+    /// focused status bar toward the side's status color, and an unset name
+    /// lifts that color toward white.
+    ///
+    /// No color depends on the pane's focus. The frame around the base column
+    /// takes the base half's fill, and a gliding pane's pages carry that frame
+    /// under a version that holds no focus.
+    fn resolve(theme: &crate::theme::Theme) -> Self {
         use crate::theme::scope;
+        let bar = theme.get(scope::UI_STATUSBAR_FOCUSED);
         Self {
             base: DiffSideColors::resolve(
                 theme,
@@ -601,6 +614,15 @@ impl DiffSideColors {
             ),
         ]
     }
+}
+
+/// The fill of a split diff's base half in `theme` as RGB, which the frame
+/// around the base column takes, or `None` for a fill outside RGB.
+///
+/// The frame draws only as rich bars, so a fill with no RGB value has no
+/// frame.
+pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
+    style_rgb(Some(DiffSidesColors::resolve(theme).base.bg))
 }
 
 /// `from` moved `amount` of the way to `to`, or `from` unchanged when either
@@ -1351,7 +1373,7 @@ fn status_segments(
     let segments = status_segments_area(area, frame.badge_cover);
     let end_x = segments.x + segments.width;
 
-    let colors = sides.map(|_| DiffSidesColors::resolve(theme, bar_style));
+    let colors = sides.map(|_| DiffSidesColors::resolve(theme));
     let split = match sides {
         Some(SidesLayout::Split(divider)) => {
             colors.map(|colors| (split_halves(area, divider, frame.badge_cover), colors))
@@ -3471,7 +3493,7 @@ mod tests {
         let config = config.expect("the shipped config parses");
         let resolved = ["ermine_night", "default_dark"].map(|name| {
             let theme = crate::theme::Theme::from_config(&config, name).expect("theme loads");
-            DiffSidesColors::resolve(&theme, theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED))
+            DiffSidesColors::resolve(&theme)
         });
 
         let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);

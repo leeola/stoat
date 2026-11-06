@@ -58,8 +58,14 @@ pub(crate) fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
                 let h = (c.height / 16).max(1);
                 let color = rgb(c.color);
                 if c.height < 16 {
+                    // A thin bar lies in the row its top edge falls in. One
+                    // above the grid, such as the top of a frame over a pane
+                    // on row 0, lies in no row of the buffer.
+                    let Ok(row) = u16::try_from(c.y.div_euclid(16)) else {
+                        continue;
+                    };
                     for i in 0..w {
-                        set_hairline(buf, x + i, y, '─', color, above);
+                        set_hairline(buf, x + i, row, '─', color, above);
                     }
                 } else if c.width < 16 {
                     for i in 0..h {

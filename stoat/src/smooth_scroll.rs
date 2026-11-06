@@ -35,7 +35,9 @@ use crate::{
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
-        review::{diff_gutter_digits, paint_diff_rows, BufferNumbering, DiffDials},
+        review::{
+            diff_gutter_digits, emit_base_frame, paint_diff_rows, BufferNumbering, DiffDials,
+        },
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
         walkthrough::Spotlight,
@@ -189,6 +191,9 @@ pub(crate) fn render_page_decorations(
         // The terminal keeps the cells this paint writes, so they go to a
         // buffer nothing reads.
         let mut scene = gutter.scene();
+        if let Some(color) = gutter.frame {
+            emit_base_frame(area, color, false, &mut scene);
+        }
         paint_diff_rows(
             snapshot,
             top_row,
@@ -282,6 +287,9 @@ pub(crate) fn render_page_from_snapshot(
     // cells, faded to match the dimmed grid.
     if diff_view {
         let mut scene = gutter.rich.is_some().then(|| gutter.scene());
+        if let (Some(scene), Some(color)) = (scene.as_mut(), gutter.frame) {
+            emit_base_frame(area, color, false, scene);
+        }
         paint_diff_rows(
             snapshot,
             top_row,
@@ -428,6 +436,9 @@ pub(crate) struct PageGutter {
     /// at [`stoatty_protocol::PAGE_ICONS_PROTOCOL`] or later does. A page for
     /// an earlier one marks each diagnostic with the hint's dot.
     icons: bool,
+    /// The color of the frame around a split diff's base column, which a
+    /// diff page draws down the column's two sides. `None` draws no frame.
+    frame: Option<[u8; 3]>,
 }
 
 impl PageGutter {
@@ -451,6 +462,7 @@ impl PageGutter {
             rich,
             batch: false,
             icons: false,
+            frame: None,
         }
     }
 
@@ -468,6 +480,18 @@ impl PageGutter {
     /// loop learned that the terminal stores page icons.
     pub(crate) fn page_icons(self, icons: bool) -> PageGutter {
         PageGutter { icons, ..self }
+    }
+
+    /// This gutter with a split diff page framing its base column in `frame`.
+    ///
+    /// A page draws the frame's two sides and no top, since its decorations
+    /// scroll with it. The pane's own frame keeps the top edge, which sits
+    /// above the pool.
+    ///
+    /// See also:
+    /// - [`emit_base_frame`] for the frame's geometry.
+    pub(crate) fn framed(self, frame: Option<[u8; 3]>) -> PageGutter {
+        PageGutter { frame, ..self }
     }
 
     /// A scene for a page's rich gutter to paint into, at this gutter's batch
@@ -2340,6 +2364,82 @@ mod tests {
             [marks(&gutter.clone().page_icons(true)), marks(&gutter)],
             [(0, 1), (1, 0)],
             "an icon where the terminal stores it, and a dot where it drops it",
+        );
+    }
+
+    /// A framed diff page draws the two sides of the base column's frame ahead
+    /// of its gutter, the height of the page, and no top. The rest of the page
+    /// matches an unframed one.
+    #[test]
+    fn a_framed_diff_page_bars_the_base_column_s_sides() {
+        use super::render_page_decorations;
+        use crate::{
+            action_handlers::{self, dispatch},
+            render::editor::{resolve_rich_gutter, RowSeverity},
+            theme::scope,
+            Stoat,
+        };
+        use std::path::PathBuf;
+        use stoat_action::OpenFile;
+        use stoatty_protocol::command::decode_stream;
+
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/framed-page");
+        let path = root.join("doc.txt");
+        h.fake_fs().insert_file(&path, b"a\nb\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+
+        let theme = h.stoat.theme.clone();
+        let fallback = theme.get(scope::UI_TEXT);
+        let rich = resolve_rich_gutter(&theme, fallback)
+            .expect("the shipped theme resolves the rich gutter colors");
+        let gutter = PageGutter::new(
+            true,
+            Arc::new(RowSeverity::default()),
+            theme.clone(),
+            Some(rich),
+            None,
+        );
+        let snapshot = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .display_map
+            .snapshot();
+        let bars = |gutter: &PageGutter| {
+            let decorations = render_page_decorations(
+                &snapshot,
+                3,
+                0,
+                120,
+                4,
+                gutter,
+                true,
+                fallback,
+                0.0,
+                DiffDials::shipped(),
+                None,
+            );
+            decode_stream(&decorations)
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Bar(bar) => Some((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let frame = [1, 2, 3];
+        let framed = bars(&gutter.clone().framed(Some(frame)));
+        let plain = bars(&gutter);
+        // A 120-wide page's divider sits at column 59, and its hairline 952
+        // sixteenths from the page's left edge.
+        assert_eq!(
+            (&framed[..2], &framed[2..]),
+            (
+                &[(0, 0, 3, 64, frame), (949, 0, 3, 64, frame)][..],
+                &plain[..]
+            ),
         );
     }
 

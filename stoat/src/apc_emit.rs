@@ -1282,7 +1282,13 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             current_line,
         )
         .batched(batch_decorations)
-        .page_icons(page_icons);
+        .page_icons(page_icons)
+        .framed(
+            editor
+                .diff_view
+                .then(|| crate::render::pane::diff_base_tint(theme))
+                .flatten(),
+        );
         let diff_view = editor.diff_view;
         let mut rendered = Vec::new();
         let Refill {

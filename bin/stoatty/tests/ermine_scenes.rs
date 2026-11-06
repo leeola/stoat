@@ -196,6 +196,44 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
     );
 }
 
+/// A frame in the base tint runs down both sides of the split diff's base
+/// column.
+///
+/// Row 2, `3 three`, is context with no hunk mark, so its only base-tint
+/// pixels are the frame's two sides. The left one lies in the pane's first
+/// cell, column 1, and the right one in the divider column, 76, left of the
+/// hairline.
+#[test]
+fn the_split_diff_frames_its_base_column() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    let (_, y, _, height) = cell_rect(0, 2, 1, 1);
+    let columns = bar_columns(&shot, (y, height), SIDE_BASE);
+
+    let cell = |col| {
+        let (x, _, width, _) = cell_rect(col, 2, 1, 1);
+        x..x + width
+    };
+    let (left, right) = (cell(1), cell(76));
+    let sides = [&left, &right].map(|side| columns.iter().any(|x| side.contains(x)));
+    let stray = columns
+        .iter()
+        .any(|x| !left.contains(x) && !right.contains(x));
+    if sides != [true, true] || stray {
+        let frame = keep_frame(&shot, &mut home, "diff_base_frame");
+        panic!(
+            "the base tint fills pixel columns {columns:?}, not one side in each of {left:?} \
+             and {right:?}; the frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The panes sit one chrome column in from each window edge, and a blank text
 /// cell inside them stays on the base surface.
 #[test]

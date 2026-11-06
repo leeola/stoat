@@ -5813,6 +5813,77 @@ fn pool_reenters_after(change: impl FnOnce(&mut Stoat)) {
     );
 }
 
+/// A split diff pane's pooled pages carry the two sides of the base frame, so
+/// the frame holds while a glide covers the live grid with the pool.
+#[test]
+fn a_split_diff_pane_s_pages_carry_the_base_frame() {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    h.resize(140, 12);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/framed-pool");
+    let path = root.join("a.txt");
+    h.fake_fs().insert_file(&path, b"alpha\nbravo\ncharlie\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("focused editor")
+        .set_diff_view(true);
+
+    emit_smooth_scroll(&mut h.stoat);
+    let mut raw = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        raw.extend(batch);
+    }
+    let commands = command::decode_stream(&raw);
+
+    let pool = {
+        let ws = h.stoat.active_workspace();
+        ws.panes.pane(ws.panes.focus()).index
+    };
+    let region = commands
+        .iter()
+        .find_map(|c| match c {
+            Command::PoolRegion(region) if region.pool == pool => Some(*region),
+            _ => None,
+        })
+        .expect("the diff pane declares its pool");
+    let pages = commands
+        .iter()
+        .filter(|c| matches!(c, Command::Fill(_) | Command::FillDecorations(_)))
+        .count();
+
+    let tint = crate::render::pane::diff_base_tint(&h.stoat.theme).expect("an RGB tint");
+    let frame: Vec<_> = commands
+        .into_iter()
+        .flat_map(|c| match c {
+            Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+            Command::Bars(group) => group
+                .bars
+                .into_iter()
+                .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .filter(|bar| bar.4 == tint)
+        .collect();
+
+    let divider = crate::render::review::diff_divider_x(Rect::new(0, 0, region.width, 1))
+        .expect("the region splits in two");
+    let side = |x: u16| (x as i16, 0, 3, region.height * 16, tint);
+    assert_eq!(
+        (pages > 0, frame),
+        (true, [side(0), side(divider * 16 + 8 - 3)].repeat(pages)),
+        "each page carries both sides",
+    );
+}
+
 #[test]
 fn a_diff_syntax_toggle_reenters_the_pool_pages() {
     pool_reenters_after(|stoat| stoat.diff_syntax = false);
