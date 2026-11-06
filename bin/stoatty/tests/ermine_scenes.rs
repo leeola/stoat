@@ -476,6 +476,27 @@ fn the_space_box_docks_as_a_card_on_the_raised_surface() {
     );
 }
 
+/// The diff view keeps the which-key box docked as the same card with no key
+/// held, so the cell in the card's footer row is still on the raised surface.
+#[test]
+fn the_diff_view_keeps_its_box_docked_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>di<Settle>",
+    );
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(157, 47, 1, 1),
+        RAISED,
+        "diff_hints_card",
+    );
+}
+
 /// The finder's selected row fills with the select surface and carries the
 /// accent bar at its left edge.
 ///

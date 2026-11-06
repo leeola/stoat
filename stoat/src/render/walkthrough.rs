@@ -1833,6 +1833,22 @@ mod tests {
         );
     }
 
+    /// A tour over the diff view leaves the view's hints box to the toggle, so
+    /// the toggle forces a box on there as it does over a plain editor.
+    #[test]
+    fn the_toggle_forces_the_box_on_over_a_toured_diff_view() {
+        let mut h = harness(&[]);
+        open(&mut h.stoat, "tour");
+        let (editor_id, _) = h.stoat.focused_editor_ids().expect("an editor has focus");
+        h.stoat.active_workspace_mut().editors[editor_id].set_diff_view(true);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+
+        assert_eq!(
+            (h.stoat.key_hints_visible, h.stoat.screen_hints_hidden),
+            (true, false),
+        );
+    }
+
     /// A line ends one cell past its last glyph, so a box placed at the end
     /// sits beside the code rather than over it.
     #[test]

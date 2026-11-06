@@ -383,7 +383,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::ToggleKeyHints => {
-            stoat.key_hints_visible = !stoat.key_hints_visible;
+            // A screen that keeps its box up shows it with the toggle off, so
+            // there the toggle hides that box rather than forcing one on.
+            let ws = stoat.active_workspace();
+            let screen = keymap_state::view_predicate(ws);
+            match crate::render::keeps_hints_up(screen, ws.walkthrough.is_some()) {
+                true => stoat.screen_hints_hidden = !stoat.screen_hints_hidden,
+                false => stoat.key_hints_visible = !stoat.key_hints_visible,
+            }
             UpdateEffect::Redraw
         },
         ActionKind::PinMode => match stoat.set_focused_pinned(true) {

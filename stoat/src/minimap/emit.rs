@@ -2123,6 +2123,9 @@ mod tests {
         let (mut h, mut rx, _) = modified_line_fixture();
         h.stoat.stoatty_protocol = POPULATION_PALETTE_PROTOCOL;
         h.stoat.diff_tint = 2;
+        // The diff view's hints box shares the overlay lane with the band, so a
+        // toggle mark that the box repaints sends the band again.
+        h.stoat.screen_hints_hidden = true;
         h.resize(120, 24);
         action_handlers::review::enter_diff_view(&mut h.stoat);
         let diff = emit_frame(&mut h, &mut rx);

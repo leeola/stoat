@@ -1374,6 +1374,14 @@ pub struct Stoat {
     /// [`Self::syntax_highlight`], not persisted. Contexts that already
     /// auto-show the overlay are unaffected.
     pub(crate) key_hints_visible: bool,
+    /// Whether the reader hid the hints box that a screen keeps up, toggled by
+    /// `ToggleKeyHints` over such a screen, off by default and not persisted.
+    ///
+    /// The conflict screen and the diff view keep their box up through every
+    /// key, so [`Self::key_hints_visible`] has nothing to show there, and the
+    /// toggle flips this flag instead. It holds across screens, so the next
+    /// screen that keeps a box up opens with its box hidden too.
+    pub(crate) screen_hints_hidden: bool,
     /// Grouped hint rows cached for the current keymap-state hash, letting an
     /// unchanged frame skip the full keybinding walk and regrouping.
     pub(crate) hints_cache: Option<crate::render::hints::HintsCache>,
@@ -2764,6 +2772,7 @@ impl Stoat {
             lsp_status_pinned: false,
             lsp_badge_hovered: false,
             key_hints_visible: false,
+            screen_hints_hidden: false,
             hints_cache: None,
             inlay_hints_enabled: false,
             pending_inlay_hint_request: Pending::default(),

@@ -5851,6 +5851,9 @@ mod tests {
         // span the full width. The single-minimap strip would reserve the right
         // edge and shift the columns.
         h.stoat.minimap_override = Some(false);
+        // The diff view keeps its hints box up over the lower right, across the
+        // rows the checks below read.
+        h.stoat.screen_hints_hidden = true;
         // The row checks below read each live number as the row's own line.
         // Relative numbering counts the numbers from the cursor instead.
         h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);

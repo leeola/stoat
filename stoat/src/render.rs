@@ -1323,6 +1323,9 @@ pub(crate) fn frame(
         .map(|(path, pair)| (path.to_path_buf(), diff::pair_names(&pair.base_path, path)))
         .collect();
     let held_buffers = ws.held_buffer_labels();
+    // The hints box over the diff view reads the position too, after the pane
+    // loop, where no FrameCtx is left to carry it.
+    let hunk_position = diff::repo_hunk_position(ws);
 
     let frame = FrameCtx {
         workspace_name,
@@ -1352,7 +1355,7 @@ pub(crate) fn frame(
         lsp_servers,
         diff_warm_busy,
         repo_change_counts: ws.repo_change_counts(),
-        hunk_position: diff::repo_hunk_position(ws),
+        hunk_position,
         diff_base: diff_base_lead.as_deref(),
         diff_sides: (&diff_sides.0, &diff_sides.1),
         pair_sides: &pair_sides,
@@ -2154,13 +2157,19 @@ pub(crate) fn frame(
     // chord takes. The toggle read below still forces it on.
     let pin_hidden = stoat.settings.ui_pin_hides_hints.unwrap_or(true)
         && (focused_pane_pinned(ws) || app::is_pinned_mode(mode));
+    // A screen that keeps its box up shows it until the toggle hides it, and the
+    // toggle forces a box on anywhere else.
+    let touring = ws.walkthrough.is_some();
+    let toggled = match keeps_hints_up(screen, touring) {
+        true => !stoat.screen_hints_hidden,
+        false => stoat.key_hints_visible,
+    };
 
     if !painted_modal.is_some_and(ActiveModal::paints_own_box)
         && mode != "space_pane_display"
         && ((!PRIMARY_MODES.contains(&mode) && !pin_hidden)
             || screen == Some("review")
-            || screen == Some("conflict")
-            || stoat.key_hints_visible
+            || toggled
             || chord.is_some())
     {
         // The space_pane_display chord paints its own digit badges below, and
@@ -2222,15 +2231,27 @@ pub(crate) fn frame(
         } else {
             None
         };
-        let footer = conflict_footer.as_ref();
+        let own_box = screen_own_box(screen, mode, touring);
+        let diff_footer = hunk_position
+            .filter(|_| own_box == Some("diff"))
+            .map(|position| hints::HintsFooter {
+                text: format!(
+                    "hunk {}/{}",
+                    position
+                        .hunk_at
+                        .map_or_else(|| "-".to_string(), |at| at.to_string()),
+                    position.hunk_total,
+                ),
+                style: stoat.theme.get(crate::theme::scope::UI_TEXT),
+            });
+        let footer = conflict_footer.as_ref().or(diff_footer.as_ref());
 
-        let hint_label = match (chord, screen) {
-            (Some(chord), _) => chord.title,
-            (None, Some("conflict")) => "conflict",
-            (None, _) => mode,
+        let hint_label = match chord {
+            Some(chord) => chord.title,
+            None => own_box.unwrap_or(mode),
         };
         let cache = stoat.hints_cache.as_mut().expect("cache populated above");
-        let subtitle = hints_subtitle(chord.is_some(), screen, cache.rows.len());
+        let subtitle = hints_subtitle(chord.is_some(), own_box.is_some(), cache.rows.len());
         hints::render_hints_grouped(
             hint_label,
             &subtitle,
@@ -2315,16 +2336,50 @@ fn hint_rows(
     hints::group_by_action(&bindings)
 }
 
-/// The subtitle of the hints box over `screen`, listing `rows` rows.
+/// Whether `screen` keeps a hints box up while it is in the foreground.
 ///
-/// An armed chord's box names what it waits on. The conflict screen's box
-/// stays up while the screen does, so its box says so. Any other box counts
-/// its keys.
-fn hints_subtitle(chord: bool, screen: Option<&str>, rows: usize) -> Cow<'static, str> {
-    match (chord, screen) {
+/// The conflict screen and the diff view keep one up. Their box shows with
+/// the hints toggle off, and the toggle hides it there instead.
+///
+/// With `touring` set, a tour is open, and the diff view leaves its box to
+/// the toggle. The box covers the lower right of the view and hides a stop
+/// whose code sits there, and the tour's own slide and box guide the reader.
+pub(crate) fn keeps_hints_up(screen: Option<&str>, touring: bool) -> bool {
+    match screen {
+        Some("conflict") => true,
+        Some("diff") => !touring,
+        _ => false,
+    }
+}
+
+/// The screen whose own hints box shows over `screen` in `mode`, named as the
+/// box's title.
+///
+/// Only a screen that [`keeps_hints_up`] has a box of its own, so a box that
+/// the toggle forces on during a tour reads as the mode's. The conflict
+/// screen's box lists the screen's bindings in every mode. The diff view's
+/// box lists the editor's keys, so a chord sub-mode over the view shows the
+/// mode's own box in its place, under the mode's title.
+fn screen_own_box(screen: Option<&str>, mode: &str, touring: bool) -> Option<&'static str> {
+    if !keeps_hints_up(screen, touring) {
+        return None;
+    }
+    match screen {
+        Some("conflict") => Some("conflict"),
+        Some("diff") if PRIMARY_MODES.contains(&mode) => Some("diff"),
+        _ => None,
+    }
+}
+
+/// The subtitle of a hints box that lists `rows` rows.
+///
+/// An armed chord's box names what it waits on. A screen's own box says that
+/// it stays up. Any other box counts its keys.
+fn hints_subtitle(chord: bool, screen_box: bool, rows: usize) -> Cow<'static, str> {
+    match (chord, screen_box) {
         (true, _) => Cow::Borrowed("waiting on a char"),
-        (false, Some("conflict")) => Cow::Borrowed("stays up on this view"),
-        (false, _) => Cow::Owned(hints::key_count(rows)),
+        (false, true) => Cow::Borrowed("stays up on this view"),
+        (false, false) => Cow::Owned(hints::key_count(rows)),
     }
 }
 
@@ -3210,7 +3265,9 @@ mod modal_dim_tests {
 
 #[cfg(test)]
 mod dispatch_tests {
-    use super::{hints_cache_key, hints_subtitle, Flags, FocusFlags};
+    use super::{
+        hints_cache_key, hints_subtitle, keeps_hints_up, screen_own_box, Flags, FocusFlags,
+    };
     use crate::{
         action_handlers::dispatch, app::Stoat, keymap_state::modal_predicate,
         location_picker::LocationEntry,
@@ -3223,17 +3280,17 @@ mod dispatch_tests {
         h.stoat.hints_cache.as_ref().map(|c| c.key)
     }
 
-    /// A chord's box names what it waits on, even over the conflict screen,
-    /// the conflict screen's box says that it stays up, and any other box
+    /// A chord's box names what it waits on, even over a screen that keeps a
+    /// box up. A screen's own box says that it stays up, and any other box
     /// counts its keys.
     #[test]
     fn the_hints_subtitle_follows_the_chord_the_screen_and_the_key_count() {
         assert_eq!(
             [
-                hints_subtitle(true, Some("conflict"), 5),
-                hints_subtitle(false, Some("conflict"), 5),
-                hints_subtitle(false, Some("file"), 5),
-                hints_subtitle(false, None, 1),
+                hints_subtitle(true, true, 5),
+                hints_subtitle(false, true, 5),
+                hints_subtitle(false, false, 5),
+                hints_subtitle(false, false, 1),
             ],
             [
                 "waiting on a char",
@@ -3241,6 +3298,49 @@ mod dispatch_tests {
                 "5 keys",
                 "1 key"
             ],
+        );
+    }
+
+    /// The conflict screen's own box shows in every mode. The diff view's
+    /// shows in a primary mode with no tour open, and a chord sub-mode over
+    /// the view shows the mode's box.
+    #[test]
+    fn a_screen_s_own_box_shows_in_its_modes() {
+        assert_eq!(
+            [
+                screen_own_box(Some("conflict"), "space", false),
+                screen_own_box(Some("diff"), "normal", false),
+                screen_own_box(Some("diff"), "select", false),
+                screen_own_box(Some("diff"), "normal", true),
+                screen_own_box(Some("diff"), "space", false),
+                screen_own_box(Some("file"), "normal", false),
+                screen_own_box(None, "normal", false),
+            ],
+            [
+                Some("conflict"),
+                Some("diff"),
+                Some("diff"),
+                None,
+                None,
+                None,
+                None
+            ],
+        );
+    }
+
+    /// The conflict screen and the diff view keep a box up, and an open tour
+    /// leaves the diff view's box to the toggle.
+    #[test]
+    fn an_open_tour_leaves_the_diff_view_box_to_the_toggle() {
+        assert_eq!(
+            [
+                keeps_hints_up(Some("conflict"), true),
+                keeps_hints_up(Some("diff"), false),
+                keeps_hints_up(Some("diff"), true),
+                keeps_hints_up(Some("file"), false),
+                keeps_hints_up(None, false),
+            ],
+            [true, true, false, false, false],
         );
     }
 
@@ -3360,7 +3460,7 @@ mod lsp_filter_tests {
         test_harness::{keys, TestHarness},
     };
     use crossterm::event::{Event, KeyCode};
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
     use stoat_action::registry;
 
     /// Render one frame and flatten the painted cells into searchable text.
@@ -3891,6 +3991,79 @@ mod lsp_filter_tests {
     /// row label holding the same word never matches.
     fn has_box_titled(text: &str, title: &str) -> bool {
         text.contains(&format!("\u{250c} {title} \u{2500}"))
+    }
+
+    /// The top and footer rows of the box titled `title`, each from the box's
+    /// left edge on, with every run of blanks or of `─` read as one space.
+    fn box_edges(h: &mut TestHarness, title: &str) -> Option<[String; 2]> {
+        let text = box_text(h);
+        let lines: Vec<&str> = text.lines().collect();
+        let corner = format!("\u{250c} {title} ");
+        let (top, col) = lines.iter().enumerate().find_map(|(y, line)| {
+            let at = line.find(&corner)?;
+            Some((y, line[..at].chars().count()))
+        })?;
+        let bottom = (top..lines.len()).find(|&y| lines[y].chars().nth(col) == Some('\u{2514}'))?;
+
+        let words = |y: usize| {
+            lines[y]
+                .chars()
+                .skip(col)
+                .collect::<String>()
+                .split(|c: char| c.is_whitespace() || c == '\u{2500}')
+                .filter(|word| !word.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        Some([words(top), words(bottom - 1)])
+    }
+
+    /// The diff view keeps its box up with the toggle off, and the toggle hides
+    /// the box and brings it back. The flag that forces a box on elsewhere
+    /// shows none here. The box names the view and says that it stays, and its
+    /// footer reads the hunk under the cursor, `-` above the first one. A chord
+    /// over the view shows its own box, with no hunk in its footer.
+    #[test]
+    fn the_diff_view_keeps_its_box_up_with_the_hunk_position() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .set_diff_view(true);
+        let above = box_edges(&mut h, "diff");
+        h.type_keys("j j j");
+        let on = box_edges(&mut h, "diff");
+        let toggle = |h: &mut TestHarness| {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+            box_edges(h, "diff")
+        };
+        let hidden = toggle(&mut h);
+        h.stoat.key_hints_visible = true;
+        let forced = box_edges(&mut h, "diff");
+        let shown = toggle(&mut h);
+        h.type_keys("space");
+        let chord_footer = box_edges(&mut h, "space").map(|[_, footer]| footer);
+
+        let edges = |at: &str| {
+            Some([
+                "\u{250c} diff stays up on this view \u{2510}".to_string(),
+                format!("\u{2502} hunk {at}/1 C-? hide \u{b7} ? help \u{2502}"),
+            ])
+        };
+        assert_eq!(
+            (above, on, hidden, forced, shown, chord_footer),
+            (
+                edges("-"),
+                edges("1"),
+                None,
+                None,
+                edges("1"),
+                Some("\u{2502} C-? hide \u{b7} ? help \u{2502}".to_string()),
+            ),
+        );
     }
 
     #[test]

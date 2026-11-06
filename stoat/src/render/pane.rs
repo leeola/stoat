@@ -3432,6 +3432,9 @@ mod tests {
     fn diff_view_status_halves() {
         let mut h = crate::test_harness::TestHarness::with_size(120, 8);
         h.stoat.minimap_override = Some(false);
+        // The diff view keeps its hints box up, and 8 rows leave it over the
+        // whole pane above the status row.
+        h.stoat.screen_hints_hidden = true;
         h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/a.rs"));
@@ -4711,6 +4714,9 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(120, 8);
         h.stoat.settings.ui_tab_bar = Some(stoat_config::TabBarMode::Always);
         h.stoat.minimap_override = Some(false);
+        // The diff view keeps its hints box up, and 8 rows leave it over the
+        // tab bar.
+        h.stoat.screen_hints_hidden = true;
         h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
         h.stoat.set_diff_warm_auto(true);
         h.open_file(Path::new("/repo/a.rs"));
