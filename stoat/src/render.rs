@@ -1736,8 +1736,8 @@ pub(crate) fn frame(
     );
     // Each arm that paints a box paints one whenever its modal is open.
     overlaid |= painted_modal.is_some_and(ActiveModal::paints_own_box);
-    let modal_hints =
-        stoat.key_hints_visible || !painted_modal.is_some_and(ActiveModal::hints_on_request);
+    let on_request = painted_modal.is_some_and(ActiveModal::hints_on_request);
+    let modal_hints = stoat.key_hints_visible || !on_request;
     match painted_modal {
         Some(ActiveModal::Run) => {
             if let Some(run_id) = stoat.modal_run
@@ -1762,6 +1762,7 @@ pub(crate) fn frame(
                     "quit_confirm",
                     None,
                     Some("quit"),
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1789,6 +1790,7 @@ pub(crate) fn frame(
                         "workspace_picker",
                         None,
                         Some("picker"),
+                        on_request,
                         toggles,
                         &stoat.theme,
                         full,
@@ -1820,6 +1822,7 @@ pub(crate) fn frame(
                     "jumplist",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1850,6 +1853,7 @@ pub(crate) fn frame(
                     "walkthrough_picker",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1880,6 +1884,7 @@ pub(crate) fn frame(
                     "pane_finder",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1912,6 +1917,7 @@ pub(crate) fn frame(
                     "diagnostics",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1943,6 +1949,7 @@ pub(crate) fn frame(
                     "commit_picker",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -1975,6 +1982,7 @@ pub(crate) fn frame(
                     "location",
                     None,
                     Some("locations"),
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -2007,6 +2015,7 @@ pub(crate) fn frame(
                         "finder",
                         Some(finder.scope().context_name()),
                         None,
+                        on_request,
                         toggles,
                         &stoat.theme,
                         full,
@@ -2038,6 +2047,7 @@ pub(crate) fn frame(
                     "symbols",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -2068,6 +2078,7 @@ pub(crate) fn frame(
                     "code_search",
                     None,
                     None,
+                    on_request,
                     toggles,
                     &stoat.theme,
                     full,
@@ -2098,6 +2109,7 @@ pub(crate) fn frame(
                         "palette",
                         None,
                         None,
+                        on_request,
                         toggles,
                         &stoat.theme,
                         full,
@@ -2128,6 +2140,7 @@ pub(crate) fn frame(
                         "help",
                         None,
                         None,
+                        on_request,
                         toggles,
                         &stoat.theme,
                         full,
@@ -2613,6 +2626,11 @@ pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
 /// `scope` is the file finder's scope, so the box shows the bindings that
 /// hold in it, such as Tab in the buffer picker. Every other modal passes
 /// `None`.
+///
+/// `on_request` is whether the modal's box waits for the hints toggle. Only
+/// that box names the toggle's key in its footer, because the toggle hides no
+/// other. No modal box names a help key, because the modal takes `?` first,
+/// as text in its query or as a binding of its own.
 #[allow(clippy::too_many_arguments)]
 fn cached_modal_hints(
     cache: &mut Option<hints::HintsCache>,
@@ -2621,6 +2639,7 @@ fn cached_modal_hints(
     modal: &'static str,
     scope: Option<&str>,
     title: Option<&str>,
+    on_request: bool,
     toggles: ToggleStates,
     theme: &crate::theme::Theme,
     area: Rect,
@@ -2654,10 +2673,17 @@ fn cached_modal_hints(
                 )
             })
             .collect();
+        let footer_keys = hints::FooterKeys {
+            hide: match on_request {
+                true => keymap.key_for_action(&state, "ToggleKeyHints"),
+                false => None,
+            },
+            help: None,
+        };
         *cache = Some(hints::HintsCache::new(
             key,
             hints::group_by_action(&bindings),
-            hints_footer_keys(keymap, &state, mode),
+            footer_keys,
         ));
     }
     let cache = cache.as_mut().expect("cache populated above");
@@ -3296,7 +3322,8 @@ mod modal_dim_tests {
 #[cfg(test)]
 mod dispatch_tests {
     use super::{
-        hints_cache_key, hints_subtitle, keeps_hints_up, screen_own_box, Flags, FocusFlags,
+        hints::FooterKeys, hints_cache_key, hints_subtitle, keeps_hints_up, screen_own_box, Flags,
+        FocusFlags,
     };
     use crate::{
         action_handlers::dispatch, app::Stoat, keymap_state::modal_predicate,
@@ -3435,6 +3462,41 @@ mod dispatch_tests {
                 (true, true)
             ],
             "the box unasked and on the toggle, per modal"
+        );
+    }
+
+    /// A modal box names a footer key only where the key does what the footer
+    /// says. The jumplist shows its box unasked, so the toggle does not hide
+    /// it, and the file finder's box waits for the toggle, so it names the
+    /// toggle's key. Neither names a help key, because the modal takes `?`
+    /// first.
+    #[test]
+    fn a_modal_box_names_only_the_footer_keys_that_work() {
+        let footer_keys = |open: &dyn Action| {
+            let mut h = Stoat::test();
+            h.seed_focused_buffer("alpha\n");
+            dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+            h.stoat.key_hints_visible = true;
+            dispatch(&mut h.stoat, open);
+            h.render_composited();
+            h.stoat
+                .hints_cache
+                .as_ref()
+                .map(|cache| cache.footer_keys.clone())
+        };
+
+        assert_eq!(
+            [
+                footer_keys(&stoat_action::OpenJumplistPicker),
+                footer_keys(&stoat_action::OpenFileFinder),
+            ],
+            [
+                Some(FooterKeys::default()),
+                Some(FooterKeys {
+                    hide: Some("C-?".to_string()),
+                    help: None,
+                }),
+            ],
         );
     }
 
