@@ -83,7 +83,33 @@ pub struct FoldPlaceholder {
     pub type_tag: Option<TypeId>,
 }
 
+/// The tag of a fold row's placeholder.
+///
+/// A fold row is a fold that starts at its row's first column, so its
+/// placeholder takes the whole of that row and none of the row's own text
+/// shows. The diff view paints it as a band across both sides that stands for
+/// the lines the fold hides, the row's own line among them.
+struct FoldRow;
+
 impl FoldPlaceholder {
+    /// The placeholder of a fold row, reading `text`.
+    ///
+    /// The fold it goes on starts at its row's first column, so the row holds
+    /// the placeholder alone.
+    pub fn fold_row(text: impl Into<Arc<str>>) -> Self {
+        Self {
+            text: text.into(),
+            collapsed_text: None,
+            merge_adjacent: false,
+            type_tag: Some(TypeId::of::<FoldRow>()),
+        }
+    }
+
+    /// Whether this is a fold row's placeholder.
+    pub fn is_fold_row(&self) -> bool {
+        self.type_tag == Some(TypeId::of::<FoldRow>())
+    }
+
     /// The string this fold renders as.
     ///
     /// Every consumer must resolve the two strings the same way. The
@@ -1491,6 +1517,22 @@ impl FoldSnapshot {
 
     pub fn fold_count(&self) -> usize {
         self.folds.summary().count
+    }
+
+    /// Whether buffer row `row` lies under a fold row, as the row it opens on
+    /// or a row it hides.
+    ///
+    /// A fold row's own row shows its placeholder alone, so that row's line
+    /// hides with the lines the fold hides. Of the rows a display shows, only
+    /// the row a fold row opens on answers true.
+    pub fn under_fold_row(&self, row: u32) -> bool {
+        if self.fold_count() == 0 {
+            return false;
+        }
+        let start = self.inlay_snapshot.to_inlay_point(Point::new(row, 0));
+        self.folds_in_range(start..InlayPoint::new(start.row() + 1, 0))
+            .iter()
+            .any(|fold| fold.placeholder.is_fold_row())
     }
 
     /// Buffer row the earliest fold starts on, or `None` when nothing is

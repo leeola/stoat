@@ -1160,12 +1160,7 @@ fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
         let kept = kept_runs(map, line_count);
         let wanted: Vec<(Range<Point>, FoldPlaceholder)> = gaps(&kept, line_count)
             .into_iter()
-            .map(|gap| {
-                let in_hunk = map
-                    .hunks()
-                    .any(|hunk| hunk.buffer_line_range.contains(&gap.start));
-                gap_fold(rope, gap, in_hunk)
-            })
+            .map(|gap| gap_fold(rope, gap))
             .collect();
         let wanted_ranges: Vec<Range<Point>> =
             wanted.iter().map(|(range, _)| range.clone()).collect();
@@ -1277,31 +1272,27 @@ fn gaps(kept: &[Range<u32>], line_count: u32) -> Vec<Range<u32>> {
 /// row as a fold row. The empty row after a final newline holds no line, so the
 /// count leaves it out.
 ///
-/// Two gaps fold from the end of the row above instead, so they take no row.
-/// A gap of that empty row alone takes an empty placeholder, and the excerpt's
-/// last line ends as it reads. A gap whose first row lies in a hunk, `in_hunk`,
-/// which only the unmarked rows of a refined hunk leave, takes the default
-/// placeholder. A fold row on that row puts the row's base line in a block
-/// above it, because the diff view pairs a fold's own row with its base line.
-fn gap_fold(rope: &Rope, gap: Range<u32>, in_hunk: bool) -> (Range<Point>, FoldPlaceholder) {
+/// A gap of that empty row alone folds from the end of the row above under an
+/// empty placeholder instead, so it takes no row, and the excerpt's last line
+/// ends as it reads.
+fn gap_fold(rope: &Rope, gap: Range<u32>) -> (Range<Point>, FoldPlaceholder) {
     let line_count = rope.max_point().row + 1;
     let end = Point::new(gap.end - 1, rope.line_len(gap.end - 1));
     let after_final_newline = gap.end == line_count && rope.line_len(line_count - 1) == 0;
     let lines = gap.end - gap.start - u32::from(after_final_newline);
-    let from_row_above = |placeholder| match gap.start {
-        0 => (Point::new(0, 0)..end, placeholder),
-        start => (
-            Point::new(start - 1, rope.line_len(start - 1))..end,
-            placeholder,
-        ),
-    };
-    match (lines, in_hunk) {
-        (0, _) => from_row_above(FoldPlaceholder {
-            text: Arc::from(""),
-            ..FoldPlaceholder::default()
-        }),
-        (_, true) => from_row_above(FoldPlaceholder::default()),
-        (lines, false) => (
+    match lines {
+        0 => {
+            // An empty file's one row is the gap, so the fold starts on it.
+            let above = gap.start.saturating_sub(1);
+            (
+                Point::new(above, rope.line_len(above))..end,
+                FoldPlaceholder {
+                    text: Arc::from(""),
+                    ..FoldPlaceholder::default()
+                },
+            )
+        },
+        lines => (
             Point::new(gap.start, 0)..end,
             render::review::fold_row_placeholder(lines),
         ),
@@ -1328,7 +1319,6 @@ mod tests {
         display_map::{DisplayPoint, InlayPoint},
         editor_state::EditorState,
         host::FakeRepoBuilder,
-        render,
         test_harness::TestHarness,
         workspace::{
             diff::{DiffBase, WorktreeBase},
@@ -1481,56 +1471,58 @@ mod tests {
 
     /// A gap folds from the start of its first row under a fold row's
     /// placeholder, which counts the gap's lines without the empty row after
-    /// the final newline. That row alone, and a gap that starts in a hunk, fold
-    /// from the end of the row above.
+    /// the final newline. That row alone folds from the end of the row above
+    /// under an empty placeholder, and so does an empty file's one row.
     #[test]
     fn a_gap_folds_from_its_first_row_under_a_count_of_its_lines() {
         let rope = Rope::from("one\ntwo\nthree\nfour\n");
-        let fold_row = render::review::fold_row_placeholder(1).type_tag;
-        let fold = |gap: Range<u32>, in_hunk: bool| {
-            let (range, placeholder) = gap_fold(&rope, gap, in_hunk);
-            (range, placeholder.text.to_string(), placeholder.type_tag)
+        let fold = |rope: &Rope, gap: Range<u32>| {
+            let (range, placeholder) = gap_fold(rope, gap);
+            (
+                range,
+                placeholder.text.to_string(),
+                placeholder.is_fold_row(),
+            )
         };
         let lines = |n: &str| format!("\u{22ef} {n} unchanged");
 
         assert_eq!(
             [
-                fold(1..3, false),
-                fold(0..1, false),
-                fold(2..5, false),
-                fold(4..5, false),
-                fold(1..3, true),
+                fold(&rope, 1..3),
+                fold(&rope, 0..1),
+                fold(&rope, 2..5),
+                fold(&rope, 4..5),
+                fold(&Rope::from(""), 0..1),
             ],
             [
                 (
                     Point::new(1, 0)..Point::new(2, 5),
                     lines("2") + " lines",
-                    fold_row
+                    true
                 ),
                 (
                     Point::new(0, 0)..Point::new(0, 3),
                     lines("1") + " line",
-                    fold_row
+                    true
                 ),
                 (
                     Point::new(2, 0)..Point::new(4, 0),
                     lines("2") + " lines",
-                    fold_row
+                    true
                 ),
-                (Point::new(3, 4)..Point::new(4, 0), String::new(), None),
-                (Point::new(0, 3)..Point::new(2, 5), "...".to_string(), None),
+                (Point::new(3, 4)..Point::new(4, 0), String::new(), false),
+                (Point::new(0, 0)..Point::new(0, 0), String::new(), false),
             ],
         );
     }
 
-    /// A gap whose first row lies in a refined hunk folds from the end of the
-    /// row above under the default placeholder, and each gap of unchanged rows
-    /// takes a fold row that counts its lines.
+    /// A gap inside a refined hunk takes a fold row that counts its lines, as a
+    /// gap of unchanged rows does.
     ///
     /// Rows 10 to 49 form one hunk, marked at rows 10 and 11 and at 40 and 41,
     /// so the gaps at rows 15 to 36 and at row 45 lie inside it.
     #[test]
-    fn a_gap_that_starts_in_a_hunk_folds_from_the_row_above() {
+    fn a_gap_inside_a_refined_hunk_takes_a_fold_row() {
         let text: String = (1..=60).map(|n| format!("{n}\n")).collect();
         let map = DiffMap::from_hunks(
             [DiffHunk {
@@ -1565,14 +1557,14 @@ mod tests {
                 )
             })
             .collect();
-        let seven = "\u{22ef} 7 unchanged lines".to_string();
+        let count = |lines: &str| format!("\u{22ef} {lines}");
         assert_eq!(
             held,
             [
-                (Point::new(0, 0), seven.clone()),
-                (Point::new(14, 2), "...".to_string()),
-                (Point::new(44, 2), "...".to_string()),
-                (Point::new(53, 0), seven),
+                (Point::new(0, 0), count("7 unchanged lines")),
+                (Point::new(15, 0), count("22 unchanged lines")),
+                (Point::new(45, 0), count("1 unchanged line")),
+                (Point::new(53, 0), count("7 unchanged lines")),
             ],
         );
     }

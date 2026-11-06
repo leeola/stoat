@@ -27,12 +27,10 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 use std::{
-    any::TypeId,
     cmp::Ordering,
     collections::BTreeMap,
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
-    sync::Arc,
 };
 use stoat_text::Point;
 use stoat_widgets::{
@@ -339,28 +337,17 @@ pub(crate) fn render_diff_view(
 /// code, so the view collapses to a single unified column.
 pub(crate) const DIFF_TWO_COLUMN_MIN: u16 = 100;
 
-/// The tag of a fold that the diff view paints as a fold row.
-///
-/// A changes view folds the unchanged lines far from every hunk, each fold from
-/// its first row's first column, so the fold's placeholder holds the whole row
-/// and the row stands for the lines the fold hides. The diff view paints it as a
-/// band across both sides, where any other fold's placeholder trails the text
-/// of the row it starts on.
-struct FoldRow;
-
 /// The placeholder of a fold row that hides `lines` unchanged lines, which
 /// names how many.
 ///
-/// The fold it goes on starts at its row's first column, which is what makes
-/// the row hold the placeholder alone.
+/// A changes view folds the lines far from every hunk, each fold from its first
+/// row's first column, so the fold's placeholder holds the whole row and the row
+/// stands for the lines the fold hides. The diff view paints it as a band across
+/// both sides, where any other fold's placeholder trails the text of the row it
+/// starts on.
 pub(crate) fn fold_row_placeholder(lines: u32) -> FoldPlaceholder {
     let noun = if lines == 1 { "line" } else { "lines" };
-    FoldPlaceholder {
-        text: Arc::from(format!("\u{22ef} {lines} unchanged {noun}")),
-        collapsed_text: None,
-        merge_adjacent: false,
-        type_tag: Some(TypeId::of::<FoldRow>()),
-    }
+    FoldPlaceholder::fold_row(format!("\u{22ef} {lines} unchanged {noun}"))
 }
 
 /// What one display row is, without borrowing the snapshot it came from.
@@ -1156,7 +1143,7 @@ pub(crate) fn paint_diff_rows(
             },
             DiffRowKind::BufferRow { buffer_row } => {
                 landed += 1;
-                if !row_state.continuation && opens_fold_row(snapshot, buffer_row) {
+                if !row_state.continuation && snapshot.fold_snapshot().under_fold_row(buffer_row) {
                     // A fold row stands for its own line too, so that line's
                     // base line counts with the lines the fold hides below it.
                     base_line += hidden_base_lines(snapshot, next_buffer_row..buffer_row + 1)
@@ -1480,25 +1467,6 @@ pub(crate) fn paint_diff_rows(
         rg.numbers.flush(rg.scene);
         rg.bars.flush(rg.scene);
     }
-}
-
-/// Whether buffer row `row` opens a fold row, a fold tagged [`FoldRow`].
-fn opens_fold_row(snapshot: &DisplaySnapshot, row: u32) -> bool {
-    let folds = snapshot.fold_snapshot();
-    if folds.fold_count() == 0 {
-        return false;
-    }
-
-    // A fold row's fold starts at its row's first column, so a fold that meets
-    // the row's span and carries the tag starts on that row.
-    let inlays = snapshot.inlay_snapshot();
-    let max = snapshot.buffer_snapshot().rope().max_point();
-    let span = inlays.to_inlay_point(Point::new(row, 0))
-        ..inlays.to_inlay_point(Point::new(row + 1, 0).min(max));
-    folds
-        .folds_in_range(span)
-        .iter()
-        .any(|fold| fold.placeholder.type_tag == Some(TypeId::of::<FoldRow>()))
 }
 
 /// Paint display row `display_row`, a fold row, across `inner` at screen row
@@ -2592,8 +2560,11 @@ fn hidden_paired_base_lines(snapshot: &DisplaySnapshot, rows: std::ops::Range<u3
         .into_iter()
         .map(|fold| {
             // A fold's first row stays shown with the placeholder, and every
-            // row after it through the fold's end row hides.
-            let start = (inlays.to_buffer_point(fold.range.start).row + 1).max(rows.start);
+            // row after it through the fold's end row hides. A fold row's first
+            // row holds the placeholder alone, so that row hides too.
+            let first_hidden = u32::from(!fold.placeholder.is_fold_row());
+            let start =
+                (inlays.to_buffer_point(fold.range.start).row + first_hidden).max(rows.start);
             let end = (inlays.to_buffer_point(fold.range.end).row + 1).min(rows.end);
             if start >= end {
                 return 0;
@@ -4178,17 +4149,24 @@ mod tests {
         editor
     }
 
-    /// A diff-view editor over the lines `1` to `20`, with one refined
-    /// `Modified` hunk over the rows `live` and folded over `fold`.
-    ///
-    /// The hunk's base holds `removed` lines named `b<n>` from the hunk's first
-    /// line on, and its first and last rows are the marked runs. The rows above
-    /// and below the hunk match the base.
+    /// A [`hunk_editor`] folded over `fold` under the default placeholder.
     fn folded_hunk_editor(
         live: std::ops::Range<u32>,
         removed: u32,
         fold: std::ops::Range<Point>,
     ) -> EditorState {
+        let mut editor = hunk_editor(live, removed);
+        editor.display_map.fold(vec![fold]);
+        editor
+    }
+
+    /// A diff-view editor over the lines `1` to `20`, with one refined
+    /// `Modified` hunk over the rows `live`.
+    ///
+    /// The hunk's base holds `removed` lines named `b<n>` from the hunk's first
+    /// line on, and its first and last rows are the marked runs. The rows above
+    /// and below the hunk match the base.
+    fn hunk_editor(live: std::ops::Range<u32>, removed: u32) -> EditorState {
         let text: String = (1..=20).map(|n| format!("{n}\n")).collect();
         let head: String = (1..=live.start).map(|n| format!("{n}\n")).collect();
         let lines: String = (live.start + 1..=live.start + removed)
@@ -4212,9 +4190,112 @@ mod tests {
             }],
             Some(Arc::new(format!("{head}{lines}{tail}"))),
         );
-        let mut editor = diff_editor_with_map(&text, dm);
-        editor.display_map.fold(vec![fold]);
+        diff_editor_with_map(&text, dm)
+    }
+
+    /// A [`hunk_editor`] whose hunk over rows 4 to 15 has ten base lines, with
+    /// a fold row over its rows 6 to 13.
+    fn hunk_fold_row_editor() -> EditorState {
+        let mut editor = hunk_editor(4..16, 10);
+        editor.display_map.fold_with(vec![(
+            Point::new(6, 0)..Point::new(13, 2),
+            fold_row_placeholder(8),
+        )]);
         editor
+    }
+
+    /// `editor` painted in cells as a diff view over `area`, from its scroll row.
+    fn paint_cells(editor: &mut EditorState, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme(),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            BufferNumbering::Absolute,
+            &[],
+            false,
+        );
+        buf
+    }
+
+    /// A fold row over a modified hunk's rows hides their base lines with
+    /// them, its own row's line among them. The paired rows past it count
+    /// those lines, and the unified layout's text column shows the first run's
+    /// block, b5 and b6, and no block for the fold row's own line, b7.
+    #[test]
+    fn a_fold_row_inside_a_modified_hunk_hides_its_own_rows_base_line() {
+        let mut editor = hunk_fold_row_editor();
+        let paired_area = Rect::new(0, 0, 120, 12);
+        let paired: Vec<String> = number_pairs(&paint_cells(&mut editor, paired_area), paired_area)
+            .into_iter()
+            .map(|(left, _)| left)
+            .collect();
+        let unified_area = Rect::new(0, 0, 60, 24);
+        let unified = paint_cells(&mut editor, unified_area);
+        let cols = two_digit_columns(unified_area);
+        let texts: Vec<String> = (0..unified_area.height)
+            .map(|y| {
+                line_text(&unified, y, cols.right_text_x..cols.right_text_x + 3)
+                    .trim()
+                    .to_string()
+            })
+            .collect();
+
+        let column = [
+            "1", "2", "3", "4", "b5", "b6", "5", "6", "", "15", "16", "17", "18", "19", "20",
+        ];
+        assert_eq!(
+            (paired, texts),
+            (
+                ["1", "2", "3", "4", "5", "6", "", "", "", "15", "16", "17"]
+                    .map(String::from)
+                    .to_vec(),
+                column
+                    .into_iter()
+                    .map(String::from)
+                    .chain(std::iter::repeat_n(String::new(), 9))
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+
+    /// A view scrolled to the row of line 17, past a fold row over a modified
+    /// hunk's rows, paints its rows as the view from the top paints them from
+    /// that row on, in both layouts. The unified layout's unchanged rows show
+    /// their base lines, so a base count one short shows as a shifted text.
+    #[test]
+    fn a_view_scrolled_past_a_fold_row_in_a_hunk_paints_as_from_the_top() {
+        for area in [Rect::new(0, 0, 120, 24), Rect::new(0, 0, 60, 24)] {
+            let rows = |buf: &Buffer| -> Vec<String> {
+                (0..buf.area.height)
+                    .map(|y| buffer_text(buf, y).trim_end().to_string())
+                    .collect()
+            };
+            let mut editor = hunk_fold_row_editor();
+            let from_top = rows(&paint_cells(&mut editor, area));
+            let scroll = editor
+                .display_map
+                .snapshot()
+                .buffer_to_display(Point::new(16, 0))
+                .row as usize;
+            crate::test_harness::editor::place_cursor(&mut editor, 16, 0);
+            editor.scroll_row = scroll as u32;
+            let scrolled = rows(&paint_cells(&mut editor, area));
+
+            assert_eq!(
+                scrolled[..from_top.len() - scroll],
+                from_top[scroll..],
+                "width {}",
+                area.width,
+            );
+        }
     }
 
     /// A diff-view editor where line `b` moved below `d`, in the shape the tree

@@ -96,6 +96,8 @@ fn buffer_row_patch(
 ///
 /// A row a fold hides answers `u32::MAX`. Its paired base line hides with it,
 /// so no segment of that line overflows into a block below the placeholder.
+/// The row a fold row opens on answers the same, since its placeholder takes
+/// the whole row.
 fn live_line_rows(wrap_snapshot: &WrapSnapshot, row: u32, buffer_rows: u32) -> u32 {
     let tabs = wrap_snapshot.tab_snapshot();
     let folds = tabs.fold_snapshot();
@@ -106,6 +108,11 @@ fn live_line_rows(wrap_snapshot: &WrapSnapshot, row: u32, buffer_rows: u32) -> u
     // A fold collapses the rows it hides into the fold row of its first row,
     // which keeps a row of its own with the placeholder.
     if row > 0 && fold_point(row).row() == fold_point(row - 1).row() {
+        return u32::MAX;
+    }
+    // A fold whose placeholder takes its first row whole shows none of that
+    // row's text, so the row's paired base line hides as a hidden row's does.
+    if folds.under_fold_row(row) {
         return u32::MAX;
     }
 
