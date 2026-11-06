@@ -6,7 +6,7 @@ use crate::{
     diff_changes::{DiffChangesId, DiffChangesState},
     diff_map::MarkKind,
     editor_state::{EditorId, EditorState},
-    pane::{Divider, DividerOrientation, Pane, Placement, View},
+    pane::{Divider, DividerOrientation, FocusTarget, Pane, Placement, View},
     render::{
         chrome, commits, content_lane, diff_changes,
         editor::{editor_cursor_position, render_editor_with_overlay, split_minimap_strip},
@@ -1228,6 +1228,12 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 /// same scaled-run rendering under stoatty and the same cell fallback
 /// elsewhere.
 ///
+/// While the split pane in focus shows a diff view or a changes view, the bar
+/// ends in two chips, `files` and `changes`, which name the two diff layouts.
+/// The focused layout's chip takes `ui.tabbar.toggle.active` and the other
+/// `ui.tabbar.toggle.inactive`. The chips show only where they fit beside the
+/// tabs, and a press on them does nothing.
+///
 /// Leaves in `spans` the extent of each painted tab, in sixteenths of a cell
 /// from the left edge of `area`, so a pointer press resolves against the
 /// segments as painted.
@@ -1278,12 +1284,28 @@ pub(crate) fn render_tab_bar(
         }
     }
 
+    // The right run packs from the bar's edge in slice order, so the chips
+    // list from right to left after the pad that ends the bar.
+    let mut right: Vec<StatusSeg> = Vec::new();
+    if let Some(focused) = focused_diff_layout(ws) {
+        let on = inactive.patch(theme.get(crate::theme::scope::UI_TABBAR_TOGGLE_ACTIVE));
+        let off = inactive.patch(theme.get(crate::theme::scope::UI_TABBAR_TOGGLE_INACTIVE));
+        let chip = |name: &str| (format!(" {name} "), if name == focused { on } else { off });
+        right = vec![(" ".to_string(), inactive), chip("changes"), chip("files")];
+    }
+    let chars = |segments: &[StatusSeg]| -> usize {
+        segments.iter().map(|(text, _)| text.chars().count()).sum()
+    };
+    if chars(&left) + chars(&right) > usize::from(area.width) {
+        right.clear();
+    }
+
     let runs = [StatusRun {
         area,
         segments: area,
         style: inactive,
         left,
-        right: Vec::new(),
+        right,
         hairline: true,
     }];
     let rich = render_status_runs(&runs, frame, buf, scene, None);
@@ -1300,6 +1322,24 @@ pub(crate) fn render_tab_bar(
         area.width,
         spans,
     );
+}
+
+/// The diff layout that the split pane in focus shows, as the tab bar's chip
+/// names it, or `None` for any other view or a focus outside the split panes.
+///
+/// A diff-view editor is the `files` layout, which steps file by file, and a
+/// changes view is the `changes` layout.
+fn focused_diff_layout(ws: &Workspace) -> Option<&'static str> {
+    if ws.focus != FocusTarget::SplitPane {
+        return None;
+    }
+    match &ws.panes.pane(ws.panes.focus()).view {
+        View::Editor(id) if ws.editors.get(*id).is_some_and(|editor| editor.diff_view) => {
+            Some("files")
+        },
+        View::DiffChanges(_) => Some("changes"),
+        _ => None,
+    }
 }
 
 /// Records the extent of each tab in the tab bar, in sixteenths of a cell from
@@ -4404,6 +4444,86 @@ mod tests {
             &mut spans,
         );
         assert_eq!(spans, [40..100, 100..170]);
+    }
+
+    /// The tab bar ends in the `files` and `changes` chips while a diff view or
+    /// a changes view has the focus. It shows neither over a plain editor, over
+    /// a diff whose split pane gave the focus to a dock, or where the chips do
+    /// not fit beside the tabs.
+    #[test]
+    fn the_tab_bar_names_the_diff_layouts_over_a_diff() {
+        let mut h = toggles_harness();
+        h.stoat.stoatty = false;
+        let bar = |h: &mut crate::test_harness::TestHarness| {
+            h.snapshot();
+            let text = h.rendered_text();
+            let row = text.lines().next().unwrap_or_default();
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let plain = bar(&mut h);
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        let diff = bar(&mut h);
+
+        let ws = h.stoat.active_workspace_mut();
+        let dock = ws.docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Hidden,
+            default_width: 30,
+            area: Rect::default(),
+        });
+        ws.focus = FocusTarget::Dock(dock);
+        let docked = bar(&mut h);
+        h.stoat.active_workspace_mut().focus = FocusTarget::SplitPane;
+
+        h.resize(30, 8);
+        let narrow = bar(&mut h);
+        h.resize(120, 8);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        let changes = bar(&mut h);
+
+        assert_eq!(
+            [plain, diff, docked, narrow, changes],
+            [
+                "repo a \u{b7} rs",
+                "repo \u{b1} a.rs files changes",
+                "repo \u{b1} a.rs",
+                "repo \u{b1} a.rs",
+                "repo \u{b1} changes \u{b7} 1 file files changes",
+            ],
+        );
+    }
+
+    /// A diff view marks the `files` chip active, and a changes view marks the
+    /// `changes` chip.
+    #[test]
+    fn diff_view_tab_toggles() {
+        let mut h = toggles_harness();
+        focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .set_diff_view(true);
+        h.assert_snapshot("diff_view_tab_toggles");
+
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.assert_snapshot("changes_view_tab_toggles");
+    }
+
+    /// One changed `a.rs` open in an editor, 120 by 8, with the tab bar on and
+    /// no minimap.
+    fn toggles_harness() -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 8);
+        h.stoat.settings.ui_tab_bar = Some(stoat_config::TabBarMode::Always);
+        h.stoat.minimap_override = Some(false);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        h
     }
 
     /// The bar leads with the workspace name and a one-cell gap. A tagged file's

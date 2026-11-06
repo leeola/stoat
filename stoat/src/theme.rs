@@ -843,6 +843,10 @@ pub mod scope {
 
     pub const UI_TABBAR_ACTIVE: &str = "ui.tabbar.active";
     pub const UI_TABBAR_INACTIVE: &str = "ui.tabbar.inactive";
+    /// The chips at the tab bar's right that name the two diff layouts while
+    /// one has the focus, the focused layout's chip active.
+    pub const UI_TABBAR_TOGGLE_ACTIVE: &str = "ui.tabbar.toggle.active";
+    pub const UI_TABBAR_TOGGLE_INACTIVE: &str = "ui.tabbar.toggle.inactive";
 
     /// The color of the type tag beside a Rust file's name in a tab or a finder
     /// row. [`UI_TAG_MARKDOWN`] and [`UI_TAG_CONFIG`] are its siblings for the

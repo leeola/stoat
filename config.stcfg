@@ -116,6 +116,8 @@ theme default_dark {
 
     ui.tabbar.active       = { fg: text, bg: muted };
     ui.tabbar.inactive     = { fg: dim, bg: subtle };
+    ui.tabbar.toggle.active   = { fg: text, bg: subtle };
+    ui.tabbar.toggle.inactive = { fg: muted };
 
     ui.statusline.normal.fg   = primary;
     ui.statusline.insert.fg   = success;
