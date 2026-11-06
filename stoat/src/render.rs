@@ -2483,7 +2483,7 @@ pub(crate) fn pending_chord_hints(stoat: &Stoat) -> Option<hints::ChordHints> {
         })
         .or_else(|| {
             stoat.pending_replace.then_some(hints::ChordHints {
-                title: "replace",
+                title: "replace with char",
                 rows: movement::REPLACE_HINTS,
             })
         })
@@ -3729,6 +3729,7 @@ mod lsp_filter_tests {
             "change",
             "closest pair",
             "pair",
+            "cancel",
         ];
         assert_eq!(
             (rows, text.contains("inside")),
@@ -3786,7 +3787,13 @@ mod lsp_filter_tests {
         h.type_keys("m s");
         let text = box_text(&mut h);
 
-        let labels = ["pair", "quote", "own line", "that char both sides"];
+        let labels = [
+            "pair",
+            "quote",
+            "own line",
+            "that char both sides",
+            "cancel",
+        ];
         assert_eq!(
             (rows, text.contains("surround")),
             (labels.map(String::from).to_vec(), true),
@@ -3806,8 +3813,8 @@ mod lsp_filter_tests {
         let done = box_text(&mut h);
 
         let titles = |text: &str| (text.contains("replace pair"), text.contains("replace with"));
-        let from_rows = ["closest pair", "pair"];
-        let to_rows = ["pair", "quote", "that char both sides"];
+        let from_rows = ["closest pair", "pair", "cancel"];
+        let to_rows = ["pair", "quote", "that char both sides", "cancel"];
         assert_eq!(
             (rows, titles(&from), titles(&to), titles(&done)),
             (
@@ -3830,7 +3837,7 @@ mod lsp_filter_tests {
         h.type_keys("m d");
         let text = box_text(&mut h);
 
-        let labels = ["closest pair", "pair"];
+        let labels = ["closest pair", "pair", "cancel"];
         assert_eq!(
             (rows, text.contains("delete pair")),
             (labels.map(String::from).to_vec(), true),
@@ -3845,11 +3852,16 @@ mod lsp_filter_tests {
         h.type_keys("r");
         let text = box_text(&mut h);
 
-        let labels = ["that char", "line ending", "tab"];
+        let labels = [
+            "replace each selected char",
+            "replace with newline",
+            "replace with tab",
+            "cancel",
+        ];
         assert_eq!(
-            (rows, text.contains("replace")),
+            (rows, has_box_titled(&text, "replace with char")),
             (labels.map(String::from).to_vec(), true),
-            "the box lists a char, Enter, and Tab under its title",
+            "the box lists a char, Enter, Tab, and Esc under its title",
         );
     }
 
@@ -3862,7 +3874,7 @@ mod lsp_filter_tests {
         h.type_keys("escape T");
         let till = box_text(&mut h);
 
-        let labels = ["that char", "line ending", "tab"];
+        let labels = ["that char", "line ending", "tab", "cancel"];
         assert_eq!(
             (
                 rows,
@@ -3899,6 +3911,7 @@ mod lsp_filter_tests {
             "document path",
             "command",
             "named register",
+            "cancel",
         ];
         assert_eq!(
             (rows, has_box_titled(&text, "register")),
@@ -3934,7 +3947,9 @@ mod lsp_filter_tests {
 
         let labels: Vec<String> = yank::REGISTER_HINTS
             .iter()
-            .map(|&(_, label)| label.to_string())
+            .map(|&(_, label)| label)
+            .chain(["cancel"])
+            .map(String::from)
             .collect();
         assert_eq!(
             (rows, has_box_titled(&text, "replay macro")),
@@ -3969,7 +3984,9 @@ mod lsp_filter_tests {
                 has_box_titled(&exact, "goto mark"),
             ),
             (
-                ["buffer mark", "global mark"].map(String::from).to_vec(),
+                ["buffer mark", "global mark", "cancel"]
+                    .map(String::from)
+                    .to_vec(),
                 true,
                 true,
                 true,

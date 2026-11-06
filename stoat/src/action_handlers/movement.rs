@@ -2208,8 +2208,11 @@ pub(super) fn open_line(
 /// char in place of each selected char. Enter puts a line ending there, and
 /// Tab puts a tab. The Enter row reads `Ret`, the label that the keymap's hint
 /// boxes give that key.
-pub(crate) const REPLACE_HINTS: &[(&str, &str)] =
-    &[("any", "that char"), ("Ret", "line ending"), ("Tab", "tab")];
+pub(crate) const REPLACE_HINTS: &[(&str, &str)] = &[
+    ("any", "replace each selected char"),
+    ("Ret", "replace with newline"),
+    ("Tab", "replace with tab"),
+];
 
 pub(super) fn set_pending_replace(stoat: &mut Stoat) -> UpdateEffect {
     stoat.pending_replace = true;
@@ -3720,7 +3723,7 @@ fn find_parent_start(node: stoat_language::Node<'_>) -> Option<stoat_language::N
 /// row reads.
 ///
 /// The rows follow the chord's capture in `handle_key`. A char key finds that
-/// char, Enter finds a line ending, and Tab finds a tab. The rows match
+/// char, Enter finds a line ending, and Tab finds a tab. The keys match
 /// [`REPLACE_HINTS`], but the two chords act differently on those keys, so
 /// each keeps its own table.
 pub(crate) const FIND_HINTS: &[(&str, &str)] =

@@ -31,6 +31,9 @@ const MAX_COLUMN_ROWS: usize = 8;
 /// A box too narrow to give every column this much draws nothing, because a key
 /// beside a stub of its action tells the reader nothing.
 const MIN_ACTION: usize = 8;
+/// The row every one-char chord box ends in. Each chord drops on a key it does
+/// not take, so Esc cancels any of them.
+const CANCEL_ROW: (&str, &str) = ("Esc", "cancel");
 
 #[derive(Clone)]
 pub(crate) struct HintsFooter {
@@ -649,11 +652,13 @@ pub(crate) fn key_count(count: usize) -> String {
     }
 }
 
-/// The rows of `hints`, with the chars that share a label on one row.
+/// The rows of `hints`, with the chars that share a label on one row, and then
+/// the Esc row that cancels the chord.
 pub(crate) fn chord_rows(hints: &ChordHints) -> Vec<HintRow> {
     let bindings: Vec<(&str, String, Option<Toggle>)> = hints
         .rows
         .iter()
+        .chain([&CANCEL_ROW])
         .map(|&(chars, label)| (chars, label.to_string(), None))
         .collect();
     group_by_action(&bindings)
