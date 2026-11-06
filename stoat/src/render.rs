@@ -1730,6 +1730,8 @@ pub(crate) fn frame(
     );
     // Each arm that paints a box paints one whenever its modal is open.
     overlaid |= painted_modal.is_some_and(ActiveModal::paints_own_box);
+    let modal_hints =
+        stoat.key_hints_visible || !painted_modal.is_some_and(ActiveModal::hints_on_request);
     match painted_modal {
         Some(ActiveModal::Run) => {
             if let Some(run_id) = stoat.modal_run
@@ -1773,19 +1775,21 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "workspace_picker",
-                    None,
-                    Some("picker"),
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "workspace_picker",
+                        None,
+                        Some("picker"),
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::Jumplist) => {
@@ -1989,19 +1993,21 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "finder",
-                    Some(finder.scope().context_name()),
-                    None,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "finder",
+                        Some(finder.scope().context_name()),
+                        None,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::SymbolFinder) => {
@@ -2078,19 +2084,21 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "palette",
-                    None,
-                    None,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "palette",
+                        None,
+                        None,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         Some(ActiveModal::Help) => {
@@ -2106,19 +2114,21 @@ pub(crate) fn frame(
                     buf,
                     &mut *scene,
                 );
-                cached_modal_hints(
-                    &mut stoat.hints_cache,
-                    &stoat.keymap,
-                    mode,
-                    "help",
-                    None,
-                    None,
-                    toggles,
-                    &stoat.theme,
-                    full,
-                    buf,
-                    &mut *scene,
-                );
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "help",
+                        None,
+                        None,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        buf,
+                        &mut *scene,
+                    );
+                }
             }
         },
         // The transient text inputs paint no centered box. Search paints in the
@@ -3127,7 +3137,11 @@ mod modal_dim_tests {
 #[cfg(test)]
 mod dispatch_tests {
     use super::{hints_cache_key, Flags, FocusFlags};
-    use crate::{app::Stoat, keymap_state::modal_predicate, location_picker::LocationEntry};
+    use crate::{
+        action_handlers::dispatch, app::Stoat, keymap_state::modal_predicate,
+        location_picker::LocationEntry,
+    };
+    use stoat_action::Action;
 
     /// The `modal` a frame painted, read back off the hints cache the painting arm
     /// populated.
@@ -3149,13 +3163,64 @@ mod dispatch_tests {
         )
     }
 
+    /// A modal that ends in its own footer of keys, and the palette, paint no
+    /// hints box until the hints toggle asks for one. The jumplist has no
+    /// footer, so it paints its box unasked.
+    #[test]
+    fn a_footed_modal_paints_its_hints_box_on_request() {
+        let paints_box = |open: &dyn Action, modal: &str, scope: Option<&str>, toggle| {
+            let mut h = Stoat::test();
+            h.seed_focused_buffer("alpha\n");
+            dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+            h.stoat.key_hints_visible = toggle;
+            dispatch(&mut h.stoat, open);
+            h.render_composited();
+            let mode = h.stoat.focused_mode().to_string();
+            painted_modal_hints(&h) == Some(modal_hints_key(&mode, modal, scope))
+        };
+        let modals = [
+            (
+                &stoat_action::OpenFileFinder as &dyn Action,
+                "finder",
+                Some("all"),
+            ),
+            (&stoat_action::OpenHelp, "help", None),
+            (&stoat_action::SwitchWorkspace, "workspace_picker", None),
+            (&stoat_action::OpenCommandPalette, "palette", None),
+            (&stoat_action::OpenJumplistPicker, "jumplist", None),
+        ];
+
+        let shown: Vec<(bool, bool)> = modals
+            .iter()
+            .map(|&(action, modal, scope)| {
+                (
+                    paints_box(action, modal, scope, false),
+                    paints_box(action, modal, scope, true),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (false, true),
+                (false, true),
+                (false, true),
+                (false, true),
+                (true, true)
+            ],
+            "the box unasked and on the toggle, per modal"
+        );
+    }
+
     /// The frame used to walk the modal fields in its own order, so a second modal
     /// opened over a first could be the one painted while keys still routed to the
     /// other. Both now derive from the same authority.
     #[test]
     fn the_painted_modal_is_the_one_keys_route_to() {
         let mut h = Stoat::test();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
+        // The finder paints its hints box on the hints toggle alone.
+        h.stoat.key_hints_visible = true;
+        dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
         h.render_composited();
         let mode = h.stoat.focused_mode().to_string();
         assert_eq!(

@@ -779,6 +779,19 @@ impl ActiveModal {
         )
     }
 
+    /// Whether this modal's docked key hints box waits for the hints toggle,
+    /// rather than showing whenever the modal opens.
+    ///
+    /// The file finder, help, and the workspace picker end in a footer of their
+    /// own keys, and the box repeats those keys over the modal's lower right.
+    /// The palette keeps its box behind the toggle as well.
+    pub(crate) fn hints_on_request(self) -> bool {
+        matches!(
+            self,
+            Self::FileFinder | Self::Help | Self::WorkspacePicker | Self::Palette
+        )
+    }
+
     /// The resizable-box kind a zoom step applies to, or `None` for a modal that
     /// sizes entirely to its content.
     pub(crate) fn zoom_kind(self) -> Option<ModalKind> {

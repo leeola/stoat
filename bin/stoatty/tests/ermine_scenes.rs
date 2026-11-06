@@ -306,8 +306,8 @@ fn the_editor_behind_the_finder_fades() {
 /// The finder ends in a footer row on the raised surface.
 ///
 /// No other surface of the frame is raised, so the raised cells form one run
-/// in one row, the footer across the box. The docked key hints box covers the
-/// footer's right end, so the run stops short of the box's border.
+/// in one row. The docked key hints box waits for its toggle under the finder,
+/// so the run spans the 126 cells inside the box's border.
 #[test]
 fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -319,7 +319,7 @@ fn the_finder_ends_in_a_footer_on_the_raised_surface() {
     );
 
     let raised = cells_of(&shot, RAISED);
-    if !one_run_in_one_row(&raised) || raised.len() < 40 {
+    if !one_run_in_one_row(&raised) || raised.len() != 126 {
         let frame = keep_frame(&shot, &mut home, "finder_footer");
         panic!(
             "the raised cells {raised:?} are not one footer run in one row; the frame is {}",

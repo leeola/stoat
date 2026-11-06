@@ -3565,10 +3565,12 @@ mod tests {
 
     /// The picker's hints used to be a hand-written list that had already lost
     /// track of Tab. Naming that binding pins the box to the keymap, so a
-    /// future hand-written list cannot quietly reintroduce the drift.
+    /// future hand-written list cannot quietly reintroduce the drift. The
+    /// picker shows its box on the hints toggle alone.
     #[test]
     fn the_picker_hints_list_every_binding_the_keymap_holds() {
         let mut h = crate::test_harness::TestHarness::with_size(160, 40);
+        h.stoat.key_hints_visible = true;
         h.type_action("SwitchWorkspace()");
         h.snapshot();
 

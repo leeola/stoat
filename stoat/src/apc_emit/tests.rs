@@ -1344,6 +1344,8 @@ fn hints_overlay_emits_scaled_text_runs_inside_stoatty() {
     h.stoat.theme = Arc::new(rgb_modal_theme());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     h.stoat.set_apc_tx(tx);
+    // Help shows its hints box on the hints toggle alone.
+    h.stoat.key_hints_visible = true;
 
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
     h.settle();
