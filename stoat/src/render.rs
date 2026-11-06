@@ -60,6 +60,7 @@ use crate::{
     commit_list::{CommitListId, CommitListState},
     diff_changes::{DiffChangesId, DiffChangesState},
     editor_state::{EditorId, EditorState},
+    keymap::KeymapState,
     keymap_state::{
         active_modal, binding_display_desc, cursor_token, focus_flags, focused_pane_pinned,
         pane_predicate, ActiveModal, AppFlags, Flags, FocusFlags, StoatKeymapState,
@@ -90,6 +91,7 @@ use ratatui::{
 };
 use slotmap::SlotMap;
 use std::{
+    borrow::Cow,
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     io,
@@ -2181,61 +2183,18 @@ pub(crate) fn frame(
         );
 
         let missed = stoat.hints_cache.as_ref().map(|c| c.key) != Some(key);
-        if missed && let Some(chord) = &chord {
-            stoat.hints_cache = Some(hints::HintsCache::new(key, hints::chord_rows(chord)));
-        } else if missed {
-            // The conflict screen rides on normal mode, so scope to its own
-            // `view == conflict` bindings. A terminal or agent pane at rest
-            // sends every other key to its child, so it scopes to the bindings
-            // that name its pane kind. The walkthrough mode lasts a whole tour,
-            // and the reader reads code under its box, so it scopes to its own
-            // mode's bindings. At 24 rows the full list wraps into a second
-            // column over the text. A primary mode narrows to the chord
-            // entries and the context-bound keys, because the whole editor
-            // keymap is what the help screen is for. A chord sub-mode owns its
-            // whole mode, so take them all.
+        if missed {
             let state = StoatKeymapState::with_flags(mode, flags)
                 .with_view(screen)
                 .with_pane(pane)
                 .with_token(token)
                 .with_focus_flags(focus);
-            let raw = if screen == Some("conflict") {
-                stoat.keymap.scoped_bindings(&state, "view", "conflict")
-            } else if let Some(kind @ ("terminal" | "agent")) = pane.filter(|_| mode == "normal") {
-                stoat.keymap.scoped_bindings(&state, "pane", kind)
-            } else if mode == "walkthrough" {
-                stoat.keymap.scoped_bindings(&state, "mode", "walkthrough")
-            } else {
-                let keys = if PRIMARY_MODES.contains(&mode) {
-                    stoat.keymap.context_bindings(&state, PRIMARY_MODES)
-                } else {
-                    stoat.keymap.active_keys(&state)
-                };
-                // Wheel gestures are left out. This overlay affords pressing
-                // one of the keys it lists, which a notch is not. Width is also
-                // the scarce resource here, because a large chord already fills
-                // two columns and a third overflows any ordinary terminal. The
-                // help screen reads the unfiltered set, so nothing is hidden
-                // from a reader looking for it.
-                keys.into_iter()
-                    .filter(|(key, _)| key.wheel.is_none())
-                    .map(|(key, actions)| (key.display_label(), actions))
-                    .collect()
+            let footer_keys = hints_footer_keys(&stoat.keymap, &state);
+            let rows = match &chord {
+                Some(chord) => hints::chord_rows(chord),
+                None => hint_rows(&stoat.keymap, &state, mode, screen, pane),
             };
-            let bindings: Vec<(&str, String, Option<Toggle>)> = raw
-                .iter()
-                .map(|(key, actions)| {
-                    (
-                        key.as_str(),
-                        binding_display_desc(actions),
-                        toggle::binding_toggle(actions),
-                    )
-                })
-                .collect();
-            stoat.hints_cache = Some(hints::HintsCache::new(
-                key,
-                hints::group_by_action(&bindings),
-            ));
+            stoat.hints_cache = Some(hints::HintsCache::new(key, rows, footer_keys));
         }
 
         let conflict_footer = if screen == Some("conflict") {
@@ -2270,8 +2229,10 @@ pub(crate) fn frame(
             (None, _) => mode,
         };
         let cache = stoat.hints_cache.as_mut().expect("cache populated above");
+        let subtitle = hints_subtitle(chord.is_some(), screen, cache.rows.len());
         hints::render_hints_grouped(
             hint_label,
+            &subtitle,
             cache,
             footer,
             toggles,
@@ -2297,6 +2258,86 @@ pub(crate) fn frame(
             .collect(),
     };
     (frame_holds, captures)
+}
+
+/// The rows the hints box lists from `state`, its bindings grouped by action.
+///
+/// The conflict screen rides on normal mode, so it scopes to its own `view ==
+/// conflict` bindings. A terminal or agent pane at rest sends every other key
+/// to its child, so it scopes to the bindings that name its pane kind. The
+/// walkthrough mode lasts a whole tour, and the reader reads code under its
+/// box, so it scopes to its own mode's bindings. A primary mode narrows to the
+/// chord entries and the context-bound keys, because the whole editor keymap
+/// is what the help screen is for. A chord sub-mode owns its whole mode, so it
+/// takes them all.
+fn hint_rows(
+    keymap: &crate::keymap::Keymap,
+    state: &dyn KeymapState,
+    mode: &str,
+    screen: Option<&str>,
+    pane: Option<&str>,
+) -> Vec<hints::HintRow> {
+    let raw = if screen == Some("conflict") {
+        keymap.scoped_bindings(state, "view", "conflict")
+    } else if let Some(kind @ ("terminal" | "agent")) = pane.filter(|_| mode == "normal") {
+        keymap.scoped_bindings(state, "pane", kind)
+    } else if mode == "walkthrough" {
+        keymap.scoped_bindings(state, "mode", "walkthrough")
+    } else {
+        let keys = if PRIMARY_MODES.contains(&mode) {
+            keymap.context_bindings(state, PRIMARY_MODES)
+        } else {
+            keymap.active_keys(state)
+        };
+        // Wheel gestures are left out. This overlay affords pressing one of the
+        // keys it lists, which a notch is not. Width is also the scarce
+        // resource here, because a large chord already fills two columns and a
+        // third overflows any ordinary terminal. The help screen reads the
+        // unfiltered set, so nothing is hidden from a reader looking for it.
+        keys.into_iter()
+            .filter(|(key, _)| key.wheel.is_none())
+            .map(|(key, actions)| (key.display_label(), actions))
+            .collect()
+    };
+    let bindings: Vec<(&str, String, Option<Toggle>)> = raw
+        .iter()
+        .map(|(key, actions)| {
+            (
+                key.as_str(),
+                binding_display_desc(actions),
+                toggle::binding_toggle(actions),
+            )
+        })
+        .collect();
+    hints::group_by_action(&bindings)
+}
+
+/// The subtitle of the hints box over `screen`, listing `rows` rows.
+///
+/// An armed chord's box names what it waits on. The conflict screen's box
+/// stays up while the screen does, so its box says so. Any other box counts
+/// its keys.
+fn hints_subtitle(chord: bool, screen: Option<&str>, rows: usize) -> Cow<'static, str> {
+    match (chord, screen) {
+        (true, _) => Cow::Borrowed("waiting on a char"),
+        (false, Some("conflict")) => Cow::Borrowed("stays up on this view"),
+        (false, _) => Cow::Owned(hints::key_count(rows)),
+    }
+}
+
+/// The keys the hints box's footer names, the one that hides the box from
+/// `state` and the one that opens the full help from normal mode.
+///
+/// The help key reads from a bare normal-mode state, because that is where a
+/// reader goes to press it.
+fn hints_footer_keys(keymap: &crate::keymap::Keymap, state: &dyn KeymapState) -> hints::FooterKeys {
+    hints::FooterKeys {
+        hide: keymap.key_for_action(state, "ToggleKeyHints"),
+        help: keymap.key_for_action(
+            &StoatKeymapState::with_flags("normal", Flags::default()),
+            "OpenHelp",
+        ),
+    }
 }
 
 /// The content store and palette the single band declares for the focused
@@ -2528,11 +2569,14 @@ fn cached_modal_hints(
         *cache = Some(hints::HintsCache::new(
             key,
             hints::group_by_action(&bindings),
+            hints_footer_keys(keymap, &state),
         ));
     }
     let cache = cache.as_mut().expect("cache populated above");
+    let subtitle = hints::key_count(cache.rows.len());
     hints::render_hints_grouped(
         title.unwrap_or(modal),
+        &subtitle,
         cache,
         None,
         toggles,
@@ -3163,7 +3207,7 @@ mod modal_dim_tests {
 
 #[cfg(test)]
 mod dispatch_tests {
-    use super::{hints_cache_key, Flags, FocusFlags};
+    use super::{hints_cache_key, hints_subtitle, Flags, FocusFlags};
     use crate::{
         action_handlers::dispatch, app::Stoat, keymap_state::modal_predicate,
         location_picker::LocationEntry,
@@ -3174,6 +3218,27 @@ mod dispatch_tests {
     /// populated.
     fn painted_modal_hints(h: &crate::test_harness::TestHarness) -> Option<u64> {
         h.stoat.hints_cache.as_ref().map(|c| c.key)
+    }
+
+    /// A chord's box names what it waits on, even over the conflict screen,
+    /// the conflict screen's box says that it stays up, and any other box
+    /// counts its keys.
+    #[test]
+    fn the_hints_subtitle_follows_the_chord_the_screen_and_the_key_count() {
+        assert_eq!(
+            [
+                hints_subtitle(true, Some("conflict"), 5),
+                hints_subtitle(false, Some("conflict"), 5),
+                hints_subtitle(false, Some("file"), 5),
+                hints_subtitle(false, None, 1),
+            ],
+            [
+                "waiting on a char",
+                "stays up on this view",
+                "5 keys",
+                "1 key"
+            ],
+        );
     }
 
     fn modal_hints_key(mode: &str, modal: &str, scope: Option<&str>) -> u64 {

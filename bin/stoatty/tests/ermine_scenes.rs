@@ -458,6 +458,24 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
     );
 }
 
+/// The which-key box docks on the status bar as a card on the raised surface.
+///
+/// The cell two columns left of the window's right edge, two rows above the
+/// status row, sits in the card's footer row.
+#[test]
+fn the_space_box_docks_as_a_card_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "<Space><Settle>");
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(157, 47, 1, 1),
+        RAISED,
+        "hints_card",
+    );
+}
+
 /// The finder's selected row fills with the select surface and carries the
 /// accent bar at its left edge.
 ///

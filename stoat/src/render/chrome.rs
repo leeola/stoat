@@ -412,6 +412,36 @@ pub(crate) fn hline(
     }
 }
 
+/// Draw a horizontal separator along the bottom edge of row `y`, across
+/// `width` cells from column `x`.
+///
+/// The hairline rules off the row above from the row below, as a card's
+/// title row and footer rows are. The fallback is [`hline`]'s, which writes
+/// `─` glyphs into the row. Otherwise it emits one hairline [`Bar`] a
+/// sixteenth of a cell thick in the row's last sixteenth.
+pub(crate) fn hline_edge(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    style: Style,
+    scene: &mut ApcScene,
+) {
+    match style_rgb(style.fg).filter(|_| scene.live()) {
+        Some(color) => {
+            Bar {
+                x: 0,
+                y: 15,
+                width: width.saturating_mul(16),
+                height: 1,
+                color,
+            }
+            .render(Rect::new(x, y, width, 1), buf, scene);
+        },
+        None => hline(buf, x, y, width, style, scene),
+    }
+}
+
 /// Draw a vertical separator down `height` cells at column `x`, starting at row
 /// `y`.
 ///
@@ -556,7 +586,7 @@ pub(crate) fn text(
 #[cfg(test)]
 mod tests {
     use super::{
-        hline, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
+        hline, hline_edge, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
         modal_frame_anchored, popout_frame, text, toggle_mark, type_tag, vline,
     };
     use crate::theme::{scope, PanelRole, Theme};
@@ -1143,6 +1173,40 @@ mod tests {
                 height: 1,
                 color: [1, 2, 3],
             })
+        );
+    }
+
+    /// The edge hairline falls back to the centered one's dashes and emits its
+    /// bar in the row's last sixteenth, the row's bottom edge.
+    #[test]
+    fn hline_edge_falls_back_to_dashes_and_emits_a_bar_on_the_bottom_edge() {
+        let mut fallback = Buffer::empty(Rect::new(0, 0, 8, 4));
+        hline_edge(&mut fallback, 2, 3, 4, plain_style(), &mut ApcScene::new());
+        let fallback_row: String = (0..8)
+            .map(|x| fallback.cell((x, 3)).unwrap().symbol().to_string())
+            .collect();
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
+        let mut scene = ApcScene::new();
+        hline_edge(&mut buf, 2, 3, 4, rgb_style(), &mut scene);
+        assert_eq!(
+            (
+                fallback_row.as_str(),
+                buf.cell((2, 3)).unwrap().symbol(),
+                scene.buffer().as_slice()
+            ),
+            (
+                "  ────  ",
+                " ",
+                encode_bar(&BarCommand {
+                    x: 32,
+                    y: 63,
+                    width: 64,
+                    height: 1,
+                    color: [1, 2, 3],
+                })
+                .as_slice()
+            ),
         );
     }
 

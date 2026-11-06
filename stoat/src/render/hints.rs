@@ -2,8 +2,15 @@ use crate::{
     theme::TypeRole,
     toggle::{Toggle, ToggleStates},
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::Style,
+    widgets::{Block, Borders},
+};
 use std::collections::HashMap;
+use stoat_widgets::panel::Panel;
+use stoatty_protocol::command::{BorderStyle, PanelShadow};
 
 /// Columns between a row's key and its action.
 const GAP: usize = 3;
@@ -13,8 +20,12 @@ const INTER_COL_GAP: usize = 3;
 const BORDER_PAD: usize = 2;
 /// Columns of breathing room inside the frame.
 const CONTENT_PAD: usize = 2;
-/// Rows a footer adds, being a separator and the text under it.
+/// Rows the footer adds, being a separator and the text under it.
 const FOOTER_ROWS: usize = 2;
+/// The most rows a column holds while the columns fit the area's width, so a
+/// long list spreads into columns rather than into one column the window's
+/// height.
+const MAX_COLUMN_ROWS: usize = 8;
 /// The fewest columns of action text that a cut keeps.
 ///
 /// A box too narrow to give every column this much draws nothing, because a key
@@ -25,6 +36,17 @@ const MIN_ACTION: usize = 8;
 pub(crate) struct HintsFooter {
     pub(crate) text: String,
     pub(crate) style: Style,
+}
+
+/// The keys the footer names at its right, the one that hides the box and the
+/// one that opens the full help.
+///
+/// Either is `None` when no key reaches its action, and the footer then
+/// leaves that part out.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub(crate) struct FooterKeys {
+    pub(crate) hide: Option<String>,
+    pub(crate) help: Option<String>,
 }
 
 /// The box an armed one-char chord shows while it waits on its char.
@@ -57,15 +79,19 @@ pub(crate) struct HintRow {
 pub(crate) struct HintsCache {
     pub(crate) key: u64,
     pub(crate) rows: Vec<HintRow>,
+    /// The keys the footer names, which the same keymap state decides as
+    /// [`Self::rows`].
+    footer_keys: FooterKeys,
     /// The most recent layout of [`Self::rows`], or `None` before one is built.
     layout: Option<HintsLayout>,
 }
 
 impl HintsCache {
-    pub(crate) fn new(key: u64, rows: Vec<HintRow>) -> Self {
+    pub(crate) fn new(key: u64, rows: Vec<HintRow>, footer_keys: FooterKeys) -> Self {
         Self {
             key,
             rows,
+            footer_keys,
             layout: None,
         }
     }
@@ -89,17 +115,21 @@ struct HintsLayout {
 
 /// The inputs [`HintsLayout`] is derived from.
 ///
-/// The footer and title contribute their lengths rather than their text,
-/// because that is all the layout reads of them. A footer counting chunks
-/// changes length as the reader advances, so its presence alone would not
-/// catch a box that needs to be wider.
+/// The title, the subtitle, and the footer's two texts contribute their
+/// lengths rather than their text, because that is all the layout reads of
+/// them. A footer counting chunks changes length as the reader advances, so
+/// its presence alone does not catch a box that needs to be wider.
 #[derive(PartialEq, Eq)]
 struct LayoutKey {
     rows: u64,
     area_width: u16,
     area_height: u16,
     title_len: usize,
-    footer_len: Option<usize>,
+    subtitle_len: usize,
+    /// The footer's own text, 0 when the caller passes none.
+    footer_len: usize,
+    /// The keys and words at the footer's right.
+    right_len: usize,
 }
 
 /// One column of the box, holding each row's text as it will be painted.
@@ -109,6 +139,17 @@ struct LaidColumn {
     cells: Vec<LaidCell>,
     key_width: usize,
     action_width: usize,
+}
+
+/// How a set of [`LaidColumn`]s fits the area's width, best first.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Fit {
+    /// Every action text shows whole.
+    Whole,
+    /// Some action text is cut so the columns fit.
+    Cut,
+    /// Even cut text leaves the columns wider than the area.
+    TooWide,
 }
 
 /// One row of a [`LaidColumn`].
@@ -129,9 +170,15 @@ struct LaidCell {
 /// A row whose binding flips a toggle gets a mark directly right of its key,
 /// on or off as `toggles` reads it. The mark changes no width and moves no
 /// text in the box.
+///
+/// The box opens on a title row, `title` at its left and `subtitle` in muted
+/// text at its right. A footer always closes it, with `footer`'s text at its
+/// left and the cache's [`FooterKeys`] at its right. Under a live scene the box
+/// is the docked card, a borderless panel in `ui.modal.hints.card`'s fill.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_hints_grouped(
-    mode: &str,
+    title: &str,
+    subtitle: &str,
     cache: &mut HintsCache,
     footer: Option<&HintsFooter>,
     toggles: ToggleStates,
@@ -148,12 +195,16 @@ pub(crate) fn render_hints_grouped(
     // full window, so the box lays out flush to the right edge above the bar.
     let area = super::hints_overlay_area(area);
 
+    let right = footer_runs(&cache.footer_keys);
+    let right_width = runs_width(&right);
     let key = LayoutKey {
         rows: cache.key,
         area_width: area.width,
         area_height: area.height,
-        title_len: mode.len(),
-        footer_len: footer.map(|f| f.text.chars().count()),
+        title_len: title.chars().count(),
+        subtitle_len: subtitle.chars().count(),
+        footer_len: footer.map_or(0, |f| f.text.chars().count()),
+        right_len: right_width,
     };
     if cache.layout.as_ref().map(|layout| &layout.key) != Some(&key) {
         cache.layout = lay_out(&cache.rows, key);
@@ -174,28 +225,59 @@ pub(crate) fn render_hints_grouped(
     let y = area.y + area.height.saturating_sub(box_height);
     let help_area = Rect::new(x, y, box_width, box_height);
 
-    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let title = format!(" {mode} ");
-    crate::render::clear_modal(help_area, buf, theme, modal_style);
-    // Above the pools, because this box is declared after every modal and so sits
-    // over the commit picker's list and preview surfaces. Layered with the grid it
-    // would vanish under their composites for the length of every glide.
-    let inner = crate::render::chrome::modal_frame_above_pools(
-        buf,
-        help_area,
-        Some(title.as_str()),
-        modal_style,
-        theme,
-        &mut *scene,
-    );
+    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS_CARD);
+    let run_bg = crate::render::modal_fill(theme, modal_style);
+    let docked = run_bg.filter(|_| scene.live());
+    let inner = docked_frame(buf, help_area, modal_style, docked, theme, &mut *scene);
 
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let toggle_on = theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE);
     let toggle_off = theme.get(crate::theme::scope::UI_TOGGLE_INACTIVE);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
+    let muted_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let rule_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
     let end_x = inner.x + inner.width;
-    let run_bg = crate::render::modal_fill(theme, modal_style);
     let row_scale = theme.type_scale(TypeRole::Ui);
+
+    // The title row is the frame's top row. A cell frame's border rules that
+    // row off by itself, so only the card draws the hairline under it.
+    if docked.is_some() {
+        crate::render::chrome::hline_edge(
+            buf,
+            inner.x,
+            help_area.y,
+            inner.width,
+            rule_style,
+            &mut *scene,
+        );
+    }
+    // The texts take a space each side, so a cell frame's border reads them
+    // apart from its own line.
+    crate::render::chrome::text(
+        buf,
+        inner.x,
+        help_area.y,
+        end_x,
+        &format!(" {title} "),
+        action_style,
+        run_bg,
+        row_scale,
+        &mut *scene,
+    );
+    if !subtitle.is_empty() {
+        let subtitle = format!(" {subtitle} ");
+        crate::render::chrome::text(
+            buf,
+            end_x.saturating_sub(subtitle.chars().count() as u16),
+            help_area.y,
+            end_x,
+            &subtitle,
+            muted_style,
+            run_bg,
+            row_scale,
+            &mut *scene,
+        );
+    }
 
     let mut col_x = inner.x + 1;
     for column in &layout.columns {
@@ -245,40 +327,117 @@ pub(crate) fn render_hints_grouped(
         col_x += (column.key_width + GAP + column.action_width + INTER_COL_GAP) as u16;
     }
 
+    // The footer rows follow the tallest column in every box, because the
+    // footer always names the keys that hide the box and open the help. The
+    // separator rules off the text row's top edge.
+    let sep_row = inner.y + max_col_rows as u16;
+    let text_row = sep_row + 1;
+    crate::render::chrome::hline_edge(buf, inner.x, sep_row, inner.width, rule_style, &mut *scene);
     if let Some(footer) = footer {
-        let sep_row = inner.y + max_col_rows as u16;
-        let text_row = sep_row + 1;
-        if sep_row < inner.y + inner.height {
-            let sep_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
-            crate::render::chrome::hline(
-                buf,
-                inner.x,
-                sep_row,
-                inner.width,
-                sep_style,
-                &mut *scene,
-            );
-        }
-        if text_row < inner.y + inner.height {
-            // The rich text run ignores `end_x`, so the text itself is cut to
-            // the box.
-            let text = clip(
-                &footer.text,
-                (box_width as usize).saturating_sub(BORDER_PAD + CONTENT_PAD),
-            );
-            crate::render::chrome::text(
-                buf,
-                inner.x + 1,
-                text_row,
-                end_x,
-                &text,
-                footer.style,
-                run_bg,
-                row_scale,
-                scene,
-            );
-        }
+        // The rich text run ignores `end_x`, so the text itself is cut to the
+        // box, short of the keys at the row's right.
+        let content_width = (box_width as usize).saturating_sub(BORDER_PAD + CONTENT_PAD);
+        let room = match right_width {
+            0 => content_width,
+            right => content_width.saturating_sub(right + GAP),
+        };
+        crate::render::chrome::text(
+            buf,
+            inner.x + 1,
+            text_row,
+            end_x,
+            &clip(&footer.text, room),
+            footer.style,
+            run_bg,
+            row_scale,
+            &mut *scene,
+        );
     }
+    let mut x = end_x.saturating_sub(1 + right_width as u16);
+    for (text, is_key) in right {
+        let style = match is_key {
+            true => key_style,
+            false => muted_style,
+        };
+        crate::render::chrome::text(
+            buf,
+            x,
+            text_row,
+            end_x,
+            text,
+            style,
+            run_bg,
+            row_scale,
+            &mut *scene,
+        );
+        x += text.chars().count() as u16;
+    }
+}
+
+/// Draw the hints box's frame over `area` and return the rect one cell inside
+/// it.
+///
+/// `docked` is the card's fill, `Some` only under a live scene with an RGB
+/// fill. The box is then the docked card, a borderless panel in that fill
+/// whose shadow tucks under its bottom edge onto the status bar it docks on.
+/// Otherwise it is the rounded modal frame in `style`. The inside rect is the
+/// same in both, so the layout's [`BORDER_PAD`] holds for either.
+///
+/// Both clear the cells under the box first, because a panel's fill covers the
+/// cells' backgrounds and not their glyphs.
+fn docked_frame(
+    buf: &mut Buffer,
+    area: Rect,
+    style: Style,
+    docked: Option<[u8; 3]>,
+    theme: &crate::theme::Theme,
+    scene: &mut stoat_widgets::ApcScene,
+) -> Rect {
+    crate::render::clear_modal(area, buf, theme, style);
+    // Above the pools, because this box is declared after every modal and so sits
+    // over the commit picker's list and preview surfaces. Layered with the grid,
+    // it vanishes under their composites for the length of every glide.
+    let Some(fill) = docked else {
+        return crate::render::chrome::modal_frame_above_pools(
+            buf, area, None, style, theme, scene,
+        );
+    };
+    Panel {
+        style: BorderStyle::None_,
+        border: fill,
+        corner_radius: 2,
+        fill: Some(fill),
+        shadow: PanelShadow::Tucked,
+        inset_x: 0,
+        above_pools: true,
+        backdrop: false,
+        anchor: None,
+    }
+    .draw_components(area, scene);
+    Block::default().borders(Borders::ALL).inner(area)
+}
+
+/// The footer's right text as runs, each a key or the plain words after one.
+///
+/// The text names the key that hides the box and the key that opens the full
+/// help, each followed by its word. A key the keymap does not reach leaves its
+/// part out, and the dot between the two parts goes with either. A left-out
+/// part is an empty run.
+fn footer_runs(keys: &FooterKeys) -> [(&str, bool); 5] {
+    let (hide, help) = (keys.hide.as_deref(), keys.help.as_deref());
+    let both = hide.is_some() && help.is_some();
+    [
+        (hide.unwrap_or(""), true),
+        (if hide.is_some() { " hide" } else { "" }, false),
+        (if both { " \u{b7} " } else { "" }, false),
+        (help.unwrap_or(""), true),
+        (if help.is_some() { " help" } else { "" }, false),
+    ]
+}
+
+/// The columns `runs` span, at one column per char as the painter draws them.
+fn runs_width(runs: &[(&str, bool)]) -> usize {
+    runs.iter().map(|(text, _)| text.chars().count()).sum()
 }
 
 /// Arrange `rows` into columns that fit `key`'s area, padding every cell.
@@ -288,16 +447,68 @@ pub(crate) fn render_hints_grouped(
 /// wider or taller than the area still lays out, so the caller can cache that it
 /// does not fit.
 fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
-    let extra_rows = key.footer_len.map(|_| FOOTER_ROWS).unwrap_or(0);
-
     // Rows that fit vertically inside the box. The layout grows into extra
-    // columns once the bindings would overflow this height.
-    let available_rows = (key.area_height as usize).saturating_sub(BORDER_PAD + extra_rows);
+    // columns once the bindings overflow this height.
+    let available_rows = (key.area_height as usize).saturating_sub(BORDER_PAD + FOOTER_ROWS);
     if available_rows == 0 {
         return None;
     }
 
-    let col_count = rows.len().div_ceil(available_rows);
+    // Columns of a capped height spread wider than a tall column does. Where
+    // they cut their text to fit the area, or overflow it, taller columns that
+    // fit better take their place, the shortest such, so a narrow window keeps
+    // whole labels and a box that shows.
+    let capped = available_rows.min(MAX_COLUMN_ROWS);
+    let mut best = lay_out_columns(rows, capped, key.area_width);
+    for rows_cap in capped + 1..=available_rows {
+        if best.1 == Fit::Whole {
+            break;
+        }
+        let taller = lay_out_columns(rows, rows_cap, key.area_width);
+        if taller.1 < best.1 {
+            best = taller;
+        }
+    }
+    let columns = best.0;
+
+    let max_col_rows = columns.iter().map(|c| c.cells.len()).max().unwrap_or(0);
+    let columns_width: usize = columns
+        .iter()
+        .map(|c| c.key_width + GAP + c.action_width)
+        .sum::<usize>()
+        + INTER_COL_GAP * columns.len().saturating_sub(1);
+
+    let title_width = match key.subtitle_len {
+        0 => key.title_len,
+        subtitle => key.title_len + GAP + subtitle,
+    };
+    // The footer never widens the box past the area. The paint cuts the text
+    // that does not fit, so a long footer never hides the keys above it.
+    let footer_width = match (key.footer_len, key.right_len) {
+        (left, 0) => left,
+        (0, right) => right,
+        (left, right) => left + GAP + right,
+    }
+    .min((key.area_width as usize).saturating_sub(BORDER_PAD + CONTENT_PAD));
+    let content_width = columns_width.max(title_width).max(footer_width);
+
+    Some(HintsLayout {
+        box_width: (content_width + BORDER_PAD + CONTENT_PAD) as u16,
+        box_height: (max_col_rows + BORDER_PAD + FOOTER_ROWS) as u16,
+        key,
+        columns,
+        max_col_rows,
+    })
+}
+
+/// Arrange `rows` into columns of at most `rows_cap` rows, padding every cell,
+/// and report how the columns fit `area_width`.
+///
+/// A box wider than the area cuts its action text to fit, so every key stays
+/// on screen. If the keys leave too little room for text, the columns keep
+/// their text whole and lay out too wide.
+fn lay_out_columns(rows: &[HintRow], rows_cap: usize, area_width: u16) -> (Vec<LaidColumn>, Fit) {
+    let col_count = rows.len().div_ceil(rows_cap);
     let rows_per_col = rows.len().div_ceil(col_count);
 
     let chunks: Vec<&[HintRow]> = rows.chunks(rows_per_col).collect();
@@ -310,13 +521,15 @@ fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
         .map(|chunk| widest(chunk.iter().map(|row| &row.action)))
         .collect();
 
-    // A box wider than the area cuts its action text to fit, so every key stays
-    // on screen. If the keys leave too little room for text, the box keeps its
-    // text whole, lays out too wide, and draws nothing.
-    let caps = action_caps(&key_widths, &action_widths, key.area_width as usize)
-        .unwrap_or_else(|| action_widths.clone());
+    let caps = action_caps(&key_widths, &action_widths, area_width as usize);
+    let fit = match &caps {
+        Some(caps) if caps == &action_widths => Fit::Whole,
+        Some(_) => Fit::Cut,
+        None => Fit::TooWide,
+    };
+    let caps = caps.unwrap_or_else(|| action_widths.clone());
 
-    let columns: Vec<LaidColumn> = chunks
+    let columns = chunks
         .iter()
         .enumerate()
         .map(|(i, chunk)| {
@@ -336,30 +549,7 @@ fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
             }
         })
         .collect();
-
-    let max_col_rows = columns.iter().map(|c| c.cells.len()).max().unwrap_or(0);
-    let columns_width: usize = columns
-        .iter()
-        .map(|c| c.key_width + GAP + c.action_width)
-        .sum::<usize>()
-        + INTER_COL_GAP * columns.len().saturating_sub(1);
-
-    let title_width = key.title_len + 4;
-    // The footer never widens the box past the area. The paint cuts the text
-    // that does not fit, so a long footer never hides the keys above it.
-    let footer_width = key
-        .footer_len
-        .unwrap_or(0)
-        .min((key.area_width as usize).saturating_sub(BORDER_PAD + CONTENT_PAD));
-    let content_width = columns_width.max(title_width).max(footer_width);
-
-    Some(HintsLayout {
-        box_width: (content_width + BORDER_PAD + CONTENT_PAD) as u16,
-        box_height: (max_col_rows + BORDER_PAD + extra_rows) as u16,
-        key,
-        columns,
-        max_col_rows,
-    })
+    (columns, fit)
 }
 
 /// The columns that the widest of `texts` spans, at one column per char as the
@@ -437,6 +627,14 @@ pub(crate) fn group_by_action(bindings: &[(&str, String, Option<Toggle>)]) -> Ve
     rows
 }
 
+/// The subtitle of a box that lists `count` rows, such as `22 keys`.
+pub(crate) fn key_count(count: usize) -> String {
+    match count {
+        1 => "1 key".to_string(),
+        count => format!("{count} keys"),
+    }
+}
+
 /// The rows of `hints`, with the chars that share a label on one row.
 pub(crate) fn chord_rows(hints: &ChordHints) -> Vec<HintRow> {
     let bindings: Vec<(&str, String, Option<Toggle>)> = hints
@@ -450,7 +648,8 @@ pub(crate) fn chord_rows(hints: &ChordHints) -> Vec<HintRow> {
 #[cfg(test)]
 mod tests {
     use super::{
-        action_caps, group_by_action, render_hints_grouped, HintsCache, HintsFooter, LaidCell,
+        action_caps, group_by_action, lay_out, render_hints_grouped, FooterKeys, HintRow,
+        HintsCache, HintsFooter, LaidCell, LayoutKey,
     };
     use crate::{
         action_handlers,
@@ -460,7 +659,7 @@ mod tests {
         toggle::{Toggle, ToggleStates},
     };
     use crossterm::event::{KeyCode, KeyModifiers};
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
     fn row_text(buf: &Buffer, y: u16) -> String {
         let area = buf.area;
@@ -470,7 +669,8 @@ mod tests {
     }
 
     fn render(bindings: &[(&str, String)], width: u16, height: u16) -> Buffer {
-        let mut cache = HintsCache::new(0, group_by_action(&plain(bindings)));
+        let mut cache =
+            HintsCache::new(0, group_by_action(&plain(bindings)), FooterKeys::default());
         render_into(&mut cache, None, ToggleStates::default(), width, height)
     }
 
@@ -497,6 +697,7 @@ mod tests {
         let mut scene = stoat_widgets::ApcScene::new();
         render_hints_grouped(
             "normal",
+            "",
             cache,
             footer,
             toggles,
@@ -542,9 +743,10 @@ mod tests {
         let keys: Vec<String> = (0..40).map(|i| format!("k{i:02}")).collect();
         let buf = render(&numbered_bindings(&keys), 80, 15);
 
+        // A column holds eight rows, so the second one starts at k08.
         let side_by_side = (0..buf.area.height).any(|y| {
             let text = row_text(&buf, y);
-            text.contains("k00") && text.contains("k10")
+            text.contains("k00") && text.contains("k08")
         });
         assert!(
             side_by_side,
@@ -552,12 +754,54 @@ mod tests {
         );
     }
 
+    /// The column heights of `count` numbered rows whose labels are `label`
+    /// long, laid out over an area `width` by `height`.
+    fn column_heights(count: usize, label: usize, width: u16, height: u16) -> Vec<usize> {
+        let rows: Vec<HintRow> = (0..count)
+            .map(|i| HintRow {
+                keys: format!("k{i:02}"),
+                action: "x".repeat(label),
+                toggle: None,
+            })
+            .collect();
+        let key = LayoutKey {
+            rows: 0,
+            area_width: width,
+            area_height: height,
+            title_len: 5,
+            subtitle_len: 7,
+            footer_len: 0,
+            right_len: 0,
+        };
+        lay_out(&rows, key)
+            .expect("the area holds a row")
+            .columns
+            .iter()
+            .map(|column| column.cells.len())
+            .collect()
+    }
+
+    /// A column holds eight rows at most, so a long list spreads over three
+    /// columns rather than one column the window's height.
+    #[test]
+    fn twenty_two_rows_lay_out_as_three_columns_of_eight() {
+        assert_eq!(column_heights(22, 20, 160, 50), [8, 8, 6]);
+    }
+
+    /// Where columns of eight cut their labels to fit, the shortest taller
+    /// columns that keep every label whole take their place.
+    #[test]
+    fn a_narrow_area_takes_the_shortest_columns_that_keep_labels_whole() {
+        assert_eq!(column_heights(22, 20, 70, 50), [11, 11]);
+    }
+
     /// The padded strings are what a repaint is meant to stop rebuilding, so an
     /// unchanged frame has to reach the paint without touching them.
     #[test]
     fn an_unchanged_frame_paints_from_the_laid_out_strings() {
         let bindings = vec![("k", "act".to_string()), ("kk", "other".to_string())];
-        let mut cache = HintsCache::new(7, group_by_action(&plain(&bindings)));
+        let mut cache =
+            HintsCache::new(7, group_by_action(&plain(&bindings)), FooterKeys::default());
 
         let first = render_into(&mut cache, None, ToggleStates::default(), 40, 20);
         let laid_out: Vec<Vec<LaidCell>> = cache
@@ -591,7 +835,8 @@ mod tests {
     #[test]
     fn a_longer_footer_widens_the_box() {
         let bindings = vec![("k", "act".to_string())];
-        let mut cache = HintsCache::new(7, group_by_action(&plain(&bindings)));
+        let mut cache =
+            HintsCache::new(7, group_by_action(&plain(&bindings)), FooterKeys::default());
 
         let footer = |text: &str| HintsFooter {
             text: text.to_string(),
@@ -627,7 +872,8 @@ mod tests {
     #[test]
     fn a_footer_wider_than_the_area_is_cut_to_the_box() {
         let bindings = vec![("k", "act".to_string())];
-        let mut cache = HintsCache::new(0, group_by_action(&plain(&bindings)));
+        let mut cache =
+            HintsCache::new(0, group_by_action(&plain(&bindings)), FooterKeys::default());
         let footer = HintsFooter {
             text: "x".repeat(100),
             style: Default::default(),
@@ -650,7 +896,8 @@ mod tests {
     #[test]
     fn a_footer_is_measured_in_chars() {
         let bindings = vec![("k", "act".to_string())];
-        let mut cache = HintsCache::new(0, group_by_action(&plain(&bindings)));
+        let mut cache =
+            HintsCache::new(0, group_by_action(&plain(&bindings)), FooterKeys::default());
         let footer = HintsFooter {
             text: "\u{b7}".repeat(20),
             style: Default::default(),
@@ -663,6 +910,129 @@ mod tests {
             24,
             "twenty two-byte dots take twenty columns, plus the frame and padding"
         );
+    }
+
+    /// The footer names the hide and help keys at its right, past its own
+    /// text, and the box widens to hold both.
+    #[test]
+    fn the_footer_keys_sit_right_of_the_footer_text() {
+        let bindings = vec![("k", "act".to_string())];
+        let keys = FooterKeys {
+            hide: Some("C-?".to_string()),
+            help: Some("?".to_string()),
+        };
+        let mut cache = HintsCache::new(0, group_by_action(&plain(&bindings)), keys);
+        let footer = HintsFooter {
+            text: "1/9".to_string(),
+            style: Default::default(),
+        };
+        let buf = render_into(&mut cache, Some(&footer), ToggleStates::default(), 60, 20);
+
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| row_text(&buf, y).trim().to_string())
+            .collect();
+        assert!(
+            rows.contains(&"│ 1/9   C-? hide \u{b7} ? help │".to_string()),
+            "the footer row reads its text, then the keys: {rows:#?}",
+        );
+    }
+
+    /// A footer text too long for the box stops short of the keys at its right,
+    /// so the keys stay whole.
+    #[test]
+    fn a_long_footer_text_stops_short_of_the_footer_keys() {
+        let bindings = vec![("k", "act".to_string())];
+        let keys = FooterKeys {
+            hide: Some("C-?".to_string()),
+            help: Some("?".to_string()),
+        };
+        let mut cache = HintsCache::new(0, group_by_action(&plain(&bindings)), keys);
+        let footer = HintsFooter {
+            text: "x".repeat(100),
+            style: Default::default(),
+        };
+        let buf = render_into(&mut cache, Some(&footer), ToggleStates::default(), 40, 10);
+
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| row_text(&buf, y).trim().to_string())
+            .collect();
+        let cut = format!("│ {}\u{2026}   C-? hide \u{b7} ? help │", "x".repeat(15));
+        assert!(
+            rows.contains(&cut),
+            "the text ends in an ellipsis three columns short of the keys: {rows:#?}",
+        );
+    }
+
+    /// The title row names the box at its left and the subtitle at its right,
+    /// each set into a cell frame's border with a space either side.
+    #[test]
+    fn the_title_row_holds_the_title_and_the_subtitle() {
+        let bindings = vec![("k", "act".to_string())];
+        let mut cache =
+            HintsCache::new(0, group_by_action(&plain(&bindings)), FooterKeys::default());
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        render_hints_grouped(
+            "normal",
+            "1 key",
+            &mut cache,
+            None,
+            ToggleStates::default(),
+            &Theme::empty(),
+            area,
+            &mut buf,
+            &mut stoat_widgets::ApcScene::new(),
+        );
+
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| row_text(&buf, y).trim().to_string())
+            .collect();
+        assert!(
+            rows.contains(&"┌ normal ─ 1 key ┐".to_string()),
+            "the border row holds both texts: {rows:#?}",
+        );
+    }
+
+    /// A cell frame's border rules the title row off by itself, so the row's
+    /// dashes keep the frame's color rather than taking the card hairline's.
+    #[test]
+    fn a_cell_frame_keeps_its_border_color_across_the_title_row() {
+        let (config, errors) = stoat_config::parse(
+            r##"theme t {
+                ui.modal.hints.card = { fg: "#010203", bg: "#040506" };
+                ui.border.inactive.fg = "#0a0b0c";
+            }"##,
+        );
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let theme = Theme::from_config(&config.expect("the theme parses"), "t").expect("theme t");
+        let bindings = vec![("k", "act".to_string())];
+        let mut cache =
+            HintsCache::new(0, group_by_action(&plain(&bindings)), FooterKeys::default());
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(false);
+        render_hints_grouped(
+            "normal",
+            "",
+            &mut cache,
+            None,
+            ToggleStates::default(),
+            &theme,
+            area,
+            &mut buf,
+            &mut scene,
+        );
+
+        let top = (0..area.height)
+            .find(|&y| row_text(&buf, y).contains('┌'))
+            .expect("a cell frame");
+        let mut dashes: Vec<Color> = (area.x..area.x + area.width)
+            .filter(|&x| buf[(x, top)].symbol() == "─")
+            .map(|x| buf[(x, top)].fg)
+            .collect();
+        dashes.dedup();
+        assert_eq!(dashes, [Color::Rgb(1, 2, 3)]);
     }
 
     /// A long action text is cut to fit the area, and its key stays on screen.
@@ -706,7 +1076,7 @@ mod tests {
                 ("f", "follow".to_string(), toggle),
                 ("n", "next".to_string(), None),
             ];
-            let mut cache = HintsCache::new(0, group_by_action(&bindings));
+            let mut cache = HintsCache::new(0, group_by_action(&bindings), FooterKeys::default());
             let buf = render_into(&mut cache, None, toggles, 40, 20);
             (0..buf.area.height)
                 .map(|y| row_text(&buf, y))

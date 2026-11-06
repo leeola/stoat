@@ -65,6 +65,7 @@ theme default_dark {
 
     ui.modal.help.fg = muted;
     ui.modal.hints.fg = muted;
+    ui.modal.hints.card = { fg: muted, bg: subtle };
     ui.modal.palette.fg = muted;
     ui.modal.picker.fg = muted;
     ui.modal.run.fg = muted;
@@ -295,6 +296,7 @@ theme ermine_night inherits default_dark {
 
     ui.modal.help    = { fg: strong, bg: overlay };
     ui.modal.hints   = { fg: strong, bg: overlay };
+    ui.modal.hints.card = { fg: strong, bg: raised };
     ui.modal.palette = { fg: strong, bg: overlay };
     ui.modal.picker  = { fg: strong, bg: overlay };
     ui.modal.run     = { fg: strong, bg: overlay };

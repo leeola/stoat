@@ -280,7 +280,9 @@ fn walkthrough_fixture_plays_its_whole_tour() {
 #[test]
 fn walkthrough_commits_fixture_checks_each_commit_out() {
     let (_dir, root, harness) = fixture_harness("walkthrough-commits");
-    let mut harness = harness.with_size(WIDE_COLS, 24);
+    // The walkthrough mode's key-hint box docks over the bottom rows of both
+    // sides, so the pty is tall enough that each fixture file ends above it.
+    let mut harness = harness.with_size(WIDE_COLS, 60);
     let tour = store::load(&LocalFs, &root, "tour").expect("the fixture commits its tour");
     let first = tour.stops[0]
         .commit
@@ -315,9 +317,7 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
             .expect("enter walkthrough mode");
 
         // Two stops share each commit, so the steps alternate between a
-        // checkout and a jump within the tree already checked out. The mode's
-        // key-hint overlay covers the right end of each line, so every landing
-        // text sits at the start of its line.
+        // checkout and a jump within the tree already checked out.
         for (step, landing) in [
             (2, "fn apply("),
             (3, "\"verbose\""),

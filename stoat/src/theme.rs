@@ -783,6 +783,13 @@ pub mod scope {
 
     pub const UI_MODAL_HELP: &str = "ui.modal.help";
     pub const UI_MODAL_HINTS: &str = "ui.modal.hints";
+    /// The which-key hints box, a child of [`UI_MODAL_HINTS`] that the box
+    /// falls back to where a theme leaves it unset.
+    ///
+    /// Under stoatty the box draws as a borderless card docked on the status
+    /// bar, so only the background shows, as the card's fill. In cells the
+    /// foreground is the box's border hue.
+    pub const UI_MODAL_HINTS_CARD: &str = "ui.modal.hints.card";
     pub const UI_MODAL_PALETTE: &str = "ui.modal.palette";
     pub const UI_MODAL_PICKER: &str = "ui.modal.picker";
     pub const UI_MODAL_RUN: &str = "ui.modal.run";

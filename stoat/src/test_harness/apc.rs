@@ -309,6 +309,11 @@ mod tests {
     /// Open a fixed file, run `keys`, and return the last captured frame's text,
     /// composited from the APC scene the harness records.
     fn frame_text(keys: &str) -> String {
+        frame_after(keys).rendered_text()
+    }
+
+    /// A harness on a fixed file after `keys`, its last frame captured.
+    fn frame_after(keys: &str) -> crate::test_harness::TestHarness {
         let mut h = Stoat::test();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         h.stoat.set_apc_tx(tx);
@@ -321,7 +326,7 @@ mod tests {
             h.type_keys(keys);
         }
         h.snapshot();
-        h.rendered_text()
+        h
     }
 
     /// The which-key box rows, from its top-left corner to its bottom-left, so
@@ -342,6 +347,35 @@ mod tests {
         assert!(
             rows.len() >= 2,
             "the composited frame paints a which-key box, got {rows:?}"
+        );
+    }
+
+    /// The which-key box draws as the docked card, a borderless panel in the
+    /// card's fill at radius 2, whose shadow tucks under its bottom edge.
+    #[test]
+    fn the_which_key_box_draws_as_the_docked_card() {
+        let mut h = frame_after("space");
+        h.stoat.render();
+        let fill = crate::render::paint::style_rgb(
+            h.stoat
+                .theme
+                .get(crate::theme::scope::UI_MODAL_HINTS_CARD)
+                .bg,
+        );
+        let filled: Vec<_> =
+            stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) if panel.fill.is_some() => {
+                        Some((panel.style, panel.shadow, panel.corner_radius, panel.fill))
+                    },
+                    _ => None,
+                })
+                .collect();
+        assert_eq!(
+            filled,
+            [(BorderStyle::None_, PanelShadow::Tucked, 2, fill)],
+            "the box is the frame's one filled panel"
         );
     }
 
