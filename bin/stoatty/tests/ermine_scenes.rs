@@ -143,7 +143,7 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
 /// The base side of the split diff recedes as a whole behind the live side.
 ///
 /// Row 5, `6 six`, is context on both sides. The left text starts at column 6
-/// and the right at column 82. The base side paints the context color, which
+/// and the right at column 85. The base side paints the context color, which
 /// alone reaches about two thirds of the live text, so only the fade brings the
 /// left text's peak below three fifths of the right's.
 #[test]
@@ -156,7 +156,7 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
         "<Space>df<Settle>",
     );
     let base = brightest(&shot, cell_rect(6, 5, 5, 1));
-    let live = brightest(&shot, cell_rect(82, 5, 5, 1));
+    let live = brightest(&shot, cell_rect(85, 5, 5, 1));
 
     if u16::from(base) * 5 >= u16::from(live) * 3 {
         let frame = keep_frame(&shot, &mut home, "diff_base_side");
@@ -211,7 +211,31 @@ fn the_split_diff_frames_its_base_column() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 2, "diff_base_frame");
+    expect_base_frame_sides(&shot, &mut home, 2, 79, "diff_base_frame");
+}
+
+/// The split diff ends in a one-cell scroll overview on the window ground.
+///
+/// The single band narrows to the overview at column 158, the last column
+/// inside the island margin. Its change marks and the viewport band cover few
+/// of the column's pixels, so the column reads as chrome. A text strip reads
+/// as the editor surface.
+#[test]
+fn the_split_diff_ends_in_a_scroll_overview_on_chrome() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(158, 0, 1, 49),
+        CHROME,
+        "diff_overview",
+    );
 }
 
 /// The changes view frames its base column once, across its file headers.
@@ -228,7 +252,7 @@ fn the_changes_view_frames_its_base_column_across_the_headers() {
         "unstaged.txt",
         "<Space>dc<Settle>",
     );
-    expect_base_frame_sides(&shot, &mut home, 0, "changes_base_frame");
+    expect_base_frame_sides(&shot, &mut home, 0, 76, "changes_base_frame");
 }
 
 /// The changes view heads each file with a row on the raised surface, between
@@ -756,9 +780,16 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
 /// split diff's base column, and no other base-tint pixel.
 ///
 /// The left side lies in the pane's first cell, column 1. The right one lies
-/// in the divider column, 76, left of the hairline. A miss saves the frame as
-/// [`expect_region`] does.
-fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
+/// in the divider column `divider`, left of the hairline: 79 beside a diff
+/// view's one-cell overview, 76 beside a changes view's text strip. A miss
+/// saves the frame as [`expect_region`] does.
+fn expect_base_frame_sides(
+    shot: &Snapshot,
+    home: &mut TempDir,
+    row: u16,
+    divider: u16,
+    what: &str,
+) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
     let columns = bar_columns(shot, (y, height), SIDE_BASE);
 
@@ -766,7 +797,7 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
         let (x, _, width, _) = cell_rect(col, row, 1, 1);
         x..x + width
     };
-    let (left, right) = (cell(1), cell(76));
+    let (left, right) = (cell(1), cell(divider));
     let sides = [&left, &right].map(|side| columns.iter().any(|x| side.contains(x)));
     let stray = columns
         .iter()

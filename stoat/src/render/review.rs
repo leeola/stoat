@@ -18,7 +18,7 @@ use crate::{
     },
     editor_state::EditorState,
     host::DiffStatus,
-    minimap::{self, ClassTable},
+    minimap::{self, ClassTable, EdgeClass},
     theme::{scope as s, TypeRole},
 };
 use ratatui::{
@@ -1685,6 +1685,31 @@ pub(crate) fn diff_minimap_palette(
         }
     }
     palette
+}
+
+/// The palette of a diff view's scroll overview: `palette` with every class
+/// but the edge marks in `ground`.
+///
+/// The overview shows each row's change mark and none of its text. Its strip
+/// lays the mark lane over the cell's left half and the text's first columns
+/// over the right half, so those columns take the strip's own color and
+/// vanish. `palette` is a diff view's strip palette at some fade, and `ground`
+/// the strip's color at the same fade.
+pub(crate) fn diff_overview_palette(
+    table: &ClassTable,
+    palette: &[[u8; 3]],
+    ground: [u8; 3],
+) -> Vec<[u8; 3]> {
+    let marks = usize::from(table.edge_class(EdgeClass::Added))
+        ..=usize::from(table.edge_class(EdgeClass::Header));
+    palette
+        .iter()
+        .enumerate()
+        .map(|(class, &color)| match marks.contains(&class) {
+            true => color,
+            false => ground,
+        })
+        .collect()
 }
 
 /// Mark a cell `style` as inside a change span.
@@ -5987,14 +6012,15 @@ mod tests {
         assert_eq!(fills, [expected, expected], "in both frames");
     }
 
-    /// A per-pane minimap strip narrows the diff body, so the body's divider
-    /// sits three columns left of the content's middle. The status halves meet
-    /// there, and the frame's right side ends at its hairline.
+    /// A diff view's one-cell scroll overview narrows the diff body, so at an
+    /// odd width the body's divider sits one column left of the content's
+    /// middle, 59 of 121. The status halves meet there, and the frame's right
+    /// side ends at its hairline.
     #[test]
-    fn the_status_halves_meet_at_the_divider_beside_a_minimap_strip() {
+    fn the_status_halves_meet_at_the_divider_beside_the_overview() {
         use ratatui::style::Color;
 
-        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        let mut h = diff_harness_sized(121, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
         h.stoat.minimap_override = None;
         h.stoat.settings.editor_minimap = Some(stoat_config::MinimapMode::PerPane);
         h.snapshot();
@@ -6013,13 +6039,13 @@ mod tests {
         assert_eq!(
             (
                 strip.map(|strip| strip.width),
-                [55, 56, 57].map(|x| buf[(x, y)].bg),
+                [58, 59, 60].map(|x| buf[(x, y)].bg),
                 frame_sides,
             ),
             (
-                Some(7),
+                Some(1),
                 [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)],
-                vec![0, 56 * 16 + 8 - 3],
+                vec![0, 59 * 16 + 8 - 3],
             ),
         );
     }
@@ -8709,6 +8735,30 @@ mod tests {
                     flat(MINIMAP_MOVED),
                     flat(MINIMAP_DELETED),
                 ],
+            ),
+        );
+    }
+
+    /// The overview palette keeps the diff palette's edge marks and paints every
+    /// other class in the ground, so a row shows its mark and none of its text.
+    #[test]
+    fn the_overview_palette_keeps_the_edge_marks_and_grounds_the_rest() {
+        let (table, palette) = minimap_palette(MINIMAP_BG_SOURCE, DiffDials::shipped(), true);
+        let ground = [1, 2, 3];
+        let overview = diff_overview_palette(&table, &palette, ground);
+        let first_mark = usize::from(table.edge_class(EdgeClass::Added));
+        let past_marks = usize::from(table.edge_class(EdgeClass::Header)) + 1;
+
+        assert_eq!(
+            (
+                &overview[..first_mark],
+                &overview[first_mark..past_marks],
+                &overview[past_marks..]
+            ),
+            (
+                &vec![ground; first_mark][..],
+                &palette[first_mark..past_marks],
+                &vec![ground; palette.len() - past_marks][..]
             ),
         );
     }

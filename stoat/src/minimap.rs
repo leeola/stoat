@@ -96,7 +96,7 @@ pub const LINES_PER_CELL: u8 = 8;
 
 /// Columns reserved on a line's left edge for the diff/diagnostic mark lane, so
 /// a mark never overwrites the code silhouette. Content starts after it.
-const LANE_WIDTH: u32 = 2;
+pub(crate) const LANE_WIDTH: u32 = 2;
 
 /// Bytes of a line that [`summarize_line`] reaches.
 ///

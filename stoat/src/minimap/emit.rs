@@ -127,6 +127,12 @@ pub(crate) struct MinimapPalettes {
     pub(crate) diff: Vec<[u8; 3]>,
     /// [`Self::diff`] at the frame's fade, `None` where [`Self::dimmed`] is.
     pub(crate) diff_dimmed: Option<Vec<[u8; 3]>>,
+    /// The palette a diff view's scroll overview declares, as
+    /// [`review::diff_overview_palette`] builds it over [`Self::diff`] on the
+    /// window ground.
+    pub(crate) overview: Vec<[u8; 3]>,
+    /// [`Self::overview`] at the frame's fade, `None` where [`Self::dimmed`] is.
+    pub(crate) overview_dimmed: Option<Vec<[u8; 3]>>,
 }
 
 impl MinimapPalettes {
@@ -158,14 +164,23 @@ impl MinimapPalettes {
             })
         };
 
+        let diff_dimmed = blend(&diff);
+        let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(theme));
+        let overview = review::diff_overview_palette(table, &diff, ground);
+        let overview_dimmed = dim_bg.zip(diff_dimmed.as_deref()).map(|(bg, dimmed)| {
+            review::diff_overview_palette(table, dimmed, paint::dim_rgb(ground, bg, dim))
+        });
+
         Self {
             theme: theme.clone(),
             dim,
             dials,
             syntax,
             dimmed: blend(table.palette()),
-            diff_dimmed: blend(&diff),
+            diff_dimmed,
             diff,
+            overview,
+            overview_dimmed,
         }
     }
 
@@ -2111,11 +2126,11 @@ mod tests {
     }
 
     /// The single band follows its editor into the diff view. It declares the
-    /// palette the dials derive and declares it again at each dial step and
-    /// theme switch, and the buffer's lines sync with their status blocks.
+    /// scroll overview of the palette the dials derive, again at a theme
+    /// switch, and the buffer's lines sync with their status blocks.
     ///
-    /// A dial step sends no line again. The summaries hold no dial, so the
-    /// palette declaration carries the whole step.
+    /// A dial step sends neither the band nor a line. The overview keeps only
+    /// the mark classes, which no dial moves, and the summaries hold no dial.
     #[test]
     fn a_diff_view_strip_declares_the_dial_palette() {
         use crate::{host::DiffStatus, minimap::EdgeClass, render::SINGLE_MINIMAP_STRIP_ID};
@@ -2148,18 +2163,20 @@ mod tests {
         let flat = emit_frame(&mut h, &mut rx);
 
         let table = &h.stoat.minimap_class_table;
-        let palette_at = |tint: i8, syntax: bool| {
+        let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme));
+        let overview_at = |tint: i8, syntax: bool| {
             let dials = DiffDials {
                 tint_amount: review::diff_tint_amount(tint),
                 ..DiffDials::from_stoat(&h.stoat)
             };
-            review::diff_minimap_palette(table, &h.stoat.theme, dials, syntax)
+            let palette = review::diff_minimap_palette(table, &h.stoat.theme, dials, syntax);
+            review::diff_overview_palette(table, &palette, ground)
         };
-        let flat_palette = palette_at(1, false);
+        let flat_palette = overview_at(1, false);
         assert_ne!(
-            palette_at(2, true),
+            overview_at(2, true),
             table.palette(),
-            "the dials move the palette"
+            "the overview moves the palette"
         );
         assert_eq!(
             (
@@ -2170,17 +2187,18 @@ mod tests {
                 (splices(&stepped), splices(&flat)),
             ),
             (
-                Some(palette_at(2, true)),
+                Some(overview_at(2, true)),
                 Some(vec![
                     table.edge_class(EdgeClass::Modified),
                     table.population_base(DiffStatus::Modified),
                 ]),
-                Some(palette_at(1, true)),
-                Some(flat_palette.clone()),
+                None,
+                None,
                 (0, 0),
             ),
-            "the band declares the dial palette over the diff view's synced lines, \
-             and again at a tint step and a syntax toggle with no line splice",
+            "the band declares the overview of the dial palette over the diff view's \
+             synced lines, and a tint step and a syntax toggle send neither the band \
+             nor a line",
         );
 
         action_handlers::dispatch(
@@ -2196,25 +2214,30 @@ mod tests {
         let plain = emit_frame(&mut h, &mut rx);
 
         let table = &h.stoat.minimap_class_table;
-        let themed_palette = review::diff_minimap_palette(
+        let themed_palette = review::diff_overview_palette(
             table,
-            &h.stoat.theme,
-            DiffDials::from_stoat(&h.stoat),
-            false,
+            &review::diff_minimap_palette(
+                table,
+                &h.stoat.theme,
+                DiffDials::from_stoat(&h.stoat),
+                false,
+            ),
+            crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme)),
         );
         assert_ne!(themed_palette, flat_palette, "the theme moves the palette");
         assert_eq!(
             (band(&themed), band(&plain)),
             (Some(themed_palette), Some(table.palette().to_vec())),
-            "a theme switch declares the dial palette under the new theme, and the \
+            "a theme switch declares the overview under the new theme, and the \
              class table's own palette once the view is plain",
         );
     }
 
-    /// A strip declares the palette for its view and its focus. A diff view
-    /// takes the dial palette, and an unfocused strip takes its palette at the
-    /// inactive dim. A terminal before the population palette receives each one
-    /// cut to the legacy prefix.
+    /// A strip declares the palette for its view and its focus. A diff view's
+    /// overview takes the dial palette with its text classes on the window
+    /// ground, and an unfocused strip takes its palette at the inactive dim. A
+    /// terminal before the population palette receives each one cut to the
+    /// legacy prefix.
     #[test]
     fn a_strip_declares_the_palette_for_its_view_and_focus() {
         use stoatty_protocol::command::Command;
@@ -2290,6 +2313,13 @@ mod tests {
                 true,
             );
             diff.truncate(len);
+            let ground = crate::minimap::color_to_rgb(crate::render::themed_bg(&h.stoat.theme));
+            let overview = review::diff_overview_palette(table, &diff, ground);
+            let dimmed_overview = review::diff_overview_palette(
+                table,
+                &dimmed(&diff),
+                paint::dim_rgb(ground, bg, dim),
+            );
             let sorted = |mut pair: Vec<Vec<[u8; 3]>>| {
                 pair.sort();
                 pair
@@ -2297,8 +2327,8 @@ mod tests {
             assert_eq!(
                 (diff_focused, diff_unfocused),
                 (
-                    sorted(vec![diff.clone(), dimmed(&plain)]),
-                    sorted(vec![dimmed(&diff), plain]),
+                    sorted(vec![overview, dimmed(&plain)]),
+                    sorted(vec![dimmed_overview, plain]),
                 ),
                 "at protocol {protocol}",
             );

@@ -17,7 +17,10 @@ use crate::{
     pane::Pane,
     render::{
         chrome,
-        editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
+        editor::{
+            fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip,
+            MINIMAP_STRIP_COLS,
+        },
         layout::split_pane_status,
         paint::style_rgb,
         pane::diff_base_tint,
@@ -141,7 +144,7 @@ pub(crate) fn render_diff_changes(
     scene: &mut ApcScene,
 ) {
     let (inner, _) = split_pane_status(pane.area);
-    let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled);
+    let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled, MINIMAP_STRIP_COLS);
     state.minimap_rect = strip;
     if let Some(editor) = state
         .focused_excerpt()
@@ -240,7 +243,7 @@ pub(crate) fn render_diff_changes(
 /// rect, covers no part of the paint.
 pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
     let (inner, _) = split_pane_status(pane.area);
-    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled);
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, MINIMAP_STRIP_COLS);
     frame.composited_stacks.contains(&(pane.index, inner))
 }
 
@@ -560,7 +563,7 @@ pub(crate) fn replay_cursor(
         return;
     };
     let (inner, _) = split_pane_status(pane.area);
-    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled);
+    let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, MINIMAP_STRIP_COLS);
     let scroll_row = scroll.saturating_sub(top + 1);
     let text = Rect {
         y: inner.y + first as u16,
@@ -1661,6 +1664,21 @@ mod tests {
                 None,
                 vec![diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]
             ),
+        );
+    }
+
+    /// A dial step declares the single band over a changes view again, in the
+    /// palette the stepped dials derive.
+    #[test]
+    fn a_dial_step_redeclares_the_single_band_over_a_changes_view() {
+        let (mut h, mut rx) = strip_harness(MinimapMode::Single);
+        let (_, _, before) = paint_strips(&mut h, &mut rx);
+        h.stoat.diff_tint = 2;
+        let (_, _, stepped) = paint_strips(&mut h, &mut rx);
+        assert_ne!(before, stepped, "the step moves the palette");
+        assert_eq!(
+            stepped,
+            [diff_changes_strip(&h, SINGLE_MINIMAP_STRIP_ID, 0.0)]
         );
     }
 }
