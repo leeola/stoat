@@ -454,6 +454,21 @@ pub trait GitRepo: Send + Sync {
     /// commit picker decorates rows with names the user can check out.
     fn local_branches(&self) -> Vec<(String, String)>;
 
+    /// Every remote-tracking branch as `(short name, tip sha)`, e.g.
+    /// `("origin/main", sha)`.
+    ///
+    /// A symbolic ref such as `origin/HEAD` is left out. It names the remote's
+    /// default branch, which the list already holds, so a badge for it repeats
+    /// that branch's badge on the same commit.
+    fn remote_branches(&self) -> Vec<(String, String)>;
+
+    /// Every tag as `(name, commit sha)`, e.g. `("v1.0", sha)`.
+    ///
+    /// An annotated tag reports the commit it names, not the tag object. A
+    /// tag of a tree or a blob is left out, because only a commit takes a
+    /// badge in the commits list.
+    fn tags(&self) -> Vec<(String, String)>;
+
     /// Short name of the branch HEAD is attached to, e.g. `"main"`.
     ///
     /// `None` when HEAD is detached or points at an unborn branch. A review

@@ -7,9 +7,9 @@ use crate::host::git::{
     RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
 use git2::{
-    build::CheckoutBuilder, ApplyLocation, BranchType, Commit, Delta, Diff, DiffFindOptions,
-    DiffLineType, DiffOptions, ErrorCode, Repository, RepositoryState, Sort, StashFlags, Status,
-    StatusEntry, StatusOptions,
+    build::CheckoutBuilder, ApplyLocation, Branch, BranchType, Commit, Delta, Diff,
+    DiffFindOptions, DiffLineType, DiffOptions, ErrorCode, Repository, RepositoryState, Sort,
+    StashFlags, Status, StatusEntry, StatusOptions,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -706,11 +706,38 @@ impl GitRepo for LocalGitRepo {
             return Vec::new();
         };
         branches
+            .filter_map(|entry| branch_tip(&entry.ok()?.0))
+            .collect()
+    }
+
+    fn remote_branches(&self) -> Vec<(String, String)> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(branches) = repo.branches(Some(BranchType::Remote)) else {
+            return Vec::new();
+        };
+        branches
             .filter_map(|entry| {
                 let (branch, _) = entry.ok()?;
-                let name = branch.name().ok().flatten()?.to_string();
-                let tip = branch.get().peel_to_commit().ok()?.id().to_string();
-                Some((name, tip))
+                match branch.get().symbolic_target_bytes() {
+                    Some(_) => None,
+                    None => branch_tip(&branch),
+                }
+            })
+            .collect()
+    }
+
+    fn tags(&self) -> Vec<(String, String)> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(names) = repo.tag_names(None) else {
+            return Vec::new();
+        };
+        names
+            .iter()
+            .filter_map(|name| {
+                let name = name.ok().flatten()?;
+                let tag = repo.find_reference(&format!("refs/tags/{name}")).ok()?;
+                let commit = tag.peel_to_commit().ok()?;
+                Some((name.to_string(), commit.id().to_string()))
             })
             .collect()
     }
@@ -1235,6 +1262,14 @@ fn checkout_commit(repo: &Repository, commit: &Commit<'_>) -> Result<(), GitAppl
     opts.safe();
     repo.checkout_tree(commit.as_object(), Some(&mut opts))
         .map_err(err_msg)
+}
+
+/// The short name and tip sha of `branch`, or `None` for a name that is not
+/// UTF-8 or a tip that peels to no commit.
+fn branch_tip(branch: &Branch<'_>) -> Option<(String, String)> {
+    let name = branch.name().ok().flatten()?.to_string();
+    let tip = branch.get().peel_to_commit().ok()?.id().to_string();
+    Some((name, tip))
 }
 
 fn err_msg(e: git2::Error) -> GitApplyError {
@@ -2505,6 +2540,48 @@ mod tests {
                 ("feature".to_string(), shas[0].clone()),
                 ("main".to_string(), shas[2].clone()),
             ]
+        );
+    }
+
+    /// A remote branch and a tag each pair with the commit they name, an
+    /// annotated tag through its tag object. The remote's symbolic HEAD names
+    /// a branch the list already holds, and a tag of a tree names no commit,
+    /// so both are left out.
+    #[test]
+    fn remote_branches_and_tags_pair_each_ref_with_its_commit() {
+        let (dir, repo, shas) = seeded_repo();
+        let commit = |at: usize| repo.find_commit(Oid::from_str(&shas[at]).unwrap()).unwrap();
+        let sig = Signature::now("test", "t@t").unwrap();
+        repo.reference("refs/remotes/origin/main", commit(1).id(), false, "seed")
+            .unwrap();
+        repo.reference_symbolic(
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+            false,
+            "seed",
+        )
+        .unwrap();
+        repo.tag_lightweight("v0", commit(0).as_object(), false)
+            .unwrap();
+        repo.tag("v1", commit(2).as_object(), &sig, "release", false)
+            .unwrap();
+        repo.tag_lightweight("tree", commit(2).tree().unwrap().as_object(), false)
+            .unwrap();
+
+        let git = discover(&dir);
+        let sorted = |mut refs: Vec<(String, String)>| {
+            refs.sort();
+            refs
+        };
+        assert_eq!(
+            (sorted(git.remote_branches()), sorted(git.tags())),
+            (
+                vec![("origin/main".to_string(), shas[1].clone())],
+                vec![
+                    ("v0".to_string(), shas[0].clone()),
+                    ("v1".to_string(), shas[2].clone()),
+                ],
+            ),
         );
     }
 

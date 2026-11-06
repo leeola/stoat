@@ -627,6 +627,25 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Point remote-tracking branch `name`, such as `origin/main`, at `sha`, as
+    /// [`GitRepo::remote_branches`] reports it.
+    pub fn remote_branch(&mut self, name: &str, sha: &str) -> &mut Self {
+        let (name, sha) = (name.to_string(), sha.to_string());
+        self.mutate_repo(|state| {
+            state.remotes.insert(name, sha);
+        });
+        self
+    }
+
+    /// Tag the commit `sha` as `name`, as [`GitRepo::tags`] reports it.
+    pub fn tag(&mut self, name: &str, sha: &str) -> &mut Self {
+        let (name, sha) = (name.to_string(), sha.to_string());
+        self.mutate_repo(|state| {
+            state.tags.insert(name, sha);
+        });
+        self
+    }
+
     /// Attach HEAD to branch `name`, as [`GitRepo::head_branch`] reports it.
     /// Independent of [`Self::set_head`], so a test wanting both an attached
     /// branch and a matching head sha sets both.
@@ -793,6 +812,12 @@ struct FakeRepoState {
     /// reports the same sequence every run, which keeps tests asserting on the
     /// whole list rather than sorting it first.
     branches: BTreeMap<String, String>,
+    /// Remote-tracking branch name to tip sha, seeded via
+    /// [`FakeRepoBuilder::remote_branch`], ordered as `branches` is.
+    remotes: BTreeMap<String, String>,
+    /// Tag name to commit sha, seeded via [`FakeRepoBuilder::tag`], ordered as
+    /// `branches` is.
+    tags: BTreeMap<String, String>,
     /// The branch [`GitRepo::head_branch`] reports, seeded via
     /// [`FakeRepoBuilder::set_head_branch`]. `None` models a detached HEAD,
     /// which is the default because a seeded repo has no branch until a test
@@ -1431,6 +1456,24 @@ impl GitRepo for FakeGitRepo {
         let state = self.state.lock().unwrap();
         state
             .branches
+            .iter()
+            .map(|(name, sha)| (name.clone(), sha.clone()))
+            .collect()
+    }
+
+    fn remote_branches(&self) -> Vec<(String, String)> {
+        let state = self.state.lock().unwrap();
+        state
+            .remotes
+            .iter()
+            .map(|(name, sha)| (name.clone(), sha.clone()))
+            .collect()
+    }
+
+    fn tags(&self) -> Vec<(String, String)> {
+        let state = self.state.lock().unwrap();
+        state
+            .tags
             .iter()
             .map(|(name, sha)| (name.clone(), sha.clone()))
             .collect()
@@ -2713,6 +2756,31 @@ mod tests {
             ]
         );
         assert_eq!(repo.head_branch().as_deref(), Some("feature"));
+    }
+
+    /// The seeded remotes and tags each report by name, in name order rather
+    /// than the order the test seeds them in.
+    #[test]
+    fn remote_branches_and_tags_report_seeded_refs() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit("c2", &[])
+            .remote_branch("origin/main", "c1")
+            .tag("v2", "c2")
+            .tag("v1", "c1");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            (repo.remote_branches(), repo.tags()),
+            (
+                vec![("origin/main".to_string(), "c1".to_string())],
+                vec![
+                    ("v1".to_string(), "c1".to_string()),
+                    ("v2".to_string(), "c2".to_string()),
+                ],
+            ),
+        );
     }
 
     #[test]
