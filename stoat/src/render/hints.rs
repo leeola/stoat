@@ -87,7 +87,7 @@ pub(crate) struct HintsCache {
     pub(crate) rows: Vec<HintRow>,
     /// The keys the footer names, which the same keymap state decides as
     /// [`Self::rows`].
-    footer_keys: FooterKeys,
+    pub(crate) footer_keys: FooterKeys,
     /// The most recent layout of [`Self::rows`], or `None` before one is built.
     layout: Option<HintsLayout>,
 }
@@ -136,6 +136,17 @@ struct LayoutKey {
     footer_len: usize,
     /// The keys and words at the footer's right.
     right_len: usize,
+}
+
+impl LayoutKey {
+    /// The rows the footer takes, none for a footer with no text and no keys,
+    /// so that box ends at its last row rather than in a blank one.
+    fn footer_rows(&self) -> usize {
+        match (self.footer_len, self.right_len) {
+            (0, 0) => 0,
+            _ => FOOTER_ROWS,
+        }
+    }
 }
 
 /// One column of the box, holding each row's text as it will be painted.
@@ -342,9 +353,11 @@ pub(crate) fn render_hints_grouped(
         col_x += (column.key_width + GAP + column.action_width + INTER_COL_GAP) as u16;
     }
 
-    // The footer rows follow the tallest column in every box, because the
-    // footer always names the keys that hide the box and open the help. The
-    // separator rules off the text row's top edge.
+    // The footer rows follow the tallest column. The separator rules off the
+    // text row's top edge.
+    if layout.key.footer_rows() == 0 {
+        return;
+    }
     let sep_row = inner.y + max_col_rows as u16;
     let text_row = sep_row + 1;
     crate::render::chrome::hline_edge(buf, inner.x, sep_row, inner.width, rule_style, &mut *scene);
@@ -464,7 +477,8 @@ fn runs_width(runs: &[(&str, bool)]) -> usize {
 fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
     // Rows that fit vertically inside the box. The layout grows into extra
     // columns once the bindings overflow this height.
-    let available_rows = (key.area_height as usize).saturating_sub(BORDER_PAD + FOOTER_ROWS);
+    let footer_rows = key.footer_rows();
+    let available_rows = (key.area_height as usize).saturating_sub(BORDER_PAD + footer_rows);
     if available_rows == 0 {
         return None;
     }
@@ -509,7 +523,7 @@ fn lay_out(rows: &[HintRow], key: LayoutKey) -> Option<HintsLayout> {
 
     Some(HintsLayout {
         box_width: (content_width + BORDER_PAD + CONTENT_PAD) as u16,
-        box_height: (max_col_rows + BORDER_PAD + FOOTER_ROWS) as u16,
+        box_height: (max_col_rows + BORDER_PAD + footer_rows) as u16,
         key,
         columns,
         max_col_rows,
@@ -1055,12 +1069,40 @@ mod tests {
         let top = (0..buf.area.height)
             .find(|&y| row_text(&buf, y).contains('┌'))
             .expect("a cell frame");
-        let mut dashes: Vec<Color> = (buf.area.x..buf.area.x + buf.area.width)
-            .filter(|&x| buf[(x, top)].symbol() == "─")
-            .map(|x| buf[(x, top)].fg)
+        assert_eq!(dash_colors(&buf, top), [Color::Rgb(1, 2, 3)]);
+    }
+
+    /// A box whose footer names nothing ends at its last row, so its bottom
+    /// border follows that row and keeps the frame's color, with no footer
+    /// separator over it.
+    #[test]
+    fn a_footerless_box_ends_at_its_last_row() {
+        let theme = theme_t(
+            r##"ui.modal.hints.card = { fg: "#010203", bg: "#040506" };
+                ui.border.inactive.fg = "#0a0b0c";"##,
+        );
+        let buf = render_cells(&plain(&[("k", "act".to_string())]), &theme);
+
+        let bottom = (0..buf.area.height)
+            .find(|&y| row_text(&buf, y).contains('└'))
+            .expect("a cell frame");
+        assert_eq!(
+            (
+                row_text(&buf, bottom - 1).contains("act"),
+                dash_colors(&buf, bottom)
+            ),
+            (true, vec![Color::Rgb(1, 2, 3)]),
+        );
+    }
+
+    /// The colors of the `─` cells across row `y`, each run of one color once.
+    fn dash_colors(buf: &Buffer, y: u16) -> Vec<Color> {
+        let mut colors: Vec<Color> = (buf.area.x..buf.area.x + buf.area.width)
+            .filter(|&x| buf[(x, y)].symbol() == "─")
+            .map(|x| buf[(x, y)].fg)
             .collect();
-        dashes.dedup();
-        assert_eq!(dashes, [Color::Rgb(1, 2, 3)]);
+        colors.dedup();
+        colors
     }
 
     /// A submenu row's label takes the submenu style. A theme that sets none

@@ -2164,13 +2164,15 @@ pub(crate) fn frame(
         true => !stoat.screen_hints_hidden,
         false => stoat.key_hints_visible,
     };
+    // A chord mode that no pin hides, and an armed chord, show the box whatever
+    // the toggle holds, so the toggle does not hide that box.
+    let auto_shown = (!PRIMARY_MODES.contains(&mode) && !pin_hidden)
+        || screen == Some("review")
+        || chord.is_some();
 
     if !painted_modal.is_some_and(ActiveModal::paints_own_box)
         && mode != "space_pane_display"
-        && ((!PRIMARY_MODES.contains(&mode) && !pin_hidden)
-            || screen == Some("review")
-            || toggled
-            || chord.is_some())
+        && (auto_shown || toggled)
     {
         // The space_pane_display chord paints its own digit badges below, and
         // the auto-shown hint box would only stack an eleven-row overlay over
@@ -2190,6 +2192,7 @@ pub(crate) fn frame(
             None,
             None,
             chord.as_ref().map(|chord| chord.title),
+            pin_hidden,
         );
 
         let missed = stoat.hints_cache.as_ref().map(|c| c.key) != Some(key);
@@ -2199,7 +2202,16 @@ pub(crate) fn frame(
                 .with_pane(pane)
                 .with_token(token)
                 .with_focus_flags(focus);
-            let footer_keys = hints_footer_keys(&stoat.keymap, &state);
+            // An armed chord takes either footer key as its char, and the toggle
+            // hides no box that shows on its own.
+            let footer_keys = match (chord.is_some(), auto_shown) {
+                (true, _) => hints::FooterKeys::default(),
+                (false, true) => hints::FooterKeys {
+                    hide: None,
+                    ..hints_footer_keys(&stoat.keymap, &state, mode)
+                },
+                (false, false) => hints_footer_keys(&stoat.keymap, &state, mode),
+            };
             let rows = match &chord {
                 Some(chord) => hints::chord_rows(chord),
                 None => hint_rows(&stoat.keymap, &state, mode, screen, pane),
@@ -2384,17 +2396,28 @@ fn hints_subtitle(chord: bool, screen_box: bool, rows: usize) -> Cow<'static, st
 }
 
 /// The keys the hints box's footer names, the one that hides the box from
-/// `state` and the one that opens the full help from normal mode.
+/// `state` and the one that opens the full help.
 ///
-/// The help key reads from a bare normal-mode state, because that is where a
-/// reader goes to press it.
-fn hints_footer_keys(keymap: &crate::keymap::Keymap, state: &dyn KeymapState) -> hints::FooterKeys {
-    hints::FooterKeys {
-        hide: keymap.key_for_action(state, "ToggleKeyHints"),
-        help: keymap.key_for_action(
+/// In a primary `mode` the help key reads from a bare normal-mode state,
+/// because that is where a reader goes to press it. A chord mode reads it from
+/// its own `state`, because the chord takes its keys first. A chord that binds
+/// `?` to an action of its own then names its way out and the help key, such
+/// as `Esc ?`.
+fn hints_footer_keys(
+    keymap: &crate::keymap::Keymap,
+    state: &dyn KeymapState,
+    mode: &str,
+) -> hints::FooterKeys {
+    let help = match PRIMARY_MODES.contains(&mode) {
+        true => keymap.key_for_action(
             &StoatKeymapState::with_flags("normal", Flags::default()),
             "OpenHelp",
         ),
+        false => keymap.key_for_action(state, "OpenHelp"),
+    };
+    hints::FooterKeys {
+        hide: keymap.key_for_action(state, "ToggleKeyHints"),
+        help,
     }
 }
 
@@ -2484,6 +2507,10 @@ pub(crate) fn overlay_pane(ws: &Workspace) -> Option<PaneId> {
 ///
 /// `chord` is the title of an armed chord whose own table takes the place of
 /// the keymap's rows.
+///
+/// `pin_hidden` is whether a pin hides a chord mode's box. A pinned box shows
+/// only for the toggle, so the toggle hides it, and its footer names the hide
+/// key that an unpinned chord box leaves out.
 #[allow(clippy::too_many_arguments)]
 fn hints_cache_key(
     mode: &str,
@@ -2495,6 +2522,7 @@ fn hints_cache_key(
     modal: Option<&str>,
     scope: Option<&str>,
     chord: Option<&str>,
+    pin_hidden: bool,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     mode.hash(&mut hasher);
@@ -2505,6 +2533,7 @@ fn hints_cache_key(
     focus.hash(&mut hasher);
     modal.hash(&mut hasher);
     scope.hash(&mut hasher);
+    pin_hidden.hash(&mut hasher);
     chord.hash(&mut hasher);
     hasher.finish()
 }
@@ -2608,6 +2637,7 @@ fn cached_modal_hints(
         Some(modal),
         scope,
         None,
+        false,
     );
     if cache.as_ref().map(|c| c.key) != Some(key) {
         let state = StoatKeymapState::with_flags(mode, Flags::default())
@@ -2627,7 +2657,7 @@ fn cached_modal_hints(
         *cache = Some(hints::HintsCache::new(
             key,
             hints::group_by_action(&bindings),
-            hints_footer_keys(keymap, &state),
+            hints_footer_keys(keymap, &state, mode),
         ));
     }
     let cache = cache.as_mut().expect("cache populated above");
@@ -3355,6 +3385,7 @@ mod dispatch_tests {
             Some(modal),
             scope,
             None,
+            false,
         )
     }
 
@@ -3457,6 +3488,7 @@ mod lsp_filter_tests {
         action_handlers::{textobject::TextobjectMode, yank},
         app::UpdateEffect,
         lsp::LspSymbolKind,
+        render::hints::FooterKeys,
         test_harness::{keys, TestHarness},
     };
     use crossterm::event::{Event, KeyCode};
@@ -4022,7 +4054,7 @@ mod lsp_filter_tests {
     /// the box and brings it back. The flag that forces a box on elsewhere
     /// shows none here. The box names the view and says that it stays, and its
     /// footer reads the hunk under the cursor, `-` above the first one. A chord
-    /// over the view shows its own box, with no hunk in its footer.
+    /// over the view shows its own box, whose footer names no hunk.
     #[test]
     fn the_diff_view_keeps_its_box_up_with_the_hunk_position() {
         let mut h = TestHarness::with_size(150, 50);
@@ -4061,7 +4093,61 @@ mod lsp_filter_tests {
                 None,
                 None,
                 edges("1"),
-                Some("\u{2502} C-? hide \u{b7} ? help \u{2502}".to_string()),
+                Some("\u{2502} Esc ? help \u{2502}".to_string()),
+            ),
+        );
+    }
+
+    /// A box's footer names a key only where the key does what the footer
+    /// says. An armed chord takes both keys as its char, so its box ends at
+    /// its last row. A chord mode's box shows whatever the toggle holds, so it
+    /// names no hide key, and its help key is the chord's own way to the help.
+    /// A pin leaves the box to the toggle, so a pinned chord's box names the
+    /// hide key again.
+    #[test]
+    fn a_hints_footer_names_only_the_keys_that_work() {
+        let mut h = TestHarness::with_size(150, 50);
+        let footer = |h: &mut TestHarness| {
+            h.render_composited();
+            h.stoat
+                .hints_cache
+                .as_ref()
+                .expect("a box laid out")
+                .footer_keys
+                .clone()
+        };
+        h.type_keys("r");
+        let chord = (footer(&mut h), box_edges(&mut h, "replace with char"));
+        h.type_keys("escape space");
+        let space = footer(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::PinMode);
+        h.stoat.key_hints_visible = true;
+        let pinned = footer(&mut h);
+        h.type_keys("escape z");
+        let help_chord = footer(&mut h);
+        h.type_keys("escape");
+        let forced = footer(&mut h);
+
+        let keys = |hide: Option<&str>, help: Option<&str>| FooterKeys {
+            hide: hide.map(String::from),
+            help: help.map(String::from),
+        };
+        assert_eq!(
+            (chord, [space, pinned, help_chord, forced]),
+            (
+                (
+                    keys(None, None),
+                    Some([
+                        "\u{250c} replace with char waiting on a char \u{2510}".to_string(),
+                        "\u{2502} Esc cancel \u{2502}".to_string(),
+                    ]),
+                ),
+                [
+                    keys(None, Some("Esc ?")),
+                    keys(Some("C-?"), Some("Esc ?")),
+                    keys(None, Some("?")),
+                    keys(Some("C-?"), Some("?")),
+                ],
             ),
         );
     }
