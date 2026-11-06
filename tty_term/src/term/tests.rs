@@ -6300,6 +6300,32 @@ fn a_strip_the_scene_stops_declaring_loses_its_view() {
     );
 }
 
+/// A frame's synchronized update opens with a reset, then carries a strip's
+/// first declaration and its first view. The view outlives that reset, so the
+/// thumb follows it from the strip's first frame.
+#[test]
+fn a_view_sent_with_its_strip_s_first_declaration_survives_the_update() {
+    let mut terminal = Terminal::new(4, 4, Theme::default());
+    terminal.advance(b"\x1b[?2026h");
+    terminal.advance(&encode_reset());
+    terminal.advance(&encode_minimap(&minimap_cmd(5, 9)));
+    terminal.advance(&encode_minimap_view(&MinimapViewCommand {
+        strip_id: 5,
+        top_256: 256,
+        visible_lines: 20,
+    }));
+    terminal.advance(b"\x1b[?2026l");
+
+    assert_eq!(
+        terminal.minimap_views.get(&5).copied(),
+        Some(MinimapView {
+            top_256: 256,
+            visible: 20,
+        }),
+        "the view lands after the reset that opens its update",
+    );
+}
+
 #[test]
 fn minimap_drop_removes_content_store() {
     let mut terminal = Terminal::new(4, 4, Theme::default());

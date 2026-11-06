@@ -2044,33 +2044,16 @@ impl Terminal {
                 }
             },
             // A minimap declaration is a decoration cleared by reset, staged like
-            // a border. Its content store, views, and drop are persistent state
-            // that acts immediately, so an incremental splice is never lost.
-            Command::Minimap(_) => self.stage_or_apply(command),
+            // a border. Its content store and drop are persistent state that
+            // acts immediately, so an incremental splice is never lost.
+            //
+            // A view is persistent state too, but it stages with the
+            // declarations. The reset that opens a frame prunes every view whose
+            // strip its lanes do not declare. A staged view lands after that
+            // reset, so the view sent with a strip's first declaration survives.
+            Command::Minimap(_) | Command::MinimapView(_) => self.stage_or_apply(command),
             Command::MinimapLines(lines) => self.splice_minimap_content(lines),
             Command::MinimapLen(len) => self.resize_minimap_content(len),
-            Command::MinimapView(view) => {
-                // An id already drawn keeps advancing its thumb at the cap, so
-                // the limit costs a real scene nothing and refuses only the
-                // fresh ids a looping writer invents.
-                if !self.minimap_views.contains_key(&view.strip_id)
-                    && self.minimap_views.len() >= MAX_MINIMAP_VIEWS
-                {
-                    self.warn_minimap_cap("minimap view limit reached, refusing a new strip id");
-                    return;
-                }
-                self.minimap_views.insert(
-                    view.strip_id,
-                    MinimapView {
-                        top_256: view.top_256,
-                        visible: view.visible_lines,
-                    },
-                );
-                // A view-only advance still marks the strip dirty so the next
-                // projection re-stamps the thumb. Otherwise it freezes at its
-                // last position until a re-declare or resize marks it.
-                self.decorations_dirty.minimaps = true;
-            },
             Command::MinimapDrop(drop) => {
                 self.minimap_contents.remove(&drop.content_id);
                 self.journal_minimap(MinimapJournal::Drop(drop.content_id));
@@ -2358,15 +2341,16 @@ impl Terminal {
         }
     }
 
-    /// Apply a decoration command to the open lane, or act on a lane marker or a
-    /// reset.
+    /// Apply a decoration command to the open lane, or act on a lane marker, a
+    /// reset, or a minimap view.
     ///
     /// The completed `Popover` and `TextRun` commands arrive here already carrying
     /// their captured text from [`Self::commit_capture`], so they push directly
     /// rather than reopening a capture. Only the accumulating decoration commands,
-    /// the lane markers, and `Reset` reach this method. The stream-routing and
-    /// pool commands act at feed time in [`Self::apply_command`] and never route
-    /// here.
+    /// the minimap views, the lane markers, and `Reset` reach this method. A view
+    /// comes here so it applies in stream order against the reset. The
+    /// stream-routing and pool commands act at feed time in
+    /// [`Self::apply_command`] and never route here.
     ///
     /// A decoration waits in its lane until [`Self::flatten_lanes`] rebuilds the
     /// flat lists the projection reads.
@@ -2462,13 +2446,35 @@ impl Terminal {
                     self.lanes_changed = true;
                 }
             },
+            Command::MinimapView(view) => {
+                // An id already drawn keeps advancing its thumb at the cap, so
+                // the limit costs a real scene nothing and refuses only the
+                // fresh ids a looping writer invents.
+                if !self.minimap_views.contains_key(&view.strip_id)
+                    && self.minimap_views.len() >= MAX_MINIMAP_VIEWS
+                {
+                    self.warn_minimap_cap("minimap view limit reached, refusing a new strip id");
+                    return;
+                }
+                self.minimap_views.insert(
+                    view.strip_id,
+                    MinimapView {
+                        top_256: view.top_256,
+                        visible: view.visible_lines,
+                    },
+                );
+                // A view-only advance still marks the strip dirty so the next
+                // projection re-stamps the thumb. Otherwise it freezes at its
+                // last position until a re-declare or resize marks it.
+                self.decorations_dirty.minimaps = true;
+            },
             Command::LaneBegin(id) => self.begin_lane(id),
             Command::LaneEnd => self.lane = 0,
             Command::Reset => self.clear_decorations(),
             // None of these reach here. apply_command routes them at feed time:
             // the stream and pool controls, the immediate minimap content,
-            // length, view, and drop commands, and the batches it splits into
-            // single runs and bars.
+            // length, and drop commands, and the batches it splits into single
+            // runs and bars.
             Command::Fill(_)
             | Command::FillRows(_)
             | Command::FillDecorations(_)
@@ -2486,7 +2492,6 @@ impl Terminal {
             | Command::PoolDrop(_)
             | Command::MinimapLines(_)
             | Command::MinimapLen(_)
-            | Command::MinimapView(_)
             | Command::MinimapDrop(_)
             | Command::WindowOpen(_)
             | Command::WindowClose(_)
