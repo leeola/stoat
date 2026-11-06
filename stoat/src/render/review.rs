@@ -3,6 +3,7 @@ use super::{
     paint::{
         brighten_rgb, brighten_style, dim_rgb, luma, paint_style_runs, render_side_num, style_rgb,
     },
+    text::write_str_clipped,
 };
 use crate::{
     app::Stoat,
@@ -13,7 +14,7 @@ use crate::{
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
         BlockPlacement, BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot,
-        RowHighlightCursor, WrapPoint,
+        FoldPlaceholder, RowHighlightCursor, WrapPoint,
     },
     editor_state::EditorState,
     host::DiffStatus,
@@ -26,10 +27,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
 };
 use std::{
+    any::TypeId,
     cmp::Ordering,
     collections::BTreeMap,
     fmt::Write,
     hash::{DefaultHasher, Hash, Hasher},
+    sync::Arc,
 };
 use stoat_text::Point;
 use stoat_widgets::{
@@ -335,6 +338,30 @@ pub(crate) fn render_diff_view(
 /// half falls under about 43 columns after its gutters, too cramped to read
 /// code, so the view collapses to a single unified column.
 pub(crate) const DIFF_TWO_COLUMN_MIN: u16 = 100;
+
+/// The tag of a fold that the diff view paints as a fold row.
+///
+/// A changes view folds the unchanged lines far from every hunk, each fold from
+/// its first row's first column, so the fold's placeholder holds the whole row
+/// and the row stands for the lines the fold hides. The diff view paints it as a
+/// band across both sides, where any other fold's placeholder trails the text
+/// of the row it starts on.
+struct FoldRow;
+
+/// The placeholder of a fold row that hides `lines` unchanged lines, which
+/// names how many.
+///
+/// The fold it goes on starts at its row's first column, which is what makes
+/// the row hold the placeholder alone.
+pub(crate) fn fold_row_placeholder(lines: u32) -> FoldPlaceholder {
+    let noun = if lines == 1 { "line" } else { "lines" };
+    FoldPlaceholder {
+        text: Arc::from(format!("\u{22ef} {lines} unchanged {noun}")),
+        collapsed_text: None,
+        merge_adjacent: false,
+        type_tag: Some(TypeId::of::<FoldRow>()),
+    }
+}
 
 /// What one display row is, without borrowing the snapshot it came from.
 ///
@@ -1052,6 +1079,9 @@ pub(crate) fn paint_diff_rows(
     // The rows of a wrapped base line paint one after another, so one entry
     // breaks each line once per paint rather than once per row.
     let mut base_layout: Option<(u32, BaseLineLayout)> = None;
+    // The rows of `inner` that fold rows take, which the gutter rules break
+    // around.
+    let mut fold_offsets: Vec<u16> = Vec::new();
 
     for display_row in scroll_row..end_row {
         let y = inner.y + (display_row - scroll_row) as u16;
@@ -1126,6 +1156,26 @@ pub(crate) fn paint_diff_rows(
             },
             DiffRowKind::BufferRow { buffer_row } => {
                 landed += 1;
+                if !row_state.continuation && opens_fold_row(snapshot, buffer_row) {
+                    // A fold row stands for its own line too, so that line's
+                    // base line counts with the lines the fold hides below it.
+                    base_line += hidden_base_lines(snapshot, next_buffer_row..buffer_row + 1)
+                        + seam_lines_through(&seams, &mut seam_cursor, next_buffer_row, buffer_row);
+                    next_buffer_row = buffer_row + 1;
+                    paint_fold_row(
+                        snapshot,
+                        display_row,
+                        inner,
+                        y,
+                        theme,
+                        &mut rich,
+                        buf,
+                        &mut line_buf,
+                        decorations_only,
+                    );
+                    fold_offsets.push(y - inner.y);
+                    continue;
+                }
                 // A continuation belongs to the line its first row numbered and
                 // counted, so it paints text alone. `base_line_at` counts a
                 // continuation top row's seams, so the walk skips them here.
@@ -1403,21 +1453,25 @@ pub(crate) fn paint_diff_rows(
 
     // One hairline per gutter spanning the visible rows, replacing the per-row
     // glyph. A gutter's hairline sits at the rich gutter's separator offset,
-    // and the mid divider centers in its cell at `DIVIDER_RULE_X`.
+    // and the mid divider centers in its cell at `DIVIDER_RULE_X`. A fold row's
+    // band runs across both sides, so each hairline breaks around it.
     if let Some(rg) = rich.as_mut() {
-        let height = (end_row - scroll_row) as u16 * 16;
+        let spans = rule_spans((end_row - scroll_row) as u16, &fold_offsets);
         let gutter_rules =
             [left_x, right_x].map(|side| (side - inner.x) * 16 + rg.offsets.separator_x);
         let divider = sep_x.map(|sep| (sep - inner.x) * 16 + DIVIDER_RULE_X);
         for x in gutter_rules.into_iter().chain(divider) {
-            if x / 16 < inner.width {
+            if x / 16 >= inner.width {
+                continue;
+            }
+            for &(top, rows) in &spans {
                 rg.bars.push(
                     inner,
                     Bar {
                         x: x as i16,
-                        y: 0,
+                        y: (top * 16) as i16,
                         width: 1,
-                        height,
+                        height: rows * 16,
                         color: rg.colors.dim,
                     },
                 );
@@ -1426,6 +1480,102 @@ pub(crate) fn paint_diff_rows(
         rg.numbers.flush(rg.scene);
         rg.bars.flush(rg.scene);
     }
+}
+
+/// Whether buffer row `row` opens a fold row, a fold tagged [`FoldRow`].
+fn opens_fold_row(snapshot: &DisplaySnapshot, row: u32) -> bool {
+    let folds = snapshot.fold_snapshot();
+    if folds.fold_count() == 0 {
+        return false;
+    }
+
+    // A fold row's fold starts at its row's first column, so a fold that meets
+    // the row's span and carries the tag starts on that row.
+    let inlays = snapshot.inlay_snapshot();
+    let max = snapshot.buffer_snapshot().rope().max_point();
+    let span = inlays.to_inlay_point(Point::new(row, 0))
+        ..inlays.to_inlay_point(Point::new(row + 1, 0).min(max));
+    folds
+        .folds_in_range(span)
+        .iter()
+        .any(|fold| fold.placeholder.type_tag == Some(TypeId::of::<FoldRow>()))
+}
+
+/// Paint display row `display_row`, a fold row, across `inner` at screen row
+/// `y`.
+///
+/// The row fills with `diff.fold`'s background across both sides, and its
+/// placeholder, which names how many lines the fold hides, centers in
+/// `ui.text.muted`. No number, mark, or base text paints, since the row stands
+/// for lines rather than showing one. A rich gutter draws the text at the scale
+/// of its numbers, and cells draw it in cells.
+///
+/// `text` is scratch space for the placeholder.
+#[allow(clippy::too_many_arguments)]
+fn paint_fold_row(
+    snapshot: &DisplaySnapshot,
+    display_row: u32,
+    inner: Rect,
+    y: u16,
+    theme: &crate::theme::Theme,
+    rich: &mut Option<DiffRichGutter<'_>>,
+    buf: &mut Buffer,
+    text: &mut String,
+    decorations_only: bool,
+) {
+    text.clear();
+    snapshot.write_display_line(text, display_row);
+    let fill = theme.get(s::DIFF_FOLD);
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    if !decorations_only {
+        for x in inner.x..inner.x + inner.width {
+            buf[(x, y)].set_char(' ').set_style(fill);
+        }
+    }
+
+    let chars = text.chars().count();
+    match rich {
+        Some(rg) => {
+            let advance = text_run::advance_sixteenths(chars, rg.number_scale);
+            let color = style_rgb(muted.fg).unwrap_or(rg.colors.dim);
+            let bg = style_rgb(fill.bg).unwrap_or(rg.colors.bg);
+            rg.numbers.push(
+                inner,
+                TextRun {
+                    col: ((inner.width * 16).saturating_sub(advance) / 2) as i16,
+                    row: ((y - inner.y) * 16) as i16,
+                    scale: rg.number_scale,
+                    color: rg.colors.faded(color),
+                    bg: Some(rg.colors.faded(bg)),
+                    text,
+                    follow: 0,
+                    anchor: None,
+                },
+            );
+        },
+        None if !decorations_only => {
+            let width = (chars as u16).min(inner.width);
+            let x = inner.x + (inner.width - width) / 2;
+            write_str_clipped(buf, x, y, text, fill.patch(muted), inner.x + inner.width);
+        },
+        None => {},
+    }
+}
+
+/// The runs of rows `0..rows` that no row of `breaks` cuts, each as its top
+/// row and its row count.
+///
+/// `breaks` is in ascending order.
+fn rule_spans(rows: u16, breaks: &[u16]) -> Vec<(u16, u16)> {
+    let mut spans = Vec::new();
+    let mut top = 0;
+    for &row in breaks.iter().chain(std::iter::once(&rows)) {
+        if row > top {
+            spans.push((top, row - top));
+        }
+        top = row + 1;
+    }
+    spans
 }
 
 /// The colors one diff paint blends toward: the editor background its softening
@@ -4097,7 +4247,13 @@ mod tests {
     /// A minimal theme whose diff colors resolve to RGB, so the change washes
     /// engage when rendering a hand-built diff editor off the harness.
     fn rgb_diff_theme() -> Theme {
-        let src = r##"theme rgbtest {
+        rgb_diff_theme_with("")
+    }
+
+    /// [`rgb_diff_theme`] with the settings in `extra` added to its block.
+    fn rgb_diff_theme_with(extra: &str) -> Theme {
+        let src = format!(
+            r##"theme rgbtest {{
             diff.context.fg  = "#808080";
             diff.added.fg    = "#00ff00";
             diff.modified.fg = "#ffff00";
@@ -4108,10 +4264,172 @@ mod tests {
             diff.approved.fg = "#ff8000";
             diff.unapproved.fg = "#8000ff";
             ui.background.bg = "#282c34";
-        }"##;
-        let (config, _) = stoat_config::parse(src);
+            {extra}
+        }}"##
+        );
+        let (config, _) = stoat_config::parse(&src);
         Theme::from_config(&config.expect("theme config parses"), "rgbtest")
             .expect("rgb theme builds")
+    }
+
+    /// The fold fill and the muted text color the fold row tests read.
+    const FOLD_THEME: &str = r##"diff.fold.bg = "#303030"; ui.text.muted.fg = "#909090";"##;
+
+    /// The count on the fold row of [`fold_row_editor`].
+    const FOLD_TEXT: &str = "\u{22ef} 12 unchanged lines";
+
+    /// A diff view of twenty lines whose sixteenth line changed, with lines 1
+    /// to 12 under a fold row.
+    fn fold_row_editor() -> EditorState {
+        let base: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        let mut editor = diff_editor(&base, &base.replace("\n16\n", "\nSIXTEEN\n"));
+        editor.display_map.fold_with(vec![(
+            Point::new(0, 0)..Point::new(11, 2),
+            fold_row_placeholder(12),
+        )]);
+        editor
+    }
+
+    /// A fold row paints across both sides on the fold fill, its count centered
+    /// in muted text with no number beside it, and the rows below number their
+    /// base and buffer lines past the twelve lines it stands for.
+    #[test]
+    fn a_fold_row_spans_both_sides_and_the_numbers_resume_below_it() {
+        let mut editor = fold_row_editor();
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &rgb_diff_theme_with(FOLD_THEME),
+            &mut buf,
+            false,
+            None,
+            None,
+            false,
+            DiffDials::shipped(),
+            BufferNumbering::Absolute,
+            &[],
+            false,
+        );
+
+        let start = (120 - FOLD_TEXT.chars().count() as u16) / 2;
+        let row = buffer_text(&buf, 0);
+        let fill = Color::Rgb(0x30, 0x30, 0x30);
+        assert_eq!(
+            (
+                (row.trim().to_string(), row.find('\u{22ef}')),
+                (0..120).all(|x| buf[(x, 0)].bg == fill),
+                buf[(start, 0)].fg,
+                number_pairs(&buf, area)[1..].to_vec(),
+            ),
+            (
+                (FOLD_TEXT.to_string(), Some(usize::from(start))),
+                true,
+                Color::Rgb(0x90, 0x90, 0x90),
+                pairs(13..=21, 13..=21),
+            ),
+        );
+    }
+
+    /// [`fold_row_editor`] painted with a rich gutter over 120 by 10, its cells
+    /// too unless `decorations_only`.
+    ///
+    /// Answers the cells, the scene's commands, the scale the gutter's numbers
+    /// take, and the columns the paint lays out.
+    fn rich_fold_row_paint(decorations_only: bool) -> (Buffer, Vec<Command>, u16, DiffColumns) {
+        let mut editor = fold_row_editor();
+        let theme = rgb_diff_theme_with(FOLD_THEME);
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        render_diff_view(
+            &mut editor,
+            area,
+            Style::default(),
+            &theme,
+            &mut buf,
+            true,
+            None,
+            Some(&mut scene),
+            true,
+            DiffDials::shipped(),
+            BufferNumbering::Absolute,
+            &[],
+            decorations_only,
+        );
+
+        let scale = theme.type_scale(TypeRole::Small);
+        let digits = diff_gutter_digits(&editor.display_map.snapshot());
+        let cols = DiffColumns::compute(area, DiffLayout::diff_view(digits, Some(scale)));
+        (buf, decode_stream(scene.buffer()), scale, cols)
+    }
+
+    /// A text run's `(col, row, scale, color, bg)`.
+    type RunFields = (i16, i16, u16, [u8; 3], Option<[u8; 3]>);
+
+    /// The runs of `commands` that draw [`FOLD_TEXT`].
+    fn fold_runs(commands: &[Command]) -> Vec<RunFields> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text == FOLD_TEXT => {
+                    Some((run.col, run.row, run.scale, run.color, run.bg))
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Under a rich gutter a fold row's count is one run at the gutter's number
+    /// scale, centered across the row on the fold fill, and the mid divider
+    /// breaks around the row.
+    #[test]
+    fn a_rich_fold_row_centers_one_small_run_and_breaks_the_divider() {
+        let (_, commands, scale, cols) = rich_fold_row_paint(false);
+        let divider = (cols.sep_x.expect("two columns") * 16 + DIVIDER_RULE_X) as i16;
+        let divider_bars: Vec<(i16, u16)> = commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.x == divider => Some((bar.y, bar.height)),
+                _ => None,
+            })
+            .collect();
+
+        let advance = text_run::advance_sixteenths(FOLD_TEXT.chars().count(), scale);
+        assert_eq!(
+            (fold_runs(&commands), divider_bars),
+            (
+                vec![(
+                    ((1920 - advance) / 2) as i16,
+                    0,
+                    scale,
+                    [0x90, 0x90, 0x90],
+                    Some([0x30, 0x30, 0x30])
+                )],
+                vec![(16, 144)],
+            ),
+        );
+    }
+
+    /// A decorations-only paint of a fold row writes none of the row's cells and
+    /// still sends its count, so a page refill that sends decorations alone
+    /// keeps the count on the cells a full paint left.
+    #[test]
+    fn a_decorations_only_fold_row_writes_no_cell_and_keeps_its_count() {
+        let (full_buf, full, _, _) = rich_fold_row_paint(false);
+        let (buf, decorations, _, _) = rich_fold_row_paint(true);
+        let blank = Buffer::empty(buf.area);
+        let row_blank = |buf: &Buffer| (0..120).all(|x| buf[(x, 0)] == blank[(x, 0)]);
+        assert_eq!(
+            (
+                row_blank(&buf),
+                row_blank(&full_buf),
+                fold_runs(&decorations)
+            ),
+            (true, false, fold_runs(&full)),
+        );
     }
 
     fn diff_editor_staged(base: &str, index: &str, text: &str) -> EditorState {

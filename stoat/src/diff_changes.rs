@@ -22,7 +22,7 @@ use crate::{
     buffer_lifecycle,
     buffer_registry::{BufferRegistry, OpenOrigin},
     diff_map::{DiffHunkStatus, DiffMap},
-    display_map::{FoldSnapshot, InlayPoint},
+    display_map::{FoldPlaceholder, FoldSnapshot, InlayPoint},
     editor_state::{EditorId, EditorState},
     pane::View,
     render,
@@ -35,6 +35,7 @@ use std::{
     mem,
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use stoat_text::{Point, Rope};
 
@@ -1157,22 +1158,29 @@ fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
         let rope = snapshot.buffer_snapshot().rope();
         let line_count = rope.max_point().row + 1;
         let kept = kept_runs(map, line_count);
-        let wanted: Vec<Range<Point>> = gaps(&kept, line_count)
+        let wanted: Vec<(Range<Point>, FoldPlaceholder)> = gaps(&kept, line_count)
             .into_iter()
-            .map(|gap| fold_range(rope, gap))
+            .map(|gap| {
+                let in_hunk = map
+                    .hunks()
+                    .any(|hunk| hunk.buffer_line_range.contains(&gap.start));
+                gap_fold(rope, gap, in_hunk)
+            })
             .collect();
+        let wanted_ranges: Vec<Range<Point>> =
+            wanted.iter().map(|(range, _)| range.clone()).collect();
 
         // The folds sit where their anchors carried them across every edit
         // since their cut, so a gap whose rows moved still finds its fold.
         let held = folded_ranges(snapshot.fold_snapshot());
         let stale: Vec<Range<Point>> = held
             .iter()
-            .filter(|fold| !holds(&wanted, fold))
+            .filter(|fold| !holds(&wanted_ranges, fold))
             .cloned()
             .collect();
-        let fresh: Vec<Range<Point>> = wanted
+        let fresh: Vec<(Range<Point>, FoldPlaceholder)> = wanted
             .into_iter()
-            .filter(|fold| !holds(&held, fold))
+            .filter(|(range, _)| !holds(&held, range))
             .collect();
         (map.version(), kept, stale, fresh)
     };
@@ -1180,7 +1188,7 @@ fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
         editor.display_map.unfold(stale);
     }
     if !fresh.is_empty() {
-        editor.display_map.fold(fresh);
+        editor.display_map.fold_with(fresh);
     }
     Some((version, kept))
 }
@@ -1262,17 +1270,41 @@ fn gaps(kept: &[Range<u32>], line_count: u32) -> Vec<Range<u32>> {
     gaps
 }
 
-/// The fold that hides the rows of `gap`.
+/// The fold that hides the rows of `gap`, with the placeholder it shows.
 ///
-/// A gap below a shown row folds from the end of that row, so the row ends in
-/// the fold's placeholder and the row below the gap starts the next display
-/// row. A gap at the top folds from the buffer's start, so its placeholder
-/// takes a display row of its own.
-fn fold_range(rope: &Rope, gap: Range<u32>) -> Range<Point> {
+/// A gap folds from the start of its first row, so the fold takes a display
+/// row of its own that names how many lines it hides. The diff view paints that
+/// row as a fold row. The empty row after a final newline holds no line, so the
+/// count leaves it out.
+///
+/// Two gaps fold from the end of the row above instead, so they take no row.
+/// A gap of that empty row alone takes an empty placeholder, and the excerpt's
+/// last line ends as it reads. A gap whose first row lies in a hunk, `in_hunk`,
+/// which only the unmarked rows of a refined hunk leave, takes the default
+/// placeholder. A fold row on that row puts the row's base line in a block
+/// above it, because the diff view pairs a fold's own row with its base line.
+fn gap_fold(rope: &Rope, gap: Range<u32>, in_hunk: bool) -> (Range<Point>, FoldPlaceholder) {
+    let line_count = rope.max_point().row + 1;
     let end = Point::new(gap.end - 1, rope.line_len(gap.end - 1));
-    match gap.start {
-        0 => Point::new(0, 0)..end,
-        start => Point::new(start - 1, rope.line_len(start - 1))..end,
+    let after_final_newline = gap.end == line_count && rope.line_len(line_count - 1) == 0;
+    let lines = gap.end - gap.start - u32::from(after_final_newline);
+    let from_row_above = |placeholder| match gap.start {
+        0 => (Point::new(0, 0)..end, placeholder),
+        start => (
+            Point::new(start - 1, rope.line_len(start - 1))..end,
+            placeholder,
+        ),
+    };
+    match (lines, in_hunk) {
+        (0, _) => from_row_above(FoldPlaceholder {
+            text: Arc::from(""),
+            ..FoldPlaceholder::default()
+        }),
+        (_, true) => from_row_above(FoldPlaceholder::default()),
+        (lines, false) => (
+            Point::new(gap.start, 0)..end,
+            render::review::fold_row_placeholder(lines),
+        ),
     }
 }
 
@@ -1286,15 +1318,17 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        excerpt_rows, fold_range, gaps, kept_runs, landing_row, listed_files,
+        excerpt_rows, fold_excerpt, gap_fold, gaps, kept_runs, landing_row, listed_files,
         pump_diff_changes_stack, DiffChangesState, ExcerptStats, Landing, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
-        buffer::BufferId,
+        buffer::{BufferId, TextBuffer},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
         display_map::{DisplayPoint, InlayPoint},
+        editor_state::EditorState,
         host::FakeRepoBuilder,
+        render,
         test_harness::TestHarness,
         workspace::{
             diff::{DiffBase, WorktreeBase},
@@ -1304,10 +1338,11 @@ mod tests {
     use std::{
         ops::Range,
         path::{Path, PathBuf},
-        sync::Arc,
+        sync::{Arc, RwLock},
     };
     use stoat_action::CloseDiffChanges;
     use stoat_language::structural_diff;
+    use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{Point, Rope};
 
     /// The map a structural diff of `base` against `text` gives.
@@ -1444,16 +1479,100 @@ mod tests {
         );
     }
 
-    /// A gap below a shown row folds from that row's end, and a gap at the top
-    /// folds from the buffer's start.
+    /// A gap folds from the start of its first row under a fold row's
+    /// placeholder, which counts the gap's lines without the empty row after
+    /// the final newline. That row alone, and a gap that starts in a hunk, fold
+    /// from the end of the row above.
     #[test]
-    fn a_fold_starts_at_the_end_of_the_row_above_its_gap() {
+    fn a_gap_folds_from_its_first_row_under_a_count_of_its_lines() {
         let rope = Rope::from("one\ntwo\nthree\nfour\n");
+        let fold_row = render::review::fold_row_placeholder(1).type_tag;
+        let fold = |gap: Range<u32>, in_hunk: bool| {
+            let (range, placeholder) = gap_fold(&rope, gap, in_hunk);
+            (range, placeholder.text.to_string(), placeholder.type_tag)
+        };
+        let lines = |n: &str| format!("\u{22ef} {n} unchanged");
+
         assert_eq!(
-            [fold_range(&rope, 1..3), fold_range(&rope, 0..2)],
             [
-                Point::new(0, 3)..Point::new(2, 5),
-                Point::new(0, 0)..Point::new(1, 3)
+                fold(1..3, false),
+                fold(0..1, false),
+                fold(2..5, false),
+                fold(4..5, false),
+                fold(1..3, true),
+            ],
+            [
+                (
+                    Point::new(1, 0)..Point::new(2, 5),
+                    lines("2") + " lines",
+                    fold_row
+                ),
+                (
+                    Point::new(0, 0)..Point::new(0, 3),
+                    lines("1") + " line",
+                    fold_row
+                ),
+                (
+                    Point::new(2, 0)..Point::new(4, 0),
+                    lines("2") + " lines",
+                    fold_row
+                ),
+                (Point::new(3, 4)..Point::new(4, 0), String::new(), None),
+                (Point::new(0, 3)..Point::new(2, 5), "...".to_string(), None),
+            ],
+        );
+    }
+
+    /// A gap whose first row lies in a refined hunk folds from the end of the
+    /// row above under the default placeholder, and each gap of unchanged rows
+    /// takes a fold row that counts its lines.
+    ///
+    /// Rows 10 to 49 form one hunk, marked at rows 10 and 11 and at 40 and 41,
+    /// so the gaps at rows 15 to 36 and at row 45 lie inside it.
+    #[test]
+    fn a_gap_that_starts_in_a_hunk_folds_from_the_row_above() {
+        let text: String = (1..=60).map(|n| format!("{n}\n")).collect();
+        let map = DiffMap::from_hunks(
+            [DiffHunk {
+                status: DiffHunkStatus::Modified,
+                unstaged_lines: Vec::new(),
+                marked_rows: vec![10..12, 40..42],
+                buffer_start_line: 10,
+                buffer_line_range: 10..50,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: None,
+            }],
+            None,
+        );
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), &text);
+        buffer.diff_map = Some(map);
+        let shared = Arc::new(RwLock::new(buffer));
+        let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
+        fold_excerpt(&mut editor);
+
+        let snapshot = editor.display_map.snapshot();
+        let folds = snapshot.fold_snapshot();
+        let inlays = folds.inlay_snapshot();
+        let held: Vec<(Point, String)> = folds
+            .folds_in_range(InlayPoint::default()..folds.to_inlay_point(folds.max_point()))
+            .into_iter()
+            .map(|fold| {
+                (
+                    inlays.to_buffer_point(fold.range.start),
+                    fold.placeholder.text.to_string(),
+                )
+            })
+            .collect();
+        let seven = "\u{22ef} 7 unchanged lines".to_string();
+        assert_eq!(
+            held,
+            [
+                (Point::new(0, 0), seven.clone()),
+                (Point::new(14, 2), "...".to_string()),
+                (Point::new(44, 2), "...".to_string()),
+                (Point::new(53, 0), seven),
             ],
         );
     }
@@ -1600,10 +1719,11 @@ mod tests {
             .filter_map(|row| snapshot.display_to_buffer(DisplayPoint::new(row, 0)))
             .map(|point| point.row)
             .collect();
-        // The placeholder row holds the folded top, then rows 6 to 12 show the
-        // hunk at row 9 with its context, and the rows below fold into row 12.
-        // The base line the hunk replaced takes a row with no buffer row.
-        assert_eq!(shown, [0, 6, 7, 8, 9, 10, 11, 12]);
+        // The fold row at row 0 stands for the folded top, rows 6 to 12 show the
+        // hunk at row 9 with its context, and the fold row at row 13 stands for
+        // the rows below. The base line the hunk replaced takes a row with no
+        // buffer row.
+        assert_eq!(shown, [0, 6, 7, 8, 9, 10, 11, 12, 13]);
     }
 
     /// An unsaved edit to a clean open file puts the file in the list, which
@@ -1854,12 +1974,13 @@ mod tests {
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();
         let inlays = folds.inlay_snapshot();
+        // A fold from a row's start hides that row under its fold row, and a
+        // fold from a row's end hides the rows below it.
         let hidden = |range: &Range<InlayPoint>| {
             let start = inlays.to_buffer_point(range.start);
-            let first = if start == Point::new(0, 0) {
-                0
-            } else {
-                start.row + 1
+            let first = match start.column {
+                0 => start.row,
+                _ => start.row + 1,
             };
             first..inlays.to_buffer_point(range.end).row + 1
         };

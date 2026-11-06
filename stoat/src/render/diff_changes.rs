@@ -1177,13 +1177,13 @@ mod tests {
     }
 
     /// Each number is the count that `j` or `k` takes to reach its row from
-    /// the cursor, across fold placeholders, removed base rows, and excerpt
-    /// headers.
+    /// the cursor, across fold rows, removed base rows, and excerpt headers.
+    /// A fold row takes a step and shows no number.
     ///
     /// a.txt changes its first line and folds the lines past its fourth into
-    /// that row. b.txt changes line 15 and folds lines 1 to 11 into a
-    /// placeholder row of its own, where the cursor sits. c.txt drops line 3,
-    /// which leaves a removed base row and no fold.
+    /// a fold row. b.txt changes line 15 and folds lines 1 to 11 into a fold
+    /// row, where the cursor sits, and lines 19 and 20 into another. c.txt
+    /// drops line 3, which leaves a removed base row and no fold.
     #[test]
     fn a_number_is_the_count_that_reaches_its_row() {
         let twenty: String = (1..=20).map(|n| format!("{n}\n")).collect();
@@ -1209,9 +1209,9 @@ mod tests {
         assert_eq!(
             numbers,
             vec![
-                vec!["4", "3", "2", "1"],
-                vec!["1", "1", "2", "3", "4", "5", "6", "7"],
-                vec!["8", "9", "", "10", "11", "12", "13"],
+                vec!["5", "4", "3", "2", ""],
+                vec!["", "1", "2", "3", "4", "5", "6", "7", ""],
+                vec!["9", "10", "", "11", "12", "13", "14"],
             ]
         );
 

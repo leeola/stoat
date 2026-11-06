@@ -889,6 +889,9 @@ pub mod scope {
     pub const DIFF_UNSTAGED: &str = "diff.unstaged";
     pub const DIFF_APPROVED: &str = "diff.approved";
     pub const DIFF_UNAPPROVED: &str = "diff.unapproved";
+    /// The fill of a changes view's fold row, the row that stands for the
+    /// unchanged lines a fold hides.
+    pub const DIFF_FOLD: &str = "diff.fold";
     /// The base half of a split diff view's status row, its text on its tint.
     ///
     /// The `name` scope colors the base's name. Each channel the theme leaves

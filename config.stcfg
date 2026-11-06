@@ -142,6 +142,7 @@ theme default_dark {
     diff.unstaged.fg     = muted;
     diff.approved.fg     = special;
     diff.unapproved.fg   = dim;
+    diff.fold.bg         = subtle;
 
     ui.diagnostic.error.fg   = danger;
     ui.diagnostic.warning.fg = warning;
@@ -313,6 +314,7 @@ theme ermine_night inherits default_dark {
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
+    diff.fold.bg     = raised;
 
     diff.sides.base           = { fg: side_base_fg, bg: side_base_bg };
     diff.sides.base.name.fg   = side_base_name;

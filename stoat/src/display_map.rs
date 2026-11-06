@@ -121,6 +121,16 @@ fn live_line_rows(wrap_snapshot: &WrapSnapshot, row: u32, buffer_rows: u32) -> u
     end.saturating_sub(first_wrap_row(row)).max(1)
 }
 
+/// The anchors a fold over buffer range `range` holds.
+///
+/// The start binds right and the end left, so text typed at either edge of
+/// the fold stays outside it.
+fn fold_anchors(buffer_snapshot: &MultiBufferSnapshot, range: Range<Point>) -> Range<Anchor> {
+    let start = buffer_snapshot.rope().point_to_offset(range.start);
+    let end = buffer_snapshot.rope().point_to_offset(range.end);
+    buffer_snapshot.anchor_at(start, Bias::Right)..buffer_snapshot.anchor_at(end, Bias::Left)
+}
+
 /// Whether one sync's edits move the row count of some buffer line, which
 /// decides where a paired base line overflows.
 ///
@@ -444,15 +454,24 @@ impl DisplayMap {
         let buffer_snapshot = self.multi_buffer.snapshot();
         let anchor_ranges = ranges
             .into_iter()
-            .map(|r| {
-                let start_off = buffer_snapshot.rope().point_to_offset(r.start);
-                let end_off = buffer_snapshot.rope().point_to_offset(r.end);
-                buffer_snapshot.anchor_at(start_off, Bias::Right)
-                    ..buffer_snapshot.anchor_at(end_off, Bias::Left)
-            })
+            .map(|range| fold_anchors(&buffer_snapshot, range))
             .collect();
         self.fold_map
             .fold(anchor_ranges, FoldPlaceholder::default(), &buffer_snapshot);
+    }
+
+    /// Fold each range under the placeholder beside it.
+    ///
+    /// [`Self::fold`] gives every range the default placeholder. A caller that
+    /// names what each fold hides, as the changes view's fold rows do, passes
+    /// one placeholder per range.
+    pub fn fold_with(&mut self, folds: Vec<(Range<Point>, FoldPlaceholder)>) {
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        for (range, placeholder) in folds {
+            let anchors = fold_anchors(&buffer_snapshot, range);
+            self.fold_map
+                .fold(vec![anchors], placeholder, &buffer_snapshot);
+        }
     }
 
     pub fn unfold(&mut self, ranges: Vec<Range<Point>>) {

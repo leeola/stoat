@@ -277,6 +277,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `conflict`, `review`, `submode`, `default`).
 - `diff.added`, `diff.deleted`, `diff.modified`, `diff.moved`, `diff.context`,
   `diff.current_hunk` -- the diff and review views.
+- `diff.fold` -- the fill (background) of a changes view's fold row, the row
+  that names how many unchanged lines a fold hides. The row's text takes
+  `ui.text.muted`.
 - `diff.sides.base`, `diff.sides.base.name`, `diff.sides.target`,
   `diff.sides.target.name` -- the two halves of a split diff view's status
   row, its text (foreground) on its tint (background), and the color of the

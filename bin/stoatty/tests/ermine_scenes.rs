@@ -271,6 +271,33 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
     );
 }
 
+/// The changes view folds the unchanged lines between two hunks into a fold
+/// row on the raised surface.
+///
+/// The diff-kinds stack lists hunks.txt fourth, and its fold row is row 18,
+/// under the row of its line 6 on the base surface. The fold row's count is
+/// centered, so the cells from column 2 to column 31 hold none.
+#[test]
+fn the_changes_view_folds_unchanged_lines_into_a_raised_row() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "diff-kinds", "hunks.txt", "<Space>dc<Settle>");
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(2, 17, 30, 1),
+        BASE,
+        "changes_row_above_fold",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(2, 18, 30, 1),
+        RAISED,
+        "changes_fold_row",
+    );
+}
+
 /// The panes sit one chrome column in from each window edge, and a blank text
 /// cell inside them stays on the base surface.
 #[test]
