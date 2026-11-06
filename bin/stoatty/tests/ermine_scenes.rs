@@ -200,9 +200,7 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
 /// column.
 ///
 /// Row 2, `3 three`, is context with no hunk mark, so its only base-tint
-/// pixels are the frame's two sides. The left one lies in the pane's first
-/// cell, column 1, and the right one in the divider column, 76, left of the
-/// hairline.
+/// pixels are the frame's two sides.
 #[test]
 fn the_split_diff_frames_its_base_column() {
     let mut home = support::scratch_home();
@@ -212,26 +210,24 @@ fn the_split_diff_frames_its_base_column() {
         "unstaged.txt",
         "<Space>df<Settle>",
     );
-    let (_, y, _, height) = cell_rect(0, 2, 1, 1);
-    let columns = bar_columns(&shot, (y, height), SIDE_BASE);
+    expect_base_frame_sides(&shot, &mut home, 2, "diff_base_frame");
+}
 
-    let cell = |col| {
-        let (x, _, width, _) = cell_rect(col, 2, 1, 1);
-        x..x + width
-    };
-    let (left, right) = (cell(1), cell(76));
-    let sides = [&left, &right].map(|side| columns.iter().any(|x| side.contains(x)));
-    let stray = columns
-        .iter()
-        .any(|x| !left.contains(x) && !right.contains(x));
-    if sides != [true, true] || stray {
-        let frame = keep_frame(&shot, &mut home, "diff_base_frame");
-        panic!(
-            "the base tint fills pixel columns {columns:?}, not one side in each of {left:?} \
-             and {right:?}; the frame is {}",
-            frame.display(),
-        );
-    }
+/// The changes view frames its base column once, across its file headers.
+///
+/// Row 0 is the first file's header, which carries no hunk mark, so its only
+/// base-tint pixels are the frame's two sides. A frame per excerpt would leave
+/// the header outside every frame.
+#[test]
+fn the_changes_view_frames_its_base_column_across_the_headers() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>dc<Settle>",
+    );
+    expect_base_frame_sides(&shot, &mut home, 0, "changes_base_frame");
 }
 
 /// The panes sit one chrome column in from each window edge, and a blank text
@@ -684,6 +680,37 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
         "{what}: most pixels of {rect:?} are {}, not {}; the frame is {}",
         hex(found),
         hex(want),
+        frame.display(),
+    );
+}
+
+/// Panics unless `row` of `shot` holds the two sides of the frame around a
+/// split diff's base column, and no other base-tint pixel.
+///
+/// The left side lies in the pane's first cell, column 1. The right one lies
+/// in the divider column, 76, left of the hairline. A miss saves the frame as
+/// [`expect_region`] does.
+fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
+    let (_, y, _, height) = cell_rect(0, row, 1, 1);
+    let columns = bar_columns(shot, (y, height), SIDE_BASE);
+
+    let cell = |col| {
+        let (x, _, width, _) = cell_rect(col, row, 1, 1);
+        x..x + width
+    };
+    let (left, right) = (cell(1), cell(76));
+    let sides = [&left, &right].map(|side| columns.iter().any(|x| side.contains(x)));
+    let stray = columns
+        .iter()
+        .any(|x| !left.contains(x) && !right.contains(x));
+    if sides == [true, true] && !stray {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: the base tint fills pixel columns {columns:?} of row {row}, not one side in \
+         each of {left:?} and {right:?}; the frame is {}",
         frame.display(),
     );
 }

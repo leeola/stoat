@@ -37,6 +37,7 @@ use crate::{
         help::{paint_help_detail_rows, paint_help_list_rows},
         review::{
             diff_gutter_digits, emit_base_frame, paint_diff_rows, BufferNumbering, DiffDials,
+            FrameEdges,
         },
         serialize_buffer,
         symbol_finder::paint_symbol_rows,
@@ -192,7 +193,7 @@ pub(crate) fn render_page_decorations(
         // buffer nothing reads.
         let mut scene = gutter.scene();
         if let Some(color) = gutter.frame {
-            emit_base_frame(area, color, false, &mut scene);
+            emit_base_frame(area, color, FrameEdges::Sides, &mut scene);
         }
         paint_diff_rows(
             snapshot,
@@ -288,7 +289,7 @@ pub(crate) fn render_page_from_snapshot(
     if diff_view {
         let mut scene = gutter.rich.is_some().then(|| gutter.scene());
         if let (Some(scene), Some(color)) = (scene.as_mut(), gutter.frame) {
-            emit_base_frame(area, color, false, scene);
+            emit_base_frame(area, color, FrameEdges::Sides, scene);
         }
         paint_diff_rows(
             snapshot,

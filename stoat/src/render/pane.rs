@@ -16,7 +16,7 @@ use crate::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
         },
-        review,
+        review::{self, FrameEdges},
         run_pane::render_run_pane,
         status_lane,
         term_pane::render_term_pane,
@@ -119,12 +119,8 @@ pub(crate) fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                if editor.diff_view
-                    && scene.live()
-                    && let Some(tint) = diff_base_tint(theme)
-                {
-                    let (inner, _) = split_minimap_strip(content_area, frame.minimap_enabled);
-                    review::emit_base_frame(inner, tint, true, scene);
+                if editor.diff_view {
+                    emit_pane_base_frame(content_area, FrameEdges::All, frame, scene);
                 }
 
                 let labels = if is_focused {
@@ -222,6 +218,16 @@ pub(crate) fn render_pane(
         // keeps it.
         View::DiffChanges(id) => {
             if let Some(state) = diff_changes_views.get_mut(*id) {
+                // A held stack's pages draw the frame's sides, and its
+                // composite covers the live ones, as it covers the stack's
+                // runs. An empty stack shows no base column to frame.
+                let edges = match diff_changes::stack_composited(pane, frame) {
+                    true => FrameEdges::Top,
+                    false => FrameEdges::All,
+                };
+                if !state.excerpts.is_empty() {
+                    emit_pane_base_frame(content_area, edges, frame, scene);
+                }
                 diff_changes::render_diff_changes(
                     pane,
                     is_focused,
@@ -623,6 +629,27 @@ impl DiffSideColors {
 /// frame.
 pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
     style_rgb(Some(DiffSidesColors::resolve(theme).base.bg))
+}
+
+/// Emit the `edges` of the frame around the base column of a diff pane whose
+/// content fills `content_area`, ahead of the pane's own paint.
+///
+/// The diff body leaves out the pane's minimap strip, so the frame does too.
+/// A changes view takes one frame over its whole stack, since its excerpts
+/// paint one diff body each.
+///
+/// Emits nothing on a dead scene or for a tint outside RGB.
+fn emit_pane_base_frame(
+    content_area: Rect,
+    edges: FrameEdges,
+    frame: FrameCtx<'_>,
+    scene: &mut ApcScene,
+) {
+    let Some(tint) = diff_base_tint(frame.theme).filter(|_| scene.live()) else {
+        return;
+    };
+    let (inner, _) = split_minimap_strip(content_area, frame.minimap_enabled);
+    review::emit_base_frame(inner, tint, edges, scene);
 }
 
 /// `from` moved `amount` of the way to `to`, or `from` unchanged when either

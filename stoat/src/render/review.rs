@@ -828,13 +828,27 @@ pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
     (inner.width >= DIFF_TWO_COLUMN_MIN).then(|| divider_x(inner))
 }
 
+/// The edges of the base half's frame that one paint emits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameEdges {
+    /// The two sides and the top, for a pane whose live grid shows.
+    All,
+    /// The two sides alone, for a pool page. A page scrolls, and the top edge
+    /// stays with the pane.
+    Sides,
+    /// The top alone, for a pane whose pool covers its sides. The top sits
+    /// above the pool, so only the pane draws it.
+    Top,
+}
+
 /// Emit the frame that marks the base half of the split diff over `inner`, in
 /// `color`.
 ///
 /// A bar runs down the half's left edge, where the status row's base half
 /// starts below, and one down its right edge, which ends at the divider's
-/// hairline. Each is the height of `inner`. With `top`, a third bar runs from
-/// the left bar to the hairline just above `inner`'s first row.
+/// hairline. Each is the height of `inner`. A third bar runs from the left bar
+/// to the hairline just above `inner`'s first row. `edges` picks which of them
+/// emit.
 ///
 /// The right bar sits in the divider column rather than the half's last cell,
 /// so it covers no base text.
@@ -846,7 +860,12 @@ pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
 /// See also:
 /// - [`PageGutter::framed`](crate::smooth_scroll::PageGutter::framed), which carries the side bars
 ///   onto a gliding pane's pages.
-pub(crate) fn emit_base_frame(inner: Rect, color: [u8; 3], top: bool, scene: &mut ApcScene) {
+pub(crate) fn emit_base_frame(
+    inner: Rect,
+    color: [u8; 3],
+    edges: FrameEdges,
+    scene: &mut ApcScene,
+) {
     let Some(divider) = diff_divider_x(inner) else {
         return;
     };
@@ -854,11 +873,14 @@ pub(crate) fn emit_base_frame(inner: Rect, color: [u8; 3], top: bool, scene: &mu
     let rule = (divider - inner.x) * 16 + DIVIDER_RULE_X;
     let height = inner.height * 16;
     let width = BASE_FRAME_WIDTH;
-    let sides = [0, rule - width].map(|x| (x as i16, 0, width, height));
-    let top_bar = top.then_some((0, -(width as i16), rule, width));
+    let sides = [0, rule - width]
+        .map(|x| (x as i16, 0, width, height))
+        .into_iter()
+        .filter(|_| edges != FrameEdges::Top);
+    let top = (edges != FrameEdges::Sides).then_some((0, -(width as i16), rule, width));
 
     let mut bars = BarBatch::default();
-    for (x, y, width, height) in sides.into_iter().chain(top_bar) {
+    for (x, y, width, height) in sides.chain(top) {
         bars.push(
             inner,
             Bar {
@@ -4739,13 +4761,13 @@ mod tests {
     }
 
     /// The frame bars the base half's two sides, the full height of the body,
-    /// and on request its top, just above the first row. A unified diff has no
-    /// base half to frame.
+    /// and its top, just above the first row, and a paint emits the edges it
+    /// names. A unified diff has no base half to frame.
     #[test]
     fn the_base_frame_bars_the_base_half_s_sides_and_top() {
-        let bars = |inner: Rect, top: bool| {
+        let bars = |inner: Rect, edges: FrameEdges| {
             let mut scene = ApcScene::new();
-            emit_base_frame(inner, [1, 2, 3], top, &mut scene);
+            emit_base_frame(inner, [1, 2, 3], edges, &mut scene);
             decode_stream(scene.buffer())
                 .into_iter()
                 .map(|command| match command {
@@ -4760,17 +4782,15 @@ mod tests {
         let wide = Rect::new(2, 1, 120, 10);
         let left = (32, 16, 3, 160, [1, 2, 3]);
         let right = (32 + 952 - 3, 16, 3, 160, [1, 2, 3]);
+        let top = (32, 13, 952, 3, [1, 2, 3]);
         assert_eq!(
             [
-                bars(wide, true),
-                bars(wide, false),
-                bars(Rect::new(2, 1, 80, 10), true)
+                bars(wide, FrameEdges::All),
+                bars(wide, FrameEdges::Sides),
+                bars(wide, FrameEdges::Top),
+                bars(Rect::new(2, 1, 80, 10), FrameEdges::All)
             ],
-            [
-                vec![left, right, (32, 13, 952, 3, [1, 2, 3])],
-                vec![left, right],
-                vec![],
-            ],
+            [vec![left, right, top], vec![left, right], vec![top], vec![]],
         );
     }
 
@@ -5569,8 +5589,8 @@ mod tests {
     }
 
     /// A per-pane minimap strip narrows the diff body, so the body's divider
-    /// sits three columns left of the content's middle, and the halves meet
-    /// there.
+    /// sits three columns left of the content's middle. The status halves meet
+    /// there, and the frame's right side ends at its hairline.
     #[test]
     fn the_status_halves_meet_at_the_divider_beside_a_minimap_strip() {
         use ratatui::style::Color;
@@ -5582,6 +5602,11 @@ mod tests {
         let strip = crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
             .minimap_rect;
+        let frame_sides: Vec<i16> = content_bars(&mut h)
+            .into_iter()
+            .filter(|bar| bar.4 == [0x2a, 0x1d, 0x20] && bar.1 == 0)
+            .map(|bar| bar.0)
+            .collect();
 
         let buf = h.rendered_buffer();
         let y = buf.area.height - 1;
@@ -5589,9 +5614,14 @@ mod tests {
         assert_eq!(
             (
                 strip.map(|strip| strip.width),
-                [55, 56, 57].map(|x| buf[(x, y)].bg)
+                [55, 56, 57].map(|x| buf[(x, y)].bg),
+                frame_sides,
             ),
-            (Some(7), [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)]),
+            (
+                Some(7),
+                [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)],
+                vec![0, 56 * 16 + 8 - 3],
+            ),
         );
     }
 
@@ -5641,25 +5671,6 @@ mod tests {
     /// content, in the base tint. A unified diff and a plain pane paint none.
     #[test]
     fn a_split_diff_pane_leads_its_content_with_the_base_frame() {
-        use crate::render::content_lane;
-
-        let content_bars = |h: &mut crate::test_harness::TestHarness| {
-            let _ = h.stoat.render();
-            let ws = h.stoat.active_workspace();
-            let index = ws.panes.pane(ws.panes.focus()).index;
-            decode_stream(h.stoat.apc_scene.lane_bytes(content_lane(index)))
-                .into_iter()
-                .flat_map(|command| match command {
-                    Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
-                    Command::Bars(group) => group
-                        .bars
-                        .into_iter()
-                        .map(|(x, y, width, height)| (x, y, width, height, group.color))
-                        .collect(),
-                    _ => Vec::new(),
-                })
-                .collect::<Vec<_>>()
-        };
         let tint = [0x2a, 0x1d, 0x20];
         let tinted = |bars: Vec<(i16, i16, u16, u16, [u8; 3])>| {
             bars.into_iter().filter(|bar| bar.4 == tint).count()
@@ -5693,6 +5704,32 @@ mod tests {
                 0,
             ),
         );
+    }
+
+    /// Render a frame and return every bar the focused pane's content lane
+    /// draws, in draw order, as `(x, y, width, height, color)` in sixteenths.
+    fn content_bars(
+        h: &mut crate::test_harness::TestHarness,
+    ) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+        let _ = h.stoat.render();
+        let ws = h.stoat.active_workspace();
+        let index = ws.panes.pane(ws.panes.focus()).index;
+        decode_stream(
+            h.stoat
+                .apc_scene
+                .lane_bytes(crate::render::content_lane(index)),
+        )
+        .into_iter()
+        .flat_map(|command| match command {
+            Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+            Command::Bars(group) => group
+                .bars
+                .into_iter()
+                .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
     }
 
     /// The status row of the stoatty frame and of the fallback frame, in that

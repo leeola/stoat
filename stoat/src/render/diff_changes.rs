@@ -17,7 +17,8 @@ use crate::{
     render::{
         editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         layout::split_pane_status,
-        review,
+        pane::diff_base_tint,
+        review::{self, FrameEdges},
         text::{text_width, write_str, write_str_clipped},
         undercurl::UndercurlBatch,
         FrameCtx,
@@ -342,6 +343,11 @@ pub(crate) fn paint_stack_rows(
 ///
 /// `paint` names whether the page's cells paint too, as [`PagePaint`]
 /// describes.
+///
+/// The page leads with the two sides of the frame around the base column, as
+/// [`review::emit_base_frame`] lays them, and no top. The page scrolls with
+/// the stack, and the pane's own frame keeps the top edge above the pool. An
+/// empty stack holds no pool, so every page has excerpts to frame.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_page(
     state: &DiffChangesState,
@@ -365,6 +371,9 @@ pub(crate) fn paint_stack_page(
         })
         .collect();
     let area = page.area;
+    if let Some(tint) = diff_base_tint(frame.theme) {
+        review::emit_base_frame(area, tint, FrameEdges::Sides, scene);
+    }
     paint_stack_rows(
         state, editors, buffers, is_focused, text_style, undercurls, frame, page, scene, first_row,
         area, paint,
@@ -455,6 +464,7 @@ mod tests {
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
             commits::PreviewDials,
+            content_lane,
             layout::split_pane_status,
             paint,
             review::{self, DiffColumns, DiffDials, DiffLayout},
@@ -479,8 +489,12 @@ mod tests {
     use stoat_config::{LineNumbers, MinimapMode, WrapMode};
     use stoat_text::Point;
     use stoat_widgets::ApcScene;
-    use stoatty_protocol::command::Command;
+    use stoatty_protocol::command::{decode_stream, Command};
     use tokio::sync::mpsc::UnboundedReceiver;
+
+    /// The base tint of the shipped theme, which the frame around the base
+    /// column takes.
+    const TINT: [u8; 3] = [0x2a, 0x1d, 0x20];
 
     /// The strip id, content id, and palette of a minimap strip that a frame
     /// declares.
@@ -583,11 +597,17 @@ mod tests {
         let cols = excerpt_columns(&h, inner, 2);
 
         // a.txt's three rows sit under its header on row 0, and b.txt's first
-        // row under its header on row 4. Each header pairs its name with the
-        // column the name starts on.
+        // row under its header on row 4. Each header pairs the rule the base
+        // frame's left side draws in column 0 with its name and the column the
+        // name starts on.
         let headers = [inner.y, inner.y + 4].map(|y| {
-            let start = (inner.x..inner.x + inner.width).find(|&x| buf[(x, y)].symbol() != " ");
-            (cells(&buf, inner.x, inner.width, y), start)
+            let text_x = inner.x + 1;
+            let start = (text_x..inner.x + inner.width).find(|&x| buf[(x, y)].symbol() != " ");
+            (
+                buf[(inner.x, y)].symbol().to_string(),
+                cells(&buf, text_x, inner.width - 1, y),
+                start,
+            )
         });
         let numbers: Vec<(String, String)> = [1, 2, 3, 5]
             .into_iter()
@@ -610,8 +630,8 @@ mod tests {
             (headers, numbers, cursors),
             (
                 [
-                    ("a.txt".to_string(), centered),
-                    ("b.txt".to_string(), centered)
+                    ("│".to_string(), "a.txt".to_string(), centered),
+                    ("│".to_string(), "b.txt".to_string(), centered)
                 ],
                 vec![pair("1"), pair("2"), pair("3"), pair("1")],
                 vec![Some((cols.right_text_x, inner.y + 1)), None],
@@ -1184,6 +1204,104 @@ mod tests {
             (false, true, true, false),
             "an empty full scene, equal scenes, a blank page, and a page like the full one",
         );
+    }
+
+    /// A split changes view leads its content with one frame around the base
+    /// column, in the base tint, and no excerpt adds a bar of that tint.
+    #[test]
+    fn a_split_changes_view_leads_its_content_with_one_base_frame() {
+        let mut h = changes_view(
+            120,
+            24,
+            &[
+                ("a.txt", "a\nx\n", "A\nx\n"),
+                ("b.txt", "b\nd\ne\n", "b\ne\n"),
+            ],
+        );
+        h.stoat.render();
+        let index = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).index
+        };
+        let bars = frame_bars(decode_stream(
+            h.stoat.apc_scene.lane_bytes(content_lane(index)),
+        ));
+
+        // The stack spans the 120 columns and 23 rows above the status row, and
+        // the divider's hairline sits 952 sixteenths in.
+        assert_eq!(
+            (
+                bars[..3].to_vec(),
+                bars.iter().filter(|bar| bar.4 == TINT).count()
+            ),
+            (
+                vec![
+                    (0, 0, 3, 368, TINT),
+                    (949, 0, 3, 368, TINT),
+                    (0, -3, 952, 3, TINT)
+                ],
+                3,
+            ),
+        );
+    }
+
+    /// A stack page leads with the two sides of the frame around the base
+    /// column, the height of the page, and draws no top.
+    #[test]
+    fn a_stack_page_leads_with_the_base_frame_s_sides() {
+        let mut h = changes_view(
+            120,
+            24,
+            &[
+                ("a.txt", "a\nx\n", "A\nx\n"),
+                ("b.txt", "b\nd\ne\n", "b\ne\n"),
+            ],
+        );
+        h.stoat.render();
+        let commands = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
+            let mut page = Buffer::empty(Rect::new(0, 0, 120, 12));
+            let text_style = frame.theme.get(scope::UI_TEXT);
+            paint_stack_page(
+                state,
+                editors,
+                buffers,
+                true,
+                text_style,
+                &mut UndercurlBatch::default(),
+                frame,
+                &mut page,
+                scene,
+                0,
+                PagePaint::Cells,
+            );
+            decode_stream(scene.bytes())
+        });
+        let bars = frame_bars(commands);
+
+        assert_eq!(
+            (
+                bars[..2].to_vec(),
+                bars.iter().filter(|bar| bar.4 == TINT).count()
+            ),
+            (vec![(0, 0, 3, 192, TINT), (949, 0, 3, 192, TINT)], 2),
+        );
+    }
+
+    /// Every bar `commands` draws, in draw order, as `(x, y, width, height,
+    /// color)` in sixteenths, whether the scene sends it alone or in a batch.
+    fn frame_bars(commands: Vec<Command>) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+        commands
+            .into_iter()
+            .flat_map(|command| match command {
+                Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+                Command::Bars(group) => group
+                    .bars
+                    .into_iter()
+                    .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .collect()
     }
 
     /// Two staged files under a focused changes view at 120 by 24, with the

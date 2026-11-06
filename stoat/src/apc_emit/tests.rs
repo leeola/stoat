@@ -3925,24 +3925,30 @@ fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8
     h.stoat.apc_scene.lane_bytes(lane).to_vec()
 }
 
-/// A step that scrolls a held stack leaves the stack's runs and bars out of
-/// the pane's content lane, and the minimap strip's declaration stays. The
-/// pool's pages carry the runs, and its composite covers the live grid.
+/// A step that scrolls a held stack leaves the stack's runs and bars, and the
+/// sides of the frame around its base column, out of the pane's content lane.
+/// The frame's top edge and the minimap strip's declaration stay. The pool's
+/// pages carry the runs and the sides, and its composite covers the live grid.
+/// The top edge sits above the pool.
 #[test]
-fn a_scrolling_step_over_a_held_stack_keeps_only_the_strip_in_its_lane() {
+fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     use stoatty_protocol::command::Command;
 
     let base: String = (1..=30).map(|i| format!("{i}\n")).collect();
     let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
     let (mut h, mut rx, pool) = gutter_stack(&[("a.txt", &base, &text)], MinimapMode::PerPane);
+    let tint = crate::render::pane::diff_base_tint(&h.stoat.theme).expect("an RGB tint");
+    let top_edge =
+        |command: &Command| matches!(command, Command::Bar(bar) if bar.color == tint && bar.y < 0);
     let (runs, rest): (Vec<Command>, Vec<Command>) =
         command::decode_stream(&content_lane_bytes(&h, pool))
             .into_iter()
             .partition(|command| {
-                matches!(
-                    command,
-                    Command::TextRun(_) | Command::TextRunEnd | Command::Bar(_)
-                )
+                !top_edge(command)
+                    && matches!(
+                        command,
+                        Command::TextRun(_) | Command::TextRunEnd | Command::Bar(_)
+                    )
             });
     emit_raw(&mut h, &mut rx);
 
@@ -3954,26 +3960,44 @@ fn a_scrolling_step_over_a_held_stack_keeps_only_the_strip_in_its_lane() {
         let state = h.stoat.active_workspace().focused_diff_changes();
         (state.expect("the changes view").scroll > 0).then_some(lane)
     });
-    assert_eq!((runs.is_empty(), scrolled), (false, Some(rest)));
+    let top_edges = rest.iter().filter(|command| top_edge(command)).count();
+    assert_eq!(
+        (runs.is_empty(), top_edges, scrolled),
+        (false, 1, Some(rest))
+    );
 }
 
 /// A stack that the terminal stops holding paints its runs again, though
 /// nothing else about the pane moved since a capture painted under the
 /// composite.
+///
+/// While the terminal holds the stack, the lane keeps only the top edge of the
+/// frame around the base column, which sits above the pool.
 #[test]
 fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
+    use stoatty_protocol::command::Command;
+
     let (mut h, mut rx, pool) = gutter_stack(TWO_FILES, MinimapMode::Off);
     let first = content_lane_bytes(&h, pool);
     emit_raw(&mut h, &mut rx);
     h.stoat.render();
     h.stoat.render();
-    let held = content_lane_bytes(&h, pool);
+    let held = command::decode_stream(&content_lane_bytes(&h, pool));
 
+    let top_edge: Vec<Command> = command::decode_stream(&first)
+        .into_iter()
+        .filter(|command| matches!(command, Command::Bar(bar) if bar.y < 0))
+        .collect();
     crate::ssh::retire_terminal_state(&mut h.stoat);
     h.stoat.render();
     assert_eq!(
-        (first.is_empty(), held, content_lane_bytes(&h, pool)),
-        (false, vec![], first)
+        (
+            first.is_empty(),
+            top_edge.len(),
+            held,
+            content_lane_bytes(&h, pool)
+        ),
+        (false, 1, top_edge.clone(), first)
     );
 }
 
