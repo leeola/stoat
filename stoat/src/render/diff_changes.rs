@@ -2,7 +2,8 @@
 //!
 //! The changes view paints its excerpts one under another through the
 //! per-file diff's painter, so a hunk reads the same here as in the per-file
-//! diff. A header row names each excerpt's file, centered across the pane.
+//! diff. A header row names each excerpt's file and counts its diff, centered
+//! across the pane.
 //! The focused excerpt paints the cursor where the changes view's keys act.
 //!
 //! Under relative numbering every excerpt numbers its rows by the `j` or `k`
@@ -11,24 +12,38 @@
 
 use crate::{
     buffer_registry::BufferRegistry,
-    diff_changes::{self, DiffChangesState},
+    diff_changes::{self, DiffChangesState, ExcerptStats},
     editor_state::{EditorId, EditorState},
     pane::Pane,
     render::{
+        chrome,
         editor::{fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip},
         layout::split_pane_status,
+        paint::style_rgb,
         pane::diff_base_tint,
         review::{self, FrameEdges},
         text::{text_width, write_str, write_str_clipped},
         undercurl::UndercurlBatch,
         FrameCtx,
     },
-    theme::scope,
+    theme::{scope, Theme},
 };
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Modifier, Style},
+};
 use slotmap::SlotMap;
+use std::path::Path;
 use stoat_config::LineNumbers;
-use stoat_widgets::ApcScene;
+use stoat_widgets::{
+    bar::{Bar, BarBatch},
+    ApcScene,
+};
+
+/// The sixteenths down a header row at which its two hairlines lie, the row's
+/// top and bottom edges.
+const HAIRLINE_Y: [i16; 2] = [0, 15];
 
 /// How much of a page of the changes view's pool a paint covers.
 ///
@@ -90,11 +105,11 @@ impl PaintLayout {
 /// least scroll that keeps it on screen, and a cursor that stayed leaves the
 /// scroll, so a wheel scroll leaves the cursor off screen.
 ///
-/// Each excerpt takes a header row in the commit header style, with its file
-/// name centered, and then its rows. The rows paint from the excerpt's own
-/// scroll row, so an excerpt cut at the top shows its lower rows. After the
-/// paint each excerpt's viewport holds all of its rows, so the editor's own
-/// follow never scrolls an excerpt.
+/// Each excerpt takes a header row, which names its file and counts its diff,
+/// and then its rows. The rows paint from the excerpt's own scroll row, so an
+/// excerpt cut at the top shows its lower rows. After the paint each excerpt's
+/// viewport holds all of its rows, so the editor's own follow never scrolls an
+/// excerpt.
 ///
 /// The focused excerpt records the cell of its cursor in
 /// [`EditorState::cursor_screen_cell`] when the terminal draws that cursor.
@@ -232,15 +247,21 @@ pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
 /// Paint stack rows `first_row..first_row + area.height` of the stack `state`
 /// holds into `area` of `buf`.
 ///
-/// Each excerpt the rows reach takes a header row in the commit header style,
-/// with its file name centered, and then its rows. The rows paint from the
-/// excerpt's own scroll row, so an excerpt cut at the top of `area` shows its
-/// lower rows. A painted excerpt's editor records where this paint laid it
-/// out: its scroll row, its viewport, its text rect, and the cell of its
-/// cursor.
+/// Each excerpt the rows reach takes a header row and then its rows. The header
+/// names the file and counts its diff, centered on the raised surface. Under a
+/// live scene a hairline in the inactive border color runs along the header's
+/// top and bottom edges. The rows paint from the excerpt's own scroll row, so
+/// an excerpt cut at the top of `area` shows its lower rows. A painted
+/// excerpt's editor records where this paint laid it out: its scroll row, its
+/// viewport, its text rect, and the cell of its cursor.
 ///
-/// Under [`PagePaint::DecorationsOnly`] the rows paint no header and no text,
-/// and the excerpts' diff gutters fill `scene` alone.
+/// The rows draw the two sides of the frame around the base column, as
+/// [`review::emit_base_frame`] lays them over `area`, and no top. The sides
+/// cross every header, over its hairlines.
+///
+/// Under [`PagePaint::DecorationsOnly`] the rows write no cell. The headers'
+/// hairlines, the frame's sides, and the excerpts' diff gutters fill `scene`
+/// alone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_rows(
     state: &DiffChangesState,
@@ -256,8 +277,31 @@ pub(crate) fn paint_stack_rows(
     area: Rect,
     paint: PagePaint,
 ) {
-    let header_style = frame.theme.get(scope::VCS_COMMIT_SHA);
     let (scroll, rows_on_screen) = (first_row, usize::from(area.height));
+    let header_row = |top: usize| {
+        (scroll..scroll + rows_on_screen)
+            .contains(&top)
+            .then(|| Rect {
+                y: area.y + (top - scroll) as u16,
+                height: 1,
+                ..area
+            })
+    };
+
+    // The frame's sides draw over the header hairlines, and the excerpts'
+    // hunk lanes draw over the frame's left side.
+    emit_header_hairlines(
+        state
+            .excerpts
+            .iter()
+            .filter_map(|excerpt| header_row(excerpt.top)),
+        frame.theme,
+        scene,
+    );
+    if let Some(tint) = diff_base_tint(frame.theme) {
+        review::emit_base_frame(area, tint, FrameEdges::Sides, scene);
+    }
+
     let origins =
         (is_focused && frame.line_numbers == LineNumbers::Relative && frame.mode != "insert")
             .then(|| diff_changes::step_origins(state, editors))
@@ -268,12 +312,10 @@ pub(crate) fn paint_stack_rows(
         if top + 1 + rows <= scroll || top >= scroll + rows_on_screen {
             continue;
         }
-        if top >= scroll && paint == PagePaint::Cells {
-            let y = area.y + (top - scroll) as u16;
-            let end_x = area.x + area.width;
-            let width = text_width(&excerpt.rel_path).min(usize::from(area.width)) as u16;
-            let x = area.x + (area.width - width) / 2;
-            write_str_clipped(buf, x, y, &excerpt.rel_path, header_style, end_x);
+        if let Some(row) = header_row(top).filter(|_| paint == PagePaint::Cells) {
+            let stats = diff_changes::excerpt_stats(excerpt, buffers);
+            let runs = header_runs(&excerpt.rel_path, stats, frame.theme);
+            paint_header(buf, row, &runs, frame.theme);
         }
 
         // The screen row of the excerpt's first row, past its header.
@@ -333,6 +375,97 @@ pub(crate) fn paint_stack_rows(
     }
 }
 
+/// Emit a hairline along the top and the bottom edge of each header row in
+/// `rows`, in the inactive border color.
+fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene: &mut ApcScene) {
+    let Some(color) = style_rgb(theme.get(scope::UI_BORDER_INACTIVE).fg) else {
+        return;
+    };
+    let mut bars = BarBatch::default();
+    for row in rows {
+        for y in HAIRLINE_Y {
+            bars.push(
+                row,
+                Bar {
+                    x: 0,
+                    y,
+                    width: row.width * 16,
+                    height: 1,
+                    color,
+                },
+            );
+        }
+    }
+    bars.flush(scene);
+}
+
+/// The runs of the header over the file at `rel_path`, each in the style it
+/// paints in.
+///
+/// The header names the file's type tag, its directory, and its name. Then it
+/// counts the lines `stats` adds and removes and the hunks. A count of zero
+/// takes no run. Where the tree pass refined a hunk, the count names the git
+/// hunks and then the structural ones. With no structural count to tell them
+/// from, the count names the hunks alone.
+fn header_runs(rel_path: &str, stats: ExcerptStats, theme: &Theme) -> Vec<(String, Style)> {
+    let muted = theme.get(scope::UI_TEXT_MUTED);
+    let mut runs = Vec::new();
+    if let Some((tag, tag_scope)) = chrome::type_tag(Path::new(rel_path)) {
+        runs.push((format!("{tag} "), theme.get(tag_scope)));
+    }
+
+    let (dir, name) = rel_path.split_at(rel_path.rfind('/').map_or(0, |slash| slash + 1));
+    runs.push((dir.to_string(), muted));
+    runs.push((
+        name.to_string(),
+        theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD),
+    ));
+
+    if stats.added > 0 {
+        runs.push((format!(" +{}", stats.added), theme.get(scope::DIFF_ADDED)));
+    }
+    if stats.removed > 0 {
+        runs.push((
+            format!(" \u{2212}{}", stats.removed),
+            theme.get(scope::DIFF_DELETED),
+        ));
+    }
+    if stats.hunks > 0 {
+        let count = |n: usize, noun: &str| match n {
+            1 => format!("1 {noun}"),
+            n => format!("{n} {noun}s"),
+        };
+        let hunks = match stats.structural {
+            0 => count(stats.hunks, "hunk"),
+            structural => format!(
+                "{} \u{b7} {structural} structural",
+                count(stats.hunks, "git hunk")
+            ),
+        };
+        runs.push((format!(" \u{b7} {hunks}"), muted));
+    }
+    runs
+}
+
+/// Fill `row` with the raised surface and write `runs` across it, centered.
+///
+/// Runs wider than the row start at its left column and clip at its right
+/// edge, so the start of the file's path stays in view.
+fn paint_header(buf: &mut Buffer, row: Rect, runs: &[(String, Style)], theme: &Theme) {
+    let fill = theme.get(scope::UI_SURFACE_RAISED);
+    let end_x = row.x + row.width;
+    for x in row.x..end_x {
+        buf[(x, row.y)].set_char(' ').set_style(fill);
+    }
+
+    let width: usize = runs.iter().map(|(text, _)| text_width(text)).sum();
+    let mut x = row.x + (row.width - width.min(usize::from(row.width)) as u16) / 2;
+    for (text, style) in runs {
+        write_str_clipped(buf, x, row.y, text, *style, end_x);
+        x = x.saturating_add(text_width(text) as u16);
+    }
+}
+
 /// Paint the stack rows from `first_row` over the whole of `page`, as a page of
 /// the changes view's pool holds them.
 ///
@@ -344,10 +477,9 @@ pub(crate) fn paint_stack_rows(
 /// `paint` names whether the page's cells paint too, as [`PagePaint`]
 /// describes.
 ///
-/// The page leads with the two sides of the frame around the base column, as
-/// [`review::emit_base_frame`] lays them, and no top. The page scrolls with
-/// the stack, and the pane's own frame keeps the top edge above the pool. An
-/// empty stack holds no pool, so every page has excerpts to frame.
+/// The page scrolls with the stack, so it takes the sides of the frame that
+/// the rows draw and no top. The pane's own frame keeps the top edge above the
+/// pool. An empty stack holds no pool, so every page has excerpts to frame.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_stack_page(
     state: &DiffChangesState,
@@ -371,9 +503,6 @@ pub(crate) fn paint_stack_page(
         })
         .collect();
     let area = page.area;
-    if let Some(tint) = diff_base_tint(frame.theme) {
-        review::emit_base_frame(area, tint, FrameEdges::Sides, scene);
-    }
     paint_stack_rows(
         state, editors, buffers, is_focused, text_style, undercurls, frame, page, scene, first_row,
         area, paint,
@@ -454,12 +583,12 @@ pub(crate) fn replay_cursor(
 
 #[cfg(test)]
 mod tests {
-    use super::{paint_stack_page, paint_stack_rows, PagePaint};
+    use super::{header_runs, paint_stack_page, paint_stack_rows, PagePaint};
     use crate::{
         action_handlers, apc_emit,
         app::Stoat,
         buffer_registry::BufferRegistry,
-        diff_changes::{self, DiffChangesState},
+        diff_changes::{self, DiffChangesState, ExcerptStats},
         editor_state::{EditorId, EditorState},
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
@@ -478,7 +607,11 @@ mod tests {
         workspace::Workspace,
     };
     use crossterm::event::Event;
-    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier, Style},
+    };
     use slotmap::SlotMap;
     use std::{
         collections::HashMap,
@@ -495,6 +628,10 @@ mod tests {
     /// The base tint of the shipped theme, which the frame around the base
     /// column takes.
     const TINT: [u8; 3] = [0x2a, 0x1d, 0x20];
+
+    /// The inactive border color of the shipped theme, which the header
+    /// hairlines take.
+    const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 
     /// The strip id, content id, and palette of a minimap strip that a frame
     /// declares.
@@ -532,6 +669,21 @@ mod tests {
             .collect::<String>()
             .trim()
             .to_string()
+    }
+
+    /// The text in columns `x` to `x + width` of header row `y`, trimmed, and
+    /// the column it starts on.
+    ///
+    /// The composite draws the header's hairlines as rules over the row's
+    /// blank cells, so the reader takes a rule cell as blank.
+    fn header_text(buf: &Buffer, x: u16, width: u16, y: u16) -> (String, Option<u16>) {
+        let symbol = |x: u16| match buf[(x, y)].symbol() {
+            "─" => " ",
+            symbol => symbol,
+        };
+        let start = (x..x + width).find(|&x| symbol(x) != " ");
+        let text: String = (x..x + width).map(symbol).collect();
+        (text.trim().to_string(), start)
     }
 
     /// The columns the live frame lays an excerpt out in over `inner` when the
@@ -579,9 +731,9 @@ mod tests {
         h
     }
 
-    /// Each excerpt paints under a header row that names its file in the middle
-    /// of the row, with its rows numbered in the per-file diff's gutters, and
-    /// only the focused excerpt paints a cursor.
+    /// Each excerpt paints under a header row that names its file and counts
+    /// its diff in the middle of the row, with its rows numbered in the
+    /// per-file diff's gutters, and only the focused excerpt paints a cursor.
     ///
     /// The numbers are absolute, so each pair names its own base and buffer
     /// line.
@@ -597,17 +749,14 @@ mod tests {
         let cols = excerpt_columns(&h, inner, 2);
 
         // a.txt's three rows sit under its header on row 0, and b.txt's first
-        // row under its header on row 4. Each header pairs the rule the base
-        // frame's left side draws in column 0 with its name and the column the
-        // name starts on.
+        // row under its header on row 4. Each header pairs the rule in column
+        // 0 with its text and the column the text starts on. The composite
+        // keeps the first rule that a blank cell takes, and the header's
+        // hairline goes out ahead of the frame's left side, which the terminal
+        // draws over it.
         let headers = [inner.y, inner.y + 4].map(|y| {
-            let text_x = inner.x + 1;
-            let start = (text_x..inner.x + inner.width).find(|&x| buf[(x, y)].symbol() != " ");
-            (
-                buf[(inner.x, y)].symbol().to_string(),
-                cells(&buf, text_x, inner.width - 1, y),
-                start,
-            )
+            let (text, start) = header_text(&buf, inner.x + 1, inner.width - 1, y);
+            (buf[(inner.x, y)].symbol().to_string(), text, start)
         });
         let numbers: Vec<(String, String)> = [1, 2, 3, 5]
             .into_iter()
@@ -625,13 +774,14 @@ mod tests {
             .map(|excerpt| editors[excerpt.editor_id].cursor_screen_cell)
             .collect();
         let pair = |n: &str| (n.to_string(), n.to_string());
-        let centered = Some(inner.x + (inner.width - 5) / 2);
+        let header = |name: &str| format!("{name} +1 \u{2212}1 \u{b7} 1 hunk");
+        let centered = Some(inner.x + (inner.width - 20) / 2);
         assert_eq!(
             (headers, numbers, cursors),
             (
                 [
-                    ("│".to_string(), "a.txt".to_string(), centered),
-                    ("│".to_string(), "b.txt".to_string(), centered)
+                    ("─".to_string(), header("a.txt"), centered),
+                    ("─".to_string(), header("b.txt"), centered)
                 ],
                 vec![pair("1"), pair("2"), pair("3"), pair("1")],
                 vec![Some((cols.right_text_x, inner.y + 1)), None],
@@ -699,6 +849,85 @@ mod tests {
             cells(&buf, inner.x, inner.width, inner.y),
             name[..usize::from(inner.width)]
         );
+    }
+
+    /// A header names the type tag, the directory, and the bold name, then the
+    /// line counts in their diff colors and the hunks in muted text. With no
+    /// structural hunk the count names the hunks alone, and a count of zero
+    /// takes no run.
+    #[test]
+    fn a_header_counts_its_lines_and_hunks_after_the_path() {
+        let h = TestHarness::with_size(40, 4);
+        let theme = &h.stoat.theme;
+        let stats = |added, removed, hunks, structural| ExcerptStats {
+            added,
+            removed,
+            hunks,
+            structural,
+        };
+        let text = |path: &str, stats: ExcerptStats| -> String {
+            header_runs(path, stats, theme)
+                .into_iter()
+                .map(|(text, _)| text)
+                .collect()
+        };
+        let run = |text: &str, style: Style| (text.to_string(), style);
+
+        assert_eq!(
+            (
+                header_runs("stoat/src/render/chrome.rs", stats(12, 15, 2, 2), theme),
+                [
+                    text("src/theme.rs", stats(6, 0, 1, 0)),
+                    text("notes.txt", stats(0, 4, 3, 0)),
+                    text("a.rs", stats(1, 1, 1, 1)),
+                    text("new.txt", ExcerptStats::default()),
+                ],
+            ),
+            (
+                vec![
+                    run("rs ", theme.get(scope::UI_TAG_RUST)),
+                    run("stoat/src/render/", theme.get(scope::UI_TEXT_MUTED)),
+                    run(
+                        "chrome.rs",
+                        theme.get(scope::UI_TEXT).add_modifier(Modifier::BOLD)
+                    ),
+                    run(" +12", theme.get(scope::DIFF_ADDED)),
+                    run(" \u{2212}15", theme.get(scope::DIFF_DELETED)),
+                    run(
+                        " \u{b7} 2 git hunks \u{b7} 2 structural",
+                        theme.get(scope::UI_TEXT_MUTED)
+                    ),
+                ],
+                [
+                    "rs src/theme.rs +6 \u{b7} 1 hunk",
+                    "notes.txt \u{2212}4 \u{b7} 3 hunks",
+                    "rs a.rs +1 \u{2212}1 \u{b7} 1 git hunk \u{b7} 1 structural",
+                    "new.txt",
+                ]
+                .map(String::from),
+            ),
+        );
+    }
+
+    /// Under a live scene each header lies between two hairlines in the
+    /// inactive border color, along its top and bottom edges, the width of the
+    /// stack.
+    #[test]
+    fn a_header_lies_between_two_hairlines() {
+        let mut h = two_files(16);
+        h.stoat.render();
+        let index = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).index
+        };
+        let hairlines: Vec<_> = frame_bars(decode_stream(
+            h.stoat.apc_scene.lane_bytes(content_lane(index)),
+        ))
+        .into_iter()
+        .filter(|bar| bar.4 == HAIRLINE)
+        .collect();
+
+        assert_eq!(hairlines, header_hairlines());
     }
 
     /// With no excerpt the changes view says that its list builds, or that the
@@ -913,7 +1142,7 @@ mod tests {
         let expected = rows(&live, inner.x, inner.y + 2);
         assert_eq!(
             (rows(&run, 0, 0), expected[2].as_str()),
-            (expected.clone(), "b.txt"),
+            (expected.clone(), "b.txt +1 \u{2212}1 \u{b7} 1 hunk"),
         );
     }
 
@@ -1151,7 +1380,7 @@ mod tests {
 
         assert_eq!(
             (live[0].2.is_some(), header.as_str(), layouts(&mut h)),
-            (true, "b.txt", live.clone()),
+            (true, "b.txt +1 \u{2212}1 \u{b7} 1 hunk", live.clone()),
             "the live cursor cell, the page's header row, and every layout field",
         );
     }
@@ -1206,10 +1435,12 @@ mod tests {
         );
     }
 
-    /// A split changes view leads its content with one frame around the base
-    /// column, in the base tint, and no excerpt adds a bar of that tint.
+    /// A split changes view frames its content once around the base column, in
+    /// the base tint. The top edge leads the content, the header hairlines
+    /// follow, and the sides cross over them. No excerpt adds a bar of that
+    /// tint.
     #[test]
-    fn a_split_changes_view_leads_its_content_with_one_base_frame() {
+    fn a_split_changes_view_frames_its_content_once() {
         let mut h = changes_view(
             120,
             24,
@@ -1227,28 +1458,31 @@ mod tests {
             h.stoat.apc_scene.lane_bytes(content_lane(index)),
         ));
 
-        // The stack spans the 120 columns and 23 rows above the status row, and
-        // the divider's hairline sits 952 sixteenths in.
+        // The stack spans the 120 columns and 23 rows above the status row, its
+        // headers lie on rows 0 and 4, and the divider's hairline sits 952
+        // sixteenths in.
         assert_eq!(
             (
-                bars[..3].to_vec(),
+                bars[..7].to_vec(),
                 bars.iter().filter(|bar| bar.4 == TINT).count()
             ),
             (
-                vec![
-                    (0, 0, 3, 368, TINT),
-                    (949, 0, 3, 368, TINT),
-                    (0, -3, 952, 3, TINT)
-                ],
+                [
+                    vec![(0, -3, 952, 3, TINT)],
+                    header_hairlines(),
+                    vec![(0, 0, 3, 368, TINT), (949, 0, 3, 368, TINT)],
+                ]
+                .concat(),
                 3,
             ),
         );
     }
 
-    /// A stack page leads with the two sides of the frame around the base
-    /// column, the height of the page, and draws no top.
+    /// A stack page draws the two sides of the frame around the base column,
+    /// the height of the page, after the header hairlines, so the sides cross
+    /// over them. The page draws no top.
     #[test]
-    fn a_stack_page_leads_with_the_base_frame_s_sides() {
+    fn a_stack_page_draws_the_frame_s_sides_over_the_header_hairlines() {
         let mut h = changes_view(
             120,
             24,
@@ -1280,11 +1514,24 @@ mod tests {
 
         assert_eq!(
             (
-                bars[..2].to_vec(),
+                bars[..6].to_vec(),
                 bars.iter().filter(|bar| bar.4 == TINT).count()
             ),
-            (vec![(0, 0, 3, 192, TINT), (949, 0, 3, 192, TINT)], 2),
+            (
+                [
+                    header_hairlines(),
+                    vec![(0, 0, 3, 192, TINT), (949, 0, 3, 192, TINT)],
+                ]
+                .concat(),
+                2,
+            ),
         );
+    }
+
+    /// The hairlines along the top and bottom edges of the headers on rows 0
+    /// and 4 of a stack 120 columns wide.
+    fn header_hairlines() -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+        [0, 15, 64, 79].map(|y| (0, y, 1920, 1, HAIRLINE)).to_vec()
     }
 
     /// Every bar `commands` draws, in draw order, as `(x, y, width, height,

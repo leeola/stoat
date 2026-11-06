@@ -33,6 +33,7 @@ const CHROME: [u8; 3] = [0x12, 0x14, 0x18];
 const HOVER: [u8; 3] = [0x2c, 0x30, 0x39];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
+const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
@@ -228,6 +229,46 @@ fn the_changes_view_frames_its_base_column_across_the_headers() {
         "<Space>dc<Settle>",
     );
     expect_base_frame_sides(&shot, &mut home, 0, "changes_base_frame");
+}
+
+/// The changes view heads each file with a row on the raised surface, between
+/// two hairlines.
+///
+/// Row 0 is the first file's header. Its text is centered, so the cells from
+/// column 2 to column 31 hold none. The hairlines take the top and bottom
+/// pixel rows of the header row.
+#[test]
+fn the_changes_view_heads_each_file_on_the_raised_surface() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>dc<Settle>",
+    );
+
+    let (x, y, width, height) = cell_rect(2, 0, 30, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y, width, height),
+        RAISED,
+        "changes_header",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y, width, 1),
+        HAIRLINE,
+        "changes_header_top",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + height - 1, width, 1),
+        HAIRLINE,
+        "changes_header_bottom",
+    );
 }
 
 /// The panes sit one chrome column in from each window edge, and a blank text

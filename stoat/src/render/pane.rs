@@ -218,15 +218,12 @@ pub(crate) fn render_pane(
         // keeps it.
         View::DiffChanges(id) => {
             if let Some(state) = diff_changes_views.get_mut(*id) {
-                // A held stack's pages draw the frame's sides, and its
-                // composite covers the live ones, as it covers the stack's
-                // runs. An empty stack shows no base column to frame.
-                let edges = match diff_changes::stack_composited(pane, frame) {
-                    true => FrameEdges::Top,
-                    false => FrameEdges::All,
-                };
+                // The stack's rows draw the frame's sides, on the live paint
+                // and on a held stack's pages alike, so the sides go out over
+                // the header hairlines. An empty stack shows no base column to
+                // frame.
                 if !state.excerpts.is_empty() {
-                    emit_pane_base_frame(content_area, edges, frame, scene);
+                    emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
                 }
                 diff_changes::render_diff_changes(
                     pane,
@@ -635,8 +632,9 @@ pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
 /// content fills `content_area`, ahead of the pane's own paint.
 ///
 /// The diff body leaves out the pane's minimap strip, so the frame does too.
-/// A changes view takes one frame over its whole stack, since its excerpts
-/// paint one diff body each.
+/// A changes view takes only the top edge here. Its stack rows draw the sides,
+/// so one frame spans the whole stack although each excerpt paints its own
+/// diff body.
 ///
 /// Emits nothing on a dead scene or for a tint outside RGB.
 fn emit_pane_base_frame(

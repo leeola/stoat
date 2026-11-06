@@ -117,6 +117,48 @@ pub(crate) struct Excerpt {
     pub owns_buffer: bool,
 }
 
+/// The size of one excerpt's diff, which its header row counts out.
+///
+/// The line counts take every row a hunk marks. A modified line counts once on
+/// each side. A moved line counts as added where it went and as removed where
+/// it left. A reindented line counts on each side too, though the tree pass
+/// finds no change in it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ExcerptStats {
+    /// Live rows the hunks mark.
+    pub added: u32,
+    /// Base lines the hunks remove.
+    pub removed: u32,
+    /// Every hunk the line pass found, which the git walk stops on.
+    pub hunks: usize,
+    /// Hunks the tree pass narrowed to the rows whose tokens changed.
+    pub structural: usize,
+}
+
+impl ExcerptStats {
+    /// Counts the hunks of `map`.
+    pub(crate) fn of(map: &DiffMap) -> Self {
+        map.hunks().fold(Self::default(), |stats, hunk| {
+            // A moved-to hunk's base range names the lines it came from. The
+            // moved-away hunk, which holds no live rows, removes those lines,
+            // so only that hunk counts them.
+            let removed = match hunk.status {
+                DiffHunkStatus::Deleted | DiffHunkStatus::Modified => map.base_line_count(hunk),
+                DiffHunkStatus::Moved if hunk.buffer_line_range.is_empty() => {
+                    map.base_line_count(hunk)
+                },
+                DiffHunkStatus::Moved | DiffHunkStatus::Added => 0,
+            };
+            Self {
+                added: stats.added + hunk.buffer_line_range.len() as u32,
+                removed: stats.removed + removed,
+                hunks: stats.hunks + 1,
+                structural: stats.structural + usize::from(hunk.refined()),
+            }
+        })
+    }
+}
+
 /// The editor position a changes view lands its cursor on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Landing {
@@ -284,6 +326,18 @@ pub(crate) fn excerpt_rows(
     editors
         .get_mut(excerpt.editor_id)
         .map_or(0, |editor| editor.display_map.line_count() as usize)
+}
+
+/// The size of `excerpt`'s diff, all zero while its buffer has no diff map.
+pub(crate) fn excerpt_stats(excerpt: &Excerpt, buffers: &BufferRegistry) -> ExcerptStats {
+    let Some(buffer) = buffers.get(excerpt.buffer_id) else {
+        return ExcerptStats::default();
+    };
+    let buffer = buffer.read().expect("buffer poisoned");
+    buffer
+        .diff_map
+        .as_ref()
+        .map_or_else(ExcerptStats::default, ExcerptStats::of)
 }
 
 /// The stack row of the focused excerpt's cursor, as of the last
@@ -1220,7 +1274,7 @@ fn map_version(buffers: &BufferRegistry, id: BufferId) -> Option<usize> {
 mod tests {
     use super::{
         excerpt_rows, fold_range, gaps, kept_runs, landing_row, listed_files,
-        pump_diff_changes_stack, DiffChangesState, Landing, StackStamp,
+        pump_diff_changes_stack, DiffChangesState, ExcerptStats, Landing, StackStamp,
     };
     use crate::{
         action_handlers::dispatch,
@@ -1255,6 +1309,60 @@ mod tests {
     /// Lines `1` to `n`, one per line.
     fn numbered(n: u32) -> String {
         (1..=n).map(|line| format!("{line}\n")).collect()
+    }
+
+    /// A `status` hunk over live rows `rows` and base bytes `base`, which the
+    /// tree pass narrowed to `marked_rows`.
+    fn hunk(
+        status: DiffHunkStatus,
+        rows: Range<u32>,
+        base: Range<usize>,
+        marked_rows: Vec<Range<u32>>,
+    ) -> DiffHunk {
+        DiffHunk {
+            status,
+            unstaged_lines: Vec::new(),
+            marked_rows,
+            buffer_start_line: rows.start,
+            buffer_line_range: rows,
+            base_byte_range: base,
+            anchor_range: None,
+            token_detail: None,
+        }
+    }
+
+    /// The counts take the live rows and the base lines each hunk marks. A move
+    /// adds at the hunk it went to and removes at the hunk it left, and only a
+    /// refined hunk is structural. Each base line `bN` takes three bytes.
+    #[test]
+    fn excerpt_stats_count_both_sides_of_every_hunk() {
+        let base: String = (0..10).map(|line| format!("b{line}\n")).collect();
+        let map = DiffMap::from_hunks(
+            [
+                hunk(DiffHunkStatus::Added, 0..4, 0..0, Vec::new()),
+                hunk(
+                    DiffHunkStatus::Modified,
+                    4..6,
+                    3..11,
+                    std::iter::once(4..5).collect(),
+                ),
+                hunk(DiffHunkStatus::Modified, 6..7, 15..17, Vec::new()),
+                hunk(DiffHunkStatus::Deleted, 8..8, 18..20, Vec::new()),
+                hunk(DiffHunkStatus::Moved, 9..10, 24..26, Vec::new()),
+                hunk(DiffHunkStatus::Moved, 12..12, 21..26, Vec::new()),
+            ],
+            Some(Arc::new(base)),
+        );
+
+        assert_eq!(
+            ExcerptStats::of(&map),
+            ExcerptStats {
+                added: 8,
+                removed: 7,
+                hunks: 6,
+                structural: 1
+            },
+        );
     }
 
     /// A hunk keeps three rows each side, a run held at the buffer's ends, and
