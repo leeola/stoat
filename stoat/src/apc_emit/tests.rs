@@ -2764,7 +2764,7 @@ fn fresh_terminal_page(
     (rows, cols): (u16, u16),
 ) -> Buffer {
     let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
-    let pane = terminal_pool_panes(&h.stoat, inactive_dim, None)
+    let pane = terminal_pool_panes(&h.stoat, inactive_dim, 0.0, None)
         .into_iter()
         .find(|pane| pane.term_id == term_id)
         .expect("the terminal pane pools");
@@ -2887,7 +2887,7 @@ fn a_terminal_page_draws_its_pane_as_the_live_grid_does_and_the_region_carries_i
         let pages_and_live = |h: &mut crate::test_harness::TestHarness| {
             let live = h.stoat.render();
             let inactive_dim = h.stoat.settings.ui_inactive_dim.unwrap_or(0.25) as f32;
-            let pane = terminal_pool_panes(&h.stoat, inactive_dim, None)
+            let pane = terminal_pool_panes(&h.stoat, inactive_dim, 0.0, None)
                 .into_iter()
                 .find(|pane| pane.term_id == term_id)
                 .expect("the terminal pane pools");
@@ -2981,6 +2981,19 @@ fn a_window_out_of_focus_declares_an_unfaded_region() {
     assert_eq!(
         unfocused_region_dims(|h| h.stoat.window_focused = false),
         (vec![51], vec![0]),
+    );
+}
+
+/// A modal that paints its own box declares an unfocused terminal pane's
+/// region at the modal fade, the deeper of the pane's two fades.
+#[test]
+fn a_boxed_modal_declares_its_fade_on_a_terminal_region() {
+    assert_eq!(
+        unfocused_region_dims(|h| {
+            h.stoat.settings.ui_modal_dim = Some(0.65);
+            h.type_action("SwitchWorkspace()");
+        }),
+        (vec![51], vec![166]),
     );
 }
 
@@ -3816,6 +3829,39 @@ fn an_unfocused_stack_page_shows_what_the_live_paint_shows() {
             page_runs
         ),
         (buffer_cells(&live, rect), false, live_runs),
+    );
+}
+
+/// A page of a changes view under a modal that paints its own box holds the
+/// fade the live paint shows on its rows. The pool is resident, so its pages
+/// are what the terminal shows behind the modal.
+#[test]
+fn a_stack_page_under_a_boxed_modal_shows_its_fade() {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
+    h.stoat.theme = Arc::new(rgb_diff_gutter_theme());
+    h.stoat.settings.ui_modal_dim = Some(0.65);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    h.stage_review_scenario("/repo", TWO_FILES);
+    h.open_file(&PathBuf::from("/repo/a.txt"));
+    h.cover_with_diff_changes(false);
+    h.settle();
+    h.stoat.render();
+    let _ = emit_raw(&mut h, &mut rx);
+
+    h.type_action("SwitchWorkspace()");
+    let live = h.stoat.render();
+    let (pool, _, region) = diff_changes_pool_panes(&h.stoat, None)[0];
+    let bytes = emit_raw(&mut h, &mut rx);
+    let page = fill_payload(&bytes, pool, 0);
+
+    // The modal's box covers the middle rows, so the top two stand for the page.
+    let top = Rect::new(region.left, region.top, region.width, 2);
+    assert_eq!(
+        page_cells(page, region.width, region.height)[..2],
+        buffer_cells(&live, top)[..]
     );
 }
 

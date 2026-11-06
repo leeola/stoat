@@ -153,17 +153,17 @@ pub(crate) struct MinimapChrome<'a> {
     /// [`ClassTable::legacy_palette`](crate::minimap::ClassTable::legacy_palette)'s
     /// length for a terminal before protocol 13.
     pub(crate) palette: &'a [[u8; 3]],
-    /// [`Self::palette`] pre-blended toward the background at the inactive dim,
-    /// for an unfocused pane's strip.
+    /// [`Self::palette`] pre-blended toward the background at the frame's fade,
+    /// for the strip of a pane that fades.
     ///
-    /// Every unfocused pane blends the same palette the same way, so the frame
+    /// Every pane that fades blends the same palette the same way, so the frame
     /// does it once rather than each pane doing it again. Aliases
     /// [`Self::palette`] when no dim applies.
     pub(crate) dimmed_palette: &'a [[u8; 3]],
     /// The palette a diff view's strip declares, which follows the diff dials.
     pub(crate) diff_palette: &'a [[u8; 3]],
-    /// [`Self::diff_palette`] at the inactive dim, for an unfocused diff view's
-    /// strip. Aliases [`Self::diff_palette`] when no dim applies.
+    /// [`Self::diff_palette`] at the frame's fade, for the strip of a diff view
+    /// that fades. Aliases [`Self::diff_palette`] when no dim applies.
     pub(crate) dimmed_diff_palette: &'a [[u8; 3]],
     /// The content store of the active workspace's changes view strip, which
     /// every changes view pane's strip and the single band over a focused
@@ -418,6 +418,13 @@ pub(crate) struct FrameCtx<'a> {
     /// `0.0` disables dimming. Applied by [`crate::render::pane::render_pane`]
     /// to unfocused panes only.
     pub(crate) inactive_dim: f32,
+    /// Fraction every pane's colors blend toward the theme background while a
+    /// modal paints its own box over them, resolved by [`Stoat::modal_dim`].
+    /// `0.0` while no such modal is open.
+    ///
+    /// See also:
+    /// - [`Self::pane_dim`] for the fade one pane takes from this and [`Self::inactive_dim`].
+    pub(crate) modal_dim: f32,
     /// The diff view's paint dials, resolved from the session per
     /// [`DiffDials::from_stoat`]. Read only by diff-view panes.
     pub(crate) diff_dials: DiffDials,
@@ -464,6 +471,23 @@ pub(crate) struct FrameCtx<'a> {
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
     pub(crate) perf: Option<PerfSegment>,
+}
+
+impl FrameCtx<'_> {
+    /// The fade a pane paints with this frame, per [`pane_fade`].
+    pub(crate) fn pane_dim(&self, is_focused: bool) -> f32 {
+        pane_fade(is_focused, self.inactive_dim, self.modal_dim)
+    }
+}
+
+/// The fraction a pane's colors blend toward the theme background.
+///
+/// The fade is the larger of `inactive_dim`, which only an unfocused pane
+/// takes, and `modal_dim`, which every pane takes. A modal fade over an
+/// unfocused pane so deepens a lighter unfocused fade and keeps a deeper one.
+pub(crate) fn pane_fade(is_focused: bool, inactive_dim: f32, modal_dim: f32) -> f32 {
+    let unfocused = if is_focused { 0.0 } else { inactive_dim };
+    unfocused.max(modal_dim)
 }
 
 /// A screen buffer whose every cell holds `blank` or a held capture, blanked
@@ -1156,8 +1180,11 @@ pub(crate) fn frame(
     let modal_overlay = modal_overlay_open(stoat);
     let size = stoat.layout_size();
     let inactive_dim = stoat.painted_inactive_dim();
+    let modal_dim = stoat.modal_dim();
 
-    stoat.refresh_minimap_palettes(minimap_enabled, inactive_dim);
+    // A per-pane strip takes its dimmed palette whenever its pane dims, so the
+    // palette builds at the deeper of the two fades.
+    stoat.refresh_minimap_palettes(minimap_enabled, inactive_dim.max(modal_dim));
 
     // Resolved before the field borrows below, because snapshotting the prompt
     // editor's display map takes the whole app mutably. Nothing between here
@@ -1347,6 +1374,7 @@ pub(crate) fn frame(
         wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
         scrolloff: stoat.settings.scrolloff.unwrap_or(3),
         inactive_dim,
+        modal_dim,
         diff_dials,
         images_capable: stoat.stoatty && stoat.stoatty_protocol >= 2,
         batch_decorations: stoat.stoatty_protocol >= BATCHED_DECORATIONS_PROTOCOL,
@@ -2976,6 +3004,123 @@ mod minimap_chrome_tests {
         let [r, g, b] = style_rgb(h.stoat.theme.get(scope::UI_BORDER_FOCUSED).fg)
             .expect("the theme's focus accent is RGB");
         assert_eq!((strip.width, strip.thumb), (7, [r, g, b, 23]));
+    }
+}
+
+#[cfg(test)]
+mod modal_dim_tests {
+    use super::pane_fade;
+    use crate::{
+        render::paint::{dim_rgb, style_rgb},
+        test_fixture::open_scratch_file,
+        test_harness::TestHarness,
+        theme::scope,
+    };
+    use ratatui::style::Color;
+    use stoat_config::MinimapMode;
+    use stoatty_protocol::command::{self, Command};
+
+    /// An unfocused pane takes the deeper of the two fades, and a focused pane
+    /// takes the modal fade alone.
+    #[test]
+    fn a_pane_takes_the_deeper_of_its_fades() {
+        assert_eq!(
+            [
+                pane_fade(true, 0.8, 0.65),
+                pane_fade(false, 0.8, 0.65),
+                pane_fade(false, 0.1, 0.65),
+                pane_fade(true, 0.8, 0.0),
+            ],
+            [0.65, 0.8, 0.65, 0.0]
+        );
+    }
+
+    /// A modal that paints its own box fades every pane behind it by
+    /// `ui.modal_dim`, the unfocused one past its own lighter fade. The search
+    /// prompt paints no box, so the panes keep their fades.
+    #[test]
+    fn a_boxed_modal_fades_every_pane_behind_it() {
+        let mut h = TestHarness::with_size(80, 24);
+        let _path = open_scratch_file(&mut h, "abcdef\n");
+        h.type_action("SplitRight()");
+        h.stoat.settings.ui_inactive_dim = Some(0.1);
+        h.stoat.settings.ui_modal_dim = Some(0.65);
+        let glyphs = |h: &mut TestHarness| -> Vec<Color> {
+            let buf = h.stoat.render();
+            (0..80)
+                .filter(|&x| buf[(x, 0)].symbol() == "c")
+                .map(|x| buf[(x, 0)].fg)
+                .collect()
+        };
+
+        let plain = glyphs(&mut h);
+        h.type_keys("/");
+        let searching = glyphs(&mut h);
+        h.type_keys("escape");
+        h.type_action("SwitchWorkspace()");
+        let boxed = glyphs(&mut h);
+
+        let bg = style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg).expect("an RGB ground");
+        let Some(&Color::Rgb(r, g, b)) = plain.last() else {
+            panic!("the focused pane paints its text in RGB, not {plain:?}");
+        };
+        let fade = |amount: f32| {
+            let [r, g, b] = dim_rgb([r, g, b], bg, amount);
+            Color::Rgb(r, g, b)
+        };
+        assert_eq!(
+            [plain, searching, boxed],
+            [
+                vec![fade(0.1), fade(0.0)],
+                vec![fade(0.1), fade(0.0)],
+                vec![fade(0.65), fade(0.65)],
+            ],
+            "the unfocused left pane, then the focused right one"
+        );
+    }
+
+    /// `ui.modal_dim` clamps to `0.0..=1.0`, and a setting left unset fades no
+    /// pane.
+    #[test]
+    fn the_modal_fade_clamps_its_setting_and_needs_it_set() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.type_action("SwitchWorkspace()");
+        let fades = [None, Some(2.0), Some(-1.0)].map(|setting| {
+            h.stoat.settings.ui_modal_dim = setting;
+            h.stoat.modal_dim()
+        });
+        assert_eq!(fades, [0.0, 1.0, 0.0]);
+    }
+
+    /// A per-pane minimap strip fades with its pane under a boxed modal, its
+    /// thumb and its palette alike.
+    #[test]
+    fn a_pane_strip_fades_with_its_pane_under_a_boxed_modal() {
+        let mut h = TestHarness::with_size(120, 24);
+        h.stoat.settings.editor_minimap = Some(MinimapMode::PerPane);
+        h.stoat.settings.ui_modal_dim = Some(0.65);
+        h.seed_focused_buffer(&"line\n".repeat(60));
+        let strip = |h: &mut TestHarness| {
+            h.stoat.render();
+            command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .find_map(|cmd| match cmd {
+                    Command::Minimap(strip) => Some(strip),
+                    _ => None,
+                })
+                .expect("the pane declares a strip")
+        };
+
+        let plain = strip(&mut h);
+        h.type_action("SwitchWorkspace()");
+        let faded = strip(&mut h);
+
+        let bg = style_rgb(h.stoat.theme.get(scope::UI_BACKGROUND).bg).expect("an RGB ground");
+        let fade = |color: [u8; 3]| dim_rgb(color, bg, 0.65);
+        let [r, g, b, alpha] = plain.thumb;
+        let [r, g, b] = fade([r, g, b]);
+        let palette: Vec<[u8; 3]> = plain.palette.iter().map(|&color| fade(color)).collect();
+        assert_eq!((faded.thumb, faded.palette), ([r, g, b, alpha], palette));
     }
 }
 

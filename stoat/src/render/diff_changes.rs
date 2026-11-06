@@ -803,6 +803,7 @@ mod tests {
             wrap_column: 80,
             scrolloff: stoat.settings.scrolloff.unwrap_or(3),
             inactive_dim: 0.0,
+            modal_dim: 0.0,
             diff_dials: DiffDials::from_stoat(stoat),
             images_capable: false,
             batch_decorations: false,

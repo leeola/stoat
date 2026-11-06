@@ -162,7 +162,7 @@ pub(crate) fn repaint_term_rows(
     }
     render_term_rows(agent, frame.theme, area, is_focused, buf, rows);
     for line in lines() {
-        pane::dim_unfocused_pane(line, is_focused, frame, buf);
+        pane::dim_pane(line, is_focused, frame, buf);
     }
 }
 

@@ -6828,12 +6828,30 @@ fn a_held_pane_that_paints_fresh_leaves_no_held_cells() {
 }
 
 /// A modal over a held pane leaves no trace once it closes, since the blank
-/// job puts the capture back over what the modal painted. The unfocused pane
-/// replays its held capture with no copy. The focused pane paints fresh, since
-/// the terminal cursor it gave the finder's input comes back to it.
+/// job puts the capture back over what the modal painted. Under a modal that
+/// dims no pane, the unfocused pane replays its held capture with no copy. The
+/// focused pane paints fresh, since the terminal cursor it gave the finder's
+/// input comes back to it.
 #[test]
 fn a_closed_modal_leaves_no_trace_on_a_held_pane() {
+    let (held_replays, restored, fresh) = close_finder_over_split(0.0);
+    assert_eq!((held_replays, restored), (1, fresh));
+}
+
+/// A modal that dims the panes under it leaves no trace either. The captures
+/// it leaves hold the dimmed paint, so the panes paint fresh as it closes.
+#[test]
+fn a_closed_dimming_modal_leaves_no_trace_on_a_held_pane() {
+    let (_, restored, fresh) = close_finder_over_split(0.65);
+    assert_eq!(restored, fresh);
+}
+
+/// Open the finder over a split pair under `modal_dim`, paint a held frame,
+/// then close the finder and paint through the blank job. Returns the held
+/// replays that paint made, the frame it painted, and a fresh frame.
+fn close_finder_over_split(modal_dim: f64) -> (u64, Buffer, Buffer) {
     let mut h = Stoat::test();
+    h.stoat.settings.ui_modal_dim = Some(modal_dim);
     split_pair(&mut h);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
     h.settle();
@@ -6842,10 +6860,8 @@ fn a_closed_modal_leaves_no_trace_on_a_held_pane() {
     let held_before = h.stoat.pane_replays_held;
 
     let restored = paint_restored(&mut h, buf, holds);
-    assert_eq!(
-        (h.stoat.pane_replays_held - held_before, restored),
-        (1, h.stoat.render())
-    );
+    let held_replays = h.stoat.pane_replays_held - held_before;
+    (held_replays, restored, h.stoat.render())
 }
 
 /// A frame lists each pane capture it shows whole for the UI thread, by its

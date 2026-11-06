@@ -331,6 +331,10 @@ on init {
     # from 0 (no fade) to 1.
     ui.inactive_dim = 0.14;
 
+    # How far every pane's colors blend toward the theme background while a
+    # modal paints its own box over them, from 0 (no fade) to 1.
+    ui.modal_dim = 0.65;
+
     # Fade the unfocused panes only while the stoatty window has focus. The
     # fade marks the pane a keystroke reaches, and with the window in the
     # background no keystroke reaches any, so every pane paints plain until

@@ -227,6 +227,13 @@ pub fn settings_schema() -> &'static [SettingDef] {
             default: "0.25",
         },
         SettingDef {
+            path: &[Lit("ui"), Lit("modal_dim")],
+            shape: ValueShape::Number,
+            doc: "Fraction every pane's colors blend toward the background while \
+                  a modal paints its own box over them (0 disables).",
+            default: "0",
+        },
+        SettingDef {
             path: &[Lit("ui"), Lit("inactive_dim_follows_focus")],
             shape: ValueShape::Bool,
             doc: "Whether the unfocused-pane fade paints only while the terminal \

@@ -278,6 +278,31 @@ fn the_finder_header_ends_in_a_chip_on_the_hover_surface() {
     }
 }
 
+/// The editor behind the finder fades toward its own ground.
+///
+/// The fade blends a glyph toward its cell's background, so the backdrop keeps
+/// its surface and its text dims. The brightest pixel of the first line's text
+/// falls below half of what it was before the finder opened.
+#[test]
+fn the_editor_behind_the_finder_fades() {
+    let mut home = support::scratch_home();
+    let mut session = spawn_settled(home.path(), "many-files", "src/alpha.txt");
+    let text = cell_rect(6, 0, 17, 1);
+    let before = session.snapshot().expect("a snapshot");
+    play(&mut session, "<Space>p<Settle>");
+    let after = session.snapshot().expect("a snapshot");
+
+    let (lit, faded) = (brightest(&before, text), brightest(&after, text));
+    if u16::from(faded) * 2 >= u16::from(lit) {
+        let frame = keep_frame(&after, &mut home, "modal_backdrop");
+        panic!(
+            "the backdrop text peaks at {faded} under the finder and at {lit} before it; the \
+             frame is {}",
+            frame.display(),
+        );
+    }
+}
+
 /// The finder ends in a footer row on the raised surface.
 ///
 /// No other surface of the frame is raised, so the raised cells form one run
@@ -571,6 +596,20 @@ fn cells_of(shot: &Snapshot, color: [u8; 3]) -> Vec<(u16, u16)> {
         .flat_map(|row| (0..COLS).map(move |col| (col, row)))
         .filter(|&(col, row)| dominant_color(shot, cell_rect(col, row, 1, 1)) == color)
         .collect()
+}
+
+/// The largest channel of any pixel in `rect` of `shot`.
+fn brightest(shot: &Snapshot, (x, y, width, height): PixelRect) -> u8 {
+    (y..y + height)
+        .flat_map(|row| {
+            let start = ((row * shot.width + x) * 4) as usize;
+            let end = start + (width * 4) as usize;
+            shot.rgba[start..end]
+                .chunks_exact(4)
+                .map(|pixel| pixel[0].max(pixel[1]).max(pixel[2]))
+        })
+        .max()
+        .expect("the rectangle holds pixels")
 }
 
 /// Whether `cells`, row by row, form one unbroken run in one row.

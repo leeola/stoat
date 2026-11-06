@@ -107,15 +107,15 @@ pub(crate) struct PaneCacheKey {
     /// The theme and the settings the paint reads off the app, neither of which
     /// passes through a display layer.
     pub(crate) paint_generation: u64,
-    /// The dim an unfocused pane's cells and minimap palette are blended by,
-    /// as bits so the key stays comparable.
+    /// The dim the pane's cells and minimap palette are blended by, per
+    /// [`FrameCtx::pane_dim`], as bits so the key stays comparable.
     ///
     /// Read straight off the settings rather than through the config install,
     /// so a value written into the field directly moves no generation. The same
     /// goes for the line numbering below. Anything the frame reads off settings
     /// without a version of its own belongs here rather than trusting the
     /// generation to have seen it.
-    pub(crate) inactive_dim_bits: u32,
+    pub(crate) dim_bits: u32,
     pub(crate) line_numbers: LineNumbers,
     /// The diagnostics the gutter and the underlines are drawn from.
     pub(crate) diagnostics_version: u64,
@@ -498,7 +498,7 @@ pub(crate) fn pane_cache_key(
         area: pane.area,
         pane_index: pane.index as usize,
         paint_generation,
-        inactive_dim_bits: frame.inactive_dim.to_bits(),
+        dim_bits: frame.pane_dim(is_focused).to_bits(),
         line_numbers: frame.line_numbers,
         diagnostics_version: diagnostics_version(buffers, buffer, frame),
         diff_version,
@@ -572,7 +572,7 @@ fn terminal_cache_key(
         area: pane_areas(pane.area, frame.minimap_band).0,
         pane_index: pane.index as usize,
         paint_generation,
-        inactive_dim_bits: frame.inactive_dim.to_bits(),
+        dim_bits: frame.pane_dim(is_focused).to_bits(),
         line_numbers: LineNumbers::Off,
         diagnostics_version: 0,
         diff_version: 0,
@@ -699,7 +699,7 @@ fn stack_cache_key(
         area: pane.area,
         pane_index: pane.index as usize,
         paint_generation,
-        inactive_dim_bits: frame.inactive_dim.to_bits(),
+        dim_bits: frame.pane_dim(is_focused).to_bits(),
         line_numbers: frame.line_numbers,
         diagnostics_version: diagnostics_version(buffers, buffer, frame),
         diff_version: diff_version(buffers, buffer)?,
@@ -829,7 +829,7 @@ mod tests {
             area: Rect::new(0, 0, 40, 10),
             pane_index: 0,
             paint_generation: 0,
-            inactive_dim_bits: 0,
+            dim_bits: 0,
             line_numbers: LineNumbers::Off,
             diagnostics_version: 0,
             diff_version: 0,
@@ -909,9 +909,9 @@ mod tests {
                 },
             ),
             (
-                "inactive_dim_bits",
+                "dim_bits",
                 PaneCacheKey {
-                    inactive_dim_bits: 1,
+                    dim_bits: 1,
                     ..base
                 },
             ),

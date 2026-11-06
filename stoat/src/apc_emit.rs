@@ -482,6 +482,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         wrap_column: 80,
         scrolloff: stoat.settings.scrolloff.unwrap_or(3),
         inactive_dim: 0.0,
+        modal_dim: 0.0,
         diff_dials: DiffDials::shipped(),
         images_capable: false,
         batch_decorations,
@@ -965,6 +966,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         .flatten();
 
     let inactive_dim = stoat.painted_inactive_dim();
+    let modal_dim = stoat.modal_dim();
 
     // A terminal or agent pane draws at the terminal font size as a terminal
     // pool, which a terminal before that protocol does not know. The live grid
@@ -974,7 +976,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         true => Vec::new(),
         false => {
             let covered = crate::render::overlay_pane(stoat.active_workspace());
-            terminal_pool_panes(stoat, inactive_dim, covered)
+            terminal_pool_panes(stoat, inactive_dim, modal_dim, covered)
         },
     };
 
@@ -1148,13 +1150,10 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
         let Some(editor) = ws.editors.get_mut(*editor_id) else {
             continue;
         };
-        // A pooled page for an unfocused pane carries the same dim as its
-        // live grid, so a wheel glide over it never flashes bright content.
-        let dim = if focused_editor == Some(*editor_id) {
-            0.0
-        } else {
-            inactive_dim
-        };
+        // A pooled page carries the same fade as its pane's live grid, so a
+        // wheel glide over it never flashes bright content.
+        let dim =
+            crate::render::pane_fade(focused_editor == Some(*editor_id), inactive_dim, modal_dim);
         // The walkthrough spotlight rides the pages of the editor the live grid
         // paints it on, so a glide composites the lit annotation and the dim.
         let page_spotlight = spotlight
@@ -1489,6 +1488,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             wrap_column: stoat.settings.editor_wrap_column.unwrap_or(80).max(1),
             scrolloff: stoat.settings.scrolloff.unwrap_or(3),
             inactive_dim,
+            modal_dim,
             diff_dials,
             images_capable: false,
             batch_decorations,
@@ -2893,6 +2893,7 @@ pub(crate) fn composited_stacks(stoat: &Stoat) -> Vec<(u32, Rect)> {
 fn terminal_pool_panes(
     stoat: &Stoat,
     inactive_dim: f32,
+    modal_dim: f32,
     covered: Option<PaneId>,
 ) -> Vec<TerminalPoolPane> {
     let ws = stoat.active_workspace();
@@ -2924,10 +2925,7 @@ fn terminal_pool_panes(
             }
 
             let is_focused = focused == Some(id);
-            let fade = match is_focused {
-                true => 0.0,
-                false => inactive_dim,
-            };
+            let fade = crate::render::pane_fade(is_focused, inactive_dim, modal_dim);
             Some(TerminalPoolPane {
                 term_id,
                 region: PoolRegionCommand {
@@ -3499,9 +3497,7 @@ fn stack_page_version(
     (theme_epoch, paint_generation, region.width, region.height).hash(&mut hasher);
     crate::render::pane_cache::dial_bits(frame.diff_dials).hash(&mut hasher);
     is_focused.hash(&mut hasher);
-    if !is_focused {
-        frame.inactive_dim.to_bits().hash(&mut hasher);
-    }
+    frame.pane_dim(is_focused).to_bits().hash(&mut hasher);
 
     for excerpt in &state.excerpts {
         let Some(editor) = editors.get_mut(excerpt.editor_id) else {
@@ -3615,7 +3611,7 @@ fn paint_pool_page(
         crate::smooth_scroll::page_top_row(index, region.height) as usize,
         paint,
     );
-    crate::render::pane::dim_unfocused_pane(area, is_focused, frame, &mut page);
+    crate::render::pane::dim_pane(area, is_focused, frame, &mut page);
     (page, scene)
 }
 

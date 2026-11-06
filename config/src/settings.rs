@@ -189,6 +189,12 @@ pub struct Settings {
     /// `ui.inactive_dim_follows_focus = false;` in stcfg to keep the fade
     /// through an alt-tab.
     pub ui_inactive_dim_follows_focus: Option<bool>,
+    /// Fraction every pane's colors blend toward the theme background while a
+    /// modal paints its own box over them, so the box reads in front. `None`
+    /// falls back to 0, which leaves the panes as they are. Set
+    /// `ui.modal_dim = 0.65;` in stcfg. The raw value is stored here and
+    /// clamped to 0.0..=1.0 at the consumer.
+    pub ui_modal_dim: Option<f64>,
     /// Whether relative line numbers paint as absolute while the terminal
     /// window has no OS focus. `None` falls back to on. Set
     /// `ui.relative_numbers_follow_focus = false;` in stcfg to keep relative
@@ -363,6 +369,7 @@ impl Settings {
             ui_inactive_dim_follows_focus: other
                 .ui_inactive_dim_follows_focus
                 .or(self.ui_inactive_dim_follows_focus),
+            ui_modal_dim: other.ui_modal_dim.or(self.ui_modal_dim),
             ui_relative_numbers_follow_focus: other
                 .ui_relative_numbers_follow_focus
                 .or(self.ui_relative_numbers_follow_focus),
@@ -588,6 +595,11 @@ impl Settings {
                     self.ui_inactive_dim_follows_focus = Some(b);
                 }
             },
+            ["ui", "modal_dim"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.ui_modal_dim = Some(n);
+                }
+            },
             ["ui", "relative_numbers_follow_focus"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.ui_relative_numbers_follow_focus = Some(b);
@@ -744,6 +756,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: None,
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -887,6 +900,15 @@ mod tests {
         assert_eq!(dim("on init { ui.inactive_dim = 0.4; }"), Some(0.4));
         assert_eq!(dim("on init { ui.inactive_dim = 0; }"), Some(0.0));
         assert_eq!(dim("on init { }"), None, "absent falls back at consumer");
+    }
+
+    #[test]
+    fn from_config_extracts_ui_modal_dim() {
+        let dim = |src: &str| Settings::from_config(&parse_ok(src)).ui_modal_dim;
+        assert_eq!(
+            [dim("on init { ui.modal_dim = 0.65; }"), dim("on init { }")],
+            [Some(0.65), None]
+        );
     }
 
     #[test]
@@ -1148,6 +1170,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: None,
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -1200,6 +1223,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: None,
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -1261,6 +1285,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_modal_dim: Some(0.3),
             ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
@@ -1305,6 +1330,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_modal_dim: Some(0.65),
             ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
@@ -1351,6 +1377,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: Some(0.65),
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -1400,6 +1427,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_modal_dim: Some(0.3),
             ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
@@ -1447,6 +1475,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: Some(0.3),
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -1507,6 +1536,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: None,
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -1559,6 +1589,7 @@ mod tests {
                 ui_tab_bar: None,
                 ui_inactive_dim: None,
                 ui_inactive_dim_follows_focus: None,
+                ui_modal_dim: None,
                 ui_relative_numbers_follow_focus: None,
                 ui_pin_hides_hints: None,
                 highlight_retention: None,
@@ -1608,6 +1639,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_modal_dim: None,
             ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,
@@ -1652,6 +1684,7 @@ mod tests {
             ui_tab_bar: None,
             ui_inactive_dim: None,
             ui_inactive_dim_follows_focus: None,
+            ui_modal_dim: None,
             ui_relative_numbers_follow_focus: None,
             ui_pin_hides_hints: None,
             highlight_retention: None,

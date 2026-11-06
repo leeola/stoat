@@ -4095,6 +4095,19 @@ impl Stoat {
         self.inactive_dim()
     }
 
+    /// The fade a frame paints every pane with, focused or not, while a modal
+    /// paints its own box over them.
+    ///
+    /// The `ui.modal_dim` setting answers, clamped to `0.0..=1.0` and `0.0`
+    /// when unset. A transient input such as the search prompt paints no box,
+    /// so it leaves the panes at `0.0` and the editor it works on in full.
+    pub(crate) fn modal_dim(&self) -> f32 {
+        if !active_modal(self).is_some_and(ActiveModal::paints_own_box) {
+            return 0.0;
+        }
+        self.settings.ui_modal_dim.unwrap_or(0.0).clamp(0.0, 1.0) as f32
+    }
+
     /// The line numbering the gutter takes, resolving `:relative-numbers`
     /// against the `editor.line_numbers` setting.
     ///

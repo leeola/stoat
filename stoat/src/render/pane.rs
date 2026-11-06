@@ -140,7 +140,7 @@ pub(crate) fn render_pane(
                     },
                     frame.terminal_cursor_editor == Some(*editor_id),
                     Some(undercurls),
-                    if is_focused { 0.0 } else { frame.inactive_dim },
+                    frame.pane_dim(is_focused),
                     frame.diff_dials,
                     frame.wrap_mode,
                     frame.wrap_column,
@@ -196,7 +196,7 @@ pub(crate) fn render_pane(
             if let Some(state) = commit_lists.get_mut(*id) {
                 commits::render_commits(pane, is_focused, state, frame, buf, &mut *scene);
             }
-            dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            dim_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             return;
         },
         // The changes view paints the pane status row through its focused
@@ -223,13 +223,13 @@ pub(crate) fn render_pane(
                         .render(strip, buf, scene);
                 }
             }
-            dim_unfocused_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            dim_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
             render_pane_status(pane, is_focused, frame, editors, status, buf, scene);
             return;
         },
     }
 
-    dim_unfocused_pane(content_area, is_focused, frame, buf);
+    dim_pane(content_area, is_focused, frame, buf);
 
     render_pane_status(pane, is_focused, frame, editors, status, buf, scene);
     scene.set_lane(content_lane(pane.index));
@@ -396,8 +396,8 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
 /// `content_id`.
 ///
 /// The strip takes the diff palette when `diff` holds, and the syntax palette
-/// otherwise. An unfocused pane's palette and thumb blend toward the theme
-/// background at the inactive dim, as the rest of the pane does.
+/// otherwise. A dimmed pane's palette and thumb blend toward the theme
+/// background at the pane's dim, as the rest of the pane does.
 fn pane_minimap<'a>(
     pane: &Pane,
     chrome: MinimapChrome<'a>,
@@ -406,7 +406,7 @@ fn pane_minimap<'a>(
     is_focused: bool,
     frame: FrameCtx<'_>,
 ) -> Minimap<'a> {
-    let dim = if is_focused { 0.0 } else { frame.inactive_dim };
+    let dim = frame.pane_dim(is_focused);
     let dim_bg = (dim > 0.0)
         .then(|| {
             style_rgb(
@@ -432,25 +432,23 @@ fn pane_minimap<'a>(
         bg: [0, 0, 0, 0],
         thumb: [tr, tg, tb, ta],
         thumb_border: [tr, tg, tb],
-        palette: match (diff, is_focused) {
-            (false, true) => chrome.palette,
-            (false, false) => chrome.dimmed_palette,
-            (true, true) => chrome.diff_palette,
-            (true, false) => chrome.dimmed_diff_palette,
+        palette: match (diff, dim > 0.0) {
+            (false, false) => chrome.palette,
+            (false, true) => chrome.dimmed_palette,
+            (true, false) => chrome.diff_palette,
+            (true, true) => chrome.dimmed_diff_palette,
         },
     }
 }
 
-/// Dim `area` toward the theme background when the pane is unfocused, so the
-/// focused pane reads as the one keys reach.
-pub(crate) fn dim_unfocused_pane(
-    area: Rect,
-    is_focused: bool,
-    frame: FrameCtx<'_>,
-    buf: &mut Buffer,
-) {
-    if !is_focused
-        && frame.inactive_dim > 0.0
+/// Dim `area` toward the theme background by the pane's fade.
+///
+/// An unfocused pane fades so the focused pane reads as the one keys reach,
+/// and every pane fades while a modal paints its own box over them, per
+/// [`FrameCtx::pane_dim`].
+pub(crate) fn dim_pane(area: Rect, is_focused: bool, frame: FrameCtx<'_>, buf: &mut Buffer) {
+    let dim = frame.pane_dim(is_focused);
+    if dim > 0.0
         && let Some(bg) = style_rgb(
             frame
                 .theme
@@ -458,7 +456,7 @@ pub(crate) fn dim_unfocused_pane(
                 .and_then(|s| s.bg),
         )
     {
-        dim_pane_content(buf, area, bg, frame.inactive_dim);
+        dim_pane_content(buf, area, bg, dim);
     }
 }
 

@@ -105,9 +105,10 @@ pub(crate) const POPULATION_PALETTE_PROTOCOL: u32 = 13;
 
 /// The palettes a frame's minimap strips declare beside the class table's own.
 ///
-/// A focused plain strip declares the class table's palette as it is. An
-/// unfocused strip declares its palette blended toward the background at the
-/// inactive dim. A diff view's strip declares [`review::diff_minimap_palette`],
+/// A plain strip whose pane does not fade declares the class table's palette
+/// as it is. A strip whose pane fades declares its palette blended toward the
+/// background at the frame's fade, the deeper of the inactive dim and a boxed
+/// modal's dim. A diff view's strip declares [`review::diff_minimap_palette`],
 /// so a dial step reaches the strip through its declaration alone.
 ///
 /// Every strip of a kind declares the same palette, so the frame builds them
@@ -118,13 +119,13 @@ pub(crate) struct MinimapPalettes {
     dim: f32,
     dials: DiffDials,
     syntax: bool,
-    /// The class table's palette at the inactive dim. `None` when no dim
-    /// applies or the background is not RGB, where an unfocused strip declares
-    /// the palette undimmed.
+    /// The class table's palette at the frame's fade. `None` when no fade
+    /// applies or the background is not RGB, where a fading strip declares the
+    /// palette undimmed.
     pub(crate) dimmed: Option<Vec<[u8; 3]>>,
     /// The diff view's palette under the dials and the syntax flag.
     pub(crate) diff: Vec<[u8; 3]>,
-    /// [`Self::diff`] at the inactive dim, `None` where [`Self::dimmed`] is.
+    /// [`Self::diff`] at the frame's fade, `None` where [`Self::dimmed`] is.
     pub(crate) diff_dimmed: Option<Vec<[u8; 3]>>,
 }
 
