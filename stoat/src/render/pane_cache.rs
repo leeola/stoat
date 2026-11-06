@@ -24,8 +24,8 @@
 //! key.
 //!
 //! The diff view's branch returns before its selection pass as well. Past what
-//! a plain pane reads, it reads the diff dials and the names on its sides bar.
-//! No version moves with either, so the key holds both.
+//! a plain pane reads, it reads the diff dials. No version moves with them, so
+//! the key holds them.
 //!
 //! A changes view paints one diff view per excerpt its window shows. Its key
 //! holds the parts an editor key holds for the focused excerpt, and it folds
@@ -46,11 +46,8 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Pane, PaneId, Placement, View},
     render::{
-        diff_changes::stack_composited,
-        pane::{diff_sides_for, pane_areas},
-        review::DiffDials,
-        undercurl::UndercurlBatch,
-        FrameCtx, Hold,
+        diff_changes::stack_composited, pane::pane_areas, review::DiffDials,
+        undercurl::UndercurlBatch, FrameCtx, Hold,
     },
     term_session::{TermId, TermSession},
     workspace::WorkspaceId,
@@ -123,7 +120,7 @@ pub(crate) struct PaneCacheKey {
     /// of its columns.
     pub(crate) diff_version: usize,
     /// Whether the editor shows the diff view, which paints the base beside the
-    /// buffer and a sides bar over both.
+    /// buffer.
     pub(crate) diff_view: bool,
     /// The diff view's dials, as the soften scale and the tint amount in bits,
     /// then the bold and the underline flags.
@@ -132,12 +129,6 @@ pub(crate) struct PaneCacheKey {
     /// Outside the diff view nothing reads them, and they hold zeros there so a
     /// turn repaints no plain pane.
     pub(crate) diff_dials: (u32, u32, bool, bool),
-    /// A hash of the two names the diff view's sides bar shows, zero outside the
-    /// diff view.
-    ///
-    /// A switch of the diff base renames the sides with no generation of its
-    /// own.
-    pub(crate) diff_sides: u64,
     /// The minimap content published for this pane's buffer, which the strip
     /// paints from and which no display version covers.
     pub(crate) minimap_content_id: u32,
@@ -474,13 +465,9 @@ pub(crate) fn pane_cache_key(
     }
     let diff_version = diff_version(buffers, buffer)?;
 
-    let (diff_dials, diff_sides) = match editor.diff_view {
-        true => {
-            let mut sides = DefaultHasher::new();
-            diff_sides_for(buffers.path_for(buffer), frame).hash(&mut sides);
-            (dial_bits(frame.diff_dials), sides.finish())
-        },
-        false => ((0, 0, false, false), 0),
+    let diff_dials = match editor.diff_view {
+        true => dial_bits(frame.diff_dials),
+        false => (0, 0, false, false),
     };
 
     let minimap_content_id = frame
@@ -504,7 +491,6 @@ pub(crate) fn pane_cache_key(
         diff_version,
         diff_view: editor.diff_view,
         diff_dials,
-        diff_sides,
         minimap_content_id,
         minimap_enabled: frame.minimap_enabled,
         focused: is_focused,
@@ -578,7 +564,6 @@ fn terminal_cache_key(
         diff_version: 0,
         diff_view: false,
         diff_dials: (0, 0, false, false),
-        diff_sides: 0,
         minimap_content_id: 0,
         minimap_enabled: false,
         focused: is_focused,
@@ -705,7 +690,6 @@ fn stack_cache_key(
         diff_version: diff_version(buffers, buffer)?,
         diff_view: true,
         diff_dials: dial_bits(frame.diff_dials),
-        diff_sides: 0,
         minimap_content_id: frame
             .minimap_chrome
             .as_ref()
@@ -835,7 +819,6 @@ mod tests {
             diff_version: 0,
             diff_view: false,
             diff_dials: (0, 0, false, false),
-            diff_sides: 0,
             minimap_content_id: 0,
             minimap_enabled: false,
             focused: false,
@@ -858,7 +841,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 24] = [
+        let moved: [(&str, PaneCacheKey); 23] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -947,13 +930,6 @@ mod tests {
                 "diff_dials",
                 PaneCacheKey {
                     diff_dials: (0, 0, false, true),
-                    ..base
-                },
-            ),
-            (
-                "diff_sides",
-                PaneCacheKey {
-                    diff_sides: 1,
                     ..base
                 },
             ),

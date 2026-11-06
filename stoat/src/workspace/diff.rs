@@ -157,7 +157,7 @@ impl DiffBase {
 
 /// How a [`DiffBase::Rev`] became the base.
 ///
-/// The sides bar names the two columns from it.
+/// A diff view's status row names the two columns from it.
 #[derive(Clone)]
 pub(crate) enum RevOrigin {
     /// The reader named the revision, spelled as typed.
@@ -1423,8 +1423,8 @@ pub(crate) fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
     (below(base_path), below(path))
 }
 
-/// The first seven chars of `sha`, the length the sides bar and the base
-/// prompt show.
+/// The first seven chars of `sha`, the length the diff status row and the
+/// base prompt show.
 pub(crate) fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }

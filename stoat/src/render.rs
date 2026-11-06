@@ -333,8 +333,8 @@ pub(crate) struct FrameCtx<'a> {
     /// working tree. It replaces [`Self::repo_change_counts`], which describes
     /// a working tree the pane is then not showing.
     pub(crate) diff_base: Option<&'a str>,
-    /// The names of the diff's left and right sides, which the diff view's top
-    /// bar reads.
+    /// The names of the diff's left and right sides, which a diff view's status
+    /// row shows.
     pub(crate) diff_sides: (&'a str, &'a str),
     /// The sides a paired file's diff view names, keyed by the measured path.
     ///
@@ -1504,15 +1504,7 @@ pub(crate) fn frame(
             {
                 diff_changes::replay_cursor(pane, state, &mut ws.editors, frame, scene.live());
             }
-            pane::render_pane_status(
-                pane,
-                is_focused,
-                frame,
-                &mut ws.editors,
-                &status_row,
-                buf,
-                scene,
-            );
+            pane::render_pane_status(pane, frame, &mut ws.editors, &status_row, buf, scene);
             scene.end_lane();
             continue;
         }

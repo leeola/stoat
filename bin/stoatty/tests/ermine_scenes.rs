@@ -39,6 +39,8 @@ const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
+const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
+const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
@@ -162,6 +164,36 @@ fn the_base_side_of_the_split_diff_recedes_behind_the_live_side() {
             frame.display(),
         );
     }
+}
+
+/// The split diff's status row tints its base half toward removal and its
+/// target half toward addition.
+///
+/// Row 49 is the status row. Column 30 lies in the base half and column 130 in
+/// the target half.
+#[test]
+fn the_split_diff_s_status_halves_take_their_side_tints() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        "<Space>df<Settle>",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(30, 49, 1, 1),
+        SIDE_BASE,
+        "diff_status_base_half",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(130, 49, 1, 1),
+        SIDE_TARGET,
+        "diff_status_target_half",
+    );
 }
 
 /// The panes sit one chrome column in from each window edge, and a blank text

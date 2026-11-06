@@ -885,6 +885,16 @@ pub mod scope {
     pub const DIFF_UNSTAGED: &str = "diff.unstaged";
     pub const DIFF_APPROVED: &str = "diff.approved";
     pub const DIFF_UNAPPROVED: &str = "diff.unapproved";
+    /// The base half of a split diff view's status row, its text on its tint.
+    ///
+    /// The `name` scope colors the base's name. Each channel the theme leaves
+    /// unset derives from the status bar and `diff.deleted`.
+    pub const DIFF_SIDES_BASE: &str = "diff.sides.base";
+    pub const DIFF_SIDES_BASE_NAME: &str = "diff.sides.base.name";
+    /// The target half, as [`DIFF_SIDES_BASE`] is the base half, with
+    /// `diff.added` in place of `diff.deleted`.
+    pub const DIFF_SIDES_TARGET: &str = "diff.sides.target";
+    pub const DIFF_SIDES_TARGET_NAME: &str = "diff.sides.target.name";
 
     pub const UI_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
     pub const UI_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";

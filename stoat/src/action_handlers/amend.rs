@@ -546,7 +546,7 @@ mod tests {
         );
     }
 
-    /// The sides bar follows the amend onto the commit it left behind, as the
+    /// The side names follow the amend onto the commit it left behind, as the
     /// walk does.
     #[test]
     fn an_amend_renames_the_commit_the_sides_name() {

@@ -7009,8 +7009,8 @@ fn a_replayed_pane_keeps_its_status_and_content_lanes() {
 /// A pane's status row rides a lane apart from the rest of the pane, so a
 /// cursor move resends the row alone.
 ///
-/// The diff view draws its sides bar after the status row, so the pane has to
-/// return to its content lane once the row is done.
+/// The pane draws its cards over the content after the status row, so it
+/// returns to its content lane once the row is done.
 #[test]
 fn a_pane_status_lane_holds_its_status_row_alone() {
     let mut h = Stoat::test();
@@ -8104,11 +8104,11 @@ fn a_dial_turn_repaints_an_unfocused_diff_pane() {
     assert_eq!(replayed.1, repainted.1, "the scene bytes match");
 }
 
-/// A base switch renames the sides before the new diff lands. Every version
-/// the key reads stands still until then, so only the names in the key
-/// repaint the unfocused diff pane.
+/// A base switch renames the sides before the new diff lands. The names paint
+/// in the status row, which paints on every frame, so the unfocused diff pane
+/// replays its content and its row still names the new base.
 #[test]
-fn a_renamed_side_repaints_an_unfocused_diff_pane() {
+fn a_renamed_side_shows_on_an_unfocused_diff_pane_that_replays() {
     let mut h = Stoat::test();
     diff_pair(&mut h);
     repaint_focused_pane(&mut h);
@@ -8122,10 +8122,18 @@ fn a_renamed_side_repaints_an_unfocused_diff_pane() {
         .active_workspace_mut()
         .set_diff_base(Some(DiffBase::named("main", "0123456789abcdef".into())));
     repaint_focused_pane(&mut h);
+    let before = h.stoat.pane_paints;
+    let buf = h.render_composited();
+    let status_row: String = (0..buf.area.width / 2)
+        .map(|x| buf[(x, buf.area.height - 1)].symbol())
+        .collect();
     assert_eq!(
-        frame_paints(&mut h),
-        2,
-        "the renamed side repaints the diff pane",
+        (
+            h.stoat.pane_paints - before,
+            status_row.contains("main 0123456")
+        ),
+        (1, true),
+        "the diff pane replays, and its status row names the new base: {status_row}",
     );
 }
 

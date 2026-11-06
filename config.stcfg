@@ -228,6 +228,12 @@ theme ermine_night inherits default_dark {
     let tint_accent      = "#223049";
     let tint_info        = "#1e3237";
     let tint_special     = "#2a2236";
+    let side_base_bg     = "#2a1d20";
+    let side_base_fg     = "#a3898c";
+    let side_base_name   = "#f2b3b7";
+    let side_target_bg   = "#1d2a1f";
+    let side_target_fg   = "#8ea78b";
+    let side_target_name = "#bfe6bb";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -305,6 +311,11 @@ theme ermine_night inherits default_dark {
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
+
+    diff.sides.base           = { fg: side_base_fg, bg: side_base_bg };
+    diff.sides.base.name.fg   = side_base_name;
+    diff.sides.target         = { fg: side_target_fg, bg: side_target_bg };
+    diff.sides.target.name.fg = side_target_name;
 
     syntax.keyword        = { fg: special, modifiers: [] };
     syntax.function.fg    = accent;

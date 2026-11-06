@@ -1594,7 +1594,7 @@ fn tint_style(style: Style, target: Color, amount: f32) -> Style {
 }
 
 /// Shift `fg` toward `target` by `amount`, per [`tint_style`] on two RGB colors.
-fn tint_rgb(fg: [u8; 3], target: [u8; 3], amount: f32) -> [u8; 3] {
+pub(crate) fn tint_rgb(fg: [u8; 3], target: [u8; 3], amount: f32) -> [u8; 3] {
     if amount <= 0.0 {
         return fg;
     }
@@ -5428,54 +5428,113 @@ mod tests {
             .unwrap_or_else(|| panic!("no row across {cols:?} starts with {needle:?}"))
     }
 
+    /// The status row names both sides with the cursor on the top row, and
+    /// again once the base switches to the index.
     #[test]
-    fn the_sides_bar_yields_to_a_cursor_on_the_top_row() {
+    fn the_diff_view_names_both_sides_in_its_status_row() {
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
-        assert_eq!(
-            top_row_in_both_frames(&mut h).map(|row| row.contains("working tree")),
-            [false, false],
-            "the line under edit stays clear in both frames",
-        );
-    }
-
-    #[test]
-    fn the_diff_view_names_both_sides_on_its_top_row() {
-        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
-        h.type_keys("j");
-        let head = top_row_in_both_frames(&mut h);
+        let head = status_row_in_both_frames(&mut h);
 
         h.stoat
             .active_workspace_mut()
             .set_worktree_base(WorktreeBase::Index);
         h.settle_diff_jobs();
-        let index = top_row_in_both_frames(&mut h);
+        let index = status_row_in_both_frames(&mut h);
 
+        // A rich frame lays each segment out at the Ui scale, which can close
+        // the space between a mark and its name, so the parts are looked for
+        // apart.
+        let names = |row: &String, base: &str| {
+            [base, "working tree", "\u{2212}", "+"]
+                .iter()
+                .all(|part| row.contains(part))
+        };
         assert_eq!(
             (
-                head.each_ref()
-                    .map(|row| row.contains("HEAD → working tree")),
-                index
-                    .each_ref()
-                    .map(|row| row.contains("index → working tree")),
+                head.each_ref().map(|row| names(row, "HEAD")),
+                index.each_ref().map(|row| names(row, "index")),
             ),
             ([true, true], [true, true]),
             "{head:?} then {index:?}",
         );
     }
 
+    /// The halves meet at the diff's divider column, with the base tint left of
+    /// it, the window ground on it, and the target tint right of it.
     #[test]
-    fn the_sides_bar_centers_on_the_divider() {
+    fn the_status_halves_meet_at_the_divider() {
+        use ratatui::style::Color;
+
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
-        h.type_keys("j");
+        let fills = [true, false].map(|stoatty| {
+            h.stoat.stoatty = stoatty;
+            h.snapshot();
+            let buf = h.rendered_buffer();
+            let y = buf.area.height - 1;
+            [58, 59, 60].map(|x| buf[(x, y)].bg)
+        });
+
+        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let expected = [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)];
+        assert_eq!(fills, [expected, expected], "in both frames");
+    }
+
+    /// A per-pane minimap strip narrows the diff body, so the body's divider
+    /// sits three columns left of the content's middle, and the halves meet
+    /// there.
+    #[test]
+    fn the_status_halves_meet_at_the_divider_beside_a_minimap_strip() {
+        use ratatui::style::Color;
+
+        let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        h.stoat.minimap_override = None;
+        h.stoat.settings.editor_minimap = Some(stoat_config::MinimapMode::PerPane);
+        h.snapshot();
+        let strip = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .minimap_rect;
+
+        let buf = h.rendered_buffer();
+        let y = buf.area.height - 1;
+        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
         assert_eq!(
-            top_row_in_both_frames(&mut h).map(|row| row.chars().position(|c| c == '→')),
-            [Some(59), Some(59)],
-            "the arrow sits on the separator column",
+            (
+                strip.map(|strip| strip.width),
+                [55, 56, 57].map(|x| buf[(x, y)].bg)
+            ),
+            (Some(7), [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)]),
         );
     }
 
+    /// A diff too narrow for two columns keeps one status bar, and names its
+    /// sides there as two chips on their tints.
     #[test]
-    fn a_plain_pane_carries_no_sides_bar() {
+    fn a_unified_diff_names_its_sides_as_chips_in_one_bar() {
+        use ratatui::style::Color;
+
+        let mut h = diff_harness_sized(80, "a\nb\nc\nold\n", "a\nb\nc\nnew\n");
+        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let runs = [true, false].map(|stoatty| {
+            h.stoat.stoatty = stoatty;
+            h.snapshot();
+            let buf = h.rendered_buffer();
+            let y = buf.area.height - 1;
+            let mut runs: Vec<Color> = Vec::new();
+            for x in 0..buf.area.width {
+                let bg = buf[(x, y)].bg;
+                if runs.last() != Some(&bg) {
+                    runs.push(bg);
+                }
+            }
+            runs
+        });
+
+        let expected = [0x7fb0ff, 0x121418, 0x2a1d20, 0x1d2a1f, 0x121418].map(rgb);
+        assert_eq!(runs, [expected, expected].map(Vec::from), "in both frames");
+    }
+
+    #[test]
+    fn a_plain_pane_names_no_diff_sides() {
         let mut h = diff_harness("a\nb\nc\nold\n", "a\nb\nc\nnew\n");
         crate::action_handlers::focused_editor_mut(&mut h.stoat)
             .expect("editor")
@@ -5489,12 +5548,14 @@ mod tests {
         );
     }
 
-    /// Row 0 of the stoatty frame and of the fallback frame, in that order.
-    fn top_row_in_both_frames(h: &mut crate::test_harness::TestHarness) -> [String; 2] {
+    /// The status row of the stoatty frame and of the fallback frame, in that
+    /// order.
+    fn status_row_in_both_frames(h: &mut crate::test_harness::TestHarness) -> [String; 2] {
         [true, false].map(|stoatty| {
             h.stoat.stoatty = stoatty;
             h.snapshot();
-            line_text(h.rendered_buffer(), 0, 0..120)
+            let buf = h.rendered_buffer();
+            line_text(buf, buf.area.height - 1, 0..buf.area.width)
         })
     }
 

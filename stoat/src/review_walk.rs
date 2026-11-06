@@ -22,7 +22,7 @@ pub(crate) enum WalkSpan {
     ///
     /// The diff holds all of `from`'s work since the fork and none of what
     /// landed on `against` after it. Both names stay as the reader typed them,
-    /// which is how the badge and the sides bar name the review.
+    /// which is how the badge and the diff status row name the review.
     Range {
         base: String,
         from: String,

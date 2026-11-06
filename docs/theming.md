@@ -150,12 +150,11 @@ theme that sets `ui.surface.chrome` lays the panes out one chrome column in from
 each side of the window. That whole-cell margin carries the gap around a pane,
 and an inset hides the outer pixels of the pane's first and last column.
 
-The popout cards over the status bar and the diff view's sides bar draw in the
-`popout` frame. Every modal and cursor popup, the key hints box, the docks, and
-the run pane draw in the `overlay` frame. Tabs, the status bar, the popout
-cards, the sides bar, the key hints box, hover text, and walkthrough labels draw
-at `ui.type.ui`, gutter numbers at `ui.type.small`, and modal titles at
-`ui.type.body`.
+The popout cards over the status bar draw in the `popout` frame. Every modal
+and cursor popup, the key hints box, the docks, and the run pane draw in the
+`overlay` frame. Tabs, the status bar, the popout cards, the key hints box,
+hover text, and walkthrough labels draw at `ui.type.ui`, gutter numbers at
+`ui.type.small`, and modal titles at `ui.type.body`.
 
 ## Semantic palette groups: the primary knob
 
@@ -274,6 +273,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `conflict`, `review`, `submode`, `default`).
 - `diff.added`, `diff.deleted`, `diff.modified`, `diff.moved`, `diff.context`,
   `diff.current_hunk` -- the diff and review views.
+- `diff.sides.base`, `diff.sides.base.name`, `diff.sides.target`,
+  `diff.sides.target.name` -- the two halves of a split diff view's status
+  row, its text (foreground) on its tint (background), and the color of the
+  side's name. A channel the theme leaves unset tints the status bar toward
+  `diff.deleted` on the base half and toward `diff.added` on the target half.
 - `ui.diagnostic.error`, `ui.diagnostic.warning`, `ui.diagnostic.info`,
   `ui.diagnostic.hint` -- LSP diagnostic severities.
 - `vcs.conflict.*`, `vcs.commit.*`, `vcs.rebase.*` -- merge conflicts, the

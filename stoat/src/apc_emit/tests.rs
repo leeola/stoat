@@ -2142,6 +2142,41 @@ fn detached_pane_ships_a_window_status_row_that_goes_quiet_when_idle() {
     );
 }
 
+/// A detached plain editor's status row names its file and runs whole, with no
+/// diff sides in it.
+#[test]
+fn detached_pane_status_row_names_its_file_and_no_sides() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.window_ipc_connected = true;
+
+    let root = PathBuf::from("/detach-row");
+    let path = root.join("named.txt");
+    h.fake_fs().insert_file(&path, b"hello\nworld\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    let size = h.stoat.size();
+    h.stoat.active_workspace_mut().layout(size);
+    h.type_action("SplitRight()");
+    h.settle();
+    h.type_action("DetachPane()");
+    while rx.try_recv().is_ok() {}
+
+    emit_smooth_scroll(&mut h.stoat);
+    let mut raw = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        raw.extend(batch);
+    }
+    let text = String::from_utf8_lossy(&raw);
+    assert_eq!(
+        (text.contains("named.txt"), text.contains("working tree")),
+        (true, false),
+        "the row names the file and no diff sides",
+    );
+}
+
 #[test]
 fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
     use stoatty_protocol::command::Command;
@@ -6969,7 +7004,7 @@ fn error_popout_emits_scaled_runs_under_stoatty() {
 }
 
 #[test]
-fn diff_sides_bar_emits_a_ui_scale_run_under_stoatty() {
+fn diff_status_halves_emit_ui_scale_runs_under_stoatty() {
     use crate::theme::TypeRole;
     use stoatty_protocol::command::Command;
 
@@ -6994,22 +7029,29 @@ fn diff_sides_bar_emits_a_ui_scale_run_under_stoatty() {
         raw.extend(batch);
     }
     let cmds = command::decode_stream(&raw);
-    let top_row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+    let status_y = buf.area.height - 1;
+    let status_row: String = (0..buf.area.width)
+        .map(|x| buf[(x, status_y)].symbol())
+        .collect();
+    let ui_run = |name: &str| {
+        cmds.iter().any(|c| {
+            matches!(
+                c,
+                Command::TextRun(t) if t.scale == h.stoat.theme.type_scale(TypeRole::Ui)
+                    && t.row == status_y as i16 * 16
+                    && t.text == format!(" {name} ")
+            )
+        })
+    };
 
     assert_eq!(
         (
-            cmds.iter().any(|c| matches!(
-                c,
-                Command::TextRun(t) if t.scale == h.stoat.theme.type_scale(TypeRole::Ui)
-                    && t.row == 0
-                    && t.text.contains("HEAD → working tree")
-            )),
-            cmds.iter()
-                .any(|c| matches!(c, Command::Panel(panel) if panel.top == 0)),
-            top_row.contains("working tree"),
+            ui_run("HEAD"),
+            ui_run("working tree"),
+            status_row.contains("working tree"),
         ),
         (true, true, false),
-        "the bar streams as a Ui-scale run on a panel, with no grid text",
+        "each name streams as a Ui-scale run on the status row, with no grid text",
     );
 }
 

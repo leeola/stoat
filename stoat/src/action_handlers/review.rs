@@ -2442,7 +2442,7 @@ mod tests {
         );
     }
 
-    /// The sides bar names a revision as the reader typed it, beside the short
+    /// The status row names a revision as the reader typed it, beside the short
     /// sha it resolved to. A typed sha needs no second spelling.
     #[test]
     fn diff_with_a_rev_names_the_base_as_typed() {
