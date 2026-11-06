@@ -1,15 +1,18 @@
 use crate::{
     app::Stoat,
-    completion::{CompletionItem, CompletionPopup},
+    completion::{CompletionItem, CompletionItemKind, CompletionPopup},
     fuzzy,
     pane::{FocusTarget, View},
-    render::{cursor_popup, text::clip_to_width},
+    render::{
+        cursor_popup,
+        text::{clip_to_width, write_str, write_str_clipped},
+    },
+    theme::scope,
 };
 use nucleo::Utf32Str;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Modifier,
     widgets::{Block, Borders},
 };
 use std::ops::Range;
@@ -17,6 +20,16 @@ use std::ops::Range;
 /// Maximum number of completion rows visible at once. Larger lists
 /// scroll so the selected row stays in view.
 pub(crate) const MAX_VISIBLE_ROWS: usize = 10;
+
+/// The column a row's label starts in, past the kind badge and a space.
+const LABEL_COLUMN: usize = 2;
+
+/// The columns that keep the longest label apart from the kind names.
+const KIND_GAP: usize = 2;
+
+/// Rows the footer takes under the list, which are the hairline and the detail
+/// line.
+const FOOTER_ROWS: u16 = 2;
 
 /// The on-screen rectangles of the completion popup, derived from `stoat` by
 /// [`completion_popup_layout`], plus the scroll offset of the first visible row.
@@ -27,14 +40,17 @@ pub(crate) const MAX_VISIBLE_ROWS: usize = 10;
 pub(crate) struct CompletionLayout {
     /// The bordered popup rect.
     pub(crate) popup_area: Rect,
-    /// Inside the border: the scrolling row region, also the pool region.
-    /// Excludes the detail footer row when one is present.
+    /// The scrolling row region inside the border, which is also the pool
+    /// region. It leaves out the footer's hairline and detail rows when a
+    /// detail shows.
     pub(crate) inner: Rect,
     /// Index of the first visible item, the list's scroll offset.
     pub(crate) viewport_top: usize,
-    /// Detail-and-documentation line for the selected row, painted dimmed
-    /// in a footer row just below [`Self::inner`]. `None` when the
-    /// selected row has neither.
+    /// The detail and documentation line of the selected row, painted on the
+    /// footer row under the hairline below [`Self::inner`].
+    ///
+    /// `None` when the selected row has neither, or when the box leaves no list
+    /// row above the footer.
     pub(crate) detail: Option<String>,
 }
 
@@ -149,16 +165,23 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
     // truncation allocates a string per visible row to hand it over.
     let clipped_width = |text: &str| text.chars().take(interior_width as usize).count();
 
-    let max_line_width = popup
-        .rows()
-        .skip(viewport_top)
-        .take(visible_count)
-        .map(|item| clipped_width(&item.label))
-        .max()
-        .unwrap_or(0) as u16;
+    let (label_width, name_width) =
+        popup
+            .rows()
+            .skip(viewport_top)
+            .take(visible_count)
+            .fold((0, 0), |(label, name), item| {
+                let item_name = kind_name(item).chars().count();
+                (label.max(clipped_width(&item.label)), name.max(item_name))
+            });
+    let name_room = match name_width {
+        0 => 0,
+        width => KIND_GAP + width,
+    };
+    let row_width = (LABEL_COLUMN + label_width + name_room).min(interior_width as usize) as u16;
     let detail = popup.row(selected_idx).and_then(detail_footer);
     let detail_width = detail.as_deref().map(clipped_width).unwrap_or(0) as u16;
-    let footer_rows: u16 = if detail.is_some() { 1 } else { 0 };
+    let footer_rows = if detail.is_some() { FOOTER_ROWS } else { 0 };
 
     // Completion prefers below, unlike the other cursor popups. It appears
     // mid-typing, so covering the line above the cursor hides what was just
@@ -167,14 +190,17 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
         content_area,
         cursor_screen,
         (
-            max_line_width.max(detail_width),
+            row_width.max(detail_width),
             visible_count as u16 + footer_rows,
         ),
         false,
     );
     let full_inner = Block::default().borders(Borders::ALL).inner(popup_area);
+    // A box clamped to the footer's height or less keeps its rows for the list.
+    let detail = detail.filter(|_| full_inner.height > FOOTER_ROWS);
+    let footer_rows = if detail.is_some() { FOOTER_ROWS } else { 0 };
     let inner = Rect {
-        height: full_inner.height.saturating_sub(footer_rows),
+        height: full_inner.height - footer_rows,
         ..full_inner
     };
 
@@ -189,9 +215,9 @@ pub(crate) fn completion_popup_layout(stoat: &mut Stoat) -> Option<(String, Comp
     ))
 }
 
-/// The dimmed footer line for a completion row, joining its detail with
-/// the first line of its documentation. `None` when it has neither.
-/// Painted just below the list by [`render_completion`].
+/// The footer line for a completion row, joining its detail with the first
+/// line of its documentation. `None` when it has neither. Painted under the
+/// hairline below the list by [`render_completion`].
 fn detail_footer(item: &CompletionItem) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     if let Some(detail) = item.detail.as_deref().filter(|d| !d.is_empty()) {
@@ -236,7 +262,7 @@ pub(crate) fn render_completion(
         return false;
     };
 
-    let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let modal_style = stoat.theme.get(scope::UI_MODAL_HINTS);
     crate::render::clear_modal(layout.popup_area, buf, &stoat.theme, modal_style);
     crate::render::chrome::modal_frame(
         buf,
@@ -259,16 +285,19 @@ pub(crate) fn render_completion(
     );
 
     if let Some(detail) = &layout.detail {
-        let footer_y = layout.inner.y + layout.inner.height;
-        let footer_style = modal_style.add_modifier(Modifier::DIM);
-        let text = clip_to_width(detail, layout.inner.width as usize);
-        for (col_idx, ch) in text.chars().enumerate() {
-            let col = layout.inner.x + col_idx as u16;
-            if col >= layout.inner.x + layout.inner.width {
-                break;
-            }
-            buf[(col, footer_y)].set_char(ch).set_style(footer_style);
+        let inner = layout.inner;
+        let rule_y = inner.y + inner.height;
+        let rule_style = stoat.theme.get(scope::UI_BORDER_INACTIVE);
+        crate::render::chrome::hline(buf, inner.x, rule_y, inner.width, rule_style, scene);
+
+        let footer_y = rule_y + 1;
+        let footer_style = modal_style.patch(stoat.theme.get(scope::UI_MODAL_FOOTER));
+        let end = inner.x + inner.width;
+        for col in inner.x..end {
+            buf[(col, footer_y)].set_char(' ').set_style(footer_style);
         }
+        let text_style = footer_style.patch(stoat.theme.get(scope::UI_TEXT_DIM));
+        write_str_clipped(buf, inner.x, footer_y, detail, text_style, end);
     }
 
     park_layout(stoat, memo);
@@ -276,8 +305,11 @@ pub(crate) fn render_completion(
 }
 
 /// Paint completion rows into `area` starting at item `start_row`, one row per
-/// item, truncating each label to the area width and highlighting the selected
-/// row and the characters matching `prefix`.
+/// item, highlighting the selected row and the characters matching `prefix`.
+///
+/// A row leads with its kind badge from [`kind_glyph`] and sets its label from
+/// [`LABEL_COLUMN`], clipped to the area. Its [`kind_name`] ends the row in
+/// `ui.text.muted` when the label leaves room for it.
 ///
 /// Shared by the live popup, which derives `start_row` from the viewport, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
@@ -293,9 +325,14 @@ pub(crate) fn paint_completion_rows(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let modal_style = theme.get(crate::theme::scope::UI_MODAL_HINTS);
-    let selected_style = theme.list_selected(crate::theme::scope::UI_SELECTION);
+    // The box style's foreground is its border color, so an unselected row
+    // takes the text color over it.
+    let text_style = theme
+        .get(scope::UI_MODAL_HINTS)
+        .patch(theme.get(scope::UI_TEXT));
+    let selected_style = theme.list_selected(scope::UI_SELECTION);
     let match_style = theme.list_match();
+    let name_style = theme.get(scope::UI_TEXT_MUTED);
 
     let pattern = fuzzy::parse_query(prefix);
     let mut hay_buf: Vec<char> = Vec::new();
@@ -311,27 +348,35 @@ pub(crate) fn paint_completion_rows(
                 break;
             };
             let row = area.y + row_idx;
-            let label = clip_to_width(&item.label, width);
             let row_style = if item_idx == selected_idx {
                 selected_style
             } else {
-                modal_style
+                text_style
             };
+            for col in area.x..area.x + area.width {
+                buf[(col, row)].set_char(' ').set_style(row_style);
+            }
             if item_idx == selected_idx {
                 crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
             }
+            if let Some((glyph, kind_scope)) = kind_glyph(item.kind).filter(|_| width > 0) {
+                write_str(
+                    buf,
+                    area.x,
+                    row,
+                    glyph,
+                    row_style.patch(theme.get(kind_scope)),
+                );
+            }
 
+            let label = clip_to_width(&item.label, width.saturating_sub(LABEL_COLUMN));
             indices_buf.clear();
             if let Some(p) = &pattern {
                 let hay = Utf32Str::new(label, &mut hay_buf);
                 p.indices(hay, matcher, &mut indices_buf);
             }
-
             for (col_idx, ch) in label.chars().enumerate() {
-                let col = area.x + col_idx as u16;
-                if col >= area.x + area.width {
-                    break;
-                }
+                let col = area.x + (LABEL_COLUMN + col_idx) as u16;
                 // A match style with no background keeps the row's own fill, so
                 // the selected row stays whole under a matched char.
                 let style = if indices_buf.contains(&(col_idx as u32)) {
@@ -341,8 +386,78 @@ pub(crate) fn paint_completion_rows(
                 };
                 buf[(col, row)].set_char(ch).set_style(style);
             }
+
+            let name = kind_name(item);
+            let name_width = name.chars().count();
+            let label_end = LABEL_COLUMN + label.chars().count();
+            if name_width > 0 && label_end + KIND_GAP + name_width <= width {
+                let name_x = area.x + (width - name_width) as u16;
+                write_str(buf, name_x, row, name, row_style.patch(name_style));
+            }
         }
     });
+}
+
+/// The glyph and the theme scope of the badge that leads a row of `kind`.
+///
+/// Returns [`None`] for a kind with no badge, which are files, folders,
+/// snippets, the catch-all kind, and an item of no kind. The row then leaves
+/// its badge cell blank.
+fn kind_glyph(kind: Option<CompletionItemKind>) -> Option<(&'static str, &'static str)> {
+    let badge = match kind? {
+        CompletionItemKind::Function | CompletionItemKind::Method => {
+            ("f", scope::UI_COMPLETION_KIND_FUNCTION)
+        },
+        CompletionItemKind::Constant
+        | CompletionItemKind::Enum
+        | CompletionItemKind::Class
+        | CompletionItemKind::Struct => ("c", scope::UI_COMPLETION_KIND_CONSTANT),
+        CompletionItemKind::Module => ("m", scope::UI_COMPLETION_KIND_MODULE),
+        CompletionItemKind::Variable | CompletionItemKind::Field => {
+            ("v", scope::UI_COMPLETION_KIND_VARIABLE)
+        },
+        CompletionItemKind::Keyword => ("k", scope::UI_COMPLETION_KIND_KEYWORD),
+        CompletionItemKind::File
+        | CompletionItemKind::Folder
+        | CompletionItemKind::Snippet
+        | CompletionItemKind::Other => return None,
+    };
+    Some(badge)
+}
+
+/// The word that ends a row of `item`, such as `fn` for a function or the type
+/// of a constant.
+///
+/// Most servers lead an item's detail with that word, so the word is the
+/// detail's leading run of letters, digits, and underscores. A detail of
+/// `fn(&self) -> Rect` gives `fn`. An item whose detail leads with no such run
+/// takes its kind's name. The catch-all kind and an item of no kind give an
+/// empty word.
+fn kind_name(item: &CompletionItem) -> &str {
+    let detail = item.detail.as_deref().unwrap_or_default();
+    let word_end = detail
+        .find(|ch: char| !(ch.is_alphanumeric() || ch == '_'))
+        .unwrap_or(detail.len());
+    if word_end > 0 {
+        return &detail[..word_end];
+    }
+
+    match item.kind {
+        Some(CompletionItemKind::Function) => "function",
+        Some(CompletionItemKind::Method) => "method",
+        Some(CompletionItemKind::Variable) => "variable",
+        Some(CompletionItemKind::Field) => "field",
+        Some(CompletionItemKind::Module) => "module",
+        Some(CompletionItemKind::Class) => "class",
+        Some(CompletionItemKind::Struct) => "struct",
+        Some(CompletionItemKind::Enum) => "enum",
+        Some(CompletionItemKind::Constant) => "constant",
+        Some(CompletionItemKind::Keyword) => "keyword",
+        Some(CompletionItemKind::File) => "file",
+        Some(CompletionItemKind::Folder) => "folder",
+        Some(CompletionItemKind::Snippet) => "snippet",
+        Some(CompletionItemKind::Other) | None => "",
+    }
 }
 
 fn extract_prefix(stoat: &Stoat, prefix_range: Range<usize>) -> String {
@@ -391,10 +506,13 @@ fn viewport_top_for(selected: usize, total: usize, window: usize) -> usize {
 mod tests {
     use crate::{
         apc_emit,
-        completion::{CompletionItem, CompletionPopup, CompletionSource},
+        completion::{CompletionItem, CompletionItemKind, CompletionPopup, CompletionSource},
         test_fixture::open_scratch_file,
         test_harness::TestHarness,
+        theme::{scope, Theme},
     };
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+    use stoat_widgets::ApcScene;
 
     fn make_item(label: &str) -> CompletionItem {
         CompletionItem {
@@ -552,5 +670,206 @@ mod tests {
         h.type_keys("i");
         assert!(h.stoat.pending_completion.is_none());
         h.assert_snapshot("snapshot_completion_popup_absent");
+    }
+
+    /// The badge cell of each kind class as (glyph, foreground, background),
+    /// with an item of a kind that has no badge last.
+    #[test]
+    fn each_kind_class_leads_its_row_with_its_badge() {
+        let kinds = [
+            CompletionItemKind::Function,
+            CompletionItemKind::Struct,
+            CompletionItemKind::Module,
+            CompletionItemKind::Field,
+            CompletionItemKind::Keyword,
+            CompletionItemKind::Snippet,
+        ];
+        let items = kinds.map(|kind| CompletionItem {
+            kind: Some(kind),
+            ..make_item("x")
+        });
+        let (buf, inner) = painted(items.to_vec());
+
+        let badges: Vec<(&str, Color, Color)> = (inner.y..inner.y + kinds.len() as u16)
+            .map(|y| {
+                let cell = &buf[(inner.x, y)];
+                (cell.symbol(), cell.fg, cell.bg)
+            })
+            .collect();
+        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        assert_eq!(
+            badges,
+            [
+                ("f", rgb(0x7fb0ff), rgb(0x223049)),
+                ("c", rgb(0x6cc7d6), rgb(0x1e3237)),
+                ("m", rgb(0xc59af0), rgb(0x2a2236)),
+                ("v", rgb(0xa3a9b5), rgb(0x2c3039)),
+                ("k", rgb(0xe8bd6a), rgb(0x2c3039)),
+                (" ", rgb(0xdfe2e8), rgb(0x252830)),
+            ]
+        );
+    }
+
+    /// A row ends in the detail's leading word, or else in its kind's name, and
+    /// the box holds the longest label and the longest word two columns apart.
+    /// The footer under them fills its whole row, past a shorter detail.
+    #[test]
+    fn a_row_ends_in_the_word_that_names_its_kind() {
+        let item = |label: &str, kind, detail: Option<&str>| CompletionItem {
+            kind,
+            detail: detail.map(str::to_owned),
+            ..make_item(label)
+        };
+        let (buf, inner) = painted(vec![
+            item(
+                "modal_frame",
+                Some(CompletionItemKind::Function),
+                Some("fn(&self) -> Rect"),
+            ),
+            item(
+                "MODAL_MARGIN",
+                Some(CompletionItemKind::Constant),
+                Some("size_t"),
+            ),
+            item("modals", Some(CompletionItemKind::Module), None),
+            item("word", None, None),
+        ]);
+
+        let rows: Vec<String> = (inner.y..inner.y + inner.height)
+            .map(|y| {
+                (inner.x..inner.x + inner.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "f modal_frame       fn",
+                "c MODAL_MARGIN  size_t",
+                "m modals        module",
+                "  word                ",
+            ]
+        );
+
+        let footer_y = inner.y + inner.height + 1;
+        let footer: Vec<Color> = (inner.x..inner.x + inner.width)
+            .map(|x| buf[(x, footer_y)].bg)
+            .collect();
+        assert_eq!(
+            footer,
+            [Color::Rgb(0x1e, 0x21, 0x27); 22],
+            "the raised footer fills the row past the shorter detail"
+        );
+    }
+
+    /// Every kind's badge, and the name a row of it ends in when its detail
+    /// gives no word.
+    #[test]
+    fn each_kind_takes_its_class_badge_and_its_name() {
+        let kinds = [
+            CompletionItemKind::Function,
+            CompletionItemKind::Method,
+            CompletionItemKind::Variable,
+            CompletionItemKind::Field,
+            CompletionItemKind::Module,
+            CompletionItemKind::Class,
+            CompletionItemKind::Struct,
+            CompletionItemKind::Enum,
+            CompletionItemKind::Constant,
+            CompletionItemKind::Keyword,
+            CompletionItemKind::File,
+            CompletionItemKind::Folder,
+            CompletionItemKind::Snippet,
+            CompletionItemKind::Other,
+        ];
+        let items = kinds.map(|kind| CompletionItem {
+            kind: Some(kind),
+            ..make_item("x")
+        });
+        let table: Vec<(Option<(&str, &str)>, &str)> = items
+            .iter()
+            .map(|item| (super::kind_glyph(item.kind), super::kind_name(item)))
+            .collect();
+
+        let f = Some(("f", scope::UI_COMPLETION_KIND_FUNCTION));
+        let v = Some(("v", scope::UI_COMPLETION_KIND_VARIABLE));
+        let m = Some(("m", scope::UI_COMPLETION_KIND_MODULE));
+        let c = Some(("c", scope::UI_COMPLETION_KIND_CONSTANT));
+        let k = Some(("k", scope::UI_COMPLETION_KIND_KEYWORD));
+        assert_eq!(
+            table,
+            [
+                (f, "function"),
+                (f, "method"),
+                (v, "variable"),
+                (v, "field"),
+                (m, "module"),
+                (c, "class"),
+                (c, "struct"),
+                (c, "enum"),
+                (c, "constant"),
+                (k, "keyword"),
+                (None, "file"),
+                (None, "folder"),
+                (None, "snippet"),
+                (None, ""),
+            ]
+        );
+    }
+
+    /// A row narrower than its content drops its name first, then clips its
+    /// label, so the name never runs into the label.
+    #[test]
+    fn a_narrow_row_drops_its_name_and_then_clips_its_label() {
+        let popup = CompletionPopup::showing(vec![CompletionItem {
+            kind: Some(CompletionItemKind::Function),
+            ..make_item("abcdefghij")
+        }]);
+        let theme = {
+            let (config, _) = stoat_config::parse("theme t { }");
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let row = |width: u16| -> String {
+            let area = Rect::new(0, 0, width, 1);
+            let mut buf = Buffer::empty(area);
+            let mut scene = ApcScene::new();
+            super::paint_completion_rows(&popup, 0, "", 0, area, &theme, &mut buf, &mut scene);
+            (0..width).map(|x| buf[(x, 0)].symbol()).collect()
+        };
+        assert_eq!(
+            [row(8), row(20), row(22)],
+            ["f abcdef", "f abcdefghij        ", "f abcdefghij  function"]
+        );
+    }
+
+    /// A box clamped to the footer's height keeps its rows for the list.
+    #[test]
+    fn a_box_too_short_for_the_footer_drops_it() {
+        let mut foo = make_item("foo");
+        foo.detail = Some("fn foo() -> u32".into());
+        let mut h = TestHarness::with_size(40, 5);
+        let _path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.stoat.pending_completion = Some(CompletionPopup::showing(vec![foo]));
+
+        let (_, layout) = super::completion_popup_layout(&mut h.stoat).expect("the popup lays out");
+        assert_eq!(
+            (layout.popup_area.height, layout.inner.height, layout.detail),
+            (4, 2, None)
+        );
+    }
+
+    /// The popup over `items`, the first selected, painted into a 40 by 12
+    /// frame, alongside its row region.
+    fn painted(items: Vec<CompletionItem>) -> (Buffer, Rect) {
+        let mut h = TestHarness::with_size(40, 12);
+        let _path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.stoat.pending_completion = Some(CompletionPopup::showing(items));
+
+        let buf = h.stoat.render();
+        let (_, layout) = super::completion_popup_layout(&mut h.stoat).expect("the popup lays out");
+        (buf, layout.inner)
     }
 }

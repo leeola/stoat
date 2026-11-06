@@ -789,6 +789,16 @@ pub mod scope {
     /// The footer row a modal ends in, with its key hints and page dots.
     pub const UI_MODAL_FOOTER: &str = "ui.modal.footer";
 
+    /// The badge that leads a completion row, a glyph on a tinted cell.
+    ///
+    /// Functions, constants and types, modules, variables and fields, and
+    /// keywords each have their own scope.
+    pub const UI_COMPLETION_KIND_FUNCTION: &str = "ui.completion.kind.function";
+    pub const UI_COMPLETION_KIND_CONSTANT: &str = "ui.completion.kind.constant";
+    pub const UI_COMPLETION_KIND_MODULE: &str = "ui.completion.kind.module";
+    pub const UI_COMPLETION_KIND_VARIABLE: &str = "ui.completion.kind.variable";
+    pub const UI_COMPLETION_KIND_KEYWORD: &str = "ui.completion.kind.keyword";
+
     pub const UI_PROMPT: &str = "ui.prompt";
     pub const UI_KEY_LABEL: &str = "ui.key_label";
     /// The mark the key hints box draws beside a key whose toggle is on.

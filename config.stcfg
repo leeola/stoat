@@ -82,6 +82,12 @@ theme default_dark {
     ui.virtual.inlay = { fg: dim, bg: subtle, modifiers: [italic] };
     ui.chip = { fg: dim, bg: subtle };
 
+    ui.completion.kind.function = { fg: accent, bg: subtle, modifiers: [bold] };
+    ui.completion.kind.constant = { fg: info, bg: subtle, modifiers: [bold] };
+    ui.completion.kind.module   = { fg: special, bg: subtle, modifiers: [bold] };
+    ui.completion.kind.variable = { fg: dim, bg: subtle, modifiers: [bold] };
+    ui.completion.kind.keyword  = { fg: warning, bg: subtle, modifiers: [bold] };
+
     ui.badge.active.fg = warning;
     ui.badge.complete.fg = success;
     ui.badge.error.fg = danger;
@@ -219,6 +225,9 @@ theme ermine_night inherits default_dark {
     let wash             = "#2a3c5a";
     let cursor_secondary = "#8a909c";
     let divider          = "#22252b";
+    let tint_accent      = "#223049";
+    let tint_info        = "#1e3237";
+    let tint_special     = "#2a2236";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -280,6 +289,10 @@ theme ermine_night inherits default_dark {
     ui.modal.picker  = { fg: strong, bg: overlay };
     ui.modal.run     = { fg: strong, bg: overlay };
     ui.modal.footer  = { bg: raised };
+
+    ui.completion.kind.function.bg = tint_accent;
+    ui.completion.kind.constant.bg = tint_info;
+    ui.completion.kind.module.bg   = tint_special;
 
     ui.prompt.fg       = accent;
     ui.key_label.fg    = info;

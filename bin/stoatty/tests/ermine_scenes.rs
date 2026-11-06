@@ -35,6 +35,7 @@ const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
+const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
@@ -394,6 +395,41 @@ fn a_hover_ends_in_a_footer_on_the_raised_surface() {
         (middle, row + 1, "box_bottom_edge"),
     ] {
         expect_region(&shot, &mut home, cell_rect(col, row, 1, 1), OVERLAY, what);
+    }
+}
+
+/// A completion row of a function leads with its badge on the function tint.
+///
+/// The server loads the crate before it answers, so the completion key plays
+/// again until the tint shows. The prefix `mai` names the fixture's `main`
+/// function. Every badge sits in the box's first column, so the tinted cells
+/// all share one column.
+#[test]
+fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
+    let mut home = support::scratch_home();
+    let mut session = spawn_settled(home.path(), "rust-lsp", "src/main.rs");
+    play(&mut session, "/unused<Enter>omai");
+
+    let deadline = Instant::now() + LSP_DEADLINE;
+    let (shot, tinted) = loop {
+        play(&mut session, "<C-Space><Wait:2000>");
+        let shot = session.snapshot().expect("a snapshot");
+        let tinted = cells_of(&shot, TINT_ACCENT);
+        if !tinted.is_empty() {
+            break (shot, tinted);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no function completion showed before the deadline"
+        );
+    };
+
+    if tinted.iter().any(|&(col, _)| col != tinted[0].0) {
+        let frame = keep_frame(&shot, &mut home, "completion_badges");
+        panic!(
+            "the function tint cells {tinted:?} are not one badge column; the frame is {}",
+            frame.display(),
+        );
     }
 }
 

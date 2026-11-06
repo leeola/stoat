@@ -241,6 +241,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   ground.
 - `ui.modal.footer` -- the footer row a modal ends in, with its key hints and
   page dots.
+- `ui.completion.kind.function`, `ui.completion.kind.constant`,
+  `ui.completion.kind.module`, `ui.completion.kind.variable`,
+  `ui.completion.kind.keyword` -- the badge that leads a completion row, a
+  glyph (foreground) on a tinted cell (background). Methods take the function
+  badge, enums, classes, and structs take the constant badge, and fields take
+  the variable badge. An item of any other kind leaves the cell blank.
 - `ui.prompt`, `ui.key_label`, `ui.heading`, `ui.error`, `ui.message.error` --
   chrome accents.
 - `ui.toggle.active`, `ui.toggle.inactive` -- the on and off marks beside a
