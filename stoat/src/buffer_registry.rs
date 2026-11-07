@@ -163,10 +163,10 @@ struct BufferEntry {
     /// to clobber it. `None` for scratch buffers and for files whose
     /// metadata could not be read.
     disk_mtime: Option<SystemTime>,
-    /// The file's byte length on disk as the open read it, which a compressed
-    /// buffer's status row names beside its text's length. A save does not
-    /// refresh it, because only a compressed buffer shows it, and a
-    /// compressed buffer never saves.
+    /// The file's byte length on disk as the open or the last reload read it,
+    /// which a compressed buffer's status row names beside its text's length.
+    /// A save does not refresh it, because only a compressed buffer shows it,
+    /// and a compressed buffer never saves.
     disk_len: Option<u64>,
     /// Why the buffer must not write back to its file, or `None` for a buffer
     /// that writes back.
@@ -401,17 +401,17 @@ impl BufferRegistry {
         self.buffers.get(&id).and_then(|e| e.disk_mtime)
     }
 
-    /// Record the file's byte length on disk as the open read it. No-op for an
-    /// unknown buffer id.
+    /// Record the file's byte length on disk as an open or a reload read it.
+    /// No-op for an unknown buffer id.
     pub(crate) fn set_disk_len(&mut self, id: BufferId, len: u64) {
         if let Some(entry) = self.buffers.get_mut(&id) {
             entry.disk_len = Some(len);
         }
     }
 
-    /// The file's byte length on disk as the open read it, or `None` for a
-    /// scratch buffer, an unknown id, a file whose metadata never read, or a
-    /// buffer a state file restored without it.
+    /// The file's byte length on disk as the open or the last reload read it,
+    /// or `None` for a scratch buffer, an unknown id, a file whose metadata
+    /// never read, or a buffer a state file restored without it.
     pub(crate) fn disk_len(&self, id: BufferId) -> Option<u64> {
         self.buffers.get(&id).and_then(|e| e.disk_len)
     }
@@ -1026,8 +1026,8 @@ pub(crate) struct BufferEntrySnap {
     /// Without it a restored buffer has no baseline and the guard never fires.
     #[serde(default)]
     pub disk_mtime: Option<SystemTime>,
-    /// The file's byte length on disk as the open read it, so a restored
-    /// compressed buffer still names its file's size.
+    /// The file's byte length on disk as the open or the last reload read it,
+    /// so a restored compressed buffer still names its file's size.
     ///
     /// Defaulted so a state file written before this field loads, with no
     /// length.

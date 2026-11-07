@@ -91,6 +91,9 @@ struct AutoReloadResult {
     /// a file the reload rejects is not re-read twice a second until it
     /// changes again.
     mtime: SystemTime,
+    /// The file's byte length as the same stat read it, recorded with the
+    /// mtime.
+    len: u64,
     /// The buffer version the comparison was made against.
     ///
     /// An edit landing while the read ran leaves the spans below describing
@@ -260,12 +263,12 @@ pub(crate) fn stat_and_read_buffer(
     if dirty {
         return false;
     }
-    let Some(mtime) = stoat
+    let Some((mtime, len)) = stoat
         .fs_host
         .metadata(path)
         .ok()
         .flatten()
-        .map(|m| m.modified)
+        .map(|m| (m.modified, m.len))
     else {
         return false;
     };
@@ -295,6 +298,7 @@ pub(crate) fn stat_and_read_buffer(
                 id,
                 mode,
                 mtime,
+                len,
                 version,
                 outcome,
             });
@@ -465,6 +469,7 @@ fn install_reload(
         id,
         mode,
         mtime,
+        len,
         version,
         outcome,
         ..
@@ -484,10 +489,9 @@ fn install_reload(
     let diff = match outcome {
         Ok(diff) => diff,
         Err(message) => {
-            stoat
-                .active_workspace_mut()
-                .buffers
-                .set_disk_mtime(id, mtime);
+            let buffers = &mut stoat.active_workspace_mut().buffers;
+            buffers.set_disk_mtime(id, mtime);
+            buffers.set_disk_len(id, len);
             stoat.set_status(message);
             return Installed::Status;
         },
@@ -499,10 +503,9 @@ fn install_reload(
         .set_line_ending(id, diff.ending);
 
     let Some((old_span, text)) = diff.splice else {
-        stoat
-            .active_workspace_mut()
-            .buffers
-            .set_disk_mtime(id, mtime);
+        let buffers = &mut stoat.active_workspace_mut().buffers;
+        buffers.set_disk_mtime(id, mtime);
+        buffers.set_disk_len(id, len);
         return Installed::Nothing;
     };
 
@@ -527,10 +530,9 @@ fn install_reload(
         guard.mark_clean();
     }
     note_reload_flash(stoat, &buffer, id, [flashed]);
-    stoat
-        .active_workspace_mut()
-        .buffers
-        .set_disk_mtime(id, mtime);
+    let buffers = &mut stoat.active_workspace_mut().buffers;
+    buffers.set_disk_mtime(id, mtime);
+    buffers.set_disk_len(id, len);
     if let Some(path) = stoat.active_workspace().buffers.path_for(id)
         && logs_change(stoat, path, mode)
     {
@@ -652,8 +654,8 @@ pub(crate) fn reload_focused(stoat: &mut Stoat, force: bool) -> UpdateEffect {
         return UpdateEffect::Redraw;
     }
 
-    let outcome = match file_mtime(stoat, &path) {
-        Some(mtime) => reload_from_disk(stoat, id, &path, mtime),
+    let outcome = match file_stamp(stoat, &path) {
+        Some((mtime, len)) => reload_from_disk(stoat, id, &path, mtime, len),
         None => ReloadOutcome::Missing,
     };
     match outcome {
@@ -777,7 +779,7 @@ fn reload_each(
             continue;
         }
 
-        let Some(mtime) = file_mtime(stoat, &path) else {
+        let Some((mtime, len)) = file_stamp(stoat, &path) else {
             tally.missing += 1;
             continue;
         };
@@ -785,7 +787,7 @@ fn reload_each(
             continue;
         }
 
-        match reload_from_disk(stoat, id, &path, mtime) {
+        match reload_from_disk(stoat, id, &path, mtime, len) {
             ReloadOutcome::Reloaded => tally.reloaded += 1,
             ReloadOutcome::Missing => tally.missing += 1,
             ReloadOutcome::Unchanged => {},
@@ -812,11 +814,11 @@ enum ReloadOutcome {
 /// Replace buffer `id`'s content with `path`'s current bytes, mirroring
 /// [`pump_auto_reload`]'s replace arm without the cursor-follow logic.
 ///
-/// `mtime` is the file's mtime from the caller's stat, and it becomes the
+/// `mtime` and `len` are what the caller's stat read, and they become the
 /// buffer's baseline. A file that does not read yields
 /// [`ReloadOutcome::Missing`] and leaves the buffer untouched. A file already
 /// byte-identical to the buffer is left un-edited to avoid version churn, but
-/// the buffer is still marked clean and its mtime baseline refreshed. Otherwise
+/// the buffer is still marked clean and its baseline refreshed. Otherwise
 /// the buffer takes the changed lines of a line diff in one undoable step and
 /// is marked clean, so an anchor on a line both texts share stays on it.
 fn reload_from_disk(
@@ -824,6 +826,7 @@ fn reload_from_disk(
     id: BufferId,
     path: &Path,
     mtime: SystemTime,
+    len: u64,
 ) -> ReloadOutcome {
     let Ok(new) = read_text_via_host(&*stoat.fs_host, path) else {
         return ReloadOutcome::Missing;
@@ -890,10 +893,9 @@ fn reload_from_disk(
             }
         }
     }
-    stoat
-        .active_workspace_mut()
-        .buffers
-        .set_disk_mtime(id, mtime);
+    let buffers = &mut stoat.active_workspace_mut().buffers;
+    buffers.set_disk_mtime(id, mtime);
+    buffers.set_disk_len(id, len);
     tracing::info!(
         target: "stoat::file",
         path = %path.display(),
@@ -1012,14 +1014,15 @@ fn item_landings(
         .collect()
 }
 
-/// The mtime of `path` on disk, or `None` when its metadata does not read.
-fn file_mtime(stoat: &Stoat, path: &Path) -> Option<SystemTime> {
+/// The mtime and byte length of `path` on disk, or `None` when its metadata
+/// does not read.
+fn file_stamp(stoat: &Stoat, path: &Path) -> Option<(SystemTime, u64)> {
     stoat
         .fs_host
         .metadata(path)
         .ok()
         .flatten()
-        .map(|meta| meta.modified)
+        .map(|meta| (meta.modified, meta.len))
 }
 
 /// Open a log file and follow it as new lines are written.
@@ -1239,7 +1242,7 @@ fn catch_up_live_reload(stoat: &mut Stoat) {
             .into_iter()
             .filter_map(|path| {
                 let id = ws.buffers.id_for_path(&path)?;
-                let mtime = file_mtime(stoat, &path)?;
+                let (mtime, _) = file_stamp(stoat, &path)?;
                 (ws.buffers.disk_mtime(id) != Some(mtime)).then_some((path, mtime))
             })
             .collect();
@@ -1784,7 +1787,8 @@ mod tests {
         );
     }
 
-    /// A gzip file reloads as the text it holds, as it opened.
+    /// A gzip file reloads as the text it holds, as it opened, and the
+    /// registry records the file's new length on disk.
     #[test]
     fn auto_reload_decompresses_a_gzip_file() {
         let mut h = Stoat::test();
@@ -1792,13 +1796,45 @@ mod tests {
         let seed = test_harness::gzip(b"line1\n");
         let (path, id) = open_auto_reload(&mut h, &root, "log.txt.gz", &seed);
 
-        h.fake_fs()
-            .insert_file(&path, test_harness::gzip(b"line1\nline2\n"));
+        let gz = test_harness::gzip(b"line1\nline2\n");
+        h.fake_fs().insert_file(&path, &gz);
         pump_poll(&mut h);
 
         assert_eq!(
-            (h.buffer_text(id), h.stoat.pending_message.clone()),
-            ("line1\nline2\n".to_string(), None)
+            (
+                h.buffer_text(id),
+                h.stoat.pending_message.clone(),
+                h.stoat.active_workspace().buffers.disk_len(id),
+            ),
+            ("line1\nline2\n".to_string(), None, Some(gz.len() as u64))
+        );
+    }
+
+    /// A poll records the file's length with its mtime whatever the read finds,
+    /// for a version the buffer rejects and for one whose text the buffer
+    /// already holds.
+    #[test]
+    fn a_poll_records_the_length_of_a_rejected_or_matching_file() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/auto-reload-len");
+        let (path, id) = open_auto_reload(&mut h, &root, "log.txt", b"one\ntwo\n");
+        let disk_len = |h: &TestHarness| h.stoat.active_workspace().buffers.disk_len(id);
+
+        h.fake_fs().insert_file(&path, NOT_UTF8);
+        pump_poll(&mut h);
+        let rejected = disk_len(&h);
+
+        let crlf = b"one\r\ntwo\r\n";
+        h.fake_fs().insert_file(&path, crlf);
+        pump_poll(&mut h);
+
+        assert_eq!(
+            (rejected, disk_len(&h), h.buffer_text(id)),
+            (
+                Some(NOT_UTF8.len() as u64),
+                Some(crlf.len() as u64),
+                "one\ntwo\n".to_string()
+            )
         );
     }
 
@@ -3402,18 +3438,25 @@ mod tests {
         );
     }
 
-    /// `:reload` reads a gzip file as the text it holds, as the open did.
+    /// `:reload` reads a gzip file as the text it holds, as the open did, and
+    /// records the file's new length on disk.
     #[test]
     fn reload_decompresses_a_gzip_file() {
         let mut h = Stoat::test();
         let root = Path::new("/reload-gzip");
-        let id = open_plain(&mut h, root, "a.txt.gz", &test_harness::gzip(b"old\n"));
+        let id = open_plain(&mut h, root, "a.txt.gz", &test_harness::gzip(b"old text\n"));
 
-        h.fake_fs()
-            .insert_file(root.join("a.txt.gz"), test_harness::gzip(b"new\n"));
+        let gz = test_harness::gzip(b"new\n");
+        h.fake_fs().insert_file(root.join("a.txt.gz"), &gz);
         reload_focused(&mut h.stoat, false);
 
-        assert_eq!(h.buffer_text(id), "new\n");
+        assert_eq!(
+            (
+                h.buffer_text(id),
+                h.stoat.active_workspace().buffers.disk_len(id),
+            ),
+            ("new\n".to_string(), Some(gz.len() as u64))
+        );
     }
 
     #[test]
