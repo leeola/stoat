@@ -202,6 +202,40 @@ fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
     );
 }
 
+/// A popover rounds at the two logical pixels an overlay panel rounds at. The
+/// pixel whose center sits one and a half pixels in from the box's corner
+/// shows the box, where a wider rounding leaves the surface behind it.
+#[test]
+fn a_popover_rounds_at_the_overlay_panel_radius() {
+    const FILL: [u8; 3] = [20, 22, 30];
+
+    let r = render_scene(1.0, |grid, _rows, _cols| {
+        grid.set_overlays(vec![Overlay {
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 3,
+            fill: Rgb::new(FILL[0], FILL[1], FILL[2]),
+            border: Rgb::new(200, 100, 50),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: String::new(),
+            spans: Vec::new(),
+        }]);
+    });
+
+    let corner = r.px(1, 1);
+    assert!(
+        corner
+            .iter()
+            .zip(SURFACE)
+            .all(|(&channel, surface)| channel + 40 < surface),
+        "the pixel inside the corner shows the box, got {corner:?}",
+    );
+}
+
 /// Popover chrome is stated in logical pixels, so a 2x display draws it at
 /// twice the size rather than at half the weight of the panel chrome beside it.
 ///

@@ -30,12 +30,17 @@ const SHADOW_MARGIN: f32 = 16.0;
 
 /// Drop-shadow displacement in logical pixels, down and to the right, so an
 /// overlay reads as floating above the grid rather than pasted onto it.
+///
+/// With [`SHADOW_MARGIN`] it is the drop shadow the panel pass casts under an
+/// overlay panel, so a popover floats as high as a modal or the completion list.
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
-/// Corner radius in logical pixels for the rounded box, so a popover reads like
-/// an IDE tooltip rather than a sharp block. The shader clamps it to the box's
-/// half-extent, so a small box rounds proportionally.
-const CORNER_RADIUS: f32 = 6.0;
+/// Corner radius in logical pixels for the rounded box.
+///
+/// It is the radius the overlay panel role gives a modal or the completion
+/// list, so a popover rounds like the panels around it. The shader clamps it to
+/// the box's half-extent, so a small box rounds proportionally.
+const CORNER_RADIUS: f32 = 2.0;
 
 /// Per-overlay instance: the anchor cell, the size in cells, the two colors, the
 /// drop-shadow displacement and blur radius, and the corner radius.
