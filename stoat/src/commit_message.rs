@@ -20,6 +20,9 @@ pub(crate) struct CommitDraft {
     /// The message amends HEAD with the index, in place of a commit on top of
     /// HEAD.
     pub(crate) amend: bool,
+    /// The commit ends a merge in progress, which makes the merged branch's
+    /// tip its second parent.
+    pub(crate) merge: bool,
 }
 
 /// The commit that a held COMMIT_EDITMSG buffer lands when it leaves the

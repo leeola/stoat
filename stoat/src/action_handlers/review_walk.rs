@@ -282,7 +282,10 @@ pub(crate) fn git_checkout(stoat: &mut Stoat, reference: &str) -> UpdateEffect {
 
 /// The repository a checkout acts on at its turn, or `None` after badging why
 /// the checkout does not run.
-fn checkout_repo(stoat: &mut Stoat) -> Option<Arc<dyn crate::host::GitRepo>> {
+///
+/// The merge commands share it, since a review walk or a rebase holds HEAD
+/// against a merge too.
+pub(super) fn checkout_repo(stoat: &mut Stoat) -> Option<Arc<dyn crate::host::GitRepo>> {
     let ws = stoat.active_workspace();
     let refusal = if ws.review_walk.is_some() {
         Some(("a review walk is open", Some("run :done first".to_string())))

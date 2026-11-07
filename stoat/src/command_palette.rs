@@ -554,9 +554,12 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
+        // FIXME: The merge abort and continue commands list in any repository,
+        // where the rebase pair waits for a rebase. The gate needs the merge
+        // state, which the workspace does not cache.
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
         | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush
-        | GitStashPop | GitStashList => ctx.in_repo,
+        | GitStashPop | GitStashList | GitMerge | GitMergeAbort | GitMergeContinue => ctx.in_repo,
 
         // WalkthroughOpen is absent on purpose. A reader opens a tour when none
         // plays, so a gate on one hides it exactly when it is wanted.
@@ -1972,6 +1975,9 @@ mod tests {
             "GitDiff",
             "GitDiffCached",
             "GitLs",
+            "GitMerge",
+            "GitMergeAbort",
+            "GitMergeContinue",
             "GitRebase",
             "GitRebaseAbort",
             "GitRebaseContinue",

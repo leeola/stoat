@@ -5,8 +5,9 @@ use crate::{
         commits::{
             CloseCommits, CommitsDetailDown, CommitsDetailUp, CommitsFirst, CommitsLast,
             CommitsNext, CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev,
-            CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitLs, GitStash,
-            GitStashList, GitStashPop, GitStashPush, OpenCommits,
+            CommitsRefresh, GitAdd, GitAmend, GitBranch, GitCheckout, GitCommit, GitLs, GitMerge,
+            GitMergeAbort, GitMergeContinue, GitStash, GitStashList, GitStashPop, GitStashPush,
+            OpenCommits,
         },
         conflict::{
             CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
@@ -1039,6 +1040,21 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             reference: reference.to_owned(),
         }))
     });
+    add(GitMerge::DEF, |params| {
+        let branch = params
+            .first()
+            .context(MissingSnafu { name: "branch" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "branch",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(GitMerge {
+            branch: branch.to_owned(),
+        }))
+    });
+    add(GitMergeAbort::DEF, |_| Ok(Box::new(GitMergeAbort)));
+    add(GitMergeContinue::DEF, |_| Ok(Box::new(GitMergeContinue)));
     add(GitBranch::DEF, |_| Ok(Box::new(GitBranch)));
     add(GitCommit::DEF, |_| Ok(Box::new(GitCommit)));
     add(GitAmend::DEF, |_| Ok(Box::new(GitAmend)));
@@ -1445,6 +1461,8 @@ mod tests {
         "DiffChangesLast",
         "DiffChangesOpen",
         "GitLs",
+        "GitMergeAbort",
+        "GitMergeContinue",
         "GitBranch",
         "GitCommit",
         "GitAmend",
@@ -2068,6 +2086,7 @@ mod tests {
         // + 3 ReviewNextCommit/ReviewPrevCommit/ReviewDone.
         // + 1 GitLs.
         // + 1 GitCheckout.
+        // + 3 GitMerge, GitMergeAbort, GitMergeContinue.
         // + 1 GitBranch.
         // + 1 GitCommit.
         // + 1 GitAmend.
@@ -2113,7 +2132,7 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 476);
+        assert_eq!(all().count(), 479);
     }
 
     #[test]

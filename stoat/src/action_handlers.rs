@@ -11,6 +11,7 @@ pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
 pub(crate) mod git_commit;
+mod git_merge;
 mod git_stash;
 pub(crate) mod help;
 pub(crate) mod jump;
@@ -68,9 +69,9 @@ pub(crate) use pane::{
 use std::{io::Read, path::Path, sync::Arc};
 use stoat_action::{
     Action, ActionKind, AutoReload, AutoReloadConfig, DiffFiles, Dump, FocusPane, GitCheckout,
-    GitLs, GitRebase, GitReview, GitStashPush, GotoTab, Mosh, OpenBuffer, OpenConfig, OpenFile,
-    OpenLogs, OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run, SetCwd, SetTheme, Ssh,
-    WalkthroughOpen,
+    GitLs, GitMerge, GitRebase, GitReview, GitStashPush, GotoTab, Mosh, OpenBuffer, OpenConfig,
+    OpenFile, OpenLogs, OpenReviewAgentEdits, RenameTab, RenameWorkspace, Review, Run, SetCwd,
+    SetTheme, Ssh, WalkthroughOpen,
 };
 use stoat_text::{Anchor, BufferId, LineEnding, Rope, Selection};
 pub(crate) use terminal::respawn_terminal_panes;
@@ -825,6 +826,15 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .expect("GitCheckout action downcast");
             review_walk::git_checkout(stoat, &action.reference)
         },
+        ActionKind::GitMerge => {
+            let action = action
+                .as_any()
+                .downcast_ref::<GitMerge>()
+                .expect("GitMerge action downcast");
+            git_merge::git_merge(stoat, &action.branch)
+        },
+        ActionKind::GitMergeAbort => git_merge::git_merge_abort(stoat),
+        ActionKind::GitMergeContinue => git_merge::git_merge_continue(stoat),
         ActionKind::GitBranch => palette::open_palette_seeded(stoat, "git checkout "),
         ActionKind::GitCommit => git_commit::git_commit(stoat),
         ActionKind::GitAmend => git_commit::git_amend(stoat),

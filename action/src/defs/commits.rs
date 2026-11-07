@@ -209,6 +209,78 @@ impl Action for GitCheckout {
     }
 }
 
+const GIT_MERGE_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "branch",
+    kind: ParamKind::String,
+    value_source: ValueSource::Branches,
+    required: true,
+    description: "Local branch to merge into HEAD.",
+}];
+
+define_action_def!(
+    GitMergeDef,
+    "GitMerge",
+    ActionKind::GitMerge,
+    "merge a branch into HEAD",
+    "Merge a local branch into HEAD. A branch that HEAD already holds changes \
+     nothing, a branch ahead of HEAD fast-forwards it, and any other branch \
+     merges into a commit over both tips. A merge that conflicts stops with \
+     the conflicts in the index and opens the conflict view. Refuses while a \
+     review walk, a rebase, or another merge holds HEAD, and over a tracked \
+     file's local edit.",
+    ActionPriority::Common,
+    command_name = "git merge",
+    params = GIT_MERGE_PARAMS
+);
+
+#[derive(Debug)]
+pub struct GitMerge {
+    /// Local branch to merge into HEAD.
+    pub branch: String,
+}
+
+impl GitMerge {
+    pub const DEF: &GitMergeDef = &GitMergeDef;
+}
+
+impl Action for GitMerge {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+define_action!(
+    GitMergeAbortDef,
+    GitMergeAbort,
+    "GitMergeAbort",
+    ActionKind::GitMergeAbort,
+    "abort the merge in progress",
+    "Abort the merge in progress. The files the merge changed take back \
+     HEAD's content, and the merge state goes. An edit to any other file \
+     stays. With no merge in progress, it badges and changes nothing.",
+    ActionPriority::Common,
+    command_name = "git merge abort"
+);
+
+define_action!(
+    GitMergeContinueDef,
+    GitMergeContinue,
+    "GitMergeContinue",
+    ActionKind::GitMergeContinue,
+    "commit the merge in progress",
+    "Commit the merge in progress through the commit message buffer, as \
+     git's continue flag does. The buffer opens over the merge's message, \
+     and when it closes clean the commit lands with the merged branch's tip \
+     as its second parent. With no merge in progress, it badges and changes \
+     nothing.",
+    ActionPriority::Common,
+    command_name = "git merge continue"
+);
+
 define_action!(
     GitBranchDef,
     GitBranch,

@@ -208,6 +208,9 @@ fn queue_message_open(stoat: &mut Stoat, amend: bool) -> UpdateEffect {
 /// Answers the draft and how the write went. When there is nothing to commit,
 /// it answers the badge label instead. A commit needs a staged change, and an
 /// amend needs a HEAD.
+///
+/// A commit during a merge opens over the merge's message and needs no staged
+/// change, since a merge whose conflicts all took HEAD's side changes no file.
 fn prepare_draft(
     fs: &dyn FsHost,
     repo: &dyn GitRepo,
@@ -215,11 +218,14 @@ fn prepare_draft(
     amend: bool,
 ) -> Result<(CommitDraft, io::Result<()>), &'static str> {
     let staged = staged_changes(repo, &workdir);
+    let merge = if amend { None } else { repo.merge_state() };
     let message = if amend {
         let head = repo
             .resolve_rev("HEAD")
             .and_then(|head| repo.commit_message(&head));
         head.ok_or("no commit to amend")?.trim_end().to_string()
+    } else if let Some(merge) = &merge {
+        merge.message.trim_end().to_string()
     } else if staged.is_empty() {
         return Err("nothing staged");
     } else {
@@ -232,6 +238,7 @@ fn prepare_draft(
         staged,
         branch: repo.head_branch(),
         amend,
+        merge: merge.is_some(),
     };
     let written = write_message(fs, &draft, &message);
     Ok((draft, written))
@@ -394,7 +401,13 @@ fn land_commit(stoat: &mut Stoat, draft: CommitDraft, committed: Committed) {
     stoat.active_workspace_mut().invalidate_all_diffs();
     super::commits::reload_every_list(stoat);
     let first_line = message.lines().next().unwrap_or("");
-    let verb = if draft.amend { "amended" } else { "committed" };
+    let verb = if draft.amend {
+        "amended"
+    } else if draft.merge {
+        "merged"
+    } else {
+        "committed"
+    };
     stoat.set_status(format!("{verb} {} {first_line}", &sha[..sha.len().min(7)]));
 }
 
@@ -967,6 +980,46 @@ mod tests {
                 (None, Some("a review walk is open".to_string())),
                 (None, Some("a rebase is in progress".to_string())),
             ],
+        );
+    }
+
+    /// A continue during a merge opens the message over the merge's message
+    /// with nothing staged. The commit drops the message's comment lines,
+    /// takes the merged tip as its second parent, and ends the merge.
+    #[test]
+    fn a_merge_continue_commits_the_merge_message_over_both_parents() {
+        let mut h = harness(&[]);
+        h.fake_git().add_repo("/repo").merge_in_progress(
+            "f1",
+            Some("feature"),
+            "Merge branch 'feature'\n\n#Conflicts:\n#\ta.rs\n",
+        );
+        submit(&mut h, ":git merge continue");
+        let opened =
+            message_file(&h).is_some_and(|text| text.starts_with("Merge branch 'feature'\n"));
+        submit(&mut h, ":wq");
+
+        let sha = head(&h).expect("a HEAD");
+        let repo = h
+            .stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .expect("the repo");
+        assert_eq!(
+            (
+                opened,
+                head_message(&h),
+                repo.parent_shas(&sha),
+                repo.merge_state(),
+                h.stoat.pending_message.clone(),
+            ),
+            (
+                true,
+                Some("Merge branch 'feature'".to_string()),
+                vec!["c2".to_string(), "f1".to_string()],
+                None,
+                Some(format!("merged {} Merge branch 'feature'", &sha[..7])),
+            ),
         );
     }
 
