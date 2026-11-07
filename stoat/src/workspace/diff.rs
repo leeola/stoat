@@ -25,7 +25,10 @@ use crate::{
     },
     display_map::{highlights::HighlightStyle, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
-    host::{git::HunkTallies, FsHost, GitHost, GitRepo},
+    host::{
+        git::{HunkTallies, MergeState},
+        FsHost, GitHost, GitRepo,
+    },
     jumplist::JumpEntry,
     multi_buffer::MultiBuffer,
     review_approval::ApprovedRows,
@@ -224,6 +227,8 @@ struct RepoTally {
     upstream: Option<(usize, usize)>,
     /// Whether a rebase is paused in the repository.
     rebasing: bool,
+    /// The merge in progress, if one is.
+    merge: Option<MergeState>,
 }
 
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
@@ -345,6 +350,11 @@ pub(crate) struct DiffState {
     pub(super) upstream: Option<(usize, usize)>,
     /// Whether a rebase was paused in the repository at the last tally.
     pub(super) rebasing: bool,
+    /// The merge in progress at the last tally, if one was.
+    ///
+    /// Read with the tally, since a merge's start, abort, and commit each move
+    /// the files the tally counts.
+    pub(super) merge: Option<MergeState>,
     /// The in-flight repo-wide tally, held so it is not cancelled before its
     /// answer lands.
     tally_job: Option<Task<Option<RepoTally>>>,
@@ -1108,6 +1118,7 @@ impl DiffState {
                     self.repo_head = tally.head;
                     self.upstream = tally.upstream;
                     self.rebasing = tally.rebasing;
+                    self.merge = tally.merge;
                     landed = true;
                 }
                 self.tally_job = None;
@@ -1131,6 +1142,7 @@ impl DiffState {
                             .or_else(|| repo.resolve_rev("HEAD").map(|sha| short_sha(&sha))),
                         upstream: repo.upstream_divergence(),
                         rebasing: repo.rebase_in_progress(),
+                        merge: repo.merge_state(),
                         rev_changed: rev.map(|sha| {
                             repo.changed_files_from(&sha)
                                 .into_iter()
@@ -1476,6 +1488,10 @@ pub(crate) struct RepoStatus {
     pub(crate) behind: usize,
     /// Whether a rebase is paused in the repository.
     pub(crate) rebasing: bool,
+    /// The name of the branch a merge in progress brings in, or the merge
+    /// head's short sha when no local branch points at it. `None` with no
+    /// merge in progress.
+    pub(crate) merge_head: Option<String>,
 }
 
 /// Where a diff view stands in the repository's review, as the bar names it.

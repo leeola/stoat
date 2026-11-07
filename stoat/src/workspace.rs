@@ -26,7 +26,7 @@ use crate::{
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
-    host::GitHost,
+    host::{git::MergeState, GitHost},
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
@@ -1538,7 +1538,19 @@ impl Workspace {
             ahead,
             behind,
             rebasing: self.diff.rebasing,
+            merge_head: self.merge_state().map(|merge| {
+                merge
+                    .head_name
+                    .clone()
+                    .unwrap_or_else(|| diff::short_sha(&merge.head_sha))
+            }),
         })
+    }
+
+    /// The merge in progress as the last tally read it, or `None` with no
+    /// merge in progress, before the first tally lands, and outside a repo.
+    pub(crate) fn merge_state(&self) -> Option<&MergeState> {
+        self.diff.merge.as_ref()
     }
 
     /// Hunks each changed file carries against HEAD, sorted by repo-relative

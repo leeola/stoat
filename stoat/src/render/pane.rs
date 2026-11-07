@@ -2563,7 +2563,10 @@ fn focused_staged_label(
 /// `ui.text.muted`, an up arrow for the commits it holds past the upstream and
 /// a down arrow for the ones it lacks, each only when not zero. A `REB` chip
 /// follows while a rebase is paused, in the
-/// mode chip's style over `ui.statusline.rebase`'s color. Each count the
+/// mode chip's style over `ui.statusline.rebase`'s color. While a merge is in
+/// progress a `MERGE` chip follows in the mode chip's style over
+/// `vcs.merge.banner`'s color, and then the merge head's name in `ui.text.dim`.
+/// Each count the
 /// repository holds follows in its own color, the staged hunks in
 /// `diff.staged`, the unstaged hunks in `ui.text.muted`, and the untracked
 /// files in `ui.text.dim`. A repository that holds none reads `clean` in
@@ -2595,6 +2598,20 @@ fn repo_segments(
         let color = theme.get(s::UI_STATUSLINE_REBASE).fg.unwrap_or(Color::Red);
         segments.push((" ".to_string(), base_style));
         segments.push((" REB ".to_string(), theme.get(s::UI_MODE_LABEL).bg(color)));
+    }
+    if let Some(merge_head) = &repo.merge_head {
+        // A theme without the merge banner's color takes the conflict screen's.
+        let color = theme
+            .try_get(s::VCS_MERGE_BANNER)
+            .and_then(|banner| banner.fg)
+            .or(theme.get(s::UI_STATUSLINE_CONFLICT).fg)
+            .unwrap_or(Color::LightRed);
+        segments.push((" ".to_string(), base_style));
+        segments.push((" MERGE ".to_string(), theme.get(s::UI_MODE_LABEL).bg(color)));
+        segments.push((
+            format!(" {merge_head}"),
+            tinted(base_style, theme, s::UI_TEXT_DIM),
+        ));
     }
 
     let counts = [
@@ -3760,6 +3777,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             rebasing: false,
+            merge_head: None,
         });
         repo_label(kind, base_lead, repo.as_ref(), file, position)
     }
@@ -3869,6 +3887,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             rebasing,
+            merge_head: None,
         };
         let label = |repo: RepoStatus| repo_label(MarkKind::Staged, None, Some(&repo), None, None);
         assert_eq!(
@@ -3898,6 +3917,7 @@ mod tests {
                 ahead,
                 behind,
                 rebasing: false,
+                merge_head: None,
             };
             repo_label(MarkKind::Staged, None, Some(&repo), None, None)
         };
@@ -3928,6 +3948,7 @@ mod tests {
             ahead: 2,
             behind: 1,
             rebasing: true,
+            merge_head: None,
         };
         let fg = |scope: &str| theme.get(scope).fg;
         let segments: Vec<(String, Option<Color>, Option<Color>, bool)> =
@@ -3985,6 +4006,54 @@ mod tests {
         );
     }
 
+    /// The merge chip is the mode chip's bold label over the merge banner's
+    /// color, or over the conflict screen's color in a theme without it. The
+    /// merge head's name follows in the dim color.
+    #[test]
+    fn the_merge_chip_takes_the_merge_banner_color() {
+        use ratatui::style::{Color, Modifier, Style};
+
+        let (config, errors) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let config = config.expect("the shipped config parses");
+        let repo = RepoStatus {
+            head: None,
+            staged: 0,
+            unstaged: 1,
+            untracked: 0,
+            ahead: 0,
+            behind: 0,
+            rebasing: false,
+            merge_head: Some("feature".to_string()),
+        };
+        let merge = |name: &str, [r, g, b]: [u8; 3]| {
+            let theme = crate::theme::Theme::from_config(&config, name).expect("the theme loads");
+            let found: Vec<_> = repo_segments(&repo, Style::default(), &theme)
+                .into_iter()
+                .take(3)
+                .map(|(text, style)| {
+                    let bold = style.add_modifier.contains(Modifier::BOLD);
+                    (text, style.fg, style.bg, bold)
+                })
+                .collect();
+            let chip = theme.get(crate::theme::scope::UI_MODE_LABEL).fg;
+            let dim = theme.get(crate::theme::scope::UI_TEXT_DIM).fg;
+            let want = vec![
+                (" ".to_string(), None, None, false),
+                (" MERGE ".to_string(), chip, Some(Color::Rgb(r, g, b)), true),
+                (" feature".to_string(), dim, None, false),
+            ];
+            (found, want)
+        };
+
+        for (found, want) in [
+            merge("ermine_night", [0xf5, 0x9a, 0xa0]),
+            merge("default_dark", [0xea, 0x85, 0x8b]),
+        ] {
+            assert_eq!(found, want);
+        }
+    }
+
     #[test]
     fn a_clean_repo_reads_in_the_clean_color() {
         use ratatui::style::Style;
@@ -3999,6 +4068,7 @@ mod tests {
             ahead: 0,
             behind: 0,
             rebasing: false,
+            merge_head: None,
         };
         let segments: Vec<_> = repo_segments(&clean, Style::default(), theme)
             .into_iter()
@@ -4406,16 +4476,18 @@ mod tests {
     }
 
     /// The repo segment names the branch and reads `clean` for a tree with no
-    /// change, and it carries a `REB` chip while a rebase is paused. A detached
-    /// HEAD reads as its short sha, an untracked file counts apart from the
-    /// unstaged hunks, and the branch's divergence from its upstream follows
-    /// its name.
+    /// change, and it carries a `REB` chip while a rebase is paused. A merge in
+    /// progress carries a `MERGE` chip and the merge head's name, or its short
+    /// sha when no branch names it. A detached HEAD reads as its short sha, an
+    /// untracked file counts apart from the unstaged hunks, and the branch's
+    /// divergence from its upstream follows its name.
     #[test]
     fn statusline_names_the_branch_and_a_clean_tree() {
         let row = |branch: Option<&str>,
                    rebasing: bool,
                    untracked: bool,
-                   upstream: Option<(usize, usize)>| {
+                   upstream: Option<(usize, usize)>,
+                   merge: Option<Option<&str>>| {
             let mut h = crate::test_harness::TestHarness::with_size(80, 12);
             h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
             h.fake_fs().insert_file(Path::new("/repo/f.txt"), b"a\n");
@@ -4434,6 +4506,9 @@ mod tests {
                 if let Some((ahead, behind)) = upstream {
                     repo.upstream(ahead, behind);
                 }
+                if let Some(head_name) = merge {
+                    repo.merge_in_progress("f00dfeed1234", head_name, "Merge");
+                }
             }
             h.stoat.set_diff_warm_auto(true);
             h.open_file(Path::new("/repo/f.txt"));
@@ -4443,16 +4518,20 @@ mod tests {
         };
         assert_eq!(
             [
-                row(Some("main"), false, false, None),
-                row(Some("main"), true, false, None),
-                row(None, false, true, None),
-                row(Some("main"), false, false, Some((2, 1))),
+                row(Some("main"), false, false, None, None),
+                row(Some("main"), true, false, None, None),
+                row(None, false, true, None, None),
+                row(Some("main"), false, false, Some((2, 1)), None),
+                row(Some("main"), false, false, None, Some(Some("feature"))),
+                row(Some("main"), false, false, None, Some(None)),
             ],
             [
                 "NOR repo f.txt \u{2387} main \u{2713} clean 1:1",
                 "NOR repo f.txt \u{2387} main REB \u{2713} clean 1:1",
                 "NOR repo f.txt \u{2387} a100000 ? 1 untracked 1:1",
                 "NOR repo f.txt \u{2387} main \u{2191}2 \u{2193}1 \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main MERGE feature \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main MERGE f00dfee \u{2713} clean 1:1",
             ],
         );
     }
