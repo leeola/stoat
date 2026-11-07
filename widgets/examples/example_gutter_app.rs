@@ -303,8 +303,6 @@ fn pane_gutter<'a>(pane: &Pane, lines: &'a [GutterLine]) -> Gutter<'a> {
         lines,
         left_bars: 2,
         left_bar_width: pane.gutter.bar_width,
-        diff_bars: 0,
-        diff_bar_width: pane.gutter.bar_width,
         pad: pane.gutter.pad,
         number_scale: NUMBER_SCALE,
         width_digits: width_digits(),
@@ -325,7 +323,7 @@ fn gutter_lines() -> Vec<GutterLine> {
             number: index as u32 + 1,
             height: line_height(line),
             git: line.git.map(|g| GitMark {
-                slots: [Some(git_color(g)), Some(git_color(g)), None],
+                slots: [Some(git_color(g)), Some(git_color(g))],
                 seam: false,
             }),
             diagnostic: line.diag.map(|diag| Diagnostic {

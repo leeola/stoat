@@ -1788,14 +1788,9 @@ pub(crate) fn gutter_digits(line_count: u32) -> u16 {
 /// resolves the wrap width before the wrapped snapshot exists.
 pub(crate) fn measure_gutter_width(width_digits: u16, rich: Option<u16>) -> u16 {
     match rich {
-        Some(number_scale) => rich_gutter(
-            &[],
-            width_digits,
-            ([0; 3], [0; 3], [0; 3]),
-            number_scale,
-            PLAIN_STRUCTURAL_BARS,
-        )
-        .cell_width(),
+        Some(number_scale) => {
+            rich_gutter(&[], width_digits, ([0; 3], [0; 3], [0; 3]), number_scale).cell_width()
+        },
         None => width_digits + 3,
     }
 }
@@ -1879,7 +1874,7 @@ pub(crate) fn gutter_component_lines(
             git: diff_marks.get(&(number - 1)).and_then(|mark| {
                 let hunk = diff_colors.for_tree(mark.status, mark.tree, bg)?;
                 Some(GitMark {
-                    slots: [Some(hunk), Some(diff_colors.for_state(mark.state)), None],
+                    slots: [Some(hunk), Some(diff_colors.for_state(mark.state))],
                     seam: mark.status == DiffHunkStatus::Deleted,
                 })
             }),
@@ -1891,24 +1886,14 @@ pub(crate) fn gutter_component_lines(
         .collect()
 }
 
-/// How many structural lanes the plain editor's gutter draws right of the icon
-/// cell.
-///
-/// The measure, the live paint and the pooled pages all read this, so the
-/// width the measure reserves is the width the paint fills. The plain editor
-/// marks no structural change of its own, so it reserves none.
-pub(crate) const PLAIN_STRUCTURAL_BARS: u16 = 0;
-
 /// The width of every rich gutter lane, in sixteenths.
 const GUTTER_LANE_WIDTH: u16 = 3;
 
 /// The sub-cell [`Gutter`] widget for `lines`, carrying the geometry the live
 /// and pooled-page renders share.
 ///
-/// The hunk and state lanes sit left of the number, and `structural_bars`
-/// lanes sit right of the icon cell, every lane [`GUTTER_LANE_WIDTH`] wide. The
-/// plain editor passes [`PLAIN_STRUCTURAL_BARS`], and the diff view sizes its
-/// sides from its own count.
+/// The hunk and state lanes sit left of the number, each [`GUTTER_LANE_WIDTH`]
+/// wide. The diff view lays its sides out from the same widget.
 ///
 /// The `colors` are the number, separator, and background colors. The numbers
 /// draw at `number_scale`, which also sets the gutter's width, so a measure and
@@ -1918,14 +1903,11 @@ pub(crate) fn rich_gutter(
     width_digits: u16,
     (number_fg, separator, bg): ([u8; 3], [u8; 3], [u8; 3]),
     number_scale: u16,
-    structural_bars: u16,
 ) -> Gutter<'_> {
     Gutter {
         lines,
         left_bars: 2,
         left_bar_width: GUTTER_LANE_WIDTH,
-        diff_bars: structural_bars,
-        diff_bar_width: GUTTER_LANE_WIDTH,
         pad: 1,
         number_scale,
         width_digits,
@@ -2141,13 +2123,7 @@ fn draw_rich_gutter(
 ) -> u16 {
     let scene_key = gutter_scene_key(geometry.lines_key, inner, colors, number_scale);
 
-    let gutter = rich_gutter(
-        &geometry.lines,
-        geometry.width_digits,
-        colors,
-        number_scale,
-        PLAIN_STRUCTURAL_BARS,
-    );
+    let gutter = rich_gutter(&geometry.lines, geometry.width_digits, colors, number_scale);
     let cell_width = gutter.cell_width();
 
     if geometry.scene_key == Some(scene_key) {
@@ -5471,11 +5447,11 @@ mod tests {
                 .map(|line| line.git.map(|git| (git.slots, git.seam)))
                 .collect::<Vec<_>>(),
             [
-                Some(([Some([40, 50, 60]), Some([160, 170, 180]), None], false)),
+                Some(([Some([40, 50, 60]), Some([160, 170, 180])], false)),
                 // The modified color, half way to the black background.
-                Some(([Some([20, 25, 30]), Some([160, 170, 180]), None], false)),
+                Some(([Some([20, 25, 30]), Some([160, 170, 180])], false)),
                 None,
-                Some(([Some([100, 110, 120]), Some([160, 170, 180]), None], true)),
+                Some(([Some([100, 110, 120]), Some([160, 170, 180])], true)),
             ],
         );
     }

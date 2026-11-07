@@ -6,9 +6,7 @@ use super::{
 use crate::{
     app::Stoat,
     auto_reload::ReloadFlash,
-    diff_map::{
-        ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange, TreeMark,
-    },
+    diff_map::{ChangeKind, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, ProseChange},
     display_map::{
         highlights::HighlightStyle, syntax_theme::DiffTheme, tab_map, BaseLineLayout, Block,
         BlockPlacement, BlockRowKind, CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot,
@@ -686,9 +684,8 @@ pub(crate) struct DiffLayout {
 pub(crate) struct RichGutterOffsets {
     /// Where a right-aligned line number ends.
     number_right: u16,
-    /// Each status bar's left edge: the git bar, the state bar, then the tree
-    /// bar.
-    bars: [u16; 3],
+    /// Each status bar's left edge: the git bar, then the state bar.
+    bars: [u16; 2],
     /// Each status bar's width.
     bar_width: u16,
     /// The separator hairline's left edge.
@@ -697,34 +694,32 @@ pub(crate) struct RichGutterOffsets {
 
 impl DiffLayout {
     /// The diff view's gutter for `digits`-wide numbers: line number, the
-    /// git, state and tree status, then a rule.
+    /// git and state status, then a rule.
     ///
     /// A cell gutter leaves its first cell blank, where the plain gutter
     /// draws its mark column, right-aligns the number in the next `digits`
-    /// cells, puts the three status glyphs after it, and draws the rule in
-    /// the cell after them. A `rich` gutter, given as the scale its numbers
-    /// draw at, spans the sub-cell gutter's
-    /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) with
-    /// one structural lane, and places its parts at that gutter's sixteenth
-    /// offsets. The git and state bars [`draw_diff_status`] paints take the
-    /// lanes left of the number, and the tree bar the structural lane.
+    /// cells, puts the two status glyphs after it, and draws the rule in the
+    /// cell after them. A `rich` gutter, given as the scale its numbers draw
+    /// at, spans the sub-cell gutter's
+    /// [`Gutter::cell_width`](stoat_widgets::gutter::Gutter::cell_width) and
+    /// places its parts at that gutter's sixteenth offsets. The git and state
+    /// bars [`draw_diff_status`] paints take the lanes left of the number.
     pub(crate) fn diff_view(digits: u16, rich: Option<u16>) -> Self {
         let rich = rich.map(|number_scale| {
-            let gutter =
-                editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale, 1);
+            let gutter = editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), number_scale);
             let offsets = RichGutterOffsets {
                 number_right: gutter.number_right_edge(),
-                bars: [0, 1, 2].map(|slot| gutter.bar_x(slot)),
-                bar_width: gutter.diff_bar_width,
+                bars: [0, 1].map(|slot| gutter.bar_x(slot)),
+                bar_width: gutter.left_bar_width,
                 separator_x: gutter.separator_x(),
             };
             (gutter.cell_width(), offsets)
         });
         Self {
-            gutter_w: rich.map_or(digits + 5, |(width, _)| width),
+            gutter_w: rich.map_or(digits + 4, |(width, _)| width),
             num_off: 1,
             status_off: digits + 1,
-            sep_off: Some(digits + 4),
+            sep_off: Some(digits + 3),
             rich: rich.map(|(_, offsets)| offsets),
             two_column_min: DIFF_TWO_COLUMN_MIN,
         }
@@ -1302,7 +1297,6 @@ pub(crate) fn paint_diff_rows(
                         y,
                         change_scope,
                         mark.state,
-                        mark.tree,
                         false,
                         theme,
                     );
@@ -1345,11 +1339,7 @@ pub(crate) fn paint_diff_rows(
                             dim_style,
                             digits,
                         );
-                        if let Some(GutterMark {
-                            status,
-                            tree,
-                            state,
-                        }) = snapshot
+                        if let Some(GutterMark { status, state, .. }) = snapshot
                             .diff_map()
                             .and_then(|dm| dm.staged_mark_at_base_line(line_base))
                         {
@@ -1361,7 +1351,6 @@ pub(crate) fn paint_diff_rows(
                                 y,
                                 staged_mark_scope(status),
                                 state,
-                                tree,
                                 status == DiffHunkStatus::Deleted,
                                 theme,
                             );
@@ -2123,39 +2112,26 @@ fn base_token_spans(
         .unwrap_or(&[])
 }
 
-/// Paint the diff view's three-cell status column for a hunk row.
+/// Paint the diff view's two-cell status column for a hunk row.
 ///
 /// The first cell carries the git bar `▎` in `change_scope`, and the second
 /// the state bar `▎` in the scope [`editor::mark_state_scope`] gives `state`.
-/// The third carries the tree glyph by the plain gutter's rule, in
-/// `change_scope`. A row the tree pass marked takes `▎`, a row it has not
-/// reached the thinner `▏`, and a row it found unchanged nothing. A `seam`
-/// takes the gutter's `▔` deletion mark in the git and tree cells. A cell
+/// With `seam` set, the git cell takes the gutter's `▔` deletion mark. A cell
 /// outside the buffer gets no paint.
 fn paint_status_bars(
     buf: &mut Buffer,
     (x, y): (u16, u16),
     change_scope: &str,
     state: MarkState,
-    tree: TreeMark,
     seam: bool,
     theme: &crate::theme::Theme,
 ) {
-    let tree_mark = match tree {
-        TreeMark::Unmarked => None,
-        _ if seam => Some('▔'),
-        TreeMark::Marked => Some('▎'),
-        TreeMark::Unrefined => Some('\u{258F}'),
-    };
     let cells = [
-        (x, Some(if seam { '▔' } else { '▎' }), change_scope),
-        (x + 1, Some('▎'), editor::mark_state_scope(theme, state)),
-        (x + 2, tree_mark, change_scope),
+        (x, if seam { '▔' } else { '▎' }, change_scope),
+        (x + 1, '▎', editor::mark_state_scope(theme, state)),
     ];
     for (cell_x, mark, scope) in cells {
-        if let Some(mark) = mark
-            && cell_x < buf.area.x + buf.area.width
-        {
+        if cell_x < buf.area.x + buf.area.width {
             buf[(cell_x, y)].set_char(mark).set_style(theme.get(scope));
         }
     }
@@ -2353,7 +2329,7 @@ fn paint_base_side(
     // The row is there for the removal, so the removal's status wins over a
     // staged mark on the same base line.
     match removal {
-        Some((state, tree)) => {
+        Some((state, _)) => {
             let change_scope = if changes
                 .iter()
                 .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
@@ -2370,17 +2346,12 @@ fn paint_base_side(
                 y,
                 change_scope,
                 state,
-                tree,
                 false,
                 theme,
             );
         },
         None => {
-            if let Some(GutterMark {
-                status,
-                tree,
-                state,
-            }) = snapshot
+            if let Some(GutterMark { status, state, .. }) = snapshot
                 .diff_map()
                 .and_then(|dm| dm.staged_mark_at_base_line(base_line))
             {
@@ -2392,7 +2363,6 @@ fn paint_base_side(
                     y,
                     staged_mark_scope(status),
                     state,
-                    tree,
                     status == DiffHunkStatus::Deleted,
                     theme,
                 );
@@ -3011,15 +2981,12 @@ fn draw_diff_num(
     }
 }
 
-/// Emit the git, state and tree bars (rich) or paint the ASCII status glyphs.
+/// Emit the git and state bars (rich) or paint the ASCII status glyphs.
 ///
 /// The bars sit at the rich offsets from `side_x`, the side's first cell. The
-/// git bar takes the change color and the state bar the color of `state`. The
-/// tree bar takes the change color on a row the tree pass marked, that color
-/// faded toward the background by [`editor::TREE_FADE`] on a row it has not
-/// reached, and nothing on a row it found unchanged. A `seam` draws the git
-/// and tree bars as the short top-aligned bar the rich gutter draws for a
-/// deletion.
+/// git bar takes the change color and the state bar the color of `state`.
+/// With `seam` set, the git bar is the short top-aligned bar the rich gutter
+/// draws for a deletion.
 ///
 /// The glyphs take the cell gutter's status column at `status_x`.
 #[allow(clippy::too_many_arguments)]
@@ -3031,7 +2998,6 @@ fn draw_diff_status(
     y: u16,
     change_scope: &str,
     state: MarkState,
-    tree: TreeMark,
     seam: bool,
     theme: &crate::theme::Theme,
 ) {
@@ -3046,23 +3012,11 @@ fn draw_diff_status(
                 MarkState::Approved => rg.colors.approved,
                 MarkState::Unapproved => rg.colors.unapproved,
             };
-            let tree_color = match tree {
-                TreeMark::Marked => Some(change),
-                TreeMark::Unrefined => Some(dim_rgb(change, rg.colors.bg, editor::TREE_FADE)),
-                TreeMark::Unmarked => None,
-            };
             let kind_height = if seam { 6 } else { 16 };
             let side = (side_x - inner.x) * 16;
             let y0 = ((y - inner.y) * 16) as i16;
-            let bars = [
-                (Some(change), kind_height),
-                (Some(state_color), 16),
-                (tree_color, kind_height),
-            ];
+            let bars = [(change, kind_height), (state_color, 16)];
             for (x, (color, height)) in rg.offsets.bars.into_iter().zip(bars) {
-                let Some(color) = color else {
-                    continue;
-                };
                 rg.bars.push(
                     inner,
                     Bar {
@@ -3075,7 +3029,7 @@ fn draw_diff_status(
                 );
             }
         },
-        None => paint_status_bars(buf, (status_x, y), change_scope, state, tree, seam, theme),
+        None => paint_status_bars(buf, (status_x, y), change_scope, state, seam, theme),
     }
 }
 
@@ -3118,7 +3072,7 @@ fn draw_removal_tick(
         },
         None => {
             let style = theme.get(s::DIFF_DELETED);
-            for x in [status_x, status_x + 1, status_x + 2] {
+            for x in [status_x, status_x + 1] {
                 if x < buf.area.x + buf.area.width {
                     buf[(x, y)].set_char('▔').set_style(style);
                 }
@@ -3255,9 +3209,10 @@ mod tests {
     /// The diff view lays a side out as line number, status column, rule, text,
     /// and aliases both sides onto one column below [`DIFF_TWO_COLUMN_MIN`].
     ///
-    /// A cell gutter for two digits spans the plain degraded gutter's six
-    /// cells. A rich one spans the sub-cell gutter's four cells at the test
-    /// scale, where a digit advances a whole cell, and keeps the cell offsets.
+    /// A cell gutter for two digits spans six cells, which hold a blank cell,
+    /// the digits, the two status glyphs, and the rule. A rich one spans the
+    /// sub-cell gutter's five cells at the test scale, where a digit advances a
+    /// whole cell, and keeps the cell offsets.
     #[test]
     fn the_diff_view_layout_rules_off_its_gutter_and_unifies_when_narrow() {
         let wide = Rect::new(3, 0, 121, 10);
@@ -3268,15 +3223,15 @@ mod tests {
                 left_x: 3,
                 left_num_x: 4,
                 status_left_x: 6,
-                left_sep_x: Some(9),
-                left_text_x: 10,
-                left_content_w: 53,
+                left_sep_x: Some(8),
+                left_text_x: 9,
+                left_content_w: 54,
                 right_x: 64,
                 right_num_x: 65,
                 status_right_x: 67,
-                right_sep_x: Some(70),
-                right_text_x: 71,
-                right_content_w: 53,
+                right_sep_x: Some(69),
+                right_text_x: 70,
+                right_content_w: 54,
                 sep_x: Some(63),
                 rich: None,
             },
@@ -3292,7 +3247,7 @@ mod tests {
                 right_content_w: 55,
                 rich: Some(RichGutterOffsets {
                     number_right: 44,
-                    bars: [0, 4, 68],
+                    bars: [0, 4],
                     bar_width: 3,
                     separator_x: 75,
                 }),
@@ -3307,15 +3262,15 @@ mod tests {
                 left_x: 0,
                 left_num_x: 1,
                 status_left_x: 3,
-                left_sep_x: Some(6),
-                left_text_x: 7,
-                left_content_w: 33,
+                left_sep_x: Some(5),
+                left_text_x: 6,
+                left_content_w: 34,
                 right_x: 0,
                 right_num_x: 1,
                 status_right_x: 3,
-                right_sep_x: Some(6),
-                right_text_x: 7,
-                right_content_w: 33,
+                right_sep_x: Some(5),
+                right_text_x: 6,
+                right_content_w: 34,
                 sep_x: None,
                 rich: None,
             },
@@ -3334,18 +3289,17 @@ mod tests {
         assert_eq!([digits(&base, "a\nb\n"), digits("a\n", "a\nb\n")], [3, 2]);
     }
 
-    /// A rich diff side reserves the three-bar sub-cell gutter's cells. A cell
-    /// side reserves a blank cell, the digits, three status glyphs and the rule.
+    /// A rich diff side reserves the two-lane sub-cell gutter's cells. A cell
+    /// side reserves a blank cell, the digits, two status glyphs and the rule.
     #[test]
-    fn a_diff_side_reserves_the_three_bar_widgets_width() {
+    fn a_diff_side_reserves_the_two_lane_widgets_width() {
         let widget = |digits| {
-            editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), FULL_CELL_SCALE, 1)
-                .cell_width()
+            editor::rich_gutter(&[], digits, ([0; 3], [0; 3], [0; 3]), FULL_CELL_SCALE).cell_width()
         };
         assert_eq!(
             [2, 4].map(|digits| [None, Some(FULL_CELL_SCALE)]
                 .map(|rich| DiffLayout::diff_view(digits, rich).gutter_w)),
-            [[2 + 5, widget(2)], [4 + 5, widget(4)]],
+            [[2 + 4, widget(2)], [4 + 4, widget(4)]],
             "two and four digits, cell then rich",
         );
     }
@@ -4546,10 +4500,20 @@ mod tests {
         diff_editor_with_map(text, dm)
     }
 
-    /// Each row's left git, state and tree cells, then the right ones, as glyph
-    /// and color, with `editor` painted 120 columns wide under
-    /// [`rgb_diff_theme`].
-    fn status_cells(editor: &mut EditorState) -> Vec<[(String, Color); 6]> {
+    /// Each row's left git and state cells, then the right ones, as glyph and
+    /// color, with `editor` painted 120 columns wide under [`rgb_diff_theme`].
+    fn status_cells(editor: &mut EditorState) -> Vec<[(String, Color); 4]> {
+        let (buf, columns) = cell_paint(editor);
+        let cell = |x: u16, y: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
+        let (left, right) = (columns.status_left_x, columns.status_right_x);
+        (0..buf.area.height)
+            .map(|y| [left, left + 1, right, right + 1].map(|x| cell(x, y)))
+            .collect()
+    }
+
+    /// `editor` painted 120 columns wide under [`rgb_diff_theme`] in the cell
+    /// gutter, and the columns that gutter lays out.
+    fn cell_paint(editor: &mut EditorState) -> (Buffer, DiffColumns) {
         let area = Rect::new(0, 0, 120, 8);
         let digits = diff_gutter_digits(&editor.display_map.snapshot());
         let mut buf = Buffer::empty(area);
@@ -4568,18 +4532,27 @@ mod tests {
             &[],
             false,
         );
-
-        let columns = DiffColumns::compute(area, DiffLayout::diff_view(digits, None));
-        let cell = |x: u16, y: u16| (buf[(x, y)].symbol().to_string(), buf[(x, y)].fg);
-        let (left, right) = (columns.status_left_x, columns.status_right_x);
-        (0..area.height)
-            .map(|y| [left, left + 1, left + 2, right, right + 1, right + 2].map(|x| cell(x, y)))
-            .collect()
+        (
+            buf,
+            DiffColumns::compute(area, DiffLayout::diff_view(digits, None)),
+        )
     }
 
-    /// A status cell no glyph paints, past the line number's dim cells.
-    fn blank() -> (String, Color) {
-        (" ".to_string(), Color::Reset)
+    /// Each side's two status cells end where its rule starts, so a changed
+    /// row and a removal's tick both leave the rule standing.
+    #[test]
+    fn the_status_cells_end_at_the_rule() {
+        let (buf, columns) = cell_paint(&mut diff_editor("a\nb\nc\nx\ny\nd\n", "a\nB\nc\nd\n"));
+        let rules = [columns.left_sep_x, columns.right_sep_x].map(|x| x.expect("a split rule"));
+
+        assert_eq!(
+            (0..6)
+                .map(|y| rules.map(|x| buf[(x, y)].symbol()))
+                .collect::<Vec<_>>(),
+            [["│"; 2]; 6],
+            "a context row, the changed row, a context row, the two removed rows, \
+             and the last context row keep both rules",
+        );
     }
 
     /// The glyphs of `cells`, for cells whose color is the number's or none.
@@ -4604,16 +4577,11 @@ mod tests {
             "a\nB\nc\nD\n",
         ));
 
-        // No tree pass reaches a line diff, so every tree cell reads unrefined.
         assert_eq!(
-            (cells[1][..3].to_vec(), symbols(&cells[1][3..])),
+            (cells[1][..2].to_vec(), symbols(&cells[1][2..])),
             (
-                vec![
-                    glyph("▎", s::DIFF_DELETED),
-                    glyph("▎", s::DIFF_STAGED),
-                    glyph("\u{258F}", s::DIFF_DELETED),
-                ],
-                vec![" ", " ", " "],
+                vec![glyph("▎", s::DIFF_DELETED), glyph("▎", s::DIFF_STAGED)],
+                vec![" ", " "],
             ),
             "base line 1 takes the staged mark's bars, and the live B none: {cells:?}",
         );
@@ -4622,10 +4590,8 @@ mod tests {
             [
                 glyph("▎", s::DIFF_DELETED),
                 glyph("▎", s::DIFF_UNSTAGED),
-                glyph("\u{258F}", s::DIFF_DELETED),
                 glyph("▎", s::DIFF_ADDED),
                 glyph("▎", s::DIFF_UNSTAGED),
-                glyph("\u{258F}", s::DIFF_ADDED),
             ],
             "the removed d keeps the removal's bars beside the live D's: {cells:?}",
         );
@@ -4641,14 +4607,10 @@ mod tests {
             "a\nb\n",
         ));
         assert_eq!(
-            (cells[1][..3].to_vec(), symbols(&cells[1][3..])),
+            (cells[1][..2].to_vec(), symbols(&cells[1][2..])),
             (
-                vec![
-                    glyph("▔", s::DIFF_DELETED),
-                    glyph("▎", s::DIFF_STAGED),
-                    glyph("▔", s::DIFF_DELETED),
-                ],
-                vec![" ", " ", " "],
+                vec![glyph("▔", s::DIFF_DELETED), glyph("▎", s::DIFF_STAGED)],
+                vec![" ", " "],
             ),
             "the line after the removed text takes the deletion mark: {cells:?}",
         );
@@ -4673,10 +4635,8 @@ mod tests {
             [
                 glyph("▎", s::DIFF_DELETED),
                 glyph("▎", state),
-                glyph("\u{258F}", s::DIFF_DELETED),
                 glyph("▎", s::DIFF_ADDED),
                 glyph("▎", state),
-                glyph("\u{258F}", s::DIFF_ADDED),
             ]
         };
         assert_eq!(
@@ -4734,20 +4694,16 @@ mod tests {
     #[test]
     fn a_pure_removal_ticks_the_right_column_once() {
         let cells = status_cells(&mut diff_editor("a\nx\ny\nb\n", "a\nb\n"));
-        let right_symbols = |row: usize| symbols(&cells[row][3..]);
+        let right_symbols = |row: usize| symbols(&cells[row][2..]);
 
         assert_eq!(
-            cells[1][3..],
-            [
-                glyph("▔", s::DIFF_DELETED),
-                glyph("▔", s::DIFF_DELETED),
-                glyph("▔", s::DIFF_DELETED)
-            ],
-            "the first removed row ticks the three right status cells: {cells:?}",
+            cells[1][2..],
+            [glyph("▔", s::DIFF_DELETED), glyph("▔", s::DIFF_DELETED)],
+            "the first removed row ticks the two right status cells: {cells:?}",
         );
         assert_eq!(
             [right_symbols(2), right_symbols(3)],
-            [[" ", " ", " "], [" ", " ", " "]],
+            [[" ", " "], [" ", " "]],
             "the second removed row and the row after the gap stay blank: {cells:?}",
         );
     }
@@ -4776,8 +4732,8 @@ mod tests {
         let cells = status_cells(&mut diff_editor_with_map("a\nB\nc\n", dm));
 
         assert_eq!(
-            symbols(&cells[1][3..]),
-            [" ", " ", " "],
+            symbols(&cells[1][2..]),
+            [" ", " "],
             "the removed x sits above the added B, so it takes no tick: {cells:?}",
         );
     }
@@ -4790,92 +4746,14 @@ mod tests {
             "a\nb\n", "a\nB\n", "a\nX\n",
         ));
         assert_eq!(
-            cells[1][..3],
-            [
-                glyph("▎", s::DIFF_DELETED),
-                glyph("▎", s::DIFF_UNSTAGED),
-                glyph("\u{258F}", s::DIFF_DELETED),
-            ],
+            cells[1][..2],
+            [glyph("▎", s::DIFF_DELETED), glyph("▎", s::DIFF_UNSTAGED)],
             "the removed B takes the unstaged removal's bars: {cells:?}",
         );
     }
 
-    /// A refined hunk bars every row it spans in the git column, and the tree
-    /// column narrows to the rows its runs name. Without the narrowing a
-    /// reindent tree-bars every row it moved, which is the clutter the
-    /// refinement exists to remove.
-    #[test]
-    fn a_refined_hunk_tree_bars_only_its_marked_rows() {
-        let cols = wide_columns();
-        // One hunk over the whole block, refined to its middle row alone.
-        let text = "a\nb\nc\nd\n";
-        let mut editor = {
-            let executor = Executor::new(Arc::new(TestScheduler::new()));
-            let mut tb = TextBuffer::with_text(BufferId::new(0), text);
-            tb.diff_map = Some(DiffMap::from_hunks(
-                [DiffHunk {
-                    status: DiffHunkStatus::Modified,
-                    buffer_start_line: 0,
-                    buffer_line_range: 0..4,
-                    base_byte_range: 0..8,
-                    anchor_range: None,
-                    token_detail: Some(Arc::new(TokenDetail {
-                        buffer_spans: Vec::new(),
-                        base_spans: Vec::new(),
-                        tree: true,
-                    })),
-                    unstaged_lines: std::iter::once(0..4).collect(),
-                    marked_rows: std::iter::once(2..3).collect(),
-                }],
-                Some(Arc::new(text.to_string())),
-            ));
-            let shared = Arc::new(RwLock::new(tb));
-            let mut editor =
-                EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
-            editor.set_diff_view(true);
-            editor
-        };
-
-        let area = Rect::new(0, 0, 120, 8);
-        let mut buf = Buffer::empty(area);
-        let theme = rgb_diff_theme();
-        render_diff_view(
-            &mut editor,
-            area,
-            Style::default(),
-            &theme,
-            &mut buf,
-            true,
-            None,
-            None,
-            true,
-            DiffDials::shipped(),
-            BufferNumbering::Absolute,
-            &[],
-            false,
-        );
-
-        let barred = |x: u16| {
-            (0..area.height)
-                .filter(|&y| buf[(x, y)].symbol() == "▎")
-                .collect::<Vec<u16>>()
-        };
-        // The diff view stacks base rows, so the screen row is found by what it
-        // shows rather than assumed equal to the buffer row.
-        let row_of = |line: &str| {
-            (0..area.height)
-                .find(|&y| line_text(&buf, y, right_text(&cols)).trim() == line)
-                .expect("the buffer row is on screen")
-        };
-        assert_eq!(
-            (barred(cols.status_right_x), barred(cols.status_right_x + 2)),
-            (["a", "b", "c", "d"].map(row_of).to_vec(), vec![row_of("c")]),
-            "the git column bars every row the hunk spans, and the tree column the marked one",
-        );
-    }
-
     /// A reindent the tree pass found nothing in keeps its git bar on every
-    /// row the line pass changed, and its tree cells stay blank.
+    /// row the line pass changed.
     #[test]
     fn a_reindent_the_tree_pass_found_unchanged_keeps_its_git_bars() {
         let (base, text) = (
@@ -4896,15 +4774,13 @@ mod tests {
         let body = [
             glyph("▎", s::DIFF_DELETED),
             glyph("▎", s::DIFF_UNSTAGED),
-            blank(),
             glyph("▎", s::DIFF_ADDED),
             glyph("▎", s::DIFF_UNSTAGED),
-            blank(),
         ];
         assert_eq!(
             [cells[1].clone(), cells[2].clone()],
             [body.clone(), body],
-            "both body rows bar the line pass's change and leave the tree cell blank: {cells:?}",
+            "both body rows bar the line pass's change: {cells:?}",
         );
     }
 
@@ -4927,78 +4803,26 @@ mod tests {
         );
     }
 
-    /// The rich tree bar takes the change color on a row the tree pass marked,
-    /// that color faded on a row it has not reached, and nothing on a row it
-    /// found unchanged. On a seam it is the short top-aligned bar.
+    /// A staged deletion leaves no base line of its own, so its rich git bar
+    /// is the short top-aligned bar on the base line after the removed text.
     #[test]
-    fn rich_tree_bars_follow_the_tree_reading() {
-        let reached = DiffHunk {
-            status: DiffHunkStatus::Modified,
-            buffer_start_line: 0,
-            buffer_line_range: 0..2,
-            base_byte_range: 0..4,
-            anchor_range: None,
-            token_detail: Some(Arc::new(TokenDetail {
-                buffer_spans: Vec::new(),
-                base_spans: Vec::new(),
-                tree: true,
-            })),
-            unstaged_lines: std::iter::once(0..2).collect(),
-            marked_rows: std::iter::once(0..1).collect(),
-        };
-        let unreached = DiffHunk {
-            buffer_start_line: 3,
-            buffer_line_range: 3..4,
-            base_byte_range: 6..8,
-            token_detail: None,
-            unstaged_lines: std::iter::once(3..4).collect(),
-            marked_rows: Vec::new(),
-            ..reached.clone()
-        };
-        let dm = DiffMap::from_hunks(
-            [reached, unreached],
-            Some(Arc::new("a\nb\nc\nd\n".to_string())),
-        );
-        let (bytes, columns, buf) = rich_scene(&mut diff_editor_with_map("A\nB\nc\nD\n", dm));
-        let offsets = columns.rich.expect("a rich layout");
-        let tree_bar = |side: u16, row: u16, height: u16, color| BarCommand {
-            x: (side * 16 + offsets.bars[2]) as i16,
-            y: (row * 16) as i16,
-            width: offsets.bar_width,
-            height,
-            color,
-        };
-        // The rgb test theme's added color, which a live modified row's bars
-        // take, and `faded` blends it toward the theme's #282c34 background.
-        let added = [0, 255, 0];
-        let faded = |color| dim_rgb(color, [40, 44, 52], editor::TREE_FADE);
-        let right = columns.right_x;
-        // The diff view stacks base rows, so each screen row is found by its text.
-        let row_of = |line: &str| {
-            (0..buf.area.height)
-                .find(|&y| line_text(&buf, y, right_text(&columns)).trim() == line)
-                .expect("the buffer row is on screen")
-        };
-        let (a, b, d) = (row_of("A"), row_of("B"), row_of("D"));
-        assert_eq!(
-            [
-                holds_bar(&bytes, tree_bar(right, a, 16, added)),
-                holds_bar(&bytes, tree_bar(right, b, 16, added)),
-                holds_bar(&bytes, tree_bar(right, b, 16, faded(added))),
-                holds_bar(&bytes, tree_bar(right, d, 16, faded(added))),
-            ],
-            [true, false, false, true],
-            "the marked row's bar, none on the unmarked row, and the unreached row's faded",
-        );
-
+    fn a_staged_deletion_draws_the_short_rich_git_bar() {
         let (bytes, columns, _) = rich_scene(&mut diff_editor_with_staged_marks(
             "a\nx\nb\n",
             "a\nb\n",
             "a\nb\n",
         ));
+        let offsets = columns.rich.expect("a rich layout");
+        let git_bar = BarCommand {
+            x: (columns.left_x * 16 + offsets.bars[0]) as i16,
+            y: 16,
+            width: offsets.bar_width,
+            height: 6,
+            color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
+        };
         assert!(
-            holds_bar(&bytes, tree_bar(columns.left_x, 1, 6, faded([255, 0, 0]))),
-            "a staged deletion's tree bar is the short top bar",
+            holds_bar(&bytes, git_bar),
+            "base line 1 takes the short git bar of the removal before it",
         );
     }
 
@@ -5525,17 +5349,17 @@ mod tests {
             false,
         );
 
-        // The gutter/code separator is painted at col 6, past the blank mark
-        // cell, the two-digit number and the three status cells, but a unified
+        // The gutter/code separator is painted at col 5, past the blank mark
+        // cell, the two-digit number and the two status cells, but a unified
         // view has no two-column mid-divider, so no rule appears in the text
         // region.
-        let sep_col = area.x + 6;
+        let sep_col = area.x + 5;
         assert!(
             (0..area.height).any(|y| buf[(sep_col, y)].symbol() == "│"),
             "the gutter/code separator is painted in the unified view"
         );
         for y in 0..area.height {
-            for x in (area.x + 7)..area.width {
+            for x in (area.x + 6)..area.width {
                 assert_ne!(
                     buf[(x, y)].symbol(),
                     "│",
@@ -5550,7 +5374,7 @@ mod tests {
             .text_rect
             .expect("the render records the text rect")
             .x;
-        assert_eq!(col, area.x + 7, "unified text starts past the one gutter");
+        assert_eq!(col, area.x + 6, "unified text starts past the one gutter");
 
         let renders = |needle: &str| {
             (0..area.height).any(|y| {

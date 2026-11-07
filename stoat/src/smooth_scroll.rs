@@ -31,7 +31,7 @@ use crate::{
         conflict_view::render_conflict_rows,
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
-            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity, PLAIN_STRUCTURAL_BARS,
+            paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity,
         },
         file_finder::paint_finder_rows,
         help::{paint_help_detail_rows, paint_help_list_rows},
@@ -563,7 +563,6 @@ fn paint_page_gutter(
                 width_digits,
                 (rich.number_fg, rich.separator, rich.bg),
                 rich.number_scale,
-                PLAIN_STRUCTURAL_BARS,
             );
             let mut scene = gutter.scene();
             // The components write only the scene, so `buf` keeps its cells.

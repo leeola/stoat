@@ -8,8 +8,8 @@ use crate::{
 use ratatui::{buffer::Buffer, layout::Rect, style::Style, widgets::StatefulWidget};
 use stoatty_protocol::command::IconKind;
 
-/// Sixteenths between the line number's right edge and the icon cell, and
-/// between the structural lane and the separator hairline.
+/// Sixteenths between the line number's right edge and the icon cell, and the
+/// least gap between the icon cell and the separator hairline.
 ///
 /// A quarter cell, so every gutter gap stays a clean division of the cell
 /// regardless of digit count.
@@ -33,8 +33,8 @@ const HINT_DOT: &str = "\u{b7}";
 /// a one-column severity mark) into the buffer.
 ///
 /// Left to right, the gutter holds the hunk and state lanes, the right-aligned
-/// number, the icon cell, the structural lane, and the hairline. The icon cell
-/// is a whole grid cell, because an icon anchors to a cell.
+/// number, the icon cell, and the hairline. The icon cell is a whole grid cell,
+/// because an icon anchors to a cell.
 ///
 /// The geometry knobs are in **sixteenths of a cell** (16 = one cell), so the
 /// gutter tracks live font zoom. The widget positions every element at an
@@ -51,10 +51,6 @@ pub struct Gutter<'a> {
     pub left_bars: u16,
     /// Each left lane's width, in sixteenths.
     pub left_bar_width: u16,
-    /// How many structural lanes sit right of the icon cell, zero or one.
-    pub diff_bars: u16,
-    /// Each structural lane's width, in sixteenths.
-    pub diff_bar_width: u16,
     /// Padding between adjacent lanes, in sixteenths.
     pub pad: u16,
     /// Line-number glyph size, in 256ths of a cell. A hint's dot draws at it
@@ -85,20 +81,19 @@ pub struct Gutter<'a> {
 /// A line's git marks, one bar color per lane, and whether the change is a
 /// deletion seam.
 ///
-/// Each slot has a fixed lane. Slot 0 is the hunk kind and slot 1 the state,
-/// both left of the number. Slot 2 is the structural change, right of the icon
-/// cell. A gutter draws a slot only where it reserves the slot's lane, per
-/// [`Gutter::left_bars`] and [`Gutter::diff_bars`].
+/// Each slot has a fixed lane left of the number. Slot 0 is the hunk kind and
+/// slot 1 the state. A gutter draws a slot only where it reserves the slot's
+/// lane, per [`Gutter::left_bars`].
 ///
-/// A seam draws the two change slots as short top-aligned bars, since a
-/// deletion occupies no line of its own and marks the row that now sits below
-/// the removed content, while a normal change fills the code row. The state
-/// slot always spans the line height.
+/// With [`Self::seam`] set, the hunk slot draws as a short top-aligned bar,
+/// since a deletion occupies no line of its own and marks the row that now
+/// sits below the removed content. A normal change fills the code row. The
+/// state slot always spans the line height.
 #[derive(Clone, Copy)]
 pub struct GitMark {
     /// The bar color per slot, `None` for a slot that paints nothing on this
     /// row.
-    pub slots: [Option<[u8; 3]>; 3],
+    pub slots: [Option<[u8; 3]>; 2],
     pub seam: bool,
 }
 
@@ -137,12 +132,12 @@ impl Gutter<'_> {
     /// The whole-cell columns the gutter reserves, from its sixteenth layout.
     ///
     /// The cells before the icon cell fit the left lanes, the number column,
-    /// and a quarter-cell gap. The cells after it fit the structural lanes and
-    /// a quarter-cell gap on each side of the hairline. Each part rounds up on
-    /// its own, so the slack lands left of the right-aligned numbers and left
-    /// of the structural lanes rather than around the hairline.
+    /// and a quarter-cell gap. The cells after it fit a quarter-cell gap on
+    /// each side of the hairline. Each part rounds up on its own, so the slack
+    /// lands left of the right-aligned numbers and right of the icon cell
+    /// rather than around the hairline.
     pub fn cell_width(&self) -> u16 {
-        let tail = self.diff_bars_span() + NUMBER_GAP + 1 + TEXT_GAP;
+        let tail = NUMBER_GAP + 1 + TEXT_GAP;
         self.icon_x() / 16 + 1 + tail.div_ceil(16)
     }
 
@@ -158,13 +153,14 @@ impl Gutter<'_> {
 
     /// Slot `slot`'s left edge, in sixteenths from the gutter's left edge.
     ///
-    /// Slots 0 and 1 are the hunk and state lanes at the gutter's left edge.
-    /// Slot 2 is the structural lane, right of the icon cell.
+    /// Slots 0 and 1 are the hunk and state lanes at the gutter's left edge,
+    /// and no other slot exists.
     pub fn bar_x(&self, slot: u16) -> u16 {
-        match slot {
-            0 | 1 => slot * (self.left_bar_width + self.pad),
-            _ => self.separator_x() - NUMBER_GAP - self.diff_bars_span(),
-        }
+        debug_assert!(
+            slot < 2,
+            "a gutter has two lanes, and slot {slot} is neither"
+        );
+        slot * (self.left_bar_width + self.pad)
     }
 
     /// Where a right-aligned line number ends, in sixteenths from the gutter's left edge.
@@ -177,30 +173,9 @@ impl Gutter<'_> {
         self.cell_width() * 16 - 1 - TEXT_GAP
     }
 
-    /// Whether the gutter reserves slot `slot`'s lane.
-    fn reserves(&self, slot: u16) -> bool {
-        match slot {
-            0 | 1 => slot < self.left_bars,
-            _ => self.diff_bars > 0,
-        }
-    }
-
-    /// Slot `slot`'s bar width, in sixteenths.
-    fn slot_width(&self, slot: u16) -> u16 {
-        match slot {
-            0 | 1 => self.left_bar_width,
-            _ => self.diff_bar_width,
-        }
-    }
-
     /// Sixteenths the left lanes and the pad between them span.
     fn left_bars_span(&self) -> u16 {
         self.left_bars * self.left_bar_width + self.left_bars.saturating_sub(1) * self.pad
-    }
-
-    /// Sixteenths the structural lanes and the pads between them span.
-    fn diff_bars_span(&self) -> u16 {
-        self.diff_bars * self.diff_bar_width + self.diff_bars.saturating_sub(1) * self.pad
     }
 
     /// Sixteenths a run of `digits` numerals advances at [`Self::number_scale`].
@@ -222,8 +197,8 @@ impl Gutter<'_> {
     pub fn draw_components(&self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
         let number_right = self.number_right_edge();
         // The lanes sit left of the numbers, the icon cell right of them, and
-        // the structural lane and the separator right of that. Nothing
-        // overlaps, so a batch that groups by style leaves what shows as it is.
+        // the separator right of that. Nothing overlaps, so a batch that
+        // groups by style leaves what shows as it is.
         let mut numbers = TextRunBatch::default();
         let mut bars = BarBatch::default();
 
@@ -269,7 +244,7 @@ impl Gutter<'_> {
             }
             if let Some(git) = line.git {
                 for (slot, color) in (0u16..).zip(git.slots) {
-                    let Some(color) = color.filter(|_| self.reserves(slot)) else {
+                    let Some(color) = color.filter(|_| slot < self.left_bars) else {
                         continue;
                     };
                     let height = match slot {
@@ -282,7 +257,7 @@ impl Gutter<'_> {
                         Bar {
                             x: cells::signed_sixteenths(self.bar_x(slot)),
                             y: row,
-                            width: self.slot_width(slot),
+                            width: self.left_bar_width,
                             height: height.min(remaining),
                             color,
                         },
@@ -432,18 +407,16 @@ mod tests {
     const GRAY: [u8; 3] = [80, 90, 100];
     const BLUE: [u8; 3] = [97, 175, 239];
 
-    /// The full lane set at scale 160 and two digits. The icon cell lands at
-    /// cell 2 (the lanes 7, the number 20, and the gap 4 round up to 32
-    /// sixteenths), so the number ends at 28. The tail (one 3/16 lane, two
-    /// gaps, and the hairline) rounds up to one cell, so the gutter is four
-    /// cells wide, the hairline sits at 59, and the structural lane at 52.
+    /// Both lanes at scale 160 and two digits. The icon cell lands at cell 2
+    /// (the lanes 7, the number 20, and the gap 4 round up to 32 sixteenths),
+    /// so the number ends at 28. The tail (two gaps and the hairline) rounds
+    /// up to one cell, so the gutter is four cells wide and the hairline sits
+    /// at 59.
     fn config(lines: &[GutterLine]) -> Gutter<'_> {
         Gutter {
             lines,
             left_bars: 2,
             left_bar_width: 3,
-            diff_bars: 1,
-            diff_bar_width: 3,
             pad: 1,
             number_scale: 160,
             width_digits: 2,
@@ -463,7 +436,7 @@ mod tests {
         }
     }
 
-    fn marks(slots: [Option<[u8; 3]>; 3], seam: bool) -> Option<GitMark> {
+    fn marks(slots: [Option<[u8; 3]>; 2], seam: bool) -> Option<GitMark> {
         Some(GitMark { slots, seam })
     }
 
@@ -512,17 +485,6 @@ mod tests {
             .all(|command| drawn.contains(command))
     }
 
-    /// The bars `bytes` draw, in emit order.
-    fn bars(bytes: &[u8]) -> Vec<BarCommand> {
-        singles(bytes)
-            .into_iter()
-            .filter_map(|command| match command {
-                Command::Bar(bar) => Some(bar),
-                _ => None,
-            })
-            .collect()
-    }
-
     /// The commands `bytes` decode to, each batch expanded into the single
     /// runs or bars it stands for and the close markers dropped.
     fn singles(bytes: &[u8]) -> Vec<Command> {
@@ -569,8 +531,7 @@ mod tests {
     /// per-run frames draw.
     #[test]
     fn a_batching_host_takes_one_frame_per_style() {
-        let lines =
-            [1, 2].map(|number| line(number, marks([Some(GREEN), None, None], false), None));
+        let lines = [1, 2].map(|number| line(number, marks([Some(GREEN), None], false), None));
         let emit = |batches: bool| {
             let area = Rect::new(0, 0, 10, 2);
             let mut scene = ApcScene::new();
@@ -620,58 +581,10 @@ mod tests {
             (
                 gutter.icon_x(),
                 gutter.number_right_edge(),
-                [0, 1, 2].map(|slot| gutter.bar_x(slot)),
+                [0, 1].map(|slot| gutter.bar_x(slot)),
                 gutter.separator_x(),
             ),
-            (32, 28, [0, 4, 52], 59),
-        );
-    }
-
-    /// The plain editor reserves no structural lane, so slot 2 paints nothing
-    /// and the tail keeps one cell.
-    #[test]
-    fn a_gutter_without_a_structural_lane_draws_only_the_left_lanes() {
-        let lines = [line(
-            1,
-            marks([Some(GREEN), Some(GRAY), Some(BLUE)], false),
-            None,
-        )];
-        let gutter = Gutter {
-            diff_bars: 0,
-            ..config(&lines)
-        };
-
-        assert_eq!(
-            (
-                (gutter.cell_width(), gutter.separator_x()),
-                bars(&emit(&gutter, 1)),
-            ),
-            (
-                (4, 59),
-                vec![
-                    BarCommand {
-                        x: 0,
-                        y: 0,
-                        width: 3,
-                        height: 16,
-                        color: GREEN,
-                    },
-                    BarCommand {
-                        x: 4,
-                        y: 0,
-                        width: 3,
-                        height: 16,
-                        color: GRAY,
-                    },
-                    BarCommand {
-                        x: 59,
-                        y: 0,
-                        width: 1,
-                        height: 16,
-                        color: [60, 66, 77],
-                    },
-                ],
-            ),
+            (32, 28, [0, 4], 59),
         );
     }
 
@@ -758,7 +671,7 @@ mod tests {
     fn the_state_lane_spans_the_line_height() {
         let lines = [GutterLine {
             height: 2,
-            ..line(1, marks([Some(GREEN), Some(GRAY), None], false), error())
+            ..line(1, marks([Some(GREEN), Some(GRAY)], false), error())
         }];
         let scene = emit(&config(&lines), 2);
 
@@ -785,7 +698,7 @@ mod tests {
                 height: 2,
                 ..line(1, None, None)
             },
-            line(2, marks([Some(RED), None, None], false), error()),
+            line(2, marks([Some(RED), None], false), error()),
         ];
         let emit = |bound| {
             let mut gutter = config(&lines);
@@ -849,7 +762,7 @@ mod tests {
             line(1, None, None),
             GutterLine {
                 height: 2,
-                ..line(2, marks([Some(GREEN), Some(GRAY), None], false), error())
+                ..line(2, marks([Some(GREEN), Some(GRAY)], false), error())
             },
         ];
         let scene = emit(&config(&lines), 2);
@@ -864,25 +777,20 @@ mod tests {
         );
     }
 
-    /// The two change-kind slots draw a seam short, and the state slot between
-    /// them keeps its full height.
+    /// On a deletion mark the hunk slot draws short, and the state slot keeps
+    /// its full height.
     #[test]
     fn seam_git_mark_draws_a_short_top_aligned_bar() {
-        let lines = [line(
-            4,
-            marks([Some(RED), Some(GRAY), Some(BLUE)], true),
-            None,
-        )];
+        let lines = [line(4, marks([Some(RED), Some(GRAY)], true), None)];
         let scene = emit(&config(&lines), 1);
 
         assert_eq!(
             [
                 contains(&scene, &bar(0, 0, 3, 6, RED)),
                 contains(&scene, &bar(4, 0, 3, 16, GRAY)),
-                contains(&scene, &bar(52, 0, 3, 6, BLUE)),
             ],
-            [true; 3],
-            "slots 0 and 2 draw the short seam bar, and slot 1 fills the row"
+            [true; 2],
+            "slot 0 draws the short deletion bar, and slot 1 fills the row"
         );
     }
 }
