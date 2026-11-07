@@ -929,6 +929,18 @@ pub mod scope {
     pub const VCS_COMMIT_SHA: &str = "vcs.commit.sha";
     pub const VCS_COMMIT_SUMMARY: &str = "vcs.commit.summary";
     pub const VCS_COMMIT_METADATA: &str = "vcs.commit.metadata";
+    /// The colors the commit graph's lanes cycle through, by lane index.
+    ///
+    /// A lane index carries no meaning of its own, so the six only need to
+    /// stay tellable apart where neighbouring lanes run side by side.
+    pub const VCS_LANES: [&str; 6] = [
+        "vcs.lane.1",
+        "vcs.lane.2",
+        "vcs.lane.3",
+        "vcs.lane.4",
+        "vcs.lane.5",
+        "vcs.lane.6",
+    ];
 
     pub const VCS_REBASE_PICK: &str = "vcs.rebase.pick";
     pub const VCS_REBASE_SQUASH: &str = "vcs.rebase.squash";

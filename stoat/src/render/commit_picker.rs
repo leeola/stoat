@@ -1,6 +1,8 @@
 use crate::{
+    commit_graph::GraphRow,
     commit_list::Preview,
     commit_picker::{CommitColumn, CommitPicker, CommitPickerRole, COMMIT_COLUMNS},
+    host::CommitInfo,
     render::{
         file_finder::file_finder_layout,
         paint::{blend, style_rgb},
@@ -13,7 +15,7 @@ use crate::{
     workspace::Workspace,
 };
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-use std::{cmp::Ordering, sync::Arc};
+use std::{array, cmp::Ordering, collections::HashMap, sync::Arc};
 use stoat_widgets::{polyline::Polyline, ApcScene};
 
 /// Rows the list keeps however small the body gets, so a short modal still
@@ -61,6 +63,24 @@ impl CommitPickerLayout {
             None => self.list,
         }
     }
+}
+
+/// What [`paint_commit_graph`] draws: a list's lane layout over the commits it
+/// lays out, from the commit picker or the commits view.
+pub(crate) struct GraphPaint<'a> {
+    /// One row per commit of [`Self::commits`].
+    pub(crate) rows: &'a [GraphRow],
+    /// Lanes the widest row needs, which the column clamps to its drawn width.
+    pub(crate) lanes: u16,
+    pub(crate) commits: &'a [CommitInfo],
+    /// Full sha to the local branch names pointing at it, which marks a tip.
+    pub(crate) tips: &'a HashMap<String, Vec<String>>,
+    /// The surface under the graph, which the lanes blend toward and the node
+    /// halos and merge holes fill with. `None` leaves the lanes unblended and
+    /// the nodes without a halo.
+    pub(crate) background: Option<[u8; 3]>,
+    /// The full sha HEAD points at, whose node fills in the text color.
+    pub(crate) head: Option<&'a str>,
 }
 
 /// Cells one lane occupies, the second of which separates it from its
@@ -229,15 +249,37 @@ pub(crate) fn render_commit_picker(
         &mut *scene,
     );
     if let Some(graph_rect) = layout.graph {
-        paint_commit_graph(picker, start_row, graph_rect, theme, buf, scene);
+        paint_commit_graph(
+            &picker_graph(picker, theme),
+            start_row,
+            graph_rect,
+            theme,
+            buf,
+            scene,
+        );
     }
 }
 
-/// Colors lanes cycle through, so neighbouring lanes stay tellable apart.
+/// The node graph of `picker`'s list, on the modal background.
 ///
-/// Fixed rather than themed because a lane index carries no meaning a theme
-/// could speak to. Each is blended toward the modal background at paint time,
-/// which keeps the graph present without competing with the table beside it.
+/// Shared by the live modal and its smooth-scroll page, so both paint one
+/// graph.
+pub(crate) fn picker_graph<'a>(picker: &'a CommitPicker, theme: &Theme) -> GraphPaint<'a> {
+    GraphPaint {
+        rows: &picker.graph.0,
+        lanes: picker.graph.1,
+        commits: &picker.commits,
+        tips: &picker.branch_tips,
+        background: style_rgb(theme.get(scope::UI_MODAL_PALETTE).bg),
+        head: None,
+    }
+}
+
+/// The colors lanes cycle through under a theme that sets no
+/// [`scope::VCS_LANES`] scope, so neighbouring lanes stay tellable apart.
+///
+/// Each is blended toward the graph's background at paint time, which keeps the
+/// graph present without competing with the rows beside it.
 const LANE_COLORS: [[u8; 3]; 6] = [
     [122, 162, 247],
     [158, 206, 106],
@@ -301,8 +343,9 @@ const CURVE_SEGMENTS: i32 = 8;
 /// A node's shape says what kind of commit it marks. A branch tip takes a wider
 /// disc in the unblended lane color, since those are the rows a reader navigates
 /// by. A merge is hollowed out to a ring, and an ordinary commit stays a filled
-/// disc. Each sits inside a halo of the modal background, which is what keeps it
-/// readable as a dot against the lane running through it.
+/// disc. Each sits inside a halo of the graph's background, which is what keeps
+/// it readable as a dot against the lane running through it. HEAD's node fills
+/// in the text color, so the commit checked out stands apart from every lane.
 ///
 /// Under a terminal whose theme resolves to RGB this strokes the lanes as
 /// polylines and writes no glyphs, matching how every other sub-cell component
@@ -311,24 +354,26 @@ const CURVE_SEGMENTS: i32 = 8;
 /// node, a bar where a lane runs straight through, and a tick at the node where
 /// the row spawns or absorbs a lane.
 pub(crate) fn paint_commit_graph(
-    picker: &CommitPicker,
+    graph: &GraphPaint<'_>,
     start_row: usize,
     area: Rect,
     theme: &Theme,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let (rows, lanes) = &picker.graph;
-    if area.width == 0 || area.height == 0 || *lanes == 0 {
+    let (rows, lanes) = (graph.rows, graph.lanes);
+    if area.width == 0 || area.height == 0 || lanes == 0 {
         return;
     }
 
     // A stroked path needs a host that can draw one and a theme that names its
     // color, the same gate every other sub-cell component here uses.
-    let rich = scene.live() && style_rgb(theme.get(scope::UI_TEXT).fg).is_some();
-    let background = style_rgb(theme.get(scope::UI_MODAL_PALETTE).bg);
-    let drawn = (*lanes).min(MAX_DRAWN_LANES);
-    let raw_lane_color = |lane: u16| LANE_COLORS[lane.min(drawn - 1) as usize % LANE_COLORS.len()];
+    let text = style_rgb(theme.get(scope::UI_TEXT).fg);
+    let rich = scene.live() && text.is_some();
+    let background = graph.background;
+    let palette = lane_palette(theme);
+    let drawn = lanes.min(MAX_DRAWN_LANES);
+    let raw_lane_color = |lane: u16| palette[lane.min(drawn - 1) as usize % palette.len()];
     let lane_color = |lane: u16| match background {
         Some(bg) => blend(raw_lane_color(lane), bg, LANE_BLEND_PERCENT),
         None => raw_lane_color(lane),
@@ -341,14 +386,14 @@ pub(crate) fn paint_commit_graph(
     // that is exactly what the list displays, so the two walk together.
     for (row_idx, (row, commit)) in rows
         .iter()
-        .zip(&picker.commits)
+        .zip(graph.commits)
         .skip(start_row)
         .take(area.height as usize)
         .enumerate()
     {
         let y = row_idx as u16;
         let node_lane = clamp(row.node_lane);
-        let tip = picker.branch_tips.contains_key(&commit.sha);
+        let tip = graph.tips.contains_key(&commit.sha);
         // A tip that is also a merge draws as a tip. Which branch a row heads
         // is what a reader navigates by, so it outranks how the row was made.
         let merge = !tip && commit.parents.len() >= 2;
@@ -386,9 +431,10 @@ pub(crate) fn paint_commit_graph(
                 if let Some(bg) = background {
                     dot(area, node_lane, y, diameter + NODE_HALO, bg, buf, scene);
                 }
-                let color = match tip {
-                    true => raw_lane_color(node_lane),
-                    false => lane_color(node_lane),
+                let color = match (graph.head == Some(commit.sha.as_str()), tip) {
+                    (true, _) => text.unwrap_or_else(|| raw_lane_color(node_lane)),
+                    (false, true) => raw_lane_color(node_lane),
+                    (false, false) => lane_color(node_lane),
                 };
                 dot(area, node_lane, y, diameter, color, buf, scene);
 
@@ -412,6 +458,19 @@ pub(crate) fn paint_commit_graph(
             },
         }
     }
+}
+
+/// The six lane colors of `theme`, in lane order.
+///
+/// Each lane takes its [`scope::VCS_LANES`] scope where the theme sets one in
+/// RGB, and the matching entry of [`LANE_COLORS`] where it does not.
+fn lane_palette(theme: &Theme) -> [[u8; 3]; 6] {
+    array::from_fn(|lane| {
+        theme
+            .try_get(scope::VCS_LANES[lane])
+            .and_then(|style| style_rgb(style.fg))
+            .unwrap_or(LANE_COLORS[lane])
+    })
 }
 
 /// Stroke a disc `width` sixteenths across, centered on `lane` in row `y`.

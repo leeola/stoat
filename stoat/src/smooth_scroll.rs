@@ -966,7 +966,9 @@ pub(crate) fn render_commit_picker_list_page(
     region_width: u16,
     region_height: u16,
 ) -> Vec<u8> {
-    use crate::render::commit_picker::{graph_width, paint_commit_graph, paint_commit_picker_rows};
+    use crate::render::commit_picker::{
+        graph_width, paint_commit_graph, paint_commit_picker_rows, picker_graph,
+    };
 
     let graph_cells = lanes.map(graph_width).unwrap_or(0).min(region_width);
 
@@ -989,7 +991,14 @@ pub(crate) fn render_commit_picker_list_page(
 
             if graph_cells > 0 {
                 let graph = Rect::new(0, 0, graph_cells, area.height);
-                paint_commit_graph(picker, start_row, graph, theme, buf, scene);
+                paint_commit_graph(
+                    &picker_graph(picker, theme),
+                    start_row,
+                    graph,
+                    theme,
+                    buf,
+                    scene,
+                );
             }
         },
     )

@@ -299,6 +299,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   `ui.diagnostic.hint` -- LSP diagnostic severities.
 - `vcs.conflict.*`, `vcs.commit.*`, `vcs.rebase.*` -- merge conflicts, the
   commit log, and the interactive-rebase todo.
+- `vcs.lane.1` to `vcs.lane.6` -- the colors the commit graph's lanes cycle
+  through. A lane the theme leaves unset takes a built-in color.
 - `chat.*` -- the agent chat panel.
 - `syntax.*` -- tree-sitter highlight captures (open-ended, with the fallback
   above).

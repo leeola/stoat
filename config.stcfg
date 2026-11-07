@@ -160,6 +160,13 @@ theme default_dark {
     vcs.commit.summary.fg  = text;
     vcs.commit.metadata.fg = muted;
 
+    vcs.lane.1.fg = "#7aa2f7";
+    vcs.lane.2.fg = "#9ece6a";
+    vcs.lane.3.fg = "#e0af68";
+    vcs.lane.4.fg = "#bb9af7";
+    vcs.lane.5.fg = "#7dcfff";
+    vcs.lane.6.fg = "#f7768e";
+
     vcs.rebase.pick.fg   = success;
     vcs.rebase.squash.fg = warning;
     vcs.rebase.fixup.fg  = warning;
@@ -333,6 +340,13 @@ theme ermine_night inherits default_dark {
     syntax.constant.fg    = info;
     syntax.punctuation.fg = muted;
     syntax.number.fg      = number;
+
+    vcs.lane.1.fg = accent;
+    vcs.lane.2.fg = success;
+    vcs.lane.3.fg = special;
+    vcs.lane.4.fg = warning;
+    vcs.lane.5.fg = info;
+    vcs.lane.6.fg = danger;
 
     ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 0 };
     ui.panel.popout  = { radius: 1, shadow: overhang };

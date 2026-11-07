@@ -830,8 +830,15 @@ mod tests {
     /// and the modal background its blends and halos are drawn from, rather
     /// than relying on whatever the default carries.
     fn graph_theme() -> crate::theme::Theme {
-        let src = r##"theme t { ui.text.fg = "#ffffff"; ui.modal.palette.bg = "#282c34"; }"##;
-        let (config, _) = stoat_config::parse(src);
+        graph_theme_with("")
+    }
+
+    /// [`graph_theme`] with the scope lines of `extra` added.
+    fn graph_theme_with(extra: &str) -> crate::theme::Theme {
+        let src = format!(
+            r##"theme t {{ ui.text.fg = "#ffffff"; ui.modal.palette.bg = "#282c34"; {extra} }}"##
+        );
+        let (config, _) = stoat_config::parse(&src);
         crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
@@ -1540,11 +1547,26 @@ mod tests {
         theme: &crate::theme::Theme,
         live: bool,
     ) -> (ratatui::buffer::Buffer, stoat_widgets::ApcScene) {
+        painted(
+            &crate::render::commit_picker::picker_graph(p, theme),
+            theme,
+            live,
+        )
+    }
+
+    /// Paint `graph` into a fresh 8 by 4 buffer and scene under `theme`.
+    fn painted(
+        graph: &crate::render::commit_picker::GraphPaint<'_>,
+        theme: &crate::theme::Theme,
+        live: bool,
+    ) -> (ratatui::buffer::Buffer, stoat_widgets::ApcScene) {
         let area = ratatui::layout::Rect::new(0, 0, 8, 4);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let mut scene = stoat_widgets::ApcScene::new();
         scene.set_live(live);
-        crate::render::commit_picker::paint_commit_graph(p, 0, area, theme, &mut buf, &mut scene);
+        crate::render::commit_picker::paint_commit_graph(
+            graph, 0, area, theme, &mut buf, &mut scene,
+        );
         (buf, scene)
     }
 
@@ -1920,6 +1942,56 @@ mod tests {
             nodes[1].1, nodes[5].1,
             "and a tip keeps the raw lane color rather than the blended one \
              every other node shares"
+        );
+    }
+
+    /// A lane takes the theme's `vcs.lane` color, and a lane the theme leaves
+    /// unset keeps its built-in one. A tip's node shows the lane color
+    /// unblended.
+    #[test]
+    fn the_lanes_take_the_themes_lane_colors() {
+        let h = seeded_picker_harness();
+        let p = h.stoat.commit_picker.as_ref().expect("open");
+        let tip_color = |theme: &crate::theme::Theme| {
+            let (_, mut scene) = painted_graph(p, theme, true);
+            node_discs(&mut scene)[1].1
+        };
+
+        assert_eq!(
+            [
+                tip_color(&graph_theme()),
+                tip_color(&graph_theme_with(r##"vcs.lane.1.fg = "#010203";"##)),
+            ],
+            [[122, 162, 247], [1, 2, 3]],
+            "the first lane's tip, built in and then themed"
+        );
+    }
+
+    /// HEAD's node fills in the text color, and every other node keeps its own.
+    #[test]
+    fn heads_node_fills_in_the_text_color() {
+        let h = seeded_picker_harness();
+        let p = h.stoat.commit_picker.as_ref().expect("open");
+        let theme = graph_theme();
+        let colors = |graph: &crate::render::commit_picker::GraphPaint<'_>| {
+            let (_, mut scene) = painted(graph, &theme, true);
+            node_discs(&mut scene)
+                .into_iter()
+                .map(|(_, color)| color)
+                .collect::<Vec<_>>()
+        };
+        let plain = crate::render::commit_picker::picker_graph(p, &theme);
+        let headed = crate::render::commit_picker::GraphPaint {
+            head: Some(&p.commits[2].sha),
+            ..crate::render::commit_picker::picker_graph(p, &theme)
+        };
+
+        let mut expected = colors(&plain);
+        expected[5] = [0xff, 0xff, 0xff];
+        assert_eq!(
+            colors(&headed),
+            expected,
+            "only the third row's fill changes, to the text color"
         );
     }
 
