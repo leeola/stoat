@@ -476,6 +476,35 @@ fn the_space_box_docks_as_a_card_on_the_raised_surface() {
     );
 }
 
+/// The commits view lists the rebase fixture's history with the lane graph left
+/// of its rows. A blank cell on the selected first row fills with the select
+/// surface, and one two rows below stays on the base.
+#[test]
+fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "rebase",
+        "base.txt",
+        "<C-;>OpenCommits<Enter><Settle>",
+    );
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(30, 0, 1, 1),
+        SELECT,
+        "selected_commit_row",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(30, 2, 1, 1),
+        BASE,
+        "unselected_commit_row",
+    );
+}
+
 /// The diff view keeps the which-key box docked as the same card with no key
 /// held, so the cell in the card's footer row is still on the raised surface.
 #[test]

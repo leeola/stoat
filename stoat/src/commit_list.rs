@@ -1,4 +1,5 @@
 use crate::{
+    commit_graph::{self, GraphRow},
     host::{CommitFileChange, CommitInfo, GitRepo},
     pane::View,
     review_session::DiffDocument,
@@ -52,9 +53,14 @@ pub(crate) struct CommitListState {
     /// opened over, so one handle answers for the life of the list.
     pub repo: Arc<dyn GitRepo>,
     pub commits: Vec<CommitInfo>,
-    /// True once the backing walk hit a root commit; further
-    /// `log_commits` calls with `after = last_sha` would return empty,
-    /// so we stop asking.
+    /// The lane layout of [`Self::commits`], and the lanes its widest row
+    /// needs, laid out again whenever a page lands.
+    pub graph: (Vec<GraphRow>, u16),
+    /// Full sha to the local branch names pointing at it, as the last landed
+    /// page read them.
+    pub branch_tips: HashMap<String, Vec<String>>,
+    /// True once a load returned fewer commits than it asked for, which is the
+    /// walk reaching the history's roots, so no later page exists.
     pub reached_end: bool,
     pub selected: usize,
     pub scroll_top: usize,
@@ -148,6 +154,9 @@ pub(crate) struct PageLoad {
     pub reached_end: bool,
     /// What the load learned of the pending selection's commit.
     pub selection: SelectionSearch,
+    /// Full sha to the local branch names pointing at it, read with the page
+    /// so the graph marks the tips the repository holds when the page lands.
+    pub branch_tips: HashMap<String, Vec<String>>,
 }
 
 /// What a load learned of a restored selection's commit.
@@ -271,6 +280,8 @@ impl CommitListState {
             workdir,
             repo,
             commits: Vec::new(),
+            graph: (Vec::new(), 0),
+            branch_tips: HashMap::new(),
             reached_end: false,
             selected: 0,
             scroll_top: 0,
@@ -369,6 +380,9 @@ impl CommitListState {
     /// to `commits` and updates `reached_end`. Returns true when a
     /// result landed, which tells the caller to redraw.
     ///
+    /// The lanes are laid out again over every loaded commit, because a page
+    /// continues lanes the pages above it opened.
+    ///
     /// A load that found the pending selection's commit selects it on the row
     /// it stood on. One that found the commit gone ends the wait and leaves the
     /// selection where it is.
@@ -382,6 +396,8 @@ impl CommitListState {
             Poll::Ready(load) => {
                 let loaded_before = self.commits.len();
                 self.commits.extend(load.commits);
+                self.graph = commit_graph::assign_lanes(&self.commits);
+                self.branch_tips = load.branch_tips;
                 self.reached_end = load.reached_end;
                 match load.selection {
                     SelectionSearch::NotAsked => {},
@@ -438,12 +454,16 @@ mod tests {
     };
     use crate::{
         app::Stoat,
+        host::GitHost,
         pane::View,
+        render::paint::style_rgb,
         review_session::DiffDocument,
         term_session::TermId,
         test_harness::{CommitSpec, TestHarness},
+        theme::scope,
     };
     use std::{path::PathBuf, sync::Arc};
+    use stoatty_protocol::command::{self, Command};
 
     impl PreviewCache {
         fn cache_session(&mut self, sha: &str) {
@@ -539,6 +559,38 @@ mod tests {
         h.assert_snapshot("commits_open");
     }
 
+    /// The graph fills HEAD's node, the first row's, in the text color, and the
+    /// rows below share their lane's color.
+    #[test]
+    fn the_commits_graph_fills_heads_node_in_the_text_color() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history("/repo", HISTORY);
+        h.open_commits("/repo");
+        h.render_composited();
+
+        let fills: Vec<[u8; 3]> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Polyline(line) if line.points.len() == 1 => Some(line.color),
+                _ => None,
+            })
+            .skip(1)
+            .step_by(2)
+            .collect();
+        let text = style_rgb(h.stoat.theme.get(scope::UI_TEXT).fg).expect("an RGB text color");
+        assert_eq!(
+            (
+                fills.len(),
+                fills[0],
+                fills[1] == fills[2],
+                fills[1] != text
+            ),
+            (3, text, true, true),
+            "each node rides a halo, and only HEAD's fill is the text color",
+        );
+    }
+
     #[test]
     fn snapshot_commits_navigate_next() {
         let mut h = Stoat::test();
@@ -566,6 +618,77 @@ mod tests {
         h.fake_git().add_repo("/repo");
         h.open_commits("/repo");
         h.assert_snapshot("commits_empty_history");
+    }
+
+    /// A merge lays its merged branch out in a lane of its own, the branch's
+    /// commit a row of its own between the merge and the fork. A plain
+    /// terminal draws the lanes as glyphs.
+    #[test]
+    fn snapshot_commits_graph_shows_a_merge() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.stoat.stoatty = false;
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[("a.rs", "a\n")])
+            .commit_with_parent_message("b2000000", "a1000000", "feat: side", &[("a.rs", "s\n")])
+            .commit_with_parent_message("c3000000", "a1000000", "feat: main", &[("a.rs", "m\n")])
+            .merge_commit("d4000000", "b2000000", &[("a.rs", "m\n")])
+            .branch("side", "b2000000")
+            .branch("main", "d4000000");
+        h.open_commits("/repo");
+        h.assert_snapshot("commits_graph_shows_a_merge");
+    }
+
+    /// A page past the first walks again from the top, so a merged branch's
+    /// commits that sort below the page break still load, each once.
+    ///
+    /// The two branches alternate in time, so the walk interleaves them, and a
+    /// walk resumed from the first page's last row reaches only that row's own
+    /// branch.
+    #[test]
+    fn a_merge_history_past_one_page_loads_each_commit_once() {
+        let mut h = Stoat::test();
+        let shas =
+            |side: char| -> Vec<String> { (1..=40).map(|i| format!("{side}{i:07}")).collect() };
+        let (sides, mains) = (shas('s'), shas('m'));
+        {
+            let mut repo = h.fake_git().add_repo("/repo");
+            repo.commit_with_message("r0000000", "root", &[]);
+            for i in 0..40 {
+                let parent = |line: &[String]| match i {
+                    0 => "r0000000".to_string(),
+                    _ => line[i - 1].clone(),
+                };
+                repo.commit_with_parent_message(&sides[i], &parent(&sides), "side", &[]);
+                repo.commit_with_parent_message(&mains[i], &parent(&mains), "main", &[]);
+            }
+            repo.merge_commit("merge000", &sides[39], &[]);
+        }
+        h.open_commits("/repo");
+        h.type_keys("G");
+        h.settle();
+        h.type_keys("G");
+        h.settle();
+
+        let listed: Vec<String> = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("a commits list")
+            .commits
+            .iter()
+            .map(|commit| commit.sha.clone())
+            .collect();
+        let walked: Vec<String> = h
+            .fake_git
+            .discover(std::path::Path::new("/repo"))
+            .expect("the repo")
+            .log_graph("merge000", usize::MAX)
+            .into_iter()
+            .map(|commit| commit.sha)
+            .collect();
+        assert_eq!((listed.len(), listed), (82, walked));
     }
 
     #[test]

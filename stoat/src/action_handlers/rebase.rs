@@ -45,9 +45,9 @@ pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
 
     // Cursor position selects the rebase boundary:
     //   onto = commits[selected]
-    //   todo = commits[0..selected] (newest-first) reversed to oldest-first
-    // So pressing `i` on the 4th entry (HEAD~3) rebases the top 3 commits
-    // onto it. Cursor at HEAD leaves nothing to rebase.
+    //   todo = the first-parent line from HEAD down to onto, oldest-first
+    // So pressing `i` on HEAD~3 rebases the three commits above it onto it.
+    // Cursor at HEAD leaves nothing to rebase.
     let selected = state.selected;
     if selected == 0 || selected >= state.commits.len() {
         emit_rebase_error(
@@ -57,13 +57,19 @@ pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
         );
         return UpdateEffect::Redraw;
     }
+    let Some(chain) = first_parent_chain(&state.commits, selected) else {
+        emit_rebase_error(
+            stoat,
+            "base is off the first-parent line",
+            Some("select a commit that HEAD's first parents pass through".into()),
+        );
+        return UpdateEffect::Redraw;
+    };
 
     let workdir = state.workdir.clone();
     let onto = state.commits[selected].sha.clone();
-    let entries: Vec<RebaseEntry> = state.commits[..selected]
-        .iter()
-        .rev()
-        .cloned()
+    let entries: Vec<RebaseEntry> = chain
+        .into_iter()
         .map(|commit| RebaseEntry {
             op: RebaseTodoOp::Pick,
             commit,
@@ -72,6 +78,31 @@ pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
 
     stoat.active_workspace_mut().rebase = Some(RebaseState::new(workdir, onto, entries));
     UpdateEffect::Redraw
+}
+
+/// The commits the first-parent line passes from the first of `commits` down to
+/// row `base`, oldest first, or `None` when that line leaves the loaded rows or
+/// ends before it reaches `base`.
+///
+/// The list walks every parent, so the rows above `base` hold a merged branch's
+/// commits too. A rebase replays the line HEAD's first parents trace, which
+/// over a linear history is every row above `base`.
+fn first_parent_chain(commits: &[CommitInfo], base: usize) -> Option<Vec<CommitInfo>> {
+    let base_sha = commits.get(base)?.sha.as_str();
+    let rows: HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(row, commit)| (commit.sha.as_str(), row))
+        .collect();
+
+    let mut chain = Vec::new();
+    let mut row = 0;
+    while commits[row].sha != base_sha {
+        chain.push(commits[row].clone());
+        row = *rows.get(commits[row].parents.first()?.as_str())?;
+    }
+    chain.reverse();
+    Some(chain)
 }
 
 /// Plan an interactive rebase of the first-parent commits above `rev`, or open

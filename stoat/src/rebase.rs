@@ -403,6 +403,47 @@ mod tests {
         assert_eq!(state.todo[0].commit.sha, "c3");
     }
 
+    /// Over a merge the plan holds the first-parent line from HEAD down to the
+    /// base, not the merged branch's commit the list shows between them. A base
+    /// on the merged branch is off that line, so it plans nothing.
+    ///
+    /// The walk lists d4, c3, b2, then a1, so row 3 is the root and row 2 the
+    /// merged branch's commit.
+    #[test]
+    fn enter_rebase_over_a_merge_plans_the_first_parent_line() {
+        let plan = |row: usize| {
+            let mut h = Stoat::test();
+            h.resize(90, 12);
+            h.fake_git()
+                .add_repo("/repo")
+                .commit_with_message("a1", "root", &[])
+                .commit_with_parent_message("b2", "a1", "side", &[])
+                .commit_with_parent_message("c3", "a1", "main", &[])
+                .merge_commit("d4", "b2", &[]);
+            h.open_commits("/repo");
+            for _ in 0..row {
+                h.type_keys("j");
+            }
+            h.type_keys("i");
+            let planned = h.stoat.active_workspace().rebase.as_ref().map(|plan| {
+                let shas: Vec<String> = plan.todo.iter().map(|e| e.commit.sha.clone()).collect();
+                (plan.onto.clone(), shas)
+            });
+            (planned, dirty_badge(&h))
+        };
+
+        assert_eq!(
+            [plan(3), plan(2)],
+            [
+                (
+                    Some(("a1".to_string(), vec!["c3".to_string(), "d4".to_string()])),
+                    None
+                ),
+                (None, Some("base is off the first-parent line".to_string())),
+            ],
+        );
+    }
+
     #[test]
     fn execute_drop_rewrites_history_via_stepper() {
         use crate::host::GitHost;

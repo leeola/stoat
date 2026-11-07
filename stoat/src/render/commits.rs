@@ -6,8 +6,9 @@ use crate::{
     host::{CommitFileChange, CommitFileChangeKind},
     pane::Pane,
     render::{
+        commit_picker::{graph_width, paint_commit_graph, GraphPaint},
         layout::split_pane_status,
-        paint::{render_empty_num, render_side_num, render_side_text},
+        paint::{render_empty_num, render_side_num, render_side_text, style_rgb},
         pane::render_overlay_status,
         review::{
             paint_base_row, resolve_diff_tints, DiffColumns, DiffDials, DiffLayout, DiffTints,
@@ -158,9 +159,13 @@ fn render_commit_list_pane(
 /// Paint the commit list into `area` starting at row `start_row`, with the
 /// selected row highlighted and a trailing load/end marker.
 ///
+/// The lane graph takes a column at the left and the rows take the rest, as the
+/// commit picker's table sits right of its graph. HEAD, the commit the list's
+/// walk starts from, is the first row.
+///
 /// Shared by the live list, which derives `start_row` from `scroll_top`, and the
 /// smooth-scroll pool, which paints absolute pages, so both render identical
-/// rows. The selected row's accent bar goes into `scene`.
+/// rows. The selected row's accent bar and the graph's strokes go into `scene`.
 pub(crate) fn paint_commit_rows(
     state: &CommitListState,
     area: Rect,
@@ -180,6 +185,30 @@ pub(crate) fn paint_commit_rows(
         write_str(buf, area.x, area.y, msg, dim);
         return;
     }
+
+    let (rows, lanes) = (&state.graph.0, state.graph.1);
+    let graph_cells = match lanes {
+        0 => 0,
+        lanes => graph_width(lanes).min(area.width),
+    };
+    if graph_cells > 0 {
+        let graph = GraphPaint {
+            rows,
+            lanes,
+            commits: &state.commits,
+            tips: &state.branch_tips,
+            background: style_rgb(theme.get(s::UI_BACKGROUND).bg),
+            head: state.commits.first().map(|commit| commit.sha.as_str()),
+        };
+        let column = Rect::new(area.x, area.y, graph_cells, area.height);
+        paint_commit_graph(&graph, start_row, column, theme, buf, &mut *scene);
+    }
+    let area = Rect::new(
+        area.x + graph_cells,
+        area.y,
+        area.width - graph_cells,
+        area.height,
+    );
 
     let sel_style = theme.list_selected(crate::theme::scope::UI_SELECTION_REVERSED);
     let sha_style = theme.get(s::VCS_COMMIT_SHA);

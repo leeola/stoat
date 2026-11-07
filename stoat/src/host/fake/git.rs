@@ -9,7 +9,8 @@ use crate::host::{
     },
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -908,10 +909,13 @@ impl FakeRepoState {
     /// Walk every parent from `start`, newest first, yielding at most `limit`
     /// commits, each once however many paths reach it.
     ///
-    /// Ordering is by seeded time, which the builder stamps from the commit
-    /// count and so tracks seeding order. Ties break on sha, since a
-    /// synthesized commit's counter can land on a seeded commit's time and the
-    /// order still has to be the same on every run.
+    /// A commit waits until every child of it in the walk is out, as the real
+    /// backend's topological walk does. Among the commits free to go, the newest
+    /// by seeded time goes first, which the builder stamps from the commit count
+    /// and so tracks seeding order. Ties break on sha, since a synthesized
+    /// commit's counter sometimes matches a seeded commit's time and the order
+    /// still has to be the same on every run. Without the wait, such a tie lists
+    /// a commit before the child that names it.
     fn walk_graph(&self, start: String, limit: usize) -> Vec<CommitInfo> {
         let mut seen: HashSet<String> = HashSet::new();
         let mut pending = vec![start];
@@ -926,12 +930,33 @@ impl FakeRepoState {
             pending.extend(commit.parents.iter().cloned());
         }
 
-        let mut reached: Vec<CommitInfo> = seen
+        let mut children: HashMap<&str, usize> = seen.iter().map(|sha| (sha.as_str(), 0)).collect();
+        for parent in seen.iter().flat_map(|sha| &self.commits[sha].parents) {
+            if let Some(count) = children.get_mut(parent.as_str()) {
+                *count += 1;
+            }
+        }
+        let mut free: BinaryHeap<(i64, Reverse<&str>)> = children
             .iter()
-            .filter_map(|sha| self.commits.get(sha).map(|c| commit_info(sha, c)))
+            .filter(|&(_, &count)| count == 0)
+            .map(|(&sha, _)| (self.commits[sha].time, Reverse(sha)))
             .collect();
-        reached.sort_by(|a, b| b.time.cmp(&a.time).then_with(|| a.sha.cmp(&b.sha)));
-        reached.truncate(limit);
+
+        let mut reached = Vec::new();
+        while reached.len() < limit
+            && let Some((_, Reverse(sha))) = free.pop()
+        {
+            let commit = &self.commits[sha];
+            reached.push(commit_info(sha, commit));
+            for parent in &commit.parents {
+                if let Some(count) = children.get_mut(parent.as_str()) {
+                    *count -= 1;
+                    if *count == 0 {
+                        free.push((self.commits[parent].time, Reverse(parent.as_str())));
+                    }
+                }
+            }
+        }
 
         reached
     }

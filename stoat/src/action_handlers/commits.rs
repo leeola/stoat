@@ -9,7 +9,7 @@ use crate::{
     review_session::DiffDocument,
     workspace::{diff::BaseHighlightCache, Workspace},
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 const COMMITS_INITIAL_PAGE: usize = 64;
 const COMMITS_PREFETCH_GAP: usize = 8;
@@ -329,6 +329,7 @@ fn reload_list(stoat: &mut Stoat, id: CommitListId) -> bool {
     let ws = stoat.active_workspace_mut();
     if let Some(state) = ws.commit_lists.get_mut(id) {
         state.commits.clear();
+        state.graph = (Vec::new(), 0);
         state.reached_end = false;
         state.selected = 0;
         state.scroll_top = 0;
@@ -361,13 +362,13 @@ fn maybe_spawn_next_page(stoat: &mut Stoat, id: CommitListId) {
     if loaded == 0 || state.selected + COMMITS_PREFETCH_GAP < loaded {
         return;
     }
-    let last_sha = state.commits[loaded - 1].sha.clone();
+    let first_sha = state.commits[0].sha.clone();
     let repo = state.repo.clone();
     let task = spawn_commit_log_load(
         &stoat.executor,
         repo,
-        Some(last_sha),
-        COMMITS_INITIAL_PAGE,
+        Some(first_sha),
+        loaded,
         stoat.redraw_notify.clone(),
     );
     if let Some(state) = stoat.active_workspace_mut().commit_lists.get_mut(id) {
@@ -474,8 +475,16 @@ fn pump_commit_list(stoat: &mut Stoat, id: CommitListId) -> bool {
     landed || (spawned_after && !spawned_before)
 }
 
-/// Spawn the blocking log walk, waking the run loop through `redraw` when the
-/// page lands.
+/// Spawn the blocking graph walk for one page, waking the run loop through
+/// `redraw` when the page lands.
+///
+/// The walk follows every parent, so a merged branch's commits are rows of
+/// their own. A page does not resume from the list's last row, whose ancestors
+/// leave out a merged branch's commits that the full walk lists after it. So
+/// each page walks again from `from`, the list's first row, through the
+/// `loaded` rows the list holds and one page past them, and keeps that page.
+/// The walk is topological from a fixed commit, so every call lists the same
+/// order. `None` starts at HEAD, for a list's first page.
 ///
 /// The pump reading this task polls with a noop waker, so the wake is what makes
 /// a page appear on its own rather than waiting for the next input event to
@@ -483,18 +492,24 @@ fn pump_commit_list(stoat: &mut Stoat, id: CommitListId) -> bool {
 fn spawn_commit_log_load(
     executor: &stoat_scheduler::Executor,
     repo: Arc<dyn crate::host::GitRepo>,
-    after: Option<String>,
-    limit: usize,
+    from: Option<String>,
+    loaded: usize,
     redraw: Arc<tokio::sync::Notify>,
 ) -> stoat_scheduler::Task<PageLoad> {
     executor.spawn_blocking(move || {
-        let commits = repo.log_commits(after.as_deref(), limit);
-        redraw.notify_one();
-        PageLoad {
-            reached_end: commits.is_empty(),
-            commits,
+        let want = loaded + COMMITS_INITIAL_PAGE;
+        let walk = from
+            .or_else(|| repo.resolve_rev("HEAD"))
+            .map(|start| repo.log_graph(&start, want))
+            .unwrap_or_default();
+        let load = PageLoad {
+            reached_end: walk.len() < want,
+            commits: walk.into_iter().skip(loaded).collect(),
             selection: SelectionSearch::NotAsked,
-        }
+            branch_tips: branch_tips(&*repo),
+        };
+        redraw.notify_one();
+        load
     })
 }
 
@@ -517,45 +532,63 @@ fn spawn_first_load(
                 load
             })
         },
-        None => spawn_commit_log_load(&stoat.executor, repo, None, COMMITS_INITIAL_PAGE, redraw),
+        None => spawn_commit_log_load(&stoat.executor, repo, None, 0, redraw),
     }
 }
 
-/// The pages from the top of `repo`'s first-parent history through the one
-/// that holds `sha`, or the first page alone when no page does.
+/// The rows from the top of `repo`'s history through the one that holds `sha`,
+/// or the first page alone when no row does.
 ///
 /// One pool task in place of a page per pump, so a commit deep in the history
-/// costs the run loop one landing. A miss keeps one page, as a fresh list
-/// does, although the walk reads the whole history to learn the commit is
-/// gone.
+/// costs the run loop one landing. The walk doubles its length until it holds
+/// the commit or ends, so the walks a deep commit costs sum to a few times its
+/// depth. A miss keeps one page, as a fresh list does, although the walk reads
+/// the whole history to learn the commit is gone.
 fn search_history(repo: &dyn crate::host::GitRepo, sha: &str) -> PageLoad {
-    let mut commits: Vec<crate::host::CommitInfo> = Vec::new();
+    let branch_tips = branch_tips(repo);
+    let Some(head) = repo.resolve_rev("HEAD") else {
+        return PageLoad {
+            commits: Vec::new(),
+            reached_end: true,
+            selection: SelectionSearch::Gone,
+            branch_tips,
+        };
+    };
+
+    let mut want = COMMITS_INITIAL_PAGE;
     loop {
-        let after = commits.last().map(|commit| commit.sha.as_str());
-        let page = repo.log_commits(after, COMMITS_INITIAL_PAGE);
-        if page.is_empty() {
-            let reached_end = commits.len() <= COMMITS_INITIAL_PAGE;
-            commits.truncate(COMMITS_INITIAL_PAGE);
+        let mut commits = repo.log_graph(&head, want);
+        let reached_end = commits.len() < want;
+        if let Some(index) = commits.iter().position(|commit| commit.sha == sha) {
             return PageLoad {
                 commits,
                 reached_end,
-                selection: SelectionSearch::Gone,
+                selection: SelectionSearch::Found(index),
+                branch_tips,
             };
         }
-
-        let page_start = commits.len();
-        commits.extend(page);
-        if let Some(offset) = commits[page_start..]
-            .iter()
-            .position(|commit| commit.sha == sha)
-        {
+        if reached_end {
+            let one_page = commits.len() <= COMMITS_INITIAL_PAGE;
+            commits.truncate(COMMITS_INITIAL_PAGE);
             return PageLoad {
                 commits,
-                reached_end: false,
-                selection: SelectionSearch::Found(page_start + offset),
+                reached_end: one_page,
+                selection: SelectionSearch::Gone,
+                branch_tips,
             };
         }
+        want *= 2;
     }
+}
+
+/// Full sha to the local branch names pointing at it, which marks a tip in the
+/// list's graph.
+fn branch_tips(repo: &dyn crate::host::GitRepo) -> HashMap<String, Vec<String>> {
+    let mut tips: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, sha) in repo.local_branches() {
+        tips.entry(sha).or_default().push(name);
+    }
+    tips
 }
 
 /// What a preview build needs to bake syntax colors into its session.

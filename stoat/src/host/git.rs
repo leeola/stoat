@@ -426,6 +426,11 @@ pub trait GitRepo: Send + Sync {
     /// [`Self::log_from`] follows first parents and so hides whatever a merge
     /// brought in. This reports the real DAG instead, so a merged branch's own
     /// commits appear as rows of their own. Empty when `start_sha` is unknown.
+    ///
+    /// Every commit comes before its parents, whatever the commit times say,
+    /// so a lane layout over the result never meets a parent above its child.
+    /// The walk from one commit lists the same order on every call, so a
+    /// longer walk extends a shorter one.
     fn log_graph(&self, start_sha: &str, limit: usize) -> Vec<CommitInfo>;
 
     /// Resolve a revision the user typed to a full commit sha.
