@@ -1469,11 +1469,14 @@ impl Workspace {
         // The tally counts each untracked file as one unstaged hunk, and the
         // bar names the untracked files apart.
         let untracked = tallies.untracked.len();
+        let (ahead, behind) = self.diff.upstream.unwrap_or_default();
         Some(RepoStatus {
             head: self.diff.repo_head.clone(),
             staged: tallies.staged,
             unstaged: tallies.unstaged.saturating_sub(untracked),
             untracked,
+            ahead,
+            behind,
             rebasing: self.diff.rebasing,
         })
     }

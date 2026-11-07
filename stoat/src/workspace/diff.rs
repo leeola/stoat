@@ -220,6 +220,8 @@ struct RepoTally {
     /// The name the status bar gives HEAD, the branch it is on or its short
     /// sha when detached. `None` on an unborn branch.
     head: Option<String>,
+    /// How far HEAD's branch has moved from its upstream, `(ahead, behind)`.
+    upstream: Option<(usize, usize)>,
     /// Whether a rebase is paused in the repository.
     rebasing: bool,
 }
@@ -338,6 +340,9 @@ pub(crate) struct DiffState {
     /// Read with the tally, since a git re-read that moves HEAD stales the
     /// tally too.
     pub(super) repo_head: Option<String>,
+    /// How far HEAD's branch had moved from its upstream at the last tally,
+    /// `(ahead, behind)`, or `None` without an upstream.
+    pub(super) upstream: Option<(usize, usize)>,
     /// Whether a rebase was paused in the repository at the last tally.
     pub(super) rebasing: bool,
     /// The in-flight repo-wide tally, held so it is not cancelled before its
@@ -1101,6 +1106,7 @@ impl DiffState {
                     self.repo_hunk_tallies = Some(tally.tallies);
                     self.rev_changed = tally.rev_changed;
                     self.repo_head = tally.head;
+                    self.upstream = tally.upstream;
                     self.rebasing = tally.rebasing;
                     landed = true;
                 }
@@ -1123,6 +1129,7 @@ impl DiffState {
                         head: repo
                             .head_branch()
                             .or_else(|| repo.resolve_rev("HEAD").map(|sha| short_sha(&sha))),
+                        upstream: repo.upstream_divergence(),
                         rebasing: repo.rebase_in_progress(),
                         rev_changed: rev.map(|sha| {
                             repo.changed_files_from(&sha)
@@ -1462,6 +1469,11 @@ pub(crate) struct RepoStatus {
     /// Hunks the working tree carries over the index in tracked files.
     pub(crate) unstaged: usize,
     pub(crate) untracked: usize,
+    /// Commits HEAD's branch holds that its upstream lacks, zero without an
+    /// upstream.
+    pub(crate) ahead: usize,
+    /// Commits the upstream holds that HEAD's branch lacks.
+    pub(crate) behind: usize,
     /// Whether a rebase is paused in the repository.
     pub(crate) rebasing: bool,
 }

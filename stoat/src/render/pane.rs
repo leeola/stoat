@@ -2225,7 +2225,10 @@ fn focused_staged_label(
 /// piece led by a space.
 ///
 /// The head follows the branch glyph, the glyph in `ui.text.dim` and the name
-/// in bold `ui.text`. A `REB` chip follows while a rebase is paused, in the
+/// in bold `ui.text`. The branch's divergence from its upstream follows in
+/// `ui.text.muted`, an up arrow for the commits it holds past the upstream and
+/// a down arrow for the ones it lacks, each only when not zero. A `REB` chip
+/// follows while a rebase is paused, in the
 /// mode chip's style over `ui.statusline.rebase`'s color. Each count the
 /// repository holds follows in its own color, the staged hunks in
 /// `diff.staged`, the unstaged hunks in `ui.text.muted`, and the untracked
@@ -2245,6 +2248,14 @@ fn repo_segments(
             tinted(base_style, theme, s::UI_TEXT_DIM),
         ));
         segments.push((head.clone(), name));
+    }
+    let divergence: String = [(repo.ahead, '\u{2191}'), (repo.behind, '\u{2193}')]
+        .into_iter()
+        .filter(|&(count, _)| count > 0)
+        .map(|(count, arrow)| format!(" {arrow}{count}"))
+        .collect();
+    if !divergence.is_empty() {
+        segments.push((divergence, tinted(base_style, theme, s::UI_TEXT_MUTED)));
     }
     if repo.rebasing {
         let color = theme.get(s::UI_STATUSLINE_REBASE).fg.unwrap_or(Color::Red);
@@ -3397,6 +3408,8 @@ mod tests {
             staged,
             unstaged,
             untracked: 0,
+            ahead: 0,
+            behind: 0,
             rebasing: false,
         });
         repo_label(kind, base_lead, repo.as_ref(), file, position)
@@ -3504,6 +3517,8 @@ mod tests {
             staged: 0,
             unstaged: 1,
             untracked,
+            ahead: 0,
+            behind: 0,
             rebasing,
         };
         let label = |repo: RepoStatus| repo_label(MarkKind::Staged, None, Some(&repo), None, None);
@@ -3521,9 +3536,35 @@ mod tests {
         );
     }
 
+    /// The divergence from the upstream shows each side only when it is not
+    /// zero, right after the head.
+    #[test]
+    fn the_divergence_shows_each_side_only_when_not_zero() {
+        let label = |ahead: usize, behind: usize| {
+            let repo = RepoStatus {
+                head: Some("main".to_string()),
+                staged: 0,
+                unstaged: 0,
+                untracked: 0,
+                ahead,
+                behind,
+                rebasing: false,
+            };
+            repo_label(MarkKind::Staged, None, Some(&repo), None, None)
+        };
+        assert_eq!(
+            [label(2, 0), label(0, 3), label(0, 0)],
+            [
+                Some(" \u{2387} main \u{2191}2 \u{2713} clean ".to_string()),
+                Some(" \u{2387} main \u{2193}3 \u{2713} clean ".to_string()),
+                Some(" \u{2387} main \u{2713} clean ".to_string()),
+            ],
+        );
+    }
+
     /// Each piece of the repo segment reads in its own color. The glyph is dim,
-    /// the head bold, the rebase chip on the rebase color, and each count in
-    /// its scope.
+    /// the head bold, the divergence muted, the rebase chip on the rebase
+    /// color, and each count in its scope.
     #[test]
     fn the_repo_segment_colors_each_piece() {
         use ratatui::style::{Color, Modifier, Style};
@@ -3535,6 +3576,8 @@ mod tests {
             staged: 1,
             unstaged: 2,
             untracked: 3,
+            ahead: 2,
+            behind: 1,
             rebasing: true,
         };
         let fg = |scope: &str| theme.get(scope).fg;
@@ -3562,6 +3605,12 @@ mod tests {
                     fg(crate::theme::scope::UI_TEXT),
                     None,
                     true
+                ),
+                (
+                    " \u{2191}2 \u{2193}1".to_string(),
+                    fg(crate::theme::scope::UI_TEXT_MUTED),
+                    None,
+                    false
                 ),
                 (" ".to_string(), None, None, false),
                 (" REB ".to_string(), chip, rebase, true),
@@ -3598,6 +3647,8 @@ mod tests {
             staged: 0,
             unstaged: 0,
             untracked: 0,
+            ahead: 0,
+            behind: 0,
             rebasing: false,
         };
         let segments: Vec<_> = repo_segments(&clean, Style::default(), theme)
@@ -4007,11 +4058,15 @@ mod tests {
 
     /// The repo segment names the branch and reads `clean` for a tree with no
     /// change, and it carries a `REB` chip while a rebase is paused. A detached
-    /// HEAD reads as its short sha, and an untracked file counts apart from the
-    /// unstaged hunks.
+    /// HEAD reads as its short sha, an untracked file counts apart from the
+    /// unstaged hunks, and the branch's divergence from its upstream follows
+    /// its name.
     #[test]
     fn statusline_names_the_branch_and_a_clean_tree() {
-        let row = |branch: Option<&str>, rebasing: bool, untracked: bool| {
+        let row = |branch: Option<&str>,
+                   rebasing: bool,
+                   untracked: bool,
+                   upstream: Option<(usize, usize)>| {
             let mut h = crate::test_harness::TestHarness::with_size(80, 12);
             h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
             h.fake_fs().insert_file(Path::new("/repo/f.txt"), b"a\n");
@@ -4027,6 +4082,9 @@ mod tests {
                 if untracked {
                     repo.untracked("new.txt");
                 }
+                if let Some((ahead, behind)) = upstream {
+                    repo.upstream(ahead, behind);
+                }
             }
             h.stoat.set_diff_warm_auto(true);
             h.open_file(Path::new("/repo/f.txt"));
@@ -4036,14 +4094,16 @@ mod tests {
         };
         assert_eq!(
             [
-                row(Some("main"), false, false),
-                row(Some("main"), true, false),
-                row(None, false, true),
+                row(Some("main"), false, false, None),
+                row(Some("main"), true, false, None),
+                row(None, false, true, None),
+                row(Some("main"), false, false, Some((2, 1))),
             ],
             [
                 "NOR repo f.txt \u{2387} main \u{2713} clean 1:1",
                 "NOR repo f.txt \u{2387} main REB \u{2713} clean 1:1",
                 "NOR repo f.txt \u{2387} a100000 ? 1 untracked 1:1",
+                "NOR repo f.txt \u{2387} main \u{2191}2 \u{2193}1 \u{2713} clean 1:1",
             ],
         );
     }

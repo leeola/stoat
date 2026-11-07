@@ -481,6 +481,14 @@ pub trait GitRepo: Send + Sync {
     /// the `None` case is what makes it record a bare sha to return to instead.
     fn head_branch(&self) -> Option<String>;
 
+    /// How far HEAD's branch has moved apart from its upstream, as the commits
+    /// it holds that the upstream lacks and the upstream's commits it lacks,
+    /// `(ahead, behind)`.
+    ///
+    /// `None` when HEAD is detached, its branch tracks no upstream, or the
+    /// upstream ref does not exist, such as before a first fetch.
+    fn upstream_divergence(&self) -> Option<(usize, usize)>;
+
     /// Per-file summary of what changed between `sha` and its first
     /// parent (empty tree for a root commit). Lighter than building a
     /// full review: the left pane of the commit list renders these

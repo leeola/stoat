@@ -751,6 +751,18 @@ impl GitRepo for LocalGitRepo {
         head.shorthand().ok().map(|name| name.to_string())
     }
 
+    fn upstream_divergence(&self) -> Option<(usize, usize)> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let head = repo.head().ok()?;
+        if !head.is_branch() {
+            return None;
+        }
+        let local = head.target()?;
+        let upstream_name = repo.branch_upstream_name(head.name().ok()?).ok()?;
+        let upstream = repo.refname_to_id(upstream_name.as_str().ok()?).ok()?;
+        repo.graph_ahead_behind(local, upstream).ok()
+    }
+
     fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
         let head = repo
@@ -2540,6 +2552,40 @@ mod tests {
                 ("feature".to_string(), shas[0].clone()),
                 ("main".to_string(), shas[2].clone()),
             ]
+        );
+    }
+
+    /// HEAD's branch counts the commits it holds past its upstream and the
+    /// upstream's commits it lacks, and a branch that tracks no upstream
+    /// reports none.
+    #[test]
+    fn upstream_divergence_counts_both_sides_of_a_fork() {
+        let (dir, repo, shas) = seeded_repo();
+        let no_upstream = discover(&dir).upstream_divergence();
+
+        let fork = repo.find_commit(Oid::from_str(&shas[1]).unwrap()).unwrap();
+        let sig = Signature::now("test", "t@t").unwrap();
+        let tree = fork.tree().unwrap();
+        let theirs = [1, 2].iter().fold(fork, |parent, n| {
+            let message = format!("theirs {n}");
+            let oid = repo
+                .commit(None, &sig, &sig, &message, &tree, &[&parent])
+                .unwrap();
+            repo.find_commit(oid).unwrap()
+        });
+        repo.reference("refs/remotes/origin/main", theirs.id(), false, "seed")
+            .unwrap();
+        repo.remote("origin", "https://example.invalid/repo.git")
+            .unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("branch.main.remote", "origin").unwrap();
+        config
+            .set_str("branch.main.merge", "refs/heads/main")
+            .unwrap();
+
+        assert_eq!(
+            (no_upstream, discover(&dir).upstream_divergence()),
+            (None, Some((1, 2))),
         );
     }
 

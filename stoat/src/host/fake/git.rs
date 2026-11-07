@@ -696,6 +696,13 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Give HEAD's branch an upstream it is `ahead` of and `behind`, as
+    /// [`GitRepo::upstream_divergence`] reports it.
+    pub fn upstream(&mut self, ahead: usize, behind: usize) -> &mut Self {
+        self.mutate_repo(|state| state.upstream = Some((ahead, behind)));
+        self
+    }
+
     /// Program the repo to return `Err(GitApplyError::Backend(message))`
     /// for every subsequent call to [`GitRepo::apply_to_index`] until
     /// [`Self::clear_apply_failure`] is called. The failing calls still
@@ -864,6 +871,9 @@ struct FakeRepoState {
     /// which is the default because a seeded repo has no branch until a test
     /// asks for one.
     head_branch: Option<String>,
+    /// What [`GitRepo::upstream_divergence`] answers, as set by
+    /// [`FakeRepoBuilder::upstream`]. `None` models a branch with no upstream.
+    upstream: Option<(usize, usize)>,
     /// When set, rewrite/rebase calls that touch this sha return a
     /// conflict error without mutating state. Used by error-path tests.
     conflict_at: Option<String>,
@@ -1547,6 +1557,10 @@ impl GitRepo for FakeGitRepo {
     fn head_branch(&self) -> Option<String> {
         let state = self.state.lock().unwrap();
         state.head_branch.clone()
+    }
+
+    fn upstream_divergence(&self) -> Option<(usize, usize)> {
+        self.state.lock().unwrap().upstream
     }
 
     fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
@@ -2825,6 +2839,21 @@ mod tests {
 
     /// The seeded remotes and tags each report by name, in name order rather
     /// than the order the test seeds them in.
+    /// A repo reports the divergence its builder seeds, and none without one.
+    #[test]
+    fn upstream_divergence_reports_the_seeded_counts() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).upstream(2, 1);
+        let seeded = host.discover(&workdir()).unwrap().upstream_divergence();
+        host.add_repo("/other");
+        let bare = host
+            .discover(Path::new("/other"))
+            .unwrap()
+            .upstream_divergence();
+
+        assert_eq!((seeded, bare), (Some((2, 1)), None));
+    }
+
     #[test]
     fn remote_branches_and_tags_report_seeded_refs() {
         let host = FakeGit::new();
