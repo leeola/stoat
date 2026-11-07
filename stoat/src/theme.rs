@@ -959,6 +959,38 @@ pub mod scope {
     pub const VCS_CONFLICT_HEADER: &str = "vcs.conflict.header";
     pub const VCS_CONFLICT_OURS: &str = "vcs.conflict.ours";
     pub const VCS_CONFLICT_THEIRS: &str = "vcs.conflict.theirs";
+    /// An unresolved chunk's rows in the merge view's merged column: the
+    /// background tints the rows, and the foreground colors their bar.
+    pub const VCS_CONFLICT_BAND: &str = "vcs.conflict.band";
+    /// The chip at the end of an unresolved chunk's first merged row, which
+    /// names the chunk's state and its keys.
+    pub const VCS_CONFLICT_CHIP: &str = "vcs.conflict.chip";
+    /// The ancestor's text, which the merged column shows for an unresolved
+    /// chunk.
+    pub const VCS_CONFLICT_GHOST: &str = "vcs.conflict.ghost";
+    /// The mark on the tab of a file that still holds a conflict.
+    pub const VCS_CONFLICT_MARK: &str = "vcs.conflict.mark";
+    /// The merged column's header cell in the merge view.
+    pub const VCS_CONFLICT_HEAD: &str = "vcs.conflict.head";
+    /// The banner row that names a merge in progress.
+    pub const VCS_MERGE_BANNER: &str = "vcs.merge.banner";
+    /// The banner row that names a rebase paused on a conflict.
+    pub const VCS_REBASE_BANNER: &str = "vcs.rebase.banner";
+    /// The section heads of the git status panel, one per section.
+    pub const VCS_STATUS_CONFLICTED: &str = "vcs.status.conflicted";
+    pub const VCS_STATUS_STAGED: &str = "vcs.status.staged";
+    pub const VCS_STATUS_UNSTAGED: &str = "vcs.status.unstaged";
+    pub const VCS_STATUS_UNTRACKED: &str = "vcs.status.untracked";
+    /// The kind letter of a git status panel row, in the order added,
+    /// modified, deleted, renamed, untracked, unmerged.
+    pub const VCS_STATUS_KIND: [&str; 6] = [
+        "vcs.status.kind.added",
+        "vcs.status.kind.modified",
+        "vcs.status.kind.deleted",
+        "vcs.status.kind.renamed",
+        "vcs.status.kind.untracked",
+        "vcs.status.kind.unmerged",
+    ];
 
     pub const VCS_COMMIT_SHA: &str = "vcs.commit.sha";
     pub const VCS_COMMIT_SUMMARY: &str = "vcs.commit.summary";
@@ -1678,6 +1710,48 @@ mod tests {
             ),
             (Some(rgb(0xc9b383)), Some(rgb(0x8a7650)), None),
             "the label, the ring, and no ring under default_dark",
+        );
+    }
+
+    /// The ermine theme colors the merge view's conflict band and the merge
+    /// banner, tells the four status sections apart, and colors every kind
+    /// letter.
+    #[test]
+    fn the_ermine_theme_colors_the_merge_and_status_scopes() {
+        let [ermine, _] = shipped_themes();
+        let fg = |name: &str| ermine.try_get(name).and_then(|style| style.fg);
+        let colors = |name| (fg(name), ermine.try_get(name).and_then(|style| style.bg));
+
+        let mut sections: Vec<Color> = [
+            scope::VCS_STATUS_CONFLICTED,
+            scope::VCS_STATUS_STAGED,
+            scope::VCS_STATUS_UNSTAGED,
+            scope::VCS_STATUS_UNTRACKED,
+        ]
+        .into_iter()
+        .filter_map(fg)
+        .collect();
+        sections.sort_by_key(|color| format!("{color:?}"));
+        sections.dedup();
+        let unkinded: Vec<&str> = scope::VCS_STATUS_KIND
+            .into_iter()
+            .filter(|name| fg(name).is_none())
+            .collect();
+
+        assert_eq!(
+            (
+                colors(scope::VCS_CONFLICT_BAND),
+                colors(scope::VCS_MERGE_BANNER),
+                sections.len(),
+                unkinded,
+            ),
+            (
+                (Some(rgb(0xf2777f)), Some(rgb(0x2a1b1d))),
+                (Some(rgb(0xf59aa0)), Some(rgb(0x2a1d21))),
+                4,
+                Vec::<&str>::new(),
+            ),
+            "the band, the banner, four section colors, and a color per kind",
         );
     }
 

@@ -327,6 +327,20 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   A local branch's badge takes its lane's color instead. Inside stoatty a
   remote or tag badge also carries a hairline frame, in its color mixed
   toward `ui.background`.
+- `vcs.conflict.band`, `vcs.conflict.chip`, `vcs.conflict.ghost`,
+  `vcs.conflict.head`, `vcs.conflict.mark` -- the three-way merge view: an
+  unresolved chunk's merged rows (background) and their bar (foreground), the
+  chip on a chunk's first merged row, the ancestor's text in the merged column,
+  the merged column's header cell, and the mark on a conflicted file's tab.
+  The `vcs.conflict.ours` and `vcs.conflict.theirs` backgrounds tint the two
+  side columns. The ermine_night theme sets these, and default_dark leaves
+  them unset.
+- `vcs.merge.banner`, `vcs.rebase.banner` -- the banner row of a merge in
+  progress and of a rebase paused on a conflict.
+- `vcs.status.conflicted`, `vcs.status.staged`, `vcs.status.unstaged`,
+  `vcs.status.untracked` -- the section heads of the git status panel.
+  `vcs.status.kind.added`, `.modified`, `.deleted`, `.renamed`, `.untracked`,
+  and `.unmerged` color the kind letter of each row.
 - `chat.*` -- the agent chat panel.
 - `syntax.*` -- tree-sitter highlight captures (open-ended, with the fallback
   above).

@@ -260,6 +260,13 @@ theme ermine_night inherits default_dark {
     let side_target_name = "#bfe6bb";
     let readonly         = "#c9b383";
     let readonly_line    = "#8a7650";
+    let conflict         = "#f59aa0";
+    let tint_ours        = "#18241b";
+    let tint_theirs      = "#231d2e";
+    let tint_conflict    = "#2a1b1d";
+    let chip_conflict    = "#33201f";
+    let tint_merge       = "#2a1d21";
+    let merged_head      = "#1b1d22";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -342,6 +349,28 @@ theme ermine_night inherits default_dark {
 
     ui.readonly.label.fg = readonly;
     ui.readonly.frame.fg = readonly_line;
+
+    ui.statusline.conflict.fg = conflict;
+    vcs.conflict.ours      = { fg: success, bg: tint_ours };
+    vcs.conflict.theirs    = { fg: special, bg: tint_theirs };
+    vcs.conflict.band      = { fg: danger, bg: tint_conflict };
+    vcs.conflict.chip      = { fg: danger, bg: chip_conflict };
+    vcs.conflict.ghost     = { fg: muted, modifiers: [italic] };
+    vcs.conflict.mark.fg   = conflict;
+    vcs.conflict.head.bg   = merged_head;
+    vcs.merge.banner       = { fg: conflict, bg: tint_merge };
+    vcs.rebase.banner      = { fg: danger, bg: tint_conflict };
+
+    vcs.status.conflicted.fg     = danger;
+    vcs.status.staged.fg         = info;
+    vcs.status.unstaged.fg       = muted;
+    vcs.status.untracked.fg      = disabled;
+    vcs.status.kind.added.fg     = success;
+    vcs.status.kind.modified.fg  = accent;
+    vcs.status.kind.deleted.fg   = danger;
+    vcs.status.kind.renamed.fg   = special;
+    vcs.status.kind.untracked.fg = muted;
+    vcs.status.kind.unmerged.fg  = danger;
 
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
