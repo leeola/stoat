@@ -30,7 +30,6 @@ use std::{
     borrow::Cow,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::SystemTime,
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{LineEnding, Rope};
@@ -197,7 +196,6 @@ fn register_content(
     meta: Option<FsMetadata>,
     origin: OpenOrigin,
 ) -> Option<(BufferId, SharedBuffer)> {
-    let disk_mtime = meta.map(|m| m.modified);
     match content {
         OpenContent::Text { text, compressed } => register_open(
             stoat,
@@ -208,7 +206,7 @@ fn register_content(
                 text: &text,
                 read_only: read_only_kind(compressed, meta),
             },
-            disk_mtime,
+            meta,
             origin,
         ),
         OpenContent::Rope {
@@ -225,7 +223,7 @@ fn register_content(
                 ending,
                 read_only: read_only_kind(compressed, meta),
             },
-            disk_mtime,
+            meta,
             origin,
         ),
         OpenContent::Image { .. } => None,
@@ -312,7 +310,6 @@ fn install_content(
     meta: Option<FsMetadata>,
     origin: OpenOrigin,
 ) -> Option<BufferId> {
-    let disk_mtime = meta.map(|m| m.modified);
     match content {
         OpenContent::Text { text, compressed } => finish_open(
             stoat,
@@ -323,7 +320,7 @@ fn install_content(
                 text: &text,
                 read_only: read_only_kind(compressed, meta),
             },
-            disk_mtime,
+            meta,
             origin,
         ),
         OpenContent::Rope {
@@ -340,7 +337,7 @@ fn install_content(
                 ending,
                 read_only: read_only_kind(compressed, meta),
             },
-            disk_mtime,
+            meta,
             origin,
         ),
         OpenContent::Image { px } => {
@@ -638,7 +635,7 @@ fn finish_open(
     target: PaneId,
     absolute: &Path,
     content: OpenBody<'_>,
-    disk_mtime: Option<SystemTime>,
+    disk: Option<FsMetadata>,
     origin: OpenOrigin,
 ) -> Option<BufferId> {
     let executor = stoat.executor.clone();
@@ -648,7 +645,7 @@ fn finish_open(
         Some(target),
         absolute,
         content,
-        disk_mtime,
+        disk,
         origin,
     )?;
 
@@ -660,16 +657,16 @@ fn finish_open(
 /// an open that needs no pane.
 ///
 /// It registers the buffer (deduping on path), logs a file it newly registers
-/// with the pane `target` names, records `origin` on it, applies mtime and
-/// language, and notifies LSP unless the file was compressed. A workspace that
-/// is gone answers [`None`].
+/// with the pane `target` names, records `origin` on it, applies the mtime and
+/// the length `disk` read and the language, and notifies LSP unless the file
+/// was compressed. A workspace that is gone answers [`None`].
 fn register_open(
     stoat: &mut Stoat,
     workspace: WorkspaceId,
     target: Option<PaneId>,
     absolute: &Path,
     content: OpenBody<'_>,
-    disk_mtime: Option<SystemTime>,
+    disk: Option<FsMetadata>,
     origin: OpenOrigin,
 ) -> Option<(BufferId, SharedBuffer)> {
     let lang = {
@@ -709,8 +706,9 @@ fn register_open(
         ws.buffers.note_origin(buffer_id, origin);
         if !existed {
             ws.buffers.set_line_ending(buffer_id, ending);
-            if let Some(mtime) = disk_mtime {
-                ws.buffers.set_disk_mtime(buffer_id, mtime);
+            if let Some(meta) = disk {
+                ws.buffers.set_disk_mtime(buffer_id, meta.modified);
+                ws.buffers.set_disk_len(buffer_id, meta.len);
             }
             ws.buffers.set_read_only(buffer_id, read_only);
         }
@@ -1370,10 +1368,10 @@ mod tests {
     }
 
     /// The metadata read before the pool's read is what the install records,
-    /// so a large file the process lacks write access to keeps its kind and its
-    /// mtime.
+    /// so a large file the process lacks write access to keeps its kind, its
+    /// mtime, and its length.
     #[test]
-    fn a_large_read_only_file_keeps_its_kind_and_mtime_through_the_pool() {
+    fn a_large_read_only_file_keeps_its_kind_mtime_and_length_through_the_pool() {
         let mut h = TestHarness::with_size(80, 24);
         let root = Path::new("/big");
         let path = root.join("locked.txt");
@@ -1397,8 +1395,16 @@ mod tests {
             .id_for_path(&path)
             .expect("the buffer installs once the read finishes");
         assert_eq!(
-            (buffers.read_only(id), buffers.disk_mtime(id)),
-            (Some(ReadOnly::Permission), Some(mtime))
+            (
+                buffers.read_only(id),
+                buffers.disk_mtime(id),
+                buffers.disk_len(id)
+            ),
+            (
+                Some(ReadOnly::Permission),
+                Some(mtime),
+                Some(OPEN_SYNC_MAX_BYTES + 16)
+            )
         );
     }
 

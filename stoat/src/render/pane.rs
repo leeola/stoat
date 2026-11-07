@@ -2,7 +2,7 @@ use crate::{
     action_handlers::search::StatusPrompt,
     app::SPINNER_FRAMES,
     buffer::BufferId,
-    buffer_registry::BufferRegistry,
+    buffer_registry::{BufferRegistry, ReadOnly},
     diff_changes::{DiffChangesId, DiffChangesState},
     diff_map::MarkKind,
     editor_state::{EditorId, EditorState},
@@ -1616,10 +1616,13 @@ fn status_segments(
         && sides.is_none()
     {
         let left_pad = if cursor == area.x { " " } else { "" };
-        let read_only = if status.read_only { " [readonly]" } else { "" };
         let modified = if status.dirty { " [+]" } else { "" };
-        let text = format!("{left_pad}{name}{read_only}{modified} ");
+        let text = format!("{left_pad}{name}{modified} ");
         push_left(&mut left, &mut cursor, lead_end, text, lead_style);
+        if let Some(note) = read_only_note(status.read_only, status.disk_len, status.text_len) {
+            let muted = tinted(lead_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            push_left(&mut left, &mut cursor, lead_end, note, muted);
+        }
     }
     // A lone cursor paints no count, since the count only answers how many
     // places an edit lands once there is more than one.
@@ -2024,6 +2027,50 @@ fn push_left(left: &mut Vec<StatusSeg>, cursor: &mut u16, end_x: u16, text: Stri
         .saturating_add(text.chars().count() as u16)
         .min(end_x);
     left.push((text, style));
+}
+
+/// The muted segment the status row names a read-only buffer's kind in, or
+/// `None` for a buffer that writes back.
+///
+/// A compressed buffer reads the file's size on disk and its text's size,
+/// `disk_len` and `text_len` in bytes. A buffer a state file restored without
+/// the disk size reads the kind alone. A buffer the process lacks write
+/// access to reads `read only`.
+fn read_only_note(
+    kind: Option<ReadOnly>,
+    disk_len: Option<u64>,
+    text_len: usize,
+) -> Option<String> {
+    Some(match kind? {
+        ReadOnly::Compressed => match disk_len {
+            Some(disk) => format!(
+                " gzip \u{b7} {} \u{2192} {} ",
+                byte_size(disk),
+                byte_size(text_len as u64)
+            ),
+            None => " gzip ".to_owned(),
+        },
+        ReadOnly::Permission => " read only ".to_owned(),
+    })
+}
+
+/// `bytes` in the largest binary unit that keeps a whole number before the
+/// point.
+///
+/// Bytes and KiB read as whole numbers, the KiB rounded. MiB and GiB keep one
+/// decimal place.
+fn byte_size(bytes: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+
+    let scaled = |unit: u64| bytes as f64 / unit as f64;
+    match bytes {
+        0..KIB => format!("{bytes} B"),
+        KIB..MIB => format!("{} KiB", scaled(KIB).round()),
+        MIB..GIB => format!("{:.1} MiB", scaled(MIB)),
+        _ => format!("{:.1} GiB", scaled(GIB)),
+    }
 }
 
 /// Paint the built status segments into cells through [`paint_segment`], the
@@ -2578,7 +2625,7 @@ fn editor_status_info(
     // wants them together. One acquisition answers for all of them, so the
     // staged label takes no lock of its own.
     let shared = buffers.get(buffer_id);
-    let (dirty, staged_counts, mark_kind) = shared
+    let (dirty, staged_counts, mark_kind, text_len) = shared
         .as_ref()
         .and_then(|b| b.read().ok())
         .map(|g| {
@@ -2587,13 +2634,16 @@ fn editor_status_info(
                 g.dirty,
                 map.map(|dm| dm.staged_counts()),
                 map.map(|dm| dm.mark_kind()).unwrap_or_default(),
+                g.rope().len(),
             )
         })
         .unwrap_or_default();
     PaneStatusInfo {
         filename: Some(filename),
         buffer_id: Some(buffer_id),
-        read_only: buffers.read_only(buffer_id).is_some(),
+        read_only: buffers.read_only(buffer_id),
+        disk_len: buffers.disk_len(buffer_id),
+        text_len,
         dirty,
         cursor_pos: editor_cursor_position(editor),
         selections: Some((
@@ -2612,9 +2662,15 @@ struct PaneStatusInfo {
     /// The buffer an editor view shows, which the bar looks up in
     /// [`FrameCtx::held_buffers`].
     buffer_id: Option<BufferId>,
-    /// Whether the buffer must not write back to its file, which the bar tags
-    /// `[readonly]` between the name and the modified tag.
-    read_only: bool,
+    /// Why the buffer must not write back to its file, which the bar names in a
+    /// muted segment after the name and the modified tag.
+    read_only: Option<ReadOnly>,
+    /// The file's byte length on disk, which a compressed buffer's segment
+    /// names.
+    disk_len: Option<u64>,
+    /// The buffer's text length in bytes, which a compressed buffer's segment
+    /// names beside the file's.
+    text_len: usize,
     dirty: bool,
     cursor_pos: Option<(u32, u32)>,
     /// The primary cursor's 1-based place among the cursors in start order,
@@ -2705,14 +2761,17 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_base_lead, focused_staged_label, paint_status_fallback, repo_segments, split_halves,
-        split_side_segments, status_filename, tab_spans, DiffSideColors, DiffSidesColors,
+        byte_size, diff_base_lead, focused_staged_label, paint_status_fallback, read_only_note,
+        repo_segments, split_halves, split_side_segments, status_filename, tab_spans,
+        DiffSideColors, DiffSidesColors,
     };
     use crate::{
         action_handlers::{dispatch, focused_editor_mut},
         agent_ipc::AgentControl,
         badge::{Anchor, Badge, BadgeSource, BadgeState},
         buffer::{BufferId, TextBuffer},
+        buffer_lifecycle,
+        buffer_registry::ReadOnly,
         diff_map::{DiffMap, MarkKind},
         editor_state::EditorState,
         host::LspNotification,
@@ -4605,8 +4664,77 @@ mod tests {
         });
     }
 
-    /// A read-only buffer's status row reads `name [readonly] [+]`, the
-    /// read-only tag between the name and the modified tag.
+    /// Sizes read whole in bytes and rounded KiB, and to one decimal in MiB and
+    /// GiB.
+    #[test]
+    fn byte_sizes_read_in_the_largest_whole_unit() {
+        assert_eq!(
+            [512, 41_600, 190_464, 1_572_864, 3_221_225_472].map(byte_size),
+            ["512 B", "41 KiB", "186 KiB", "1.5 MiB", "3.0 GiB"],
+        );
+    }
+
+    /// A compressed buffer names both sizes, or the kind alone without the size
+    /// on disk, and a buffer the process lacks write access to reads `read only`.
+    /// A buffer that writes back has no segment.
+    #[test]
+    fn the_read_only_note_names_the_kind_and_the_sizes() {
+        assert_eq!(
+            [
+                read_only_note(None, Some(41_600), 190_464),
+                read_only_note(Some(ReadOnly::Compressed), Some(41_600), 190_464),
+                read_only_note(Some(ReadOnly::Compressed), None, 190_464),
+                read_only_note(Some(ReadOnly::Permission), None, 5),
+            ],
+            [
+                None,
+                Some(" gzip \u{b7} 41 KiB \u{2192} 186 KiB ".to_owned()),
+                Some(" gzip ".to_owned()),
+                Some(" read only ".to_owned()),
+            ],
+        );
+    }
+
+    /// A compressed buffer's status row names the file's size on disk and its
+    /// text's size after the name.
+    #[test]
+    fn the_status_row_names_a_gzip_buffer_s_sizes() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let root = PathBuf::from("/ro");
+        let path = root.join("a.txt.gz");
+        let gz = crate::test_harness::gzip(b"hello\n");
+        h.fake_fs().insert_file(&path, gz.clone());
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path });
+        h.settle();
+        // A gzip file reads on the blocking pool, and the read installs here.
+        buffer_lifecycle::install_pending_opens(&mut h.stoat);
+        h.settle();
+
+        let buf = h.render_composited();
+
+        let row = buf.area.height - 1;
+        let bar = (0..buf.area.width)
+            .map(|x| buf[(x, row)].symbol())
+            .collect::<String>()
+            .replace('─', " ");
+        let lead = format!(" NOR  ro a.txt.gz  gzip \u{b7} {} B \u{2192} 6 B", gz.len());
+        let kind_x = lead.find("gzip").expect("the lead names the kind") as u16;
+        let muted = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_TEXT_MUTED)
+            .fg
+            .expect("the theme mutes text");
+        assert_eq!(
+            (bar, buf[(kind_x, row)].fg),
+            (format!("{lead:<56}1:1 "), muted),
+            "the sizes after the name, in the muted color",
+        );
+    }
+
+    /// A buffer the process lacks write access to reads `name [+]  read only`,
+    /// its kind in a muted segment after the modified tag.
     #[test]
     fn the_status_row_tags_a_read_only_buffer() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 12);
@@ -4628,7 +4756,7 @@ mod tests {
             .replace('─', " ");
         assert_eq!(
             bar,
-            format!("{:<56}1:1 ", " NOR  ro file.txt [readonly] [+]")
+            format!("{:<56}1:1 ", " NOR  ro file.txt [+]  read only")
         );
     }
 

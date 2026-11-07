@@ -163,6 +163,11 @@ struct BufferEntry {
     /// to clobber it. `None` for scratch buffers and for files whose
     /// metadata could not be read.
     disk_mtime: Option<SystemTime>,
+    /// The file's byte length on disk as the open read it, which a compressed
+    /// buffer's status row names beside its text's length. A save does not
+    /// refresh it, because only a compressed buffer shows it, and a
+    /// compressed buffer never saves.
+    disk_len: Option<u64>,
     /// Why the buffer must not write back to its file, or `None` for a buffer
     /// that writes back.
     read_only: Option<ReadOnly>,
@@ -275,6 +280,7 @@ impl BufferRegistry {
                 preview,
                 origin: OpenOrigin::Visited,
                 disk_mtime: None,
+                disk_len: None,
                 read_only: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
@@ -330,6 +336,7 @@ impl BufferRegistry {
                 preview: false,
                 origin: OpenOrigin::Visited,
                 disk_mtime: None,
+                disk_len: None,
                 read_only: None,
                 auto_reload: AutoReloadMode::Off,
                 last_shown: 0,
@@ -392,6 +399,21 @@ impl BufferRegistry {
     /// scratch buffer, an unknown id, or a file whose metadata never read.
     pub(crate) fn disk_mtime(&self, id: BufferId) -> Option<SystemTime> {
         self.buffers.get(&id).and_then(|e| e.disk_mtime)
+    }
+
+    /// Record the file's byte length on disk as the open read it. No-op for an
+    /// unknown buffer id.
+    pub(crate) fn set_disk_len(&mut self, id: BufferId, len: u64) {
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.disk_len = Some(len);
+        }
+    }
+
+    /// The file's byte length on disk as the open read it, or `None` for a
+    /// scratch buffer, an unknown id, a file whose metadata never read, or a
+    /// buffer a state file restored without it.
+    pub(crate) fn disk_len(&self, id: BufferId) -> Option<u64> {
+        self.buffers.get(&id).and_then(|e| e.disk_len)
     }
 
     /// Record why `id` must not write back to its file, or `None` to let it.
@@ -909,6 +931,7 @@ impl BufferRegistry {
                 },
                 line_ending: entry.line_ending,
                 disk_mtime: entry.disk_mtime,
+                disk_len: entry.disk_len,
                 read_only: entry.read_only,
             })
             .collect();
@@ -963,6 +986,7 @@ impl BufferRegistry {
                     preview: false,
                     origin: OpenOrigin::Named,
                     disk_mtime: entry.disk_mtime,
+                    disk_len: entry.disk_len,
                     read_only: entry.read_only,
                     auto_reload: AutoReloadMode::Off,
                     last_shown: 0,
@@ -1002,6 +1026,13 @@ pub(crate) struct BufferEntrySnap {
     /// Without it a restored buffer has no baseline and the guard never fires.
     #[serde(default)]
     pub disk_mtime: Option<SystemTime>,
+    /// The file's byte length on disk as the open read it, so a restored
+    /// compressed buffer still names its file's size.
+    ///
+    /// Defaulted so a state file written before this field loads, with no
+    /// length.
+    #[serde(default)]
+    pub disk_len: Option<u64>,
     /// Why the buffer must not write back to its file. A restored compressed
     /// buffer still holds text that is not the file's, so it keeps its kind
     /// and stays out of LSP.
@@ -1156,17 +1187,44 @@ mod tests {
     }
 
     /// A restored compressed buffer still holds text that is not its file's,
-    /// so the session keeps its kind.
+    /// so the session keeps its kind and its file's length.
     #[test]
-    fn a_snapshot_round_trip_keeps_the_read_only_kind() {
+    fn a_snapshot_round_trip_keeps_the_read_only_kind_and_disk_length() {
         let mut reg = BufferRegistry::new();
         let (id, _) = reg.open(Path::new("/a.txt.gz"), "text");
         reg.set_read_only(id, Some(ReadOnly::Compressed));
+        reg.set_disk_len(id, 41_600);
 
         let mut restored = BufferRegistry::new();
         restored.restore_from(reg.snapshot_retaining(|_, _| true));
 
-        assert_eq!(restored.read_only(id), Some(ReadOnly::Compressed));
+        assert_eq!(
+            (restored.read_only(id), restored.disk_len(id)),
+            (Some(ReadOnly::Compressed), Some(41_600))
+        );
+    }
+
+    /// A state file written before the disk length was saved loads, and its
+    /// buffers have no length.
+    #[test]
+    fn a_snapshot_without_a_disk_length_restores_none() {
+        let mut reg = BufferRegistry::new();
+        let (id, _) = reg.open(Path::new("/a.txt.gz"), "text");
+        reg.set_disk_len(id, 41_600);
+        let body = ron::ser::to_string(&reg.snapshot_retaining(|_, _| true))
+            .expect("a snapshot serializes");
+
+        let field = "disk_len:Some(41600),";
+        let older = body.replacen(field, "", 1);
+        assert_eq!(
+            older.len() + field.len(),
+            body.len(),
+            "the snapshot names its disk length once: {body}"
+        );
+        let mut restored = BufferRegistry::new();
+        restored.restore_from(ron::from_str(&older).expect("an older snapshot parses"));
+
+        assert_eq!(restored.disk_len(id), None);
     }
 
     #[test]
