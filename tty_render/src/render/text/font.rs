@@ -7,7 +7,7 @@
 
 use crate::render::CellMetrics;
 use cosmic_text::{
-    fontdb::{Database, Query, Weight},
+    fontdb::{Database, Query, Style, Weight},
     Attrs, AttrsList, Buffer as CosmicBuffer, CacheKey, Ellipsize, Family, Font, FontSystem,
     Hinting, LayoutLine, Metrics, ShapeBuffer, ShapeLine, Shaping, Wrap,
 };
@@ -50,6 +50,48 @@ pub(super) const EMOJI_FAMILIES: [&str; 4] = [
 /// Words a [`CoveredSet`] holds, one bit per Unicode codepoint.
 const UNICODE_WORDS: usize = 0x11_0000 / 64;
 
+/// The number of [`FaceStyle`]s, one for each pairing of bold and italic.
+const FACE_STYLES: usize = 4;
+
+/// The weight and slant that text shapes in, as a terminal cell's bold and
+/// italic attributes name them.
+///
+/// Bold reaches the shaper as a weight, which the glyph's [`CacheKey`] carries,
+/// so a variable face rasterizes the glyph along its weight axis. Italic
+/// reaches it as a style, which resolves the family's italic face, or a skew of
+/// the upright face where the family has no italic one.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(super) struct FaceStyle {
+    pub(super) bold: bool,
+    pub(super) italic: bool,
+}
+
+impl FaceStyle {
+    pub(super) const REGULAR: FaceStyle = FaceStyle {
+        bold: false,
+        italic: false,
+    };
+
+    /// Shaping attributes for `family` in this style.
+    fn attrs(self, family: Family<'_>) -> Attrs<'_> {
+        let weight = match self.bold {
+            true => Weight::BOLD,
+            false => Weight::NORMAL,
+        };
+        let style = match self.italic {
+            true => Style::Italic,
+            false => Style::Normal,
+        };
+        Attrs::new().family(family).weight(weight).style(style)
+    }
+
+    /// Which of the [`FACE_STYLES`] tables of a [`RunShapeCache`] holds this
+    /// style's runs.
+    fn slot(self) -> usize {
+        usize::from(self.bold) | usize::from(self.italic) << 1
+    }
+}
+
 /// Shape `ch` on its own at `scale` times the cell size and return its glyph
 /// cache key, or `None` if it produces no glyph.
 ///
@@ -58,14 +100,15 @@ const UNICODE_WORDS: usize = 0x11_0000 / 64;
 /// size, so each scale of a character keys a distinct atlas entry.
 ///
 /// `primary` is the preferred family; glyphs it lacks are shaped with the
-/// bundled symbols font instead (see [`glyph_family`]).
+/// bundled symbols font instead (see [`glyph_family`]). `style` names the weight
+/// and slant, which the key carries too.
 pub(super) fn shape_char(
     font_system: &mut FontSystem,
     ch: char,
     scale: f32,
     metrics: CellMetrics,
     primary: Family<'_>,
-    weight: Weight,
+    style: FaceStyle,
     covered: &mut Option<CoveredSet>,
 ) -> Option<CacheKey> {
     let (family, any_face_covers) = glyph_family(font_system, ch, primary, covered);
@@ -84,12 +127,7 @@ pub(super) fn shape_char(
     );
     let mut encoded = [0u8; 4];
     let text = ch.encode_utf8(&mut encoded);
-    buffer.set_text(
-        text,
-        &Attrs::new().family(family).weight(weight),
-        shaping,
-        None,
-    );
+    buffer.set_text(text, &style.attrs(family), shaping, None);
     buffer.shape_until_scroll(font_system, false);
 
     let run = buffer.layout_runs().next()?;
@@ -523,8 +561,8 @@ pub(super) struct ShapeScratch {
     shaped_chars: usize,
 }
 
-/// Shape `text` as one run with `family`, returning each glyph's source byte
-/// offset paired with its cache key.
+/// Shape `text` as one run with `family` in `style`, returning each glyph's
+/// source byte offset paired with its cache key.
 ///
 /// Shaping the run as a single string lets the font's contextual alternates
 /// merge adjacent characters into ligature glyphs. The returned byte offset is
@@ -538,13 +576,14 @@ pub(super) fn shape_run(
     text: &str,
     metrics: CellMetrics,
     family: Family<'_>,
+    style: FaceStyle,
 ) -> Vec<(usize, CacheKey)> {
     #[cfg(test)]
     {
         scratch.shaped_chars += text.chars().count();
     }
 
-    let attrs = AttrsList::new(&Attrs::new().family(family));
+    let attrs = AttrsList::new(&style.attrs(family));
     let line = match &mut scratch.line {
         Some(line) => {
             line.build(font_system, text, &attrs, Shaping::Advanced, TAB_WIDTH);
@@ -607,12 +646,12 @@ const TAB_WIDTH: u16 = 8;
 /// evicts rather than growing.
 const RUN_SHAPE_CACHE_CAP: usize = 4096;
 
-/// The glyphs `text` lays out as one run, from `cache` or from `miss`.
+/// The glyphs `text` lays out as one run in `style`, from `cache` or from `miss`.
 ///
-/// The run text alone keys the result, since runs group only same-scale
-/// primary-covered cells in one family. On a miss `miss` builds the glyphs and
-/// they are stored, evicting a run nothing has asked for lately once the cache
-/// is full.
+/// The run text and its style key the result, since runs group only same-scale
+/// primary-covered cells of one style in one family. On a miss `miss` builds
+/// the glyphs and they are stored, evicting a run nothing has asked for lately
+/// once the cache is full.
 ///
 /// `miss` decides how to build them, because the two ways cost very different
 /// things. A run holding something the face reshapes has to go through
@@ -622,37 +661,45 @@ const RUN_SHAPE_CACHE_CAP: usize = 4096;
 /// and neither.
 pub(super) fn shape_run_cached<'a>(
     cache: &'a mut RunShapeCache,
+    style: FaceStyle,
     text: &str,
     miss: impl FnOnce(&mut ShapeScratch) -> Vec<(usize, CacheKey)>,
 ) -> &'a [(usize, CacheKey)] {
     // The slot copies out, so the lookup's borrow ends before the miss path
     // needs the cache mutably. A map holding the glyphs themselves cannot do that,
     // and pays a second hash to read what the first already found.
-    if let Some(&slot) = cache.at.get(text) {
+    if let Some(&slot) = cache.at[style.slot()].get(text) {
         cache.runs[slot].asked_for = true;
         return &cache.runs[slot].glyphs;
     }
 
     let glyphs = miss(&mut cache.scratch);
-    let slot = cache.store(text, glyphs);
+    let slot = cache.store(style, text, glyphs);
     &cache.runs[slot].glyphs
 }
 
-/// One cached run, holding the text it was shaped from, its glyphs, and
-/// whether anyone has asked for it since the eviction hand last passed it.
+/// One cached run, holding the text it was shaped from, the style it was shaped
+/// in, its glyphs, and whether anyone has asked for it since the eviction hand
+/// last passed it.
 struct CachedRun {
     /// Shares its allocation with the key [`RunShapeCache::at`] holds, so the
     /// slot unmaps itself on eviction without storing the text twice.
     key: Arc<str>,
+    /// Which of the maps holds [`Self::key`].
+    style: FaceStyle,
     glyphs: Vec<(usize, CacheKey)>,
     asked_for: bool,
 }
 
-/// Shaped glyphs of each ligature run, found by the run's text.
+/// Shaped glyphs of each ligature run, found by the run's text and style.
 ///
-/// The glyphs live in a Vec and the map holds positions into it, so a hit costs one
-/// hash and an index. Holding the glyphs in the map instead would cost a second hash
-/// on every hit, to read what the first lookup already proved was there.
+/// The glyphs live in a Vec and the maps hold positions into it, so a hit costs one
+/// hash and an index. Glyphs held in a map instead cost a second hash on every
+/// hit, to read what the first lookup already proved was there.
+///
+/// Each [`FaceStyle`] has a map of its own, since one word shapes to other
+/// glyphs in bold or italic. The maps share the one ring, so the cap bounds
+/// every style together.
 ///
 /// Past [`RUN_SHAPE_CACHE_CAP`] runs the Vec stops growing and becomes the ring
 /// a second-chance sweep evicts around. Terminal content repeats, so a
@@ -661,7 +708,7 @@ struct CachedRun {
 /// one-off runs that pushed the cache to its bound.
 #[derive(Default)]
 pub struct RunShapeCache {
-    at: FxHashMap<Arc<str>, usize>,
+    at: [FxHashMap<Arc<str>, usize>; FACE_STYLES],
     runs: Vec<CachedRun>,
     /// Shaping allocations the misses reuse, held here because this is already
     /// the thing a caller keeps for as long as it shapes.
@@ -677,14 +724,32 @@ impl RunShapeCache {
     /// Every run text held, sorted, so a caller can assert what was shaped
     /// rather than only how much was.
     pub(super) fn cached_texts(&self) -> Vec<String> {
-        let mut texts: Vec<String> = self.at.keys().map(|key| key.to_string()).collect();
+        let mut texts: Vec<String> = self
+            .at
+            .iter()
+            .flat_map(|at| at.keys())
+            .map(|key| key.to_string())
+            .collect();
         texts.sort();
         texts
     }
 
-    /// The glyphs held for `text`, or `None` when it was never shaped.
+    /// The glyphs held for `text` in the regular face, or `None` when it was
+    /// never shaped there.
     pub(super) fn cached_glyphs(&self, text: &str) -> Option<&[(usize, CacheKey)]> {
-        self.at.get(text).map(|&slot| &self.runs[slot].glyphs[..])
+        self.cached_glyphs_in(FaceStyle::REGULAR, text)
+    }
+
+    /// The glyphs held for `text` in `style`, or `None` when it was never shaped
+    /// in that style.
+    pub(super) fn cached_glyphs_in(
+        &self,
+        style: FaceStyle,
+        text: &str,
+    ) -> Option<&[(usize, CacheKey)]> {
+        self.at[style.slot()]
+            .get(text)
+            .map(|&slot| &self.runs[slot].glyphs[..])
     }
 
     /// Characters the shaper laid out to fill this cache, which is the work a
@@ -696,19 +761,20 @@ impl RunShapeCache {
 }
 
 impl RunShapeCache {
-    /// Store `glyphs` under `text` and return the slot holding them.
+    /// Store `glyphs` under `text` in `style` and return the slot holding them.
     ///
     /// Below the cap this appends. At the cap it evicts through [`Self::sweep`]
     /// and reuses the slot that comes back.
     ///
-    /// `text` must not already be cached. Storing it twice leaves the earlier
-    /// slot holding the same key with nothing mapped to it, and evicting that
-    /// slot then unmaps the later one. The only caller is
+    /// `text` must not already be cached in `style`. Storing it twice leaves the
+    /// earlier slot holding the same key with nothing mapped to it, and
+    /// evicting that slot then unmaps the later one. The only caller is
     /// [`shape_run_cached`]'s miss path, which has just proved the key absent.
-    fn store(&mut self, text: &str, glyphs: Vec<(usize, CacheKey)>) -> usize {
+    fn store(&mut self, style: FaceStyle, text: &str, glyphs: Vec<(usize, CacheKey)>) -> usize {
         let key: Arc<str> = Arc::from(text);
         let run = CachedRun {
             key: Arc::clone(&key),
+            style,
             glyphs,
             asked_for: false,
         };
@@ -722,7 +788,7 @@ impl RunShapeCache {
             slot
         };
 
-        self.at.insert(key, slot);
+        self.at[style.slot()].insert(key, slot);
         slot
     }
 
@@ -742,7 +808,8 @@ impl RunShapeCache {
                 continue;
             }
 
-            self.at.remove(&self.runs[slot].key);
+            let run = &self.runs[slot];
+            self.at[run.style.slot()].remove(&run.key);
             return slot;
         }
     }
@@ -996,7 +1063,17 @@ pub fn shape_words(font_system: &mut FontSystem, font_size: u32, text: &str) -> 
 
     text.split(' ')
         .filter(|word| !word.is_empty())
-        .map(|word| shape_run(&mut scratch, font_system, word, metrics, family).len())
+        .map(|word| {
+            shape_run(
+                &mut scratch,
+                font_system,
+                word,
+                metrics,
+                family,
+                FaceStyle::REGULAR,
+            )
+            .len()
+        })
         .sum()
 }
 
@@ -1027,8 +1104,15 @@ pub fn shape_words_cached(
     text.split(' ')
         .filter(|word| !word.is_empty())
         .map(|word| {
-            shape_run_cached(cache, word, |scratch| {
-                shape_run(scratch, font_system, word, metrics, family)
+            shape_run_cached(cache, FaceStyle::REGULAR, word, |scratch| {
+                shape_run(
+                    scratch,
+                    font_system,
+                    word,
+                    metrics,
+                    family,
+                    FaceStyle::REGULAR,
+                )
             })
             .len()
         })
@@ -1131,7 +1215,7 @@ mod tests {
         build_font_system, bundled_database, bundled_font_system_with_locale, font_covers,
         glyph_family, resolve_primary_family, resolve_primary_font, run_text_and_columns_into,
         shape_char, shape_family, shape_run, shape_run_cached, shape_words, substitution_rules,
-        CoveredSet, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, EMOJI_FAMILIES,
+        CoveredSet, FaceStyle, RunShapeCache, ShapeScratch, BUNDLED_FAMILY, EMOJI_FAMILIES,
         RUN_SHAPE_CACHE_CAP, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
@@ -1165,7 +1249,7 @@ mod tests {
             1.0,
             metrics,
             family,
-            Weight::NORMAL,
+            FaceStyle::REGULAR,
             &mut None,
         )
         .expect("normal glyph shapes");
@@ -1175,7 +1259,10 @@ mod tests {
             1.0,
             metrics,
             family,
-            Weight::BOLD,
+            FaceStyle {
+                bold: true,
+                italic: false,
+            },
             &mut None,
         )
         .expect("bold glyph shapes");
@@ -1290,7 +1377,7 @@ mod tests {
                 1.0,
                 metrics,
                 primary,
-                Weight::NORMAL,
+                FaceStyle::REGULAR,
                 &mut covered,
             )
             .is_some(),
@@ -1316,7 +1403,7 @@ mod tests {
             1.0,
             metrics,
             primary,
-            Weight::NORMAL,
+            FaceStyle::REGULAR,
             &mut None,
         );
 
@@ -1404,7 +1491,7 @@ mod tests {
                     1.0,
                     metrics,
                     jbm,
-                    Weight::NORMAL,
+                    FaceStyle::REGULAR,
                     &mut covered,
                 ) {
                     alone.push((offset, key));
@@ -1418,6 +1505,7 @@ mod tests {
                 text,
                 metrics,
                 jbm,
+                FaceStyle::REGULAR,
             );
             let changes = shaped != alone;
             ligated += usize::from(changes);
@@ -1448,6 +1536,7 @@ mod tests {
             "ab",
             metrics,
             jbm,
+            FaceStyle::REGULAR,
         )
         .iter()
         .map(|(offset, _)| *offset)
@@ -1464,6 +1553,7 @@ mod tests {
             "=",
             metrics,
             jbm,
+            FaceStyle::REGULAR,
         );
         let ligated = shape_run(
             &mut ShapeScratch::default(),
@@ -1471,6 +1561,7 @@ mod tests {
             "=>",
             metrics,
             jbm,
+            FaceStyle::REGULAR,
         );
         assert_eq!(alone.len(), 1, "a lone = shapes to one glyph");
         assert_ne!(
@@ -1500,6 +1591,7 @@ mod tests {
             "aaaa",
             metrics,
             Family::Name("JetBrains Mono"),
+            FaceStyle::REGULAR,
         );
         assert_eq!(shaped.len(), 4, "one glyph per character");
         assert!(
@@ -1525,6 +1617,7 @@ mod tests {
                 "a",
                 metrics,
                 Family::Name("JetBrains Mono"),
+                FaceStyle::REGULAR,
             );
             assert_eq!(
                 shaped[0].1.font_size_bits,
@@ -1554,6 +1647,7 @@ mod tests {
             "\u{e0b6}\u{e0b4}",
             metrics,
             Family::Name(SYMBOLS_FAMILY),
+            FaceStyle::REGULAR,
         );
         let offsets: Vec<usize> = shaped.iter().map(|(offset, _)| *offset).collect();
         assert_eq!(
@@ -1617,8 +1711,15 @@ mod tests {
         let jbm = Family::Name("JetBrains Mono");
 
         let mut cache = RunShapeCache::default();
-        let fresh = shape_run_cached(&mut cache, "==", |scratch| {
-            shape_run(scratch, &mut font_system, "==", metrics, jbm)
+        let fresh = shape_run_cached(&mut cache, FaceStyle::REGULAR, "==", |scratch| {
+            shape_run(
+                scratch,
+                &mut font_system,
+                "==",
+                metrics,
+                jbm,
+                FaceStyle::REGULAR,
+            )
         })
         .to_vec();
         assert_eq!(
@@ -1628,12 +1729,13 @@ mod tests {
                 &mut font_system,
                 "==",
                 metrics,
-                jbm
+                jbm,
+                FaceStyle::REGULAR,
             ),
             "the miss stores the same glyphs a direct shape produces"
         );
         assert_eq!(
-            (cache.at.len(), cache.runs.len()),
+            (cache.at[FaceStyle::REGULAR.slot()].len(), cache.runs.len()),
             (1, 1),
             "the miss shaped and stored one run"
         );
@@ -1646,10 +1748,18 @@ mod tests {
             "ab",
             metrics,
             jbm,
+            FaceStyle::REGULAR,
         );
-        cache.runs[cache.at["=="]].glyphs = poison.clone();
-        let hit = shape_run_cached(&mut cache, "==", |scratch| {
-            shape_run(scratch, &mut font_system, "==", metrics, jbm)
+        cache.runs[cache.at[FaceStyle::REGULAR.slot()]["=="]].glyphs = poison.clone();
+        let hit = shape_run_cached(&mut cache, FaceStyle::REGULAR, "==", |scratch| {
+            shape_run(
+                scratch,
+                &mut font_system,
+                "==",
+                metrics,
+                jbm,
+                FaceStyle::REGULAR,
+            )
         });
         assert_eq!(
             hit,
@@ -1657,7 +1767,7 @@ mod tests {
             "a hit returns the stored run, not a reshape"
         );
         assert_eq!(
-            (cache.at.len(), cache.runs.len()),
+            (cache.at[FaceStyle::REGULAR.slot()].len(), cache.runs.len()),
             (1, 1),
             "a hit adds no entry"
         );
@@ -1679,27 +1789,34 @@ mod tests {
 
         let mut cache = RunShapeCache::default();
         for index in 0..RUN_SHAPE_CACHE_CAP {
-            cache.store(&format!("run{index}"), Vec::new());
+            cache.store(FaceStyle::REGULAR, &format!("run{index}"), Vec::new());
         }
         assert_eq!(cache.runs.len(), RUN_SHAPE_CACHE_CAP, "the cache filled");
 
         // Ask for one run near the hand's start and leave its neighbour alone,
         // so the next sweep meets both and has to choose between them.
-        shape_run_cached(&mut cache, "run0", |scratch| {
-            shape_run(scratch, &mut font_system, "run0", metrics, jbm)
+        shape_run_cached(&mut cache, FaceStyle::REGULAR, "run0", |scratch| {
+            shape_run(
+                scratch,
+                &mut font_system,
+                "run0",
+                metrics,
+                jbm,
+                FaceStyle::REGULAR,
+            )
         });
 
-        cache.store("first new run", Vec::new());
+        cache.store(FaceStyle::REGULAR, "first new run", Vec::new());
         assert!(
-            cache.at.contains_key("run0"),
+            cache.at[FaceStyle::REGULAR.slot()].contains_key("run0"),
             "the run asked for since the hand last passed survives its sweep"
         );
         assert!(
-            !cache.at.contains_key("run1"),
+            !cache.at[FaceStyle::REGULAR.slot()].contains_key("run1"),
             "the untouched run behind it is the one evicted"
         );
         assert_eq!(
-            (cache.at.len(), cache.runs.len()),
+            (cache.at[FaceStyle::REGULAR.slot()].len(), cache.runs.len()),
             (RUN_SHAPE_CACHE_CAP, RUN_SHAPE_CACHE_CAP),
             "an insert past the cap replaces rather than grows"
         );
@@ -1707,16 +1824,61 @@ mod tests {
         // The survivor's second chance is spent, so the next sweep reaching it
         // takes it. Every later insert keeps the cache at its bound.
         for index in 0..RUN_SHAPE_CACHE_CAP {
-            cache.store(&format!("later{index}"), Vec::new());
+            cache.store(FaceStyle::REGULAR, &format!("later{index}"), Vec::new());
         }
         assert_eq!(
-            (cache.at.len(), cache.runs.len()),
+            (cache.at[FaceStyle::REGULAR.slot()].len(), cache.runs.len()),
             (RUN_SHAPE_CACHE_CAP, RUN_SHAPE_CACHE_CAP),
             "a stream of unique runs settles at the bound instead of growing"
         );
         assert!(
-            !cache.at.contains_key("run0"),
+            !cache.at[FaceStyle::REGULAR.slot()].contains_key("run0"),
             "a run nobody asks for again is evicted on a later lap"
+        );
+    }
+
+    /// One word shapes to other glyphs in bold, so each style caches its own
+    /// run of it, and evicting one style's run leaves the other's in place.
+    #[test]
+    fn each_style_caches_its_own_run_of_a_word() {
+        let mut font_system = bundled();
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+        let jbm = Family::Name("JetBrains Mono");
+        let bold = FaceStyle {
+            bold: true,
+            italic: false,
+        };
+
+        let mut cache = RunShapeCache::default();
+        let mut shaped = |style: FaceStyle| {
+            shape_run_cached(&mut cache, style, "ab", |scratch| {
+                shape_run(scratch, &mut font_system, "ab", metrics, jbm, style)
+            })
+            .to_vec()
+        };
+        let (heavy, regular) = (shaped(bold), shaped(FaceStyle::REGULAR));
+        assert_ne!(regular, heavy, "the bold run keys glyphs of its own");
+        assert_eq!(
+            (
+                cache.cached_glyphs_in(FaceStyle::REGULAR, "ab"),
+                cache.cached_glyphs_in(bold, "ab"),
+            ),
+            (Some(&regular[..]), Some(&heavy[..])),
+        );
+
+        // The bold run holds slot 0, where the hand starts, so the first sweep
+        // past the cap evicts it.
+        for index in 2..RUN_SHAPE_CACHE_CAP {
+            cache.store(FaceStyle::REGULAR, &format!("run{index}"), Vec::new());
+        }
+        cache.store(FaceStyle::REGULAR, "one past the cap", Vec::new());
+        assert_eq!(
+            (
+                cache.at[bold.slot()].contains_key("ab"),
+                cache.at[FaceStyle::REGULAR.slot()].contains_key("ab"),
+            ),
+            (false, true),
+            "the sweep unmapped the bold run and kept the regular one",
         );
     }
 

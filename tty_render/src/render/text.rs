@@ -18,10 +18,7 @@ use crate::{
     },
 };
 use bytemuck::{Pod, Zeroable};
-use cosmic_text::{
-    fontdb::{Database, Weight},
-    CacheKey, Family, Font, FontSystem, SwashCache,
-};
+use cosmic_text::{fontdb::Database, CacheKey, Family, Font, FontSystem, SwashCache};
 use rustc_hash::FxHashMap;
 use std::{mem, ops::Range, sync::Arc};
 use stoatty_term::{
@@ -457,15 +454,17 @@ struct SizedFace {
     /// mark beside a line of code stands as tall as its capitals.
     cap_height: f32,
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
-    /// alongside the integer cell scales.
-    shape_cache: FxHashMap<(char, u32, u16), Option<CacheKey>>,
-    /// Shaped glyphs of each ligature run, keyed by the run text, so a repainted
-    /// row reuses them instead of rebuilding a cosmic-text buffer and reshaping.
+    /// alongside the integer cell scales, and by the style the character
+    /// shapes in.
+    shape_cache: FxHashMap<(char, u32, font::FaceStyle), Option<CacheKey>>,
+    /// Shaped glyphs of each ligature run, keyed by the run text and its style,
+    /// so a repainted row reuses them instead of rebuilding a cosmic-text buffer
+    /// and reshaping.
     ///
-    /// Keyed on text alone because runs only group same-scale primary-covered
-    /// cells in the constant primary family, matching [`Self::shape_cache`]'s
-    /// family-blind invariant. Bounded, evicting the runs nothing has asked for
-    /// lately once it is full.
+    /// Keyed on text and style alone because runs only group same-scale
+    /// primary-covered cells of one style in the constant primary family,
+    /// matching [`Self::shape_cache`]'s family-blind invariant. Bounded,
+    /// evicting the runs nothing has asked for lately once it is full.
     run_shape_cache: RunShapeCache,
 }
 
@@ -2884,7 +2883,7 @@ impl TextPass {
             if ch == ' ' {
                 continue;
             }
-            let Some(key) = self.glyph_key(ch, scale, Weight::NORMAL) else {
+            let Some(key) = self.glyph_key(ch, scale, font::FaceStyle::REGULAR) else {
                 continue;
             };
             let Some(info) = self.atlas.get_or_insert(
@@ -3319,7 +3318,7 @@ impl TextPass {
                 if ch == ' ' {
                     continue;
                 }
-                let Some(key) = self.glyph_key(ch, scale, Weight::NORMAL) else {
+                let Some(key) = self.glyph_key(ch, scale, font::FaceStyle::REGULAR) else {
                     continue;
                 };
                 let Some(info) = self.atlas.get_or_insert(
@@ -3882,10 +3881,15 @@ impl TextPass {
                 let font_system = &mut self.font_system;
                 let metrics = self.face.metrics;
                 let primary = shaping.primary;
-                let shaped =
-                    font::shape_run_cached(&mut self.face.run_shape_cache, &run_text, |scratch| {
-                        font::shape_run(scratch, font_system, &run_text, metrics, primary)
-                    });
+                let style = cell_style(&cell);
+                let shaped = font::shape_run_cached(
+                    &mut self.face.run_shape_cache,
+                    style,
+                    &run_text,
+                    |scratch| {
+                        font::shape_run(scratch, font_system, &run_text, metrics, primary, style)
+                    },
+                );
 
                 let (fg, _) = cell.draw_colors();
                 for &(_, key) in shaped {
@@ -3969,10 +3973,23 @@ impl TextPass {
             let primary = shaping.primary;
             let reshapes = shaping.reshapes;
             let cells = &run;
-            let shaped =
-                font::shape_run_cached(&mut self.face.run_shape_cache, &run_text, |scratch| {
+            // Runs group only cells whose flags match, so the first cell names
+            // the style of every cell in the run.
+            let style = cell_style(&cell);
+            let shaped = font::shape_run_cached(
+                &mut self.face.run_shape_cache,
+                style,
+                &run_text,
+                |scratch| {
                     if reshapes(cells) {
-                        return font::shape_run(scratch, font_system, &run_text, metrics, primary);
+                        return font::shape_run(
+                            scratch,
+                            font_system,
+                            &run_text,
+                            metrics,
+                            primary,
+                            style,
+                        );
                     }
 
                     // No lookup the face turns on reaches any of these glyphs, so
@@ -3989,14 +4006,15 @@ impl TextPass {
                             primary,
                             ch,
                             1.0,
-                            Weight::NORMAL,
+                            style,
                         ) {
                             glyphs.push((offset, key));
                         }
                         offset += ch.len_utf8();
                     }
                     glyphs
-                });
+                },
+            );
             for &(offset, key) in shaped {
                 let Some(&glyph_col) = run_cols.get(offset) else {
                     continue;
@@ -4069,7 +4087,7 @@ impl TextPass {
             });
         }
 
-        let key = self.glyph_key(cell.ch, scale, Weight::NORMAL)?;
+        let key = self.glyph_key(cell.ch, scale, cell_style(cell))?;
         let info = self.atlas.get_or_insert(
             device,
             queue,
@@ -4110,10 +4128,9 @@ impl TextPass {
 
         for overlay in grid.overlays() {
             let scale = overlay.scale.max(1);
-            let weight = if overlay.bold {
-                Weight::BOLD
-            } else {
-                Weight::NORMAL
+            let style = font::FaceStyle {
+                bold: overlay.bold,
+                italic: false,
             };
             let mut content = OverlayContent::default();
 
@@ -4137,7 +4154,7 @@ impl TextPass {
                         continue;
                     }
 
-                    let Some(key) = self.glyph_key(ch, f32::from(scale), weight) else {
+                    let Some(key) = self.glyph_key(ch, f32::from(scale), style) else {
                         continue;
                     };
 
@@ -4172,10 +4189,10 @@ impl TextPass {
         groups
     }
 
-    /// The cached glyph cache key for `ch` at `scale`, shaping it on first use.
-    /// `None` for a character that produces no glyph. The key is distinct per
-    /// scale, so the atlas rasterizes each scale of a character separately.
-    fn glyph_key(&mut self, ch: char, scale: f32, weight: Weight) -> Option<CacheKey> {
+    /// The cached glyph cache key for `ch` at `scale` in `style`, shaping it on
+    /// first use. `None` for a character that produces no glyph. The key is
+    /// distinct per scale and style, so the atlas rasterizes each separately.
+    fn glyph_key(&mut self, ch: char, scale: f32, style: font::FaceStyle) -> Option<CacheKey> {
         glyph_key_in(
             &mut self.face.shape_cache,
             &mut self.font_system,
@@ -4184,7 +4201,7 @@ impl TextPass {
             font::shape_family(self.family.as_deref()),
             ch,
             scale,
-            weight,
+            style,
         )
     }
 }
@@ -4196,23 +4213,39 @@ impl TextPass {
 /// the borrows stay apart.
 #[allow(clippy::too_many_arguments)]
 fn glyph_key_in(
-    shape_cache: &mut FxHashMap<(char, u32, u16), Option<CacheKey>>,
+    shape_cache: &mut FxHashMap<(char, u32, font::FaceStyle), Option<CacheKey>>,
     font_system: &mut FontSystem,
     covered: &mut Option<font::CoveredSet>,
     metrics: CellMetrics,
     family: Family<'_>,
     ch: char,
     scale: f32,
-    weight: Weight,
+    style: font::FaceStyle,
 ) -> Option<CacheKey> {
-    let cache_key = (ch, scale.to_bits(), weight.0);
+    let cache_key = (ch, scale.to_bits(), style);
     if let Some(key) = shape_cache.get(&cache_key) {
         return *key;
     }
 
-    let key = font::shape_char(font_system, ch, scale, metrics, family, weight, covered);
+    let key = font::shape_char(font_system, ch, scale, metrics, family, style, covered);
     shape_cache.insert(cache_key, key);
     key
+}
+
+/// The style that `cell` shapes its text in, from its bold and italic
+/// attributes.
+///
+/// A cell-fill codepoint keeps the regular face whatever its attributes. Its
+/// quad stretches to the cell box, so a heavier or slanted glyph breaks its
+/// joins with the cells beside it.
+fn cell_style(cell: &Cell) -> font::FaceStyle {
+    if is_cell_fill(cell.ch) {
+        return font::FaceStyle::REGULAR;
+    }
+    font::FaceStyle {
+        bold: cell.flags.contains(Flags::BOLD),
+        italic: cell.flags.contains(Flags::ITALIC),
+    }
 }
 
 /// Whether the primary face could substitute inside a run, asked of the run's

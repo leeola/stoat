@@ -20,7 +20,7 @@ use stoatty_protocol::command::{
 };
 use stoatty_term::{
     grid::{
-        whole_row, Cell, Grid, MarkId, Overlay, Rgb, Scale, ScrollRegion, Sketch, TextRun,
+        whole_row, Cell, Flags, Grid, MarkId, Overlay, Rgb, Scale, ScrollRegion, Sketch, TextRun,
         UnderlineStyle,
     },
     term::Damage,
@@ -1089,6 +1089,74 @@ fn a_combining_mark_draws_with_its_base() {
         "the precomposed accent"
     );
     assert_ne!(marked, drawn('e', MarkId::NONE), "not the bare letter");
+}
+
+/// A cell's bold and italic attributes pick the face its text shapes in, on
+/// every path a cell's glyph takes. Bold keys the regular face along its
+/// weight axis, and italic keys the italic face. A box-drawing cell keeps the
+/// regular face whatever its attributes, so the box lines it joins stay
+/// straight.
+#[test]
+fn a_cells_bold_and_italic_attributes_pick_its_face() {
+    let (device, queue, mut pass) = bundled_text_pass();
+    let mut grid = Grid::new(1, 6);
+    let cells = [
+        ('a', MarkId::NONE, Flags::empty()),
+        ('a', MarkId::NONE, Flags::BOLD),
+        ('a', MarkId::NONE, Flags::ITALIC),
+        ('a', MarkId::NONE, Flags::BOLD | Flags::ITALIC),
+        ('\u{2500}', MarkId::NONE, Flags::BOLD | Flags::ITALIC),
+        ('e', MarkId::intern(&['\u{301}']), Flags::ITALIC),
+    ];
+    for (col, (ch, marks, flags)) in cells.into_iter().enumerate() {
+        let cell = grid.get_mut(0, col);
+        (cell.ch, cell.marks, cell.flags) = (ch, marks, flags);
+    }
+
+    // Each column as whether its glyph keys the regular face's font, and the
+    // weight the glyph rasterizes at.
+    let faces = |pass: &mut TextPass, reshapes: bool| {
+        let covers = |_: char| true;
+        let reshapes = move |_: &[(usize, char)]| reshapes;
+        let shaping = RowShaping {
+            primary: font::shape_family(Some("JetBrains Mono")),
+            covers: &covers,
+            reshapes: &reshapes,
+            cursor_cell: None,
+        };
+        let mut pending = Vec::new();
+        pass.rasterize_row(&device, &queue, &grid, 0, &shaping, &mut pending);
+        let keys: Vec<_> = pending
+            .iter()
+            .filter_map(|glyph| match glyph.source {
+                GlyphSource::Font(key) => Some((glyph.col, key)),
+                GlyphSource::Procedural { .. } => None,
+            })
+            .collect();
+        keys.iter()
+            .map(|&(col, key)| (col, key.font_id == keys[0].1.font_id, key.font_weight.0))
+            .collect::<Vec<_>>()
+    };
+
+    let expected = [
+        (0, true, 400),
+        (1, true, 700),
+        (2, false, 400),
+        (3, false, 700),
+        (4, true, 400),
+        (5, false, 400),
+    ];
+    assert_eq!(faces(&mut pass, true), expected, "runs through the shaper");
+    // The shaper's runs answer every later lookup of the same text and style,
+    // so the per-character case starts from an empty run cache.
+    pass.face.run_shape_cache = font::RunShapeCache::default();
+    assert_eq!(
+        faces(&mut pass, false),
+        expected,
+        "runs from character keys"
+    );
+    pass.ligatures = false;
+    assert_eq!(faces(&mut pass, true), expected, "cells shaped one by one");
 }
 
 /// A wide emoji draws from a color face, so its glyph lands in the color atlas
