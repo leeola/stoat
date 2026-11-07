@@ -1,20 +1,23 @@
 use crate::{
     app::{SeparatorAxis, SplitSeparator},
     commit_list::{CommitListState, CommitRefs, Preview},
-    commit_picker::age_label,
+    commit_picker::{age_label, age_words},
     diff_map::{BaseHighlights, ChangeKind, ProseChange},
     display_map::DEFAULT_TAB_SIZE,
-    host::{CommitFileChange, CommitFileChangeKind},
+    host::{CommitFileChange, CommitFileChangeKind, CommitInfo},
     pane::Pane,
     render::{
         commit_picker::{graph_width, paint_commit_graph, tip_colors, GraphPaint},
         layout::split_pane_status,
         paint::{blend, render_empty_num, render_side_num, render_side_text, style_rgb},
         pane::{render_overlay_status, ScreenSubject},
+        picker::line_strong,
         review::{
             paint_base_row, resolve_diff_tints, DiffColumns, DiffDials, DiffLayout, DiffTints,
         },
-        text::{truncate_to_cols, write_str},
+        text::{
+            clip_to_width, truncate_to_cols, wrap_text, write_cell, write_str, write_str_clipped,
+        },
         FrameCtx,
     },
     review::{ReviewRow, ReviewSide},
@@ -125,6 +128,34 @@ const RING_PERCENT: u16 = 40;
 
 /// Thickness of a badge's ring, in sixteenths of a cell.
 const RING_STROKE: u16 = 1;
+
+/// Cells the detail pane's text rows stand in from each side.
+const DETAIL_INSET: u16 = 1;
+
+/// Cells between the pieces of the detail header's meta row.
+const META_GAP: u16 = 1;
+
+/// Rows the detail header gives a commit's message body at most.
+///
+/// Enough for a short paragraph, while a long body leaves the files table and
+/// the diff their room.
+const BODY_ROWS: usize = 4;
+
+/// Cells a file row's stat bar takes inside stoatty.
+const STAT_BAR_CELLS: u16 = 7;
+
+/// Height of a stat bar in sixteenths of a cell, centered in its row.
+const STAT_BAR_HEIGHT: u16 = 4;
+
+/// The keys the commits view's preview answers, each a bound key and the word
+/// for what it does.
+///
+/// Written out rather than read from the keymap, as a modal's footer hints
+/// are, so the label names the default bindings.
+const PREVIEW_HINTS: [(&str, &str); 2] = [("C-d/C-u", "scroll"), ("Enter", "review")];
+
+/// The text between two of the preview's hints.
+const HINT_SEPARATOR: &str = " \u{b7} ";
 
 /// The commit list's rectangle within an overlay pane, or `None` when the pane
 /// is too small. Shared by the renderer and the smooth-scroll emit so the pooled
@@ -561,6 +592,11 @@ fn write_right(buf: &mut Buffer, end: u16, y: u16, width: u16, text: &str, style
     write_str(buf, end.saturating_sub(cols), y, text, style);
 }
 
+/// Paint the selected commit's header, files table, and diff preview into
+/// `area`.
+///
+/// A label row names the file the preview stands on. The preview takes the
+/// pane's full width, and the rows above it stand one cell in from each side.
 fn render_commit_detail_pane(
     state: &mut CommitListState,
     workspace_root: &Path,
@@ -571,116 +607,493 @@ fn render_commit_detail_pane(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let dim = theme.get(crate::theme::scope::VCS_COMMIT_METADATA);
-    let Some(sha) = state.selected_sha().map(str::to_owned) else {
+    let Some(commit) = state.commits.get(state.selected) else {
         write_str(buf, area.x, area.y, "no selection", dim);
         return;
     };
+    let sha = commit.sha.clone();
+    let text_area = Rect::new(
+        area.x + DETAIL_INSET,
+        area.y,
+        area.width.saturating_sub(2 * DETAIL_INSET),
+        area.height,
+    );
+    let body = state.bodies.get(&sha).map(String::as_str);
+    let header_rows = render_commit_header(
+        commit,
+        body,
+        &state.refs,
+        state.now_epoch,
+        theme,
+        text_area,
+        buf,
+    );
 
-    let summary_rows = match state.summaries.get(&sha) {
-        Some(changes) => render_commit_summary(changes, workspace_root, theme, area, buf),
-        None => {
-            write_str(buf, area.x, area.y, "loading summary...", dim);
-            1
-        },
-    };
-
-    let preview_y = area.y + summary_rows as u16 + 1;
-    if preview_y >= area.y + area.height {
+    let end_y = area.y + area.height;
+    let files_y = area.y + header_rows + 1;
+    if files_y >= end_y {
         return;
     }
+    let changes = state.summaries.get(&sha);
+    let files_rows = changes
+        .map_or(1, |changes| 1 + changes.len())
+        .min(usize::from(end_y - files_y)) as u16;
+    let label_y = files_y + files_rows + 1;
     let preview_area = Rect::new(
         area.x,
-        preview_y,
+        label_y + 1,
         area.width,
-        area.y + area.height - preview_y,
+        end_y.saturating_sub(label_y + 1),
     );
-    match state.preview_sessions.get(&sha) {
-        Preview::Built(document) => {
-            // Clamped here, where the diff's row count and the pane's height
-            // are both known. Written back so the wheel and the keys step from
-            // the offset actually painted rather than past the last page.
-            let document = Arc::clone(document);
-            state.preview_scroll = crate::render::commit_picker::clamped_preview_scroll(
-                state.preview_scroll,
-                &document,
-                preview_area.height,
-            );
-            render_commit_preview(
-                &document,
-                theme,
-                preview_area,
-                state.preview_scroll,
-                dials,
-                buf,
-                scene,
-            )
-        },
-        Preview::Empty => {
-            if preview_area.height > 0 {
-                write_str(buf, preview_area.x, preview_area.y, "no changes", dim);
-            }
-        },
-        Preview::Unbuilt => {
-            if preview_area.height > 0 {
-                write_str(
-                    buf,
-                    preview_area.x,
-                    preview_area.y,
-                    "loading preview...",
-                    dim,
-                );
-            }
-        },
+
+    let preview = match state.preview_sessions.get(&sha) {
+        Preview::Built(document) => Some(Some(Arc::clone(document))),
+        Preview::Empty => Some(None),
+        Preview::Unbuilt => None,
+    };
+    if let Some(Some(document)) = &preview {
+        // Clamped here, where the diff's row count and the pane's height
+        // are both known. Written back so the wheel and the keys step from
+        // the offset actually painted rather than past the last page.
+        state.preview_scroll = crate::render::commit_picker::clamped_preview_scroll(
+            state.preview_scroll,
+            document,
+            preview_area.height,
+        );
+    }
+    let current = match &preview {
+        Some(Some(document)) => file_at_row(document, state.preview_scroll),
+        _ => None,
+    };
+
+    let files_area = Rect::new(area.x, files_y, area.width, files_rows);
+    match changes {
+        Some(changes) => render_commit_files(
+            changes,
+            current,
+            workspace_root,
+            theme,
+            files_area,
+            buf,
+            &mut *scene,
+        ),
+        None => write_str(buf, text_area.x, files_y, "loading summary...", dim),
+    }
+
+    if label_y >= end_y {
+        return;
+    }
+    let label = Rect::new(text_area.x, label_y, text_area.width, 1);
+    render_preview_label(current, theme, label, buf);
+    if preview_area.height == 0 {
+        return;
+    }
+    match preview {
+        Some(Some(document)) => render_commit_preview(
+            &document,
+            theme,
+            preview_area,
+            state.preview_scroll,
+            dials,
+            buf,
+            scene,
+        ),
+        Some(None) => write_str(buf, text_area.x, preview_area.y, "no changes", dim),
+        None => write_str(buf, text_area.x, preview_area.y, "loading preview...", dim),
     }
 }
 
-fn render_commit_summary(
+/// Paint the header of `commit` into `area`, and return the rows it took.
+///
+/// The first row is the summary in bold, and the second its meta row, which
+/// [`paint_commit_meta`] lays out. The message `body` follows in
+/// `ui.text.dim`, word-wrapped into at most [`BODY_ROWS`] rows.
+fn render_commit_header(
+    commit: &CommitInfo,
+    body: Option<&str>,
+    refs: &CommitRefs,
+    now_epoch: i64,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    buf: &mut Buffer,
+) -> u16 {
+    use crate::theme::scope as s;
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+    let end_x = area.x + area.width;
+    let bold = theme.get(s::UI_TEXT).add_modifier(Modifier::BOLD);
+    write_str_clipped(buf, area.x, area.y, &commit.summary, bold, end_x);
+    if area.height == 1 {
+        return 1;
+    }
+
+    let meta = Rect::new(area.x, area.y + 1, area.width, 1);
+    paint_commit_meta(commit, refs, now_epoch, theme, meta, buf);
+
+    let room = usize::from(area.height - 2);
+    let lines = body.map_or_else(Vec::new, |body| body_rows(body, usize::from(area.width)));
+    let dim = theme.get(s::UI_TEXT_DIM);
+    for (row, line) in lines.iter().take(room).enumerate() {
+        write_str_clipped(buf, area.x, area.y + 2 + row as u16, line, dim, end_x);
+    }
+    2 + lines.len().min(room) as u16
+}
+
+/// Paint the meta row of `commit` into `row`.
+///
+/// The row reads the short sha, the author, and the age in words, then a
+/// divider and a chip per parent. A chip reads the parent's number, its short
+/// sha, and the first local branch that points at it. The first parent's chip
+/// takes `vcs.commit.parent` and the rest `vcs.commit.parent.merged`.
+///
+/// A chip that does not fit stays off the row with every chip after it. A root
+/// commit has no parent, so its row ends at the age.
+fn paint_commit_meta(
+    commit: &CommitInfo,
+    refs: &CommitRefs,
+    now_epoch: i64,
+    theme: &crate::theme::Theme,
+    row: Rect,
+    buf: &mut Buffer,
+) {
+    use crate::theme::scope as s;
+    let end_x = row.x + row.width;
+    let meta = theme.get(s::VCS_COMMIT_METADATA);
+    let age = age_words(now_epoch, commit.time);
+
+    let mut x = row.x;
+    for (text, style) in [
+        (commit.short_sha.as_str(), theme.get(s::VCS_COMMIT_SHA)),
+        (commit.author_name.as_str(), meta),
+        (age.as_str(), meta),
+    ] {
+        write_str_clipped(buf, x, row.y, text, style, end_x);
+        x = x.saturating_add(text.chars().count() as u16 + META_GAP);
+    }
+    if commit.parents.is_empty() {
+        return;
+    }
+
+    let divider = line_strong(theme).map_or(meta, |[r, g, b]| Style::new().fg(Color::Rgb(r, g, b)));
+    write_str_clipped(buf, x, row.y, "\u{2502}", divider, end_x);
+    x = x.saturating_add(1 + META_GAP);
+    let label = match commit.parents.len() {
+        1 => "parent",
+        _ => "parents",
+    };
+    write_str_clipped(buf, x, row.y, label, meta, end_x);
+    x = x.saturating_add(label.len() as u16 + META_GAP);
+
+    let short_len = commit.short_sha.len();
+    for (index, parent) in commit.parents.iter().enumerate() {
+        let short = &parent[..short_len.min(parent.len())];
+        let chip = match refs.local.get(parent).and_then(|names| names.first()) {
+            Some(branch) => format!("{} \u{b7} {short} {branch}", index + 1),
+            None => format!("{} \u{b7} {short}", index + 1),
+        };
+        let width = chip.chars().count() as u16 + 2;
+        if x.saturating_add(width) > end_x {
+            break;
+        }
+
+        let style = match index {
+            0 => theme.get(s::VCS_COMMIT_PARENT),
+            _ => theme.get(s::VCS_COMMIT_PARENT_MERGED),
+        };
+        for col in x..x + width {
+            buf[(col, row.y)].set_char(' ').set_style(style);
+        }
+        write_str(buf, x + 1, row.y, &chip, style);
+        x += width + META_GAP;
+    }
+}
+
+/// The message `body` word-wrapped to `width` cells, in at most [`BODY_ROWS`]
+/// rows.
+///
+/// Its line breaks reflow, since its author wrapped it for some other width. A
+/// body that needs more rows ends its last row in an ellipsis.
+fn body_rows(body: &str, width: usize) -> Vec<String> {
+    let mut rows = wrap_text(body, width);
+    if rows.len() <= BODY_ROWS {
+        return rows;
+    }
+
+    rows.truncate(BODY_ROWS);
+    if let Some(last) = rows.last_mut() {
+        let kept = clip_to_width(last, width.saturating_sub(1)).trim_end();
+        *last = format!("{kept}\u{2026}");
+    }
+    rows
+}
+
+/// Paint `changes` into `area` as the commit's files table.
+///
+/// The header row reads `files` and `vs parent`, with the commit's added and
+/// deleted counts at the right. A row per file follows while rows remain.
+///
+/// A file row reads its kind letter in the diff
+/// color of its change, its directory in `ui.text.muted` and its name, then its
+/// counts, in columns as wide as the widest count. Inside stoatty a stat bar
+/// closes the row. The row of `current`, the file the preview stands on, fills
+/// `ui.list.current` from edge to edge.
+fn render_commit_files(
     changes: &[CommitFileChange],
+    current: Option<&str>,
     workspace_root: &Path,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
-) -> usize {
+    scene: &mut stoat_widgets::ApcScene,
+) {
     use crate::theme::scope as s;
-    let header_style = theme.get(s::UI_TEXT).add_modifier(Modifier::BOLD);
-    let path_style = theme.get(s::UI_TEXT);
-    let add_style = theme.get(s::DIFF_ADDED);
-    let del_style = theme.get(s::DIFF_DELETED);
-
-    let total_add: u32 = changes.iter().map(|c| c.additions).sum();
-    let total_del: u32 = changes.iter().map(|c| c.deletions).sum();
-    let header = format!(
-        "{} file{}, +{total_add} -{total_del}",
-        changes.len(),
-        if changes.len() == 1 { "" } else { "s" }
-    );
-    write_str(buf, area.x, area.y, &header, header_style);
-
-    let mut rows_used = 1;
-    let max_rows = (area.height as usize).saturating_sub(1);
-    for (i, change) in changes.iter().take(max_rows).enumerate() {
-        let y = area.y + 1 + i as u16;
-        let kind_char = match change.kind {
-            CommitFileChangeKind::Added => 'A',
-            CommitFileChangeKind::Modified => 'M',
-            CommitFileChangeKind::Deleted => 'D',
-            CommitFileChangeKind::Renamed => 'R',
-            CommitFileChangeKind::TypeChange => 'T',
-        };
-        write_str(buf, area.x, y, &format!("{kind_char} "), path_style);
-        let rel = crate::paths::display_relative(&change.rel_path, workspace_root);
-        let path_width = area.width.saturating_sub(2 + 12) as usize;
-        let rel = truncate_to_cols(&rel, path_width);
-        write_str(buf, area.x + 2, y, &rel, path_style);
-
-        let stats = format!(" +{} -{}", change.additions, change.deletions);
-        let stats_x = area.x + area.width.saturating_sub(stats.len() as u16);
-        let split = stats.find('-').unwrap_or(stats.len());
-        write_str(buf, stats_x, y, &stats[..split], add_style);
-        write_str(buf, stats_x + split as u16, y, &stats[split..], del_style);
-        rows_used += 1;
+    if area.height == 0 || area.width <= 2 * DETAIL_INSET {
+        return;
     }
-    rows_used
+    let x0 = area.x + DETAIL_INSET;
+    let end_x = area.x + area.width - DETAIL_INSET;
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    let added = theme.get(s::DIFF_ADDED);
+    let deleted = theme.get(s::DIFF_DELETED);
+
+    let bold = theme.get(s::UI_TEXT).add_modifier(Modifier::BOLD);
+    write_str_clipped(buf, x0, area.y, "files", bold, end_x);
+    write_str_clipped(buf, x0 + 6, area.y, "vs parent", muted, end_x);
+    let total_add = format!("+{}", changes.iter().map(|c| c.additions).sum::<u32>());
+    let total_del = format!(
+        "\u{2212}{}",
+        changes.iter().map(|c| c.deletions).sum::<u32>()
+    );
+    let del_x = end_x.saturating_sub(total_del.chars().count() as u16);
+    let add_x = del_x.saturating_sub(total_add.chars().count() as u16 + 1);
+    if add_x > x0 + 6 + "vs parent".len() as u16 {
+        write_str(buf, add_x, area.y, &total_add, added);
+        write_str(buf, del_x, area.y, &total_del, deleted);
+    }
+
+    let count_cols = |count: fn(&CommitFileChange) -> u32| {
+        changes
+            .iter()
+            .map(|change| {
+                count(change)
+                    .checked_ilog10()
+                    .map_or(1, |log| log as u16 + 1)
+                    + 1
+            })
+            .max()
+            .unwrap_or(2)
+    };
+    let (add_cols, del_cols) = (count_cols(|c| c.additions), count_cols(|c| c.deletions));
+    let bar_cols = match scene.live() {
+        true => STAT_BAR_CELLS + 1,
+        false => 0,
+    };
+    let del_end = end_x.saturating_sub(bar_cols);
+    let add_end = del_end.saturating_sub(del_cols + 1);
+    let path_end = add_end.saturating_sub(add_cols + 1);
+    let largest = changes
+        .iter()
+        .map(|change| change.additions + change.deletions)
+        .max()
+        .unwrap_or(0);
+    let current_style = theme.get(s::UI_LIST_CURRENT);
+    let text = theme.get(s::UI_TEXT);
+
+    for (index, change) in changes
+        .iter()
+        .take(usize::from(area.height - 1))
+        .enumerate()
+    {
+        let y = area.y + 1 + index as u16;
+        if current.is_some_and(|path| Path::new(path) == change.rel_path) {
+            for col in area.x..area.x + area.width {
+                buf[(col, y)].set_style(current_style);
+            }
+        }
+
+        let (kind, kind_scope) = kind_mark(change.kind);
+        write_cell(buf, x0, y, kind, theme.get(kind_scope));
+        let path = crate::paths::display_relative(&change.rel_path, workspace_root);
+        paint_file_path(buf, x0 + 2, path_end, y, &path, muted, text);
+
+        let additions = format!("+{}", change.additions);
+        write_right(buf, add_end, y, add_cols, &additions, added);
+        let deletions = format!("\u{2212}{}", change.deletions);
+        write_right(buf, del_end, y, del_cols, &deletions, deleted);
+        if bar_cols > 0 {
+            let cells = Rect::new(end_x - STAT_BAR_CELLS, y, STAT_BAR_CELLS, 1);
+            stat_bar(cells, change, largest, theme, buf, &mut *scene);
+        }
+    }
+}
+
+/// The letter that marks a file's kind of change, and the diff scope it paints
+/// in.
+fn kind_mark(kind: CommitFileChangeKind) -> (char, &'static str) {
+    use crate::theme::scope as s;
+    match kind {
+        CommitFileChangeKind::Added => ('A', s::DIFF_ADDED),
+        CommitFileChangeKind::Modified => ('M', s::DIFF_MODIFIED),
+        CommitFileChangeKind::Deleted => ('D', s::DIFF_DELETED),
+        CommitFileChangeKind::Renamed => ('R', s::DIFF_MOVED),
+        CommitFileChangeKind::TypeChange => ('T', s::DIFF_MODIFIED),
+    }
+}
+
+/// Paint `path` in row `y` from column `x` up to `end`, its directory in
+/// `dir_style` and its file name in `name_style`.
+///
+/// A path wider than the room gives up the front of its directory to an
+/// ellipsis, so the file name stays whole. A name wider than the room alone is
+/// cut at its end.
+fn paint_file_path(
+    buf: &mut Buffer,
+    x: u16,
+    end: u16,
+    y: u16,
+    path: &str,
+    dir_style: Style,
+    name_style: Style,
+) {
+    let room = usize::from(end.saturating_sub(x));
+    if room == 0 {
+        return;
+    }
+    let (dir, name) = match path.rfind('/') {
+        Some(slash) => path.split_at(slash + 1),
+        None => ("", path),
+    };
+    let (dir_cols, name_cols) = (dir.chars().count(), name.chars().count());
+
+    if dir_cols + name_cols <= room {
+        write_str(buf, x, y, dir, dir_style);
+        write_str(buf, x + dir_cols as u16, y, name, name_style);
+        return;
+    }
+    if name_cols >= room {
+        write_str_clipped(buf, x, y, name, name_style, end);
+        return;
+    }
+
+    let kept = room - 1 - name_cols;
+    let tail = dir
+        .char_indices()
+        .nth(dir_cols - kept)
+        .map_or("", |(byte, _)| &dir[byte..]);
+    write_cell(buf, x, y, '\u{2026}', dir_style);
+    write_str(buf, x + 1, y, tail, dir_style);
+    write_str(buf, x + 1 + kept as u16, y, name, name_style);
+}
+
+/// Draw a file row's stat bar over `cells`.
+///
+/// A track fills `ui.divider`, and the added and deleted shares fill over it
+/// from the left, each the [`stat_share`] of its count against `largest`, the
+/// largest change in the commit.
+fn stat_bar(
+    cells: Rect,
+    change: &CommitFileChange,
+    largest: u32,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    use crate::theme::scope as s;
+    let span = cells.width * 16;
+    let added = stat_share(change.additions, largest, span);
+    let deleted = stat_share(change.deletions, largest, span).min(span - added);
+
+    let y = ((16 - STAT_BAR_HEIGHT) / 2) as i16;
+    for (x, width, scope) in [
+        (0, span, s::UI_DIVIDER),
+        (0, added, s::DIFF_ADDED),
+        (added, deleted, s::DIFF_DELETED),
+    ] {
+        let Some(color) = style_rgb(theme.get(scope).fg).filter(|_| width > 0) else {
+            continue;
+        };
+        Bar {
+            x: x as i16,
+            y,
+            width,
+            height: STAT_BAR_HEIGHT,
+            color,
+        }
+        .render(cells, buf, scene);
+    }
+}
+
+/// The sixteenths of a `span` wide stat bar that `count` changed lines fill,
+/// rounded, in proportion to `largest`.
+///
+/// The commit's largest change fills the whole span. A nonzero count keeps at
+/// least a sixteenth, so a one-line change still shows beside a large one.
+fn stat_share(count: u32, largest: u32, span: u16) -> u16 {
+    if count == 0 {
+        return 0;
+    }
+    let scaled =
+        (u64::from(count) * u64::from(span) + u64::from(largest) / 2) / u64::from(largest.max(1));
+    (scaled.min(u64::from(span)) as u16).max(1)
+}
+
+/// Paint the preview's label row into `row`.
+///
+/// `preview` leads in bold, then `path`, the file the preview stands on, in
+/// `ui.text.muted`. The preview's keys close the row at the right, each key in
+/// `ui.key_label` and its word in `ui.text.muted`, where they clear the path.
+fn render_preview_label(
+    path: Option<&str>,
+    theme: &crate::theme::Theme,
+    row: Rect,
+    buf: &mut Buffer,
+) {
+    use crate::theme::scope as s;
+    let end_x = row.x + row.width;
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    let bold = theme.get(s::UI_TEXT).add_modifier(Modifier::BOLD);
+    write_str_clipped(buf, row.x, row.y, "preview", bold, end_x);
+    let path = path.unwrap_or_default();
+    let path_x = row.x + "preview".len() as u16 + META_GAP;
+    write_str_clipped(buf, path_x, row.y, path, muted, end_x);
+
+    let hints_cols: usize = PREVIEW_HINTS
+        .iter()
+        .map(|(key, word)| key.len() + 1 + word.len())
+        .sum::<usize>()
+        + HINT_SEPARATOR.chars().count() * (PREVIEW_HINTS.len() - 1);
+    let hints_x = end_x.saturating_sub(hints_cols as u16);
+    if hints_x <= path_x + path.chars().count() as u16 {
+        return;
+    }
+
+    let key_style = theme.get(s::UI_KEY_LABEL);
+    let mut x = hints_x;
+    for (index, (key, word)) in PREVIEW_HINTS.iter().enumerate() {
+        if index > 0 {
+            write_str(buf, x, row.y, HINT_SEPARATOR, muted);
+            x += HINT_SEPARATOR.chars().count() as u16;
+        }
+        write_str(buf, x, row.y, key, key_style);
+        write_str(buf, x + key.len() as u16 + 1, row.y, word, muted);
+        x += (key.len() + 1 + word.len()) as u16;
+    }
+}
+
+/// The path of the file that holds row `row` of `doc`'s preview, counting the
+/// rows [`preview_row_count`] counts, or `None` past the preview's last row.
+fn file_at_row(doc: &DiffDocument, row: usize) -> Option<&str> {
+    let mut end = 0;
+    doc.files.iter().find_map(|file| {
+        end += file
+            .chunks
+            .iter()
+            .filter_map(|chunk_id| doc.chunks.get(chunk_id))
+            .map(|chunk| 1 + chunk.hunk.rows.len())
+            .sum::<usize>();
+        (row < end).then_some(file.rel_path.as_str())
+    })
 }
 
 /// Rows [`render_commit_preview`] would paint for `session` in full, counting
@@ -1103,8 +1516,10 @@ pub(crate) fn render_commit_preview(
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_list_width, initials, render_commit_preview, row_badges, PreviewDials,
-        MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT,
+        body_rows, commit_list_width, commits_detail_rect, file_at_row, initials, paint_file_path,
+        preview_row_count, render_commit_preview, render_preview_label, row_badges, stat_share,
+        PreviewDials, DETAIL_INSET, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT,
+        STAT_BAR_CELLS, STAT_BAR_HEIGHT,
     };
     use crate::{
         app::Stoat,
@@ -1116,12 +1531,13 @@ mod tests {
         },
         review::ReviewFileInput,
         review_session::DiffDocument,
+        test_harness::TestHarness,
         theme::{scope, Theme},
     };
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
-        style::{Color, Modifier},
+        style::{Color, Modifier, Style},
     };
     use std::{
         collections::HashMap,
@@ -1534,6 +1950,214 @@ mod tests {
             ),
             (gap([0xff, 0x00, 0x00]), gap([0xff, 0xff, 0x00])),
             "the base side takes deleted whole and the live side modified"
+        );
+    }
+
+    #[test]
+    fn a_body_reflows_and_a_cut_one_ends_in_an_ellipsis() {
+        assert_eq!(
+            [
+                body_rows("one two\nthree", 9),
+                body_rows("a b c d e f g h i j", 3),
+            ],
+            [
+                vec!["one two", "three"],
+                vec!["a b", "c d", "e f", "g\u{2026}"],
+            ],
+        );
+    }
+
+    #[test]
+    fn a_stat_share_scales_to_the_largest_change_and_keeps_a_sixteenth() {
+        assert_eq!(
+            [(0, 4), (4, 4), (1, 4), (1, 300)]
+                .map(|(count, largest)| stat_share(count, largest, 112)),
+            [0, 112, 28, 1],
+        );
+    }
+
+    #[test]
+    fn a_long_path_gives_up_the_front_of_its_directory() {
+        let paint = |width: u16| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+            let path = "stoat/src/render/commits.rs";
+            paint_file_path(&mut buf, 0, width, 0, path, Style::new(), Style::new());
+            row_text(&buf)
+        };
+        assert_eq!(
+            [paint(30), paint(12), paint(8)],
+            [
+                "stoat/src/render/commits.rs",
+                "\u{2026}/commits.rs",
+                "commits."
+            ],
+        );
+    }
+
+    #[test]
+    fn the_label_drops_its_keys_where_they_would_cover_the_path() {
+        let label = |width: u16| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, width, 1));
+            let row = Rect::new(0, 0, width, 1);
+            render_preview_label(Some("src/a.rs"), &Theme::empty(), row, &mut buf);
+            row_text(&buf)
+        };
+        assert_eq!(
+            [label(50), label(30)],
+            [
+                format!(
+                    "{:<21}C-d/C-u scroll \u{b7} Enter review",
+                    "preview src/a.rs"
+                ),
+                "preview src/a.rs".to_string(),
+            ],
+        );
+    }
+
+    /// The first row of `buf` as text, its trailing blanks trimmed.
+    fn row_text(buf: &Buffer) -> String {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
+        row.trim_end().to_string()
+    }
+
+    #[test]
+    fn each_preview_row_belongs_to_the_file_whose_rows_hold_it() {
+        let input = |name: &str| ReviewFileInput {
+            path: PathBuf::from(format!("/w/{name}")),
+            rel_path: name.into(),
+            language: None,
+            base_text: Arc::new("x\n".to_string()),
+            buffer_text: Arc::new("y\nz\n".to_string()),
+        };
+        let doc_of = |names: &[&str]| {
+            let mut doc = DiffDocument::default();
+            doc.add_files(names.iter().map(|name| input(name)).collect());
+            doc
+        };
+        let doc = doc_of(&["a.rs", "b.rs"]);
+        let first = preview_row_count(&doc_of(&["a.rs"]));
+
+        assert_eq!(
+            [0, first - 1, first, preview_row_count(&doc)].map(|row| file_at_row(&doc, row)),
+            [Some("a.rs"), Some("a.rs"), Some("b.rs"), None],
+        );
+    }
+
+    /// The files table marks the file the preview stands on and the label names
+    /// it, so a scroll into the next file moves both.
+    #[test]
+    fn the_previewed_file_follows_the_preview_scroll() {
+        let mut h = Stoat::test();
+        h.resize(120, 16);
+        let lines = |tag: &str| -> String { (0..10).map(|n| format!("{tag} {n}\n")).collect() };
+        let (a, b) = (lines("a"), lines("b"));
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message(
+                "a1000000",
+                "feat: root",
+                &[("src/a.rs", ""), ("src/b.rs", "")],
+            )
+            .commit_with_parent_message(
+                "b2000000",
+                "a1000000",
+                "feat: grow",
+                &[("src/a.rs", &a), ("src/b.rs", &b)],
+            );
+        h.open_commits("/repo");
+
+        let marks = |h: &mut TestHarness| {
+            h.snapshot();
+            let (buf, text) = (h.rendered_buffer(), h.rendered_text());
+            let (col, row) = cell_of(&text, "src/a.rs");
+            let raised = h.stoat.theme.get(scope::UI_LIST_CURRENT).bg;
+            let current = [row, row + 1].map(|y| buf[(col, y)].bg == raised.unwrap_or_default());
+            let label = text
+                .lines()
+                .find(|line| line.contains("C-d/C-u"))
+                .and_then(|line| line.split('\u{2502}').nth(1))
+                .and_then(|label| label.split_whitespace().nth(1))
+                .unwrap_or_default()
+                .to_string();
+            (current, label)
+        };
+        let top = marks(&mut h);
+        if let Some(list) = h.stoat.active_workspace_mut().focused_commits_mut() {
+            list.preview_scroll = 11;
+        }
+        let scrolled = marks(&mut h);
+
+        assert_eq!(
+            [top, scrolled],
+            [
+                ([true, false], "src/a.rs".to_string()),
+                ([false, true], "src/b.rs".to_string()),
+            ],
+        );
+    }
+
+    /// Inside stoatty a file row ends in a track, its added and deleted shares
+    /// over it in proportion to the commit's largest change.
+    #[test]
+    fn a_file_rows_stat_bar_fills_its_shares_over_the_track() {
+        let mut h = Stoat::test();
+        h.resize(120, 16);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message(
+                "a1000000",
+                "feat: root",
+                &[("src/a.rs", ""), ("src/b.rs", "x\n")],
+            )
+            .commit_with_parent_message(
+                "b2000000",
+                "a1000000",
+                "feat: grow",
+                &[("src/a.rs", "1\n2\n3\n4\n"), ("src/b.rs", "y\n")],
+            );
+        h.open_commits("/repo");
+        h.render_composited();
+
+        let theme = &h.stoat.theme;
+        let rgb = |name: &str| style_rgb(theme.get(name).fg).expect("an RGB scope");
+        let kinds = [
+            (rgb(scope::UI_DIVIDER), "track"),
+            (rgb(scope::DIFF_ADDED), "added"),
+            (rgb(scope::DIFF_DELETED), "deleted"),
+        ];
+        let bars: Vec<(&str, i16, i16, u16)> =
+            command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Bar(bar) if bar.height == STAT_BAR_HEIGHT => kinds
+                        .iter()
+                        .find(|(color, _)| *color == bar.color)
+                        .map(|(_, kind)| (*kind, bar.x, bar.y, bar.width)),
+                    _ => None,
+                })
+                .collect();
+
+        let row = cell_of(&h.rendered_text(), "src/a.rs").1 as i16;
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let detail = commits_detail_rect(pane, None).expect("a detail pane");
+        let (x, a, b) = (
+            ((detail.x + detail.width - DETAIL_INSET - STAT_BAR_CELLS) * 16) as i16,
+            row * 16 + 6,
+            row * 16 + 22,
+        );
+        assert_eq!(
+            bars,
+            [
+                ("track", x, a, 112),
+                ("added", x, a, 112),
+                ("track", x, b, 112),
+                ("added", x, b, 28),
+                ("deleted", x + 28, b, 28),
+            ],
+            "the largest change fills its track, and a smaller one fills its share",
         );
     }
 

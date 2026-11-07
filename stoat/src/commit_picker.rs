@@ -78,18 +78,18 @@ pub(crate) struct CommitRow {
 }
 
 /// Seconds in each unit an age is reported in, largest first, so a difference
-/// takes the coarsest unit it fills.
+/// takes the coarsest unit it fills, with the unit's short suffix and its word.
 ///
-/// A month is a plain thirtieth of a year rather than a calendar month, which
-/// is what lets this stay a pure integer bucket with no date library behind it.
-/// The label is approximate by design. "3mo" tells the reader what they need
-/// about a commit's age, where an exact date would not.
-const AGE_UNITS: [(i64, &str); 5] = [
-    (31_536_000, "y"),
-    (2_592_000, "mo"),
-    (86_400, "d"),
-    (3_600, "h"),
-    (60, "m"),
+/// A month is a plain thirty days rather than a calendar month, which is what
+/// lets this stay a pure integer bucket with no date library behind it. The
+/// label is approximate by design. "3mo" tells the reader what they need about
+/// a commit's age, where an exact date does not.
+const AGE_UNITS: [(i64, &str, &str); 5] = [
+    (31_536_000, "y", "year"),
+    (2_592_000, "mo", "month"),
+    (86_400, "d", "day"),
+    (3_600, "h", "hour"),
+    (60, "m", "minute"),
 ];
 
 /// A commit's age at `now`, as a short relative label like `3d` or `2mo`.
@@ -98,12 +98,29 @@ const AGE_UNITS: [(i64, &str); 5] = [
 /// a rewritten author date), reads as `now` rather than a negative age.
 pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
     let age = now_epoch.saturating_sub(commit_time);
-    for (seconds, suffix) in AGE_UNITS {
+    for (seconds, suffix, _) in AGE_UNITS {
         if age >= seconds {
             return format!("{}{suffix}", age / seconds);
         }
     }
     "now".to_string()
+}
+
+/// A commit's age at `now` in words, like `3 days ago`, for a header with the
+/// room to spell it out.
+///
+/// The units are [`age_label`]'s. Anything under a minute, and anything dated
+/// in the future, reads as `just now`.
+pub(crate) fn age_words(now_epoch: i64, commit_time: i64) -> String {
+    let age = now_epoch.saturating_sub(commit_time);
+    for (seconds, _, word) in AGE_UNITS {
+        if age >= seconds {
+            let count = age / seconds;
+            let plural = if count == 1 { "" } else { "s" };
+            return format!("{count} {word}{plural} ago");
+        }
+    }
+    "just now".to_string()
 }
 
 /// The moment `executor`'s clock reads, in unix epoch seconds.
@@ -726,7 +743,8 @@ impl CommitPicker {
 #[cfg(test)]
 mod tests {
     use super::{
-        age_label, CommitColumn, CommitPicker, CommitPickerRole, PreviewCache, COMMIT_COLUMNS,
+        age_label, age_words, CommitColumn, CommitPicker, CommitPickerRole, PreviewCache,
+        COMMIT_COLUMNS,
     };
     use crate::{
         apc_emit,
@@ -1056,6 +1074,30 @@ mod tests {
     #[test]
     fn a_commit_dated_ahead_of_now_reads_as_now() {
         assert_eq!(age_label(1_000, 5_000), "now");
+    }
+
+    #[test]
+    fn age_words_spell_out_the_unit_and_its_plural() {
+        let now = 1_000_000_000;
+        let ago = |seconds| age_words(now, now - seconds);
+        assert_eq!(
+            [
+                ago(59),
+                ago(60),
+                ago(3_600 * 5),
+                ago(86_400 * 2),
+                ago(31_536_000),
+                age_words(1_000, 5_000),
+            ],
+            [
+                "just now",
+                "1 minute ago",
+                "5 hours ago",
+                "2 days ago",
+                "1 year ago",
+                "just now",
+            ],
+        );
     }
 
     #[test]

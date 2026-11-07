@@ -632,6 +632,23 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Give the seeded commit `sha` the full message `message`, such as a merge
+    /// that [`Self::merge_commit`] seeds with a placeholder message.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no commit `sha` is seeded yet.
+    pub fn set_message(&mut self, sha: &str, message: &str) -> &mut Self {
+        self.mutate_repo(|state| {
+            let commit = state
+                .commits
+                .get_mut(sha)
+                .unwrap_or_else(|| panic!("set_message: no seeded commit {sha}"));
+            commit.message = message.to_string();
+        });
+        self
+    }
+
     /// Point HEAD at `sha` explicitly. Useful when a test seeds several
     /// independent branches; the last [`Self::commit_full`] invocation
     /// wins by default, which is the common case.

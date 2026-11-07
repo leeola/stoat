@@ -75,6 +75,10 @@ pub(crate) struct CommitListState {
     pub viewport_rows: usize,
     pub pending_load: Option<Task<PageLoad>>,
     pub summaries: HashMap<String, Vec<CommitFileChange>>,
+    /// The message body of each commit whose preview landed, the text after
+    /// its summary line, kept beside [`Self::summaries`] because one job reads
+    /// both. A commit with no body has no entry.
+    pub bodies: HashMap<String, String>,
     pub preview_sessions: PreviewCache,
     pub pending_preview: Option<PendingPreview>,
     /// Last sha the user requested a preview for. Tracked so a stale
@@ -146,6 +150,9 @@ pub(crate) struct PreviewLoad {
     /// none. Distinct from an empty list, which is a commit that changed
     /// nothing.
     pub summary: Option<Vec<CommitFileChange>>,
+    /// The commit's full message, or `None` from a surface that paints no
+    /// message, and for a message that is not UTF-8.
+    pub message: Option<String>,
     /// `None` when the commit yields no diff to show, which is a final answer
     /// rather than a failure to retry.
     pub document: Option<DiffDocument>,
@@ -311,6 +318,7 @@ impl CommitListState {
             viewport_rows: 0,
             pending_load: None,
             summaries: HashMap::new(),
+            bodies: HashMap::new(),
             preview_sessions: PreviewCache::default(),
             pending_preview: None,
             requested_preview: None,
@@ -454,6 +462,10 @@ impl CommitListState {
                 if let Some(summary) = load.summary {
                     self.summaries.insert(pending.sha.clone(), summary);
                 }
+                let body = load.message.as_deref().map_or("", message_body);
+                if !body.is_empty() {
+                    self.bodies.insert(pending.sha.clone(), body.to_string());
+                }
                 match load.document {
                     Some(document) => self
                         .preview_sessions
@@ -470,10 +482,19 @@ impl CommitListState {
     }
 }
 
+/// The text of a commit `message` after its summary line.
+///
+/// The blank lines around it are trimmed, so a message of one line has an
+/// empty body.
+fn message_body(message: &str) -> &str {
+    message.split_once('\n').map_or("", |(_, rest)| rest.trim())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        CommitListId, CommitListSnap, Preview, PreviewCache, SavedSelection, PREVIEW_CACHE_CAP,
+        message_body, CommitListId, CommitListSnap, Preview, PreviewCache, SavedSelection,
+        PREVIEW_CACHE_CAP,
     };
     use crate::{
         app::Stoat,
@@ -542,6 +563,18 @@ mod tests {
             [cache.mark_used("sha0"), cache.mark_used("absent")],
             [true, false],
             "only a cached sha counts as a use"
+        );
+    }
+
+    #[test]
+    fn a_body_is_the_message_past_its_summary_line() {
+        assert_eq!(
+            [
+                message_body("feat: x\n\nWhy it matters.\n\nMore.\n"),
+                message_body("feat: x\n"),
+                message_body("feat: x"),
+            ],
+            ["Why it matters.\n\nMore.", "", ""],
         );
     }
 
@@ -695,6 +728,36 @@ mod tests {
             .tag("v1.0", "c3000000");
         h.open_commits("/repo");
         h.assert_snapshot("commits_refs_and_age");
+    }
+
+    /// The detail pane opens with the merge's header: its summary, a meta row
+    /// with a chip per parent, and its message body wrapped to the pane. The
+    /// files table follows, its first row the file the preview stands on.
+    #[test]
+    fn snapshot_commits_detail_header() {
+        let mut h = Stoat::test();
+        h.resize(160, 20);
+        h.stoat.stoatty = false;
+        let tree = |pane: &'static str, notes: &'static str| {
+            [("docs/notes.md", notes), ("src/render/pane.rs", pane)]
+        };
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &tree("a\n", ""))
+            .commit_with_parent_message("b2000000", "a1000000", "feat: side", &tree("a\ns\n", ""))
+            .commit_with_parent_message("c3000000", "a1000000", "feat: main", &tree("a\n", ""))
+            .merge_commit("d4000000", "b2000000", &tree("a\ns\nm\n", "one\ntwo\n"))
+            .set_message(
+                "d4000000",
+                "Merge branch 'side'\n\nResident pools keep their composite when a glide \
+                 settles, and unfocused panes fade through the pool dim byte instead of \
+                 their cells.\n",
+            )
+            .branch("side", "b2000000")
+            .branch("main", "d4000000")
+            .set_head_branch("main");
+        h.open_commits("/repo");
+        h.assert_snapshot("commits_detail_header");
     }
 
     /// A list too narrow for a few words of summary beside the author and age

@@ -1249,9 +1249,11 @@ fn spawn_preview_load(
             None => None,
         };
         redraw.notify_one();
-        // The picker paints no file-change summary, so it reads none.
+        // The picker paints no file-change summary and no message, so it reads
+        // neither.
         crate::commit_list::PreviewLoad {
             summary: None,
+            message: None,
             document,
         }
     })

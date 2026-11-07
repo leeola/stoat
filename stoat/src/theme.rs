@@ -761,6 +761,12 @@ pub mod scope {
     /// The characters a list's query matched. A theme that leaves it unset
     /// paints them with [`UI_SEARCH_MATCH`].
     pub const UI_LIST_MATCH: &str = "ui.list.match";
+    /// The row of a list that another pane shows, such as the file a commit's
+    /// diff preview stands on in the commits view's files table.
+    ///
+    /// It marks where the reader is without taking the selection's look, since
+    /// the keys move the preview rather than this row.
+    pub const UI_LIST_CURRENT: &str = "ui.list.current";
     /// The chip at the right end of a filter modal's header row, such as the
     /// file finder's note of what Shift-Tab switches its list to.
     pub const UI_CHIP: &str = "ui.chip";
@@ -770,6 +776,9 @@ pub mod scope {
 
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";
     pub const UI_BORDER_INACTIVE: &str = "ui.border.inactive";
+    /// The faint track a meter fills over, such as the stat bar of a file row
+    /// in the commits view.
+    pub const UI_DIVIDER: &str = "ui.divider";
 
     pub const UI_PANEL_ISLAND: &str = "ui.panel.island";
     pub const UI_PANEL_POPOUT: &str = "ui.panel.popout";
@@ -929,6 +938,12 @@ pub mod scope {
     pub const VCS_COMMIT_SHA: &str = "vcs.commit.sha";
     pub const VCS_COMMIT_SUMMARY: &str = "vcs.commit.summary";
     pub const VCS_COMMIT_METADATA: &str = "vcs.commit.metadata";
+    /// The chip that names a commit's first parent in the commits view's
+    /// detail header.
+    pub const VCS_COMMIT_PARENT: &str = "vcs.commit.parent";
+    /// The chip of every parent after the first, the branches a merge brings
+    /// in. A theme that leaves it unset paints them as [`VCS_COMMIT_PARENT`].
+    pub const VCS_COMMIT_PARENT_MERGED: &str = "vcs.commit.parent.merged";
     /// The colors the commit graph's lanes cycle through, by lane index.
     ///
     /// A lane index carries no meaning of its own, so the six only need to

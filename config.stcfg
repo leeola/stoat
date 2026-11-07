@@ -62,6 +62,7 @@ theme default_dark {
 
     ui.border.focused.fg = accent;
     ui.border.inactive.fg = muted;
+    ui.divider.fg = subtle;
 
     ui.modal.help.fg = muted;
     ui.modal.hints.fg = muted;
@@ -83,6 +84,7 @@ theme default_dark {
     ui.text.dim.fg = dim;
     ui.virtual.inlay = { fg: dim, bg: subtle, modifiers: [italic] };
     ui.chip = { fg: dim, bg: subtle };
+    ui.list.current.bg = subtle;
 
     ui.completion.kind.function = { fg: accent, bg: subtle, modifiers: [bold] };
     ui.completion.kind.constant = { fg: info, bg: subtle, modifiers: [bold] };
@@ -159,6 +161,8 @@ theme default_dark {
     vcs.commit.sha.fg      = warning;
     vcs.commit.summary.fg  = text;
     vcs.commit.metadata.fg = muted;
+    vcs.commit.parent        = { fg: accent, bg: subtle };
+    vcs.commit.parent.merged = { fg: special, bg: subtle };
 
     vcs.lane.1.fg = "#7aa2f7";
     vcs.lane.2.fg = "#9ece6a";
@@ -283,6 +287,7 @@ theme ermine_night inherits default_dark {
     ui.text.disabled.fg   = disabled;
     ui.border.focused.fg  = accent;
     ui.border.inactive.fg = hairline;
+    ui.divider.fg         = divider;
 
     ui.selection           = { fg: text, bg: select };
     ui.selection.reversed  = { fg: text, bg: select, modifiers: [] };
@@ -294,6 +299,8 @@ theme ermine_night inherits default_dark {
     # keep their own selection scopes and ui.search.match.
     ui.list.selected = { fg: text, bg: select };
     ui.list.match    = { fg: warning, modifiers: [bold] };
+
+    ui.list.current.bg = raised;
 
     ui.tabbar.active       = { fg: text, bg: base };
     ui.tabbar.inactive     = { fg: dim, bg: chrome };
@@ -353,6 +360,8 @@ theme ermine_night inherits default_dark {
     vcs.lane.6.fg = danger;
 
     vcs.ref.head.fg = chrome;
+    vcs.commit.parent.bg        = tint_accent;
+    vcs.commit.parent.merged.bg = tint_special;
 
     ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 0 };
     ui.panel.popout  = { radius: 1, shadow: overhang };

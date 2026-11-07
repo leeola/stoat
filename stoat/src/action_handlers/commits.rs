@@ -340,6 +340,7 @@ fn reload_list(stoat: &mut Stoat, id: CommitListId) -> bool {
         state.scroll_top = 0;
         state.preview_scroll = 0;
         state.summaries.clear();
+        state.bodies.clear();
         state.preview_sessions.clear();
         state.pending_preview = None;
         state.requested_preview = None;
@@ -672,6 +673,7 @@ fn spawn_commit_preview_load(
                 repo.changed_contents(None, &sha).unwrap_or_default(),
             ),
         };
+        let message = repo.commit_message(&sha);
         let document =
             super::review::build_document_from_changes(&language_registry, &workdir, changes).map(
                 |mut doc| {
@@ -682,6 +684,7 @@ fn spawn_commit_preview_load(
         redraw.notify_one();
         crate::commit_list::PreviewLoad {
             summary: Some(summary),
+            message,
             document,
         }
     })
