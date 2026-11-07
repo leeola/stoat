@@ -33,7 +33,7 @@ use crate::{
     theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
         diff::{self, DiffBase, HunkPosition, RepoStatus},
-        Workspace,
+        TabConflictMark, Workspace,
     },
 };
 use lsp_types::DiagnosticSeverity;
@@ -82,6 +82,9 @@ const SIDE_TEXT_TINT: f32 = 0.15;
 
 /// How far a side's name lifts from its status color toward white.
 const SIDE_NAME_LIFT: f32 = 0.4;
+
+/// The tab bar's conflict chip's `padding: 0 8px`, in sixteenths.
+const CHIP_PAD: u16 = 8;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pane(
@@ -1461,6 +1464,10 @@ pub(crate) fn render_tab_bar(
             inactive
         };
         let (label, tag) = ws.tab_label(idx);
+        if let Some(mark) = ws.tab_conflict_mark(idx) {
+            left.push(tab_mark(mark, style, theme));
+            owners.push(Some(idx));
+        }
         left.push((format!(" {label} "), style));
         owners.push(Some(idx));
         if let Some(TypeTag {
@@ -1498,15 +1505,32 @@ pub(crate) fn render_tab_bar(
         right.clear();
     }
 
+    // The chip takes its cells out of the run, and one blank cell ends the bar
+    // after it. It drops where the tabs leave it no room, as the diff chips do.
+    let chip = conflict_chip(ws, frame, scene.live())
+        .filter(|chip| chars(&left) + usize::from(chip.cells) < usize::from(area.width));
+    let segments = match &chip {
+        Some(chip) => Rect {
+            width: area.width - chip.cells - 1,
+            ..area
+        },
+        None => area,
+    };
+
     let runs = [StatusRun {
         area,
-        segments: area,
+        segments,
         style: inactive,
         left,
         right,
         hairline: true,
     }];
     let rich = render_status_runs(&runs, frame, buf, scene, None);
+    if let Some(chip) = chip {
+        let rect = Rect::new(segments.right(), area.y, chip.cells, 1);
+        draw_conflict_chip(&chip, rect, theme, buf, scene);
+    }
+
     let scale = if rich {
         theme.type_scale(TypeRole::Ui)
     } else {
@@ -1517,9 +1541,130 @@ pub(crate) fn render_tab_bar(
             .into_iter()
             .zip(runs[0].left.iter().map(|(text, _)| text.chars().count())),
         scale,
-        area.width,
+        segments.width,
         spans,
     );
+}
+
+/// The segment ahead of a tab's label that marks its file as unmerged or as
+/// resolved.
+///
+/// An unmerged file's `!` takes `vcs.conflict.mark`, or the conflict header's
+/// color in a theme without it.
+fn tab_mark(mark: TabConflictMark, style: Style, theme: &crate::theme::Theme) -> StatusSeg {
+    use crate::theme::scope;
+    match mark {
+        TabConflictMark::Conflicted => {
+            let fg = theme
+                .try_get(scope::VCS_CONFLICT_MARK)
+                .and_then(|mark| mark.fg)
+                .or(theme.get(scope::VCS_CONFLICT_HEADER).fg);
+            (" !".to_string(), fg.map_or(style, |fg| style.fg(fg)))
+        },
+        TabConflictMark::Resolved => (
+            " \u{2713}".to_string(),
+            tinted(style, theme, scope::DIFF_ADDED),
+        ),
+    }
+}
+
+/// The chip the tab bar ends in while the conflict view is focused.
+struct ConflictChip {
+    /// The files the session has not applied, and the chunk at the cursor.
+    text: String,
+    style: Style,
+    /// The chip's text color under a live scene, where it paints as a panel
+    /// and a run. `None` paints it in cells.
+    rich: Option<[u8; 3]>,
+    cells: u16,
+}
+
+/// The tab bar's [`ConflictChip`], or `None` off the conflict screen.
+///
+/// Under a live scene the chip's text draws at the Caption scale, the board's
+/// 11 px chrome text, so its width follows that text and the board's 8/16
+/// padding on each side. In cells it takes its text and a cell on each side.
+fn conflict_chip(ws: &Workspace, frame: FrameCtx<'_>, live: bool) -> Option<ConflictChip> {
+    use crate::theme::scope;
+    let position = frame
+        .conflict_position
+        .filter(|_| frame.screen == Some("conflict"))?;
+    let session = ws.conflict.as_ref()?;
+
+    let unresolved = session.files.len().saturating_sub(session.applied.len());
+    let at = position
+        .chunk_at
+        .map_or_else(|| "-".to_string(), |at| at.to_string());
+    let text = format!(
+        "{unresolved} unresolved \u{b7} {at} / {} chunks",
+        position.chunk_total
+    );
+
+    let theme = frame.theme;
+    let style = theme
+        .try_get(scope::VCS_CONFLICT_CHIP)
+        .unwrap_or_else(|| theme.get(scope::VCS_CONFLICT_HEADER));
+    let rich = style_rgb(style.fg).filter(|_| live);
+    let chars = text.chars().count();
+    let cells = match rich {
+        Some(_) => {
+            let advance = text_run::advance_sixteenths(chars, theme.type_scale(TypeRole::Caption));
+            (2 * CHIP_PAD + advance).div_ceil(16)
+        },
+        None => chars as u16 + 2,
+    };
+
+    Some(ConflictChip {
+        text,
+        style,
+        rich,
+        cells,
+    })
+}
+
+/// Paint `chip` over `rect`, a one-row rounded panel with its text in a run
+/// under a live scene, or its cells otherwise.
+///
+/// The cells under the panel take the chip's fill too, so no glyph the bar
+/// left there shows through it.
+fn draw_conflict_chip(
+    chip: &ConflictChip,
+    rect: Rect,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    for x in rect.x..rect.right() {
+        text::write_cell(buf, x, rect.y, ' ', chip.style);
+    }
+    let Some(color) = chip.rich else {
+        text::write_str(buf, rect.x + 1, rect.y, &chip.text, chip.style);
+        return;
+    };
+
+    Panel {
+        style: BorderStyle::None_,
+        border: color,
+        corner_radius: 1,
+        fill: style_rgb(chip.style.bg),
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    }
+    .draw_components(rect, scene);
+    TextRun {
+        col: CHIP_PAD as i16,
+        row: 0,
+        scale: theme.type_scale(TypeRole::Caption),
+        color,
+        bg: None,
+        text: &chip.text,
+        follow: 0,
+        anchor: None,
+    }
+    .render(rect, buf, scene);
 }
 
 /// The diff layout that the split pane in focus shows, as the tab bar's chip
@@ -2904,7 +3049,7 @@ fn render_image_pane(
 mod tests {
     use super::{
         byte_size, diff_base_lead, focused_staged_label, paint_status_fallback, read_only_note,
-        repo_segments, split_halves, split_side_segments, status_filename, tab_spans,
+        repo_segments, split_halves, split_side_segments, status_filename, tab_mark, tab_spans,
         DiffSideColors, DiffSidesColors,
     };
     use crate::{
@@ -2921,7 +3066,10 @@ mod tests {
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
         term_session::TermId,
-        workspace::diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase},
+        workspace::{
+            diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase},
+            TabConflictMark,
+        },
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range};
@@ -5492,6 +5640,175 @@ mod tests {
             [(5, 18), (18, 30), (30, 51)].map(|(start, end): (u16, u16)| start * 16..end * 16),
             "each tab's span in sixteenths, from its label's lead space to its last tag",
         );
+    }
+
+    /// A conflicted file's tab leads with `!` in the conflict mark's color once
+    /// the tally lists the file. The conflict view's tab names the file it
+    /// resolves and keeps the mark. While the view is focused the bar ends in a
+    /// chip that counts the files left and names the chunk at the cursor.
+    #[test]
+    fn the_tab_bar_marks_a_conflicted_file_and_ends_in_the_chunk_chip() {
+        let mut h = conflict_tabs_harness(&["f.txt"]);
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/f.txt"),
+            },
+        );
+        h.settle_diff_jobs();
+        let file_bar = tab_bar_row(&h.render_composited());
+
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        let buf = h.render_composited();
+        let scene = stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes());
+        let chip = scene.iter().find_map(|command| match command {
+            stoatty_protocol::command::Command::Panel(panel) if panel.top == 0 => {
+                Some((panel.left, panel.width, panel.fill))
+            },
+            _ => None,
+        });
+        let chip_text = scene.iter().find_map(|command| match command {
+            stoatty_protocol::command::Command::TextRun(run) if run.text.contains("unresolved") => {
+                Some((run.col, run.text.clone(), run.color))
+            },
+            _ => None,
+        });
+
+        let text = "1 unresolved \u{b7} 1 / 1 chunks";
+        assert_eq!(
+            (
+                file_bar.chars().take(30).collect::<String>(),
+                tab_bar_row(&buf).chars().take(30).collect::<String>(),
+                buf[(6, 0)].fg,
+                chip,
+                chip_text,
+            ),
+            (
+                format!("{:<30}", " ws   ! f.txt"),
+                format!("{:<30}", " ws   ! f.txt"),
+                ratatui::style::Color::Rgb(0xf5, 0x9a, 0xa0),
+                Some((71, 28, Some([0x33, 0x20, 0x1f]))),
+                Some((71 * 16 + 8, text.to_string(), [0xf2, 0x77, 0x7f])),
+            ),
+            "the chip ends one cell before the bar's edge, its text 8/16 in",
+        );
+    }
+
+    /// A tab whose file the conflict view applied reads U+2713 in the added
+    /// color, and the view's own tab marks the next file it shows.
+    #[test]
+    fn the_tab_bar_marks_an_applied_file_resolved() {
+        let mut h = conflict_tabs_harness(&["a.txt", "b.txt"]);
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/a.txt"),
+            },
+        );
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        h.settle_diff_jobs();
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::ConflictPickOurs);
+        dispatch(&mut h.stoat, &stoat_action::ConflictApply);
+        h.settle();
+
+        let buf = h.render_composited();
+        let chip = stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .find_map(|command| match command {
+                stoatty_protocol::command::Command::TextRun(run)
+                    if run.text.contains("unresolved") =>
+                {
+                    Some(run.text)
+                },
+                _ => None,
+            });
+        let added = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::DIFF_ADDED)
+            .fg
+            .expect("the theme colors added text");
+        assert_eq!(
+            (
+                tab_bar_row(&buf).chars().take(30).collect::<String>(),
+                buf[(6, 0)].fg,
+                chip,
+            ),
+            (
+                format!("{:<30}", " ws   \u{2713} a.txt  ! b.txt"),
+                added,
+                Some("1 unresolved \u{b7} 1 / 1 chunks".to_string()),
+            ),
+            "the chip counts the one file the view has not applied",
+        );
+    }
+
+    /// An unmerged file's `!` takes `vcs.conflict.mark`, or the conflict
+    /// header's color in a theme without that scope. A resolved file's mark
+    /// takes the added color.
+    #[test]
+    fn a_tab_mark_takes_the_conflict_mark_or_the_header_color() {
+        let (config, errors) = stoat_config::parse(crate::app::DEFAULT_KEYMAP);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let config = config.expect("the shipped config parses");
+        let marks = |name: &str| {
+            let theme = crate::theme::Theme::from_config(&config, name).expect("the theme loads");
+            [TabConflictMark::Conflicted, TabConflictMark::Resolved]
+                .map(|mark| tab_mark(mark, ratatui::style::Style::default(), &theme))
+        };
+        let segment = |text: &str, [r, g, b]: [u8; 3]| {
+            (
+                text.to_string(),
+                ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(r, g, b)),
+            )
+        };
+
+        assert_eq!(
+            [marks("ermine_night"), marks("default_dark")],
+            [
+                [
+                    segment(" !", [0xf5, 0x9a, 0xa0]),
+                    segment(" \u{2713}", [0x8f, 0xd1, 0x8a])
+                ],
+                [
+                    segment(" !", [0xe0, 0x6c, 0x75]),
+                    segment(" \u{2713}", [0x98, 0xc3, 0x79])
+                ],
+            ],
+        );
+    }
+
+    /// A 100 by 12 harness whose tab bar always shows, in workspace `ws` over
+    /// a fake repository at `/repo` where each of `files` is conflicted.
+    fn conflict_tabs_harness(files: &[&str]) -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(100, 12);
+        h.stoat.settings.ui_tab_bar = Some(stoat_config::TabBarMode::Always);
+        h.stoat.set_diff_warm_auto(true);
+        let ws = h.stoat.active_workspace_mut();
+        ws.name = "ws".to_string();
+        ws.git_root = PathBuf::from("/repo");
+        let mut repo = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+        for file in files {
+            repo.conflicted_file(
+                file,
+                Some("a\nbase\n"),
+                Some("a\nours\n"),
+                Some("a\ntheirs\n"),
+            );
+        }
+        h
+    }
+
+    /// The tab bar's row of `buf`, with the composite's blank bar cells read as
+    /// spaces.
+    fn tab_bar_row(buf: &Buffer) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>()
+            .replace('─', " ")
     }
 
     /// The status row names the workspace until a second tab shows the tab

@@ -49,6 +49,7 @@ const TINT_OURS: [u8; 3] = [0x18, 0x24, 0x1b];
 const TINT_THEIRS: [u8; 3] = [0x23, 0x1d, 0x2e];
 const TINT_CONFLICT: [u8; 3] = [0x2a, 0x1b, 0x1d];
 const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
+const CHIP_CONFLICT: [u8; 3] = [0x33, 0x20, 0x1f];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
@@ -888,6 +889,31 @@ fn the_conflict_view_paints_the_merge_grid() {
     }
     let (x, y, _, height) = cell_rect(1, 2, 1, 1);
     expect_region(&shot, &mut home, (x + 2, y, 2, height), SUCCESS, "ours_bar");
+}
+
+/// The tab bar ends in the conflict chip while the conflict view is focused.
+///
+/// One tab shows no tab bar, so the scene shows it first. The chip reads `1
+/// unresolved · 1 / 1 chunks` at the Caption scale, 24 cells that end one
+/// cell before the bar's right edge, so cells 140 to 152 of row 0 lie inside
+/// it on its fill.
+#[test]
+fn the_tab_bar_ends_in_the_conflict_chip() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "conflict",
+        "file.txt",
+        "<C-;>ToggleTabBar<Enter><Settle><C-;>Conflict<Enter><Settle>",
+    );
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(140, 0, 12, 1),
+        CHIP_CONFLICT,
+        "conflict_chip",
+    );
 }
 
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.

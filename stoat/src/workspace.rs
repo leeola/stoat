@@ -500,6 +500,15 @@ pub(crate) enum ParseRestyle {
     Onscreen,
 }
 
+/// The conflict mark a tab's file carries in the tab bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabConflictMark {
+    /// The index leaves the file unmerged.
+    Conflicted,
+    /// The conflict view applied the file's resolution.
+    Resolved,
+}
+
 /// A one-pane tree showing a fresh scratch buffer, the shape a workspace and
 /// every new tab start in.
 ///
@@ -842,6 +851,30 @@ impl Workspace {
         }
     }
 
+    /// The conflict mark tab `idx` carries, or `None` for a tab whose file is
+    /// neither unmerged nor resolved in the conflict view.
+    ///
+    /// A file the view applied reads as resolved before the next tally drops it
+    /// from the unmerged list, since the apply's index write lands first.
+    pub(crate) fn tab_conflict_mark(&self, idx: usize) -> Option<TabConflictMark> {
+        let path = self.tab_file(idx)?;
+        let applied = self.conflict.as_ref().is_some_and(|session| {
+            session
+                .applied
+                .iter()
+                .any(|&index| session.files.get(index).is_some_and(|file| file == path))
+        });
+        if applied {
+            return Some(TabConflictMark::Resolved);
+        }
+
+        let relative = path.strip_prefix(&self.git_root).ok()?;
+        self.repo_conflicted_files()?
+            .binary_search_by(|file| file.as_path().cmp(relative))
+            .ok()
+            .map(|_| TabConflictMark::Conflicted)
+    }
+
     /// The file the focused editor of tab `idx` shows, or `None` for a renamed
     /// tab, a diff view, or a pane that is no editor.
     fn tab_file(&self, idx: usize) -> Option<&Path> {
@@ -853,13 +886,30 @@ impl Workspace {
         let View::Editor(id) = &tree.pane(tree.focus()).view else {
             return None;
         };
-        let editor = self.editors.get(*id).filter(|editor| !editor.diff_view)?;
+        self.editors.get(*id).filter(|editor| !editor.diff_view)?;
+        self.editor_file(*id)
+    }
+
+    /// The file editor `id` shows, or `None` for one with no file.
+    ///
+    /// The conflict view's merged column edits a scratch buffer, so its editor
+    /// answers the file the view resolves.
+    fn editor_file(&self, id: EditorId) -> Option<&Path> {
+        if let Some(session) = self
+            .conflict
+            .as_ref()
+            .filter(|session| session.file.editor_id == id)
+        {
+            return Some(&session.file.path);
+        }
+        let editor = self.editors.get(id)?;
         self.buffers.path_for(editor.buffer_id)
     }
 
     /// What a pane that shows `view` calls itself in the tab bar.
     ///
-    /// An editor names its file, or reads as scratch when it has none. A
+    /// An editor names its file, or reads as scratch when it has none. The
+    /// conflict view's merged column names the file the view resolves. A
     /// terminal or an agent names itself by the title its child set, cut to
     /// [`TAB_TITLE_MAX_COLS`], and by its kind until the child sets one. A
     /// commits list reads `commits`, in a parked tab too, and so does a rebase
@@ -868,9 +918,7 @@ impl Workspace {
     pub(crate) fn view_title(&self, view: &View) -> String {
         match view {
             View::Editor(id) => self
-                .editors
-                .get(*id)
-                .and_then(|editor| self.buffers.path_for(editor.buffer_id))
+                .editor_file(*id)
                 .and_then(|path| path.file_name())
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "scratch".to_string()),
@@ -1522,6 +1570,15 @@ impl Workspace {
             .repo_hunk_tallies
             .as_ref()
             .map(|tallies| tallies.untracked.as_slice())
+    }
+
+    /// The files the index leaves unmerged, sorted by repo-relative path, or
+    /// `None` before the first tally lands and outside a repo.
+    pub(crate) fn repo_conflicted_files(&self) -> Option<&[PathBuf]> {
+        self.diff
+            .repo_hunk_tallies
+            .as_ref()
+            .map(|tallies| tallies.conflicted.as_slice())
     }
 
     /// Files changed since the revision base, absolute, as the last tally read
