@@ -376,6 +376,7 @@ theme ermine_night inherits default_dark {
     ui.panel.popout  = { radius: 1, shadow: overhang };
     ui.panel.overlay = { radius: 2, shadow: drop, above_pools: true };
     ui.type.ui       = { scale: 232 };
+    ui.type.caption  = { scale: 216 };
     ui.type.small    = { scale: 208 };
 }
 

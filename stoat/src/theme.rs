@@ -301,6 +301,9 @@ pub enum TypeRole {
     Body,
     /// Tabs, the status bar, and chips.
     Ui,
+    /// Section headers, banner rows, and other 11 px chrome text, one step
+    /// under [`TypeRole::Ui`].
+    Caption,
     /// Gutter numbers and counts.
     Small,
     /// The mode label, such as `NOR`.
@@ -313,6 +316,7 @@ impl TypeRole {
             TypeRole::Title => scope::UI_TYPE_TITLE,
             TypeRole::Body => scope::UI_TYPE_BODY,
             TypeRole::Ui => scope::UI_TYPE_UI,
+            TypeRole::Caption => scope::UI_TYPE_CAPTION,
             TypeRole::Small => scope::UI_TYPE_SMALL,
             TypeRole::Mode => scope::UI_TYPE_MODE,
         }
@@ -324,6 +328,7 @@ impl TypeRole {
             TypeRole::Title => 320,
             TypeRole::Body => FULL_CELL_SCALE,
             TypeRole::Ui => 232,
+            TypeRole::Caption => 216,
             TypeRole::Small | TypeRole::Mode => 208,
         }
     }
@@ -803,6 +808,7 @@ pub mod scope {
     pub const UI_TYPE_TITLE: &str = "ui.type.title";
     pub const UI_TYPE_BODY: &str = "ui.type.body";
     pub const UI_TYPE_UI: &str = "ui.type.ui";
+    pub const UI_TYPE_CAPTION: &str = "ui.type.caption";
     pub const UI_TYPE_SMALL: &str = "ui.type.small";
     pub const UI_TYPE_MODE: &str = "ui.type.mode";
 
@@ -1159,19 +1165,27 @@ mod tests {
             TypeRole::Title,
             TypeRole::Body,
             TypeRole::Ui,
+            TypeRole::Caption,
             TypeRole::Small,
             TypeRole::Mode,
         ];
 
         assert_eq!(
             roles.map(|role| theme.themed_type_scale(role)),
-            [300, 256, 232, 190, 208],
+            [300, 256, 232, 216, 190, 208],
             "a set scale wins, and every unset role answers Ermine's"
         );
         assert_eq!(
             roles.map(|role| theme.type_scale(role)),
-            [256; 5],
+            [256; 6],
             "the test build draws every role at a full cell"
+        );
+
+        let captioned = load("theme c { ui.type.caption.scale = 220; }", "c");
+        assert_eq!(
+            captioned.themed_type_scale(TypeRole::Caption),
+            220,
+            "the caption step reads its own scope"
         );
     }
 

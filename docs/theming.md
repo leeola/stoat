@@ -142,6 +142,7 @@ ui.type.ui.scale = 240;
 | `ui.type.title`    | 320                              |
 | `ui.type.body`     | 256                              |
 | `ui.type.ui`       | 232                              |
+| `ui.type.caption`  | 216                              |
 | `ui.type.small`    | 208                              |
 | `ui.type.mode`     | 208                              |
 
@@ -154,7 +155,9 @@ The popout cards over the status bar draw in the `popout` frame. Every modal
 and cursor popup, the key hints box, the docks, and the run pane draw in the
 `overlay` frame. Tabs, the status bar, the popout cards, the key hints box,
 hover text, and walkthrough labels draw at `ui.type.ui`, gutter numbers at
-`ui.type.small`, and modal titles at `ui.type.body`.
+`ui.type.small`, and modal titles at `ui.type.body`. The `ui.type.caption` step
+sits between `ui.type.ui` and `ui.type.small`. It is for 11 px chrome text,
+such as section headers, banner rows, and small chips.
 
 ## Semantic palette groups: the primary knob
 
