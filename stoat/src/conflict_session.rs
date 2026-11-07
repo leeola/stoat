@@ -3,7 +3,8 @@ use crate::{
     editor_state::EditorId,
     host::git::{GitRepo, MergeState},
     merge_view::{AlignRow, ChunkState, MergeDoc, RowPick},
-    workspace::diff,
+    multi_buffer::{MultiBuffer, MultiBufferSnapshot},
+    workspace::{diff, Workspace},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -29,6 +30,12 @@ pub(crate) struct ConflictSession {
     /// The side names the open read, which each file the session steps to
     /// shows in its header.
     pub(crate) labels: ConflictLabels,
+    /// Whether the conflicts come from a merge in progress, as the open read
+    /// the repository.
+    ///
+    /// Read once, since a merge ends through its abort or its commit, and both
+    /// close the view.
+    pub(crate) merging: bool,
     /// Index into [`Self::files`] of the file currently shown.
     pub(crate) current: usize,
     /// Resolve state of the file currently shown.
@@ -81,8 +88,8 @@ pub(crate) struct FileResolveState {
 ///
 /// Cloned from the session onto the swapped-in editor at open, so the renderer
 /// (which only receives the focused editor) can build its column display list
-/// from `doc` each frame. `file_index`/`file_count`/`rel_path` feed the hints
-/// footer. Refreshed alongside the session when a pick reassembles a region.
+/// from `doc` each frame. `rel_path` names the file in the MergeGrid header.
+/// Refreshed alongside the session when a pick reassembles a region.
 #[derive(Clone)]
 pub(crate) struct ConflictViewState {
     pub(crate) doc: MergeDoc,
@@ -94,8 +101,6 @@ pub(crate) struct ConflictViewState {
     /// derive each chunk's resolution state against its live region text and
     /// paint the matching gutter glyph.
     pub(crate) picks: Vec<Vec<RowPick>>,
-    pub(crate) file_index: usize,
-    pub(crate) file_count: usize,
     pub(crate) rel_path: String,
     /// The names the MergeGrid header gives the two sides.
     pub(crate) labels: ConflictLabels,
@@ -126,8 +131,6 @@ impl ConflictViewState {
         doc: MergeDoc,
         chunk_anchors: Vec<(Anchor, Anchor)>,
         picks: Vec<Vec<RowPick>>,
-        file_index: usize,
-        file_count: usize,
         rel_path: String,
         labels: ConflictLabels,
     ) -> Self {
@@ -135,12 +138,16 @@ impl ConflictViewState {
             doc,
             chunk_anchors,
             picks,
-            file_index,
-            file_count,
             rel_path,
             labels,
             derived: None,
         }
+    }
+
+    /// The index of the chunk whose center region holds byte `offset` of the
+    /// merged buffer `buffer`, or `None` for an offset outside every chunk.
+    pub(crate) fn chunk_at(&self, buffer: &MultiBufferSnapshot, offset: usize) -> Option<usize> {
+        chunk_holding(&self.chunk_anchors, buffer, offset)
     }
 
     /// The merge doc paired with its derived layout for `snapshot`, rebuilding
@@ -232,6 +239,62 @@ impl ConflictLabels {
     }
 }
 
+/// Where the focused conflict view's cursor stands among its file's chunks,
+/// and the operation the conflicts come from.
+///
+/// The status row and the hints footer read it, as they read a diff view's
+/// [`HunkPosition`](crate::workspace::diff::HunkPosition).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConflictPosition {
+    /// `merge` during a merge, `rebase` during a rebase, and `conflict` for
+    /// conflicts with neither behind them.
+    pub(crate) operation: &'static str,
+    /// The 1-based chunk the cursor stands in, or `None` outside every chunk.
+    pub(crate) chunk_at: Option<usize>,
+    pub(crate) chunk_total: usize,
+}
+
+/// The focused conflict view's [`ConflictPosition`], or `None` when the focused
+/// pane shows no conflict view.
+///
+/// The cursor is the newest selection's start, the place the chunk keys read,
+/// so the chunk the position names is the chunk a pick acts on.
+pub(crate) fn conflict_position(ws: &Workspace) -> Option<ConflictPosition> {
+    let session = ws.conflict.as_ref()?;
+    let (editor_id, buffer_id) = ws.focused_editor()?;
+    let editor = ws.editors.get(editor_id)?;
+    let state = editor.conflict_view.as_ref()?;
+
+    let buffer = MultiBuffer::singleton(ws.buffers.get(buffer_id)?).snapshot();
+    let cursor = buffer.resolve_anchor(&editor.selections.newest_anchor().start);
+    let operation = match (session.merging, ws.rebase_active.is_some()) {
+        (true, _) => "merge",
+        (false, true) => "rebase",
+        (false, false) => "conflict",
+    };
+
+    Some(ConflictPosition {
+        operation,
+        chunk_at: state.chunk_at(&buffer, cursor).map(|index| index + 1),
+        chunk_total: state.doc.chunks.len(),
+    })
+}
+
+/// The index of the chunk in `chunk_anchors` whose center region holds byte
+/// `offset` of `buffer`, or `None` for an offset outside every chunk.
+///
+/// A region ends before its end anchor, so the line after a chunk is outside
+/// it.
+pub(crate) fn chunk_holding(
+    chunk_anchors: &[(Anchor, Anchor)],
+    buffer: &MultiBufferSnapshot,
+    offset: usize,
+) -> Option<usize> {
+    chunk_anchors.iter().position(|(start, end)| {
+        (buffer.resolve_anchor(start)..buffer.resolve_anchor(end)).contains(&offset)
+    })
+}
+
 /// Resolve each chunk's anchors to the row span it currently occupies in the
 /// center buffer.
 ///
@@ -282,7 +345,11 @@ fn chunk_states(
 mod tests {
     use super::ConflictLabels;
     use crate::{
-        app::Stoat, host::git::MergeState, merge_view::MergeDoc, pane::View,
+        app::Stoat,
+        host::git::MergeState,
+        merge_view::MergeDoc,
+        pane::View,
+        rebase::{ActiveRebase, RebaseState},
         test_harness::TestHarness,
     };
     use stoat_action::{
@@ -1270,6 +1337,61 @@ mod tests {
                     theirs: "feature".to_string(),
                 })
             ),
+        );
+    }
+
+    #[test]
+    fn the_position_names_the_operation_and_the_chunk_at_the_cursor() {
+        let position = |h: &TestHarness| {
+            super::conflict_position(h.stoat.active_workspace())
+                .map(|at| (at.operation, at.chunk_at, at.chunk_total))
+        };
+        let mut h = Stoat::test();
+        seed_two_chunks(&mut h);
+        let closed = position(&h);
+        dispatch_conflict(&mut h);
+        let first = position(&h);
+        // The first chunk's region ends where the line after its marker block
+        // starts.
+        h.stoat
+            .collapse_focused_cursor_to("a\n<<<<<<< ours\nB\n=======\nX\n>>>>>>> theirs\n".len());
+        let after_first = position(&h);
+        pick(&mut h, &ConflictNextChunk);
+        let second = position(&h);
+        h.stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(
+            RebaseState::new("/repo".into(), "c1".into(), Vec::new()),
+            None,
+        ));
+        let rebasing = position(&h);
+
+        let mut merging = Stoat::test();
+        let git_root = merging.stoat.active_workspace().git_root.clone();
+        merging
+            .fake_git()
+            .add_repo(git_root)
+            .merge_in_progress("f00dfeed", Some("feature"), "Merge branch 'feature'")
+            .conflicted_file("f.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"));
+        dispatch_conflict(&mut merging);
+
+        assert_eq!(
+            [
+                closed,
+                first,
+                after_first,
+                second,
+                rebasing,
+                position(&merging)
+            ],
+            [
+                None,
+                Some(("conflict", Some(1), 2)),
+                Some(("conflict", None, 2)),
+                Some(("conflict", Some(2), 2)),
+                Some(("rebase", Some(2), 2)),
+                Some(("merge", Some(1), 1)),
+            ],
+            "the cursor's chunk counts from one, and the line after a chunk names \
+             none",
         );
     }
 }

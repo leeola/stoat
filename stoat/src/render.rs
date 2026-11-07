@@ -58,6 +58,7 @@ use crate::{
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     commit_list::{CommitListId, CommitListState},
+    conflict_session::{self, ConflictPosition},
     diff_changes::{DiffChangesId, DiffChangesState},
     editor_state::{EditorId, EditorState},
     keymap::KeymapState,
@@ -334,6 +335,10 @@ pub(crate) struct FrameCtx<'a> {
     /// The bar prints `-` for a cursor above the focused file's first hunk, the
     /// one place the walk has nothing behind it.
     pub(crate) hunk_position: Option<HunkPosition>,
+    /// Where the focused conflict view's cursor stands among the file's chunks,
+    /// which the focused pane's bar names on the conflict screen. `None` when
+    /// the focused pane shows no conflict view.
+    pub(crate) conflict_position: Option<ConflictPosition>,
     /// What the bar names the workspace's diff base, when that is not the
     /// working tree. It replaces [`Self::repo`], which describes
     /// a working tree the pane is then not showing.
@@ -1329,8 +1334,10 @@ pub(crate) fn frame(
     let held_buffers = ws.held_buffer_labels();
     let repo_status = ws.repo_status();
     // The hints box over the diff view reads the position too, after the pane
-    // loop, where no FrameCtx is left to carry it.
+    // loop, where no FrameCtx is left to carry it. So does the box over the
+    // conflict view.
     let hunk_position = diff::repo_hunk_position(ws);
+    let conflict_position = conflict_session::conflict_position(ws);
 
     let frame = FrameCtx {
         workspace_name,
@@ -1361,6 +1368,7 @@ pub(crate) fn frame(
         diff_warm_busy,
         repo: repo_status.as_ref(),
         hunk_position,
+        conflict_position,
         diff_base: diff_base_lead.as_deref(),
         diff_sides: (&diff_sides.0, &diff_sides.1),
         pair_sides: &pair_sides,
@@ -2238,30 +2246,18 @@ pub(crate) fn frame(
             stoat.hints_cache = Some(hints::HintsCache::new(key, rows, footer_keys));
         }
 
-        let conflict_footer = if screen == Some("conflict") {
-            let conflict_state = match ws.panes.pane(ws.panes.focus()).view {
-                View::Editor(id) => ws.editors.get(id).and_then(|e| e.conflict_view.as_ref()),
-                _ => None,
-            };
-            conflict_state.map(|state| {
-                let total = state.doc.chunks.len();
-                let resolved = state.doc.chunks.iter().filter(|c| c.auto.is_some()).count();
-                let text = format!(
-                    "file {}/{} {} · {} conflicts · {} resolved",
-                    state.file_index + 1,
-                    state.file_count,
-                    state.rel_path,
-                    total,
-                    resolved,
-                );
-                hints::HintsFooter {
-                    text,
-                    style: stoat.theme.get(crate::theme::scope::UI_TEXT),
-                }
-            })
-        } else {
-            None
-        };
+        let conflict_footer = conflict_position
+            .filter(|_| screen == Some("conflict"))
+            .map(|position| hints::HintsFooter {
+                text: format!(
+                    "chunk {} / {}",
+                    position
+                        .chunk_at
+                        .map_or_else(|| "-".to_string(), |at| at.to_string()),
+                    position.chunk_total,
+                ),
+                style: stoat.theme.get(crate::theme::scope::UI_TEXT),
+            });
         let own_box = screen_own_box(screen, mode, touring);
         let diff_footer = hunk_position
             .filter(|_| own_box == Some("diff"))
@@ -4164,6 +4160,40 @@ mod lsp_filter_tests {
                 edges("1"),
                 Some("\u{2502} Esc ? help \u{2502}".to_string()),
             ),
+        );
+    }
+
+    /// The conflict screen's box footer names the chunk at the cursor, `-`
+    /// on a line outside every chunk.
+    #[test]
+    fn the_conflict_box_footer_names_the_chunk_at_the_cursor() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.stoat.active_workspace_mut().git_root = std::path::PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("a\nb\nc\nd\ne\n"),
+                Some("a\nB\nc\nD\ne\n"),
+                Some("a\nX\nc\nY\ne\n"),
+            );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Conflict);
+        h.settle();
+        let footer = |h: &mut TestHarness| box_edges(h, "conflict").map(|[_, footer]| footer);
+
+        let first = footer(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ConflictNextChunk);
+        h.settle();
+        let second = footer(&mut h);
+        h.type_keys("g g");
+        let outside = footer(&mut h);
+
+        assert_eq!(
+            [first, second, outside],
+            ["1", "2", "-"].map(|at| Some(format!(
+                "\u{2502} chunk {at} / 2 C-? hide \u{b7} ? help \u{2502}"
+            ))),
         );
     }
 

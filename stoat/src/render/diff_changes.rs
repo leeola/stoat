@@ -1043,6 +1043,7 @@ mod tests {
             diff_warm_busy: false,
             repo: None,
             hunk_position: None,
+            conflict_position: None,
             diff_base: None,
             diff_sides: ("", ""),
             pair_sides: &NO_PAIRS,

@@ -1,7 +1,9 @@
 use super::focused_editor_mut;
 use crate::{
     app::Stoat,
-    conflict_session::{ConflictLabels, ConflictSession, ConflictViewState, FileResolveState},
+    conflict_session::{
+        self, ConflictLabels, ConflictSession, ConflictViewState, FileResolveState,
+    },
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
     editor_state::{EditorId, EditorState},
     git_jobs::{self, GitJob, GitLanding, GitWork},
@@ -102,6 +104,7 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
     let Some(FoundConflicts {
         repo,
         files,
+        merging,
         labels,
     }) = found
     else {
@@ -130,6 +133,7 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
             repo,
             files,
             labels,
+            merging,
             current,
             file,
             saved_editor,
@@ -152,10 +156,8 @@ struct ConflictDoc {
     /// they were normalized away.
     ending: LineEnding,
     path: PathBuf,
-    /// Position of `path` in the session's file list, and the length of that
-    /// list, both painted in the view's header.
+    /// Position of `path` in the session's file list.
     index: usize,
-    file_count: usize,
 }
 
 /// What the run loop does with a [`ConflictDoc`] once it lands.
@@ -189,15 +191,15 @@ enum ConflictSource {
         repo: Arc<dyn GitRepo>,
         path: PathBuf,
         index: usize,
-        file_count: usize,
     },
 }
 
-/// The repository an open discovered, with every conflicted path it listed and
-/// the names of the sides it merges.
+/// The repository an open discovered, with every conflicted path it listed,
+/// the names of the sides it merges, and whether a merge is in progress.
 struct FoundConflicts {
     repo: Arc<dyn GitRepo>,
     files: Vec<PathBuf>,
+    merging: bool,
     labels: ConflictLabels,
 }
 
@@ -251,7 +253,7 @@ fn read_conflict(
     source: ConflictSource,
     language_registry: &LanguageRegistry,
 ) -> Result<ConflictLoad, &'static str> {
-    let (stages, path, index, file_count, found) = match source {
+    let (stages, path, index, found) = match source {
         ConflictSource::Discover {
             git_host,
             git_root,
@@ -265,23 +267,19 @@ fn read_conflict(
                 .unwrap_or(0);
             let path = files.get(index).ok_or("no merge conflicts")?.clone();
             let stages = repo.conflict_stages(&path).ok_or("no merge conflicts")?;
-            let file_count = files.len();
-            let labels = ConflictLabels::new(repo.head_branch(), repo.merge_state().as_ref());
+            let merge = repo.merge_state();
+            let labels = ConflictLabels::new(repo.head_branch(), merge.as_ref());
             let found = FoundConflicts {
                 repo,
                 files,
+                merging: merge.is_some(),
                 labels,
             };
-            (stages, path, index, file_count, Some(found))
+            (stages, path, index, Some(found))
         },
-        ConflictSource::Session {
-            repo,
-            path,
-            index,
-            file_count,
-        } => {
+        ConflictSource::Session { repo, path, index } => {
             let stages = repo.conflict_stages(&path).ok_or("no merge conflicts")?;
-            (stages, path, index, file_count, None)
+            (stages, path, index, None)
         },
     };
 
@@ -305,7 +303,6 @@ fn read_conflict(
             ending,
             path,
             index,
-            file_count,
         },
         found,
     })
@@ -324,11 +321,7 @@ fn install_conflict_file(
     labels: &ConflictLabels,
 ) -> (FileResolveState, Option<usize>) {
     let ConflictDoc {
-        doc,
-        ending,
-        path,
-        index,
-        file_count,
+        doc, ending, path, ..
     } = landed;
     let language = stoat.language_registry.for_path(&path);
     let (center_text, chunk_ranges) = doc.initial_center_text();
@@ -380,8 +373,6 @@ fn install_conflict_file(
         doc.clone(),
         chunk_anchors.clone(),
         picks.clone(),
-        index,
-        file_count,
         rel_path,
         labels.clone(),
     )));
@@ -607,18 +598,14 @@ pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool, count: usize)
 /// already stepped past. A parked target drops a pending switch for the same
 /// reason.
 fn switch_to_file(stoat: &mut Stoat, target: usize) {
-    let (file_count, repo, target_path) = {
+    let (repo, target_path) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;
         };
         if target == session.current || target >= session.files.len() {
             return;
         }
-        (
-            session.files.len(),
-            session.repo.clone(),
-            session.files[target].clone(),
-        )
+        (session.repo.clone(), session.files[target].clone())
     };
 
     let parked = stoat
@@ -636,7 +623,6 @@ fn switch_to_file(stoat: &mut Stoat, target: usize) {
                 repo,
                 path: target_path,
                 index: target,
-                file_count,
             };
             spawn_conflict_doc(stoat, source, ConflictIntent::Switch { target });
         },
@@ -1130,11 +1116,8 @@ fn current_chunk_and_row(stoat: &mut Stoat) -> Option<(usize, Range<usize>, Stri
     let cursor = buffer_snapshot.resolve_anchor(&cursor_anchor);
 
     let session = stoat.active_workspace().conflict.as_ref()?;
-    let chunk_idx = session.file.chunk_anchors.iter().position(|(start, end)| {
-        let start = buffer_snapshot.resolve_anchor(start);
-        let end = buffer_snapshot.resolve_anchor(end);
-        (start..end).contains(&cursor)
-    })?;
+    let chunk_idx =
+        conflict_session::chunk_holding(&session.file.chunk_anchors, buffer_snapshot, cursor)?;
 
     let (start, end) = &session.file.chunk_anchors[chunk_idx];
     let region = buffer_snapshot.resolve_anchor(start)..buffer_snapshot.resolve_anchor(end);

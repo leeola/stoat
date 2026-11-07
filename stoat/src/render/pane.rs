@@ -1657,6 +1657,12 @@ fn status_segments(
     // The typed text is what the user needs to read mid-type. The workspace,
     // screen and file names are context they already have.
     let prompt = frame.status_prompt.filter(|_| is_focused);
+    // The conflict screen's lead names the operation and the chunk at the
+    // cursor in place of the file name. The pane's buffer is the scratch
+    // merged result, which the grid's header already names after its file.
+    let conflict = frame
+        .conflict_position
+        .filter(|_| is_focused && frame.screen == Some("conflict"));
     if is_focused {
         let (label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
@@ -1686,6 +1692,20 @@ fn status_segments(
                     lead_end,
                     format!(" {modal_label} "),
                     lead_style,
+                );
+            } else if let Some(position) = conflict {
+                let at = position
+                    .chunk_at
+                    .map_or_else(|| "-".to_string(), |at| at.to_string());
+                push_left(
+                    &mut left,
+                    &mut cursor,
+                    lead_end,
+                    format!(
+                        " {} \u{b7} chunk {at} / {} ",
+                        position.operation, position.chunk_total
+                    ),
+                    tinted(lead_style, theme, crate::theme::scope::UI_TEXT),
                 );
             } else if let Some((screen_label, screen_color)) = screen_segment(frame.screen, theme) {
                 let screen_color = split.map_or(screen_color, |(_, colors)| colors.base.name);
@@ -1735,6 +1755,7 @@ fn status_segments(
     if let Some(name) = &status.filename
         && prompt.is_none()
         && sides.is_none()
+        && conflict.is_none()
     {
         let left_pad = if cursor == area.x { " " } else { "" };
         let modified = if status.dirty { " [+]" } else { "" };
@@ -4878,6 +4899,87 @@ mod tests {
         assert_eq!(
             bar,
             format!("{:<56}1:1 ", " NOR  ro file.txt [+]  read only")
+        );
+    }
+
+    /// The conflict screen's row leads with the operation and the chunk at the
+    /// cursor, in the text color, in place of the scratch buffer's name.
+    #[test]
+    fn the_status_row_names_the_conflict_chunk_at_the_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("a\nbase\n"),
+                Some("a\nours\n"),
+                Some("a\ntheirs\n"),
+            );
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+
+        let buf = h.render_composited();
+        let lead = " NOR  repo  conflict \u{b7} chunk 1 / 1";
+        let at = lead.find("conflict").expect("the lead names the operation") as u16;
+        let text = h
+            .stoat
+            .theme
+            .get(crate::theme::scope::UI_TEXT)
+            .fg
+            .expect("the theme colors text");
+        assert_eq!(
+            (
+                status_row(&buf, buf.area),
+                buf[(at, buf.area.height - 1)].fg
+            ),
+            (format!("{lead:<56}2:1 "), text),
+        );
+    }
+
+    /// A pane beside the conflict view keeps its own file's name, since only
+    /// the focused conflict pane leads with the chunk. The open widens its
+    /// pane, so the layout unwidens to show the other one.
+    #[test]
+    fn a_pane_beside_the_conflict_view_keeps_its_file_name() {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_git()
+            .add_repo("/repo")
+            .with_fs(h.fake_fs())
+            .conflicted_file(
+                "f.txt",
+                Some("a\nbase\n"),
+                Some("a\nours\n"),
+                Some("a\ntheirs\n"),
+            );
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: PathBuf::from("/repo/f.txt"),
+            },
+        );
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::SplitRight);
+        dispatch(&mut h.stoat, &Conflict);
+        h.settle();
+        h.stoat.active_workspace_mut().panes.unwiden();
+
+        let buf = h.render_composited();
+        let rows: Vec<String> = h
+            .stoat
+            .active_workspace()
+            .panes
+            .split_panes()
+            .map(|(_, pane)| status_row(&buf, pane.area))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                format!("{:<52}1:1 ", " f.txt"),
+                format!("{:<56}", " NOR  repo  conflict \u{b7} chunk 1 / 1"),
+            ],
         );
     }
 
