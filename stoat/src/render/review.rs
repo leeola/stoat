@@ -1339,7 +1339,7 @@ pub(crate) fn paint_diff_rows(
                             dim_style,
                             digits,
                         );
-                        if let Some(GutterMark { status, state, .. }) = snapshot
+                        if let Some(GutterMark { status, state }) = snapshot
                             .diff_map()
                             .and_then(|dm| dm.staged_mark_at_base_line(line_base))
                         {
@@ -2329,7 +2329,7 @@ fn paint_base_side(
     // The row is there for the removal, so the removal's status wins over a
     // staged mark on the same base line.
     match removal {
-        Some((state, _)) => {
+        Some(state) => {
             let change_scope = if changes
                 .iter()
                 .any(|(_, k, _)| matches!(k, ChangeKind::Moved))
@@ -2351,7 +2351,7 @@ fn paint_base_side(
             );
         },
         None => {
-            if let Some(GutterMark { status, state, .. }) = snapshot
+            if let Some(GutterMark { status, state }) = snapshot
                 .diff_map()
                 .and_then(|dm| dm.staged_mark_at_base_line(base_line))
             {

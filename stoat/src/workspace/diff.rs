@@ -2315,7 +2315,7 @@ mod tests {
         buffer::BufferId,
         diff_map::{
             BaseHighlights, DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkKind, MarkState,
-            StagedMark, TreeMark,
+            StagedMark,
         },
         display_map::syntax_theme::SyntaxStyles,
         host::DiffStatus,
@@ -4496,7 +4496,6 @@ mod tests {
             dm.staged_mark_at_base_line(1),
             Some(GutterMark {
                 status: DiffHunkStatus::Modified,
-                tree: TreeMark::Unrefined,
                 state: MarkState::Staged,
             }),
             "b->B is a staged mark on base line 1",

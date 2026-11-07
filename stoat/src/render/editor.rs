@@ -3078,7 +3078,6 @@ mod tests {
         buffer::BufferId,
         diff_map::{
             DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, StagedMark, TokenDetail,
-            TreeMark,
         },
         render::{
             review::{self, DiffColumns, DiffDials, DiffLayout},
@@ -3715,19 +3714,18 @@ mod tests {
     }
 
     /// The fallback gutter paints one glyph right of the number on every
-    /// marked row, whatever the tree pass reads there. A change takes `▎`, and
-    /// a deletion `▔`.
+    /// marked row. A change takes `▎`, and a deletion `▔`.
     #[test]
     fn fallback_gutter_paints_the_git_glyph_cell() {
         let theme = crate::theme::Theme::empty();
         let folded: Vec<(u32, u16)> = (1..=5).map(|number| (number, 1)).collect();
         let diff_marks: std::collections::BTreeMap<u32, GutterMark> = (0u32..)
             .zip([
-                mark(DiffHunkStatus::Modified, TreeMark::Marked),
-                mark(DiffHunkStatus::Modified, TreeMark::Unrefined),
-                mark(DiffHunkStatus::Modified, TreeMark::Unmarked),
-                mark(DiffHunkStatus::Deleted, TreeMark::Marked),
-                mark(DiffHunkStatus::Deleted, TreeMark::Unrefined),
+                mark(DiffHunkStatus::Modified),
+                mark(DiffHunkStatus::Modified),
+                mark(DiffHunkStatus::Modified),
+                mark(DiffHunkStatus::Deleted),
+                mark(DiffHunkStatus::Deleted),
             ])
             .collect();
         let area = Rect::new(0, 0, 12, 5);
@@ -3753,12 +3751,10 @@ mod tests {
         );
     }
 
-    /// The gutter mark of an unstaged row of kind `status` the tree pass reads
-    /// as `tree`.
-    fn mark(status: DiffHunkStatus, tree: TreeMark) -> GutterMark {
+    /// The gutter mark of an unstaged row of kind `status`.
+    fn mark(status: DiffHunkStatus) -> GutterMark {
         GutterMark {
             status,
-            tree,
             state: MarkState::Unstaged,
         }
     }
@@ -3771,7 +3767,7 @@ mod tests {
         let theme = crate::theme::Theme::empty();
         let folded = [(1u32, 1u16), (2, 1)];
         let mut diff_marks = std::collections::BTreeMap::new();
-        diff_marks.insert(0u32, mark(DiffHunkStatus::Modified, TreeMark::Unrefined));
+        diff_marks.insert(0u32, mark(DiffHunkStatus::Modified));
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 2));
 
         let width = super::draw_fallback_line_numbers(
@@ -3815,7 +3811,7 @@ mod tests {
                     DiffHunkStatus::Added,
                     DiffHunkStatus::Modified,
                 ]
-                .map(|status| mark(status, TreeMark::Marked)),
+                .map(mark),
             )
             .collect();
         let area = Rect::new(0, 0, 12, 3);
@@ -5377,19 +5373,18 @@ mod tests {
         }
     }
 
-    /// The rich gutter's hunk lane takes the kind's full color on every row of
-    /// a hunk, whatever the tree pass reads there, and its state lane the
-    /// hunk's state color. A deletion's line sets `seam`, which draws its
-    /// hunk bar short.
+    /// The rich gutter's hunk lane takes the kind's full color on every marked
+    /// row, and its state lane the hunk's state color. A deletion's line sets
+    /// `seam`, which draws its hunk bar short.
     #[test]
     fn rich_gutter_hunk_lane_marks_every_row_of_a_hunk() {
         let folded: Vec<(u32, u16)> = (1..=4).map(|number| (number, 1)).collect();
         let diff_marks: std::collections::BTreeMap<u32, GutterMark> = (0u32..)
             .zip([
-                mark(DiffHunkStatus::Modified, TreeMark::Marked),
-                mark(DiffHunkStatus::Modified, TreeMark::Unrefined),
-                mark(DiffHunkStatus::Modified, TreeMark::Unmarked),
-                mark(DiffHunkStatus::Deleted, TreeMark::Marked),
+                mark(DiffHunkStatus::Modified),
+                mark(DiffHunkStatus::Modified),
+                mark(DiffHunkStatus::Modified),
+                mark(DiffHunkStatus::Deleted),
             ])
             .collect();
 
