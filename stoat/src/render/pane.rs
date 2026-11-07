@@ -25,6 +25,7 @@ use crate::{
         run_pane::render_run_pane,
         status_lane,
         term_pane::render_term_pane,
+        text,
         undercurl::UndercurlBatch,
         FrameCtx, MinimapChrome, PaneCtx,
     },
@@ -53,9 +54,10 @@ use stoat_widgets::{
     minimap::Minimap,
     panel::Panel,
     status_bar::{StatusBar, StatusSegment},
-    text_run, ApcScene,
+    text_run::{self, TextRun},
+    ApcScene,
 };
-use stoatty_protocol::command::BorderStyle;
+use stoatty_protocol::command::{BorderStyle, PanelShadow};
 
 /// Buffer lines the minimap strip draws per vertical cell.
 pub(super) const MINIMAP_LINES_PER_CELL: u8 = 8;
@@ -176,6 +178,13 @@ pub(crate) fn render_pane(
                     false,
                     None,
                 );
+                if !editor.diff_view
+                    && editor.conflict_view.is_none()
+                    && let Some(kind) = buffers.read_only(editor.buffer_id)
+                    && let Some(text_area) = editor.text_rect
+                {
+                    render_read_only_frame(text_area, kind, frame, buf, scene);
+                }
 
                 if let (Some(strip), Some(chrome)) = (editor.minimap_rect, frame.minimap_chrome)
                     && let Some(content) = chrome.content.get(&(chrome.workspace, editor.buffer_id))
@@ -417,6 +426,107 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
         anchor: None,
     }
     .draw_components(area, scene);
+}
+
+/// Declare the dashed ring and the label of a read-only editor whose text
+/// fills `text_area`.
+///
+/// The ring is a backdrop panel one cell narrower than the text, so the pane's
+/// pool composite and its decorations still draw inside it. The label names
+/// `kind` on a chip in the first row, one cell inside the ring's right end. The
+/// chip's panel follows the ring, because a later panel's box hides an earlier
+/// panel's stroke, and that is how the label cuts the ring's top edge. A ring
+/// too narrow for the chip draws no label.
+///
+/// Only stoatty draws either, at [`BACKDROP_PANEL_PROTOCOL`] or later, under a
+/// theme that colors `ui.readonly.frame`, `ui.readonly.label`, and the editor
+/// surface.
+///
+/// [`BACKDROP_PANEL_PROTOCOL`]: stoatty_protocol::BACKDROP_PANEL_PROTOCOL
+fn render_read_only_frame(
+    text_area: Rect,
+    kind: ReadOnly,
+    frame: FrameCtx<'_>,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    if !scene.live() || !frame.backdrop_panels {
+        return;
+    }
+    let theme = frame.theme;
+    let fg = |name: &str| style_rgb(theme.try_get(name).and_then(|style| style.fg));
+    let (Some(ring_rgb), Some(label_rgb), Some(base_rgb)) = (
+        fg(crate::theme::scope::UI_READONLY_FRAME),
+        fg(crate::theme::scope::UI_READONLY_LABEL),
+        style_rgb(
+            theme
+                .try_get(crate::theme::scope::UI_BACKGROUND)
+                .and_then(|style| style.bg),
+        ),
+    ) else {
+        return;
+    };
+
+    let ring = Rect {
+        width: text_area.width.saturating_sub(1),
+        ..text_area
+    };
+    Panel {
+        style: BorderStyle::Dashed,
+        border: ring_rgb,
+        corner_radius: theme.panel(PanelRole::Island).corner_radius,
+        fill: None,
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        backdrop: true,
+        anchor: None,
+    }
+    .draw_components(ring, scene);
+
+    let label = match kind {
+        ReadOnly::Compressed => "read only \u{b7} gzip",
+        ReadOnly::Permission => "read only \u{b7} no write access",
+    };
+    let chip_width = label.chars().count() as u16 + 2;
+    let Some(x) = ring
+        .right()
+        .checked_sub(chip_width + 1)
+        .filter(|&x| x > ring.x)
+    else {
+        return;
+    };
+
+    // A cell glyph draws above a panel's fill, so the text under the chip
+    // blanks first.
+    let [r, g, b] = base_rgb;
+    let blank = Style::default().bg(Color::Rgb(r, g, b));
+    for col in x..x + chip_width {
+        text::write_cell(buf, col, ring.y, ' ', blank);
+    }
+    Panel {
+        style: BorderStyle::None_,
+        border: label_rgb,
+        corner_radius: 0,
+        fill: Some(base_rgb),
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    }
+    .draw_components(Rect::new(x, ring.y, chip_width, 1), scene);
+    TextRun {
+        col: 0,
+        row: 0,
+        scale: theme.type_scale(TypeRole::Small),
+        color: label_rgb,
+        bg: None,
+        text: label,
+        follow: 0,
+        anchor: None,
+    }
+    .render(Rect::new(x + 1, ring.y, 1, 1), buf, scene);
 }
 
 /// What a pane's minimap strip shows.

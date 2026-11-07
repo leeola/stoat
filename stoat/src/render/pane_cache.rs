@@ -27,6 +27,10 @@
 //! a plain pane reads, it reads the diff dials. No version moves with them, so
 //! the key holds them.
 //!
+//! A plain editor of a read-only buffer draws a ring around its text and names
+//! the buffer's read-only kind on it. A save that finds write access lifts the
+//! kind and moves no version, so the key holds the kind.
+//!
 //! A changes view paints one diff view per excerpt its window shows. Its key
 //! holds the parts an editor key holds for the focused excerpt, and it folds
 //! the placement and the versions of every shown excerpt into one hash. An
@@ -40,7 +44,7 @@
 
 use crate::{
     buffer::BufferId,
-    buffer_registry::BufferRegistry,
+    buffer_registry::{BufferRegistry, ReadOnly},
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::PaintVersion,
     editor_state::{EditorId, EditorState},
@@ -162,6 +166,11 @@ pub(crate) struct PaneCacheKey {
     /// whether or not it moves anything else in the pane, so this field
     /// repaints the cell when nothing else does.
     pub(crate) terminal_cursor: bool,
+    /// Why the buffer must not write back, which a plain editor names on the
+    /// ring it draws around its text. A save that finds write access lifts it,
+    /// and no version moves with that. `None` for a changes view and a
+    /// terminal pane.
+    pub(crate) read_only: Option<ReadOnly>,
     /// The excerpts a changes view's window shows, hashed with the focused
     /// index, the window's rows, and whether the terminal composites the
     /// stack. Each one counts its buffer, placement, rows, path, fold,
@@ -502,6 +511,7 @@ pub(crate) fn pane_cache_key(
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
+        read_only: buffers.read_only(buffer),
         stack: 0,
         terminal: 0,
     })
@@ -575,6 +585,7 @@ fn terminal_cache_key(
         hover_cell: None,
         scene_live,
         terminal_cursor: false,
+        read_only: None,
         stack: 0,
         terminal: terminal.finish(),
     })
@@ -711,6 +722,7 @@ fn stack_cache_key(
         hover_cell: frame.hover_cell.filter(|_| is_focused),
         scene_live,
         terminal_cursor: frame.terminal_cursor_editor == Some(editor_id),
+        read_only: None,
         stack: stack.finish(),
         terminal: 0,
     })
@@ -802,7 +814,7 @@ fn cells_into(buf: &Buffer, rect: Rect, out: &mut Vec<Cell>) {
 #[cfg(test)]
 mod tests {
     use super::PaneCacheKey;
-    use crate::{buffer::BufferId, display_map::PaintVersion};
+    use crate::{buffer::BufferId, buffer_registry::ReadOnly, display_map::PaintVersion};
     use ratatui::layout::Rect;
     use stoat_config::{LineNumbers, WrapMode};
 
@@ -830,6 +842,7 @@ mod tests {
             hover_cell: None,
             scene_live: false,
             terminal_cursor: false,
+            read_only: None,
             stack: 0,
             terminal: 0,
         }
@@ -844,7 +857,7 @@ mod tests {
     #[test]
     fn each_field_tells_two_keys_apart() {
         let base = key(PaintVersion::default());
-        let moved: [(&str, PaneCacheKey); 23] = [
+        let moved: [(&str, PaneCacheKey); 24] = [
             (
                 "buffer",
                 PaneCacheKey {
@@ -989,6 +1002,13 @@ mod tests {
                 "terminal_cursor",
                 PaneCacheKey {
                     terminal_cursor: true,
+                    ..base
+                },
+            ),
+            (
+                "read_only",
+                PaneCacheKey {
+                    read_only: Some(ReadOnly::Compressed),
                     ..base
                 },
             ),

@@ -1817,6 +1817,220 @@ fn island_halos(
         .collect()
 }
 
+const READ_ONLY_FRAME: [u8; 3] = [0x8a, 0x76, 0x50];
+const READ_ONLY_LABEL: [u8; 3] = [0xc9, 0xb3, 0x83];
+const READ_ONLY_BASE: [u8; 3] = [0x17, 0x19, 0x1e];
+
+/// The shipped dark theme's ring and label colors over an RGB editor surface.
+fn read_only_theme() -> crate::theme::Theme {
+    let src = r##"theme readonly {
+            ui.background.bg = "#17191e";
+            ui.readonly.label.fg = "#c9b383";
+            ui.readonly.frame.fg = "#8a7650";
+        }"##;
+    let (config, _) = stoat_config::parse(src);
+    crate::theme::Theme::from_config(&config.expect("theme parses"), "readonly")
+        .expect("theme loads")
+}
+
+/// A harness at the backdrop protocol under `theme`, focused on the file
+/// `name`, which holds `bytes`. A file that is not `writable` opens read-only.
+fn read_only_harness(
+    theme: crate::theme::Theme,
+    name: &str,
+    bytes: &[u8],
+    writable: bool,
+) -> crate::test_harness::TestHarness {
+    let mut h = Stoat::test();
+    h.stoat.theme = Arc::new(theme);
+    h.stoat.stoatty_protocol = stoatty_protocol::BACKDROP_PANEL_PROTOCOL;
+    let root = PathBuf::from("/ro");
+    let path = root.join(name);
+    h.fake_fs().insert_file(&path, bytes);
+    h.fake_fs().set_read_only(&path, !writable);
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path });
+    h.settle();
+    // A gzip file reads on the blocking pool, and the read installs here.
+    crate::buffer_lifecycle::install_pending_opens(&mut h.stoat);
+    h.settle();
+    h
+}
+
+/// The ring, the label's chip, and the label's run that one painted frame of
+/// `h` holds in its scene, in scene order, and the frame's cells.
+fn read_only_paint(h: &mut crate::test_harness::TestHarness) -> (Vec<command::Command>, Buffer) {
+    use stoatty_protocol::command::{self, BorderStyle, Command};
+
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    let marks = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+        .into_iter()
+        .filter(|cmd| match cmd {
+            Command::Panel(panel) => {
+                panel.style == BorderStyle::Dashed || panel.border == READ_ONLY_LABEL
+            },
+            Command::TextRun(run) => run.color == READ_ONLY_LABEL,
+            _ => false,
+        })
+        .collect();
+    (marks, buf)
+}
+
+/// The marks of a read-only pane whose text fills `text` and whose ring reads
+/// `label`. The ring is one cell narrower than the text, the chip ends one
+/// cell inside the ring's right end, and the run starts one cell into the
+/// chip.
+fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<command::Command> {
+    use crate::theme::{PanelRole, TypeRole};
+    use stoatty_protocol::command::{
+        BorderStyle, Command, PanelCommand, PanelShadow, TextRunCommand,
+    };
+
+    let ring = Rect {
+        width: text.width - 1,
+        ..text
+    };
+    let chip = label.chars().count() as u16 + 2;
+    let x = ring.right().saturating_sub(chip + 1);
+    vec![
+        Command::Panel(PanelCommand {
+            top: ring.y,
+            left: ring.x,
+            width: ring.width,
+            height: ring.height,
+            style: BorderStyle::Dashed,
+            border: READ_ONLY_FRAME,
+            corner_radius: theme.panel(PanelRole::Island).corner_radius,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: true,
+            anchor: None,
+        }),
+        Command::Panel(PanelCommand {
+            top: ring.y,
+            left: x,
+            width: chip,
+            height: 1,
+            style: BorderStyle::None_,
+            border: READ_ONLY_LABEL,
+            corner_radius: 0,
+            fill: Some(READ_ONLY_BASE),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        }),
+        Command::TextRun(TextRunCommand {
+            col: (x as i16 + 1) * 16,
+            row: ring.y as i16 * 16,
+            scale: theme.type_scale(TypeRole::Small),
+            color: READ_ONLY_LABEL,
+            bg: None,
+            follow: 0,
+            anchor: None,
+            text: label.to_string(),
+        }),
+    ]
+}
+
+/// A read-only pane rings its text in a dashed hairline and names why on the
+/// ring. A gzip file's text has no file to write back to, and a file without
+/// write access refuses the write. The first line's text under the chip
+/// blanks, since a cell glyph draws above a panel's fill.
+#[test]
+fn a_read_only_pane_rings_its_text_and_names_why() {
+    let line = format!("{}\n", "notes ".repeat(20));
+    let gz = crate::test_harness::gzip(line.as_bytes());
+    for (name, bytes, writable, label) in [
+        ("a.md.gz", &gz[..], true, "read only \u{b7} gzip"),
+        (
+            "a.txt",
+            line.as_bytes(),
+            false,
+            "read only \u{b7} no write access",
+        ),
+    ] {
+        let mut h = read_only_harness(read_only_theme(), name, bytes, writable);
+        let (marks, buf) = read_only_paint(&mut h);
+        let text = action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("the focused editor")
+            .text_rect
+            .expect("the painted text");
+
+        let expected = ring_and_label(text, label, &h.stoat.theme);
+        let chip = match &expected[1] {
+            command::Command::Panel(chip) => *chip,
+            other => panic!("the chip's panel follows the ring, got {other:?}"),
+        };
+        let under_chip: String = (chip.left..chip.left + chip.width)
+            .map(|x| buf[(x, chip.top)].symbol())
+            .collect();
+        assert_eq!(
+            (marks, under_chip),
+            (expected, " ".repeat(chip.width.into())),
+            "{name}: the marks, then the cells under the chip",
+        );
+    }
+}
+
+/// No ring draws under a theme that leaves the read-only scopes unset, nor for
+/// a terminal that reads a backdrop panel as one above every pool.
+#[test]
+fn a_read_only_pane_draws_no_ring_without_its_colors_or_the_backdrop_protocol() {
+    let mut unthemed = read_only_harness(chrome_ground_theme(), "a.txt", b"notes\n", false);
+    let mut older = read_only_harness(read_only_theme(), "a.txt", b"notes\n", false);
+    older.stoat.stoatty_protocol = stoatty_protocol::BACKDROP_PANEL_PROTOCOL - 1;
+
+    assert_eq!(
+        [
+            read_only_paint(&mut unthemed).0,
+            read_only_paint(&mut older).0
+        ],
+        [vec![], vec![]],
+    );
+}
+
+/// A buffer whose read-only tag lifts drops its ring on the next frame, though
+/// nothing else its pane paints moved.
+#[test]
+fn a_lifted_read_only_tag_drops_the_ring() {
+    let mut h = read_only_harness(read_only_theme(), "a.txt", b"notes\n", false);
+    // A pane captures only on a frame whose key held since the frame before,
+    // so the second frame captures what the third replays on an equal key.
+    read_only_paint(&mut h);
+    let ringed = read_only_paint(&mut h).0.len();
+    let id = action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("the focused editor")
+        .buffer_id;
+    h.stoat
+        .active_workspace_mut()
+        .buffers
+        .set_read_only(id, None);
+
+    assert_eq!((ringed, read_only_paint(&mut h).0), (3, vec![]));
+}
+
+/// A ring too narrow for its label's chip still draws, with no label on it. At
+/// 32 columns the chip fits the row but starts left of the ring's left edge.
+#[test]
+fn a_ring_too_narrow_for_its_label_draws_no_label() {
+    let mut h = read_only_harness(read_only_theme(), "a.txt", b"notes\n", false);
+    h.resize(32, 10);
+
+    let marks = read_only_paint(&mut h).0;
+    let text = action_handlers::focused_editor_mut(&mut h.stoat)
+        .expect("the focused editor")
+        .text_rect
+        .expect("the painted text");
+    let mut ring = ring_and_label(text, "read only \u{b7} no write access", &h.stoat.theme);
+    ring.truncate(1);
+    assert_eq!(marks, ring);
+}
+
 #[test]
 fn the_hints_box_anchors_to_the_bottom_right_corner() {
     use stoatty_protocol::command::Command;

@@ -1069,6 +1069,7 @@ mod tests {
             minimap_chrome: None,
             minimap_band: None,
             islands: false,
+            backdrop_panels: false,
             badge_cover: None,
             hover_cell: None,
             home: None,

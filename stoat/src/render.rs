@@ -102,7 +102,7 @@ use std::{
 };
 use stoat_config::{LineNumbers, MinimapMode, WrapMode};
 use stoat_widgets::{minimap::Minimap, popover::Popover, ApcScene};
-use stoatty_protocol::BATCHED_DECORATIONS_PROTOCOL;
+use stoatty_protocol::{BACKDROP_PANEL_PROTOCOL, BATCHED_DECORATIONS_PROTOCOL};
 use unicode_width::UnicodeWidthStr;
 
 /// Strip id for the single-mode minimap, reserved above every pane index (which
@@ -460,6 +460,10 @@ pub(crate) struct FrameCtx<'a> {
     /// [`Stoat::islands_on`] answers. Each pane then declares its island halo,
     /// and the gaps draw no divider hairline.
     pub(crate) islands: bool,
+    /// Whether the terminal reads a backdrop panel, which a stoatty at
+    /// [`BACKDROP_PANEL_PROTOCOL`] or later does. An older one takes the flag
+    /// as above every pool, so a backdrop it draws hides the pane's own glide.
+    pub(crate) backdrop_panels: bool,
     /// The span of the window's bottom row under a bottom-right badge's chip,
     /// from [`badges::bottom_right_cover`]. A status bar on that row keeps its
     /// segments left of it, since the chip paints over the bar.
@@ -1393,6 +1397,7 @@ pub(crate) fn frame(
         minimap_chrome,
         minimap_band: single_minimap_rect,
         islands,
+        backdrop_panels: stoat.stoatty && stoat.stoatty_protocol >= BACKDROP_PANEL_PROTOCOL,
         badge_cover,
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
