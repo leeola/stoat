@@ -2295,9 +2295,10 @@ fn paint_diagnostic_spans(
     colors: Option<&SeverityColors>,
     dim: f32,
 ) {
-    // An Unnecessary-tagged hint/info span blends the cell's syntax fg toward
-    // this background rather than overwriting it. It resolves once, and the
-    // dedup set keeps overlapping muted spans from double-blending a shared cell.
+    // An Unnecessary-tagged span below error severity blends the cell's syntax
+    // fg toward this background rather than overwriting it. It resolves once,
+    // and the dedup set keeps overlapping muted spans from double-blending a
+    // shared cell.
     let mute_bg = style_rgb(fallback_style.bg.or_else(|| {
         theme
             .try_get(crate::theme::scope::UI_BACKGROUND)
@@ -2342,14 +2343,16 @@ fn paint_diagnostic_spans(
         if diag.unnecessary
             && matches!(
                 sev,
-                DiagnosticSeverity::HINT | DiagnosticSeverity::INFORMATION
+                DiagnosticSeverity::HINT
+                    | DiagnosticSeverity::INFORMATION
+                    | DiagnosticSeverity::WARNING
             )
         {
-            // An inactive-code region mutes each cell's syntax fg toward the
-            // background rather than recoloring it. The overlay draws a dotted
-            // line under it in the hint color, muted as far as the text. The
-            // dedup set blends a cell shared by overlapping Unnecessary spans
-            // exactly once.
+            // Unused or inactive code mutes each cell's syntax fg toward the
+            // background rather than recoloring it, a tagged warning such as an
+            // unused variable included. The overlay draws a dotted line under
+            // it in the hint color, muted as far as the text. The dedup set
+            // blends a cell shared by overlapping Unnecessary spans exactly once.
             let grey = theme.get(severity_scope(sev));
             runs.clear();
             paint_offset_range(
@@ -5884,26 +5887,25 @@ mod tests {
     }
 
     /// Unused code reads at the muted text's 45 percent, its dotted line
-    /// included, and takes the hint color whatever its severity.
+    /// included, and takes the hint color whatever its severity. A tagged
+    /// warning, such as an unused variable, reads the same.
     #[test]
     fn unused_code_collects_a_dotted_undercurl_in_the_muted_hint_color() {
-        let (h, spans) = collected_undercurls(tagged_overlap_diag(
-            0,
-            0,
-            5,
-            DiagnosticSeverity::INFORMATION,
-        ));
-        let theme = &h.stoat.theme;
-        let bg = super::style_rgb(theme.get(s::UI_TEXT).bg.or(theme.get(s::UI_BACKGROUND).bg))
-            .expect("a themed pane background");
-        assert_eq!(
-            spans,
-            [(
-                5,
-                super::mute_rgb(shipped_rgb(&h, s::UI_DIAGNOSTIC_HINT), bg),
-                UnderlineKind::Dotted,
-            )],
-        );
+        for severity in [DiagnosticSeverity::INFORMATION, DiagnosticSeverity::WARNING] {
+            let (h, spans) = collected_undercurls(tagged_overlap_diag(0, 0, 5, severity));
+            let theme = &h.stoat.theme;
+            let bg = super::style_rgb(theme.get(s::UI_TEXT).bg.or(theme.get(s::UI_BACKGROUND).bg))
+                .expect("a themed pane background");
+            assert_eq!(
+                spans,
+                [(
+                    5,
+                    super::mute_rgb(shipped_rgb(&h, s::UI_DIAGNOSTIC_HINT), bg),
+                    UnderlineKind::Dotted,
+                )],
+                "{severity:?}",
+            );
+        }
     }
 
     /// The paint bounds which spans it walks by the viewport. A span opening far
@@ -6374,6 +6376,27 @@ mod tests {
             ],
         );
         h.assert_snapshot("diagnostic_warning_over_unnecessary_still_underlines");
+    }
+
+    /// A tagged warning, which is how rustc sends an unused variable, reads as
+    /// unused code. Its span mutes and takes no underline in the cells. The
+    /// gutter mark and the message after the line keep the warning color.
+    #[test]
+    fn snapshot_diagnostic_unused_warning_reads_as_unused() {
+        let mut h = Stoat::test();
+        let path = open_settled(
+            &mut h,
+            "/diag-unused-warning",
+            b"let x = 1;\nlet y = 2;\nlet z = 3;\n",
+        );
+        h.seed_diagnostics(
+            path,
+            vec![Diagnostic {
+                tags: Some(vec![DiagnosticTag::UNNECESSARY]),
+                ..message_diag((1, 4), (1, 5), DiagnosticSeverity::WARNING, "unused `y`")
+            }],
+        );
+        h.assert_snapshot("diagnostic_unused_warning_reads_as_unused");
     }
 
     #[test]
