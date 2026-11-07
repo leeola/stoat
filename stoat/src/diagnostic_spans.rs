@@ -12,7 +12,10 @@
 
 use crate::editor_state::EditorState;
 use lsp_types::{DiagnosticSeverity, DiagnosticTag};
-use std::{ops::Range, path::Path};
+use std::{
+    ops::{Range, RangeInclusive},
+    path::Path,
+};
 use stoat_text::{Anchor, Bias};
 
 /// A diagnostic resolved to byte offsets once per (set, buffer) version, so the
@@ -185,6 +188,69 @@ impl DiagnosticSpanCache {
 
         self.cursor_line_diag = Some((line, buffer_version, found));
         found
+    }
+
+    /// The worst-severity diagnostic that starts on each of `lines`, in the
+    /// order given, or `None` for a line where none starts.
+    ///
+    /// A span over many lines answers only for the line it starts on, so a
+    /// reader that prints one message per line prints a long span once. Ties
+    /// go to the earliest span, as in [`Self::cursor_line_diagnostic`].
+    ///
+    /// Each run of consecutive lines takes one batch resolve, so the cost
+    /// follows the spans those lines hold. A fold that hides the lines between
+    /// two runs keeps its spans out of the work.
+    pub(crate) fn line_start_diagnostics(
+        &self,
+        lines: &[u32],
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Vec<Option<ResolvedDiag>> {
+        let rope = snapshot.rope();
+        let mut found = vec![None; lines.len()];
+
+        let mut run_start = 0;
+        while run_start < lines.len() {
+            let first = lines[run_start];
+            let mut run_end = run_start + 1;
+            while lines.get(run_end) == Some(&(lines[run_end - 1] + 1)) {
+                run_end += 1;
+            }
+            let last = lines[run_end - 1];
+
+            // A zero-width span at a line's end sits on that line, so the run
+            // reaches the newline of its last line.
+            let bytes = rope.point_to_offset(stoat_text::Point::new(first, 0))
+                ..=rope.point_to_offset(stoat_text::Point::new(last, rope.line_len(last)));
+            let spans = &self.spans[self.starting_in(&bytes, snapshot)];
+            for span in resolve_span_range(spans, snapshot) {
+                let slot = &mut found[run_start + (span.start_line - first) as usize];
+                let worse = |held: ResolvedDiag| {
+                    severity_rank(span.severity) < severity_rank(held.severity)
+                };
+                if slot.is_none_or(worse) {
+                    *slot = Some(span);
+                }
+            }
+
+            run_start = run_end;
+        }
+        found
+    }
+
+    /// The index range of [`Self::spans`] whose starts fall inside `bytes`.
+    fn starting_in(
+        &self,
+        bytes: &RangeInclusive<usize>,
+        snapshot: &crate::multi_buffer::MultiBufferSnapshot,
+    ) -> Range<usize> {
+        let start = |span: &AnchoredDiag| snapshot.resolve_anchor(&span.start);
+        let lo = self
+            .spans
+            .partition_point(|span| start(span) < *bytes.start());
+        let hi = self
+            .spans
+            .partition_point(|span| start(span) <= *bytes.end());
+        lo..hi
     }
 }
 
@@ -677,6 +743,46 @@ mod tests {
             cache.cursor_line_diagnostic(2, &snapshot).map(|d| d.index),
             Some(1),
             "the first of the two errors wins over the warning",
+        );
+    }
+
+    /// A span answers for the line it starts on and for no other, so a span
+    /// over many lines prints its message once. The worst severity wins a
+    /// line and ties go to the earliest span. A zero-width span at the file
+    /// start counts, and lines apart from each other, as a fold leaves them,
+    /// answer alike.
+    #[test]
+    fn each_line_answers_with_the_worst_span_starting_on_it() {
+        let (cache, snapshot) = line_span_cache(&[
+            (0, 0, DiagnosticSeverity::WARNING),
+            (1, 4, DiagnosticSeverity::HINT),
+            (2, 2, DiagnosticSeverity::WARNING),
+            (2, 2, DiagnosticSeverity::ERROR),
+            (2, 2, DiagnosticSeverity::ERROR),
+            (6, 6, DiagnosticSeverity::INFORMATION),
+        ]);
+
+        let found: Vec<Option<usize>> = cache
+            .line_start_diagnostics(&[0, 1, 2, 3, 6], &snapshot)
+            .iter()
+            .map(|span| span.map(|span| span.index))
+            .collect();
+        assert_eq!(found, [Some(0), Some(1), Some(3), None, Some(5)]);
+    }
+
+    /// A span counts for its line from any column, on the last line of a run
+    /// as on any other.
+    #[test]
+    fn a_span_starting_mid_line_answers_for_its_line() {
+        let (cache, snapshot) = span_cache(&[(3, 3)]);
+
+        let found = cache.line_start_diagnostics(&[0], &snapshot);
+        assert_eq!(
+            found
+                .iter()
+                .map(|span| span.map(|span| span.index))
+                .collect::<Vec<_>>(),
+            [Some(0)]
         );
     }
 

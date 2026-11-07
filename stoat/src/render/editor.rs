@@ -75,6 +75,12 @@ pub(super) const DIFF_OVERVIEW_COLS: u16 = 1;
 /// layer builds stay bounded.
 pub(super) const MAX_UNWRAPPED_COLUMNS: u32 = 4096;
 
+/// Blank cells between a line's text and the diagnostic message after it.
+///
+/// The design sets the message 24 px past the text. At the 13 px face the
+/// design draws with, three cells cover that distance.
+const EOL_MESSAGE_GAP: u32 = 3;
+
 /// Narrowest pane, in columns, that still reserves a minimap strip.
 ///
 /// At this width 100 text columns remain beside the 8-column strip. Anything
@@ -595,7 +601,7 @@ pub(crate) fn render_editor_with_overlay(
         }
 
         if let Some(cache) = editor.diagnostic_span_cache.as_mut() {
-            paint_cursor_line_diagnostic(
+            paint_line_diagnostics(
                 cache,
                 set,
                 path,
@@ -2436,14 +2442,19 @@ fn push_undercurl_runs(
     }
 }
 
-/// Paint the highest-severity diagnostic covering the primary cursor's line as
-/// an end-of-line message, dimmed in the severity color.
+/// Paint each visible line's diagnostic as a message after the line's text.
 ///
-/// The message is the first line of the winning diagnostic, started two columns
-/// past the row's content and clipped to the pane's right edge. A no-op when the
-/// cursor row is scrolled off, no diagnostic covers it, or the message is empty.
+/// A line shows the first message line of the worst diagnostic that starts on
+/// it, italic in the severity color, [`EOL_MESSAGE_GAP`] cells past its text.
+/// A span over many lines prints once, on the line it starts. The cursor's line
+/// reads the worst diagnostic that reaches it from anywhere instead, so a span
+/// the cursor sits inside still reads out there.
+///
+/// `suppress` is the diagnostic the popover shows, which prints on no line. A
+/// soft-wrapped line prints after its last row, and a message that reaches the
+/// pane's right edge ends in an ellipsis.
 #[allow(clippy::too_many_arguments)]
-fn paint_cursor_line_diagnostic(
+fn paint_line_diagnostics(
     cache: &mut DiagnosticSpanCache,
     set: &crate::diagnostics::DiagnosticSet,
     path: &Path,
@@ -2458,39 +2469,76 @@ fn paint_cursor_line_diagnostic(
     right: u16,
     buf: &mut Buffer,
 ) {
-    let cursor_point = rope.offset_to_point(cursor);
-    let display = snapshot.buffer_to_display(cursor_point);
-    if display.row < scroll_row || display.row >= end_row {
+    let line_ends = line_end_rows(snapshot, scroll_row, end_row);
+    let lines: Vec<u32> = line_ends.iter().map(|&(_, line)| line).collect();
+    let starts = cache.line_start_diagnostics(&lines, snapshot.buffer_snapshot());
+    let cursor_line = rope.offset_to_point(cursor).row;
+    let diagnostics = set.get(path);
+
+    for (&(display_row, line), start) in line_ends.iter().zip(starts) {
+        // Containment is by line rather than by offset, so a diagnostic
+        // reaching the cursor's line from anywhere on it wins the readout.
+        let found = match line == cursor_line {
+            true => cache.cursor_line_diagnostic(line, snapshot.buffer_snapshot()),
+            false => start,
+        };
+        let Some(found) = found.filter(|found| Some(found.index) != suppress) else {
+            continue;
+        };
+
+        let message = diagnostics[found.index]
+            .message
+            .lines()
+            .next()
+            .unwrap_or("");
+        let style = theme
+            .get(severity_scope(found.severity))
+            .add_modifier(Modifier::ITALIC);
+        let x = u32::from(inner.x) + snapshot.line_len(display_row) + EOL_MESSAGE_GAP;
+        let y = inner.y + (display_row - scroll_row) as u16;
+        paint_clipped_message(buf, message, x, y, right, style);
+    }
+}
+
+/// The display rows in `scroll_row..end_row` that end a buffer line, each with
+/// the line it ends.
+///
+/// A soft-wrapped line ends on its last row, and a block row ends no line.
+fn line_end_rows(snapshot: &DisplaySnapshot, scroll_row: u32, end_row: u32) -> Vec<(u32, u32)> {
+    let last_row = snapshot.line_count().saturating_sub(1);
+    (scroll_row..end_row)
+        .filter_map(|row| match snapshot.classify_row(row) {
+            BlockRowKind::BufferRow { buffer_row } => Some((row, buffer_row)),
+            BlockRowKind::Block { .. } => None,
+        })
+        .filter(|&(row, _)| row >= last_row || !snapshot.is_wrap_continuation(row + 1))
+        .collect()
+}
+
+/// Write `message` from the cell at `(x, y)` up to `right`, with an ellipsis in
+/// the last cell when the message does not fit.
+fn paint_clipped_message(
+    buf: &mut Buffer,
+    message: &str,
+    x: u32,
+    y: u16,
+    right: u16,
+    style: Style,
+) {
+    let room = u32::from(right).saturating_sub(x) as usize;
+    if room == 0 {
         return;
     }
 
-    // Containment is by line rather than by offset, so a diagnostic reaching the
-    // cursor's line from anywhere on it wins the readout.
-    let Some(resolved) = cache.cursor_line_diagnostic(cursor_point.row, snapshot.buffer_snapshot())
-    else {
-        return;
-    };
-    let index = resolved.index;
-    // The popover already shows this diagnostic, so skip the redundant EOL text.
-    if Some(index) == suppress {
-        return;
+    let fits = message.chars().count() <= room;
+    let shown = if fits { room } else { room - 1 };
+    let mut col = x;
+    for ch in message.chars().take(shown) {
+        buf[(col as u16, y)].set_char(ch).set_style(style);
+        col += 1;
     }
-
-    let message = set.get(path)[index].message.lines().next().unwrap_or("");
-    if message.is_empty() {
-        return;
-    }
-
-    let sev = resolved.severity;
-    let style = theme.get(severity_scope(sev)).add_modifier(Modifier::DIM);
-    let y = inner.y + (display.row - scroll_row) as u16;
-    let base_x = inner.x as u32 + snapshot.line_len(display.row) + 2;
-    for (i, ch) in message.chars().enumerate() {
-        let x = base_x + i as u32;
-        if x >= right as u32 {
-            break;
-        }
-        buf[(x as u16, y)].set_char(ch).set_style(style);
+    if !fits {
+        buf[(col as u16, y)].set_char('\u{2026}').set_style(style);
     }
 }
 
@@ -6191,8 +6239,9 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        // The diagnostic sits on line 1 while the cursor stays on line 0, so
-        // only the span is underlined and no end-of-line message appears.
+        // The diagnostic sits on line 1 while the cursor stays on line 0. The
+        // span is underlined, and its message trails line 1 as it trails every
+        // line a diagnostic starts on.
         h.seed_diagnostics(
             path,
             vec![Diagnostic {
@@ -6396,6 +6445,167 @@ mod tests {
             }],
         );
         h.assert_snapshot("diagnostic_cursor_line_eol_message");
+    }
+
+    /// Every line a diagnostic starts on shows its message past the text. The
+    /// info span starts on line 1 under its warning and runs to line 3, and it
+    /// prints on neither line 2 nor line 3, so the hint on line 2 keeps it. A
+    /// message that runs into the pane's edge ends in an ellipsis.
+    #[test]
+    fn snapshot_diagnostic_eol_message_on_every_line() {
+        let mut h = Stoat::test();
+        let path = open_settled(
+            &mut h,
+            "/diag-eol-every-line",
+            b"let x = 1;\nlet y = 2;\nlet z = 3;\n",
+        );
+        h.seed_diagnostics(
+            path,
+            vec![
+                message_diag(
+                    (0, 4),
+                    (0, 5),
+                    DiagnosticSeverity::ERROR,
+                    "mismatched types",
+                ),
+                message_diag((1, 4), (1, 5), DiagnosticSeverity::WARNING, "unused `y`"),
+                message_diag((1, 0), (3, 0), DiagnosticSeverity::INFORMATION, "two lines"),
+                message_diag(
+                    (2, 8),
+                    (2, 9),
+                    DiagnosticSeverity::HINT,
+                    "consider naming this literal as a constant so that every reader agrees on it",
+                ),
+            ],
+        );
+        h.assert_snapshot("diagnostic_eol_message_on_every_line");
+    }
+
+    /// The cursor's line reads out a span the cursor sits inside, though the
+    /// span starts above it. The line the span starts on keeps its message, and
+    /// the line it ends on prints nothing.
+    #[test]
+    fn the_cursor_line_reads_a_span_reaching_it_from_above() {
+        let mut h = Stoat::test();
+        h.stoat.stoatty = false;
+        let path = open_settled(
+            &mut h,
+            "/diag-eol-straddle",
+            b"fn main() {\n    let x = 1;\n}\n",
+        );
+        h.seed_diagnostics(
+            path,
+            vec![message_diag(
+                (0, 0),
+                (2, 1),
+                DiagnosticSeverity::WARNING,
+                "never called",
+            )],
+        );
+        dispatch(&mut h.stoat, &MoveDown);
+
+        let buf = h.stoat.render();
+        assert_eq!(
+            [(0, "fn main() {"), (1, "let x = 1;"), (2, "}")]
+                .map(|(y, text)| tail_after(&buf, y, text)),
+            [Some("never called"), Some("never called"), Some("")]
+                .map(|tail| tail.map(String::from)),
+        );
+    }
+
+    /// The popover shows the diagnostic under the cursor, so its message prints
+    /// on no line, while another line keeps its own.
+    #[test]
+    fn the_popover_diagnostic_prints_on_no_line() {
+        let mut h = Stoat::test();
+        let path = open_settled(&mut h, "/diag-eol-popover", b"let x = 1;\nlet y = 2;\n");
+        h.seed_diagnostics(
+            path,
+            vec![
+                message_diag((0, 0), (0, 3), DiagnosticSeverity::ERROR, "bad"),
+                message_diag((1, 4), (1, 5), DiagnosticSeverity::WARNING, "unused `y`"),
+            ],
+        );
+
+        let buf = h.stoat.render();
+        assert_eq!(
+            [(0, "let x = 1;"), (1, "2;")].map(|(y, text)| tail_after(&buf, y, text)),
+            [Some(""), Some("unused `y`")].map(|tail| tail.map(String::from)),
+        );
+    }
+
+    /// A soft-wrapped line prints its message after its last row, where the
+    /// line ends, rather than after the row the wrap cut.
+    #[test]
+    fn a_wrapped_line_prints_its_message_after_its_last_row() {
+        let mut h = Stoat::test();
+        h.stoat.settings.editor_wrap = Some(WrapMode::Bounded);
+        h.stoat.settings.editor_wrap_column = Some(20);
+        let path = open_settled(
+            &mut h,
+            "/diag-eol-wrap",
+            b"let first = alpha + beta + gamma;\n",
+        );
+        h.seed_diagnostics(
+            path,
+            vec![message_diag(
+                (0, 4),
+                (0, 9),
+                DiagnosticSeverity::WARNING,
+                "never read",
+            )],
+        );
+
+        let buf = h.stoat.render();
+        let row = |y| tail_after(&buf, y, "").unwrap_or_default();
+        assert_eq!(
+            (
+                row(0).contains("never read"),
+                row(1).ends_with("gamma;   never read")
+            ),
+            (false, true),
+            "rows: {:?}",
+            (row(0), row(1)),
+        );
+    }
+
+    /// Open `text` as `a.rs` under `root` and settle, returning its path.
+    fn open_settled(h: &mut crate::test_harness::TestHarness, root: &str, text: &[u8]) -> PathBuf {
+        let root = PathBuf::from(root);
+        let path = root.join("a.rs");
+        h.fake_fs().insert_file(&path, text);
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        path
+    }
+
+    /// A diagnostic over `start..end`, each a `(line, character)` pair, that
+    /// reads `message`.
+    fn message_diag(
+        start: (u32, u32),
+        end: (u32, u32),
+        severity: DiagnosticSeverity,
+        message: &str,
+    ) -> Diagnostic {
+        let at = |(line, character)| Position { line, character };
+        Diagnostic {
+            range: Range {
+                start: at(start),
+                end: at(end),
+            },
+            severity: Some(severity),
+            message: message.into(),
+            ..Default::default()
+        }
+    }
+
+    /// What row `y` of `buf` shows past the first `text` on it, trimmed, or
+    /// `None` when the row does not hold `text`.
+    fn tail_after(buf: &Buffer, y: u16, text: &str) -> Option<String> {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        row.split_once(text)
+            .map(|(_, tail)| tail.trim().to_string())
     }
 
     fn add_cursor_at(stoat: &mut Stoat, offset: usize) {
