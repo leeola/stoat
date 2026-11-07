@@ -1,6 +1,7 @@
 use crate::{
+    action_handlers::view,
     conflict_session::ConflictDerived,
-    display_map::{CachedHighlightEndpoints, DisplaySnapshot},
+    display_map::{CachedHighlightEndpoints, DisplayPoint, DisplaySnapshot},
     editor_state::EditorState,
     merge_view::{AlignRow, ChunkState, MergeDoc},
     render::{
@@ -10,10 +11,14 @@ use crate::{
         review::{paint_highlighted_row, DiffDials},
     },
     review::ReviewSide,
+    theme::TypeRole,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::{ops::Range, sync::Arc};
 use stoat_text::cursor_offset;
+use stoat_widgets::ApcScene;
+
+mod grid;
 
 /// At or above this inner width the ours and theirs columns keep a line-number
 /// gutter. Below it they drop it so their text has room to read.
@@ -22,33 +27,44 @@ const CONFLICT_SIDE_NUM_MIN: u16 = 120;
 /// Blend fraction toward the background for an unresolved chunk's tint wash.
 const BAND_TINT: f32 = 0.85;
 
-/// Column geometry for the three-way conflict view, resolved once per frame.
+/// A MergeGrid paint's scene, with what the live grid alone knows.
+pub(crate) struct GridPaint<'a> {
+    pub(crate) scene: &'a mut ApcScene,
+    /// The display row the cursor sits on, whose merged number the grid lifts.
+    /// `None` for a pool page, which never carries the cursor.
+    pub(crate) cursor_row: Option<u32>,
+    /// Whether each chip takes a rounded panel. A pool page captures no panel,
+    /// so a page paints the chip's box into its cells.
+    pub(crate) panels: bool,
+}
+
+/// Column geometry for the conflict view's cell layout, the one a terminal with
+/// no live scene gets, resolved once per frame.
 ///
 /// Three equal columns (ours, center, theirs) separated by two one-cell rules.
 /// The center always keeps a one-cell state gutter, a five-cell number gutter,
 /// and its text. The side columns keep a five-cell number gutter only at or
 /// above [`CONFLICT_SIDE_NUM_MIN`]. Below it they drop it.
-pub(crate) struct ConflictColumns {
+struct ConflictColumns {
     ours_num_x: u16,
     ours_text_x: u16,
     center_gutter_x: u16,
     center_num_x: u16,
-    /// Absolute x of the center column's editable text, where a click maps to a
-    /// center-buffer offset.
-    pub(crate) center_text_x: u16,
+    /// Absolute x of the center column's editable text.
+    center_text_x: u16,
     theirs_num_x: u16,
     theirs_text_x: u16,
     sep1_x: u16,
     /// Absolute x of the rule after the center column, the exclusive end of the
     /// center text region.
-    pub(crate) sep2_x: u16,
+    sep2_x: u16,
     side_w: usize,
     center_w: usize,
     side_nums: bool,
 }
 
 impl ConflictColumns {
-    pub(crate) fn compute(inner: Rect) -> Self {
+    fn compute(inner: Rect) -> Self {
         let num_w: u16 = 5;
         let sep: u16 = 1;
         let side_nums = inner.width >= CONFLICT_SIDE_NUM_MIN;
@@ -97,59 +113,118 @@ impl ConflictColumns {
 /// Paint the three-column conflict view. The editable merged center is flanked
 /// by the ours and theirs sides, aligned per
 /// [`crate::merge_view::MergeDoc::align`].
+///
+/// Under a live `scene` the view paints as the MergeGrid, with a header row
+/// above the columns, when the theme gives the grid RGB colors. Otherwise it
+/// keeps the cell layout, its rules and state gutter drawn in cells.
+///
+/// `delegates_cursor` hands the cursor to the terminal rather than painting it,
+/// which only a live scene does.
 pub(crate) fn render_conflict_view(
     editor: &mut EditorState,
     inner: Rect,
     fallback_style: Style,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
-    stoatty: bool,
+    scene: Option<&mut ApcScene>,
+    delegates_cursor: bool,
 ) {
-    let cols = ConflictColumns::compute(inner);
-    editor.text_rect = Some(Rect {
-        x: cols.center_text_x,
-        y: inner.y,
-        width: cols.sep2_x.saturating_sub(cols.center_text_x),
-        height: inner.height,
-    });
     let snapshot = editor.display_map.snapshot();
+    let delegates_cursor = delegates_cursor && scene.is_some();
+    // The grid needs a row under its header to draw anything.
+    let live = match (scene, editor.conflict_view.as_deref()) {
+        (Some(scene), Some(state)) if inner.height > grid::HEADER_ROWS => {
+            grid::Grid::resolve(inner, &snapshot, &state.doc, theme).map(|grid| (scene, grid))
+        },
+        _ => None,
+    };
+
+    let (body, text) = match &live {
+        Some((_, grid)) => (
+            Rect {
+                y: inner.y + grid::HEADER_ROWS,
+                height: inner.height.saturating_sub(grid::HEADER_ROWS),
+                ..inner
+            },
+            grid.cols.merged.text_x..grid.cols.merged.right(),
+        ),
+        None => {
+            let cols = ConflictColumns::compute(inner);
+            (inner, cols.center_text_x..cols.sep2_x)
+        },
+    };
+    editor.viewport_rows = Some(u32::from(body.height));
+    view::apply_held_screen_row(editor);
+    editor.text_rect = Some(Rect {
+        x: text.start,
+        y: body.y,
+        width: text.end.saturating_sub(text.start),
+        height: body.height,
+    });
     let scroll_row = editor.scroll_row;
+    let cursor = cursor_display(editor, &snapshot);
 
     // Held aside for the paint, since the view state below borrows the editor
     // and a sibling field cannot be borrowed alongside it.
     let mut endpoint_cache = editor.highlight_endpoint_cache.take();
     let mut row_cache = editor.diff_row_cache.take();
     if let Some(state) = editor.conflict_view.as_mut() {
-        let (doc, derived) = Arc::make_mut(state).derived(&snapshot);
+        let state = Arc::make_mut(state);
+        let paint = live.map(|(scene, grid)| {
+            grid::paint_header(
+                Rect {
+                    height: grid::HEADER_ROWS,
+                    ..inner
+                },
+                &grid,
+                &state.labels,
+                &state.rel_path,
+                theme.type_scale(TypeRole::Caption),
+                buf,
+                scene,
+            );
+            GridPaint {
+                scene,
+                cursor_row: Some(cursor.row),
+                panels: true,
+            }
+        });
+        let (doc, derived) = state.derived(&snapshot);
         render_conflict_rows(
             &snapshot,
             doc,
             derived,
             scroll_row,
-            inner,
+            body,
             fallback_style,
             theme,
             buf,
             Some(&mut endpoint_cache),
             Some(&mut row_cache),
+            paint,
         );
     }
     editor.highlight_endpoint_cache = endpoint_cache;
     editor.diff_row_cache = row_cache;
 
-    render_conflict_cursor(
-        editor,
-        &snapshot,
-        inner,
-        cols.center_text_x..cols.sep2_x,
-        theme,
-        buf,
-        stoatty,
-    );
+    render_conflict_cursor(editor, cursor, body, text, theme, buf, delegates_cursor);
 }
 
-/// Paint the primary selection's cursor over the merged center's text, or set
-/// the stoatty hardware cursor there. Skips a row scrolled out of view.
+/// The display cell of the primary selection's cursor in `snapshot`.
+fn cursor_display(editor: &EditorState, snapshot: &DisplaySnapshot) -> DisplayPoint {
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let sel = editor.selections.newest_anchor();
+    let cursor = cursor_offset(
+        rope,
+        buffer_snapshot.resolve_anchor(&sel.tail()),
+        buffer_snapshot.resolve_anchor(&sel.head()),
+    );
+    snapshot.buffer_to_display(rope.offset_to_point(cursor))
+}
+
+/// Paint the cursor at `display` over the merged center's text, or set the
+/// stoatty hardware cursor there. Skips a row scrolled out of `body`.
 ///
 /// One cell for the newest cursor, and no selection wash as a plain pane paints,
 /// because the reader picks chunks in the center column rather than selecting
@@ -160,8 +235,8 @@ pub(crate) fn render_conflict_view(
 /// than clamped onto a cell it is not on.
 fn render_conflict_cursor(
     editor: &mut EditorState,
-    snapshot: &DisplaySnapshot,
-    inner: Rect,
+    display: DisplayPoint,
+    body: Rect,
     text: Range<u16>,
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
@@ -169,23 +244,13 @@ fn render_conflict_cursor(
 ) {
     let cursor_style = theme.cursor_style();
 
-    let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let sel = editor.selections.newest_anchor();
-    let cursor = cursor_offset(
-        rope,
-        buffer_snapshot.resolve_anchor(&sel.tail()),
-        buffer_snapshot.resolve_anchor(&sel.head()),
-    );
-    let display = snapshot.buffer_to_display(rope.offset_to_point(cursor));
-
-    let visible = inner.height as u32;
+    let visible = body.height as u32;
     if display.row < editor.scroll_row || display.row >= editor.scroll_row + visible {
         return;
     }
-    let y = inner.y + (display.row - editor.scroll_row) as u16;
+    let y = body.y + (display.row - editor.scroll_row) as u16;
     let x = u32::from(text.start) + display.column;
-    if x >= u32::from(text.end) || y >= inner.y + inner.height {
+    if x >= u32::from(text.end) || y >= body.y + body.height {
         return;
     }
     let x = x as u16;
@@ -213,6 +278,10 @@ fn render_conflict_cursor(
 ///
 /// `endpoint_cache` is the editor's, when this paint has one behind it. A pooled
 /// page has no editor at all and passes `None`, resolving its endpoints fresh.
+///
+/// Under `paint` the rows paint as the MergeGrid, with their sub-cell marks in
+/// its scene. With no `paint`, or a theme that gives the grid no RGB surface,
+/// they keep the cell layout.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_conflict_rows(
     snapshot: &DisplaySnapshot,
@@ -225,7 +294,28 @@ pub(crate) fn render_conflict_rows(
     buf: &mut Buffer,
     endpoint_cache: Option<&mut Option<CachedHighlightEndpoints>>,
     row_cache: Option<&mut Option<crate::render::review::DiffRowCache>>,
+    paint: Option<GridPaint<'_>>,
 ) {
+    if let Some(paint) = paint
+        && let Some(grid) = grid::Grid::resolve(inner, snapshot, doc, theme)
+    {
+        grid::paint_rows(
+            snapshot,
+            scroll_row,
+            inner,
+            &grid,
+            doc,
+            derived,
+            fallback_style,
+            theme,
+            buf,
+            endpoint_cache,
+            row_cache,
+            paint,
+        );
+        return;
+    }
+
     let cols = ConflictColumns::compute(inner);
     paint_conflict_rows(
         snapshot,
@@ -454,10 +544,15 @@ mod tests {
         style::{Modifier, Style},
     };
     use std::{path::PathBuf, sync::Arc};
+    use stoat_widgets::ApcScene;
 
     /// Open the conflict view on one three-stage file in a `width`-wide harness.
+    ///
+    /// The harness paints for a terminal with no scene, so the view keeps the
+    /// cell layout these tests read.
     fn conflict_harness(width: u16, ancestor: &str, ours: &str, theirs: &str) -> TestHarness {
         let mut h = TestHarness::with_size(width, 24);
+        h.stoat.stoatty = false;
         h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
         h.fake_git()
             .add_repo("/repo")
@@ -491,9 +586,25 @@ mod tests {
             crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("center editor");
         let mut buf = Buffer::empty(inner);
         editor.cursor_screen_cell = None;
-        super::render_conflict_view(editor, inner, Style::default(), &theme, &mut buf, true);
+        super::render_conflict_view(
+            editor,
+            inner,
+            Style::default(),
+            &theme,
+            &mut buf,
+            Some(&mut ApcScene::new()),
+            true,
+        );
         let delegated = editor.cursor_screen_cell;
-        super::render_conflict_view(editor, inner, Style::default(), &theme, &mut buf, false);
+        super::render_conflict_view(
+            editor,
+            inner,
+            Style::default(),
+            &theme,
+            &mut buf,
+            None,
+            false,
+        );
         let painted_past = (cols.sep2_x..inner.right())
             .flat_map(|x| (inner.top()..inner.bottom()).map(move |y| (x, y)))
             .any(|cell| buf[cell].style().add_modifier.contains(Modifier::REVERSED));

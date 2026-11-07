@@ -248,7 +248,6 @@ pub(crate) fn render_editor_with_overlay(
 
     if editor.conflict_view.is_some() {
         editor.display_map.set_wrap_width(None);
-        view::apply_held_screen_row(editor);
         // The terminal draws the cursor on the same condition the main editor
         // path delegates on.
         render_conflict_view(
@@ -257,7 +256,8 @@ pub(crate) fn render_editor_with_overlay(
             fallback_style,
             theme,
             buf,
-            scene.is_some() && delegates_cursor,
+            scene,
+            delegates_cursor,
         );
         return;
     }

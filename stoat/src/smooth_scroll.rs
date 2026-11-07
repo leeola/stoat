@@ -28,7 +28,7 @@ use crate::{
         command_palette::paint_palette_rows,
         commits::paint_commit_rows,
         completion::paint_completion_rows,
-        conflict_view::render_conflict_rows,
+        conflict_view::{render_conflict_rows, GridPaint},
         editor::{
             draw_fallback_line_numbers, gutter_component_lines, gutter_diff_marks, gutter_geometry,
             paint_chunk_rows, rich_gutter, RichGutterColors, RowSeverity,
@@ -592,6 +592,11 @@ fn paint_page_gutter(
 /// [`render_conflict_rows`] the live grid calls, so a wheel glide keeps all
 /// three columns rather than dropping to the bare center buffer the plain-editor
 /// page would paint.
+///
+/// A page only exists inside stoatty, so it paints the MergeGrid the live grid
+/// paints there. The grid's bars, numbers, and chip runs ride as APC frames
+/// after the serialized cells, the way the diff gutter's components reach a
+/// page.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_conflict_page_from_parts(
     snapshot: &DisplaySnapshot,
@@ -623,6 +628,7 @@ pub(crate) fn render_conflict_page_from_parts(
         .derived_current(snapshot)
         .expect("the layout is current or was just built");
 
+    let mut scene = ApcScene::new();
     render_conflict_rows(
         snapshot,
         doc,
@@ -634,8 +640,14 @@ pub(crate) fn render_conflict_page_from_parts(
         &mut buf,
         None,
         None,
+        Some(GridPaint {
+            scene: &mut scene,
+            cursor_row: None,
+            panels: false,
+        }),
     );
-    let bytes = serialize_buffer(&buf);
+    let mut bytes = serialize_buffer(&buf);
+    bytes.extend_from_slice(scene.buffer());
 
     let mut frame = Vec::with_capacity(bytes.len() + 16);
     encode_fill_scope(&mut frame, pool, index, |out| out.extend_from_slice(&bytes));
@@ -1591,12 +1603,13 @@ mod tests {
 
     /// A conflict-view page must carry the same three columns as the live grid,
     /// so a wheel glide over the pool does not drop to the bare center buffer
-    /// and back at settle.
+    /// and back at settle. The grid's scene components ride the page after its
+    /// cells.
     #[test]
     fn conflict_view_page_paints_the_three_column_body() {
         use super::{
             page_buffer, render_conflict_page_from_parts, render_conflict_rows, serialize_buffer,
-            Rect,
+            ApcScene, GridPaint, Rect,
         };
         use crate::{test_harness::TestHarness, theme::scope};
         use std::path::PathBuf;
@@ -1627,7 +1640,8 @@ mod tests {
         };
 
         let area = Rect::new(0, 0, 150, 8);
-        let mut expected = page_buffer(area, &theme);
+        let mut cells = page_buffer(area, &theme);
+        let mut scene = ApcScene::new();
         {
             let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
             render_conflict_rows(
@@ -1638,18 +1652,29 @@ mod tests {
                 area,
                 fallback,
                 &theme,
-                &mut expected,
+                &mut cells,
                 None,
                 None,
+                Some(GridPaint {
+                    scene: &mut scene,
+                    cursor_row: None,
+                    panels: false,
+                }),
             );
         }
-        let expected = serialize_buffer(&expected);
+        let decorations = scene.buffer().clone();
+        let mut expected = serialize_buffer(&cells);
+        expected.extend_from_slice(&decorations);
 
         let got =
             render_conflict_page_from_parts(&snapshot, &state, &theme, 7, 0, fallback, 150, 8);
-        assert!(
-            got.windows(expected.len()).any(|w| w == expected),
-            "the conflict page carries the live three-column body inside its fill frames",
+        assert_eq!(
+            (
+                decorations.is_empty(),
+                got.windows(expected.len()).any(|w| w == expected)
+            ),
+            (false, true),
+            "the conflict page carries the grid's cells and components inside its fill frames",
         );
     }
 

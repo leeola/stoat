@@ -5939,7 +5939,7 @@ fn a_commit_picker_step_refills_one_page() {
 /// covers the region. Pins the routing rather than the page renderer.
 #[test]
 fn a_conflict_pane_fills_with_the_three_column_body() {
-    use crate::render::conflict_view::render_conflict_rows;
+    use crate::render::conflict_view::{render_conflict_rows, GridPaint};
     use ratatui::layout::Rect;
 
     let (mut h, mut rx) = conflict_pane();
@@ -5962,7 +5962,8 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
     };
 
     let area = Rect::new(0, 0, region.width, region.height);
-    let mut expected = crate::smooth_scroll::page_buffer(area, &theme);
+    let mut cells = crate::smooth_scroll::page_buffer(area, &theme);
+    let mut scene = ApcScene::new();
     let (doc, derived) = Arc::make_mut(&mut state).derived(&snapshot);
     render_conflict_rows(
         &snapshot,
@@ -5972,11 +5973,17 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
         area,
         fallback,
         &theme,
-        &mut expected,
+        &mut cells,
         None,
         None,
+        Some(GridPaint {
+            scene: &mut scene,
+            cursor_row: None,
+            panels: false,
+        }),
     );
-    let expected = crate::render::serialize_buffer(&expected);
+    let mut expected = crate::render::serialize_buffer(&cells);
+    expected.extend_from_slice(scene.buffer());
 
     let mut fills = Vec::new();
     while let Ok(bytes) = rx.try_recv() {
@@ -5987,6 +5994,29 @@ fn a_conflict_pane_fills_with_the_three_column_body() {
             .iter()
             .any(|batch| batch.windows(expected.len()).any(|w| w == expected)),
         "a pooled fill carries the live three-column body, not the bare center buffer",
+    );
+}
+
+/// The MergeGrid's header row stays fixed above the rows a glide moves, so the
+/// conflict pane's pool region starts one row into its content.
+#[test]
+fn a_conflict_pane_pools_the_rows_below_its_header() {
+    let (mut h, _rx) = conflict_pane();
+    // The region starts at the body the paint records, as a frame's emit
+    // follows its paint.
+    h.stoat.render();
+    let (_, _, region) = editor_pool_panes(&h.stoat)
+        .into_iter()
+        .next()
+        .expect("the conflict pane declares a pool region");
+    let content = {
+        let ws = h.stoat.active_workspace();
+        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+    };
+
+    assert_eq!(
+        (region.top, region.height),
+        (content.y + 1, content.height - 1),
     );
 }
 

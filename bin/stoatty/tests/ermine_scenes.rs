@@ -45,6 +45,10 @@ const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
 const READONLY_FRAME: [u8; 3] = [0x8a, 0x76, 0x50];
+const TINT_OURS: [u8; 3] = [0x18, 0x24, 0x1b];
+const TINT_THEIRS: [u8; 3] = [0x23, 0x1d, 0x2e];
+const TINT_CONFLICT: [u8; 3] = [0x2a, 0x1b, 0x1d];
+const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
@@ -851,6 +855,39 @@ fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
         BASE,
         "under_the_ring",
     );
+}
+
+/// The conflict view paints as the MergeGrid on the Ermine palette.
+///
+/// The fixture pauses a merge with one conflict in `file.txt`. One tab shows
+/// no tab bar, and the minimap band takes the window's last seven columns
+/// before its margin. So the view spans 151 cells, with sides of 48 cells at x
+/// 1 and 104 and the merged column of 55 cells at x 49. The header is row 0,
+/// `1 shared header` is row 1, and the chunk's first row is row 2, where each
+/// column takes its side's tint. The ours bar sits 4/16 into its column, so at
+/// 9-pixel cells it snaps to the third and fourth pixel columns of the
+/// column's first cell.
+#[test]
+fn the_conflict_view_paints_the_merge_grid() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "conflict",
+        "file.txt",
+        "<C-;>Conflict<Enter><Settle>",
+    );
+
+    for (col, row, want, what) in [
+        (5, 2, TINT_OURS, "ours_conflict_row"),
+        (55, 2, TINT_CONFLICT, "merged_conflict_row"),
+        (113, 2, TINT_THEIRS, "theirs_conflict_row"),
+        (55, 0, MERGED_HEAD, "merged_header"),
+        (5, 1, BASE, "context_row"),
+    ] {
+        expect_region(&shot, &mut home, cell_rect(col, row, 20, 1), want, what);
+    }
+    let (x, y, _, height) = cell_rect(1, 2, 1, 1);
+    expect_region(&shot, &mut home, (x + 2, y, 2, height), SUCCESS, "ours_bar");
 }
 
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.

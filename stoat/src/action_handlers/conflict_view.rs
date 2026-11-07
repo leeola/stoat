@@ -1,7 +1,7 @@
 use super::focused_editor_mut;
 use crate::{
     app::Stoat,
-    conflict_session::{ConflictSession, ConflictViewState, FileResolveState},
+    conflict_session::{ConflictLabels, ConflictSession, ConflictViewState, FileResolveState},
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
     editor_state::{EditorId, EditorState},
     git_jobs::{self, GitJob, GitLanding, GitWork},
@@ -99,7 +99,12 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
         return;
     };
     let ConflictLoad { doc, found } = load;
-    let Some(FoundConflicts { repo, files }) = found else {
+    let Some(FoundConflicts {
+        repo,
+        files,
+        labels,
+    }) = found
+    else {
         return;
     };
     let still_focused = stoat.active_workspace == workspace && {
@@ -112,7 +117,7 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
     }
     let current = doc.index;
 
-    let (file, first_chunk_offset) = install_conflict_file(stoat, doc, &git_root);
+    let (file, first_chunk_offset) = install_conflict_file(stoat, doc, &git_root, &labels);
 
     {
         let ws = stoat.active_workspace_mut();
@@ -124,6 +129,7 @@ fn open_landed(stoat: &mut Stoat, load: ConflictLoad, intent: ConflictIntent) {
             workdir: git_root,
             repo,
             files,
+            labels,
             current,
             file,
             saved_editor,
@@ -187,10 +193,12 @@ enum ConflictSource {
     },
 }
 
-/// The repository an open discovered, with every conflicted path it listed.
+/// The repository an open discovered, with every conflicted path it listed and
+/// the names of the sides it merges.
 struct FoundConflicts {
     repo: Arc<dyn GitRepo>,
     files: Vec<PathBuf>,
+    labels: ConflictLabels,
 }
 
 /// What a worker read and aligned for one conflicted file.
@@ -258,7 +266,12 @@ fn read_conflict(
             let path = files.get(index).ok_or("no merge conflicts")?.clone();
             let stages = repo.conflict_stages(&path).ok_or("no merge conflicts")?;
             let file_count = files.len();
-            let found = FoundConflicts { repo, files };
+            let labels = ConflictLabels::new(repo.head_branch(), repo.merge_state().as_ref());
+            let found = FoundConflicts {
+                repo,
+                files,
+                labels,
+            };
             (stages, path, index, file_count, Some(found))
         },
         ConflictSource::Session {
@@ -308,6 +321,7 @@ fn install_conflict_file(
     stoat: &mut Stoat,
     landed: ConflictDoc,
     git_root: &Path,
+    labels: &ConflictLabels,
 ) -> (FileResolveState, Option<usize>) {
     let ConflictDoc {
         doc,
@@ -369,6 +383,7 @@ fn install_conflict_file(
         index,
         file_count,
         rel_path,
+        labels.clone(),
     )));
     let editor_id = ws.editors.insert(editor);
 
@@ -702,17 +717,17 @@ pub(crate) fn pump_conflict_file(stoat: &mut Stoat) -> bool {
             // The session closed, or the reader stepped back onto the target,
             // while the alignment ran. Either way this document describes a
             // file that is no longer the one to show.
-            let workdir = stoat
+            let session = stoat
                 .active_workspace()
                 .conflict
                 .as_ref()
                 .filter(|session| session.current != target)
-                .map(|session| session.workdir.clone());
-            let Some(workdir) = workdir else {
+                .map(|session| (session.workdir.clone(), session.labels.clone()));
+            let Some((workdir, labels)) = session else {
                 return true;
             };
 
-            let (state, _) = install_conflict_file(stoat, load.doc, &workdir);
+            let (state, _) = install_conflict_file(stoat, load.doc, &workdir, &labels);
             show_file(stoat, target, state);
         },
     }

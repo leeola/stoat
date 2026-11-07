@@ -1,8 +1,9 @@
 use crate::{
     display_map::DisplaySnapshot,
     editor_state::EditorId,
-    host::git::GitRepo,
+    host::git::{GitRepo, MergeState},
     merge_view::{AlignRow, ChunkState, MergeDoc, RowPick},
+    workspace::diff,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -25,6 +26,9 @@ pub(crate) struct ConflictSession {
     pub(crate) repo: Arc<dyn GitRepo>,
     /// Every conflicted path in the repository, in discovery order.
     pub(crate) files: Vec<PathBuf>,
+    /// The side names the open read, which each file the session steps to
+    /// shows in its header.
+    pub(crate) labels: ConflictLabels,
     /// Index into [`Self::files`] of the file currently shown.
     pub(crate) current: usize,
     /// Resolve state of the file currently shown.
@@ -93,6 +97,8 @@ pub(crate) struct ConflictViewState {
     pub(crate) file_index: usize,
     pub(crate) file_count: usize,
     pub(crate) rel_path: String,
+    /// The names the MergeGrid header gives the two sides.
+    pub(crate) labels: ConflictLabels,
     /// Layout and chunk classification derived from the center buffer, rebuilt
     /// only when that buffer or [`Self::picks`] changes. See [`Self::derived`].
     derived: Option<ConflictDerived>,
@@ -123,6 +129,7 @@ impl ConflictViewState {
         file_index: usize,
         file_count: usize,
         rel_path: String,
+        labels: ConflictLabels,
     ) -> Self {
         Self {
             doc,
@@ -131,6 +138,7 @@ impl ConflictViewState {
             file_index,
             file_count,
             rel_path,
+            labels,
             derived: None,
         }
     }
@@ -189,6 +197,41 @@ impl ConflictViewState {
     }
 }
 
+/// The names the conflict view's header gives the two sides of the merge.
+///
+/// Read once when the view opens, since a merge keeps both sides fixed until
+/// it ends, and every file of the session shares them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConflictLabels {
+    pub(crate) ours: String,
+    pub(crate) theirs: String,
+}
+
+impl ConflictLabels {
+    /// The labels for a repository whose HEAD is on `head_branch`, mid-merge of
+    /// `merge` when one is in progress.
+    ///
+    /// Ours names HEAD's branch, or `HEAD` when it is detached. Theirs names
+    /// the merge head's branch, or its short sha when no local branch points at
+    /// it. Index conflicts with no merge in progress, as a cherry-pick or a
+    /// stash pop leaves them, name theirs `theirs`, the side git's markers name.
+    pub(crate) fn new(head_branch: Option<String>, merge: Option<&MergeState>) -> Self {
+        let theirs = match merge {
+            Some(MergeState {
+                head_name: Some(name),
+                ..
+            }) => name.clone(),
+            Some(merge) => diff::short_sha(&merge.head_sha),
+            None => "theirs".to_string(),
+        };
+
+        Self {
+            ours: head_branch.unwrap_or_else(|| "HEAD".to_string()),
+            theirs,
+        }
+    }
+}
+
 /// Resolve each chunk's anchors to the row span it currently occupies in the
 /// center buffer.
 ///
@@ -237,7 +280,11 @@ fn chunk_states(
 
 #[cfg(test)]
 mod tests {
-    use crate::{app::Stoat, merge_view::MergeDoc, pane::View, test_harness::TestHarness};
+    use super::ConflictLabels;
+    use crate::{
+        app::Stoat, host::git::MergeState, merge_view::MergeDoc, pane::View,
+        test_harness::TestHarness,
+    };
     use stoat_action::{
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
         ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
@@ -252,6 +299,14 @@ mod tests {
     fn dispatch_conflict(h: &mut TestHarness) {
         crate::action_handlers::dispatch(&mut h.stoat, &Conflict);
         h.settle();
+    }
+
+    /// A `width` by `height` harness that paints for a terminal with no scene,
+    /// where the conflict view keeps its cell layout.
+    fn cell_harness(width: u16, height: u16) -> TestHarness {
+        let mut h = TestHarness::with_size(width, height);
+        h.stoat.stoatty = false;
+        h
     }
 
     /// Open the seeded conflict view with the cursor already landed on the
@@ -1087,7 +1142,7 @@ mod tests {
 
     #[test]
     fn snapshot_picked_chunk_pads_the_taller_side() {
-        let mut h = TestHarness::with_size(150, 20);
+        let mut h = cell_harness(150, 20);
         let git_root = h.stoat.active_workspace().git_root.clone();
         h.fake_git().add_repo(git_root).conflicted_file(
             "f.txt",
@@ -1110,7 +1165,7 @@ mod tests {
 
     #[test]
     fn snapshot_conflict_view_three_columns() {
-        let mut h = TestHarness::with_size(150, 20);
+        let mut h = cell_harness(150, 20);
         let git_root = h.stoat.active_workspace().git_root.clone();
         h.fake_git().add_repo(git_root).conflicted_file(
             "src/f.txt",
@@ -1125,9 +1180,28 @@ mod tests {
         h.assert_snapshot("conflict_view_three_columns");
     }
 
+    /// Under stoatty the view paints as the MergeGrid. The cells hold its
+    /// header row, its tints, and its text, and the scene holds the rest.
+    #[test]
+    fn snapshot_conflict_view_merge_grid() {
+        let mut h = TestHarness::with_size(150, 20);
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git().add_repo(git_root).conflicted_file(
+            "src/f.txt",
+            Some("a\nb\nc\nd\ne\n"),
+            Some("a\nB\nc\nD\ne\n"),
+            Some("a\nX\nc\nY\ne\n"),
+        );
+
+        dispatch_conflict(&mut h);
+
+        assert_eq!(h.stoat.current_view(), Some("conflict"));
+        h.assert_snapshot("conflict_view_merge_grid");
+    }
+
     #[test]
     fn snapshot_conflict_view_narrow_drops_side_gutters() {
-        let mut h = TestHarness::with_size(90, 16);
+        let mut h = cell_harness(90, 16);
         let git_root = h.stoat.active_workspace().git_root.clone();
         h.fake_git().add_repo(git_root).conflicted_file(
             "f.txt",
@@ -1140,5 +1214,62 @@ mod tests {
 
         assert_eq!(h.stoat.current_view(), Some("conflict"));
         h.assert_snapshot("conflict_view_narrow");
+    }
+
+    #[test]
+    fn labels_name_the_head_branch_and_the_merge_head() {
+        let merge = |head_name: Option<&str>| MergeState {
+            head_sha: "f00dfeed1234".to_string(),
+            head_name: head_name.map(String::from),
+            message: String::new(),
+            conflicted: 1,
+        };
+        let labels = |head: Option<&str>, merge: Option<MergeState>| {
+            let labels = ConflictLabels::new(head.map(String::from), merge.as_ref());
+            (labels.ours, labels.theirs)
+        };
+
+        assert_eq!(
+            [
+                labels(Some("main"), Some(merge(Some("feature")))),
+                labels(None, Some(merge(None))),
+                labels(Some("main"), None),
+            ],
+            [
+                ("main".to_string(), "feature".to_string()),
+                ("HEAD".to_string(), "f00dfee".to_string()),
+                ("main".to_string(), "theirs".to_string()),
+            ],
+            "a detached HEAD reads HEAD, a merge head no branch names reads its short \
+             sha, and conflicts with no merge read theirs",
+        );
+    }
+
+    #[test]
+    fn a_stepped_to_file_shows_the_labels_the_open_read() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        h.fake_git()
+            .add_repo(git_root)
+            .set_head_branch("main")
+            .merge_in_progress("f00dfeed", Some("feature"), "Merge branch 'feature'")
+            .conflicted_file("a.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"))
+            .conflicted_file("b.txt", Some("base\n"), Some("ours\n"), Some("theirs\n"));
+        dispatch_conflict(&mut h);
+        pick(&mut h, &ConflictNextFile);
+
+        let labels = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .and_then(|editor| editor.conflict_view.as_ref())
+            .map(|state| state.labels.clone());
+        assert_eq!(
+            (current_file(&h), labels),
+            (
+                1,
+                Some(ConflictLabels {
+                    ours: "main".to_string(),
+                    theirs: "feature".to_string(),
+                })
+            ),
+        );
     }
 }

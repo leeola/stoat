@@ -2702,7 +2702,8 @@ fn drop_reowned_pools(
 /// non-empty content area, plain or review alike. The pool id is the pane's
 /// stable [`crate::pane::Pane::index`], so a pane keeps its pool across
 /// frames; the region is the pane area minus its bottom status row, the same
-/// content area the editor is painted into. The caller pools nothing while a
+/// content area the editor is painted into. A conflict view's region also
+/// leaves out the MergeGrid's header row. The caller pools nothing while a
 /// full-screen overlay mode is active.
 pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegionCommand)> {
     let ws = stoat.active_workspace();
@@ -2729,7 +2730,15 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
             // strip is drawn, so its width is the columns to reserve.
             let strip_cols = editor.minimap_rect.map_or(0, |rect| rect.width);
             let width = content.width.saturating_sub(strip_cols);
-            if width == 0 {
+            // The conflict view's MergeGrid holds its header row above the rows
+            // that scroll, so the region starts at the body its paint recorded.
+            let header = editor
+                .conflict_view
+                .as_ref()
+                .and(editor.text_rect)
+                .map_or(0, |text| text.y.saturating_sub(content.y));
+            let height = content.height.saturating_sub(header);
+            if width == 0 || height == 0 {
                 return None;
             }
 
@@ -2738,10 +2747,10 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
                 editor_id,
                 PoolRegionCommand {
                     pool: pane.index,
-                    top: content.y,
+                    top: content.y + header,
                     left: content.x,
                     width,
-                    height: content.height,
+                    height,
                     window: 0,
                     kind: PoolKind::Grid,
                     dim: 0,

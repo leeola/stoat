@@ -2214,11 +2214,17 @@ pub(crate) fn editor_screen_to_offset(
     let scroll_row = editor.scroll_row + u32::from(editor.scroll_frac >= 0.5);
     // The conflict view is three columns. A click in the center text maps to
     // its cell; a click in either side column (or a gutter) drops to col 0 so
-    // the cursor lands on the aligned center row's start.
+    // the cursor lands on the aligned center row's start. The paint records
+    // the center text, and under the MergeGrid the rows start below a header
+    // row that maps to no line.
     if editor.conflict_view.is_some() {
-        let cols = crate::render::conflict_view::ConflictColumns::compute(area);
-        let center_gutter = cols.center_text_x.saturating_sub(area.x);
-        let center_end = cols.sep2_x.saturating_sub(area.x);
+        let text = editor.text_rect?;
+        let header = text.y.saturating_sub(content.y);
+        if row < header {
+            return None;
+        }
+        let center_gutter = text.x.saturating_sub(area.x);
+        let center_end = text.right().saturating_sub(area.x);
         let click_col = if (center_gutter..center_end).contains(&col) {
             col
         } else {
@@ -2230,7 +2236,7 @@ pub(crate) fn editor_screen_to_offset(
             scroll_row,
             center_gutter,
             click_col,
-            row,
+            row - header,
         );
     }
     // The diff view puts the editable text in the right column, so a click
@@ -2909,26 +2915,44 @@ mod tests {
             }
         };
 
-        // At width 150 the center text starts at col 56 and the theirs column at
-        // col 100. Row 1 is the "<<<<<<< ours" marker line.
-        let area = Rect::new(0, 0, 150, 20);
-        let row_start = editor_screen_to_offset(&mut h.stoat, editor_id, area, 56, 1);
+        // The paint records the center text, which the click maps against. The
+        // MergeGrid's header takes the first row, so the "<<<<<<< ours" marker
+        // line is the row after the first text row.
+        h.stoat.render();
+        let (area, text) = {
+            let ws = h.stoat.active_workspace();
+            let text = ws.editors[editor_id]
+                .text_rect
+                .expect("the render records the text rect");
+            (ws.panes.pane(ws.panes.focus()).area, text)
+        };
+        let marker = text.y - area.y + 1;
+        let center = text.x - area.x;
+        let row_start = editor_screen_to_offset(&mut h.stoat, editor_id, area, center, marker);
         assert!(row_start.is_some(), "the center row resolves");
 
         assert_eq!(
-            editor_screen_to_offset(&mut h.stoat, editor_id, area, 59, 1),
+            editor_screen_to_offset(&mut h.stoat, editor_id, area, center + 3, marker),
             row_start.map(|offset| offset + 3),
             "a center-column click maps to the exact clicked cell"
         );
         assert_eq!(
-            editor_screen_to_offset(&mut h.stoat, editor_id, area, 3, 1),
+            editor_screen_to_offset(&mut h.stoat, editor_id, area, 3, marker),
             row_start,
             "an ours-column click lands on the aligned center row start"
         );
         assert_eq!(
-            editor_screen_to_offset(&mut h.stoat, editor_id, area, 110, 1),
+            editor_screen_to_offset(&mut h.stoat, editor_id, area, area.width - 3, marker),
             row_start,
             "a theirs-column click lands on the aligned center row start"
+        );
+        assert_eq!(
+            (
+                text.y - area.y,
+                editor_screen_to_offset(&mut h.stoat, editor_id, area, center, 0)
+            ),
+            (1, None),
+            "a click on the header row maps to no line"
         );
     }
 
