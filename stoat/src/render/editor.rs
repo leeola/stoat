@@ -20,7 +20,7 @@ use crate::{
             self, render_diff_view, BufferNumbering, DiffColumns, DiffDials, DiffLayout,
             DIFF_TWO_COLUMN_MIN,
         },
-        undercurl::UndercurlBatch,
+        undercurl::{UndercurlBatch, UnderlineKind},
     },
     theme::{Theme, TypeRole},
 };
@@ -1295,11 +1295,14 @@ pub(crate) struct DiagnosticPaintScratch {
     runs: Vec<(u16, u16, u16)>,
 }
 
-/// Blend a syntax foreground 3:2 toward the pane background, keeping the hue but
+/// Blend a syntax foreground 9:11 toward the pane background, keeping the hue but
 /// reading muted. Used to dim Unnecessary-tagged (inactive-code) regions without
 /// discarding their per-token syntax colors.
+///
+/// The 45 percent that the foreground keeps matches the opacity the design
+/// gives unused code, and the dotted line under it blends as far.
 fn mute_rgb(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
-    let mix = |f: u8, b: u8| ((f as u16 * 3 + b as u16 * 2) / 5) as u8;
+    let mix = |f: u8, b: u8| ((f as u16 * 9 + b as u16 * 11) / 20) as u8;
     [mix(fg[0], bg[0]), mix(fg[1], bg[1]), mix(fg[2], bg[2])]
 }
 
@@ -1355,6 +1358,13 @@ fn severity_color(sev: DiagnosticSeverity, colors: &SeverityColors) -> [u8; 3] {
         DiagnosticSeverity::INFORMATION => colors.info,
         DiagnosticSeverity::HINT => colors.hint,
         _ => colors.error,
+    }
+}
+
+fn severity_underline(sev: DiagnosticSeverity) -> UnderlineKind {
+    match sev {
+        DiagnosticSeverity::HINT => UnderlineKind::Dotted,
+        _ => UnderlineKind::Curly,
     }
 }
 
@@ -2309,6 +2319,10 @@ fn paint_diagnostic_spans(
     );
     ordered.sort_by_key(|s| Reverse(severity_rank(s.severity)));
 
+    // Collect the painted runs only when the undercurl overlay is live. The
+    // overlay re-stamps each run with the line its span draws.
+    let collect = undercurls.is_some() && colors.is_some();
+
     for diag in &*ordered {
         let sev = diag.severity;
         // Clip to the visible bytes so offscreen columns are never walked. The
@@ -2326,9 +2340,12 @@ fn paint_diagnostic_spans(
             )
         {
             // An inactive-code region mutes each cell's syntax fg toward the
-            // background, with no underline and no undercurl. The dedup set
-            // blends a cell shared by overlapping Unnecessary spans exactly once.
+            // background rather than recoloring it. The overlay draws a dotted
+            // line under it in the hint color, muted as far as the text. The
+            // dedup set blends a cell shared by overlapping Unnecessary spans
+            // exactly once.
             let grey = theme.get(severity_scope(sev));
+            runs.clear();
             paint_offset_range(
                 rope,
                 snapshot,
@@ -2354,8 +2371,15 @@ fn paint_diagnostic_spans(
                 right,
                 bottom,
                 buf,
-                None,
+                collect.then_some(&mut *runs),
             );
+            if let (Some(undercurls), Some(colors)) = (undercurls.as_deref_mut(), colors) {
+                let hint = match mute_bg {
+                    Some(bg) => mute_rgb(colors.hint, bg),
+                    None => colors.hint,
+                };
+                push_undercurl_runs(undercurls, runs, hint, mute_bg, dim, UnderlineKind::Dotted);
+            }
             continue;
         }
 
@@ -2363,10 +2387,7 @@ fn paint_diagnostic_spans(
             .get(severity_scope(sev))
             .add_modifier(Modifier::UNDERLINED);
 
-        // Collect the painted runs only when the undercurl overlay is live,
-        // then re-stamp each as a severity-colored curl span.
         runs.clear();
-        let collect = undercurls.is_some() && colors.is_some();
         paint_offset_range(
             rope,
             snapshot,
@@ -2384,15 +2405,34 @@ fn paint_diagnostic_spans(
             collect.then_some(&mut *runs),
         );
         if let (Some(undercurls), Some(colors)) = (undercurls.as_deref_mut(), colors) {
-            let base = severity_color(sev, colors);
-            let color = match mute_bg {
-                Some(bg) if dim > 0.0 => dim_rgb(base, bg, dim),
-                _ => base,
-            };
-            for &(x, y, len) in &*runs {
-                undercurls.push(x, y, len, color);
-            }
+            push_undercurl_runs(
+                undercurls,
+                runs,
+                severity_color(sev, colors),
+                mute_bg,
+                dim,
+                severity_underline(sev),
+            );
         }
+    }
+}
+
+/// Queue each of `runs` as an undercurl span that draws `style` in `color`,
+/// blended toward `bg` by `dim` for an unfocused pane.
+fn push_undercurl_runs(
+    undercurls: &mut UndercurlBatch,
+    runs: &[(u16, u16, u16)],
+    color: [u8; 3],
+    bg: Option<[u8; 3]>,
+    dim: f32,
+    style: UnderlineKind,
+) {
+    let color = match bg {
+        Some(bg) if dim > 0.0 => dim_rgb(color, bg, dim),
+        _ => color,
+    };
+    for &(x, y, len) in runs {
+        undercurls.push(x, y, len, color, style);
     }
 }
 
@@ -2941,7 +2981,10 @@ mod tests {
             DiffHunk, DiffHunkStatus, DiffMap, GutterMark, MarkState, StagedMark, TokenDetail,
             TreeMark,
         },
-        render::review::{self, DiffColumns, DiffDials, DiffLayout},
+        render::{
+            review::{self, DiffColumns, DiffDials, DiffLayout},
+            undercurl::UnderlineKind,
+        },
         theme::scope as s,
         Stoat,
     };
@@ -5729,8 +5772,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_diagnostic_span_collects_an_undercurl_under_stoatty() {
+    /// The `(len, color, style)` of each undercurl span that one frame
+    /// collects for `diagnostic` over `alpha\nbravo\n`, beside the harness
+    /// that painted it.
+    fn collected_undercurls(
+        diagnostic: Diagnostic,
+    ) -> (
+        crate::test_harness::TestHarness,
+        Vec<(u16, [u8; 3], UnderlineKind)>,
+    ) {
         let mut h = Stoat::test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         h.stoat.set_apc_tx(tx);
@@ -5741,19 +5791,70 @@ mod tests {
         h.stoat.active_workspace_mut().git_root = root;
         dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
         h.settle();
-        h.seed_diagnostics(path, vec![diag(0, DiagnosticSeverity::WARNING)]);
+        h.seed_diagnostics(path, vec![diagnostic]);
 
         let _ = h.stoat.render();
+        let spans = h
+            .stoat
+            .pending_undercurls
+            .spans()
+            .iter()
+            .map(|span| (span.len, span.color, span.style))
+            .collect();
+        (h, spans)
+    }
 
+    fn shipped_rgb(h: &crate::test_harness::TestHarness, scope: &str) -> [u8; 3] {
+        super::style_rgb(h.stoat.theme.get(scope).fg).expect("the shipped theme colors it")
+    }
+
+    #[test]
+    fn a_diagnostic_span_collects_an_undercurl_under_stoatty() {
+        let (h, spans) = collected_undercurls(diag(0, DiagnosticSeverity::WARNING));
         assert_eq!(
-            h.stoat.pending_undercurls.spans().len(),
-            1,
-            "the warning span paints one underline run",
+            spans,
+            [(
+                1,
+                shipped_rgb(&h, s::UI_DIAGNOSTIC_WARNING),
+                UnderlineKind::Curly
+            )],
+            "the warning paints one wavy run in the shipped warning color",
         );
+    }
+
+    #[test]
+    fn a_hint_collects_a_dotted_undercurl_in_its_own_color() {
+        let (h, spans) = collected_undercurls(diag(0, DiagnosticSeverity::HINT));
         assert_eq!(
-            Some(h.stoat.pending_undercurls.spans()[0].color),
-            super::style_rgb(h.stoat.theme.get(s::UI_DIAGNOSTIC_WARNING).fg),
-            "the run carries the shipped warning severity color",
+            spans,
+            [(
+                1,
+                shipped_rgb(&h, s::UI_DIAGNOSTIC_HINT),
+                UnderlineKind::Dotted
+            )],
+        );
+    }
+
+    /// Unused code reads at the muted text's 45 percent, its dotted line
+    /// included, and takes the hint color whatever its severity.
+    #[test]
+    fn unused_code_collects_a_dotted_undercurl_in_the_muted_hint_color() {
+        let (h, spans) = collected_undercurls(tagged_overlap_diag(
+            0,
+            0,
+            5,
+            DiagnosticSeverity::INFORMATION,
+        ));
+        let theme = &h.stoat.theme;
+        let bg = super::style_rgb(theme.get(s::UI_TEXT).bg.or(theme.get(s::UI_BACKGROUND).bg))
+            .expect("a themed pane background");
+        assert_eq!(
+            spans,
+            [(
+                5,
+                super::mute_rgb(shipped_rgb(&h, s::UI_DIAGNOSTIC_HINT), bg),
+                UnderlineKind::Dotted,
+            )],
         );
     }
 
@@ -6194,7 +6295,8 @@ mod tests {
         h.settle();
         // An Unnecessary-tagged hint marks inactive code. Its span blends each
         // token's syntax fg toward the background, keeping the per-token hues
-        // rather than flattening the line to one hint color or underlining it.
+        // rather than flattening the line to one hint color. Its dotted line
+        // rides the undercurl overlay, so no cell carries an underline.
         h.seed_diagnostics(
             path,
             vec![tagged_overlap_diag(1, 0, 10, DiagnosticSeverity::HINT)],

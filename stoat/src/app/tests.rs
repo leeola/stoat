@@ -24,6 +24,7 @@ use crate::{
         pane::pane_areas,
         review::{DiffColumns, DiffDials, DiffLayout},
         status_lane,
+        undercurl::UnderlineKind,
         walkthrough::Spotlight,
     },
     run::GridSelection,
@@ -6421,17 +6422,21 @@ fn split_pair(h: &mut crate::test_harness::TestHarness) {
     let a = h.write_file("a.txt", "alpha\nbravo\ncharlie\n");
     let b = h.write_file("b.txt", "delta\necho\nfoxtrot\n");
     h.open_file(&a);
-    publish_one_diagnostic(h, &a);
+    publish_one_diagnostic(h, &a, lsp_types::DiagnosticSeverity::ERROR);
     h.type_action("SplitRight()");
     h.open_file(&b);
     h.settle();
     let _ = h.stoat.render();
 }
 
-/// An error over the first word of `path`'s first line, anchored against the
-/// buffer as it stands.
-fn publish_one_diagnostic(h: &mut crate::test_harness::TestHarness, path: &std::path::Path) {
-    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range as LspRange};
+/// A diagnostic of `severity` over the first word of `path`'s first line,
+/// anchored against the buffer as it stands.
+fn publish_one_diagnostic(
+    h: &mut crate::test_harness::TestHarness,
+    path: &std::path::Path,
+    severity: lsp_types::DiagnosticSeverity,
+) {
+    use lsp_types::{Diagnostic, Position, Range as LspRange};
 
     h.seed_diagnostics(
         path,
@@ -6446,7 +6451,7 @@ fn publish_one_diagnostic(h: &mut crate::test_harness::TestHarness, path: &std::
                     character: 5,
                 },
             },
-            severity: Some(DiagnosticSeverity::ERROR),
+            severity: Some(severity),
             message: String::new(),
             ..Default::default()
         }],
@@ -6539,7 +6544,11 @@ fn a_landed_blank_job_behind_a_running_one_is_taken() {
 
 /// One frame's three output channels, for comparing a replayed frame
 /// against a repainted one.
-type FrameOutput = (Buffer, Vec<u8>, Vec<(u16, u16, u16, [u8; 3])>);
+type FrameOutput = (
+    Buffer,
+    Vec<u8>,
+    Vec<(u16, u16, u16, [u8; 3], UnderlineKind)>,
+);
 
 /// Move the hover cell, which only the focused pane reads, so the next frame
 /// paints that pane while an unfocused one replays.
@@ -6560,7 +6569,7 @@ fn frame_output(h: &mut crate::test_harness::TestHarness) -> FrameOutput {
         .pending_undercurls
         .spans()
         .iter()
-        .map(|span| (span.x, span.y, span.len, span.color))
+        .map(|span| (span.x, span.y, span.len, span.color, span.style))
         .collect();
     (buf, scene, spans)
 }
@@ -6603,6 +6612,35 @@ fn a_replayed_pane_paints_what_repainting_it_would() {
     assert_eq!(replayed.0, repainted.0, "the cells match");
     assert_eq!(replayed.1, repainted.1, "the scene bytes match");
     assert_eq!(replayed.2, repainted.2, "the undercurl spans match");
+}
+
+/// A replayed pane keeps the line each span draws, so the hint over the
+/// unfocused pane comes back dotted.
+#[test]
+fn a_replayed_pane_keeps_a_dotted_undercurl() {
+    let mut h = Stoat::test();
+    split_pair(&mut h);
+    publish_one_diagnostic(
+        &mut h,
+        std::path::Path::new("/test/a.txt"),
+        lsp_types::DiagnosticSeverity::HINT,
+    );
+    let _ = h.stoat.render();
+
+    repaint_focused_pane(&mut h);
+    let painted_before = h.stoat.pane_paints;
+    let replayed = frame_output(&mut h).2;
+    let painted = h.stoat.pane_paints - painted_before;
+
+    h.stoat.pane_cache.clear();
+    let repainted = frame_output(&mut h).2;
+    let styles: Vec<_> = repainted.iter().map(|span| span.4).collect();
+
+    assert_eq!(
+        (painted, styles, replayed),
+        (1, vec![UnderlineKind::Dotted], repainted),
+        "the hint pane replayed its dotted span",
+    );
 }
 
 /// Paint one frame into a fresh buffer, and answer it with the holds the

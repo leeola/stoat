@@ -1,12 +1,13 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 use std::fmt::{self, Display, Formatter, Write};
 
-/// A run of cells to re-stamp with a severity-colored curly underline.
+/// A run of cells to re-stamp with a severity-colored underline.
 ///
 /// `x`/`y` is the run's leftmost cell and `len` its width in cells, in terminal
-/// coordinates. `color` is the undercurl color (the diagnostic severity),
+/// coordinates. `color` is the underline color (the diagnostic severity),
 /// carried separately from the cells' own foreground so the text keeps its
-/// syntax coloring while only the decoration is added.
+/// syntax coloring while only the decoration is added. `style` is the line the
+/// overlay draws under the run.
 ///
 /// `cells` records the span's buffer cells as the editor left them, before the
 /// overlay stack painted. The re-stamp runs after every overlay, so [`build`]
@@ -18,7 +19,28 @@ pub(crate) struct UndercurlSpan {
     pub(crate) y: u16,
     pub(crate) len: u16,
     pub(crate) color: [u8; 3],
+    pub(crate) style: UnderlineKind,
     pub(crate) cells: Vec<ratatui::buffer::Cell>,
+}
+
+/// The line a diagnostic draws under its text.
+///
+/// Errors, warnings, and information take the wavy line. Hints and unused code
+/// take the dotted one, which reads quieter beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnderlineKind {
+    Curly,
+    Dotted,
+}
+
+impl UnderlineKind {
+    /// The SGR 4 subparameter that draws this line.
+    fn sgr(self) -> &'static str {
+        match self {
+            UnderlineKind::Curly => "4:3",
+            UnderlineKind::Dotted => "4:4",
+        }
+    }
 }
 
 /// One frame's undercurl spans, retaining their cell records between frames.
@@ -45,13 +67,14 @@ impl UndercurlBatch {
 
     /// Add a span over `len` cells from `(x, y)`, reusing a retired span's cell
     /// record when one is available.
-    pub(crate) fn push(&mut self, x: u16, y: u16, len: u16, color: [u8; 3]) {
+    pub(crate) fn push(&mut self, x: u16, y: u16, len: u16, color: [u8; 3], style: UnderlineKind) {
         match self.spans.get_mut(self.live) {
             Some(span) => {
                 span.x = x;
                 span.y = y;
                 span.len = len;
                 span.color = color;
+                span.style = style;
                 span.cells.clear();
             },
             None => self.spans.push(UndercurlSpan {
@@ -59,6 +82,7 @@ impl UndercurlBatch {
                 y,
                 len,
                 color,
+                style,
                 cells: Vec::new(),
             }),
         }
@@ -134,11 +158,12 @@ pub(crate) fn snapshot_cells(buf: &Buffer, spans: &mut [UndercurlSpan]) {
 }
 
 /// Build the raw VT that re-stamps `spans` over the already-painted `buf` with
-/// curly underlines, or an empty vec when nothing is left to stamp.
+/// each span's underline, or an empty vec when nothing is left to stamp.
 ///
 /// ratatui's cell model cannot express undercurl, so the squiggle rides as raw
 /// escapes over the grid ratatui drew. Each cell keeps its own foreground and
-/// background and gains only SGR 4:3 undercurl plus the SGR 58 underline color.
+/// background and gains only the span's line, SGR 4:3 curly or 4:4 dotted, plus
+/// the SGR 58 underline color.
 /// Consecutive cells sharing `(fg, bg)` collapse into one escape run so syntax
 /// coloring is preserved with minimal output.
 ///
@@ -180,9 +205,10 @@ pub(crate) fn build(buf: &Buffer, spans: &[UndercurlSpan]) -> Vec<u8> {
 
                 write!(
                     body,
-                    "\x1b[0;{};{};4:3;58:2::{ur}:{ug}:{ub}m",
+                    "\x1b[0;{};{};{};58:2::{ur}:{ug}:{ub}m",
                     SgrFg(fg),
                     SgrBg(bg),
+                    span.style.sgr(),
                 )
                 .expect("writing to a String is infallible");
                 for x in (span.x + run_start)..(span.x + run_end) {
@@ -241,7 +267,9 @@ impl Display for SgrBg {
 
 #[cfg(test)]
 mod tests {
-    use super::{build, snapshot_cells, UndercurlBatch, UndercurlSpan, UndercurlStamp};
+    use super::{
+        build, snapshot_cells, UndercurlBatch, UndercurlSpan, UndercurlStamp, UnderlineKind,
+    };
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -267,7 +295,7 @@ mod tests {
 
         let mut batch = UndercurlBatch::default();
         batch.begin();
-        batch.push(0, 0, 3, [9, 9, 9]);
+        batch.push(0, 0, 3, [9, 9, 9], UnderlineKind::Curly);
         snapshot_cells(&buf, batch.spans_mut());
 
         let record = batch.spans()[0].cells.capacity();
@@ -276,11 +304,17 @@ mod tests {
         batch.begin();
         assert!(batch.spans().is_empty(), "the retired span is out of reach");
 
-        batch.push(4, 0, 2, [1, 2, 3]);
+        batch.push(4, 0, 2, [1, 2, 3], UnderlineKind::Dotted);
         let reused = &batch.spans()[0];
         assert_eq!(
-            (reused.x, reused.len, reused.color, reused.cells.capacity()),
-            (4, 2, [1, 2, 3], record),
+            (
+                reused.x,
+                reused.len,
+                reused.color,
+                reused.style,
+                reused.cells.capacity(),
+            ),
+            (4, 2, [1, 2, 3], UnderlineKind::Dotted, record),
             "the new span overwrote the retired one and kept its record",
         );
         assert!(reused.cells.is_empty(), "with nothing recorded yet");
@@ -299,6 +333,7 @@ mod tests {
             y: 0,
             len: 3,
             color: [9, 9, 9],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(&buf, &mut spans);
@@ -314,6 +349,7 @@ mod tests {
             y: 0,
             len: 3,
             color: [9, 9, 9],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(buf, &mut spans);
@@ -398,6 +434,7 @@ mod tests {
             y: 0,
             len: 2,
             color: [7, 8, 9],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(&buf, &mut spans);
@@ -405,6 +442,20 @@ mod tests {
         assert_eq!(
             bytes,
             "\x1b7\x1b[1;3H\x1b[0;38;2;1;2;3;48;2;4;5;6;4:3;58:2::7:8:9mfn\x1b8\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn a_dotted_span_re_stamps_cells_with_the_dotted_line() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+        paint(&mut buf, 0, "abc", Color::Rgb(1, 1, 1), Color::Rgb(0, 0, 0));
+        let mut spans = one_span(&buf);
+        spans[0].style = UnderlineKind::Dotted;
+
+        let bytes = String::from_utf8(build(&buf, &spans)).unwrap();
+        assert_eq!(
+            bytes,
+            "\x1b7\x1b[1;1H\x1b[0;38;2;1;1;1;48;2;0;0;0;4:4;58:2::9:9:9mabc\x1b8\x1b[0m"
         );
     }
 
@@ -430,6 +481,7 @@ mod tests {
             y: 0,
             len: 3,
             color: [1, 1, 1],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(&buf, &mut spans);
@@ -452,6 +504,7 @@ mod tests {
             y: 0,
             len: 1,
             color: [2, 3, 4],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(&buf, &mut spans);
@@ -471,6 +524,7 @@ mod tests {
             y: 0,
             len: 3,
             color: [9, 9, 9],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(&buf, &mut spans);
@@ -496,6 +550,7 @@ mod tests {
             y: 0,
             len: 2,
             color: [9, 9, 9],
+            style: UnderlineKind::Curly,
             cells: Vec::new(),
         }];
         snapshot_cells(&buf, &mut spans);

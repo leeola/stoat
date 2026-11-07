@@ -46,8 +46,11 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::{Pane, PaneId, Placement, View},
     render::{
-        diff_changes::stack_composited, pane::pane_areas, review::DiffDials,
-        undercurl::UndercurlBatch, FrameCtx, Hold,
+        diff_changes::stack_composited,
+        pane::pane_areas,
+        review::DiffDials,
+        undercurl::{UndercurlBatch, UnderlineKind},
+        FrameCtx, Hold,
     },
     term_session::{TermId, TermSession},
     workspace::WorkspaceId,
@@ -205,7 +208,7 @@ pub(crate) struct PaneCacheEntry {
     /// The spans as the pane pushed them. Their cell records are deliberately
     /// not kept, since those are filled from the finished buffer after every
     /// pane has painted.
-    undercurls: Vec<(u16, u16, u16, [u8; 3])>,
+    undercurls: Vec<(u16, u16, u16, [u8; 3], UnderlineKind)>,
     /// The last key a frame built for the pane, and whether it differed from
     /// the key before it.
     ///
@@ -315,7 +318,7 @@ impl PaneCacheEntry {
         self.undercurls.extend(
             undercurls.spans()[mark.spans..]
                 .iter()
-                .map(|span| (span.x, span.y, span.len, span.color)),
+                .map(|span| (span.x, span.y, span.len, span.color, span.style)),
         );
         true
     }
@@ -359,8 +362,8 @@ impl PaneCacheEntry {
         scene.buffer().extend_from_slice(bytes);
         scene.end_lane();
 
-        for &(x, y, len, color) in &self.undercurls {
-            undercurls.push(x, y, len, color);
+        for &(x, y, len, color, style) in &self.undercurls {
+            undercurls.push(x, y, len, color, style);
         }
     }
 
