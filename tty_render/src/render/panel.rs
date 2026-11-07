@@ -495,6 +495,7 @@ fn style_code(style: BorderStyle) -> u32 {
         BorderStyle::Double => 2,
         BorderStyle::Rounded => 3,
         BorderStyle::None_ => 4,
+        BorderStyle::Dashed => 5,
     }
 }
 
@@ -878,6 +879,82 @@ mod tests {
             (column(PanelShadow::None_), column(PanelShadow::Tucked)),
             ((0, 255, 0), (0, 255, 0)),
             "one full pixel inside the top edge, nothing on either side of it"
+        );
+    }
+
+    /// A dashed frame lights three pixels in every five along each side, where
+    /// a light frame lights them all.
+    ///
+    /// The dashes run clockwise from the top-left corner, and a corner pixel
+    /// takes its place on the top or the bottom side. A dash and a gap are
+    /// logical lengths, so a denser display draws them over more pixels.
+    #[test]
+    fn a_dashed_frame_lights_three_pixels_in_five() {
+        let (device, queue) = require_headless_device();
+
+        // The box spans x 12 to 48 and y 12 to 36 at either density, so its
+        // sides' inner pixel rows and columns hold 36 and 24 pixels.
+        let metrics = |scale_factor| CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor,
+        };
+        let sides = |style, scale_factor| {
+            let mut grid = Grid::new(4, 4);
+            grid.set_panels(vec![Panel {
+                top: 1,
+                left: 1,
+                width: 3,
+                height: 2,
+                style,
+                border: Rgb::new(255, 0, 0),
+                corner_radius: 0,
+                fill: None,
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                above_pools: false,
+                backdrop: false,
+                anchor: None,
+                seq: 0,
+            }]);
+            let red = render_red(&device, &queue, &grid, metrics(scale_factor), Halves::Both);
+            let lit = |x: u32, y: u32| match red[(y * TARGET + x) as usize] {
+                255 => '#',
+                _ => '.',
+            };
+            [
+                (12..48).map(|x| lit(x, 12)).collect::<String>(),
+                (12..36).map(|y| lit(47, y)).collect::<String>(),
+                (12..48).map(|x| lit(x, 35)).collect::<String>(),
+                (12..36).map(|y| lit(12, y)).collect::<String>(),
+            ]
+        };
+
+        assert_eq!(
+            sides(BorderStyle::Light, 1.0),
+            [
+                "#".repeat(36),
+                "#".repeat(24),
+                "#".repeat(36),
+                "#".repeat(24)
+            ],
+            "a light frame's top, right, bottom, and left sides whole",
+        );
+        assert_eq!(
+            sides(BorderStyle::Dashed, 1.0),
+            [
+                "###..".repeat(7) + "#",
+                "##..###..###..###..###.#".to_string(),
+                "#".to_string() + &"..###".repeat(7),
+                "#.###..###..###..###..##".to_string(),
+            ],
+            "a dashed frame's top, right, bottom, and left sides",
+        );
+        assert_eq!(
+            sides(BorderStyle::Dashed, 2.0)[0],
+            "######....".repeat(3) + "######",
+            "at twice the density a dash and a gap span twice the pixels",
         );
     }
 

@@ -35,6 +35,7 @@ const STYLE_HEAVY: u32 = 1u;
 const STYLE_DOUBLE: u32 = 2u;
 const STYLE_ROUNDED: u32 = 3u;
 const STYLE_NONE: u32 = 4u;
+const STYLE_DASHED: u32 = 5u;
 
 // Drop-shadow color and peak alpha. The shadow paints only outside the box
 // exterior (fs_main gates it by interior coverage); this is its opacity where
@@ -270,9 +271,10 @@ fn band(d: f32, near: f32, far: f32) -> f32 {
 //
 // The heavy width and the double line's separation are logical pixels, scaled
 // to the display, so a heavy frame stays visibly heavier than a light one at
-// any density. The light and rounded hairline is one physical pixel on purpose:
-// it is the thinnest line the display draws, so a denser screen renders it
-// finer rather than fatter.
+// any density. The light, rounded, and dashed hairline is one physical pixel on
+// purpose: it is the thinnest line the display draws, so a denser screen
+// renders it finer rather than fatter. A dashed frame takes the light band
+// here, and dash_mask cuts its gaps.
 fn line_coverage(style: u32, d: f32) -> f32 {
     let s = globals.scale_factor;
     if style == STYLE_NONE {
@@ -338,13 +340,42 @@ fn box_distance(in: VsOut) -> f32 {
     return rounded_box_sdf(in.quad_px - center, half, box_radius(in));
 }
 
+/// 1.0 where a dashed frame's band is on at the fragment, 0.0 in a gap.
+///
+/// The dashes run clockwise from the box's top-left corner, 3 logical px on
+/// and 2 off. The fragment measures its place along the side of the box it is
+/// nearest. A tie goes to the top or the bottom side, so a corner pixel
+/// continues that side's run.
+fn dash_mask(in: VsOut) -> f32 {
+    let size = in.box_max - in.box_min;
+    let to_min = in.quad_px - in.box_min;
+    let to_max = in.box_max - in.quad_px;
+    let near = min(to_min, to_max);
+
+    let along_top = to_min.x;
+    let along_right = size.x + to_min.y;
+    let along_bottom = size.x + size.y + to_max.x;
+    let along_left = 2.0 * size.x + size.y + to_max.y;
+    let along = select(
+        select(along_left, along_right, to_max.x < to_min.x),
+        select(along_bottom, along_top, to_min.y <= to_max.y),
+        near.y <= near.x
+    );
+
+    let period = 5.0 * globals.scale_factor;
+    return select(0.0, 1.0, fract(along / period) < 0.6);
+}
+
 fn coverage_of(in: VsOut) -> Coverage {
     let p = in.quad_px;
     let radius = box_radius(in);
     let box_sdf = box_distance(in);
 
     // Frame band inside the box edge, weighted by the border style.
-    let stroke = line_coverage(in.style, -box_sdf);
+    var stroke = line_coverage(in.style, -box_sdf);
+    if in.style == STYLE_DASHED {
+        stroke *= dash_mask(in);
+    }
     // Optional interior fill, covering the exact area of the pixel that falls
     // inside the rounded edge. The ramp is one pixel wide, so an opaque box
     // meets what surrounds it at a crisp edge.

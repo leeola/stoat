@@ -217,6 +217,12 @@ declared before it leave the rect to the live grid. A program that draws a
 frame in the cells declares such a panel over it, so no pool paints over those
 cells. A terminal below version 15 reads the code as a light line.
 
+Style code 5 in a `border` or a `panel` draws a dashed light line. A `panel`
+frame draws it 3 logical px on and 2 off, clockwise from the box's top-left
+corner, and a `border` draws it as a solid light line. A terminal that does
+not know the code reads it as a light line, so a program sends it to any
+terminal.
+
 `ident` travels the other way, terminal to program, and arrives as input bytes
 on stdin. `decode` never yields it; use `decode_ident_reply`.
 

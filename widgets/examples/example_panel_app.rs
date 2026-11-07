@@ -63,11 +63,12 @@ const SHADOWS: [(PanelShadow, &str); 4] = [
 ];
 
 /// The border weights the columns step through, with the name each is titled by.
-const BORDERS: [(BorderStyle, &str); 4] = [
+const BORDERS: [(BorderStyle, &str); 5] = [
     (BorderStyle::Light, "light"),
     (BorderStyle::Heavy, "heavy"),
     (BorderStyle::Double, "double"),
     (BorderStyle::Rounded, "round"),
+    (BorderStyle::Dashed, "dashed"),
 ];
 
 fn main() {

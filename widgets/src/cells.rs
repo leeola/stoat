@@ -13,6 +13,17 @@ use ratatui::{
     symbols::border,
 };
 
+/// The cell perimeter a dashed frame degrades to.
+///
+/// It keeps the light corners and draws dashed light lines between them.
+pub(crate) const DASHED: border::Set<'static> = border::Set {
+    horizontal_top: "\u{254c}",
+    horizontal_bottom: "\u{254c}",
+    vertical_left: "\u{254e}",
+    vertical_right: "\u{254e}",
+    ..border::PLAIN
+};
+
 /// Convert a cell coordinate plus a sub-cell `offset` into absolute sixteenths.
 ///
 /// The wire commands anchor in signed sixteenths, so a widget positioned near

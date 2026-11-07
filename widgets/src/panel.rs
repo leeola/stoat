@@ -92,6 +92,7 @@ impl Panel {
             BorderStyle::Heavy => border::THICK,
             BorderStyle::Double => border::DOUBLE,
             BorderStyle::Rounded => border::ROUNDED,
+            BorderStyle::Dashed => cells::DASHED,
             BorderStyle::None_ => return,
         };
         let style = Style::default().fg(cells::rgb(self.border));
@@ -196,6 +197,38 @@ mod tests {
 
         assert_eq!(symbol(&buf, 0, 0), "╭");
         assert_eq!(symbol(&buf, 2, 2), "╯");
+    }
+
+    /// A dashed frame degrades to the light corners with dashed lines between
+    /// them.
+    #[test]
+    fn dashed_fallback_draws_dashed_lines_between_light_corners() {
+        let mut scene = ApcScene::new();
+        let area = Rect::new(0, 0, 3, 3);
+        let mut buf = Buffer::empty(area);
+
+        Panel {
+            style: BorderStyle::Dashed,
+            border: [1, 2, 3],
+            corner_radius: 2,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        }
+        .render(area, &mut buf, &mut scene);
+
+        let row = |y| (0..3).map(|x| symbol(&buf, x, y)).collect::<String>();
+        assert_eq!(
+            [row(0), row(1), row(2)],
+            [
+                "\u{250c}\u{254c}\u{2510}",
+                "\u{254e} \u{254e}",
+                "\u{2514}\u{254c}\u{2518}"
+            ],
+        );
     }
 
     /// A panel in the style that draws no line has no cell border to degrade

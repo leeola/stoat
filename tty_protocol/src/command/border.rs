@@ -33,6 +33,10 @@ pub struct BorderCommand {
 /// live grid. A program whose frame the cells draw declares such a panel to
 /// keep the pools off those cells. A terminal before protocol version 15 reads
 /// the style as [`BorderStyle::Light`].
+///
+/// [`BorderStyle::Dashed`] is a light hairline drawn 3 logical px on and 2 off
+/// along a panel's frame, as a read-only pane's ring. A cell border draws it
+/// as a solid light line, and so does a terminal that does not know the style.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BorderStyle {
     Light,
@@ -40,6 +44,7 @@ pub enum BorderStyle {
     Double,
     Rounded,
     None_,
+    Dashed,
 }
 
 /// Encode a [`BorderCommand`] as a full `Gstoatty;border` frame for an emitter.
@@ -85,6 +90,7 @@ pub(super) fn decode_style(code: u8) -> BorderStyle {
         2 => BorderStyle::Double,
         3 => BorderStyle::Rounded,
         4 => BorderStyle::None_,
+        5 => BorderStyle::Dashed,
         _ => BorderStyle::Light,
     }
 }
@@ -96,6 +102,7 @@ pub(super) fn style_code(style: BorderStyle) -> u8 {
         BorderStyle::Double => 2,
         BorderStyle::Rounded => 3,
         BorderStyle::None_ => 4,
+        BorderStyle::Dashed => 5,
     }
 }
 
@@ -129,6 +136,23 @@ mod tests {
             width: 4,
             height: 3,
             style: BorderStyle::Rounded,
+            color: [1, 2, 3],
+        };
+
+        assert_eq!(
+            decode(&encode_border(&command)),
+            Some(Command::Border(command))
+        );
+    }
+
+    #[test]
+    fn dashed_style_round_trips() {
+        let command = BorderCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            style: BorderStyle::Dashed,
             color: [1, 2, 3],
         };
 

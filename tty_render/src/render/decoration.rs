@@ -448,6 +448,8 @@ fn style_flag(style: BorderStyle) -> u32 {
         BorderStyle::Double => STYLE_DOUBLE,
         BorderStyle::Rounded => STYLE_ROUNDED,
         BorderStyle::None_ => STYLE_NONE,
+        // FIXME: The border decoration draws a dashed style as a solid light line.
+        BorderStyle::Dashed => STYLE_LIGHT,
     }
 }
 

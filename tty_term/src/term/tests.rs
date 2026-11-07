@@ -1979,6 +1979,52 @@ fn rounded_border_command_maps_to_rounded_style() {
     );
 }
 
+/// A dashed panel reaches the grid in its own style, which the renderer draws
+/// in dashes.
+#[test]
+fn dashed_panel_command_maps_to_dashed_style() {
+    let frame = encode_panel(&PanelCommand {
+        top: 1,
+        left: 2,
+        width: 4,
+        height: 3,
+        style: ProtoBorderStyle::Dashed,
+        border: [138, 118, 80],
+        corner_radius: 2,
+        fill: None,
+        shadow: ProtoPanelShadow::None_,
+        inset_x: 0,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    });
+
+    let mut terminal = Terminal::new(8, 8, Theme::default());
+    let mut grid = Grid::new(8, 8);
+    terminal.advance(&frame);
+    terminal.project(&mut grid);
+
+    assert_eq!(
+        grid.panels(),
+        [Panel {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            style: BorderStyle::Dashed,
+            border: Rgb::new(138, 118, 80),
+            corner_radius: 2,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 1,
+        }]
+    );
+}
+
 #[test]
 fn scale_apc_frame_claims_the_block() {
     let frame = encode_scale(&ScaleCommand {

@@ -232,6 +232,7 @@ pub(crate) fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
         command::BorderStyle::Double => BorderStyle::Double,
         command::BorderStyle::Rounded => BorderStyle::Rounded,
         command::BorderStyle::None_ => BorderStyle::None_,
+        command::BorderStyle::Dashed => BorderStyle::Dashed,
     }
 }
 

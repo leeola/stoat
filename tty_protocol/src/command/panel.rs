@@ -250,6 +250,31 @@ mod tests {
         );
     }
 
+    /// A read-only pane's ring is a dashed frame with no fill and no shadow.
+    #[test]
+    fn dashed_panel_round_trips() {
+        let command = PanelCommand {
+            top: 1,
+            left: 6,
+            width: 70,
+            height: 20,
+            style: BorderStyle::Dashed,
+            border: [138, 118, 80],
+            corner_radius: 2,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        };
+
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
     /// A backdrop panel keeps its flag apart from the above-pools one through
     /// the shared flags byte.
     #[test]
