@@ -42,6 +42,13 @@ const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
 const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
 const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
+const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
+const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
+
+/// The primary cursor's block over the base, which is the terminal palette's
+/// cursor color #dfe2e8 at the 55 percent the cursor pass blends it at. The
+/// color comes from stoatty's own palette rather than a theme scope.
+const CURSOR_OVER_BASE: [u8; 3] = [0x84, 0x87, 0x8d];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
@@ -777,6 +784,54 @@ fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
             frame.display(),
         );
     }
+}
+
+/// A selection washes its range, the primary cursor is the terminal's own
+/// translucent block, and a secondary cursor takes the theme's cursor block.
+///
+/// The text starts in cell 6. `jjvll` selects `3 t` on row 2, so the wash
+/// covers the `3` and the blank cell after it, and the primary cursor sits on
+/// the `t` in cell 8. `<Esc>CC` copies the selection onto the next two rows,
+/// and the newest, on row 4, takes the primary, which leaves the cursor on row
+/// 2 secondary.
+#[test]
+fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
+    let mut home = support::scratch_home();
+    let mut session = spawn_settled(home.path(), "basic-diff", "unstaged.txt");
+
+    play(&mut session, "jjvll<Settle>");
+    let selected = session.snapshot().expect("a snapshot");
+    expect_region(
+        &selected,
+        &mut home,
+        cell_rect(7, 2, 1, 1),
+        WASH,
+        "selection_wash",
+    );
+    expect_region(
+        &selected,
+        &mut home,
+        cell_rect(8, 2, 1, 1),
+        CURSOR_OVER_BASE,
+        "primary_cursor",
+    );
+
+    play(&mut session, "<Esc>CC<Settle>");
+    let copied = session.snapshot().expect("a snapshot");
+    expect_region(
+        &copied,
+        &mut home,
+        cell_rect(8, 2, 1, 1),
+        CURSOR_SECONDARY,
+        "secondary_cursor",
+    );
+    expect_region(
+        &copied,
+        &mut home,
+        cell_rect(8, 4, 1, 1),
+        CURSOR_OVER_BASE,
+        "copied_primary_cursor",
+    );
 }
 
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.
