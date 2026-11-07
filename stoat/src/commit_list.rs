@@ -56,9 +56,14 @@ pub(crate) struct CommitListState {
     /// The lane layout of [`Self::commits`], and the lanes its widest row
     /// needs, laid out again whenever a page lands.
     pub graph: (Vec<GraphRow>, u16),
-    /// Full sha to the local branch names pointing at it, as the last landed
-    /// page read them.
-    pub branch_tips: HashMap<String, Vec<String>>,
+    /// The refs pointing into the history, as the last landed page read them.
+    pub refs: CommitRefs,
+    /// The moment the list measures each commit's age against, in unix epoch
+    /// seconds.
+    ///
+    /// Read when the list opens or reloads, so the ages hold still while the
+    /// reader scrolls rather than drifting under them.
+    pub now_epoch: i64,
     /// True once a load returned fewer commits than it asked for, which is the
     /// walk reaching the history's roots, so no later page exists.
     pub reached_end: bool,
@@ -154,9 +159,26 @@ pub(crate) struct PageLoad {
     pub reached_end: bool,
     /// What the load learned of the pending selection's commit.
     pub selection: SelectionSearch,
-    /// Full sha to the local branch names pointing at it, read with the page
-    /// so the graph marks the tips the repository holds when the page lands.
-    pub branch_tips: HashMap<String, Vec<String>>,
+    /// The refs, read with the page so the graph and the badges mark the refs
+    /// the repository holds when the page lands.
+    pub refs: CommitRefs,
+}
+
+/// The refs that point at commits in a list's history, which mark the rows
+/// they point at.
+///
+/// Each map takes a full sha to the names pointing at it, sorted. A local
+/// branch is also a tip in the lane graph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CommitRefs {
+    /// The commit HEAD resolves to.
+    pub head: Option<String>,
+    /// The branch HEAD is attached to, `None` when HEAD is detached.
+    pub head_branch: Option<String>,
+    pub local: HashMap<String, Vec<String>>,
+    /// Remote-tracking branches, such as `origin/main`.
+    pub remote: HashMap<String, Vec<String>>,
+    pub tags: HashMap<String, Vec<String>>,
 }
 
 /// What a load learned of a restored selection's commit.
@@ -275,13 +297,14 @@ impl PreviewCache {
 }
 
 impl CommitListState {
-    pub(crate) fn new(workdir: PathBuf, repo: Arc<dyn GitRepo>) -> Self {
+    pub(crate) fn new(workdir: PathBuf, repo: Arc<dyn GitRepo>, now_epoch: i64) -> Self {
         Self {
             workdir,
             repo,
             commits: Vec::new(),
             graph: (Vec::new(), 0),
-            branch_tips: HashMap::new(),
+            refs: CommitRefs::default(),
+            now_epoch,
             reached_end: false,
             selected: 0,
             scroll_top: 0,
@@ -397,7 +420,7 @@ impl CommitListState {
                 let loaded_before = self.commits.len();
                 self.commits.extend(load.commits);
                 self.graph = commit_graph::assign_lanes(&self.commits);
-                self.branch_tips = load.branch_tips;
+                self.refs = load.refs;
                 self.reached_end = load.reached_end;
                 match load.selection {
                     SelectionSearch::NotAsked => {},
@@ -459,7 +482,7 @@ mod tests {
         render::paint::style_rgb,
         review_session::DiffDocument,
         term_session::TermId,
-        test_harness::{CommitSpec, TestHarness},
+        test_harness::{CommitSpec, TestHarness, COMMITS_NOW_EPOCH},
         theme::scope,
     };
     use std::{path::PathBuf, sync::Arc};
@@ -638,6 +661,66 @@ mod tests {
             .branch("main", "d4000000");
         h.open_commits("/repo");
         h.assert_snapshot("commits_graph_shows_a_merge");
+    }
+
+    /// Each row carries the badges of the refs pointing at it, the author's
+    /// initials, and the commit's age.
+    ///
+    /// HEAD's badge names its branch, which takes no badge of its own, and a
+    /// merge's summary takes the metadata color. A tag on the merge leaves its
+    /// summary less than a few words, so the tag stays off the row.
+    #[test]
+    fn snapshot_commits_refs_and_age() {
+        let mut h = Stoat::test();
+        h.resize(160, 12);
+        h.stoat.stoatty = false;
+        let hours_ago = |hours: i64| COMMITS_NOW_EPOCH - hours * 3_600;
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[("a.rs", "a\n")])
+            .authored("a1000000", "Ada Lovelace", hours_ago(400 * 24))
+            .commit_with_parent_message("b2000000", "a1000000", "feat: side", &[("a.rs", "s\n")])
+            .authored("b2000000", "Grace Hopper", hours_ago(60 * 24))
+            .commit_with_parent_message("c3000000", "a1000000", "feat: main", &[("a.rs", "m\n")])
+            .authored("c3000000", "Lee", hours_ago(3 * 24))
+            .merge_commit("d4000000", "b2000000", &[("a.rs", "m\n")])
+            .authored("d4000000", "Lee", hours_ago(5))
+            .commit_with_parent_message("e5000000", "d4000000", "feat: polish", &[("a.rs", "p\n")])
+            .authored("e5000000", "Ada Lovelace", hours_ago(1))
+            .branch("main", "e5000000")
+            .set_head_branch("main")
+            .branch("side", "b2000000")
+            .remote_branch("origin/main", "d4000000")
+            .tag("v0.9", "d4000000")
+            .tag("v1.0", "c3000000");
+        h.open_commits("/repo");
+        h.assert_snapshot("commits_refs_and_age");
+    }
+
+    /// A list too narrow for a few words of summary beside the author and age
+    /// columns leaves them off, and the summary takes their room. HEAD's badge
+    /// does not fit either, so it stays off too.
+    #[test]
+    fn a_narrow_list_leaves_the_author_and_age_off() {
+        let mut h = Stoat::test();
+        h.resize(40, 8);
+        h.seed_linear_history("/repo", HISTORY);
+        h.open_commits("/repo");
+
+        let text = h.rendered_text();
+        let rows: Vec<&str> = text
+            .lines()
+            .take(3)
+            .map(|line| line.split('\u{2502}').next().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "   c100000 feat: add b",
+                "   c100000 chore: twea",
+                "   c100000 feat: add a",
+            ],
+        );
     }
 
     /// A page past the first walks again from the top, so a merged branch's

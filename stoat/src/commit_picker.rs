@@ -13,6 +13,7 @@ use std::{
     mem,
     path::PathBuf,
     sync::Arc,
+    time::UNIX_EPOCH,
 };
 use stoat_scheduler::{Executor, Task};
 
@@ -103,6 +104,18 @@ pub(crate) fn age_label(now_epoch: i64, commit_time: i64) -> String {
         }
     }
     "now".to_string()
+}
+
+/// The moment `executor`'s clock reads, in unix epoch seconds.
+///
+/// [`age_label`] measures a commit's age against it. A clock set before the
+/// epoch reads 0.
+pub(crate) fn now_epoch(executor: &Executor) -> i64 {
+    executor
+        .system_now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Longest text in each column across the rows `filtered` names, in

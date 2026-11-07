@@ -5445,7 +5445,7 @@ fn a_click_away_rests_a_run_commits_diff_changes_or_docked_view() {
         let ws = commits.stoat.active_workspace_mut();
         let id = ws
             .commit_lists
-            .insert(CommitListState::new(PathBuf::from("/work"), repo));
+            .insert(CommitListState::new(PathBuf::from("/work"), repo, 0));
         ws.panes.pane_mut(left).view = View::Commits(id);
         id
     };

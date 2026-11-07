@@ -63,6 +63,7 @@ pub(crate) fn render_conflict(
         status_area,
         is_focused,
         frame.screen,
+        None,
         frame,
         buf,
         &mut *scene,

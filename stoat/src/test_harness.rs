@@ -54,6 +54,14 @@ pub(crate) type CommitSpec<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
 /// that hangs the whole test binary rather than failing one test.
 const SETTLE_MAX_PASSES: usize = 1000;
 
+/// The moment a list that [`TestHarness::open_commits`] opens measures its
+/// commits' ages against, in unix epoch seconds.
+///
+/// Three days and an hour past the time the fake repo dates its first commit
+/// to, so the age column reads the same on every run rather than drifting with
+/// the wall clock the test clock starts at.
+pub(crate) const COMMITS_NOW_EPOCH: i64 = 1_700_000_000 + 3 * 86_400 + 3_600;
+
 pub struct TestHarness {
     pub(crate) stoat: Stoat,
     scheduler: Arc<TestScheduler>,
@@ -444,10 +452,15 @@ impl TestHarness {
     /// workspace's `git_root` so the handler finds the fake repo, then
     /// dispatches `OpenCommits` and settles any async page/preview
     /// loads so the next snapshot sees resolved state.
+    ///
+    /// The list measures its ages against [`COMMITS_NOW_EPOCH`].
     pub fn open_commits(&mut self, workdir: impl Into<std::path::PathBuf>) {
         let workdir = workdir.into();
         self.stoat.active_workspace_mut().git_root = workdir;
         crate::action_handlers::dispatch(&mut self.stoat, &stoat_action::OpenCommits);
+        if let Some(list) = self.stoat.active_workspace_mut().focused_commits_mut() {
+            list.now_epoch = COMMITS_NOW_EPOCH;
+        }
         self.settle();
         self.capture("open_commits");
     }

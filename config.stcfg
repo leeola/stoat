@@ -167,6 +167,10 @@ theme default_dark {
     vcs.lane.5.fg = "#7dcfff";
     vcs.lane.6.fg = "#f7768e";
 
+    vcs.ref.head      = { fg: black, bg: success, modifiers: [bold] };
+    vcs.ref.remote.fg = muted;
+    vcs.ref.tag.fg    = warning;
+
     vcs.rebase.pick.fg   = success;
     vcs.rebase.squash.fg = warning;
     vcs.rebase.fixup.fg  = warning;
@@ -347,6 +351,8 @@ theme ermine_night inherits default_dark {
     vcs.lane.4.fg = warning;
     vcs.lane.5.fg = info;
     vcs.lane.6.fg = danger;
+
+    vcs.ref.head.fg = chrome;
 
     ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 0 };
     ui.panel.popout  = { radius: 1, shadow: overhang };

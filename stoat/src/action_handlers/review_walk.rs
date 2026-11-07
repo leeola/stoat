@@ -4,7 +4,7 @@ use crate::{
     badge::BadgeSource,
     buffer_registry::OpenOrigin,
     commit_list::PendingPreview,
-    commit_picker::{CommitPicker, CommitPickerRole, LoadedCommits, RangeFrom},
+    commit_picker::{self, CommitPicker, CommitPickerRole, LoadedCommits, RangeFrom},
     git_jobs::{self, GitJob, GitJobKey, GitLanding, GitWork},
     host::CommitInfo,
     review_walk::{ReturnRef, ReviewWalk, WalkSpan},
@@ -413,12 +413,7 @@ fn open_commit_picker(
 
     // Ages are measured against the moment the picker opened, so they hold
     // still while the user scrolls rather than drifting under them.
-    let now_epoch = stoat
-        .executor
-        .system_now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs() as i64)
-        .unwrap_or(0);
+    let now_epoch = commit_picker::now_epoch(&stoat.executor);
     let executor = stoat.executor.clone();
     let mut picker = CommitPicker::new(
         stoat.active_workspace_mut(),

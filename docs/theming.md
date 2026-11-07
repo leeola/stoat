@@ -301,6 +301,11 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   commit log, and the interactive-rebase todo.
 - `vcs.lane.1` to `vcs.lane.6` -- the colors the commit graph's lanes cycle
   through. A lane the theme leaves unset takes a built-in color.
+- `vcs.ref.head`, `vcs.ref.remote`, `vcs.ref.tag` -- the badges beside a
+  commits list row: HEAD and its branch, a remote-tracking branch, and a tag.
+  A local branch's badge takes its lane's color instead. Inside stoatty a
+  remote or tag badge also carries a hairline frame, in its color mixed
+  toward `ui.background`.
 - `chat.*` -- the agent chat panel.
 - `syntax.*` -- tree-sitter highlight captures (open-ended, with the fallback
   above).

@@ -1,15 +1,16 @@
 use crate::{
     app::{SeparatorAxis, SplitSeparator},
-    commit_list::{CommitListState, Preview},
+    commit_list::{CommitListState, CommitRefs, Preview},
+    commit_picker::age_label,
     diff_map::{BaseHighlights, ChangeKind, ProseChange},
     display_map::DEFAULT_TAB_SIZE,
     host::{CommitFileChange, CommitFileChangeKind},
     pane::Pane,
     render::{
-        commit_picker::{graph_width, paint_commit_graph, GraphPaint},
+        commit_picker::{graph_width, paint_commit_graph, tip_colors, GraphPaint},
         layout::split_pane_status,
-        paint::{render_empty_num, render_side_num, render_side_text, style_rgb},
-        pane::render_overlay_status,
+        paint::{blend, render_empty_num, render_side_num, render_side_text, style_rgb},
+        pane::{render_overlay_status, ScreenSubject},
         review::{
             paint_base_row, resolve_diff_tints, DiffColumns, DiffDials, DiffLayout, DiffTints,
         },
@@ -23,8 +24,10 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
+    widgets::StatefulWidget,
 };
 use std::{path::Path, sync::Arc};
+use stoat_widgets::bar::Bar;
 
 pub(crate) fn render_commits(
     pane: &Pane,
@@ -37,10 +40,19 @@ pub(crate) fn render_commits(
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
     let (inner, status_area) = split_pane_status(pane.area);
+    let subject = state
+        .commits
+        .get(state.selected)
+        .map(|commit| ScreenSubject {
+            name: &commit.short_sha,
+            note: (commit.parents.len() >= 2)
+                .then(|| format!("merge \u{b7} {} parents", commit.parents.len())),
+        });
     render_overlay_status(
         status_area,
         is_focused,
         Some("commits"),
+        subject.as_ref(),
         frame,
         buf,
         &mut *scene,
@@ -84,6 +96,35 @@ pub(crate) const MIN_DETAIL_COLUMNS: u16 = 11;
 /// reader who asks for a wider list has said the summaries are what they came
 /// for.
 const DEFAULT_LIST_MAX: u16 = 48;
+
+/// Cells a row's summary keeps beside its badges and its author and age
+/// columns, enough for a few words of it.
+const MIN_SUMMARY_COLUMNS: u16 = 8;
+
+/// Cells the author column takes, for two initials.
+const INITIALS_COLUMNS: u16 = 2;
+
+/// Cells the age column takes, the longest label [`age_label`] gives.
+const AGE_COLUMNS: u16 = 4;
+
+/// Cells the author and age columns take at a row's right end: a gap before
+/// each and one cell after the age.
+const META_COLUMNS: u16 = 1 + INITIALS_COLUMNS + 1 + AGE_COLUMNS + 1;
+
+/// Cells between two badges, and between the last badge and the summary.
+const BADGE_GAP: u16 = 1;
+
+/// Share of a local branch's lane color mixed into its badge's fill, in
+/// percent.
+const BADGE_TINT_PERCENT: u16 = 12;
+
+/// Share of a remote or tag badge's color mixed into its ring, in percent.
+///
+/// Light enough to frame the name without competing with it.
+const RING_PERCENT: u16 = 40;
+
+/// Thickness of a badge's ring, in sixteenths of a cell.
+const RING_STROKE: u16 = 1;
 
 /// The commit list's rectangle within an overlay pane, or `None` when the pane
 /// is too small. Shared by the renderer and the smooth-scroll emit so the pooled
@@ -163,6 +204,11 @@ fn render_commit_list_pane(
 /// commit picker's table sits right of its graph. HEAD, the commit the list's
 /// walk starts from, is the first row.
 ///
+/// A row reads its sha, the badges of the refs that point at it, and its
+/// summary, which a merge's row paints in the metadata color. The author's
+/// initials and the commit's age close the row where the list has room for
+/// them beside a few words of summary.
+///
 /// Shared by the live list, which derives `start_row` from `scroll_top`, and the
 /// smooth-scroll pool, which paints absolute pages, so both render identical
 /// rows. The selected row's accent bar and the graph's strokes go into `scene`.
@@ -196,7 +242,7 @@ pub(crate) fn paint_commit_rows(
             rows,
             lanes,
             commits: &state.commits,
-            tips: &state.branch_tips,
+            tips: &state.refs.local,
             background: style_rgb(theme.get(s::UI_BACKGROUND).bg),
             head: state.commits.first().map(|commit| commit.sha.as_str()),
         };
@@ -213,43 +259,70 @@ pub(crate) fn paint_commit_rows(
     let sel_style = theme.list_selected(crate::theme::scope::UI_SELECTION_REVERSED);
     let sha_style = theme.get(s::VCS_COMMIT_SHA);
     let summary_style = theme.get(s::VCS_COMMIT_SUMMARY);
+    let badge_styles = BadgeStyles::new(theme);
+    let tip_color = tip_colors(theme, lanes);
 
     let top = start_row.min(state.commits.len());
     let rows_visible = area.height as usize;
     let end = (top + rows_visible).min(state.commits.len());
+    let area_end = area.x + area.width;
 
     for (i, commit) in state.commits[top..end].iter().enumerate() {
+        let index = top + i;
         let y = area.y + i as u16;
-        let is_selected = top + i == state.selected;
-        let row_style = if is_selected {
-            sel_style
-        } else {
-            summary_style
-        };
+        let is_selected = index == state.selected;
+        // The selected row's own fill carries it, so its text drops the column
+        // colors, as the commit picker's does. The badges keep theirs.
+        let pick = |style: Style| if is_selected { sel_style } else { style };
 
         if is_selected && area.width > 0 {
-            for x in area.x..area.x + area.width {
+            for x in area.x..area_end {
                 buf[(x, y)].set_style(sel_style);
             }
             crate::render::chrome::selection_bar(area.x, y, theme, buf, scene);
         }
 
-        let sha_x = area.x;
         let sha = &commit.short_sha;
         let sha_len = sha.len().min(area.width as usize);
-        write_str(
-            buf,
-            sha_x,
+        write_str(buf, area.x, y, &sha[..sha_len], pick(sha_style));
+
+        let text_x = area.x + sha_len as u16 + 1;
+        let summary_end =
+            match area_end.saturating_sub(text_x) >= MIN_SUMMARY_COLUMNS + META_COLUMNS {
+                true => {
+                    let age_end = area_end - 1;
+                    let age = age_label(state.now_epoch, commit.time);
+                    write_right(buf, age_end, y, AGE_COLUMNS, &age, pick(dim));
+                    let author = initials(&commit.author_name);
+                    let author_end = age_end - AGE_COLUMNS - 1;
+                    write_right(buf, author_end, y, INITIALS_COLUMNS, &author, pick(dim));
+                    area_end - META_COLUMNS
+                },
+                false => area_end,
+            };
+
+        let badges = BadgeRow {
+            x: text_x,
+            end: summary_end,
             y,
-            &sha[..sha_len],
-            if is_selected { sel_style } else { sha_style },
+            lane_color: tip_color(rows.get(index).map_or(0, |row| row.node_lane)),
+        };
+        let summary_x = paint_badges(
+            row_badges(&state.refs, &commit.sha),
+            badges,
+            &badge_styles,
+            buf,
+            &mut *scene,
         );
 
-        let summary_x = sha_x + sha_len as u16 + 1;
-        let remaining = (area.x + area.width).saturating_sub(summary_x);
-        if remaining > 0 {
-            let summary = truncate_to_cols(&commit.summary, remaining as usize);
-            write_str(buf, summary_x, y, &summary, row_style);
+        let room = summary_end.saturating_sub(summary_x);
+        if room > 0 {
+            let summary = truncate_to_cols(&commit.summary, room as usize);
+            let style = match commit.parents.len() >= 2 {
+                true => dim,
+                false => summary_style,
+            };
+            write_str(buf, summary_x, y, &summary, pick(style));
         }
     }
 
@@ -260,6 +333,232 @@ pub(crate) fn paint_commit_rows(
         let y = area.y + (end - top) as u16;
         write_str(buf, area.x, y, "(end of history)", dim);
     }
+}
+
+/// One ref badge beside a commit row.
+#[derive(Clone, Copy)]
+struct RefBadge<'a> {
+    kind: RefKind,
+    /// The text before the name, such as a tag's mark.
+    prefix: &'static str,
+    name: &'a str,
+}
+
+impl RefBadge<'_> {
+    fn cols(&self) -> usize {
+        self.prefix.chars().count() + self.name.chars().count()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RefKind {
+    Head,
+    Local,
+    Remote,
+    Tag,
+}
+
+/// The badge colors one paint of the list shares, read from the theme once.
+struct BadgeStyles {
+    head: Style,
+    remote: Style,
+    tag: Style,
+    /// The list's background, which a local badge's fill and a ring mix their
+    /// color into.
+    ground: Option<[u8; 3]>,
+}
+
+impl BadgeStyles {
+    fn new(theme: &crate::theme::Theme) -> Self {
+        use crate::theme::scope as s;
+        Self {
+            head: theme.get(s::VCS_REF_HEAD),
+            remote: theme.get(s::VCS_REF_REMOTE),
+            tag: theme.get(s::VCS_REF_TAG),
+            ground: style_rgb(theme.get(s::UI_BACKGROUND).bg),
+        }
+    }
+
+    /// The style a `kind` badge paints with, a local branch's in `lane_color`.
+    fn style(&self, kind: RefKind, lane_color: [u8; 3]) -> Style {
+        match kind {
+            RefKind::Head => self.head,
+            RefKind::Remote => self.remote,
+            RefKind::Tag => self.tag,
+            RefKind::Local => {
+                let [r, g, b] = lane_color;
+                let style = Style::new()
+                    .fg(Color::Rgb(r, g, b))
+                    .add_modifier(Modifier::BOLD);
+                match self.ground {
+                    Some(ground) => {
+                        let [r, g, b] = blend(ground, lane_color, BADGE_TINT_PERCENT);
+                        style.bg(Color::Rgb(r, g, b))
+                    },
+                    None => style,
+                }
+            },
+        }
+    }
+
+    /// The color of the hairline ring around a `kind` badge.
+    ///
+    /// Only a remote or a tag badge, which has no fill of its own, takes a
+    /// ring. `None` for the rest, and where the theme gives no RGB to mix.
+    fn ring(&self, kind: RefKind) -> Option<[u8; 3]> {
+        let fg = match kind {
+            RefKind::Remote => self.remote.fg,
+            RefKind::Tag => self.tag.fg,
+            RefKind::Head | RefKind::Local => return None,
+        };
+        Some(blend(self.ground?, style_rgb(fg)?, RING_PERCENT))
+    }
+}
+
+/// Where one row's badges go.
+#[derive(Clone, Copy)]
+struct BadgeRow {
+    x: u16,
+    /// The column where the summary's room ends.
+    end: u16,
+    y: u16,
+    /// The color of the lane the row's node sits in.
+    lane_color: [u8; 3],
+}
+
+/// The badges of the row that shows `sha`, in the order the row paints them:
+/// HEAD, then local branches, remote-tracking branches, and tags.
+///
+/// The head badge names the branch HEAD is on, so that branch takes no local
+/// badge of its own.
+fn row_badges<'a>(refs: &'a CommitRefs, sha: &str) -> impl Iterator<Item = RefBadge<'a>> {
+    let at_head = refs.head.as_deref() == Some(sha);
+    let checked_out = refs.head_branch.as_deref().filter(|_| at_head);
+    let head = at_head.then_some(match checked_out {
+        Some(branch) => RefBadge {
+            kind: RefKind::Head,
+            prefix: "HEAD \u{2192} ",
+            name: branch,
+        },
+        None => RefBadge {
+            kind: RefKind::Head,
+            prefix: "HEAD",
+            name: "",
+        },
+    });
+
+    let named = |names: Option<&'a Vec<String>>, kind: RefKind, prefix: &'static str| {
+        names.into_iter().flatten().map(move |name| RefBadge {
+            kind,
+            prefix,
+            name: name.as_str(),
+        })
+    };
+    let local = named(refs.local.get(sha), RefKind::Local, "")
+        .filter(move |badge| Some(badge.name) != checked_out);
+    let remote = named(refs.remote.get(sha), RefKind::Remote, "");
+    let tags = named(refs.tags.get(sha), RefKind::Tag, "\u{25c6} ");
+    head.into_iter().chain(local).chain(remote).chain(tags)
+}
+
+/// Paint one row's badges from `row.x`, and return the column the summary
+/// starts at.
+///
+/// A badge is its text with one cell of padding at each end. A badge that
+/// leaves the summary fewer than [`MIN_SUMMARY_COLUMNS`] cells before
+/// `row.end` stays off the row, with every badge after it, so the badges that
+/// show keep their order.
+fn paint_badges<'a>(
+    badges: impl Iterator<Item = RefBadge<'a>>,
+    row: BadgeRow,
+    styles: &BadgeStyles,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) -> u16 {
+    let mut x = row.x;
+    for badge in badges {
+        let width = badge.cols() + 2;
+        let summary_x = x as usize + width + BADGE_GAP as usize;
+        if summary_x + MIN_SUMMARY_COLUMNS as usize > row.end as usize {
+            break;
+        }
+
+        let width = width as u16;
+        let style = styles.style(badge.kind, row.lane_color);
+        for col in x..x + width {
+            buf[(col, row.y)].set_char(' ').set_style(style);
+        }
+        write_str(buf, x + 1, row.y, badge.prefix, style);
+        let name_x = x + 1 + badge.prefix.chars().count() as u16;
+        write_str(buf, name_x, row.y, badge.name, style);
+
+        if let Some(color) = styles.ring(badge.kind) {
+            ring(Rect::new(x, row.y, width, 1), color, buf, scene);
+        }
+        x = summary_x as u16;
+    }
+    x
+}
+
+/// Frame `cells` with a hairline in `color`.
+///
+/// The ring stands one stroke in from the row's top and bottom, so the rings
+/// of badges on neighbouring rows stay apart.
+fn ring(cells: Rect, color: [u8; 3], buf: &mut Buffer, scene: &mut stoat_widgets::ApcScene) {
+    let span = cells.width * 16;
+    let tall = 16 - 2 * RING_STROKE;
+    let (top, bottom) = (RING_STROKE as i16, tall as i16);
+    let sides = [
+        (0, top, span, RING_STROKE),
+        (0, bottom, span, RING_STROKE),
+        (0, top, RING_STROKE, tall),
+        ((span - RING_STROKE) as i16, top, RING_STROKE, tall),
+    ];
+    for (x, y, width, height) in sides {
+        Bar {
+            x,
+            y,
+            width,
+            height,
+            color,
+        }
+        .render(cells, buf, scene);
+    }
+}
+
+/// The initials the author column shows for `name`, at most two letters.
+///
+/// A name of two or more words gives the first letters of its first and last
+/// words, and a one-word name its first two letters, so "Ada Lovelace" reads
+/// `AL` and "Lee" reads `LE`.
+fn initials(name: &str) -> String {
+    let mut words = name.split_whitespace();
+    let first = words.next().unwrap_or_default();
+    let letters = match words.next_back() {
+        Some(last) => [first.chars().next(), last.chars().next()],
+        None => {
+            let mut chars = first.chars();
+            [chars.next(), chars.next()]
+        },
+    };
+    letters
+        .into_iter()
+        .flatten()
+        .flat_map(char::to_uppercase)
+        .take(INITIALS_COLUMNS as usize)
+        .collect()
+}
+
+/// Write `text` so its last char sits in the column before `end`, cut to its
+/// first `width` chars.
+fn write_right(buf: &mut Buffer, end: u16, y: u16, width: u16, text: &str, style: Style) {
+    let cut = text
+        .char_indices()
+        .nth(width as usize)
+        .map_or(text.len(), |(byte, _)| byte);
+    let text = &text[..cut];
+    let cols = text.chars().count() as u16;
+    write_str(buf, end.saturating_sub(cols), y, text, style);
 }
 
 fn render_commit_detail_pane(
@@ -804,18 +1103,20 @@ pub(crate) fn render_commit_preview(
 #[cfg(test)]
 mod tests {
     use super::{
-        commit_list_width, render_commit_preview, PreviewDials, MIN_DETAIL_COLUMNS,
-        MIN_LIST_COLUMNS,
+        commit_list_width, initials, render_commit_preview, row_badges, PreviewDials,
+        MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT,
     };
     use crate::{
+        app::Stoat,
+        commit_list::CommitRefs,
         display_map::highlights::HighlightStyle,
         render::{
-            paint::{dim_rgb, luma},
+            paint::{blend, dim_rgb, luma, style_rgb},
             review::{DiffDials, CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
         },
         review::ReviewFileInput,
         review_session::DiffDocument,
-        theme::Theme,
+        theme::{scope, Theme},
     };
     use ratatui::{
         buffer::Buffer,
@@ -823,10 +1124,12 @@ mod tests {
         style::{Color, Modifier},
     };
     use std::{
+        collections::HashMap,
         path::{Path, PathBuf},
         sync::Arc,
     };
     use stoat_language::{Language, LanguageRegistry};
+    use stoatty_protocol::command::{self, Command};
 
     /// The same RGB theme the diff-view tests use, so the washes engage.
     fn rgb_theme() -> Theme {
@@ -1232,6 +1535,138 @@ mod tests {
             (gap([0xff, 0x00, 0x00]), gap([0xff, 0xff, 0x00])),
             "the base side takes deleted whole and the live side modified"
         );
+    }
+
+    #[test]
+    fn initials_take_the_outer_words_or_a_lone_words_first_two_letters() {
+        assert_eq!(
+            [
+                "Ada Lovelace",
+                "Grace Brewster Hopper",
+                "Lee",
+                "x",
+                "  ",
+                "\u{e9}mile zola"
+            ]
+            .map(initials),
+            ["AL", "GH", "LE", "X", "", "\u{c9}Z"],
+        );
+    }
+
+    /// HEAD's badge leads its row and names its branch, which then takes no
+    /// badge of its own. Local branches, remote ones, and tags follow in that
+    /// order, and a detached HEAD leaves every branch its badge.
+    #[test]
+    fn a_rows_badges_lead_with_head_and_skip_the_branch_it_names() {
+        let names =
+            |list: &[&str]| -> Vec<String> { list.iter().map(|name| name.to_string()).collect() };
+        let refs = CommitRefs {
+            head: Some("a".into()),
+            head_branch: Some("main".into()),
+            local: HashMap::from([
+                ("a".into(), names(&["feature", "main"])),
+                ("b".into(), names(&["side"])),
+            ]),
+            remote: HashMap::from([("a".into(), names(&["origin/main"]))]),
+            tags: HashMap::from([("a".into(), names(&["v1"]))]),
+        };
+        let detached = CommitRefs {
+            head_branch: None,
+            ..refs.clone()
+        };
+        let labels = |refs: &CommitRefs, sha: &str| -> Vec<String> {
+            row_badges(refs, sha)
+                .map(|badge| format!("{}{}", badge.prefix, badge.name))
+                .collect()
+        };
+
+        assert_eq!(
+            [
+                labels(&refs, "a"),
+                labels(&refs, "b"),
+                labels(&detached, "a")
+            ],
+            [
+                vec![
+                    "HEAD \u{2192} main",
+                    "feature",
+                    "origin/main",
+                    "\u{25c6} v1"
+                ],
+                vec!["side"],
+                vec!["HEAD", "feature", "main", "origin/main", "\u{25c6} v1"],
+            ],
+        );
+    }
+
+    /// Inside stoatty a remote or a tag badge frames its cells in hairline bars
+    /// a sixteenth inside its row.
+    #[test]
+    fn remote_and_tag_badges_ring_themselves_in_hairline_bars() {
+        let mut h = Stoat::test();
+        h.resize(160, 12);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[])
+            .commit_with_parent_message("b2000000", "a1000000", "feat: next", &[])
+            .commit_with_parent_message("c3000000", "b2000000", "feat: last", &[])
+            .tag("v1.0", "a1000000")
+            .remote_branch("origin/main", "b2000000");
+        h.open_commits("/repo");
+        h.render_composited();
+
+        let theme = &h.stoat.theme;
+        let ground = style_rgb(theme.get(scope::UI_BACKGROUND).bg).expect("an RGB ground");
+        let ring_of = |name: &str| {
+            let fg = style_rgb(theme.get(name).fg).expect("an RGB badge");
+            blend(ground, fg, RING_PERCENT)
+        };
+        let commands = command::decode_stream(&h.stoat.apc_scene.all_bytes());
+        let bars_in = |color: [u8; 3]| -> Vec<(i16, i16, u16, u16)> {
+            commands
+                .iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Bar(bar) if bar.color == color => {
+                        Some((bar.x, bar.y, bar.width, bar.height))
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let frame_of = |name: &str, lead: u16| {
+            let (col, row) = cell_of(&h.rendered_text(), name);
+            let cells = name.chars().count() as u16 + lead + 2;
+            let (x, y, span) = (
+                ((col - lead - 1) * 16) as i16,
+                (row * 16) as i16,
+                cells * 16,
+            );
+            vec![
+                (x, y + 1, span, 1),
+                (x, y + 14, span, 1),
+                (x, y + 1, 1, 14),
+                (x + span as i16 - 1, y + 1, 1, 14),
+            ]
+        };
+        assert_eq!(
+            [
+                bars_in(ring_of(scope::VCS_REF_REMOTE)),
+                bars_in(ring_of(scope::VCS_REF_TAG)),
+            ],
+            [frame_of("origin/main", 0), frame_of("v1.0", 2)],
+            "four hairlines around each ringed badge, inset from the row's top and bottom",
+        );
+    }
+
+    /// The cell where `needle` first starts in `text`, as `(column, row)`.
+    fn cell_of(text: &str, needle: &str) -> (u16, u16) {
+        text.lines()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let byte = line.find(needle)?;
+                Some((line[..byte].chars().count() as u16, row as u16))
+            })
+            .unwrap_or_else(|| panic!("{needle:?} is on screen"))
     }
 
     #[test]

@@ -2,8 +2,10 @@ use super::pane::EditorDisposal;
 use crate::{
     app::{Stoat, UpdateEffect},
     commit_list::{
-        CommitListId, CommitListSnap, CommitListState, PageLoad, SavedSelection, SelectionSearch,
+        CommitListId, CommitListSnap, CommitListState, CommitRefs, PageLoad, SavedSelection,
+        SelectionSearch,
     },
+    commit_picker,
     display_map::syntax_theme::SyntaxStyles,
     pane::{PaneId, View},
     review_session::DiffDocument,
@@ -159,7 +161,8 @@ fn spawn_commit_list(
         return None;
     };
 
-    let mut state = CommitListState::new(workdir, repo.clone());
+    let now_epoch = commit_picker::now_epoch(&stoat.executor);
+    let mut state = CommitListState::new(workdir, repo.clone(), now_epoch);
     state.covered = covered;
     state.pending_load = Some(spawn_first_load(stoat, repo, selection.as_ref()));
     state.pending_selection = selection;
@@ -326,8 +329,10 @@ fn reload_list(stoat: &mut Stoat, id: CommitListId) -> bool {
         return false;
     };
     let task = spawn_first_load(stoat, repo, selection.as_ref());
+    let now_epoch = commit_picker::now_epoch(&stoat.executor);
     let ws = stoat.active_workspace_mut();
     if let Some(state) = ws.commit_lists.get_mut(id) {
+        state.now_epoch = now_epoch;
         state.commits.clear();
         state.graph = (Vec::new(), 0);
         state.reached_end = false;
@@ -506,7 +511,7 @@ fn spawn_commit_log_load(
             reached_end: walk.len() < want,
             commits: walk.into_iter().skip(loaded).collect(),
             selection: SelectionSearch::NotAsked,
-            branch_tips: branch_tips(&*repo),
+            refs: commit_refs(&*repo),
         };
         redraw.notify_one();
         load
@@ -545,13 +550,13 @@ fn spawn_first_load(
 /// depth. A miss keeps one page, as a fresh list does, although the walk reads
 /// the whole history to learn the commit is gone.
 fn search_history(repo: &dyn crate::host::GitRepo, sha: &str) -> PageLoad {
-    let branch_tips = branch_tips(repo);
+    let refs = commit_refs(repo);
     let Some(head) = repo.resolve_rev("HEAD") else {
         return PageLoad {
             commits: Vec::new(),
             reached_end: true,
             selection: SelectionSearch::Gone,
-            branch_tips,
+            refs,
         };
     };
 
@@ -564,7 +569,7 @@ fn search_history(repo: &dyn crate::host::GitRepo, sha: &str) -> PageLoad {
                 commits,
                 reached_end,
                 selection: SelectionSearch::Found(index),
-                branch_tips,
+                refs,
             };
         }
         if reached_end {
@@ -574,21 +579,37 @@ fn search_history(repo: &dyn crate::host::GitRepo, sha: &str) -> PageLoad {
                 commits,
                 reached_end: one_page,
                 selection: SelectionSearch::Gone,
-                branch_tips,
+                refs,
             };
         }
         want *= 2;
     }
 }
 
-/// Full sha to the local branch names pointing at it, which marks a tip in the
-/// list's graph.
-fn branch_tips(repo: &dyn crate::host::GitRepo) -> HashMap<String, Vec<String>> {
-    let mut tips: HashMap<String, Vec<String>> = HashMap::new();
-    for (name, sha) in repo.local_branches() {
-        tips.entry(sha).or_default().push(name);
+/// The refs of `repo` that the list's graph and badges mark.
+fn commit_refs(repo: &dyn crate::host::GitRepo) -> CommitRefs {
+    CommitRefs {
+        head: repo.resolve_rev("HEAD"),
+        head_branch: repo.head_branch(),
+        local: names_by_sha(repo.local_branches()),
+        remote: names_by_sha(repo.remote_branches()),
+        tags: names_by_sha(repo.tags()),
     }
-    tips
+}
+
+/// Group `(name, sha)` pairs by sha, each sha's names sorted.
+///
+/// The sort keeps a row's badges in one order, whatever order the backend
+/// lists its refs in.
+fn names_by_sha(refs: Vec<(String, String)>) -> HashMap<String, Vec<String>> {
+    let mut by_sha: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, sha) in refs {
+        by_sha.entry(sha).or_default().push(name);
+    }
+    for names in by_sha.values_mut() {
+        names.sort_unstable();
+    }
+    by_sha
 }
 
 /// What a preview build needs to bake syntax colors into its session.
@@ -668,13 +689,51 @@ fn spawn_commit_preview_load(
 
 #[cfg(test)]
 mod tests {
+    use super::names_by_sha;
     use crate::{
         app::Stoat,
         commit_list::{CommitListId, CommitListSnap, Preview, SavedSelection},
+        commit_picker,
         pane::{Axis, View},
         run::pty::PtyNotification,
     };
     use slotmap::SlotMap;
+    use std::collections::HashMap;
+
+    #[test]
+    fn refs_group_by_sha_with_each_shas_names_sorted() {
+        let pairs = [("v2", "a"), ("x", "b"), ("v1", "a")]
+            .map(|(name, sha)| (name.to_string(), sha.to_string()))
+            .to_vec();
+        assert_eq!(
+            names_by_sha(pairs),
+            HashMap::from([
+                ("a".to_string(), vec!["v1".to_string(), "v2".to_string()]),
+                ("b".to_string(), vec!["x".to_string()]),
+            ]),
+        );
+    }
+
+    /// A reload measures the list's ages from the moment it reloads, as an
+    /// open does.
+    #[test]
+    fn a_reload_reads_the_clock_again() {
+        let mut h = Stoat::test();
+        h.seed_linear_history(
+            "/repo",
+            &[("a1b2c3d4", "feat: add a.rs", &[("a.rs", "fn a() {}\n")])],
+        );
+        h.open_commits("/repo");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitsRefresh);
+        h.settle();
+
+        let list = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .map(|list| list.now_epoch);
+        assert_eq!(list, Some(commit_picker::now_epoch(&h.stoat.executor)));
+    }
 
     /// The commits view shares the picker's preview cache, and shared the same
     /// defect: a commit that changed nothing produced no document, the answer

@@ -5361,7 +5361,7 @@ fn open_commits_list(h: &mut crate::test_harness::TestHarness) {
     let repo = work_repo(h);
     let ws = h.stoat.active_workspace_mut();
     let focus = ws.panes.focus();
-    let mut state = CommitListState::new(PathBuf::from("/work"), repo);
+    let mut state = CommitListState::new(PathBuf::from("/work"), repo, 0);
     state.covered = Some(ws.panes.pane(focus).view.clone());
     let list = ws.commit_lists.insert(state);
     ws.panes.pane_mut(focus).view = View::Commits(list);

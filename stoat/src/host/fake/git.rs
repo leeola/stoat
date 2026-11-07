@@ -609,6 +609,29 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Give the seeded commit `sha` the author `name` and the author time
+    /// `time`, in unix epoch seconds.
+    ///
+    /// A seeded commit is otherwise authored by `fake`, one second after the
+    /// commit seeded before it. The log lists the newest commit whose children
+    /// it has already listed, so a time out of step with the seeding order
+    /// reorders the log.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no commit `sha` is seeded yet.
+    pub fn authored(&mut self, sha: &str, name: &str, time: i64) -> &mut Self {
+        self.mutate_repo(|state| {
+            let commit = state
+                .commits
+                .get_mut(sha)
+                .unwrap_or_else(|| panic!("authored: no seeded commit {sha}"));
+            commit.author_name = name.to_string();
+            commit.time = time;
+        });
+        self
+    }
+
     /// Point HEAD at `sha` explicitly. Useful when a test seeds several
     /// independent branches; the last [`Self::commit_full`] invocation
     /// wins by default, which is the common case.

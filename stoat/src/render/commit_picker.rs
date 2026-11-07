@@ -371,9 +371,8 @@ pub(crate) fn paint_commit_graph(
     let text = style_rgb(theme.get(scope::UI_TEXT).fg);
     let rich = scene.live() && text.is_some();
     let background = graph.background;
-    let palette = lane_palette(theme);
     let drawn = lanes.min(MAX_DRAWN_LANES);
-    let raw_lane_color = |lane: u16| palette[lane.min(drawn - 1) as usize % palette.len()];
+    let raw_lane_color = tip_colors(theme, lanes);
     let lane_color = |lane: u16| match background {
         Some(bg) => blend(raw_lane_color(lane), bg, LANE_BLEND_PERCENT),
         None => raw_lane_color(lane),
@@ -458,6 +457,18 @@ pub(crate) fn paint_commit_graph(
             },
         }
     }
+}
+
+/// The color a graph `lanes` wide fills a branch tip's node in, by the lane
+/// the node sits in.
+///
+/// A lane past the drawn width takes the last drawn lane's color, as its node
+/// folds onto that lane. The commits list paints a local branch's badge in the
+/// same color, which ties the name to its line.
+pub(crate) fn tip_colors(theme: &Theme, lanes: u16) -> impl Fn(u16) -> [u8; 3] {
+    let palette = lane_palette(theme);
+    let drawn = lanes.clamp(1, MAX_DRAWN_LANES);
+    move |lane| palette[lane.min(drawn - 1) as usize % palette.len()]
 }
 
 /// The six lane colors of `theme`, in lane order.

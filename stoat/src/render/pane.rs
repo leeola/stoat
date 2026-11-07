@@ -802,11 +802,13 @@ fn dim_memoized(
 /// focus, and the message is cut to the room the left segments leave.
 ///
 /// `screen` picks the label. A commits pane names itself, because an
-/// unfocused list is not the screen the frame reports.
+/// unfocused list is not the screen the frame reports. `subject` adds what
+/// the screen has selected to the label.
 pub(crate) fn render_overlay_status(
     area: Rect,
     is_focused: bool,
     screen: Option<&str>,
+    subject: Option<&ScreenSubject<'_>>,
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
     scene: &mut ApcScene,
@@ -827,7 +829,7 @@ pub(crate) fn render_overlay_status(
     }
 
     let segments = status_segments_area(area, frame.badge_cover);
-    let (left, left_end) = overlay_status_segments(is_focused, segments, screen, frame);
+    let (left, left_end) = overlay_status_segments(is_focused, segments, screen, subject, frame);
     let mut right: Vec<StatusSeg> = Vec::new();
     let mut right_anchor = segments.x + segments.width;
     // The first right segment takes the bar's right edge, which is where the
@@ -869,11 +871,13 @@ pub(crate) fn render_overlay_status(
 /// `area`, and the right segments fit between it and that edge.
 ///
 /// A focused bar names an open picker modal in place of the screen, as the
-/// pane status does. The label then agrees with the prompt chip beside it.
+/// pane status does. The label then agrees with the prompt chip beside it, and
+/// carries no `subject`.
 fn overlay_status_segments(
     is_focused: bool,
     area: Rect,
     screen: Option<&str>,
+    subject: Option<&ScreenSubject<'_>>,
     frame: FrameCtx<'_>,
 ) -> (Vec<StatusSeg>, u16) {
     let theme = frame.theme;
@@ -905,21 +909,36 @@ fn overlay_status_segments(
         );
     }
     let label = match frame.modal_label.filter(|_| is_focused) {
-        Some(modal_label) => Some((modal_label, base_style)),
-        None => screen_segment(screen, theme)
-            .map(|(screen_label, screen_color)| (screen_label, base_style.fg(screen_color))),
+        Some(modal_label) => Some((modal_label, base_style, None)),
+        None => screen_segment(screen, theme).map(|(screen_label, screen_color)| {
+            (screen_label, base_style.fg(screen_color), subject)
+        }),
     };
-    if let Some((label, style)) = label {
+    if let Some((label, style, subject)) = label {
         let left_pad = if cursor == area.x { " " } else { "" };
-        push_left(
-            &mut left,
-            &mut cursor,
-            end_x,
-            format!("{left_pad}{label} "),
-            style,
-        );
+        let text = match subject {
+            Some(subject) => format!("{left_pad}{label} \u{b7} {} ", subject.name),
+            None => format!("{left_pad}{label} "),
+        };
+        push_left(&mut left, &mut cursor, end_x, text, style);
+
+        if let Some(note) = subject.and_then(|subject| subject.note.as_deref()) {
+            let muted = tinted(base_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            push_left(&mut left, &mut cursor, end_x, format!("{note} "), muted);
+        }
     }
     (left, cursor)
+}
+
+/// What an overlay screen's status label names besides the screen, such as
+/// the commit a commits list has selected.
+pub(crate) struct ScreenSubject<'a> {
+    /// The selected item's name, which the label carries after the screen's
+    /// name.
+    pub(crate) name: &'a str,
+    /// A remark after the label in `ui.text.muted`, such as a merge's count of
+    /// parents.
+    pub(crate) note: Option<String>,
 }
 
 pub(crate) fn render_pane_dividers(
@@ -4404,6 +4423,41 @@ mod tests {
                 format!("{:<60}", " PMT  (unnamed) palette"),
                 format!("{:<60}", " NOR  (unnamed) rebase"),
                 format!("{:<60}", " rebase"),
+            ],
+        );
+    }
+
+    /// A focused commits bar names the selected commit after its screen, and a
+    /// merge's count of parents after that. An open picker takes the label
+    /// whole, with no commit after it.
+    #[test]
+    fn the_commits_bar_names_its_commit_and_an_open_picker_alone() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[])
+            .commit_with_parent_message("b2000000", "a1000000", "feat: side", &[])
+            .commit_with_parent_message("c3000000", "a1000000", "feat: main", &[])
+            .merge_commit("d4000000", "b2000000", &[]);
+        h.open_commits("/repo");
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
+
+        let merge = row(&mut h);
+        h.type_keys("j");
+        let plain = row(&mut h);
+        h.type_keys(":");
+        assert_eq!(
+            [merge, plain, row(&mut h)],
+            [
+                format!(
+                    "{:<60}",
+                    " NOR  repo commits \u{b7} d400000 merge \u{b7} 2 parents"
+                ),
+                format!("{:<60}", " NOR  repo commits \u{b7} c300000"),
+                format!("{:<60}", " PMT  repo palette"),
             ],
         );
     }

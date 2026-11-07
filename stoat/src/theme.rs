@@ -942,6 +942,17 @@ pub mod scope {
         "vcs.lane.6",
     ];
 
+    /// The badge that marks the commits list's HEAD row and names the branch
+    /// HEAD is on.
+    pub const VCS_REF_HEAD: &str = "vcs.ref.head";
+    /// The badge of a remote-tracking branch, such as `origin/main`, in the
+    /// commits list.
+    ///
+    /// A local branch's badge takes its lane's color instead, which ties the
+    /// name to the line the branch runs down.
+    pub const VCS_REF_REMOTE: &str = "vcs.ref.remote";
+    pub const VCS_REF_TAG: &str = "vcs.ref.tag";
+
     pub const VCS_REBASE_PICK: &str = "vcs.rebase.pick";
     pub const VCS_REBASE_SQUASH: &str = "vcs.rebase.squash";
     pub const VCS_REBASE_FIXUP: &str = "vcs.rebase.fixup";
