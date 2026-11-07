@@ -56,6 +56,9 @@ pub struct HunkTallies {
     /// The tally counts an untracked file as a change, but a list of the work
     /// in the tree leaves a scratch file out.
     pub untracked: Vec<PathBuf>,
+    /// The files the index leaves unmerged, sorted and repo-relative. Empty
+    /// unless a merge, a rebase, or a cherry-pick stopped on a conflict.
+    pub conflicted: Vec<PathBuf>,
 }
 
 /// One changed path in a repository's working tree or index.
@@ -234,6 +237,31 @@ pub trait GitRepo: Send + Sync {
     /// just-applied commit, which the diff view uses to decide whether to show
     /// that commit's diff instead of an empty clean-tree view.
     fn rebase_in_progress(&self) -> bool;
+
+    /// The merge in progress, or `None` when the repository is not mid-merge.
+    fn merge_state(&self) -> Option<MergeState>;
+
+    /// Merge the local branch `name` into HEAD.
+    ///
+    /// A branch that HEAD already holds answers [`MergeOutcome::UpToDate`],
+    /// and a branch ahead of HEAD moves HEAD's branch to its tip. Any other
+    /// branch merges. A clean merge commits over the parents HEAD and the
+    /// branch's tip, under the message the merge writes. A merge that
+    /// conflicts stops mid-merge, with the conflicts in the index and the
+    /// working tree.
+    ///
+    /// Fails with the `Backend` reasons `a merge is in progress`, `a rebase is
+    /// in progress`, `working tree has changes` when a tracked file carries a
+    /// change, and `no branch named {name}`.
+    fn merge_branch(&self, name: &str) -> Result<MergeOutcome, GitApplyError>;
+
+    /// Abort the merge in progress.
+    ///
+    /// The paths the merge changed take back HEAD's content, the index resets
+    /// to HEAD's tree, and the merge state goes. A local edit to any other
+    /// file stays. Fails with the `Backend` reason `no merge in progress` when
+    /// the repository is not mid-merge.
+    fn abort_merge(&self) -> Result<(), GitApplyError>;
     /// Read the UTF-8 content of each `paths` entry as it appears in HEAD, in
     /// input order. An entry is `None` for an orphan branch, a path not in HEAD,
     /// or a binary blob. Resolves HEAD's tree once for the whole batch so a
@@ -625,9 +653,14 @@ pub trait GitRepo: Send + Sync {
     /// repository's configured identity. HEAD's branch moves to the new commit,
     /// or a detached HEAD moves itself.
     ///
+    /// While a merge is in progress, the merge head is the commit's second
+    /// parent, and the commit ends the merge. A tree equal to HEAD's commits
+    /// then too, because a merge whose conflicts all took HEAD's side has one.
+    ///
     /// Fails with the `Backend` reason `nothing staged` when the index tree
-    /// equals HEAD's tree. On an unborn branch an empty index counts the same.
-    /// Fails too when the repository has no configured identity.
+    /// equals HEAD's tree outside a merge. On an unborn branch an empty index
+    /// counts the same. Fails too when the repository has no configured
+    /// identity, or when the index holds an unmerged file.
     fn commit_index(&self, message: &str) -> Result<String, GitApplyError>;
 
     /// The full message of commit `sha`, or `None` when no commit has that sha
@@ -788,6 +821,38 @@ pub struct ConflictedFile {
     pub ours: Option<String>,
     /// Content on the "theirs" side (the commit being applied).
     pub theirs: Option<String>,
+}
+
+/// A merge in progress, as the repository records it between the merge and
+/// its commit.
+///
+/// `MERGE_HEAD` names the commit the merge brings in, and `MERGE_MSG` holds the
+/// message the merge commit takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeState {
+    /// The full sha of the commit the merge brings in.
+    pub head_sha: String,
+    /// The local branch whose tip is the merge head, or `None` when no local
+    /// branch points at it.
+    pub head_name: Option<String>,
+    /// The message the merge commit takes.
+    pub message: String,
+    /// How many files the index leaves unmerged.
+    pub conflicted: usize,
+}
+
+/// What [`GitRepo::merge_branch`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// HEAD already holds the branch, so nothing moved.
+    UpToDate,
+    /// HEAD's branch moved forward to the branch's tip `sha`.
+    FastForward { sha: String },
+    /// The merge commit `sha` joins the two histories.
+    Merged { sha: String },
+    /// The merge stopped on `files` unmerged files, and the repository stays
+    /// mid-merge until a commit or an abort ends it.
+    Conflicts { files: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Snafu)]

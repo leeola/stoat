@@ -4,8 +4,8 @@ use crate::host::{
     fake::FakeFs,
     git::{
         BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-        CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, RebaseError,
-        RebaseTodo, RewriteResult, StagedKind,
+        CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
+        MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
     },
 };
 use std::{
@@ -19,6 +19,10 @@ use std::{
     },
 };
 use stoat_text::LineEnding;
+
+/// The reason libgit2 gives when a commit meets an index that still holds an
+/// unmerged file, which the fake's commit gives too.
+const UNMERGED_INDEX: &str = "cannot create a tree from a not fully merged index.";
 
 /// In-memory [`GitHost`] for tests.
 ///
@@ -159,6 +163,18 @@ impl FakeGit {
             .repos
             .get(workdir)
             .map(|repo| repo.state.lock().unwrap().checkouts.clone())
+            .unwrap_or_default()
+    }
+
+    /// Snapshot the branches merged into `workdir`'s repo through
+    /// [`GitRepo::merge_branch`], in call order. A refused merge and an
+    /// up-to-date one do not appear. Empty when the repo is unknown.
+    pub fn merges(&self, workdir: &Path) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().merges.clone())
             .unwrap_or_default()
     }
 
@@ -736,6 +752,44 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Leave the repo mid-merge of the commit `sha`, the tip of `branch` when
+    /// one is named, as [`GitRepo::merge_state`] reports it. The merge commit
+    /// takes `message`.
+    pub fn merge_in_progress(
+        &mut self,
+        sha: &str,
+        branch: Option<&str>,
+        message: &str,
+    ) -> &mut Self {
+        let head = (
+            sha.to_string(),
+            branch.map(String::from),
+            message.to_string(),
+        );
+        self.mutate_repo(|state| state.merge_head = Some(head));
+        self
+    }
+
+    /// Make the next [`GitRepo::merge_branch`] stop on a conflict in `rel_path`
+    /// with the given base, ours, and theirs blobs (each `None` for an absent
+    /// stage), as [`Self::conflicted_file`] seeds one. Each call adds a file.
+    pub fn merge_conflict(
+        &mut self,
+        rel_path: impl AsRef<Path>,
+        ancestor: Option<&str>,
+        ours: Option<&str>,
+        theirs: Option<&str>,
+    ) -> &mut Self {
+        let file = ConflictedFile {
+            path: self.workdir.join(rel_path.as_ref()),
+            ancestor: ancestor.map(String::from),
+            ours: ours.map(String::from),
+            theirs: theirs.map(String::from),
+        };
+        self.mutate_repo(|state| state.merge_conflicts.push(file));
+        self
+    }
+
     /// Remove any injected apply failure so subsequent
     /// [`GitRepo::apply_to_index`] calls succeed again.
     pub fn clear_apply_failure(&mut self) -> &mut Self {
@@ -829,6 +883,16 @@ struct FakeRepoState {
     /// What [`GitRepo::rebase_in_progress`] reports, seeded via
     /// [`FakeRepoBuilder::set_rebase_in_progress`]. False by default.
     rebase_in_progress: bool,
+    /// The merge in progress as `(sha, branch, message)`, seeded via
+    /// [`FakeRepoBuilder::merge_in_progress`] or left by a merge that
+    /// conflicts. `None` outside a merge.
+    merge_head: Option<(String, Option<String>, String)>,
+    /// The files the next [`GitRepo::merge_branch`] leaves unmerged, seeded via
+    /// [`FakeRepoBuilder::merge_conflict`]. Empty merges cleanly.
+    merge_conflicts: Vec<ConflictedFile>,
+    /// The branches merged through [`GitRepo::merge_branch`], in call order.
+    /// Read via [`FakeGit::merges`].
+    merges: Vec<String>,
     applied_patches: Vec<String>,
     /// How many times a HEAD or index blob has been read out of this repo.
     ///
@@ -1118,6 +1182,100 @@ impl GitRepo for FakeGitRepo {
         state.rebase_in_progress
     }
 
+    fn merge_state(&self) -> Option<MergeState> {
+        let state = self.state.lock().unwrap();
+        let (head_sha, head_name, message) = state.merge_head.clone()?;
+        Some(MergeState {
+            head_sha,
+            head_name,
+            message,
+            conflicted: state.conflicts.len(),
+        })
+    }
+
+    /// Merges over the seeded branches, with the refusals the trait states.
+    ///
+    /// The fake models no ancestry past equality. A branch whose tip is HEAD
+    /// is up to date. A conflict seeded through
+    /// [`FakeRepoBuilder::merge_conflict`] stops the merge on the seeded
+    /// files. Any other branch merges into a commit whose tree lays the
+    /// branch tip's files over HEAD's.
+    fn merge_branch(&self, name: &str) -> Result<MergeOutcome, GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        let refusal = if state.merge_head.is_some() {
+            Some("a merge is in progress".to_string())
+        } else if state.rebase_in_progress {
+            Some("a rebase is in progress".to_string())
+        } else if !state.changed.is_empty() {
+            Some("working tree has changes".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            return BackendSnafu { reason }.fail();
+        }
+        let Some(tip) = state.branches.get(name).cloned() else {
+            return BackendSnafu {
+                reason: format!("no branch named {name}"),
+            }
+            .fail();
+        };
+        if state.head.as_deref() == Some(tip.as_str()) {
+            return Ok(MergeOutcome::UpToDate);
+        }
+        state.merges.push(name.to_string());
+
+        let message = format!("Merge branch '{name}'");
+        if !state.merge_conflicts.is_empty() {
+            state.conflicts = mem::take(&mut state.merge_conflicts);
+            state.merge_head = Some((tip, Some(name.to_string()), message));
+            return Ok(MergeOutcome::Conflicts {
+                files: state.conflicts.len(),
+            });
+        }
+
+        let head = state.head.clone();
+        let tree = {
+            let mut tree = head
+                .as_ref()
+                .and_then(|sha| state.commits.get(sha))
+                .map(|commit| commit.tree.clone())
+                .unwrap_or_default();
+            if let Some(theirs) = state.commits.get(&tip) {
+                tree.extend(theirs.tree.clone());
+            }
+            tree
+        };
+        state.synth_counter += 1;
+        let sha = format!("merge-{}-{}", &tip[..tip.len().min(6)], state.synth_counter);
+        let commit = FakeCommit {
+            parents: head.into_iter().chain([tip]).collect(),
+            tree,
+            message,
+            author_name: "fake".into(),
+            author_email: "fake@example.invalid".into(),
+            time: 1_700_000_000 + state.synth_counter as i64,
+        };
+        state.commits.insert(sha.clone(), commit);
+        state.head = Some(sha.clone());
+        if let Some(branch) = state.head_branch.clone() {
+            state.branches.insert(branch, sha.clone());
+        }
+        Ok(MergeOutcome::Merged { sha })
+    }
+
+    fn abort_merge(&self) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if state.merge_head.take().is_none() {
+            return BackendSnafu {
+                reason: "no merge in progress",
+            }
+            .fail();
+        }
+        state.conflicts.clear();
+        Ok(())
+    }
+
     fn changed_files(&self) -> Vec<ChangedFile> {
         let state = self.state.lock().unwrap();
         let mut staged: Vec<ChangedFile> = state
@@ -1260,6 +1418,12 @@ impl GitRepo for FakeGitRepo {
         let mut untracked: Vec<PathBuf> =
             state.untracked.iter().map(|path| relative(path)).collect();
         untracked.sort();
+        let mut conflicted: Vec<PathBuf> = state
+            .conflicts
+            .iter()
+            .map(|file| relative(&file.path))
+            .collect();
+        conflicted.sort();
 
         HunkTallies {
             staged: side(true),
@@ -1267,6 +1431,7 @@ impl GitRepo for FakeGitRepo {
             per_file: per_file.into_iter().collect(),
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
             untracked,
+            conflicted,
         }
     }
 
@@ -1689,6 +1854,10 @@ impl GitRepo for FakeGitRepo {
     /// `changed` and the index texts become HEAD's. The apply failure knob
     /// fails it as it fails [`GitRepo::apply_to_index`], which is how a test
     /// reaches the failure a real repository reports.
+    ///
+    /// During a merge the merge head is the second parent, an empty index
+    /// still commits, and the commit ends the merge. A file still unmerged
+    /// fails the commit with the reason a real index gives.
     fn commit_index(&self, message: &str) -> Result<String, GitApplyError> {
         let mut state = self.state.lock().unwrap();
         if let Some(reason) = &state.apply_error {
@@ -1697,8 +1866,19 @@ impl GitRepo for FakeGitRepo {
             }
             .fail();
         }
+        if !state.conflicts.is_empty() {
+            return BackendSnafu {
+                reason: UNMERGED_INDEX,
+            }
+            .fail();
+        }
+        let merge_head = state.merge_head.take().map(|(sha, _, _)| sha);
         let staged = state.changed.iter().any(|change| change.file.staged);
-        if !staged && state.index_contents.is_empty() && state.removed_index_entries.is_empty() {
+        if merge_head.is_none()
+            && !staged
+            && state.index_contents.is_empty()
+            && state.removed_index_entries.is_empty()
+        {
             return BackendSnafu {
                 reason: "nothing staged",
             }
@@ -1723,7 +1903,7 @@ impl GitRepo for FakeGitRepo {
             state.synth_counter
         );
         let commit = FakeCommit {
-            parents: head.into_iter().collect(),
+            parents: head.into_iter().chain(merge_head).collect(),
             tree,
             message: message.to_string(),
             author_name: "fake".into(),
@@ -2110,6 +2290,187 @@ mod tests {
         let host = FakeGit::new();
         host.add_repo(workdir()).set_rebase_in_progress(true);
         assert!(host.discover(&workdir()).unwrap().rebase_in_progress());
+    }
+
+    /// A seeded merge reads back with its conflicts as the count, and the
+    /// tallies list the conflicted files.
+    #[test]
+    fn merge_state_reads_the_seeded_merge() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .merge_in_progress("m1", Some("feature"), "Merge branch 'feature'")
+            .conflicted_file("b.rs", Some("base"), Some("ours"), Some("theirs"))
+            .conflicted_file("a.rs", None, Some("ours"), Some("theirs"));
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            (repo.merge_state(), repo.hunk_tallies().conflicted),
+            (
+                Some(MergeState {
+                    head_sha: "m1".to_string(),
+                    head_name: Some("feature".to_string()),
+                    message: "Merge branch 'feature'".to_string(),
+                    conflicted: 2,
+                }),
+                vec![PathBuf::from("a.rs"), PathBuf::from("b.rs")],
+            ),
+        );
+    }
+
+    /// A merge with seeded conflicts stops mid-merge on them and records the
+    /// branch. A commit then fails on the unmerged file, and an abort clears
+    /// the merge.
+    #[test]
+    fn a_conflicting_merge_stops_until_an_abort_clears_it() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "base")])
+            .commit_with_parent("t1", "c1", &[("a.rs", "theirs")])
+            .branch("feature", "t1")
+            .commit_with_parent("o1", "c1", &[("a.rs", "ours")])
+            .branch("main", "o1")
+            .set_head_branch("main")
+            .merge_conflict("a.rs", Some("base"), Some("ours"), Some("theirs"));
+        let repo = host.discover(&workdir()).unwrap();
+
+        let merged = repo.merge_branch("feature");
+        let state = repo.merge_state();
+        let paths = repo.conflicted_paths();
+        let commit = repo.commit_index("merge").map_err(|err| err.to_string());
+        let aborted = repo.abort_merge();
+        assert_eq!(
+            (
+                merged,
+                state,
+                paths,
+                commit,
+                aborted,
+                repo.merge_state(),
+                repo.conflicted_paths(),
+                host.merges(&workdir()),
+            ),
+            (
+                Ok(MergeOutcome::Conflicts { files: 1 }),
+                Some(MergeState {
+                    head_sha: "t1".to_string(),
+                    head_name: Some("feature".to_string()),
+                    message: "Merge branch 'feature'".to_string(),
+                    conflicted: 1,
+                }),
+                vec![workdir().join("a.rs")],
+                Err(format!("git backend failure: {UNMERGED_INDEX}")),
+                Ok(()),
+                None,
+                Vec::<PathBuf>::new(),
+                vec!["feature".to_string()],
+            ),
+        );
+    }
+
+    /// A clean merge commits over HEAD and the branch tip, with the tip's files
+    /// laid over HEAD's, and moves HEAD's branch. A commit during a seeded
+    /// merge takes the merge head as its second parent with nothing staged,
+    /// and ends the merge.
+    #[test]
+    fn a_clean_merge_and_a_merge_commit_take_two_parents() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "base")])
+            .commit_with_parent("t1", "c1", &[("b.rs", "theirs")])
+            .branch("feature", "t1")
+            .commit_with_parent("o1", "c1", &[("a.rs", "ours")])
+            .branch("main", "o1")
+            .set_head_branch("main");
+        let repo = host.discover(&workdir()).unwrap();
+        let Ok(MergeOutcome::Merged { sha }) = repo.merge_branch("feature") else {
+            panic!("a clean merge commits");
+        };
+
+        let seeded = FakeGit::new();
+        seeded
+            .add_repo(workdir())
+            .commit("c1", &[("a.rs", "base")])
+            .merge_in_progress("t9", None, "merge");
+        let seeded_repo = seeded.discover(&workdir()).unwrap();
+        let merge_commit = seeded_repo.commit_index("merge t9").unwrap();
+
+        assert_eq!(
+            (
+                repo.parent_shas(&sha),
+                repo.commit_tree(&sha),
+                repo.resolve_rev("main"),
+                seeded_repo.parent_shas(&merge_commit),
+                seeded_repo.merge_state(),
+            ),
+            (
+                vec!["o1".to_string(), "t1".to_string()],
+                Some(BTreeMap::from([
+                    (PathBuf::from("a.rs"), "ours".to_string()),
+                    (PathBuf::from("b.rs"), "theirs".to_string()),
+                ])),
+                Some(sha.clone()),
+                vec!["c1".to_string(), "t9".to_string()],
+                None,
+            ),
+        );
+    }
+
+    /// What `merge_branch(name)` answers over a repo at `c1` with `feature` at
+    /// `t1`, after `seed` prepares it.
+    fn merge_answer(
+        seed: impl FnOnce(&mut FakeRepoBuilder<'_>),
+        name: &str,
+    ) -> Result<MergeOutcome, String> {
+        let host = FakeGit::new();
+        let mut builder = host.add_repo(workdir());
+        builder.commit("c1", &[]).branch("feature", "t1");
+        seed(&mut builder);
+        host.discover(&workdir())
+            .unwrap()
+            .merge_branch(name)
+            .map_err(|err| err.to_string())
+    }
+
+    /// The fake refuses a merge as the trait states, and a branch whose tip is
+    /// HEAD is up to date.
+    #[test]
+    fn merge_branch_refusals_and_a_branch_at_head() {
+        assert_eq!(
+            [
+                merge_answer(
+                    |repo| {
+                        repo.merge_in_progress("m1", None, "merge");
+                    },
+                    "feature",
+                ),
+                merge_answer(
+                    |repo| {
+                        repo.set_rebase_in_progress(true);
+                    },
+                    "feature",
+                ),
+                merge_answer(
+                    |repo| {
+                        repo.unstaged_file("a.rs", "edit");
+                    },
+                    "feature",
+                ),
+                merge_answer(|_| {}, "nope"),
+                merge_answer(
+                    |repo| {
+                        repo.branch("here", "c1");
+                    },
+                    "here",
+                ),
+            ],
+            [
+                Err("git backend failure: a merge is in progress".to_string()),
+                Err("git backend failure: a rebase is in progress".to_string()),
+                Err("git backend failure: working tree has changes".to_string()),
+                Err("git backend failure: no branch named nope".to_string()),
+                Ok(MergeOutcome::UpToDate),
+            ],
+        );
     }
 
     #[test]

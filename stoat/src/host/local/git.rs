@@ -4,7 +4,7 @@ mod tree;
 use crate::host::git::{
     BackendSnafu, ChangedFile, CherryPickOutcome, CommitChanges, CommitFileChange,
     CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies,
-    RebaseError, RebaseTodo, RewriteResult, StagedKind,
+    MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
 use git2::{
     build::CheckoutBuilder, ApplyLocation, Branch, BranchType, Commit, Delta, Diff,
@@ -89,12 +89,135 @@ impl GitRepo for LocalGitRepo {
 
     fn rebase_in_progress(&self) -> bool {
         let repo = self.repo.lock().expect("git repo lock");
-        matches!(
-            repo.state(),
-            RepositoryState::Rebase
-                | RepositoryState::RebaseInteractive
-                | RepositoryState::RebaseMerge
-        )
+        rebasing(&repo)
+    }
+
+    fn merge_state(&self) -> Option<MergeState> {
+        let mut repo = self.repo.lock().expect("git repo lock");
+        if repo.state() != RepositoryState::Merge {
+            return None;
+        }
+        let head_sha = merge_heads(&mut repo).first()?.to_string();
+        Some(MergeState {
+            head_name: local_branch_at(&repo, &head_sha),
+            message: repo.message().unwrap_or_default(),
+            conflicted: conflicted_entries(&repo).map_or(0, |entries| entries.len()),
+            head_sha,
+        })
+    }
+
+    fn merge_branch(&self, name: &str) -> Result<MergeOutcome, GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let refusal = if repo.state() == RepositoryState::Merge {
+            Some("a merge is in progress".to_string())
+        } else if rebasing(&repo) {
+            Some("a rebase is in progress".to_string())
+        } else if tracked_changes(&repo) {
+            Some("working tree has changes".to_string())
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            return BackendSnafu { reason }.fail();
+        }
+        let Ok(branch) = repo.find_reference(&format!("refs/heads/{name}")) else {
+            return BackendSnafu {
+                reason: format!("no branch named {name}"),
+            }
+            .fail();
+        };
+
+        let annotated = repo
+            .reference_to_annotated_commit(&branch)
+            .map_err(err_msg)?;
+        let (analysis, _) = repo.merge_analysis(&[&annotated]).map_err(err_msg)?;
+        if analysis.is_up_to_date() {
+            return Ok(MergeOutcome::UpToDate);
+        }
+        let theirs = repo.find_commit(annotated.id()).map_err(err_msg)?;
+        if analysis.is_fast_forward() {
+            checkout_commit(&repo, &theirs)?;
+            move_head_to(&repo, &theirs, &format!("merge {name}: Fast-forward"))?;
+            return Ok(MergeOutcome::FastForward {
+                sha: theirs.id().to_string(),
+            });
+        }
+
+        repo.merge(&[&annotated], None, Some(&mut CheckoutBuilder::new()))
+            .map_err(err_msg)?;
+        let mut index = repo.index().map_err(err_msg)?;
+        if index.has_conflicts() {
+            let files = conflicted_entries(&repo)?.len();
+            return Ok(MergeOutcome::Conflicts { files });
+        }
+
+        let sig = repo.signature().map_err(err_msg)?;
+        let tree = {
+            let tree_id = index.write_tree().map_err(err_msg)?;
+            repo.find_tree(tree_id).map_err(err_msg)?
+        };
+        let head = repo
+            .head()
+            .and_then(|head| head.peel_to_commit())
+            .map_err(err_msg)?;
+        let message = repo.message().map_err(err_msg)?;
+        let sha = repo
+            .commit(Some("HEAD"), &sig, &sig, &message, &tree, &[&head, &theirs])
+            .map_err(err_msg)?;
+        repo.cleanup_state().map_err(err_msg)?;
+        Ok(MergeOutcome::Merged {
+            sha: sha.to_string(),
+        })
+    }
+
+    fn abort_merge(&self) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        if repo.state() != RepositoryState::Merge {
+            return BackendSnafu {
+                reason: "no merge in progress",
+            }
+            .fail();
+        }
+        let head_tree = repo
+            .head()
+            .and_then(|head| head.peel_to_tree())
+            .map_err(err_msg)?;
+        let mut index = repo.index().map_err(err_msg)?;
+        // A held handle keeps the index it loaded first, and the paths the
+        // merge changed are read off the index on disk.
+        index.read(false).map_err(err_msg)?;
+
+        // Only the paths the merge touched go back to HEAD, so an edit the
+        // user made to any other file while the merge was paused stays. The
+        // diff reports each unmerged file as one conflicted delta, so the
+        // conflicts are among these paths.
+        let paths: Vec<PathBuf> = repo
+            .diff_tree_to_index(Some(&head_tree), Some(&index), None)
+            .map_err(err_msg)?
+            .deltas()
+            .filter_map(|delta| {
+                delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path())
+                    .map(Path::to_path_buf)
+            })
+            .collect();
+        if !paths.is_empty() {
+            let mut checkout = CheckoutBuilder::new();
+            // A pathspec reads `*`, `?`, and `[` as patterns, and a file name
+            // that holds one names itself here.
+            checkout.force().disable_pathspec_match(true);
+            for path in &paths {
+                checkout.path(path);
+            }
+            // The checkout puts HEAD's entry for each path in the index and
+            // writes it, which leaves the index equal to HEAD's tree.
+            repo.checkout_tree(head_tree.as_object(), Some(&mut checkout))
+                .map_err(err_msg)?;
+        }
+
+        repo.cleanup_state().map_err(err_msg)
     }
 
     fn changed_files(&self) -> Vec<ChangedFile> {
@@ -258,26 +381,33 @@ impl GitRepo for LocalGitRepo {
         // An empty untracked file holds no hunk, so `per_file` leaves it out.
         untracked.retain(|path| per_file.contains_key(path));
 
+        let workdir = repo.workdir().map(Path::to_path_buf);
+        let mut conflicted: Vec<PathBuf> = conflicted_entries(&repo)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|entry| match &workdir {
+                Some(workdir) => entry
+                    .path
+                    .strip_prefix(workdir)
+                    .map_or(entry.path.clone(), Path::to_path_buf),
+                None => entry.path,
+            })
+            .collect();
+        conflicted.sort();
+
         HunkTallies {
             staged,
             unstaged,
             per_file: per_file.into_iter().collect(),
             unstaged_per_file: unstaged_per_file.into_iter().collect(),
             untracked,
+            conflicted,
         }
     }
 
     fn has_tracked_changes(&self) -> bool {
         let repo = self.repo.lock().expect("git repo lock");
-        let mut opts = StatusOptions::new();
-        opts.include_untracked(false);
-        let statuses = match repo.statuses(Some(&mut opts)) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        statuses
-            .iter()
-            .any(|entry| entry.status().intersects(STAGED.union(UNSTAGED)))
+        tracked_changes(&repo)
     }
 
     fn head_contents(&self, paths: &[&Path]) -> Vec<Option<String>> {
@@ -887,7 +1017,10 @@ impl GitRepo for LocalGitRepo {
     }
 
     fn commit_index(&self, message: &str) -> Result<String, GitApplyError> {
-        let repo = self.repo.lock().expect("git repo lock");
+        let mut repo = self.repo.lock().expect("git repo lock");
+        // Read before HEAD's commit, which borrows the repository the read
+        // needs mutably.
+        let merge_heads = merge_heads(&mut repo);
         let mut index = repo.index().map_err(err_msg)?;
         // A held handle keeps the index it loaded first. Without this reload,
         // the commit misses what was staged since that load.
@@ -899,7 +1032,7 @@ impl GitRepo for LocalGitRepo {
             Some(commit) => commit.tree_id() == tree_id,
             None => index.is_empty(),
         };
-        if unchanged {
+        if unchanged && merge_heads.is_empty() {
             return BackendSnafu {
                 reason: "nothing staged",
             }
@@ -908,10 +1041,18 @@ impl GitRepo for LocalGitRepo {
 
         let sig = repo.signature().map_err(err_msg)?;
         let tree = repo.find_tree(tree_id).map_err(err_msg)?;
-        let parents: Vec<&Commit<'_>> = head.iter().collect();
+        let merged: Vec<Commit<'_>> = merge_heads
+            .iter()
+            .map(|oid| repo.find_commit(*oid))
+            .collect::<Result<_, _>>()
+            .map_err(err_msg)?;
+        let parents: Vec<&Commit<'_>> = head.iter().chain(&merged).collect();
         let new_id = repo
             .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
             .map_err(err_msg)?;
+        if !merge_heads.is_empty() {
+            repo.cleanup_state().map_err(err_msg)?;
+        }
         Ok(new_id.to_string())
     }
 
@@ -1282,6 +1423,65 @@ fn branch_tip(branch: &Branch<'_>) -> Option<(String, String)> {
     let name = branch.name().ok().flatten()?.to_string();
     let tip = branch.get().peel_to_commit().ok()?.id().to_string();
     Some((name, tip))
+}
+
+/// The local branch whose tip is `sha`, or `None` when no local branch points
+/// at it. Of several such branches, the first in name order answers.
+fn local_branch_at(repo: &Repository, sha: &str) -> Option<String> {
+    repo.branches(Some(BranchType::Local))
+        .ok()?
+        .filter_map(|entry| branch_tip(&entry.ok()?.0))
+        .find(|(_, tip)| tip == sha)
+        .map(|(name, _)| name)
+}
+
+/// Point the branch HEAD names at `commit`, or HEAD itself when it is
+/// detached.
+///
+/// HEAD's symbolic target names its branch even before the branch's first
+/// commit, so an unborn branch comes into being at `commit`.
+fn move_head_to(repo: &Repository, commit: &Commit<'_>, reflog: &str) -> Result<(), GitApplyError> {
+    let head = repo.find_reference("HEAD").map_err(err_msg)?;
+    match head.symbolic_target().map_err(err_msg)? {
+        Some(branch) => repo
+            .reference(branch, commit.id(), true, reflog)
+            .map(drop)
+            .map_err(err_msg),
+        None => repo.set_head_detached(commit.id()).map_err(err_msg),
+    }
+}
+
+/// The commits `MERGE_HEAD` names, in its order. Empty outside a merge.
+fn merge_heads(repo: &mut Repository) -> Vec<git2::Oid> {
+    let mut heads = Vec::new();
+    // Outside a merge there is no MERGE_HEAD, which fails the walk, and the
+    // empty list is that answer.
+    let _ = repo.mergehead_foreach(|oid| {
+        heads.push(*oid);
+        true
+    });
+    heads
+}
+
+/// Whether the repository is paused mid-rebase, in any state a rebase leaves.
+fn rebasing(repo: &Repository) -> bool {
+    matches!(
+        repo.state(),
+        RepositoryState::Rebase | RepositoryState::RebaseInteractive | RepositoryState::RebaseMerge
+    )
+}
+
+/// Whether a tracked file carries a change in the index or the working tree.
+/// An untracked file does not count.
+fn tracked_changes(repo: &Repository) -> bool {
+    let mut opts = StatusOptions::new();
+    opts.include_untracked(false);
+    let Ok(statuses) = repo.statuses(Some(&mut opts)) else {
+        return false;
+    };
+    statuses
+        .iter()
+        .any(|entry| entry.status().intersects(STAGED.union(UNSTAGED)))
 }
 
 fn err_msg(e: git2::Error) -> GitApplyError {
@@ -1771,10 +1971,13 @@ fn count_hunks(diff: &Diff<'_>, per_file: &mut dyn FnMut(PathBuf, usize)) -> usi
 mod tests {
     use super::{apply_mismatch_detail, patch_target_path, LocalGit, QUOTED_LINE_MAX};
     use crate::host::git::{
-        CherryPickOutcome, CommitFileChangeKind, GitHost, GitRepo, RebaseTodo, RebaseTodoOp,
-        StagedKind,
+        CherryPickOutcome, CommitFileChangeKind, GitApplyError, GitHost, GitRepo, MergeOutcome,
+        MergeState, RebaseTodo, RebaseTodoOp, StagedKind,
     };
-    use git2::{Commit, Oid, Repository, RepositoryInitOptions, Signature};
+    use git2::{
+        build::CheckoutBuilder, Commit, Oid, Repository, RepositoryInitOptions, RepositoryState,
+        Signature,
+    };
     use std::{
         collections::BTreeMap,
         fs::Permissions,
@@ -2794,6 +2997,238 @@ mod tests {
                 Some("main".to_string()),
                 Some(sha.clone()),
             ),
+        );
+    }
+
+    /// A repo whose `main` and `feature` grow from one base commit, which holds
+    /// `a.txt` and `b.txt`. Each branch commits its files on top, and a branch
+    /// with no files stays at the base. HEAD is on `main` with a clean tree,
+    /// under a configured identity.
+    fn diverged_repo(ours: &[(&str, &[u8])], theirs: &[(&str, &[u8])]) -> (TempDir, Repository) {
+        let (dir, repo, _) = seeded_repo();
+        set_identity(&repo);
+        commit_files(&repo, &dir, &[("b.txt", b"b\n")]);
+        {
+            let base = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.branch("feature", &base, false).unwrap();
+        }
+        let switch = |branch: &str| {
+            repo.set_head(&format!("refs/heads/{branch}")).unwrap();
+            repo.checkout_head(Some(CheckoutBuilder::new().force()))
+                .unwrap();
+        };
+
+        if !ours.is_empty() {
+            commit_files(&repo, &dir, ours);
+        }
+        switch("feature");
+        if !theirs.is_empty() {
+            commit_files(&repo, &dir, theirs);
+        }
+        switch("main");
+        (dir, repo)
+    }
+
+    fn tip(repo: &Repository, rev: &str) -> String {
+        repo.revparse_single(rev).unwrap().id().to_string()
+    }
+
+    /// A branch ahead of HEAD moves HEAD's branch to its tip with no merge
+    /// commit, and a second merge of it finds HEAD up to date.
+    #[test]
+    fn merge_branch_fast_forwards_then_reads_up_to_date() {
+        let (dir, repo) = diverged_repo(&[], &[("c.txt", b"c\n")]);
+        let git = discover(&dir);
+        let feature = tip(&repo, "feature");
+
+        assert_eq!(
+            (
+                git.merge_branch("feature"),
+                git.merge_branch("feature"),
+                git.resolve_rev("main"),
+                git.head_branch(),
+                std::fs::read_to_string(dir.path().join("c.txt")).ok(),
+            ),
+            (
+                Ok(MergeOutcome::FastForward {
+                    sha: feature.clone()
+                }),
+                Ok(MergeOutcome::UpToDate),
+                Some(feature),
+                Some("main".to_string()),
+                Some("c\n".to_string()),
+            ),
+        );
+    }
+
+    /// Branches that changed different files merge into a commit over both
+    /// tips under the merge's message, and no merge state stays behind.
+    #[test]
+    fn merge_branch_commits_a_clean_merge_over_both_tips() {
+        let (dir, repo) = diverged_repo(&[("c.txt", b"ours\n")], &[("d.txt", b"theirs\n")]);
+        let git = discover(&dir);
+        let parents = vec![tip(&repo, "main"), tip(&repo, "feature")];
+
+        let Ok(MergeOutcome::Merged { sha }) = git.merge_branch("feature") else {
+            panic!("a clean merge commits");
+        };
+        assert_eq!(
+            (
+                git.parent_shas(&sha),
+                git.commit_message(&sha),
+                git.content_at(&sha, &dir.path().join("c.txt")),
+                git.content_at(&sha, &dir.path().join("d.txt")),
+                git.resolve_rev("main"),
+                git.merge_state(),
+                repo.state(),
+            ),
+            (
+                parents,
+                Some("Merge branch 'feature'\n".to_string()),
+                Some("ours\n".to_string()),
+                Some("theirs\n".to_string()),
+                Some(sha.clone()),
+                None,
+                RepositoryState::Clean,
+            ),
+        );
+    }
+
+    /// Branches that changed one file two ways stop mid-merge with the file
+    /// unmerged, and the merge state names the branch.
+    #[test]
+    fn merge_branch_stops_on_a_conflict_and_names_the_branch() {
+        let (dir, repo) = diverged_repo(&[("a.txt", b"ours\n")], &[("a.txt", b"theirs\n")]);
+        let git = discover(&dir);
+        let feature = tip(&repo, "feature");
+        let workdir = git.workdir().unwrap();
+
+        assert_eq!(
+            (
+                git.merge_branch("feature"),
+                git.merge_state(),
+                git.hunk_tallies().conflicted,
+                git.conflicted_paths(),
+            ),
+            (
+                Ok(MergeOutcome::Conflicts { files: 1 }),
+                Some(MergeState {
+                    head_sha: feature,
+                    head_name: Some("feature".to_string()),
+                    message: "Merge branch 'feature'\n\n#Conflicts:\n#\ta.txt\n".to_string(),
+                    conflicted: 1,
+                }),
+                vec![PathBuf::from("a.txt")],
+                vec![workdir.join("a.txt")],
+            ),
+        );
+    }
+
+    /// An abort puts HEAD's content back on the paths the merge changed,
+    /// removes a file the merge added, and drops the merge state, which
+    /// leaves the edit made to another file during the merge as the only
+    /// change. The added file `[b].txt` read as a pattern also matches the
+    /// edited `b.txt`, so only a literal path keeps that edit.
+    #[test]
+    fn abort_merge_restores_the_merged_paths_and_keeps_other_edits() {
+        let (dir, repo) = diverged_repo(
+            &[("a.txt", b"ours\n")],
+            &[("a.txt", b"theirs\n"), ("[b].txt", b"new\n")],
+        );
+        let git = discover(&dir);
+        git.merge_branch("feature").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "edited\n").unwrap();
+
+        let aborted = git.abort_merge().map_err(|err| err.to_string());
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).ok();
+        let changed: Vec<(PathBuf, bool)> = git
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged))
+            .collect();
+        assert_eq!(
+            (
+                aborted,
+                read("a.txt"),
+                read("b.txt"),
+                read("[b].txt"),
+                changed,
+                git.merge_state(),
+                repo.state(),
+                git.abort_merge().map_err(|err| err.to_string()),
+            ),
+            (
+                Ok(()),
+                Some("ours\n".to_string()),
+                Some("edited\n".to_string()),
+                None,
+                vec![(git.workdir().unwrap().join("b.txt"), false)],
+                None,
+                RepositoryState::Clean,
+                Err("git backend failure: no merge in progress".to_string()),
+            ),
+        );
+    }
+
+    /// A commit during a merge takes the merge head as its second parent and
+    /// ends the merge, though the conflict took HEAD's side and the tree
+    /// equals HEAD's. With the conflict still unmerged, the commit fails.
+    #[test]
+    fn commit_index_during_a_merge_lands_two_parents_and_ends_it() {
+        let (dir, repo) = diverged_repo(&[("a.txt", b"ours\n")], &[("a.txt", b"theirs\n")]);
+        let git = discover(&dir);
+        let (main, feature) = (tip(&repo, "main"), tip(&repo, "feature"));
+        let main_tree = tip(&repo, "main^{tree}");
+        git.merge_branch("feature").unwrap();
+        let unmerged = git.commit_index("merge").map_err(|err| err.to_string());
+
+        std::fs::write(dir.path().join("a.txt"), "ours\n").unwrap();
+        git.mark_resolved(Path::new("a.txt")).unwrap();
+        let sha = git.commit_index("merge feature").unwrap();
+        assert_eq!(
+            (
+                unmerged,
+                git.parent_shas(&sha),
+                tip(&repo, &format!("{sha}^{{tree}}")),
+                git.merge_state(),
+                repo.state(),
+            ),
+            (
+                Err(
+                    "git backend failure: cannot create a tree from a not fully merged index."
+                        .to_string()
+                ),
+                vec![main, feature],
+                main_tree,
+                None,
+                RepositoryState::Clean,
+            ),
+        );
+    }
+
+    /// A merge refuses over a tracked edit, for a branch that does not exist,
+    /// and while another merge is in progress.
+    #[test]
+    fn merge_branch_refuses_a_dirty_tree_an_unknown_branch_and_a_second_merge() {
+        let (dir, _repo) = diverged_repo(&[("a.txt", b"ours\n")], &[("a.txt", b"theirs\n")]);
+        let git = discover(&dir);
+        let reason =
+            |result: Result<MergeOutcome, GitApplyError>| result.map_err(|err| err.to_string());
+
+        std::fs::write(dir.path().join("b.txt"), "edited\n").unwrap();
+        let dirty = reason(git.merge_branch("feature"));
+        std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+        let unknown = reason(git.merge_branch("nope"));
+        git.merge_branch("feature").unwrap();
+        let second = reason(git.merge_branch("feature"));
+
+        assert_eq!(
+            [dirty, unknown, second],
+            [
+                Err("git backend failure: working tree has changes".to_string()),
+                Err("git backend failure: no branch named nope".to_string()),
+                Err("git backend failure: a merge is in progress".to_string()),
+            ],
         );
     }
 
