@@ -28,7 +28,7 @@ use crate::{
         polyline::PolylinePass,
         sketch::SketchPass,
         text::{self, TextPass},
-        CellMetrics, GridLayout, Occluder, PoolOccluders, MAX_COVERED,
+        CellMetrics, GridLayout, Occluder, PoolOccluders, RowAnchor, MAX_COVERED,
     },
 };
 pub use cosmic_text::fontdb;
@@ -233,6 +233,16 @@ pub(crate) enum CursorLayer {
     Deferred,
 }
 
+/// The pool a frame's cursor glyph draws from, and the slot its globals sit in.
+#[derive(Clone, Copy)]
+struct CursorPool {
+    pool: u32,
+    slot: usize,
+    /// Whether the pool records with the occludable composites, all of which
+    /// draw under every non-occludable one.
+    occludable: bool,
+}
+
 /// The device descriptor for `adapter`. Under the `perf` feature, requests
 /// `TIMESTAMP_QUERY` when the adapter supports it so the renderer can measure
 /// GPU frame time. Otherwise it is the default descriptor, requesting no
@@ -306,6 +316,12 @@ pub struct Renderer {
     /// How much of the cursor block the cursor pass paints. Held across frames,
     /// as the color is, since it follows the window's focus rather than a frame.
     cursor_fill: CursorFill,
+    /// The pool whose composite shows the cursor cell this frame, or `None`
+    /// when no pool holds the cursor.
+    ///
+    /// The cursor glyph draws from this pool's shaping alone. A pool stacked
+    /// under it paints a cell the topmost one hides.
+    cursor_pool: Option<CursorPool>,
     /// The frame's panel occluders, lent to every pass that occludes. Held here
     /// so a frame builds the list once and reuses the allocation across frames.
     occluders: Vec<Occluder>,
@@ -403,6 +419,7 @@ impl Renderer {
                 clear_rgb,
                 cursor_color: cursor,
                 cursor_fill: CursorFill::Solid,
+                cursor_pool: None,
                 occluders: Vec::new(),
                 pool_occluders: Vec::new(),
                 riding: Vec::new(),
@@ -479,7 +496,7 @@ impl Renderer {
     }
 
     /// Re-point the two colors baked in at construction, the surface clear and
-    /// the cursor tint.
+    /// the cursor color.
     ///
     /// Every other color arrives per frame with the grid, so a theme change only
     /// has to reach these two to take effect on the next draw.
@@ -497,8 +514,8 @@ impl Renderer {
     }
 
     /// Draw a frame for `grid` into `view`: clear to the default background,
-    /// fill each cell background, composite glyphs and decorations, tint the
-    /// cursor cell, then draw overlays and their content on top.
+    /// fill each cell background, composite glyphs and decorations, draw the
+    /// cursor block, then draw overlays and their content on top.
     ///
     /// `cursor` is the cursor's position in fractional cell coordinates, or
     /// `None` when it is hidden. `scroll` carries the eased whole-grid and
@@ -704,6 +721,16 @@ impl Renderer {
             covered,
             anchor,
         );
+        let grid_scroll = frame.scroll.grid + frame.scroll.document + frame.scroll.scrollback;
+        self.text.prepare_cursor_clip(
+            queue,
+            frame
+                .cursor_corners
+                .map(|corners| cursor_pixels(corners, self.metrics, anchor, grid_scroll)),
+        );
+        // The pools prepared after this, if any, name the one that holds the
+        // cursor.
+        self.cursor_pool = None;
         self.panel
             .prepare(device, queue, grid, &self.clamped_rides, resolution, anchor);
         self.overlay
@@ -852,6 +879,7 @@ impl Renderer {
         if cursor == CursorLayer::Inline {
             self.panel.draw_stroke(render_pass);
             self.background.draw_cursor(render_pass);
+            self.record_cursor_glyphs(render_pass);
         }
         self.overlay.draw(render_pass);
         self.text.draw_overlay_text(render_pass);
@@ -1138,6 +1166,17 @@ impl Renderer {
             pool,
             slot,
         );
+        // A non-occludable pool records after every occludable one, and pools of
+        // one kind record in slot order, so the last to take the cursor by that
+        // order is the one on top of it.
+        let on_top = !occludable || self.cursor_pool.is_none_or(|held| held.occludable);
+        if cursor_cell.is_some() && on_top {
+            self.cursor_pool = Some(CursorPool {
+                pool,
+                slot,
+                occludable,
+            });
+        }
         self.bar.prepare_composite(
             device,
             queue,
@@ -1298,10 +1337,15 @@ impl Renderer {
             grid_scroll,
             anchor,
         );
+        self.text.prepare_cursor_clip(
+            queue,
+            corners.map(|corners| cursor_pixels(corners, self.metrics, anchor, grid_scroll)),
+        );
     }
 
-    /// Issue the cursor block's draw into `render_pass`, clipped to `scissor` when
-    /// one is given. Already-clamped, as [`Self::draw_cursor_over`] leaves it.
+    /// Issue the cursor block's draw and its cursor glyph draws into
+    /// `render_pass`, clipped to `scissor` when one is given. Already-clamped,
+    /// as [`Self::draw_cursor_over`] leaves it.
     pub(crate) fn record_cursor_over(
         &self,
         render_pass: &mut RenderPass<'_>,
@@ -1311,6 +1355,25 @@ impl Renderer {
             render_pass.set_scissor_rect(s[0], s[1], s[2], s[3]);
         }
         self.background.draw_cursor(render_pass);
+        self.record_cursor_glyphs(render_pass);
+    }
+
+    /// Issue the draws that put the glyph a solid cursor block covers back over
+    /// it, in its cell's background color.
+    ///
+    /// Must follow the block's draw. The live grid's glyph draws first, and a
+    /// glyph under a pool culls itself. The pool on top of the cursor draws its
+    /// own after it. A hollow outline hides no text, so it draws none.
+    fn record_cursor_glyphs(&self, render_pass: &mut RenderPass<'_>) {
+        if self.cursor_fill != CursorFill::Solid {
+            return;
+        }
+
+        self.text.draw_cursor_glyph(render_pass);
+        if let Some(held) = self.cursor_pool {
+            self.text
+                .draw_composite_cursor_glyph(render_pass, held.pool, held.slot);
+        }
     }
 
     /// Composite the perf HUD topmost via a load-not-clear pass.
@@ -1539,6 +1602,26 @@ fn pool_cursor_cell(
     let top = origin_cells[1].round() as usize;
     let inside = row >= top && row - top < rows && col >= left && col - left < cols;
     inside.then(|| (row - top, col - left))
+}
+
+/// The framebuffer pixels of the cursor block's `corners`, given in cells, as
+/// the background pass's `vs_cursor` places them.
+///
+/// `anchor` places the corner rows as the live grid's rows sit, and
+/// `grid_scroll` moves every corner by that many cell heights, the offset the
+/// cursor draws under.
+fn cursor_pixels(
+    corners: [[f32; 2]; 4],
+    metrics: CellMetrics,
+    anchor: RowAnchor,
+    grid_scroll: f32,
+) -> [[f32; 2]; 4] {
+    corners.map(|[col, row]| {
+        [
+            col * metrics.width,
+            anchor.row_y(row, metrics.height) + grid_scroll * metrics.height,
+        ]
+    })
 }
 
 /// The scissors of the first [`MAX_COVERED`] `pools` that draw on a
@@ -2128,7 +2211,7 @@ impl GpuContext {
         self.renderer.set_font_size(font_size, scale_factor);
     }
 
-    /// Re-point the surface clear and cursor tint colors, so a theme change
+    /// Re-point the surface clear and cursor colors, so a theme change
     /// shows on the next draw.
     pub fn set_theme_colors(&mut self, background: Rgb, cursor: Rgb) {
         self.renderer.set_theme_colors(background, cursor);

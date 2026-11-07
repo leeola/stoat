@@ -45,10 +45,9 @@ const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
 
-/// The primary cursor's block over the base, which is the terminal palette's
-/// cursor color #dfe2e8 at the 55 percent the cursor pass blends it at. The
+/// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
-const CURSOR_OVER_BASE: [u8; 3] = [0x84, 0x87, 0x8d];
+const CURSOR_PRIMARY: [u8; 3] = [0xdf, 0xe2, 0xe8];
 
 /// The wait for rust-analyzer to load the fixture crate and answer, the bound
 /// the live LSP tests allow.
@@ -787,7 +786,7 @@ fn a_function_completion_leads_with_its_badge_on_the_function_tint() {
 }
 
 /// A selection washes its range, the primary cursor is the terminal's own
-/// translucent block, and a secondary cursor takes the theme's cursor block.
+/// opaque block, and a secondary cursor takes the theme's cursor block.
 ///
 /// The text starts in cell 6. `jjvll` selects `3 t` on row 2, so the wash
 /// covers the `3` and the blank cell after it, and the primary cursor sits on
@@ -812,7 +811,7 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
         &selected,
         &mut home,
         cell_rect(8, 2, 1, 1),
-        CURSOR_OVER_BASE,
+        CURSOR_PRIMARY,
         "primary_cursor",
     );
 
@@ -829,7 +828,7 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
         &copied,
         &mut home,
         cell_rect(8, 4, 1, 1),
-        CURSOR_OVER_BASE,
+        CURSOR_PRIMARY,
         "copied_primary_cursor",
     );
 }

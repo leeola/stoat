@@ -29,8 +29,8 @@ use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
     Buffer, BufferBinding, BufferBindingType, BufferDescriptor, BufferSize, BufferUsages,
-    ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor, Queue,
-    RenderPass, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
+    ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayout, PipelineLayoutDescriptor,
+    Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, Sampler, SamplerBindingType,
     SamplerDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
     TextureFormat, TextureSampleType, TextureView, TextureViewDimension, VertexBufferLayout,
     VertexState, VertexStepMode,
@@ -44,6 +44,12 @@ pub use font::{build_font_system, shape_words, shape_words_cached, RunShapeCache
 /// Instance buffer capacity, in glyphs, allocated up front. Grows by doubling
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 2048;
+
+/// Instances a cursor glyph buffer starts with.
+///
+/// The buffer holds the glyphs of the one cell under the cursor, which shapes
+/// to a single glyph in nearly every font, so it grows only past that.
+const CURSOR_GLYPH_CAPACITY: usize = 4;
 
 /// Atlas selector packed into each instance, matching the shader's constants.
 const KIND_MASK: u32 = 0;
@@ -178,6 +184,20 @@ struct RectInstance {
     /// Slot of the mark this rect fades in with, biased by one. See
     /// [`TextInstance::follow`].
     follow: u32,
+}
+
+/// The cursor block's four corners in framebuffer pixels, which the cursor
+/// glyph draw clips to.
+///
+/// The corners are [TL, TR] then [BL, BR], the order the background pass holds
+/// the block's corners in. A block partway between two cells covers part of the
+/// glyph it moves to, so the clip is what keeps the glyph's other part in its
+/// own color.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
+struct CursorClip {
+    corners_01: [f32; 4],
+    corners_23: [f32; 4],
 }
 
 /// One compositing host's riding text-run instances.
@@ -347,6 +367,9 @@ struct TextCompositeSlot {
     /// the runs glide with the page.
     text_runs: CompositeSlot,
     rects: CompositeSlot,
+    /// The glyphs of [`Self::cursor_cell`] in the cell's background color, which
+    /// [`TextPass::draw_composite_cursor_glyph`] draws over the cursor block.
+    cursor_glyphs: CompositeSlot,
     /// The atlas content-epoch these instances resolved against. A shift-only
     /// composite reuses them only while the atlas still matches. An eviction
     /// since means a glyph moved, so the pool must be reshaped even though its
@@ -717,6 +740,27 @@ pub struct TextPass {
     rect_instances: Buffer,
     rect_capacity: usize,
     rect_count: u32,
+    /// Draws the cursor cell's glyph over the opaque cursor block, discarding
+    /// what falls outside the block that [`Self::cursor_clip`] describes.
+    cursor_glyph_pipeline: RenderPipeline,
+    /// The block's corners in framebuffer pixels, bound at group 2 for the
+    /// cursor glyph draws alone.
+    cursor_clip: Buffer,
+    cursor_clip_bind_group: BindGroup,
+    /// The value last written to [`Self::cursor_clip`].
+    last_cursor_clip: Option<CursorClip>,
+    /// Whether the cursor block draws this frame. The cursor glyph draws skip
+    /// while it is hidden, since the clip then holds an earlier frame's block.
+    cursor_shown: bool,
+    /// The live grid's cursor cell glyphs in the cell's background color.
+    cursor_glyph_instances: Buffer,
+    cursor_glyph_capacity: usize,
+    /// What [`Self::cursor_glyph_instances`] holds, kept so a frame that leaves
+    /// the cursor cell as it was writes nothing.
+    cursor_glyphs: Vec<TextInstance>,
+    /// Scratch the cursor glyph builds fill, the live grid's and each pool's.
+    cursor_pending_scratch: Vec<PendingGlyph>,
+    cursor_glyph_scratch: Vec<TextInstance>,
     atlas: GlyphAtlas,
     font_system: FontSystem,
     /// The resolved primary shaping family, being the first configured `font_family`
@@ -964,46 +1008,60 @@ impl TextPass {
             immediate_size: 0,
         });
 
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("text"),
-            layout: Some(&layout),
-            vertex: VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(VertexBufferLayout {
-                    array_stride: size_of::<TextInstance>() as u64,
-                    step_mode: VertexStepMode::Instance,
-                    attributes: &vertex_attr_array![
-                        0 => Float32x2,
-                        1 => Uint16x2,
-                        2 => Uint16x2,
-                        3 => Uint16x2,
-                        4 => Uint32,
-                        5 => Uint32,
-                        6 => Uint32,
-                    ],
-                })],
-            },
-            fragment: Some(FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: Default::default(),
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = build_glyph_pipeline(device, "text", &shader, &layout, "fs_main", format);
 
         let underline_pipeline = build_underline_pipeline(device, &shader, &globals_layout, format);
         let rect_pipeline = build_rect_pipeline(device, &shader, &globals_layout, format);
+
+        let cursor_clip_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("text cursor clip"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let cursor_glyph_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("text cursor glyph"),
+            bind_group_layouts: &[
+                Some(&globals_layout),
+                Some(&atlas_layout),
+                Some(&cursor_clip_layout),
+            ],
+            immediate_size: 0,
+        });
+        let cursor_glyph_pipeline = build_glyph_pipeline(
+            device,
+            "text cursor glyph",
+            &shader,
+            &cursor_glyph_layout,
+            "fs_cursor_glyph",
+            format,
+        );
+        let cursor_clip = device.create_buffer(&BufferDescriptor {
+            label: Some("text cursor clip"),
+            size: size_of::<CursorClip>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cursor_clip_bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("text cursor clip"),
+            layout: &cursor_clip_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: cursor_clip.as_entire_binding(),
+            }],
+        });
+        let cursor_glyph_instances = alloc_instances(
+            device,
+            "cursor glyph instances",
+            instance_bytes::<TextInstance>(CURSOR_GLYPH_CAPACITY),
+        );
 
         // The globals buffers and the run-rect and glyph pipelines read panel
         // occluders at binding 1, so both lists are allocated before their bind
@@ -1197,6 +1255,16 @@ impl TextPass {
             rect_instances,
             rect_capacity: INITIAL_CAPACITY,
             rect_count: 0,
+            cursor_glyph_pipeline,
+            cursor_clip,
+            cursor_clip_bind_group,
+            last_cursor_clip: None,
+            cursor_shown: false,
+            cursor_glyph_instances,
+            cursor_glyph_capacity: CURSOR_GLYPH_CAPACITY,
+            cursor_glyphs: Vec::new(),
+            cursor_pending_scratch: Vec::new(),
+            cursor_glyph_scratch: Vec::new(),
             atlas,
             font_system,
             family,
@@ -1704,6 +1772,7 @@ impl TextPass {
         }
 
         self.rebuilt_scratch = rebuilt;
+        self.build_cursor_glyphs(device, queue, grid, cursor_cell(cursor));
 
         self.region_scissor = region.and_then(|region| {
             cell_rect_scissor(
@@ -2457,6 +2526,32 @@ impl TextPass {
         );
         self.composite_upload_scratch = scratch;
         self.composite_slot_scratch = rebuilt;
+
+        // Ahead of the rebind below, because resolving a glyph that an eviction
+        // took out packs it again.
+        let mut pending = mem::take(&mut self.cursor_pending_scratch);
+        cursor_cell_glyphs_into(grid, &glyph_rows, rotation, cursor_cell, &mut pending);
+        let mut cursor_glyphs = mem::take(&mut self.cursor_glyph_scratch);
+        self.build_text_instances_into(
+            device,
+            queue,
+            &pending,
+            rotation,
+            origin_cells,
+            &mut cursor_glyphs,
+        );
+        let target = self.composite_slots.entry(pool, || new_slot(device));
+        target.cursor_glyphs.count = cursor_glyphs.len() as u32;
+        upload_instances(
+            device,
+            queue,
+            &cursor_glyphs,
+            &mut target.cursor_glyphs.instances,
+            &mut target.cursor_glyphs.capacity,
+            "composite cursor glyph instances",
+        );
+        self.cursor_pending_scratch = pending;
+        self.cursor_glyph_scratch = cursor_glyphs;
 
         if self.atlas.texture_dims() != atlas_dims {
             self.atlas_bind_group = create_atlas_bind_group(
@@ -3222,6 +3317,79 @@ impl TextPass {
         }
     }
 
+    /// Upload the cursor block's corners, in framebuffer pixels, for the cursor
+    /// glyph draws, or hide those draws when `corners` is `None`.
+    ///
+    /// The corners must be the ones the cursor block draws at this frame, since
+    /// the glyph draws only inside them.
+    pub(crate) fn prepare_cursor_clip(&mut self, queue: &Queue, corners: Option<[[f32; 2]; 4]>) {
+        self.cursor_shown = corners.is_some();
+        let Some(c) = corners else {
+            return;
+        };
+
+        let clip = CursorClip {
+            corners_01: [c[0][0], c[0][1], c[1][0], c[1][1]],
+            corners_23: [c[2][0], c[2][1], c[3][0], c[3][1]],
+        };
+        crate::render::upload_globals(
+            queue,
+            &self.cursor_clip,
+            0,
+            clip,
+            &mut self.last_cursor_clip,
+        );
+    }
+
+    /// Record the live grid's cursor glyph draw into `render_pass`.
+    ///
+    /// Draws the glyph the cursor block covers in its cell's background color,
+    /// clipped to the block, so it must follow the block's draw. A glyph under a
+    /// pool draws nothing, as every live glyph there does. A no-op while the
+    /// cursor is hidden or its cell holds no glyph.
+    pub(crate) fn draw_cursor_glyph(&self, render_pass: &mut RenderPass<'_>) {
+        if !self.cursor_shown || self.cursor_glyphs.is_empty() {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.cursor_glyph_pipeline);
+        render_pass.set_bind_group(0, &self.globals_bind_group, &[0]);
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.cursor_clip_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.cursor_glyph_instances.slice(..));
+        render_pass.draw(0..6, 0..self.cursor_glyphs.len() as u32);
+    }
+
+    /// Record a composited pool's cursor glyph draw into `render_pass`.
+    ///
+    /// The pool counterpart of [`Self::draw_cursor_glyph`], drawn with the
+    /// globals `slot` holds so the glyph glides with the pool. A no-op until
+    /// [`Self::prepare_composite`] has run for `slot` with the cursor in the pool.
+    pub(crate) fn draw_composite_cursor_glyph(
+        &self,
+        render_pass: &mut RenderPass<'_>,
+        pool: u32,
+        slot: usize,
+    ) {
+        let Some(target) = self.composite_slots.get(pool) else {
+            return;
+        };
+        if !self.cursor_shown || target.cursor_glyphs.count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.cursor_glyph_pipeline);
+        render_pass.set_bind_group(
+            0,
+            &self.composite_globals_bind_group,
+            &[globals_offset(slot)],
+        );
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.cursor_clip_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, target.cursor_glyphs.instances.slice(..));
+        render_pass.draw(0..6, 0..target.cursor_glyphs.count);
+    }
+
     /// Record a composited pool's run-background and text-run glyph draw into
     /// `render_pass`.
     ///
@@ -3552,6 +3720,40 @@ impl TextPass {
         rebuild_all: bool,
     ) {
         self.patch_rows(device, queue, region, rebuilt, rebuild_all);
+    }
+
+    /// Build the live grid's cursor cell glyphs, in the cell's background
+    /// color, into [`Self::cursor_glyph_instances`].
+    ///
+    /// Writes nothing while the glyphs come out as they were, which is every
+    /// frame the cursor and its cell hold still.
+    fn build_cursor_glyphs(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        cell: Option<(usize, usize)>,
+    ) {
+        let rotation = self.grid_rotation();
+        let mut pending = mem::take(&mut self.cursor_pending_scratch);
+        cursor_cell_glyphs_into(grid, &self.glyph_row_cache, rotation, cell, &mut pending);
+        let mut built = mem::take(&mut self.cursor_glyph_scratch);
+        self.build_text_instances_into(device, queue, &pending, rotation, [0.0; 2], &mut built);
+        self.cursor_pending_scratch = pending;
+
+        let held: &[u8] = bytemuck::cast_slice(&self.cursor_glyphs);
+        if bytemuck::cast_slice::<TextInstance, u8>(&built) != held {
+            upload_instances(
+                device,
+                queue,
+                &built,
+                &mut self.cursor_glyph_instances,
+                &mut self.cursor_glyph_capacity,
+                "cursor glyph instances",
+            );
+            mem::swap(&mut self.cursor_glyphs, &mut built);
+        }
+        self.cursor_glyph_scratch = built;
     }
 
     /// Carry the per-row caches across a scroll of `scrolled` rows on a grid
@@ -4468,6 +4670,15 @@ fn new_slot(device: &Device) -> TextCompositeSlot {
         underlines: alloc_slot::<UnderlineInstance>(device, "composite underline instances"),
         text_runs: alloc_slot::<TextInstance>(device, "composite text run instances"),
         rects: alloc_slot::<RectInstance>(device, "composite text run rect instances"),
+        cursor_glyphs: CompositeSlot {
+            instances: alloc_instances(
+                device,
+                "composite cursor glyph instances",
+                instance_bytes::<TextInstance>(CURSOR_GLYPH_CAPACITY),
+            ),
+            capacity: CURSOR_GLYPH_CAPACITY,
+            count: 0,
+        },
         epoch: 0,
         baked_origin: [0.0; 2],
         baked_metrics: None,
@@ -4572,6 +4783,58 @@ fn upload_instances<T: Pod>(
         *buffer = alloc_instances(device, label, instance_bytes::<T>(*capacity));
     }
     queue.write_buffer(buffer, 0, bytemuck::cast_slice(instances));
+}
+
+/// Build a pipeline that draws [`TextInstance`] glyphs through `vs_main` and
+/// the fragment entry point `fragment`.
+///
+/// The grid glyphs and the cursor glyph share the instance layout and the
+/// blend, and differ only in what their fragment discards and in `layout`.
+fn build_glyph_pipeline(
+    device: &Device,
+    label: &str,
+    shader: &ShaderModule,
+    layout: &PipelineLayout,
+    fragment: &str,
+    format: TextureFormat,
+) -> RenderPipeline {
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[Some(VertexBufferLayout {
+                array_stride: size_of::<TextInstance>() as u64,
+                step_mode: VertexStepMode::Instance,
+                attributes: &vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Uint16x2,
+                    2 => Uint16x2,
+                    3 => Uint16x2,
+                    4 => Uint32,
+                    5 => Uint32,
+                    6 => Uint32,
+                ],
+            })],
+        },
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: Some(fragment),
+            compilation_options: Default::default(),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
 }
 
 /// Build the underline decoration pipeline sharing `shader` with the glyph pass.
@@ -5103,6 +5366,40 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
 pub(crate) fn cursor_cell(cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
     let [col, row] = cursor?;
     Some((row.round() as usize, col.round() as usize))
+}
+
+/// Collect the glyphs `rows` shaped for the cursor's `cell` into `out`, each
+/// recolored to the cell's background.
+///
+/// `rows` is a per-slot shaping cache under `rotation`, the live grid's or a
+/// pool's. The background is the one the cell draws with, so over the opaque
+/// cursor block the glyph reads as reverse video.
+fn cursor_cell_glyphs_into(
+    grid: &Grid,
+    rows: &[Vec<PendingGlyph>],
+    rotation: RowRotation,
+    cell: Option<(usize, usize)>,
+    out: &mut Vec<PendingGlyph>,
+) {
+    out.clear();
+    let Some((row, col)) = cell.filter(|&(row, col)| row < grid.rows() && col < grid.cols()) else {
+        return;
+    };
+    let Some(shaped) = rows.get(rotation.slot(row)) else {
+        return;
+    };
+
+    let (_, background) = grid.get(row, col).draw_colors();
+    out.extend(
+        shaped
+            .iter()
+            .filter(|glyph| glyph.col == col)
+            .map(|glyph| PendingGlyph {
+                row,
+                fg: background,
+                ..*glyph
+            }),
+    );
 }
 
 /// The `(col, row, char)` cells an overlay's content occupies, laid out at

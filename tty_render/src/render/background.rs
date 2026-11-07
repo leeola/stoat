@@ -36,9 +36,11 @@ use wgpu::{
 /// when a grid exceeds it; 2048 covers a default 24x80 grid without reallocating.
 const INITIAL_CAPACITY: usize = 2048;
 
-/// Cursor block blend alpha. The cursor's RGB is the theme's cursor color; this
-/// translucency is renderer policy so the block tints the cell beneath it.
-const CURSOR_ALPHA: f32 = 0.55;
+/// Blend alpha of a hollow cursor's outline.
+///
+/// The outline marks a window without focus, so it tints the cells it crosses
+/// and hides none of them. A solid block draws opaque instead.
+const HOLLOW_CURSOR_ALPHA: f32 = 0.55;
 
 /// Byte offset of the cursor pipeline's globals, one slot past the pool slots.
 ///
@@ -162,7 +164,7 @@ pub struct CursorState {
     /// The block's four corners [TL, TR, BL, BR] in fractional cell
     /// coordinates, or `None` when the cursor is hidden.
     pub corners: Option<[[f32; 2]; 4]>,
-    /// Block color. The pass applies its own blend alpha.
+    /// Block color. The pass picks the blend alpha from [`Self::fill`].
     pub color: Rgb,
     /// How much of the block the pass paints. A hollow fill draws the outline
     /// only, the mark of a window without focus.
@@ -172,10 +174,23 @@ pub struct CursorState {
 /// How much of the cursor block the cursor pass paints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CursorFill {
-    /// The whole block, tinting every cell it covers.
+    /// The whole block, opaque, the cursor of a focused window.
+    ///
+    /// The glyph the block covers draws again over it in its cell's
+    /// background color, so the cell reads as reverse video.
     Solid,
     /// The block's outline, which leaves the text under it untinted.
     Hollow,
+}
+
+impl CursorFill {
+    /// Returns the alpha the cursor pass blends this fill at.
+    fn alpha(self) -> f32 {
+        match self {
+            CursorFill::Solid => 1.0,
+            CursorFill::Hollow => HOLLOW_CURSOR_ALPHA,
+        }
+    }
 }
 
 /// The instanced background-fill pipeline and its per-frame buffers, plus a
@@ -444,7 +459,7 @@ impl BackgroundPass {
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
                 cursor.color.b as f32 / 255.0,
-                CURSOR_ALPHA,
+                cursor.fill.alpha(),
             ],
             skip_color: packed_color(clear),
             cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
@@ -736,7 +751,7 @@ impl BackgroundPass {
                 cursor.color.r as f32 / 255.0,
                 cursor.color.g as f32 / 255.0,
                 cursor.color.b as f32 / 255.0,
-                CURSOR_ALPHA,
+                cursor.fill.alpha(),
             ],
             skip_color: 0,
             cursor_hollow: u32::from(cursor.fill == CursorFill::Hollow),
@@ -795,8 +810,9 @@ impl BackgroundPass {
 
     /// Record the cursor-block draw into `render_pass`.
     ///
-    /// A no-op when the cursor is hidden. Draw it after the glyph pass so the
-    /// translucent block tints the cell and its glyph as it slides.
+    /// A no-op when the cursor is hidden. Draw it after the glyph pass. A
+    /// solid block hides the glyph under it, which the text pass's cursor
+    /// glyph draw then puts back over the block.
     pub fn draw_cursor(&self, render_pass: &mut RenderPass<'_>) {
         if !self.cursor_visible {
             return;

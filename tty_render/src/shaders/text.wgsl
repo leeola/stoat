@@ -72,6 +72,18 @@ var<storage, read> sketch_alpha: array<f32>;
 @group(1) @binding(1) var color_atlas: texture_2d<f32>;
 @group(1) @binding(2) var atlas_sampler: sampler;
 
+// The cursor block's four corners in framebuffer pixels, [TL, TR] then
+// [BL, BR], which only the cursor glyph draw reads. bg.wgsl draws the block as
+// the triangles (TL, TR, BL) and (BL, TR, BR), so in_cursor_block tests the
+// same two.
+struct CursorClip {
+    corners_01: vec4<f32>,
+    corners_23: vec4<f32>,
+}
+
+@group(2) @binding(0)
+var<uniform> cursor_clip: CursorClip;
+
 const KIND_MASK: u32 = 0u;
 const KIND_COLOR: u32 = 1u;
 
@@ -238,12 +250,58 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.seq) {
         discard;
     }
+    return glyph_color(in);
+}
 
-    // Premultiplied-alpha coverage. The pipeline blends this over the
-    // framebuffer, and because the target is not sRGB, that fixed-function
-    // blend is a per-channel sRGB-space mix from the destination to `fg`.
-    // The glyph is emitted premultiplied, so a fade scales the color and the
-    // coverage together rather than the alpha alone.
+// The cursor cell's glyph, drawn again over the opaque cursor block in its
+// cell's background color, so the cell reads as reverse video. Only the part
+// the block covers draws, which holds the glyph to the block while it eases
+// between two cells.
+@fragment
+fn fs_cursor_glyph(in: VsOut) -> @location(0) vec4<f32> {
+    if occluded(in.clip.xy, in.seq) || !in_cursor_block(in.clip.xy) {
+        discard;
+    }
+    return glyph_color(in);
+}
+
+// Whether the fragment at `frag` (physical px) lies inside the cursor block.
+fn in_cursor_block(frag: vec2<f32>) -> bool {
+    let tl = cursor_clip.corners_01.xy;
+    let tr = cursor_clip.corners_01.zw;
+    let bl = cursor_clip.corners_23.xy;
+    let br = cursor_clip.corners_23.zw;
+    return in_triangle(frag, tl, tr, bl) || in_triangle(frag, bl, tr, br);
+}
+
+// Whether `p` lies inside the triangle (a, b, c) or on one of its edges.
+//
+// The test follows the triangle's own winding, since a warped block can fold
+// and turn one of its triangles over. A point on the diagonal the two
+// triangles share therefore lands in both, so the block keeps no seam. A
+// triangle with no area holds no point.
+fn in_triangle(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>, c: vec2<f32>) -> bool {
+    let winding = sign(edge_side(a, b, c));
+    if winding == 0.0 {
+        return false;
+    }
+    return edge_side(a, b, p) * winding >= 0.0
+        && edge_side(b, c, p) * winding >= 0.0
+        && edge_side(c, a, p) * winding >= 0.0;
+}
+
+// Twice the signed area of the triangle (a, b, p), whose sign tells which side
+// of the edge from `a` to `b` the point `p` lies on.
+fn edge_side(a: vec2<f32>, b: vec2<f32>, p: vec2<f32>) -> f32 {
+    return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+}
+
+// Premultiplied-alpha coverage. The pipeline blends this over the
+// framebuffer, and because the target is not sRGB, that fixed-function
+// blend is a per-channel sRGB-space mix from the destination to `fg`.
+// The glyph is emitted premultiplied, so a fade scales the color and the
+// coverage together rather than the alpha alone.
+fn glyph_color(in: VsOut) -> vec4<f32> {
     let fade = follow_alpha(in.follow);
     if in.kind == KIND_COLOR {
         let texel = textureSampleLevel(color_atlas, atlas_sampler, in.uv, 0.0);
