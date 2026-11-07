@@ -1036,7 +1036,7 @@ mod tests {
             spinner_phase: 0,
             lsp_servers: &[],
             diff_warm_busy: false,
-            repo_change_counts: None,
+            repo: None,
             hunk_position: None,
             diff_base: None,
             diff_sides: ("", ""),

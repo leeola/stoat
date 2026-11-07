@@ -217,6 +217,11 @@ struct RepoTally {
     tallies: HunkTallies,
     /// The files changed since the revision base, `None` under any other base.
     rev_changed: Option<Vec<PathBuf>>,
+    /// The name the status bar gives HEAD, the branch it is on or its short
+    /// sha when detached. `None` on an unborn branch.
+    head: Option<String>,
+    /// Whether a rebase is paused in the repository.
+    rebasing: bool,
 }
 
 /// The per-buffer bookkeeping that decides when a diff is owed, and what the
@@ -327,6 +332,14 @@ pub(crate) struct DiffState {
     /// view lists everything changed since that revision, a file committed
     /// since and clean in the tree included.
     pub(super) rev_changed: Option<Vec<PathBuf>>,
+    /// The name the status bar gives HEAD as the last tally read it, the branch
+    /// HEAD is on or its short sha when detached.
+    ///
+    /// Read with the tally, since a git re-read that moves HEAD stales the
+    /// tally too.
+    pub(super) repo_head: Option<String>,
+    /// Whether a rebase was paused in the repository at the last tally.
+    pub(super) rebasing: bool,
     /// The in-flight repo-wide tally, held so it is not cancelled before its
     /// answer lands.
     tally_job: Option<Task<Option<RepoTally>>>,
@@ -1087,6 +1100,8 @@ impl DiffState {
                 if let Some(tally) = tally {
                     self.repo_hunk_tallies = Some(tally.tallies);
                     self.rev_changed = tally.rev_changed;
+                    self.repo_head = tally.head;
+                    self.rebasing = tally.rebasing;
                     landed = true;
                 }
                 self.tally_job = None;
@@ -1105,6 +1120,10 @@ impl DiffState {
                 move || {
                     let tally = git_host.discover(&git_root).map(|repo| RepoTally {
                         tallies: repo.hunk_tallies(),
+                        head: repo
+                            .head_branch()
+                            .or_else(|| repo.resolve_rev("HEAD").map(|sha| short_sha(&sha))),
+                        rebasing: repo.rebase_in_progress(),
                         rev_changed: rev.map(|sha| {
                             repo.changed_files_from(&sha)
                                 .into_iter()
@@ -1427,6 +1446,24 @@ pub(crate) fn pair_names(base_path: &Path, path: &Path) -> (String, String) {
 /// base prompt show.
 pub(crate) fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
+}
+
+/// The repository's state as the status bar's repo segment reads it.
+///
+/// The counts are the tally's. `staged` and `unstaged` count the hunks of
+/// tracked files, and `untracked` counts the untracked files apart from them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RepoStatus {
+    /// The branch HEAD is on, or its short sha when detached. `None` on an
+    /// unborn branch.
+    pub(crate) head: Option<String>,
+    /// Hunks the index carries over HEAD.
+    pub(crate) staged: usize,
+    /// Hunks the working tree carries over the index in tracked files.
+    pub(crate) unstaged: usize,
+    pub(crate) untracked: usize,
+    /// Whether a rebase is paused in the repository.
+    pub(crate) rebasing: bool,
 }
 
 /// Where a diff view stands in the repository's review, as the bar names it.
@@ -2305,7 +2342,8 @@ mod tests {
 
         let ws = h.stoat.active_workspace();
         assert_eq!(
-            ws.repo_change_counts(),
+            ws.repo_status()
+                .map(|status| (status.staged, status.unstaged)),
             Some((0, 4)),
             "the totals are the hunks each side carries",
         );

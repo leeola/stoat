@@ -38,7 +38,7 @@ use crate::{
     term_session::{TermId, TermSession, ViewLocation},
     workspace::diff::{
         BaseHighlightCache, ChangedRangesMemo, ChangedRangesScan, DiffBase, DiffLanding, DiffState,
-        PairBase, RevOrigin, WorktreeBase,
+        PairBase, RepoStatus, RevOrigin, WorktreeBase,
     },
 };
 use codegraph::{CodeGraph, FileId};
@@ -1457,23 +1457,31 @@ impl Workspace {
         self.diff.worktree_base
     }
 
-    /// Hunks staged and unstaged across the repo, as `(staged, unstaged)`, or
-    /// `None` before the first diff lands and for a root outside any repo.
+    /// The repository's head, counts, and rebase state as the status bar reads
+    /// them, or `None` before the first diff lands and for a root outside any
+    /// repo.
     ///
     /// Refreshed by the diff pipeline rather than read on demand, since the
-    /// answer costs a walk of every diff in the repository and the status bar
+    /// counts cost a walk of every diff in the repository and the status bar
     /// asks every frame.
-    pub(crate) fn repo_change_counts(&self) -> Option<(usize, usize)> {
-        self.diff
-            .repo_hunk_tallies
-            .as_ref()
-            .map(|tallies| (tallies.staged, tallies.unstaged))
+    pub(crate) fn repo_status(&self) -> Option<RepoStatus> {
+        let tallies = self.diff.repo_hunk_tallies.as_ref()?;
+        // The tally counts each untracked file as one unstaged hunk, and the
+        // bar names the untracked files apart.
+        let untracked = tallies.untracked.len();
+        Some(RepoStatus {
+            head: self.diff.repo_head.clone(),
+            staged: tallies.staged,
+            unstaged: tallies.unstaged.saturating_sub(untracked),
+            untracked,
+            rebasing: self.diff.rebasing,
+        })
     }
 
     /// Hunks each changed file carries against HEAD, sorted by repo-relative
     /// path, or `None` before the first diff lands and outside a repo.
     ///
-    /// The same tally [`Self::repo_change_counts`] reads its totals from, so a
+    /// The same tally [`Self::repo_status`] reads its totals from, so a
     /// list showing per-file counts and the bar showing the totals never
     /// disagree.
     pub(crate) fn repo_hunk_totals(&self) -> Option<&[(PathBuf, usize)]> {

@@ -75,7 +75,7 @@ use crate::{
     toggle::{self, Toggle, ToggleStates},
     workspace::{
         self,
-        diff::{self, HunkPosition},
+        diff::{self, HunkPosition, RepoStatus},
         Workspace, WorkspaceId,
     },
 };
@@ -321,11 +321,11 @@ pub(crate) struct FrameCtx<'a> {
     /// True while a background diff warm runs, driving the focused pane's
     /// transient ` <spinner> diff ` status-bar segment. False when idle.
     pub(crate) diff_warm_busy: bool,
-    /// Hunks staged and unstaged across the repo, which the focused pane's bar
-    /// leads its staged segment with. `None` before the first diff lands and
-    /// outside a repo, which drops the segment back to the focused file's own
-    /// hunk counts.
-    pub(crate) repo_change_counts: Option<(usize, usize)>,
+    /// The repository's head, counts, and rebase state, which the focused
+    /// pane's bar leads its staged segment with. `None` before the first diff
+    /// lands and outside a repo, which drops the segment back to the focused
+    /// file's own hunk counts.
+    pub(crate) repo: Option<&'a RepoStatus>,
     /// Where the focused diff view stands among the repo's changed files and
     /// hunks, which the focused pane's bar names in its staged segment. `None`
     /// when the focused pane shows no diff view, which is what keeps the
@@ -335,7 +335,7 @@ pub(crate) struct FrameCtx<'a> {
     /// one place the walk has nothing behind it.
     pub(crate) hunk_position: Option<HunkPosition>,
     /// What the bar names the workspace's diff base, when that is not the
-    /// working tree. It replaces [`Self::repo_change_counts`], which describes
+    /// working tree. It replaces [`Self::repo`], which describes
     /// a working tree the pane is then not showing.
     pub(crate) diff_base: Option<&'a str>,
     /// The names of the diff's left and right sides, which a diff view's status
@@ -1323,6 +1323,7 @@ pub(crate) fn frame(
         .map(|(path, pair)| (path.to_path_buf(), diff::pair_names(&pair.base_path, path)))
         .collect();
     let held_buffers = ws.held_buffer_labels();
+    let repo_status = ws.repo_status();
     // The hints box over the diff view reads the position too, after the pane
     // loop, where no FrameCtx is left to carry it.
     let hunk_position = diff::repo_hunk_position(ws);
@@ -1354,7 +1355,7 @@ pub(crate) fn frame(
         spinner_phase: app::spinner_phase(stoat.spinner_clock),
         lsp_servers,
         diff_warm_busy,
-        repo_change_counts: ws.repo_change_counts(),
+        repo: repo_status.as_ref(),
         hunk_position,
         diff_base: diff_base_lead.as_deref(),
         diff_sides: (&diff_sides.0, &diff_sides.1),

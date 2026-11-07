@@ -30,7 +30,7 @@ use crate::{
     term_session::{TermId, TermSession},
     theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
-        diff::{self, DiffBase, HunkPosition},
+        diff::{self, DiffBase, HunkPosition, RepoStatus},
         Workspace,
     },
 };
@@ -1792,7 +1792,7 @@ fn status_segments(
             && let Some(segments) = focused_staged_label(
                 status.mark_kind,
                 pair_lead.as_deref().or(frame.diff_base),
-                frame.repo_change_counts,
+                frame.repo,
                 status.staged_counts,
                 frame.hunk_position.as_ref(),
                 (trail_style, theme),
@@ -2142,19 +2142,20 @@ fn focused_editor_path<'a>(
     buffers.path_for(editors.get(*editor_id)?.buffer_id)
 }
 
-/// Statusline label leading with the repo's hunk counts and appending the
-/// focused buffer's, or `None` when neither has anything.
+/// Statusline label leading with the repo segment and appending the focused
+/// buffer's hunk counts, or `None` when neither has anything.
 ///
-/// Both halves count hunks and differ only in scope: `repo` is every changed
-/// file and `file` is the one on screen. The label names them apart rather than
-/// running them together, and a repo with nothing changed still shows while the
-/// focused file has hunks, since a tally the file contradicts is worth seeing.
+/// The repo segment reads the repository as [`repo_segments`] lays it out:
+/// its head, a rebase chip, and its counts, or a clean mark. It shows whenever
+/// a tally has landed, a clean repository included, since `clean` is itself
+/// news. The file's counts are the one on screen, and a tally the file
+/// contradicts still shows beside them, since that is worth seeing.
 ///
-/// With no repo pair the label falls back to the file's counts alone. That
+/// With no repo status the label falls back to the file's counts alone. That
 /// covers a buffer outside a repo and the window before the first diff lands,
-/// where leading with `repo 0 staged` would read as a clean repo.
+/// where leading with a clean mark would misreport the repo.
 ///
-/// A `base_lead` naming a base off the working tree replaces the repo pair
+/// A `base_lead` naming a base off the working tree replaces the repo segment
 /// rather than joining it. The tally counts what git status reports, which
 /// describes a working tree the pane is then not showing. The base always
 /// shows, even for a file with no hunks, since it says what is under review.
@@ -2166,29 +2167,34 @@ fn focused_editor_path<'a>(
 /// nothing behind it. The position rides on a label the counts produced, so a
 /// scope with nothing to count shows nothing at all.
 ///
-/// The file's counts follow the text as two segments, the pencil count of
-/// unstaged hunks in `ui.statusbar.unstaged` and the plus count of staged hunks
-/// in `ui.statusbar.staged`, so each count reads in its own color. A range
+/// The file's counts follow as two segments, the pencil count of unstaged
+/// hunks in `ui.statusbar.unstaged` and the plus count of staged hunks in
+/// `ui.statusbar.staged`, so each count reads in its own color. A range
 /// review's counts keep their words inside the text, `approved / unapproved`,
-/// since the glyphs name git states. The repo pair counts what git status
-/// reports under any base and keeps `staged / unstaged`.
+/// since the glyphs name git states.
 fn focused_staged_label(
     kind: MarkKind,
     base_lead: Option<&str>,
-    repo: Option<(usize, usize)>,
+    repo: Option<&RepoStatus>,
     file: Option<(usize, usize)>,
     position: Option<&HunkPosition>,
     (base_style, theme): (Style, &crate::theme::Theme),
 ) -> Option<Vec<StatusSeg>> {
     let place = position.map(|position| (position.file_at, position.file_total));
-    let StagedBody { text, counts } = staged_label_body(kind, base_lead, repo, file, place)?;
+    let StagedBody { repo, text, counts } = staged_label_body(kind, base_lead, repo, file, place)?;
 
-    let mut segments = Vec::new();
+    let mut segments = match repo {
+        Some(repo) => repo_segments(repo, base_style, theme),
+        None => Vec::new(),
+    };
     if let Some(text) = text {
-        let joint = if counts.is_some() { " \u{b7}" } else { "" };
-        segments.push((format!(" {text}{joint}"), base_style));
+        let lead = if segments.is_empty() { " " } else { " \u{b7} " };
+        segments.push((format!("{lead}{text}"), base_style));
     }
     if let Some((staged, unstaged)) = counts {
+        if !segments.is_empty() {
+            segments.push((" \u{b7}".to_string(), base_style));
+        }
         segments.push((
             format!(" \u{270e}{unstaged}"),
             tinted(
@@ -2215,9 +2221,69 @@ fn focused_staged_label(
     Some(segments)
 }
 
+/// The repo segment of the staged label, as the VcsStatus line reads it, each
+/// piece led by a space.
+///
+/// The head follows the branch glyph, the glyph in `ui.text.dim` and the name
+/// in bold `ui.text`. A `REB` chip follows while a rebase is paused, in the
+/// mode chip's style over `ui.statusline.rebase`'s color. Each count the
+/// repository holds follows in its own color, the staged hunks in
+/// `diff.staged`, the unstaged hunks in `ui.text.muted`, and the untracked
+/// files in `ui.text.dim`. A repository that holds none reads `clean` in
+/// `ui.statusbar.clean` in their place.
+fn repo_segments(
+    repo: &RepoStatus,
+    base_style: Style,
+    theme: &crate::theme::Theme,
+) -> Vec<StatusSeg> {
+    use crate::theme::scope as s;
+    let mut segments = Vec::new();
+    if let Some(head) = &repo.head {
+        let name = tinted(base_style, theme, s::UI_TEXT).add_modifier(Modifier::BOLD);
+        segments.push((
+            " \u{2387} ".to_string(),
+            tinted(base_style, theme, s::UI_TEXT_DIM),
+        ));
+        segments.push((head.clone(), name));
+    }
+    if repo.rebasing {
+        let color = theme.get(s::UI_STATUSLINE_REBASE).fg.unwrap_or(Color::Red);
+        segments.push((" ".to_string(), base_style));
+        segments.push((" REB ".to_string(), theme.get(s::UI_MODE_LABEL).bg(color)));
+    }
+
+    let counts = [
+        (repo.staged, '\u{271a}', "staged", s::DIFF_STAGED),
+        (repo.unstaged, '\u{270e}', "unstaged", s::UI_TEXT_MUTED),
+        (repo.untracked, '?', "untracked", s::UI_TEXT_DIM),
+    ];
+    let held: Vec<StatusSeg> = counts
+        .into_iter()
+        .filter(|&(count, ..)| count > 0)
+        .map(|(count, glyph, word, scope)| {
+            (
+                format!(" {glyph} {count} {word}"),
+                tinted(base_style, theme, scope),
+            )
+        })
+        .collect();
+    match held.is_empty() {
+        true => segments.push((
+            " \u{2713} clean".to_string(),
+            tinted(base_style, theme, s::UI_STATUSBAR_CLEAN),
+        )),
+        false => segments.extend(held),
+    }
+    segments
+}
+
 /// What [`staged_label_body`] answers for [`focused_staged_label`].
-struct StagedBody {
-    /// The unpadded text, or `None` when only the counts show.
+struct StagedBody<'a> {
+    /// The repository's state, which leads the label as its own segments.
+    /// `None` under a base off the working tree and before a tally lands.
+    repo: Option<&'a RepoStatus>,
+    /// The unpadded text after the repo segment, or `None` when only the
+    /// counts show.
     text: Option<String>,
     /// The file's git hunk counts as `(staged, unstaged)`, which follow the
     /// text as glyph segments. `None` for a review, whose counts stay words in
@@ -2225,19 +2291,19 @@ struct StagedBody {
     counts: Option<(usize, usize)>,
 }
 
-/// The text half of [`focused_staged_label`], with the file's git counts that
-/// follow it.
+/// The parts of [`focused_staged_label`] past its styling, with the file's git
+/// counts that follow them.
 ///
 /// `place` is the focused file's `(at, total)` among the changed files. With
-/// it, the text reads `file {at}/{total}` after the repo pair or the base. A
-/// file with no counts keeps its place alone.
-fn staged_label_body(
+/// it, the text reads `file {at}/{total}` after the repo segment or the base.
+/// A file with no counts keeps its place alone.
+fn staged_label_body<'a>(
     kind: MarkKind,
     base_lead: Option<&str>,
-    repo: Option<(usize, usize)>,
+    repo: Option<&'a RepoStatus>,
     file: Option<(usize, usize)>,
     place: Option<(usize, usize)>,
-) -> Option<StagedBody> {
+) -> Option<StagedBody<'a>> {
     let file = file.filter(|&(staged, unstaged)| staged > 0 || unstaged > 0);
     let (counts, worded) = match kind {
         MarkKind::Staged => (file, None),
@@ -2254,38 +2320,37 @@ fn staged_label_body(
         (None, Some(pair)) => Some(format!("file {}", words(pair))),
         (None, None) => None,
     };
-    let joined = |head: String| match &file_part {
-        Some(part) => format!("{head} \u{b7} {part}"),
-        None => head,
-    };
 
     if let Some(lead) = base_lead {
+        let text = match &file_part {
+            Some(part) => format!("{lead} \u{b7} {part}"),
+            None => lead.to_string(),
+        };
         return Some(StagedBody {
-            text: Some(joined(lead.to_string())),
+            repo: None,
+            text: Some(text),
             counts,
         });
     }
 
-    let Some((repo_staged, repo_unstaged)) = repo else {
+    let Some(repo) = repo else {
         let pair = file?;
         return Some(match kind {
             MarkKind::Staged => StagedBody {
+                repo: None,
                 text: None,
                 counts: Some(pair),
             },
             MarkKind::Approved => StagedBody {
+                repo: None,
                 text: Some(words(pair)),
                 counts: None,
             },
         });
     };
-    if repo_staged == 0 && repo_unstaged == 0 && file.is_none() {
-        return None;
-    }
-
-    let repo_part = format!("repo {repo_staged} staged / {repo_unstaged} unstaged");
     Some(StagedBody {
-        text: Some(joined(repo_part)),
+        repo: Some(repo),
+        text: file_part,
         counts,
     })
 }
@@ -2629,7 +2694,7 @@ fn render_image_pane(
 #[cfg(test)]
 mod tests {
     use super::{
-        diff_base_lead, focused_staged_label, paint_status_fallback, split_halves,
+        diff_base_lead, focused_staged_label, paint_status_fallback, repo_segments, split_halves,
         split_side_segments, status_filename, tab_spans, DiffSideColors, DiffSidesColors,
     };
     use crate::{
@@ -2644,7 +2709,7 @@ mod tests {
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         rebase::RebaseState,
         term_session::TermId,
-        workspace::diff::{DiffBase, HunkPosition, WorktreeBase},
+        workspace::diff::{DiffBase, HunkPosition, RepoStatus, WorktreeBase},
         Stoat,
     };
     use lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range};
@@ -3318,11 +3383,30 @@ mod tests {
         h.assert_snapshot("status_bar_diagnostic_badge_warning_color");
     }
 
-    /// The text the staged label's segments read, styles left out.
+    /// The text the staged label's segments read, styles left out, for a repo
+    /// on `main` whose tally holds `repo`'s staged and unstaged hunks.
     fn staged_label(
         kind: MarkKind,
         base_lead: Option<&str>,
         repo: Option<(usize, usize)>,
+        file: Option<(usize, usize)>,
+        position: Option<&HunkPosition>,
+    ) -> Option<String> {
+        let repo = repo.map(|(staged, unstaged)| RepoStatus {
+            head: Some("main".to_string()),
+            staged,
+            unstaged,
+            untracked: 0,
+            rebasing: false,
+        });
+        repo_label(kind, base_lead, repo.as_ref(), file, position)
+    }
+
+    /// The text the staged label's segments read for `repo`, styles left out.
+    fn repo_label(
+        kind: MarkKind,
+        base_lead: Option<&str>,
+        repo: Option<&RepoStatus>,
         file: Option<(usize, usize)>,
         position: Option<&HunkPosition>,
     ) -> Option<String> {
@@ -3375,17 +3459,17 @@ mod tests {
     fn the_staged_label_pairs_the_repo_hunks_with_the_focused_file() {
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((2, 3)), Some((1, 4)), None).as_deref(),
-            Some(" repo 2 staged / 3 unstaged · \u{270e}4 \u{271a}1 "),
+            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · \u{270e}4 \u{271a}1 "),
             "both pairs read side by side"
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((2, 3)), None, None).as_deref(),
-            Some(" repo 2 staged / 3 unstaged "),
+            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged "),
             "a file with no diff map drops its half"
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((2, 3)), Some((0, 0)), None).as_deref(),
-            Some(" repo 2 staged / 3 unstaged "),
+            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged "),
             "and so does a file whose diff map holds no hunks"
         );
         assert_eq!(
@@ -3399,14 +3483,133 @@ mod tests {
             "nothing to say without either"
         );
         assert_eq!(
-            staged_label(MarkKind::Staged, None, Some((0, 0)), Some((0, 0)), None),
-            None,
-            "a clean repo and an unchanged file hide the segment"
+            staged_label(MarkKind::Staged, None, Some((0, 0)), Some((0, 0)), None).as_deref(),
+            Some(" \u{2387} main \u{2713} clean "),
+            "a clean repo says so beside an unchanged file"
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((0, 0)), Some((1, 0)), None).as_deref(),
-            Some(" repo 0 staged / 0 unstaged · \u{270e}0 \u{271a}1 "),
-            "a stale zero tally still shows against a file that has hunks"
+            Some(" \u{2387} main \u{2713} clean · \u{270e}0 \u{271a}1 "),
+            "a stale clean tally still shows against a file that has hunks"
+        );
+    }
+
+    /// The repo segment names a detached HEAD by its short sha, counts the
+    /// untracked files, and carries a `REB` chip while a rebase is paused. A
+    /// repo with no head name leads with its counts.
+    #[test]
+    fn the_repo_segment_names_the_head_untracked_files_and_a_rebase() {
+        let status = |head: Option<&str>, untracked: usize, rebasing: bool| RepoStatus {
+            head: head.map(str::to_string),
+            staged: 0,
+            unstaged: 1,
+            untracked,
+            rebasing,
+        };
+        let label = |repo: RepoStatus| repo_label(MarkKind::Staged, None, Some(&repo), None, None);
+        assert_eq!(
+            [
+                label(status(Some("abc1234"), 2, false)),
+                label(status(Some("main"), 0, true)),
+                label(status(None, 0, false)),
+            ],
+            [
+                Some(" \u{2387} abc1234 \u{270e} 1 unstaged ? 2 untracked ".to_string()),
+                Some(" \u{2387} main  REB  \u{270e} 1 unstaged ".to_string()),
+                Some(" \u{270e} 1 unstaged ".to_string()),
+            ],
+        );
+    }
+
+    /// Each piece of the repo segment reads in its own color. The glyph is dim,
+    /// the head bold, the rebase chip on the rebase color, and each count in
+    /// its scope.
+    #[test]
+    fn the_repo_segment_colors_each_piece() {
+        use ratatui::style::{Color, Modifier, Style};
+
+        let h = Stoat::test();
+        let theme = &*h.stoat.theme;
+        let repo = RepoStatus {
+            head: Some("main".to_string()),
+            staged: 1,
+            unstaged: 2,
+            untracked: 3,
+            rebasing: true,
+        };
+        let fg = |scope: &str| theme.get(scope).fg;
+        let segments: Vec<(String, Option<Color>, Option<Color>, bool)> =
+            repo_segments(&repo, Style::default(), theme)
+                .into_iter()
+                .map(|(text, style)| {
+                    let bold = style.add_modifier.contains(Modifier::BOLD);
+                    (text, style.fg, style.bg, bold)
+                })
+                .collect();
+        let rebase = fg(crate::theme::scope::UI_STATUSLINE_REBASE);
+        let chip = fg(crate::theme::scope::UI_MODE_LABEL);
+        assert_eq!(
+            segments,
+            [
+                (
+                    " \u{2387} ".to_string(),
+                    fg(crate::theme::scope::UI_TEXT_DIM),
+                    None,
+                    false
+                ),
+                (
+                    "main".to_string(),
+                    fg(crate::theme::scope::UI_TEXT),
+                    None,
+                    true
+                ),
+                (" ".to_string(), None, None, false),
+                (" REB ".to_string(), chip, rebase, true),
+                (
+                    " \u{271a} 1 staged".to_string(),
+                    fg(crate::theme::scope::DIFF_STAGED),
+                    None,
+                    false
+                ),
+                (
+                    " \u{270e} 2 unstaged".to_string(),
+                    fg(crate::theme::scope::UI_TEXT_MUTED),
+                    None,
+                    false
+                ),
+                (
+                    " ? 3 untracked".to_string(),
+                    fg(crate::theme::scope::UI_TEXT_DIM),
+                    None,
+                    false
+                ),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_clean_repo_reads_in_the_clean_color() {
+        use ratatui::style::Style;
+
+        let h = Stoat::test();
+        let theme = &*h.stoat.theme;
+        let clean = RepoStatus {
+            head: None,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            rebasing: false,
+        };
+        let segments: Vec<_> = repo_segments(&clean, Style::default(), theme)
+            .into_iter()
+            .map(|(text, style)| (text, style.fg))
+            .collect();
+        assert_eq!(
+            segments,
+            [(
+                " \u{2713} clean".to_string(),
+                theme.get(crate::theme::scope::UI_STATUSBAR_CLEAN).fg
+            )],
         );
     }
 
@@ -3491,7 +3694,7 @@ mod tests {
                 Some(&at_second_file)
             )
             .as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk 2/7 "),
+            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk 2/7 "),
             "the file's place leads its counts, and the hunk position closes the label"
         );
         assert_eq!(
@@ -3503,7 +3706,7 @@ mod tests {
                 Some(&at_second_file)
             )
             .as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 2/4 · hunk 2/7 "),
+            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · hunk 2/7 "),
             "a file with no hunks keeps its place and drops its counts"
         );
         assert_eq!(
@@ -3515,7 +3718,7 @@ mod tests {
                 Some(&hunk_position(2, 4, None, 7))
             )
             .as_deref(),
-            Some(" repo 2 staged / 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk -/7 "),
+            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk -/7 "),
             "a cursor above the first hunk stands at no position"
         );
         assert_eq!(
@@ -3609,7 +3812,7 @@ mod tests {
             [
                 Some(" diff vs main base0 · file 1 approved / 4 unapproved ".to_string()),
                 Some(
-                    " repo 2 staged / 3 unstaged · file 2/4 · 1 approved / 4 unapproved · hunk 1/5 "
+                    " \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · 1 approved / 4 unapproved · hunk 1/5 "
                         .to_string()
                 ),
                 Some(" 1 approved / 4 unapproved ".to_string()),
@@ -3797,8 +4000,51 @@ mod tests {
         assert!(
             rendered
                 .replace('─', " ")
-                .contains("repo 1 staged / 1 unstaged · \u{270e}1 \u{271a}1"),
+                .contains("\u{271a} 1 staged \u{270e} 1 unstaged · \u{270e}1 \u{271a}1"),
             "statusline reports the repo's files and the focused file's hunks:\n{rendered}"
+        );
+    }
+
+    /// The repo segment names the branch and reads `clean` for a tree with no
+    /// change, and it carries a `REB` chip while a rebase is paused. A detached
+    /// HEAD reads as its short sha, and an untracked file counts apart from the
+    /// unstaged hunks.
+    #[test]
+    fn statusline_names_the_branch_and_a_clean_tree() {
+        let row = |branch: Option<&str>, rebasing: bool, untracked: bool| {
+            let mut h = crate::test_harness::TestHarness::with_size(80, 12);
+            h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+            h.fake_fs().insert_file(Path::new("/repo/f.txt"), b"a\n");
+            {
+                let mut repo = h.fake_git().add_repo("/repo");
+                repo.commit("a1000000", &[("f.txt", "a\n")])
+                    .head_file("f.txt", "a\n")
+                    .index_file("f.txt", "a\n")
+                    .set_rebase_in_progress(rebasing);
+                if let Some(branch) = branch {
+                    repo.set_head_branch(branch);
+                }
+                if untracked {
+                    repo.untracked("new.txt");
+                }
+            }
+            h.stoat.set_diff_warm_auto(true);
+            h.open_file(Path::new("/repo/f.txt"));
+            h.settle_diff_jobs();
+            let row = bar_row(&h.render_composited()).replace('\u{2500}', " ");
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        assert_eq!(
+            [
+                row(Some("main"), false, false),
+                row(Some("main"), true, false),
+                row(None, false, true),
+            ],
+            [
+                "NOR repo f.txt \u{2387} main \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main REB \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} a100000 ? 1 untracked 1:1",
+            ],
         );
     }
 
@@ -3842,12 +4088,12 @@ mod tests {
     /// while a message it leaves no room for is up. The two follow reports
     /// differ only in their last word, which a cut to the leftover room drops.
     ///
-    /// The row is 70 cells wide, so the room left of the summary holds
+    /// The row is 55 cells wide, so the room left of the summary holds
     /// `saved` and not `follow changes off`.
     #[test]
     fn the_staged_summary_gives_way_to_a_message_it_leaves_no_room_for() {
         for stoatty in [true, false] {
-            let mut h = crate::test_harness::TestHarness::with_size(70, 12);
+            let mut h = crate::test_harness::TestHarness::with_size(55, 12);
             h.stoat.stoatty = stoatty;
             h.stage_index_scenario(
                 "/repo",
@@ -3868,7 +4114,7 @@ mod tests {
             assert_eq!(
                 [bar("saved"), bar("follow changes off")],
                 [
-                    "NOR repo f.txt saved repo 0 staged / 1 unstaged · \u{270e}1 \u{271a}1 1:1",
+                    "NOR repo f.txt saved \u{270e} 1 unstaged · \u{270e}1 \u{271a}1 1:1",
                     "NOR repo f.txt follow changes off 1:1",
                 ],
                 "stoatty {stoatty}",

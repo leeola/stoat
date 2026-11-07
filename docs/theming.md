@@ -279,6 +279,8 @@ The typed UI scopes, by group (syntax scopes are open-ended):
   and the tab bar. A theme that leaves it unset draws `ui.border.inactive`.
 - `ui.statusbar.unstaged`, `ui.statusbar.staged` -- the status bar's counts of
   the focused file's unstaged and staged hunks.
+- `ui.statusbar.clean` -- the status bar's clean mark, which its repo segment
+  shows when the repository holds no staged, unstaged, or untracked change.
 - `ui.tabbar.toggle.active`, `ui.tabbar.toggle.inactive` -- the `files` and
   `changes` chips at the right of the tab bar while a diff view or a changes
   view has the focus, the chip of the focused view's layout active. A chip

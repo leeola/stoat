@@ -884,6 +884,9 @@ pub mod scope {
     /// bar. [`UI_STATUSBAR_STAGED`] is its sibling for the staged count.
     pub const UI_STATUSBAR_UNSTAGED: &str = "ui.statusbar.unstaged";
     pub const UI_STATUSBAR_STAGED: &str = "ui.statusbar.staged";
+    /// The repo segment's mark that the working tree, the index, and the
+    /// untracked files hold no change.
+    pub const UI_STATUSBAR_CLEAN: &str = "ui.statusbar.clean";
     pub const UI_MODE_LABEL: &str = "ui.mode_label";
 
     pub const UI_STATUSLINE_NORMAL: &str = "ui.statusline.normal";

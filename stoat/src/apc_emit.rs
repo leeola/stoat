@@ -431,6 +431,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         .map(|(path, pair)| (path.to_path_buf(), diff::pair_names(&pair.base_path, path)))
         .collect();
     let held_buffers = ws.held_buffer_labels();
+    let repo_status = ws.repo_status();
 
     let frame = crate::render::FrameCtx {
         workspace_name: &workspace_name,
@@ -455,7 +456,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         spinner_phase: 0,
         lsp_servers: &[],
         diff_warm_busy: false,
-        repo_change_counts: ws.repo_change_counts(),
+        repo: repo_status.as_ref(),
         hunk_position: diff::repo_hunk_position(ws),
         diff_base: diff_base_lead.as_deref(),
         diff_sides: (&diff_sides.0, &diff_sides.1),
@@ -1474,7 +1475,7 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
             spinner_phase: 0,
             lsp_servers: &[],
             diff_warm_busy: false,
-            repo_change_counts: None,
+            repo: None,
             hunk_position: None,
             diff_base: None,
             diff_sides: ("", ""),

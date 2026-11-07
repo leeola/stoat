@@ -117,6 +117,7 @@ theme default_dark {
     ui.statusbar.separator.fg = muted;
     ui.statusbar.unstaged.fg  = accent;
     ui.statusbar.staged.fg    = info;
+    ui.statusbar.clean.fg     = success;
 
     ui.tabbar.active       = { fg: text, bg: muted };
     ui.tabbar.inactive     = { fg: dim, bg: subtle };
