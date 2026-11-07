@@ -1068,6 +1068,152 @@ fn diagnostic_popover_emits_a_popover_frame_inside_stoatty() {
     );
 }
 
+/// The popover a warning under the cursor emits, painted under `theme`.
+fn warning_popover(
+    theme: Option<crate::theme::Theme>,
+    diagnostic: lsp_types::Diagnostic,
+) -> (command::PopoverCommand, Arc<crate::theme::Theme>) {
+    use stoatty_protocol::command::Command;
+
+    let mut h = Stoat::test();
+    if let Some(theme) = theme {
+        h.stoat.theme = Arc::new(theme);
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/diag-popover-header");
+    let path = root.join("a.txt");
+    h.fake_fs().insert_file(&path, b"let x = 1;\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+    h.settle();
+    // A span covering the start, so the cursor at offset zero sits inside it.
+    let span = lsp_types::Range {
+        start: lsp_types::Position {
+            line: 0,
+            character: 0,
+        },
+        end: lsp_types::Position {
+            line: 0,
+            character: 5,
+        },
+    };
+    h.seed_diagnostics(
+        path,
+        vec![lsp_types::Diagnostic {
+            range: span,
+            severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+            ..diagnostic
+        }],
+    );
+
+    let mut buf = Buffer::empty(h.stoat.size());
+    app::paint_frame(&mut h.stoat, &mut buf);
+    emit_apc_scene(&mut h.stoat);
+    let popover = drain_apc(&mut rx)
+        .into_iter()
+        .find_map(|command| match command {
+            Command::Popover(popover) => Some(popover),
+            _ => None,
+        })
+        .expect("the warning under the cursor draws a popover");
+    (popover, h.stoat.theme.clone())
+}
+
+/// The popover reads as the design's overlay. A header row names the
+/// diagnostic in the severity color at bold weight and gives its severity at
+/// the right in the muted color, over the message in the dim text color, in
+/// the `ui.popover` box.
+#[test]
+fn the_diagnostic_popover_heads_its_message_with_its_name_and_severity() {
+    use crate::{render::paint::style_rgb as rgb, theme::scope as s};
+    use stoatty_protocol::command::PopoverSpan;
+
+    let (popover, theme) = warning_popover(
+        None,
+        lsp_types::Diagnostic {
+            source: Some("clippy".into()),
+            code: Some(lsp_types::NumberOrString::String(
+                "clippy::clone_on_copy".into(),
+            )),
+            message: "using `clone` on type `Rect`".into(),
+            ..Default::default()
+        },
+    );
+
+    let fg = |scope| rgb(theme.get(scope).fg).expect("the shipped theme colors it");
+    let box_style = theme
+        .try_get(s::UI_POPOVER)
+        .expect("the shipped theme sets the box");
+    assert_eq!(
+        (
+            popover.content.as_str(),
+            &popover.spans[..],
+            [popover.fill, popover.border, popover.content_fg],
+            [popover.width, popover.height],
+        ),
+        (
+            "  clippy::clone_on_copy  warning\n  using `clone` on type `Rect`",
+            &[
+                PopoverSpan {
+                    line: 0,
+                    start: 2,
+                    len: 21,
+                    fg: fg(s::UI_DIAGNOSTIC_WARNING),
+                    bold: true,
+                },
+                PopoverSpan {
+                    line: 0,
+                    start: 25,
+                    len: 7,
+                    fg: fg(s::UI_TEXT_MUTED),
+                    bold: false,
+                },
+            ][..],
+            [
+                rgb(box_style.bg).expect("a box fill"),
+                rgb(box_style.fg).expect("a box border"),
+                fg(s::UI_TEXT_DIM),
+            ],
+            [34, 4],
+        ),
+    );
+}
+
+/// A theme without `ui.popover` keeps the box a shade darker than the editor
+/// with a border in the severity color. A line past the popover's width clips
+/// there, and a diagnostic with no source or code heads with its severity
+/// alone.
+#[test]
+fn a_theme_without_the_popover_scope_keeps_the_darkened_box() {
+    let (popover, _) = warning_popover(
+        Some(rgb_diagnostic_theme()),
+        lsp_types::Diagnostic {
+            message: "a".repeat(70),
+            ..Default::default()
+        },
+    );
+
+    let yellow = [255, 255, 0];
+    assert_eq!(
+        (
+            popover.content,
+            popover
+                .spans
+                .iter()
+                .map(|span| (span.start, span.len, span.fg))
+                .collect::<Vec<_>>(),
+            [popover.fill, popover.border, popover.content_fg],
+        ),
+        (
+            format!("  {:49}warning\n  {}", "", "a".repeat(56)),
+            vec![(2, 0, yellow), (51, 7, [96, 96, 96])],
+            [[32, 36, 42], yellow, yellow],
+        ),
+    );
+}
+
 #[test]
 fn pane_display_mode_renders_a_bold_digit_badge_per_unfocused_pane() {
     use stoatty_protocol::command::Command;

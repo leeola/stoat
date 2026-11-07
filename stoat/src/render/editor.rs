@@ -49,7 +49,7 @@ use stoat_widgets::{
     popover::Popover,
     ApcScene,
 };
-use stoatty_protocol::command::IconKind;
+use stoatty_protocol::command::{IconKind, PopoverSpan};
 
 /// Columns reserved on a pane's right edge for the minimap strip, matching the
 /// width the terminal's GPU minimap pass paints there.
@@ -80,6 +80,9 @@ pub(super) const MAX_UNWRAPPED_COLUMNS: u32 = 4096;
 /// The design sets the message 24 px past the text. At the 13 px face the
 /// design draws with, three cells cover that distance.
 const EOL_MESSAGE_GAP: u32 = 3;
+
+/// Characters a diagnostic popover line holds before it clips.
+const POPOVER_COLUMNS: usize = 56;
 
 /// Narrowest pane, in columns, that still reserves a minimap strip.
 ///
@@ -588,8 +591,7 @@ pub(crate) fn render_editor_with_overlay(
                     scene,
                     buf,
                     diag,
-                    severity_color(sev, colors),
-                    darken(bg),
+                    &popover_colors(theme, severity_color(sev, colors), bg),
                     anchor_col,
                     anchor_row,
                     content_area,
@@ -2690,11 +2692,27 @@ fn clip_chars(s: &str, max: usize) -> &str {
     }
 }
 
+/// The colors a diagnostic popover draws in.
+struct PopoverColors {
+    fill: [u8; 3],
+    border: [u8; 3],
+    /// The message lines.
+    text: [u8; 3],
+    /// The severity word at the right of the header.
+    muted: [u8; 3],
+    /// The header's name for the diagnostic, and the icon beside it.
+    severity: [u8; 3],
+}
+
 /// Render `diag` as a floating popover anchored at `(anchor_col, anchor_row)`,
 /// with a severity icon in its first cell. Returns whether it rendered.
 ///
-/// The content is the first four message lines, each clipped to 40 columns. The
-/// box is sized to fit and placed by [`popover_rect_avoiding`] so it never
+/// A header row names the diagnostic by [`popover_title`] in the severity
+/// color at bold weight, with the severity word at its right in the muted
+/// color. The first four message lines follow in the text color. Every line
+/// clips at [`POPOVER_COLUMNS`] characters.
+///
+/// The box is sized to fit and placed by [`popover_rect_avoiding`] so it never
 /// covers `cursor_cell`. A message with no text, or a popover with nowhere to
 /// go that clears the cursor, draws nothing.
 #[allow(clippy::too_many_arguments)]
@@ -2702,8 +2720,7 @@ fn render_diagnostic_popover(
     scene: &mut ApcScene,
     buf: &mut Buffer,
     diag: &lsp_types::Diagnostic,
-    color: [u8; 3],
-    fill: [u8; 3],
+    colors: &PopoverColors,
     anchor_col: u16,
     anchor_row: u16,
     pane: Rect,
@@ -2713,23 +2730,53 @@ fn render_diagnostic_popover(
         .message
         .lines()
         .take(4)
-        .map(|l| clip_chars(l, 40))
+        .map(|l| clip_chars(l, POPOVER_COLUMNS))
         .collect();
     if lines.iter().all(|l| l.is_empty()) {
         return false;
     }
-    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+
+    let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+    let word = severity_word(sev);
+    // Two blank cells at least keep the name off the severity word.
+    let title = popover_title(diag);
+    let title = clip_chars(&title, POPOVER_COLUMNS.saturating_sub(word.len() + 2));
+    let title_len = title.chars().count();
+    let longest = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .chain([title_len + 2 + word.len()])
+        .max()
+        .unwrap_or(0);
+
     // Prefix each line with the icon cell and a one-cell gap. The box is still
     // sized from the unprefixed longest line, so w and h stay unchanged and the
     // icon cell falls inside the one-cell content inset.
-    let content = lines
-        .iter()
-        .map(|line| format!("  {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let gap = longest - title_len - word.len();
+    let mut content = format!("  {title}{:gap$}{word}", "");
+    for line in &lines {
+        content.push_str("\n  ");
+        content.push_str(line);
+    }
+    let spans = [
+        PopoverSpan {
+            line: 0,
+            start: 2,
+            len: title_len as u16,
+            fg: colors.severity,
+            bold: true,
+        },
+        PopoverSpan {
+            line: 0,
+            start: (2 + longest - word.len()) as u16,
+            len: word.len() as u16,
+            fg: colors.muted,
+            bold: false,
+        },
+    ];
 
     let w = (longest as u16).saturating_add(4);
-    let h = (lines.len() as u16).saturating_add(2);
+    let h = (lines.len() as u16).saturating_add(3);
     let Some(rect) = popover_rect_avoiding(anchor_col, anchor_row, w, h, pane, cursor_cell) else {
         return false;
     };
@@ -2737,21 +2784,20 @@ fn render_diagnostic_popover(
         return false;
     }
 
-    let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
     Popover {
-        fill,
-        border: color,
-        content_fg: color,
+        fill: colors.fill,
+        border: colors.border,
+        content_fg: colors.text,
         scale: 1,
         offset: [3, 6],
         bold: false,
         content: &content,
-        spans: &[],
+        spans: &spans,
     }
     .render(rect, buf, scene);
     Icon {
         kind: icon_kind(sev),
-        color,
+        color: colors.severity,
         size: 1,
         offset: [3, 6],
     }
@@ -2766,6 +2812,62 @@ fn render_diagnostic_popover(
         scene,
     );
     true
+}
+
+/// The popover colors `theme` gives a diagnostic of `severity` color over an
+/// editor background of `editor_bg`.
+///
+/// A theme without `ui.popover` fills the box a shade darker than the editor
+/// and borders it in the severity color. Text that the theme leaves without an
+/// RGB color takes the severity color.
+fn popover_colors(theme: &Theme, severity: [u8; 3], editor_bg: [u8; 3]) -> PopoverColors {
+    let popover = theme.try_get(crate::theme::scope::UI_POPOVER);
+    let text = style_rgb(theme.get(crate::theme::scope::UI_TEXT_DIM).fg).unwrap_or(severity);
+    PopoverColors {
+        fill: popover
+            .and_then(|style| style_rgb(style.bg))
+            .unwrap_or_else(|| darken(editor_bg)),
+        border: popover
+            .and_then(|style| style_rgb(style.fg))
+            .unwrap_or(severity),
+        text,
+        muted: style_rgb(theme.get(crate::theme::scope::UI_TEXT_MUTED).fg).unwrap_or(text),
+        severity,
+    }
+}
+
+/// The name a diagnostic's popover header gives it, from its source and code.
+///
+/// The two join as `source::code`, unless the code already leads with the
+/// source that way, as a clippy lint's code does. A diagnostic with one of the
+/// two shows that one, and one with neither shows no name.
+fn popover_title(diag: &lsp_types::Diagnostic) -> String {
+    let code = diag.code.as_ref().map(|code| match code {
+        lsp_types::NumberOrString::Number(number) => number.to_string(),
+        lsp_types::NumberOrString::String(text) => text.clone(),
+    });
+    match (diag.source.as_deref(), code) {
+        (Some(source), Some(code))
+            if code
+                .strip_prefix(source)
+                .is_some_and(|rest| rest.starts_with("::")) =>
+        {
+            code
+        },
+        (Some(source), Some(code)) => format!("{source}::{code}"),
+        (Some(source), None) => source.to_owned(),
+        (None, code) => code.unwrap_or_default(),
+    }
+}
+
+/// The word a popover header names `sev` by.
+fn severity_word(sev: DiagnosticSeverity) -> &'static str {
+    match sev {
+        DiagnosticSeverity::WARNING => "warning",
+        DiagnosticSeverity::INFORMATION => "info",
+        DiagnosticSeverity::HINT => "hint",
+        _ => "error",
+    }
 }
 
 /// Paint `style` over every character cell in the buffer byte range `range`,
@@ -3040,7 +3142,9 @@ mod tests {
         theme::scope as s,
         Stoat,
     };
-    use lsp_types::{Diagnostic, DiagnosticSeverity, DiagnosticTag, Position, Range};
+    use lsp_types::{
+        Diagnostic, DiagnosticSeverity, DiagnosticTag, NumberOrString, Position, Range,
+    };
     use ratatui::{
         buffer::Buffer,
         layout::Rect,
@@ -5757,6 +5861,40 @@ mod tests {
         assert_eq!(super::darken([0, 100, 200]), [0, 82, 164]);
     }
 
+    /// A popover names a diagnostic `source::code`, the code alone when it
+    /// already leads with its source and `::`, or whichever of the two it has.
+    #[test]
+    fn a_popover_title_joins_source_and_code() {
+        let titled = |source: Option<&str>, code: Option<NumberOrString>| {
+            super::popover_title(&Diagnostic {
+                source: source.map(String::from),
+                code,
+                ..Default::default()
+            })
+        };
+        let text = |code: &str| Some(NumberOrString::String(code.into()));
+        assert_eq!(
+            [
+                titled(Some("rustc"), text("E0308")),
+                titled(Some("clippy"), text("clippy::clone_on_copy")),
+                titled(Some("clip"), text("clippy::x")),
+                titled(Some("pyright"), Some(NumberOrString::Number(2304))),
+                titled(Some("rust-analyzer"), None),
+                titled(None, text("E0425")),
+                titled(None, None),
+            ],
+            [
+                "rustc::E0308",
+                "clippy::clone_on_copy",
+                "clip::clippy::x",
+                "pyright::2304",
+                "rust-analyzer",
+                "E0425",
+                "",
+            ],
+        );
+    }
+
     #[test]
     fn clip_chars_respects_utf8_boundaries() {
         assert_eq!(super::clip_chars("hello", 3), "hel");
@@ -6538,22 +6676,27 @@ mod tests {
     }
 
     /// The popover shows the diagnostic under the cursor, so its message prints
-    /// on no line, while another line keeps its own.
+    /// on no line, while another line keeps its own. The other line sits below
+    /// the popover box, whose cells cover the rows under the cursor.
     #[test]
     fn the_popover_diagnostic_prints_on_no_line() {
         let mut h = Stoat::test();
-        let path = open_settled(&mut h, "/diag-eol-popover", b"let x = 1;\nlet y = 2;\n");
+        let path = open_settled(
+            &mut h,
+            "/diag-eol-popover",
+            b"let x = 1;\n\n\n\n\n\nlet y = 2;\n",
+        );
         h.seed_diagnostics(
             path,
             vec![
                 message_diag((0, 0), (0, 3), DiagnosticSeverity::ERROR, "bad"),
-                message_diag((1, 4), (1, 5), DiagnosticSeverity::WARNING, "unused `y`"),
+                message_diag((6, 4), (6, 5), DiagnosticSeverity::WARNING, "unused `y`"),
             ],
         );
 
         let buf = h.stoat.render();
         assert_eq!(
-            [(0, "let x = 1;"), (1, "2;")].map(|(y, text)| tail_after(&buf, y, text)),
+            [(0, "let x = 1;"), (6, "2;")].map(|(y, text)| tail_after(&buf, y, text)),
             [Some(""), Some("unused `y`")].map(|tail| tail.map(String::from)),
         );
     }

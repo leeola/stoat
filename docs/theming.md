@@ -213,6 +213,12 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `ui.surface.raised` -- the fill of a row raised inside a floating box, such
   as the hover popup's footer of goto keys. A theme that leaves it unset
   fills the row with the box's own fill.
+- `ui.popover` -- the diagnostic popover's box (background the fill,
+  foreground the border). Its header names the diagnostic in the severity
+  color and its severity in `ui.text.muted`, over a message in `ui.text.dim`.
+  A theme that leaves the background unset fills the box a shade darker than
+  the editor background, and one that leaves the foreground unset borders it
+  in the severity color.
 - `ui.text`, `ui.text.muted`, `ui.text.dim`, `ui.text.disabled` -- body text at
   descending emphasis.
 - `ui.cursor`, `ui.cursor.input` -- the block cursor in a buffer and in an input

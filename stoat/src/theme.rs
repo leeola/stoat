@@ -737,6 +737,10 @@ pub mod scope {
     pub const UI_SURFACE_CHROME: &str = "ui.surface.chrome";
     pub const UI_SURFACE_OVERLAY: &str = "ui.surface.overlay";
     pub const UI_SURFACE_RAISED: &str = "ui.surface.raised";
+
+    /// The diagnostic popover's box, the background its fill and the foreground
+    /// its border.
+    pub const UI_POPOVER: &str = "ui.popover";
     pub const UI_TEXT: &str = "ui.text";
     pub const UI_TEXT_MUTED: &str = "ui.text.muted";
     pub const UI_TEXT_DIM: &str = "ui.text.dim";

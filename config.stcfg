@@ -47,6 +47,7 @@ theme default_dark {
     let muted   = dark_gray;
     let subtle  = "#333842";
     let selection = "#3e4452";
+    let popover   = "#20242a";
     let dim     = gray;
     let text    = white;
 
@@ -58,6 +59,7 @@ theme default_dark {
     ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
     ui.search.match = { fg: black, bg: warning };
     ui.highlight.read = { bg: subtle };
+    ui.popover.bg = popover;
     ui.highlight.write = { bg: subtle, modifiers: [underlined] };
 
     ui.border.focused.fg = accent;
@@ -284,6 +286,7 @@ theme ermine_night inherits default_dark {
     ui.background.bg      = base;
     ui.surface.chrome.bg  = chrome;
     ui.surface.overlay    = { fg: strong, bg: overlay };
+    ui.popover            = { fg: strong, bg: overlay };
     ui.surface.raised.bg  = raised;
     ui.text.disabled.fg   = disabled;
     ui.border.focused.fg  = accent;
