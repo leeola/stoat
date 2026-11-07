@@ -53,6 +53,10 @@ pub const FIXTURES: &[(&str, &str)] = &[
         "the rust-lsp crate plus a live staged and unstaged rust diff",
     ),
     (
+        "read-only",
+        "a gzipped markdown changelog, which opens read-only",
+    ),
+    (
         "walkthrough",
         "a four-file crate with a six-stop tour for the walkthrough player",
     ),

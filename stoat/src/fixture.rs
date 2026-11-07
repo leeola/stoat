@@ -14,10 +14,11 @@
 //! Gated behind the non-default `fixture` feature so production builds carry no
 //! test-scaffolding code.
 
+use flate2::{write::GzEncoder, Compression};
 use git2::{build::CheckoutBuilder, Commit, Repository, RepositoryInitOptions, Signature, Time};
 use snafu::{ResultExt, Snafu};
 use std::{
-    io,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -327,6 +328,71 @@ fn emphasize(text: &str) -> String {
 
 const RUST_DIFF_GITIGNORE: &str = "/target\n";
 
+/// The markdown changelog the `read-only` fixture commits gzipped, long enough
+/// to fill every row of a 50-row scene.
+const READ_ONLY_CHANGELOG: &str = "\
+# 3.2.1 (2024-09-08)
+
+This is a patch release that fixes a crash when an index file is cut short
+mid-write. Every user of 3.2.0 gets the fix with the upgrade.
+
+Bug fixes:
+
+* [BUG #412](https://example.invalid/brine/issues/412):
+  Fix a crash when `brine verify` reads a truncated index.
+* [BUG #409](https://example.invalid/brine/issues/409):
+  Keep file modes when `brine pack` copies an executable.
+
+Miscellaneous:
+
+* Drop the `legacy-hash` feature, which no build has used since 2.0.
+
+
+# 3.2.0 (2024-06-14)
+
+This is a minor release with new flags and a faster archive walk. The walk
+skips directories that an ignore file excludes before it opens them.
+
+Feature enhancements:
+
+* Add `--since` to `brine log`, which filters entries by date.
+* [FEATURE #377](https://example.invalid/brine/issues/377):
+  Read ignore rules from `.brineignore` in every parent directory.
+* [FEATURE #381](https://example.invalid/brine/pull/381):
+  Print sizes with binary prefixes, such as `41 KiB`.
+
+Bug fixes:
+
+* [BUG #366](https://example.invalid/brine/issues/366):
+  Stop `brine diff` from reading a symlink target twice.
+* [BUG #371](https://example.invalid/brine/issues/371):
+  Report a missing archive as an error, not as an empty one.
+
+
+# 3.1.0 (2024-02-02)
+
+This release adds compressed archives. Each entry is one gzip member, so a
+reader that knows gzip but not brine reads every entry.
+
+Feature enhancements:
+
+* Add `--compress` to `brine pack`, with levels from 1 to 9.
+* [FEATURE #340](https://example.invalid/brine/issues/340):
+  Read archives that an older brine wrote without a checksum.
+
+Bug fixes:
+
+* [BUG #352](https://example.invalid/brine/issues/352):
+  Fix the progress bar, which counted directories as files.
+
+
+# 3.0.0 (2023-11-20)
+
+This is a major release. The index format changes, and `brine migrate`
+converts an index from 2.x. Read the upgrade notes before you upgrade,
+because brine 2.x does not open a 3.x index.
+";
+
 /// Failure materializing a fixture repository.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -391,6 +457,8 @@ pub enum FixtureError {
 ///   change to `src/util.rs` and an unstaged change to `src/main.rs`, with every layer (HEAD,
 ///   index, worktree) compiling so `cargo build` stays green and rust-analyzer runs against a dirty
 ///   tree.
+/// - `read-only`: one commit of `CHANGELOG.md.gz`, a 60-line markdown changelog compressed with
+///   gzip, so the file opens read-only and its pane draws the read-only ring and label.
 /// - `walkthrough`: a four-file cargo crate committed with a six-stop tour under
 ///   `.stoat/walkthroughs/tour.json`, so the walkthrough player opens on real code. The tour covers
 ///   a one-line focus, a many-line focus, a step that glides more than a screen, several
@@ -448,6 +516,7 @@ pub fn materialize(name: &str, dest: &Path) -> Result<(), FixtureError> {
         "rebase" => materialize_rebase(dest),
         "rust-lsp" => materialize_rust_lsp(dest),
         "rust-diff" => materialize_rust_diff(dest),
+        "read-only" => materialize_read_only(dest),
         "walkthrough" => walkthrough::tour::materialize(dest),
         "walkthrough-marks" => walkthrough::marks::materialize(dest),
         "walkthrough-card" => walkthrough::card::materialize(dest),
@@ -608,6 +677,23 @@ fn materialize_rust_diff(dest: &Path) -> Result<(), FixtureError> {
     Ok(())
 }
 
+fn materialize_read_only(dest: &Path) -> Result<(), FixtureError> {
+    let name = "CHANGELOG.md.gz";
+    let changelog = {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder
+            .write_all(READ_ONLY_CHANGELOG.as_bytes())
+            .and_then(|()| encoder.finish())
+            .context(IoSnafu {
+                path: dest.join(name),
+            })?
+    };
+
+    let mut repo = FixtureRepo::init(dest)?;
+    repo.commit_bytes("initial commit", &[(name, &changelog)])?;
+    Ok(())
+}
+
 /// Builder over a real git2 repository, modeled on the `TestRepo` helper used
 /// by the integration tests but authoring every commit with a deterministic
 /// signature so SHAs reproduce. Method vocabulary mirrors the in-memory
@@ -644,7 +730,25 @@ impl FixtureRepo {
             self.write(name, content)?;
             self.stage(name)?;
         }
+        self.commit_staged(message)
+    }
 
+    /// [`Self::commit`] for files whose content is bytes, such as a gzip file.
+    fn commit_bytes(
+        &mut self,
+        message: &str,
+        files: &[(&str, &[u8])],
+    ) -> Result<&mut Self, FixtureError> {
+        for (name, content) in files {
+            self.write(name, content)?;
+            self.stage(name)?;
+        }
+        self.commit_staged(message)
+    }
+
+    /// Commit the index's tree with a pinned signature, parented off the
+    /// current HEAD when there is one.
+    fn commit_staged(&mut self, message: &str) -> Result<&mut Self, FixtureError> {
         let time = Time::new(FIXTURE_EPOCH + self.commit_count, 0);
         self.commit_count += 1;
         let sig = Signature::new(FIXTURE_AUTHOR, FIXTURE_EMAIL, &time).context(GitSnafu)?;
@@ -803,7 +907,7 @@ impl FixtureRepo {
             .to_path_buf()
     }
 
-    fn write(&self, name: &str, content: &str) -> Result<(), FixtureError> {
+    fn write(&self, name: &str, content: impl AsRef<[u8]>) -> Result<(), FixtureError> {
         let path = self.workdir().join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context(IoSnafu {
@@ -1071,6 +1175,29 @@ mod tests {
                 ("src/main.rs".to_string(), false),
             ],
             "staged util.rs before unstaged main.rs",
+        );
+    }
+
+    /// The committed changelog decodes to its text, and nothing else changed.
+    #[test]
+    fn read_only_commits_a_gzip_changelog() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        materialize("read-only", dir.path()).unwrap();
+
+        let repo = LocalGit::new().discover(dir.path()).unwrap();
+        let mut text = String::new();
+        flate2::read::MultiGzDecoder::new(
+            std::fs::File::open(dir.path().join("CHANGELOG.md.gz")).unwrap(),
+        )
+        .read_to_string(&mut text)
+        .unwrap();
+
+        assert_eq!(
+            (repo.changed_files().len(), text),
+            (0, READ_ONLY_CHANGELOG.to_string()),
+            "a clean tree whose one file holds the changelog",
         );
     }
 

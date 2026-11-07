@@ -44,6 +44,7 @@ const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
 const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
 const CURSOR_SECONDARY: [u8; 3] = [0x8a, 0x90, 0x9c];
+const READONLY_FRAME: [u8; 3] = [0x8a, 0x76, 0x50];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
@@ -819,6 +820,36 @@ fn the_selection_scene_paints_the_wash_and_both_cursor_kinds() {
         cell_rect(8, 4, 1, 1),
         CURSOR_PRIMARY,
         "copied_primary_cursor",
+    );
+}
+
+/// A gzip file's pane rings its text in the dashed read-only hairline.
+///
+/// One tab shows no tab bar, so the first content row is row 0, and the
+/// ring's top edge is that row's first pixel row. Three pixels in five carry
+/// the dashed stroke, so the stroke's color leads a run of them, and the run
+/// two pixels down lies under the stroke on the editor surface. Cells 20 to
+/// 60 lie clear of the ring's rounded corners and of the label at its right
+/// end.
+#[test]
+fn a_read_only_pane_draws_the_dashed_ring_over_its_text() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "read-only", "CHANGELOG.md.gz", "");
+    let (x, y, width, _) = cell_rect(20, 0, 40, 1);
+
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y, width, 1),
+        READONLY_FRAME,
+        "ring_top_edge",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + 2, width, 1),
+        BASE,
+        "under_the_ring",
     );
 }
 
