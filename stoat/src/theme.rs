@@ -780,6 +780,18 @@ pub mod scope {
 
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";
     pub const UI_BORDER_INACTIVE: &str = "ui.border.inactive";
+    /// The label a read-only editor pane draws inside stoatty where it breaks
+    /// the top edge of [`UI_READONLY_FRAME`]'s ring, such as `read only · gzip`.
+    ///
+    /// A theme that sets only `ui.readonly` colors the label and the ring
+    /// both, since a lookup broadens a scope to its parent.
+    pub const UI_READONLY_LABEL: &str = "ui.readonly.label";
+    /// The dashed ring a read-only editor pane draws around its text area
+    /// inside stoatty.
+    ///
+    /// A theme that leaves it unset draws no ring and no label, so the status
+    /// row is the pane's only read-only mark.
+    pub const UI_READONLY_FRAME: &str = "ui.readonly.frame";
     /// The faint track a meter fills over, such as the stat bar of a file row
     /// in the commits view.
     pub const UI_DIVIDER: &str = "ui.divider";
@@ -1636,6 +1648,23 @@ mod tests {
             colors.dedup();
             assert_eq!(colors.len(), 3, "{}: no two tags share a color", theme.name);
         }
+    }
+
+    /// The ermine theme gives a read-only pane's label and ring their own two
+    /// colors, and default_dark leaves the ring unset, so it draws none.
+    #[test]
+    fn the_ermine_theme_colors_the_read_only_label_and_frame() {
+        let [ermine, dark] = shipped_themes();
+        let fg = |name| ermine.try_get(name).and_then(|style| style.fg);
+        assert_eq!(
+            (
+                fg(scope::UI_READONLY_LABEL),
+                fg(scope::UI_READONLY_FRAME),
+                dark.try_get(scope::UI_READONLY_FRAME),
+            ),
+            (Some(rgb(0xc9b383)), Some(rgb(0x8a7650)), None),
+            "the label, the ring, and no ring under default_dark",
+        );
     }
 
     /// A detached pane's badge paints in the focused bar's style on either bar,

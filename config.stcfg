@@ -258,6 +258,8 @@ theme ermine_night inherits default_dark {
     let side_target_bg   = "#1d2a1f";
     let side_target_fg   = "#8ea78b";
     let side_target_name = "#bfe6bb";
+    let readonly         = "#c9b383";
+    let readonly_line    = "#8a7650";
 
     let black     = base;
     let white     = "#dfe2e8";
@@ -337,6 +339,9 @@ theme ermine_night inherits default_dark {
     ui.tag.rust.fg     = warning;
     ui.tag.markdown.fg = info;
     ui.tag.config.fg   = special;
+
+    ui.readonly.label.fg = readonly;
+    ui.readonly.frame.fg = readonly_line;
 
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
