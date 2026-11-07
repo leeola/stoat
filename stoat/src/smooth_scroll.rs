@@ -546,7 +546,6 @@ fn paint_page_gutter(
                 &gutter.severity,
                 &diff_marks,
                 &rich.diff,
-                rich.bg,
                 &rich.colors,
                 gutter.current_line,
             );
@@ -2184,8 +2183,8 @@ mod tests {
     }
 
     /// A pooled page's rich gutter draws the plain editor's hunk and state
-    /// lanes where the live gutter draws them. A row the tree pass has not
-    /// reached takes its hunk bar faded toward the gutter background.
+    /// lanes where the live gutter draws them, the hunk bar at the kind's full
+    /// color on a row the tree pass reached and on one it has not.
     #[test]
     fn a_pooled_page_gutter_draws_the_hunk_and_state_lanes() {
         use super::{render_page_decorations, PageGutter};
@@ -2193,10 +2192,7 @@ mod tests {
             action_handlers::{self, dispatch},
             diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
             minimap::color_to_rgb,
-            render::{
-                editor::{resolve_rich_gutter, RowSeverity, TREE_FADE},
-                paint::dim_rgb,
-            },
+            render::editor::{resolve_rich_gutter, RowSeverity},
             theme::scope,
             Stoat,
         };
@@ -2254,7 +2250,6 @@ mod tests {
         let fallback = theme.get(scope::UI_TEXT);
         let rich = resolve_rich_gutter(&theme, fallback)
             .expect("the shipped theme resolves the rich gutter colors");
-        let bg = rich.bg;
         let gutter = PageGutter::new(
             true,
             Arc::new(RowSeverity::default()),
@@ -2295,11 +2290,11 @@ mod tests {
             [
                 bar(0, 16, modified),
                 bar(4, 16, unstaged),
-                bar(0, 32, dim_rgb(modified, bg, TREE_FADE)),
+                bar(0, 32, modified),
                 bar(4, 32, unstaged),
             ],
             [true; 4],
-            "both lanes on rows 1 and 2, and row 2's hunk bar faded",
+            "both lanes on rows 1 and 2, the hunk bar at full color on both",
         );
     }
 

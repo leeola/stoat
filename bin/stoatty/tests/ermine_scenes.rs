@@ -53,11 +53,6 @@ const CURSOR_PRIMARY: [u8; 3] = [0xdf, 0xe2, 0xe8];
 /// the live LSP tests allow.
 const LSP_DEADLINE: Duration = Duration::from_secs(90);
 
-/// The warning token #e8bd6a faded halfway to base, the color a hunk lane takes
-/// on a row the tree pass leaves unrefined, as it leaves every row of a text
-/// file.
-const UNREFINED_WARNING: [u8; 3] = [0x80, 0x6b, 0x44];
-
 /// A pixel rectangle as `(x, y, width, height)`.
 type PixelRect = (u32, u32, u32, u32);
 
@@ -96,13 +91,7 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, _, height) = cell_rect(1, 3, 1, 1);
 
-    expect_region(
-        &shot,
-        &mut home,
-        (x, y, 2, height),
-        UNREFINED_WARNING,
-        "hunk_lane",
-    );
+    expect_region(&shot, &mut home, (x, y, 2, height), WARNING, "hunk_lane");
     expect_region(
         &shot,
         &mut home,
