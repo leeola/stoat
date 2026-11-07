@@ -10,6 +10,7 @@ use crate::{
     input_view::InputView,
     picker::{write_row_display, PickList, Preview},
     render::{
+        chrome::TypeTag,
         editor::{render_editor, ResolvedChrome},
         paint::style_rgb,
         text::{write_str, write_str_clipped},
@@ -584,7 +585,11 @@ fn paint_type_tag(
     end_x: u16,
 ) -> u16 {
     let width = match crate::render::chrome::type_tag(path) {
-        Some((tag, tag_scope)) => {
+        Some(TypeTag {
+            tag,
+            scope: tag_scope,
+            ..
+        }) => {
             write_str_clipped(buf, x, row, tag, style.patch(theme.get(tag_scope)), end_x);
             tag.width() as u16
         },

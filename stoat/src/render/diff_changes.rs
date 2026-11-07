@@ -16,7 +16,7 @@ use crate::{
     editor_state::{EditorId, EditorState},
     pane::Pane,
     render::{
-        chrome,
+        chrome::{self, TypeTag},
         editor::{
             fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip,
             DIFF_OVERVIEW_COLS,
@@ -413,7 +413,12 @@ fn emit_header_hairlines(rows: impl Iterator<Item = Rect>, theme: &Theme, scene:
 fn header_runs(rel_path: &str, stats: ExcerptStats, theme: &Theme) -> Vec<(String, Style)> {
     let muted = theme.get(scope::UI_TEXT_MUTED);
     let mut runs = Vec::new();
-    if let Some((tag, tag_scope)) = chrome::type_tag(Path::new(rel_path)) {
+    if let Some(TypeTag {
+        tag,
+        scope: tag_scope,
+        ..
+    }) = chrome::type_tag(Path::new(rel_path))
+    {
         runs.push((format!("{tag} "), theme.get(tag_scope)));
     }
 

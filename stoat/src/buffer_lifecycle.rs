@@ -291,7 +291,7 @@ fn reads_on_pool(meta: Option<FsMetadata>, absolute: &Path) -> bool {
 }
 
 /// Whether `path`'s name ends in `.gz`, in any case.
-fn is_gzip_name(path: &Path) -> bool {
+pub(crate) fn is_gzip_name(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
 }

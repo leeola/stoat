@@ -9,7 +9,8 @@ use crate::{
     minimap::LANE_WIDTH,
     pane::{Divider, DividerOrientation, FocusTarget, Pane, Placement, View},
     render::{
-        chrome, commits, content_lane, diff_changes,
+        chrome::{self, TypeTag},
+        commits, content_lane, diff_changes,
         editor::{
             editor_cursor_position, render_editor_with_overlay, split_minimap_strip,
             DIFF_OVERVIEW_COLS,
@@ -1301,6 +1302,7 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 /// The name leads in bold, since the status row leaves it out while the bar
 /// shows. A tab reads as its [`Workspace::tab_label`], and a tagged file's
 /// extension follows it as a tag in the tag's color, joined by a muted dot.
+/// A gzip file's tab adds a second muted dot and a `gz` tag in the same color.
 /// Painting through the status-bar segment path means the bar picks up the
 /// same scaled-run rendering under stoatty and the same cell fallback
 /// elsewhere.
@@ -1351,13 +1353,22 @@ pub(crate) fn render_tab_bar(
         let (label, tag) = ws.tab_label(idx);
         left.push((format!(" {label} "), style));
         owners.push(Some(idx));
-        if let Some((tag, tag_scope)) = tag {
-            left.push((
-                "\u{b7}".to_string(),
-                tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED),
-            ));
-            left.push((format!(" {tag} "), tinted(style, theme, tag_scope)));
+        if let Some(TypeTag {
+            tag,
+            scope: tag_scope,
+            gzip,
+        }) = tag
+        {
+            let dot = tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            let tag_style = tinted(style, theme, tag_scope);
+            left.push(("\u{b7}".to_string(), dot));
+            left.push((format!(" {tag} "), tag_style));
             owners.extend([Some(idx), Some(idx)]);
+            if gzip {
+                left.push(("\u{b7}".to_string(), dot));
+                left.push((" gz ".to_string(), tag_style));
+                owners.extend([Some(idx), Some(idx)]);
+            }
         }
     }
 
@@ -5213,7 +5224,10 @@ mod tests {
     }
 
     /// The bar leads with the workspace name and a one-cell gap. A tagged file's
-    /// tab trades its extension for the tag after a dot.
+    /// tab trades its extension for the tag after a dot. A gzip file's tab
+    /// trades both extensions for the inner tag and a `gz` tag in the tag's
+    /// color, after a second muted dot. Each tab's click span covers its label
+    /// and its tags.
     #[test]
     fn the_tab_bar_leads_with_the_workspace_and_tags_each_file() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 8);
@@ -5223,13 +5237,48 @@ mod tests {
         dispatch(&mut h.stoat, &stoat_action::NewTab);
         let panel = h.write_file("panel.rs", "fn b() {}\n");
         h.open_file(&panel);
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        let changelog = PathBuf::from("/test/CHANGELOG.md.gz");
+        h.fake_fs()
+            .insert_file(&changelog, crate::test_harness::gzip(b"# 1.0\n"));
+        h.open_file(&changelog);
+        h.settle();
+        // A gzip file reads on the blocking pool, and the read installs here.
+        buffer_lifecycle::install_pending_opens(&mut h.stoat);
         h.snapshot();
 
         let text = h.rendered_text();
         let bar = text.lines().next().expect("the tab bar row");
+        let lead = " ws   chrome \u{b7} rs  panel \u{b7} rs  CHANGELOG \u{b7} md \u{b7} gz ";
+        let fg_at = |needle: &str| {
+            let col = lead[..lead.find(needle).expect("the bar names it")]
+                .chars()
+                .count();
+            h.rendered_buffer()[(col as u16, 0)].fg
+        };
+        let theme = &h.stoat.theme;
+        let md = theme
+            .get(crate::theme::scope::UI_TAG_MARKDOWN)
+            .fg
+            .expect("the theme colors a markdown tag");
+        let muted = theme
+            .get(crate::theme::scope::UI_TEXT_MUTED)
+            .fg
+            .expect("the theme mutes text");
         assert_eq!(
-            bar.trim_end_matches('─'),
-            " ws   chrome \u{b7} rs  panel \u{b7} rs "
+            (
+                bar.trim_end_matches('─'),
+                fg_at("md"),
+                fg_at("\u{b7} gz"),
+                fg_at("gz")
+            ),
+            (lead, md, muted, md),
+            "the bar text, then the gzip tab's inner tag, second dot, and gz tag",
+        );
+        assert_eq!(
+            h.stoat.tab_bar_spans,
+            [(5, 18), (18, 30), (30, 51)].map(|(start, end): (u16, u16)| start * 16..end * 16),
+            "each tab's span in sixteenths, from its label's lead space to its last tag",
         );
     }
 

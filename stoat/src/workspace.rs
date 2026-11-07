@@ -30,7 +30,12 @@ use crate::{
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
     rebase::{ActiveRebase, RebaseState},
-    render::{chrome, layout::split_pane_status, text, walkthrough::SlideParts},
+    render::{
+        chrome::{self, TypeTag},
+        layout::split_pane_status,
+        text,
+        walkthrough::SlideParts,
+    },
     review_approval::ApprovedRows,
     run::{RunId, RunState},
     ssh::RemoteTarget,
@@ -816,13 +821,20 @@ impl Workspace {
     /// in for the label's extension.
     ///
     /// A tab whose focused pane edits a file with a [`chrome::type_tag`] reads
-    /// as the file's stem beside that tag. Every other tab reads as
-    /// [`Self::tab_title`] names it, with no tag. So does a renamed tab, whose
-    /// name is the user's, and a diff view, whose `±` takes the tag's place.
-    pub(crate) fn tab_label(&self, idx: usize) -> (String, Option<(&'static str, &'static str)>) {
+    /// as the file's stem beside that tag. A gzip file's stem drops both
+    /// extensions, so `CHANGELOG.md.gz` reads `CHANGELOG`. Every other tab
+    /// reads as [`Self::tab_title`] names it, with no tag. So does a renamed
+    /// tab, whose name is the user's, and a diff view, whose `±` takes the
+    /// tag's place.
+    pub(crate) fn tab_label(&self, idx: usize) -> (String, Option<TypeTag>) {
         let tagged = self.tab_file(idx).and_then(|path| {
-            let stem = path.file_stem()?.to_string_lossy().into_owned();
-            Some((stem, chrome::type_tag(path)?))
+            let tag = chrome::type_tag(path)?;
+            let named = match tag.gzip {
+                true => Path::new(path.file_stem()?),
+                false => path,
+            };
+            let stem = named.file_stem()?.to_string_lossy().into_owned();
+            Some((stem, tag))
         });
         match tagged {
             Some((stem, tag)) => (stem, Some(tag)),
@@ -2312,6 +2324,7 @@ mod tests {
         diff_changes::DiffChangesId,
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
+        render::chrome::TypeTag,
         run::RunId,
         term_session::{TermId, ViewLocation},
         test_fixture::fake_term_session,
@@ -2744,7 +2757,14 @@ mod tests {
         assert_eq!(
             [tagged, untagged, renamed],
             [
-                ("lib".to_string(), Some(("rs", scope::UI_TAG_RUST))),
+                (
+                    "lib".to_string(),
+                    Some(TypeTag {
+                        tag: "rs",
+                        scope: scope::UI_TAG_RUST,
+                        gzip: false,
+                    }),
+                ),
                 ("notes.txt".to_string(), None),
                 ("plan.rs".to_string(), None),
             ],

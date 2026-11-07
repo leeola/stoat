@@ -1,4 +1,5 @@
 use crate::{
+    buffer_lifecycle,
     render::paint::style_rgb,
     theme::{scope, PanelRole, Theme, TypeRole},
 };
@@ -35,6 +36,17 @@ const ZOOM_STEP_DIVISOR: u16 = 10;
 /// The width of the accent bar on a list's selected row, in sixteenths of a
 /// cell.
 const SELECTION_BAR_WIDTH: u16 = 3;
+
+/// The small colored tag a tab, a finder row, or a changes header shows in
+/// place of a file's extension, and the theme scope that colors it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TypeTag {
+    pub(crate) tag: &'static str,
+    pub(crate) scope: &'static str,
+    /// Whether the name ends in `.gz`. The tag is then the inner extension's,
+    /// and a tab adds a `gz` tag in the same scope.
+    pub(crate) gzip: bool,
+}
 
 /// Size and center a modal box over `area` for content of `content` cells,
 /// returning `None` when `area` is too small to host `min`.
@@ -361,13 +373,18 @@ pub(crate) fn popout_frame(
     }
 }
 
-/// The small colored tag a tab or a finder row shows in place of a file's
-/// extension, and the theme scope that colors it.
+/// The [`TypeTag`] of the file at `path`.
 ///
-/// `None` for a file whose extension takes no tag, so its name keeps the
-/// extension.
-pub(crate) fn type_tag(path: &Path) -> Option<(&'static str, &'static str)> {
-    let tag = match path.extension()?.to_str()? {
+/// A gzip name takes the tag of the extension inside its `.gz`. `None` for a
+/// file whose extension takes no tag, so its name keeps the extension. A gzip
+/// name whose inner extension takes no tag keeps both extensions.
+pub(crate) fn type_tag(path: &Path) -> Option<TypeTag> {
+    let gzip = buffer_lifecycle::is_gzip_name(path);
+    let named = match gzip {
+        true => Path::new(path.file_stem()?),
+        false => path,
+    };
+    let (tag, tag_scope) = match named.extension()?.to_str()? {
         "rs" => ("rs", scope::UI_TAG_RUST),
         "md" => ("md", scope::UI_TAG_MARKDOWN),
         "toml" => ("toml", scope::UI_TAG_CONFIG),
@@ -375,7 +392,11 @@ pub(crate) fn type_tag(path: &Path) -> Option<(&'static str, &'static str)> {
         "cfg" => ("cfg", scope::UI_TAG_CONFIG),
         _ => return None,
     };
-    Some(tag)
+    Some(TypeTag {
+        tag,
+        scope: tag_scope,
+        gzip,
+    })
 }
 
 /// Draw a horizontal separator across `width` cells at row `y`, starting at
@@ -587,7 +608,7 @@ pub(crate) fn text(
 mod tests {
     use super::{
         hline, hline_edge, list_modal_width, modal_box, modal_frame, modal_frame_above_pools,
-        modal_frame_anchored, popout_frame, text, toggle_mark, type_tag, vline,
+        modal_frame_anchored, popout_frame, text, toggle_mark, type_tag, vline, TypeTag,
     };
     use crate::theme::{scope, PanelRole, Theme};
     use ratatui::{
@@ -607,14 +628,34 @@ mod tests {
         Style::default().fg(Color::Rgb(1, 2, 3))
     }
 
+    /// A gzip name takes its inner extension's tag, and one whose inner
+    /// extension takes no tag answers `None`.
     #[test]
     fn type_tag_names_the_rust_markdown_and_config_files() {
+        let tagged = |tag, tag_scope, gzip| {
+            Some(TypeTag {
+                tag,
+                scope: tag_scope,
+                gzip,
+            })
+        };
+        let names = [
+            "a.rs",
+            "README.md",
+            "config.stcfg",
+            "Makefile",
+            "CHANGELOG.md.gz",
+            "hosts.gz",
+        ];
+
         assert_eq!(
-            ["a.rs", "README.md", "config.stcfg", "Makefile"].map(|name| type_tag(Path::new(name))),
+            names.map(|name| type_tag(Path::new(name))),
             [
-                Some(("rs", scope::UI_TAG_RUST)),
-                Some(("md", scope::UI_TAG_MARKDOWN)),
-                Some(("stcfg", scope::UI_TAG_CONFIG)),
+                tagged("rs", scope::UI_TAG_RUST, false),
+                tagged("md", scope::UI_TAG_MARKDOWN, false),
+                tagged("stcfg", scope::UI_TAG_CONFIG, false),
+                None,
+                tagged("md", scope::UI_TAG_MARKDOWN, true),
                 None,
             ],
         );
