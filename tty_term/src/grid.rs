@@ -1770,6 +1770,36 @@ pub struct Overlay {
     /// content is affected. The box chrome is unchanged.
     pub bold: bool,
     pub content: String,
+    /// Runs of [`Self::content`] drawn in a color and weight of their own,
+    /// over [`Self::content_fg`] and [`Self::bold`].
+    pub spans: Vec<OverlaySpan>,
+}
+
+impl Overlay {
+    /// The span over character `index` of content line `line`, or `None` where
+    /// the content keeps [`Self::content_fg`]. The first listed span wins where
+    /// two overlap.
+    pub fn span_at(&self, line: usize, index: usize) -> Option<&OverlaySpan> {
+        self.spans.iter().find(|span| {
+            let start = usize::from(span.start);
+            usize::from(span.line) == line
+                && (start..start + usize::from(span.len)).contains(&index)
+        })
+    }
+}
+
+/// A run of an [`Overlay`]'s content drawn in its own color and weight.
+///
+/// `line` counts content lines from the first, and `start` counts characters
+/// from the start of that line. The `len` characters from there draw in `fg`,
+/// at bold weight when `bold` is set.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OverlaySpan {
+    pub line: u16,
+    pub start: u16,
+    pub len: u16,
+    pub fg: Rgb,
+    pub bold: bool,
 }
 
 /// Off-grid modal chrome framing a cell rectangle.
@@ -2749,6 +2779,7 @@ mod tests {
             offset: [0, 0],
             bold: false,
             content: "hi".to_owned(),
+            spans: Vec::new(),
         };
         grid.set_overlays(vec![overlay.clone()]);
 
@@ -2958,6 +2989,7 @@ mod tests {
             offset: [0, 0],
             bold: false,
             content: String::new(),
+            spans: Vec::new(),
         }
     }
 

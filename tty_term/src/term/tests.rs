@@ -8,8 +8,8 @@ use super::{
 use crate::{
     grid::{
         Bar, Border, BorderStyle, Cell, DocumentOffset, Flags, Grid, Icon, IconKind, MarkId,
-        Minimap, MinimapView, Overlay, Panel, PanelShadow, Polyline, Rgb, Scale, ScrollRegion,
-        Sketch, TextRun, UnderlineStyle,
+        Minimap, MinimapView, Overlay, OverlaySpan, Panel, PanelShadow, Polyline, Rgb, Scale,
+        ScrollRegion, Sketch, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -33,9 +33,9 @@ use stoatty_protocol::command::{
     MinimapDropCommand, MinimapLenCommand, MinimapLinesCommand, MinimapRun, MinimapViewCommand,
     PanelCommand, PanelShadow as ProtoPanelShadow, PolylineCommand, PoolAnchorCommand,
     PoolCursorCommand, PoolCursorReleaseCommand, PoolDropCommand, PoolKind, PoolRegionCommand,
-    PopoverCommand, RepositionCommand, ScaleCommand, ScrollCommand, ScrollRegionCommand,
-    SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape, SketchStyle, SketchTiming,
-    TextRunCommand, TextRunsCommand, WindowOpenCommand,
+    PopoverCommand, PopoverSpan, RepositionCommand, ScaleCommand, ScrollCommand,
+    ScrollRegionCommand, SketchBounds, SketchCommand, SketchEasing, SketchPhase, SketchShape,
+    SketchStyle, SketchTiming, TextRunCommand, TextRunsCommand, WindowOpenCommand,
 };
 
 /// Base64, for a test feeding a graphics payload.
@@ -435,6 +435,7 @@ fn a_decoration_change_bumps_only_its_epoch() {
         offset: [0, 0],
         bold: false,
         content: "x".to_owned(),
+        spans: Vec::new(),
     }));
     terminal.project(&mut grid);
 
@@ -2043,6 +2044,13 @@ fn popover_apc_frame_sets_a_grid_overlay() {
         offset: [4, -2],
         bold: true,
         content: "ok".to_owned(),
+        spans: vec![PopoverSpan {
+            line: 0,
+            start: 1,
+            len: 1,
+            fg: [1, 2, 3],
+            bold: true,
+        }],
     });
 
     let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -2064,6 +2072,13 @@ fn popover_apc_frame_sets_a_grid_overlay() {
             offset: [4, -2],
             bold: true,
             content: "ok".to_owned(),
+            spans: vec![OverlaySpan {
+                line: 0,
+                start: 1,
+                len: 1,
+                fg: Rgb::new(1, 2, 3),
+                bold: true,
+            }],
         }]
     );
 }
@@ -2082,6 +2097,7 @@ fn popover_content_streams_across_advance_chunks() {
         offset: [0, 0],
         bold: false,
         content: "streamed".to_owned(),
+        spans: Vec::new(),
     });
 
     // Split just inside the content run (past the open marker's ESC \
@@ -2110,6 +2126,7 @@ fn popover_content_streams_across_advance_chunks() {
             offset: [0, 0],
             bold: false,
             content: "streamed".to_owned(),
+            spans: Vec::new(),
         }]
     );
 }
@@ -2272,6 +2289,7 @@ fn a_capture_past_the_cap_commits_and_restores_live_routing() {
         offset: [0, 0],
         bold: false,
         content: String::new(),
+        spans: Vec::new(),
     });
 
     let mut terminal = Terminal::new(8, 8, Theme::default());

@@ -225,6 +225,7 @@ fn overlay_content_lines_do_not_wrap_at_the_grid_height() {
         bold: false,
         // Three lines, laid out from the row below the box's top edge.
         content: "MMM\nMMM\nMMM".to_owned(),
+        spans: Vec::new(),
     }]);
 
     let mut harness = Harness::new(&device, 12);

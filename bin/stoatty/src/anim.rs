@@ -2030,6 +2030,7 @@ mod tests {
             offset: [0, 0],
             bold: false,
             content: content.to_owned(),
+            spans: Vec::new(),
         }
     }
 

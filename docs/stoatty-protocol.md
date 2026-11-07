@@ -129,7 +129,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `border` | D | 12 B | Rectangle, style, color |
 | `panel` | D | 19 B+ | Rectangle, fill, border, radius, shadow |
 | `scale` | D | 5 B | Draw the cell's glyph at N times cell size |
-| `popover` | D | 23 B | + streamed content, closed by `popover_end` |
+| `popover` | D | 23 B, + 1 B count and 10 B per span | + streamed content, closed by `popover_end`; a span colors and weights a run of the content |
 | `popover_end` | D | -- | Commits the capture |
 | `icon` | D | 9 B, 13 B with offset | Renderer-drawn status sigil |
 | `text_run` | D | 12 B legacy, 13 B with bg flag, 26 B with follow and anchor | + streamed text, closed by `text_run_end` |

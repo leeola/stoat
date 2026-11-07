@@ -2,11 +2,11 @@ use crate::{cells, ApcScene};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     symbols::border,
     widgets::StatefulWidget,
 };
-use stoatty_protocol::command::{self, PopoverCommand};
+use stoatty_protocol::command::{self, PopoverCommand, PopoverSpan};
 
 /// A floating popover box drawn above the grid.
 ///
@@ -23,7 +23,8 @@ use stoatty_protocol::command::{self, PopoverCommand};
 /// fallback's inset.
 ///
 /// `bold` shapes the content at bold weight in both the rich rendering and the
-/// cell fallback.
+/// cell fallback. `spans` give runs of the content a color and weight of their
+/// own in both too. The fallback counts each character as one cell.
 pub struct Popover<'a> {
     pub fill: [u8; 3],
     pub border: [u8; 3],
@@ -32,6 +33,7 @@ pub struct Popover<'a> {
     pub offset: [i16; 2],
     pub bold: bool,
     pub content: &'a str,
+    pub spans: &'a [PopoverSpan],
 }
 
 impl StatefulWidget for Popover<'_> {
@@ -68,6 +70,7 @@ impl Popover<'_> {
                 offset: self.offset,
                 bold: self.bold,
                 content: self.content,
+                spans: self.spans,
             },
         );
     }
@@ -99,6 +102,29 @@ impl Popover<'_> {
                 let y = area.y + 1 + row as u16;
                 buf.set_stringn(area.x + 1, y, line, width, content_style);
             }
+            self.recolor_spans(area, buf, fill);
+        }
+    }
+
+    /// Restyle the fallback cells each span covers, inside the box's border.
+    fn recolor_spans(&self, area: Rect, buf: &mut Buffer, fill: Color) {
+        let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
+        for span in self.spans {
+            let style = Style::default().fg(cells::rgb(span.fg)).bg(fill);
+            let style = match span.bold {
+                true => style.add_modifier(Modifier::BOLD),
+                false => style.remove_modifier(Modifier::BOLD),
+            };
+
+            let y = u32::from(inner.y) + u32::from(span.line);
+            let start = u32::from(inner.x) + u32::from(span.start);
+            let end = (start + u32::from(span.len)).min(u32::from(inner.right()));
+            if y >= u32::from(inner.bottom()) {
+                continue;
+            }
+            for x in start..end {
+                buf[(x as u16, y as u16)].set_style(style);
+            }
         }
     }
 }
@@ -107,8 +133,13 @@ impl Popover<'_> {
 mod tests {
     use super::Popover;
     use crate::ApcScene;
-    use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_popover, PopoverCommand};
+    use ratatui::{
+        buffer::Buffer,
+        layout::Rect,
+        style::{Color, Modifier},
+        widgets::StatefulWidget,
+    };
+    use stoatty_protocol::command::{encode_popover, PopoverCommand, PopoverSpan};
 
     fn symbol(buf: &Buffer, x: u16, y: u16) -> &str {
         buf.cell((x, y)).expect("cell in bounds").symbol()
@@ -134,6 +165,7 @@ mod tests {
             offset: [-3, 7],
             bold: true,
             content: "hello",
+            spans: &[],
         }
         .render(area, &mut buf, &mut scene);
 
@@ -149,6 +181,7 @@ mod tests {
             offset: [-3, 7],
             bold: true,
             content: "hello".to_owned(),
+            spans: Vec::new(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
@@ -167,6 +200,7 @@ mod tests {
             offset: [0, 0],
             bold: false,
             content: "abcdefgh",
+            spans: &[],
         }
         .render(area, &mut buf, &mut scene);
 
@@ -193,6 +227,7 @@ mod tests {
             offset: [0, 0],
             bold: false,
             content: "one\ntwo\nthree",
+            spans: &[],
         }
         .render(area, &mut buf, &mut scene);
 
@@ -206,6 +241,62 @@ mod tests {
             row(&buf, 3),
             "└────┘",
             "the third line does not fit and never overwrites the border"
+        );
+    }
+
+    /// A span rides in the popover frame and restyles the fallback cells it
+    /// covers inside the border, while the rest of the content keeps the
+    /// popover's own color.
+    #[test]
+    fn a_span_reaches_the_frame_and_restyles_its_fallback_cells() {
+        let mut scene = ApcScene::new();
+        let area = Rect::new(0, 0, 6, 3);
+        let mut buf = Buffer::empty(area);
+        let spans = [PopoverSpan {
+            line: 0,
+            start: 1,
+            len: 9,
+            fg: [9, 8, 7],
+            bold: true,
+        }];
+
+        Popover {
+            fill: [0, 0, 0],
+            border: [255, 255, 255],
+            content_fg: [1, 1, 1],
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "abcd",
+            spans: &spans,
+        }
+        .render(area, &mut buf, &mut scene);
+
+        let expected = encode_popover(&PopoverCommand {
+            top: 0,
+            left: 0,
+            width: 6,
+            height: 3,
+            fill: [0, 0, 0],
+            border: [255, 255, 255],
+            content_fg: [1, 1, 1],
+            scale: 1,
+            offset: [0, 0],
+            bold: false,
+            content: "abcd".to_owned(),
+            spans: spans.to_vec(),
+        });
+        assert_eq!(scene.buffer().as_slice(), expected.as_slice());
+
+        let styled = |x: u16| {
+            let cell = &buf[(x, 1)];
+            (cell.fg, cell.modifier.contains(Modifier::BOLD))
+        };
+        let (plain, span) = ((Color::Rgb(1, 1, 1), false), (Color::Rgb(9, 8, 7), true));
+        assert_eq!(
+            (1..6).map(styled).collect::<Vec<_>>(),
+            [plain, span, span, span, (Color::Rgb(255, 255, 255), false)],
+            "the span restyles b, c, and d and stops at the border",
         );
     }
 
@@ -223,6 +314,7 @@ mod tests {
             offset: [0, 0],
             bold: false,
             content: "abc",
+            spans: &[],
         };
 
         let mut scene = ApcScene::new();

@@ -2778,6 +2778,7 @@ fn render_pane_id_badges(
             offset: [0, 0],
             bold: true,
             content: &digit,
+            spans: &[],
         };
         // The live popover has rounded corners, and a cell fill under it shows
         // past them, as the hover card's clear does. Each host draws one form.

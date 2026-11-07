@@ -14,8 +14,8 @@
 //! are both conversions in this direction.
 
 use crate::grid::{
-    Bar, BorderStyle, Icon, IconKind, MinimapStrip, Overlay, Panel, PanelShadow, Polyline,
-    PoolRegion, Rgb, Rgba, TextRun,
+    Bar, BorderStyle, Icon, IconKind, MinimapStrip, Overlay, OverlaySpan, Panel, PanelShadow,
+    Polyline, PoolRegion, Rgb, Rgba, TextRun,
 };
 use std::sync::Arc;
 use stoatty_protocol::command::{
@@ -192,6 +192,17 @@ pub(crate) fn popover_overlay(command: &PopoverCommand) -> Overlay {
         offset: command.offset,
         bold: command.bold,
         content: command.content.clone(),
+        spans: command
+            .spans
+            .iter()
+            .map(|span| OverlaySpan {
+                line: span.line,
+                start: span.start,
+                len: span.len,
+                fg: Rgb::new(span.fg[0], span.fg[1], span.fg[2]),
+                bold: span.bold,
+            })
+            .collect(),
     }
 }
 

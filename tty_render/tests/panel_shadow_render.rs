@@ -226,6 +226,7 @@ fn popover_chrome_scales_with_the_display() {
             offset: [0, 0],
             bold: false,
             content: String::new(),
+            spans: Vec::new(),
         }]);
     });
 

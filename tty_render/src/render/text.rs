@@ -4128,10 +4128,6 @@ impl TextPass {
 
         for overlay in grid.overlays() {
             let scale = overlay.scale.max(1);
-            let style = font::FaceStyle {
-                bold: overlay.bold,
-                italic: false,
-            };
             let mut content = OverlayContent::default();
 
             overlay_content_cells(overlay, scale as usize, &mut cells, &mut cell_lines);
@@ -4139,10 +4135,11 @@ impl TextPass {
             // The cell index a line starts at is not the glyph index it starts at,
             // since blanks and off-grid cells shape to nothing. So the line index is
             // rebuilt against the glyphs as they are pushed.
-            for line in cell_lines.windows(2) {
+            for (line_index, line) in cell_lines.windows(2).enumerate() {
                 content.starts.push(content.glyphs.len() as u32);
 
-                for &(col, row, ch) in &cells[line[0] as usize..line[1] as usize] {
+                let line_cells = &cells[line[0] as usize..line[1] as usize];
+                for (index, &(col, row, ch)) in line_cells.iter().enumerate() {
                     // No bound on the row. Content lines are laid out at
                     // increasing rows below the box's top, so a box holding more
                     // lines than the screen has rows puts its later ones past
@@ -4154,6 +4151,11 @@ impl TextPass {
                         continue;
                     }
 
+                    let span = overlay.span_at(line_index, index);
+                    let style = font::FaceStyle {
+                        bold: span.map_or(overlay.bold, |span| span.bold),
+                        italic: false,
+                    };
                     let Some(key) = self.glyph_key(ch, f32::from(scale), style) else {
                         continue;
                     };
@@ -4169,7 +4171,7 @@ impl TextPass {
                             row,
                             col,
                             source: GlyphSource::Font(key),
-                            fg: overlay.content_fg,
+                            fg: span.map_or(overlay.content_fg, |span| span.fg),
                             scale: f32::from(scale),
                             cell_fill: false,
                             wide: false,

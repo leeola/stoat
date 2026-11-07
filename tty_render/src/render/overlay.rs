@@ -373,6 +373,7 @@ mod tests {
             offset: [-4, 6],
             bold: false,
             content: "x".to_owned(),
+            spans: Vec::new(),
         }];
 
         let mut scratch = build_overlay_instances(&overlays, 1.0);
@@ -400,6 +401,7 @@ mod tests {
             offset: [-4, 6],
             bold: false,
             content: "x".to_owned(),
+            spans: Vec::new(),
         }];
 
         let instances = build_overlay_instances(&overlays, 1.0);
@@ -451,6 +453,7 @@ mod tests {
             offset: [0, 6],
             bold: false,
             content: String::new(),
+            spans: Vec::new(),
         };
 
         let mut built = Vec::new();

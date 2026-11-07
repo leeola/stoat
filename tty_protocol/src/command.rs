@@ -91,7 +91,7 @@ pub use pool::{
 };
 pub use popover::{
     encode_popover, encode_popover_end, encode_popover_end_into, encode_popover_into,
-    encode_popover_scope, PopoverCommand,
+    encode_popover_scope, PopoverCommand, PopoverSpan, MAX_POPOVER_SPANS,
 };
 pub use scale::{encode_scale, encode_scale_into, ScaleCommand};
 pub use scroll_region::{encode_scroll_region, encode_scroll_region_into, ScrollRegionCommand};
@@ -713,6 +713,7 @@ mod tests {
                     offset: [0, 0],
                     bold: false,
                     content: String::new(),
+                    spans: Vec::new(),
                 })),
             ),
             (
@@ -861,6 +862,7 @@ mod tests {
             offset: [4, -2],
             bold: false,
             content: "two\nlines".to_owned(),
+            spans: Vec::new(),
         };
 
         assert_eq!(
@@ -1046,6 +1048,7 @@ mod tests {
             offset: [4, -2],
             bold: true,
             content: "hover text".to_owned(),
+            spans: Vec::new(),
         };
         let mut scoped = Vec::new();
         encode_popover_scope(&mut scoped, &popover, |out| {
@@ -1067,6 +1070,7 @@ mod tests {
             offset: [4, -2],
             bold: true,
             content,
+            spans: Vec::new(),
         }
     }
 

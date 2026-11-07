@@ -20,8 +20,8 @@ use stoatty_protocol::command::{
 };
 use stoatty_term::{
     grid::{
-        whole_row, Cell, Flags, Grid, MarkId, Overlay, Rgb, Scale, ScrollRegion, Sketch, TextRun,
-        UnderlineStyle,
+        whole_row, Cell, Flags, Grid, MarkId, Overlay, OverlaySpan, Rgb, Scale, ScrollRegion,
+        Sketch, TextRun, UnderlineStyle,
     },
     term::Damage,
 };
@@ -644,6 +644,7 @@ fn overlay_content_cells_clip_to_box_width() {
         offset: [0, 0],
         bold: false,
         content: "Hello".to_owned(),
+        spans: Vec::new(),
     };
 
     // Inset one cell to (6, 3), and the 3-wide box holds one char after the
@@ -665,6 +666,7 @@ fn overlay_content_cells_space_and_clip_by_scale() {
         offset: [0, 0],
         bold: false,
         content: "abcd\nef".to_owned(),
+        spans: Vec::new(),
     };
 
     // At scale 2 each glyph owns a 2x2 block, so chars advance two columns
@@ -690,6 +692,7 @@ fn overlay_content_cells_emit_all_lines_clipped_to_width() {
         offset: [0, 0],
         bold: false,
         content: "abcd\nef\nXY".to_owned(),
+        spans: Vec::new(),
     };
 
     // Every line is emitted and width-clipped. Inset one cell to (6, 3), the
@@ -719,6 +722,7 @@ fn overlay_content_cells_refill_the_buffers_they_are_given() {
         offset: [0, 0],
         bold: false,
         content: content.to_owned(),
+        spans: Vec::new(),
     };
 
     let (mut cells, mut starts) = (Vec::new(), Vec::new());
@@ -2443,6 +2447,51 @@ fn chrome_run(text: &str) -> TextRun {
     }
 }
 
+/// A span draws its run of a popover's content in its own color and weight,
+/// and the rest keeps the popover's content color at regular weight, on the
+/// span's line and every other.
+#[test]
+fn a_popover_span_colors_and_weights_its_run() {
+    let (device, queue, mut pass) = bundled_text_pass();
+    let gold = Rgb::new(232, 189, 106);
+    let mut grid = Grid::new(3, 12);
+    grid.set_overlays(vec![Overlay {
+        spans: vec![OverlaySpan {
+            line: 0,
+            start: 1,
+            len: 2,
+            fg: gold,
+            bold: true,
+        }],
+        ..chrome_overlay("abcd\nwxyz")
+    }]);
+
+    let groups = pass.rasterize_overlays(&device, &queue, &grid);
+    let drawn: Vec<_> = groups[0]
+        .glyphs
+        .iter()
+        .filter_map(|glyph| match glyph.source {
+            GlyphSource::Font(key) => Some((glyph.row, glyph.col, glyph.fg, key.font_weight.0)),
+            GlyphSource::Procedural { .. } => None,
+        })
+        .collect();
+    let white = Rgb::new(255, 255, 255);
+    assert_eq!(
+        drawn,
+        [
+            (1, 1, white, 400),
+            (1, 2, gold, 700),
+            (1, 3, gold, 700),
+            (1, 4, white, 400),
+            (2, 1, white, 400),
+            (2, 2, white, 400),
+            (2, 3, white, 400),
+            (2, 4, white, 400),
+        ],
+        "the span holds to its run of the first line",
+    );
+}
+
 fn chrome_overlay(content: &str) -> Overlay {
     Overlay {
         top: 0,
@@ -2456,6 +2505,7 @@ fn chrome_overlay(content: &str) -> Overlay {
         offset: [0, 0],
         bold: false,
         content: content.to_owned(),
+        spans: Vec::new(),
     }
 }
 
@@ -4208,6 +4258,7 @@ fn overlays_reshift_cached_bases_and_rebuild_on_content_change() {
         offset: [0, 0],
         bold: false,
         content: "ab".to_owned(),
+        spans: Vec::new(),
     };
     grid.set_overlays(vec![overlay(0)]);
 
@@ -4321,6 +4372,7 @@ fn a_moved_last_row_moves_an_overlay_that_reaches_it() {
         offset: [0, 0],
         bold: false,
         content: "ab".to_owned(),
+        spans: Vec::new(),
     }]);
     let idle = Damage::Partial(vec![None; 6]);
     let frame = still_frame(&idle, &idle);
@@ -4389,6 +4441,7 @@ fn an_overlay_taller_than_its_box_builds_only_the_visible_window() {
         offset: [0, 0],
         bold: false,
         content,
+        spans: Vec::new(),
     };
 
     let resolution = [640.0, 480.0];
@@ -4475,6 +4528,7 @@ fn a_rescrolled_overlay_holds_only_this_frame_s_instances() {
         offset: [0, 0],
         bold: false,
         content: "ab".to_owned(),
+        spans: Vec::new(),
     }]);
 
     let resolution = [640.0, 480.0];

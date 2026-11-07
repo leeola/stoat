@@ -2746,6 +2746,7 @@ fn render_diagnostic_popover(
         offset: [3, 6],
         bold: false,
         content: &content,
+        spans: &[],
     }
     .render(rect, buf, scene);
     Icon {

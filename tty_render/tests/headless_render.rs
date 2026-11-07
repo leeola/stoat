@@ -74,6 +74,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             offset: [0, 0],
             bold: true,
             content: "ok".to_owned(),
+            spans: Vec::new(),
         },
         Overlay {
             top: 1,
@@ -87,6 +88,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             offset: [3, -5],
             bold: false,
             content: "aa\nbb\ncc\ndd".to_owned(),
+            spans: Vec::new(),
         },
     ]);
 
