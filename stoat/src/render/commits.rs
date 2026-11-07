@@ -29,7 +29,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 use stoat_widgets::bar::Bar;
 
 pub(crate) fn render_commits(
@@ -71,6 +71,9 @@ pub(crate) fn render_commits(
 
     state.viewport_rows = left_area.height as usize;
     state.ensure_selected_visible(state.viewport_rows);
+    if let Some(header) = commits_header_rect(pane.area, frame.commits_split) {
+        render_graph_header(state, theme, header, buf, &mut *scene);
+    }
     render_commit_list_pane(state, theme, left_area, buf, &mut *scene);
 
     if let Some(right_area) = commits_detail_rect(pane.area, frame.commits_split) {
@@ -129,8 +132,24 @@ const RING_PERCENT: u16 = 40;
 /// Thickness of a badge's ring, in sixteenths of a cell.
 const RING_STROKE: u16 = 1;
 
-/// Cells the detail pane's text rows stand in from each side.
-const DETAIL_INSET: u16 = 1;
+/// Cells the commits view's text rows stand in from each side of their pane,
+/// such as the graph header and the detail header.
+const TEXT_INSET: u16 = 1;
+
+/// Rows the graph island's header takes above the commit rows.
+const GRAPH_HEADER_ROWS: u16 = 1;
+
+/// Branch tips the graph header's legend names at most.
+const LEGEND_TIPS: usize = 4;
+
+/// Width of a legend swatch in sixteenths, set in from both sides of its cell.
+const SWATCH_WIDTH: u16 = 14;
+
+/// Height of a legend swatch in sixteenths, centered in its row.
+const SWATCH_HEIGHT: u16 = 2;
+
+/// Thickness of the graph header's rule, in sixteenths of a cell.
+const RULE_STROKE: u16 = 1;
 
 /// Cells between the pieces of the detail header's meta row.
 const META_GAP: u16 = 1;
@@ -157,19 +176,40 @@ const PREVIEW_HINTS: [(&str, &str); 2] = [("C-d/C-u", "scroll"), ("Enter", "revi
 /// The text between two of the preview's hints.
 const HINT_SEPARATOR: &str = " \u{b7} ";
 
-/// The commit list's rectangle within an overlay pane, or `None` when the pane
-/// is too small. Shared by the renderer and the smooth-scroll emit so the pooled
-/// region matches the painted list.
+/// The commit list's rows within an overlay pane, or `None` when the pane is
+/// too small. Shared by the renderer, the smooth-scroll emit, and the pointer,
+/// so the pooled region and a pressed row match the painted rows.
+///
+/// The rows start under the graph island's header row, which
+/// [`commits_header_rect`] places. So a glide leaves the header out of the
+/// pooled region, and a press maps to the row under the pointer.
 ///
 /// `split` is the dragged share of the body as a percentage, `None` until the
 /// reader drags the separator.
 pub(crate) fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
     let (inner, _) = split_pane_status(pane_area);
-    if inner.width < 10 || inner.height == 0 {
+    if inner.width < 10 || inner.height <= GRAPH_HEADER_ROWS {
         return None;
     }
     let left_w = commit_list_width(inner.width, split);
-    Some(Rect::new(inner.x, inner.y, left_w, inner.height))
+    Some(Rect::new(
+        inner.x,
+        inner.y + GRAPH_HEADER_ROWS,
+        left_w,
+        inner.height - GRAPH_HEADER_ROWS,
+    ))
+}
+
+/// The graph island's header row above the commit rows, or `None` when the
+/// pane has no room for the list.
+fn commits_header_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
+    let list = commits_list_rect(pane_area, split)?;
+    Some(Rect::new(
+        list.x,
+        list.y - GRAPH_HEADER_ROWS,
+        list.width,
+        GRAPH_HEADER_ROWS,
+    ))
 }
 
 /// The detail pane's rectangle within an overlay pane, right of the
@@ -226,6 +266,91 @@ fn render_commit_list_pane(
 ) {
     let top = state.scroll_top.min(state.commits.len().saturating_sub(1));
     paint_commit_rows(state, area, top, theme, buf, scene);
+}
+
+/// Paint the graph island's header into `row`.
+///
+/// The row reads `graph` in bold, then a legend that pairs lanes with the
+/// branch tips in them, each a swatch in the lane's tip color and the tip's
+/// name in `ui.text.muted`. [`legend_tips`] picks the entries. An entry that
+/// does not fit stays off the row with every entry after it.
+///
+/// Inside stoatty each swatch is a sub-cell bar, and a hairline in
+/// `ui.surface.raised` underlines the row. A plain terminal draws the swatch
+/// as a line glyph and no rule.
+fn render_graph_header(
+    state: &CommitListState,
+    theme: &crate::theme::Theme,
+    row: Rect,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    use crate::theme::scope as s;
+    let end_x = row.x + row.width;
+    let bold = theme.get(s::UI_TEXT).add_modifier(Modifier::BOLD);
+    let x0 = row.x + TEXT_INSET;
+    write_str_clipped(buf, x0, row.y, "graph", bold, end_x);
+
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    let tip_color = tip_colors(theme, state.graph.1);
+    let live = scene.live();
+    let mut x = x0 + "graph".len() as u16 + 1;
+    for (lane, name) in legend_tips(state) {
+        let width = 1 + name.chars().count() as u16;
+        if x.saturating_add(width) > end_x {
+            break;
+        }
+
+        let color = tip_color(lane);
+        match live {
+            true => Bar {
+                x: ((16 - SWATCH_WIDTH) / 2) as i16,
+                y: ((16 - SWATCH_HEIGHT) / 2) as i16,
+                width: SWATCH_WIDTH,
+                height: SWATCH_HEIGHT,
+                color,
+            }
+            .render(Rect::new(x, row.y, 1, 1), buf, &mut *scene),
+            false => {
+                let [r, g, b] = color;
+                let swatch = Style::new().fg(Color::Rgb(r, g, b));
+                write_cell(buf, x, row.y, '\u{2501}', swatch);
+            },
+        }
+        write_str(buf, x + 1, row.y, name, muted);
+        x += width + 1;
+    }
+
+    if let Some(color) = style_rgb(theme.get(s::UI_SURFACE_RAISED).bg) {
+        Bar {
+            x: 0,
+            y: (16 - RULE_STROKE) as i16,
+            width: row.width * 16,
+            height: RULE_STROKE,
+            color,
+        }
+        .render(row, buf, scene);
+    }
+}
+
+/// The legend entries of the graph header, as `(lane, name)` pairs.
+///
+/// One entry stands for each lane that holds a local branch tip among the
+/// loaded rows, lanes in order, at most [`LEGEND_TIPS`] of them. Each names
+/// the first branch at the topmost tip in its lane.
+fn legend_tips(state: &CommitListState) -> Vec<(u16, &str)> {
+    let mut by_lane: BTreeMap<u16, &str> = BTreeMap::new();
+    for (commit, row) in state.commits.iter().zip(&state.graph.0) {
+        if let Some(name) = state
+            .refs
+            .local
+            .get(&commit.sha)
+            .and_then(|names| names.first())
+        {
+            by_lane.entry(row.node_lane).or_insert(name);
+        }
+    }
+    by_lane.into_iter().take(LEGEND_TIPS).collect()
 }
 
 /// Paint the commit list into `area` starting at row `start_row`, with the
@@ -613,9 +738,9 @@ fn render_commit_detail_pane(
     };
     let sha = commit.sha.clone();
     let text_area = Rect::new(
-        area.x + DETAIL_INSET,
+        area.x + TEXT_INSET,
         area.y,
-        area.width.saturating_sub(2 * DETAIL_INSET),
+        area.width.saturating_sub(2 * TEXT_INSET),
         area.height,
     );
     let body = state.bodies.get(&sha).map(String::as_str);
@@ -848,11 +973,11 @@ fn render_commit_files(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     use crate::theme::scope as s;
-    if area.height == 0 || area.width <= 2 * DETAIL_INSET {
+    if area.height == 0 || area.width <= 2 * TEXT_INSET {
         return;
     }
-    let x0 = area.x + DETAIL_INSET;
-    let end_x = area.x + area.width - DETAIL_INSET;
+    let x0 = area.x + TEXT_INSET;
+    let end_x = area.x + area.width - TEXT_INSET;
     let muted = theme.get(s::UI_TEXT_MUTED);
     let added = theme.get(s::DIFF_ADDED);
     let deleted = theme.get(s::DIFF_DELETED);
@@ -1516,16 +1641,20 @@ pub(crate) fn render_commit_preview(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_rows, commit_list_width, commits_detail_rect, file_at_row, initials, paint_file_path,
-        preview_row_count, render_commit_preview, render_preview_label, row_badges, stat_share,
-        PreviewDials, DETAIL_INSET, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT,
-        STAT_BAR_CELLS, STAT_BAR_HEIGHT,
+        body_rows, commit_list_width, commits_detail_rect, commits_header_rect, file_at_row,
+        initials, legend_tips, paint_file_path, preview_row_count, render_commit_preview,
+        render_preview_label, row_badges, stat_share, PreviewDials, MIN_DETAIL_COLUMNS,
+        MIN_LIST_COLUMNS, RING_PERCENT, RULE_STROKE, STAT_BAR_CELLS, STAT_BAR_HEIGHT,
+        SWATCH_HEIGHT, SWATCH_WIDTH, TEXT_INSET,
     };
     use crate::{
         app::Stoat,
-        commit_list::CommitRefs,
+        commit_graph::GraphRow,
+        commit_list::{CommitListState, CommitRefs},
         display_map::highlights::HighlightStyle,
+        host::{CommitInfo, GitHost},
         render::{
+            commit_picker::tip_colors,
             paint::{blend, dim_rgb, luma, style_rgb},
             review::{DiffDials, CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
         },
@@ -1967,6 +2096,122 @@ mod tests {
         );
     }
 
+    /// The legend takes the topmost tip of each lane, lanes in order, and four
+    /// lanes at most.
+    #[test]
+    fn the_legend_names_the_topmost_tip_of_each_lane_in_lane_order() {
+        let h = Stoat::test();
+        h.fake_git().add_repo("/repo");
+        let repo = h.fake_git.discover(Path::new("/repo")).expect("the repo");
+        let mut state = CommitListState::new(PathBuf::from("/repo"), repo, 0);
+        let lanes = [3, 1, 4, 1, 0, 2, 0];
+        let sha = |row: usize| format!("c{row}");
+        state.commits = (0..lanes.len())
+            .map(|row| CommitInfo {
+                sha: sha(row),
+                short_sha: sha(row),
+                summary: String::new(),
+                author_name: String::new(),
+                author_email: String::new(),
+                time: 0,
+                parents: Vec::new(),
+            })
+            .collect();
+        let rows = lanes.map(|node_lane| GraphRow {
+            node_lane,
+            edges: Vec::new(),
+        });
+        state.graph = (rows.to_vec(), 5);
+        state.refs.local = (0..6)
+            .map(|row| (sha(row), vec![format!("tip{row}")]))
+            .collect();
+
+        assert_eq!(
+            legend_tips(&state),
+            [(0, "tip4"), (1, "tip1"), (2, "tip5"), (3, "tip0")],
+        );
+    }
+
+    /// A legend entry wider than the room left in the list stays off the header
+    /// row, so the separator beside the list keeps its cell.
+    #[test]
+    fn a_legend_entry_past_the_list_stays_off_the_header() {
+        let mut h = Stoat::test();
+        h.resize(40, 8);
+        h.stoat.stoatty = false;
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[])
+            .branch("a-branch-wider-than-the-list", "a1000000");
+        h.open_commits("/repo");
+
+        let text = h.rendered_text();
+        let header: String = text
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(23)
+            .collect();
+        assert_eq!(header, format!("{:<22}\u{2502}", " graph"));
+    }
+
+    /// Inside stoatty each legend swatch is a bar in its lane's tip color, set
+    /// in its cell, and a hairline in surface.raised underlines the header.
+    #[test]
+    fn the_graph_header_draws_its_swatches_and_rule_as_bars() {
+        let mut h = Stoat::test();
+        h.resize(120, 12);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[])
+            .commit_with_parent_message("b2000000", "a1000000", "feat: side", &[])
+            .commit_with_parent_message("c3000000", "a1000000", "feat: main", &[])
+            .merge_commit("d4000000", "b2000000", &[])
+            .branch("side", "b2000000")
+            .branch("main", "d4000000");
+        h.open_commits("/repo");
+        h.render_composited();
+
+        let theme = &h.stoat.theme;
+        let tip = tip_colors(theme, 2);
+        let raised = style_rgb(theme.get(scope::UI_SURFACE_RAISED).bg).expect("an RGB surface");
+        let bars: Vec<(i16, i16, u16, u16, [u8; 3])> =
+            command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|cmd| match cmd {
+                    Command::Bar(bar)
+                        if bar.height == SWATCH_HEIGHT
+                            || (bar.height == RULE_STROKE && bar.color == raised) =>
+                    {
+                        Some((bar.x, bar.y, bar.width, bar.height, bar.color))
+                    },
+                    _ => None,
+                })
+                .collect();
+
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).area
+        };
+        let header = commits_header_rect(pane, None).expect("a header row");
+        let text = h.rendered_text();
+        let swatch = |name: &str, lane: u16| {
+            let col = cell_of(&text, name).0 - 1;
+            let x = (col * 16 + (16 - SWATCH_WIDTH) / 2) as i16;
+            let y = (header.y * 16 + (16 - SWATCH_HEIGHT) / 2) as i16;
+            (x, y, SWATCH_WIDTH, SWATCH_HEIGHT, tip(lane))
+        };
+        let rule = (
+            (header.x * 16) as i16,
+            (header.y * 16 + 16 - RULE_STROKE) as i16,
+            header.width * 16,
+            RULE_STROKE,
+            raised,
+        );
+        assert_eq!(bars, [swatch("main", 0), swatch("side", 1), rule]);
+    }
+
     #[test]
     fn a_stat_share_scales_to_the_largest_change_and_keeps_a_sixteenth() {
         assert_eq!(
@@ -2144,7 +2389,7 @@ mod tests {
         };
         let detail = commits_detail_rect(pane, None).expect("a detail pane");
         let (x, a, b) = (
-            ((detail.x + detail.width - DETAIL_INSET - STAT_BAR_CELLS) * 16) as i16,
+            ((detail.x + detail.width - TEXT_INSET - STAT_BAR_CELLS) * 16) as i16,
             row * 16 + 6,
             row * 16 + 22,
         );

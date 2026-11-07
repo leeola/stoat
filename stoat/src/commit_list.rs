@@ -762,7 +762,8 @@ mod tests {
 
     /// A list too narrow for a few words of summary beside the author and age
     /// columns leaves them off, and the summary takes their room. HEAD's badge
-    /// does not fit either, so it stays off too.
+    /// does not fit either, so it stays off too. The rows start under the
+    /// graph header's row.
     #[test]
     fn a_narrow_list_leaves_the_author_and_age_off() {
         let mut h = Stoat::test();
@@ -773,6 +774,7 @@ mod tests {
         let text = h.rendered_text();
         let rows: Vec<&str> = text
             .lines()
+            .skip(1)
             .take(3)
             .map(|line| line.split('\u{2502}').next().unwrap_or_default())
             .collect();

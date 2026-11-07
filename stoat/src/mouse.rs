@@ -3393,6 +3393,33 @@ mod tests {
             .preview_scroll
     }
 
+    /// A press resolves to the commit drawn under the pointer, under the graph
+    /// header's row, and a press on the header selects nothing.
+    #[test]
+    fn a_press_lands_on_the_commit_drawn_under_it() {
+        let (mut h, list) = commits_harness(4);
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitsLast);
+        h.snapshot();
+        let row_of = |h: &crate::test_harness::TestHarness, text: &str| {
+            let rows = h.rendered_text();
+            rows.lines()
+                .position(|line| line.contains(text))
+                .expect("drawn") as u16
+        };
+        let (header, drawn) = (row_of(&h, "graph"), row_of(&h, "commit 1"));
+        let press = |h: &mut crate::test_harness::TestHarness, row: u16| {
+            let down = MouseEventKind::Down(MouseButton::Left);
+            h.stoat.update(mouse_event(down, list.x + 2, row));
+            selected_commit(h)
+        };
+
+        assert_eq!(
+            [press(&mut h, header), press(&mut h, drawn)],
+            [3, 2],
+            "the header selects nothing, and a row selects the commit drawn there"
+        );
+    }
+
     #[test]
     fn a_wheel_over_the_commits_list_steps_the_selection() {
         let (mut h, list) = commits_harness(8);
