@@ -718,6 +718,46 @@ mod tests {
         );
     }
 
+    /// The boards draw an error as a filled disc, and a warning and info with
+    /// their glyph cut out. So the middle of an icon takes the icon color for
+    /// an error alone.
+    #[test]
+    fn only_an_error_icon_fills_its_middle() {
+        let (device, queue) = require_headless_device();
+
+        // A three-cell icon strokes its glyph wider than a pixel, so the middle
+        // of its 48 px block reads either the whole color or the bare ground.
+        let middle = |kind: IconKind| {
+            let icon = Icon {
+                top: 0,
+                left: 0,
+                kind,
+                color: Rgb::new(255, 0, 0),
+                size: 3,
+                offset: [0, 0],
+                seq: 0,
+            };
+            let mut pass = IconPass::new(&device, TextureFormat::Rgba8Unorm, METRICS);
+            pass.prepare(
+                &device,
+                &queue,
+                &[icon],
+                &[],
+                [TARGET as f32, TARGET as f32],
+                BAND,
+                RowAnchor::UNIFORM,
+            );
+            let rgba = render_rgba(&device, &queue, |render_pass| pass.draw(render_pass));
+            rgba[((24 * TARGET + 24) * 4) as usize]
+        };
+
+        assert_eq!(
+            [IconKind::Error, IconKind::Warning, IconKind::Info].map(middle),
+            [255, 0, 0],
+            "the error disc is whole, and the bang and the i clear the other middles",
+        );
+    }
+
     /// A box over the whole target, declared before the icon, so only the
     /// composite's occlude-all reaches it.
     fn covering_panel() -> Panel {

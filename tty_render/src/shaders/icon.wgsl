@@ -2,11 +2,9 @@
 // block. The fragment paints a signed-distance shape per kind in the icon color
 // and nothing elsewhere, so it alpha-blends over whatever it sits on.
 //
-// Each kind is an outline with its glyph cut out of it, the way a status icon
-// is drawn in an icon set: an error is a disc crossed out, a warning is a
-// rounded triangle holding a bang, and info is a disc holding an i. A filled
-// silhouette carries none of that meaning, and a reader tells one apart from
-// the next by its glyph rather than by its outline.
+// Each kind is a severity mark the boards draw. An error is a filled disc. A
+// warning is a rounded triangle with a bang cut out of it, and info is a disc
+// with an i cut out of it.
 
 struct Globals {
     resolution: vec2<f32>,
@@ -50,6 +48,9 @@ var<storage, read> occluders: array<Occluder>;
 const KIND_ERROR: u32 = 0u;
 const KIND_WARNING: u32 = 1u;
 const KIND_INFO: u32 = 2u;
+
+// A cut-out distance that no pixel reaches, which leaves a body whole.
+const NO_CUTOUT: f32 = 1.0e9;
 
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
@@ -197,13 +198,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         cutout = min(dot, bar);
     } else {
         body = length(q) - r;
-        let arm = 0.42 * r;
-        let down = capsule_sdf(q, vec2<f32>(-arm, -arm), vec2<f32>(arm, arm), stroke);
-        let up = capsule_sdf(q, vec2<f32>(-arm, arm), vec2<f32>(arm, -arm), stroke);
-        cutout = min(down, up);
+        cutout = NO_CUTOUT;
     }
 
-    // Subtracting the glyph leaves the ground showing through it, so the icon
-    // reads as a mark rather than as a blob of color.
+    // Subtracting the glyph leaves the ground showing through it.
     return vec4<f32>(in.color, coverage(max(body, -cutout)));
 }

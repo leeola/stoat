@@ -163,24 +163,14 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         "run bg is occluded inside the box"
     );
 
-    // An icon is an outline with its glyph cut out of it, so its center is the
-    // ground and its body is the pixel a little way up the vertical axis.
-    let icon_r = 0.45 * cell_w.min(cell_h) as f32;
-    let body = |row: u32, col: u32| -> (u8, u8, u8) {
-        let x = col * cell_w + cell_w / 2;
-        let y = row * cell_h + cell_h / 2 - (0.6 * icon_r) as u32;
-        let [r, g, b] = pixel(&pixels, width, x, y);
-        (r, g, b)
-    };
-
-    assert_eq!(body(3, 0), rgb(icon_color), "icon paints outside the box");
-    assert_eq!(body(3, 3), rgb(modal_bg), "icon is occluded inside the box");
-
+    // An error is a filled disc, so the middle of its cell takes the icon color
+    // wherever no box covers it.
     assert_eq!(
         cell(3, 0),
-        rgb(modal_bg),
-        "the error's cross cuts through its disc"
+        rgb(icon_color),
+        "the error's whole disc paints outside the box"
     );
+    assert_eq!(cell(3, 3), rgb(modal_bg), "icon is occluded inside the box");
     // The bang's bar is thinner than the pixel the probe lands on, so the
     // center keeps a little of the icon rather than none of it.
     let midpoint = (u32::from(modal_bg.b) + u32::from(icon_color.b)) / 2;
