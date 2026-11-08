@@ -141,6 +141,10 @@ pub(crate) enum Note {
     /// A file that the conflict view resolved and staged during the merge in
     /// progress.
     Resolved,
+    /// A conflicted file the panel resolved whole to our side, then staged.
+    TookOurs,
+    /// A conflicted file the panel resolved whole to their side, then staged.
+    TookTheirs,
     /// The lines the row's side of the index adds and deletes.
     Lines {
         added: u32,
@@ -186,6 +190,16 @@ impl GitStatusPanel {
             .iter()
             .flat_map(|model| &model.sections)
             .flat_map(|section| &section.rows)
+    }
+
+    /// The selected row and the section it sits in, which decides what a key
+    /// does to it. `None` before the first read lands and for a clean tree.
+    pub(crate) fn selected_row(&self) -> Option<(SectionKind, &FileRow)> {
+        self.model
+            .iter()
+            .flat_map(|model| &model.sections)
+            .flat_map(|section| section.rows.iter().map(|row| (section.kind, row)))
+            .nth(self.selected)
     }
 
     /// Move the selection `delta` rows, stopping at the first and the last
@@ -609,6 +623,8 @@ fn rebase_banner(rebase: &RebaseProgress) -> OpBanner {
             .unwrap_or_default()
             .to_string(),
         detail,
+        // FIXME: The panel binds no key for `s skip` or `Space r plan`, since
+        // its `s` stages the selected row.
         keys: vec![
             ("C", "continue", scope::VCS_STATUS_STAGED),
             ("s", "skip", scope::UI_DIAGNOSTIC_WARNING),

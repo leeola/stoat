@@ -98,6 +98,8 @@ fn each_note_reads_as_the_board_draws_it() {
     let notes = [
         Note::Open { open: 2, total: 4 },
         Note::Resolved,
+        Note::TookOurs,
+        Note::TookTheirs,
         Note::Lines {
             added: 5,
             deleted: 6,
@@ -119,6 +121,8 @@ fn each_note_reads_as_the_board_draws_it() {
         [
             text("2 / 4 open", scope::VCS_STATUS_CONFLICTED),
             text("resolved", scope::VCS_STATUS_STAGED),
+            text("took ours", scope::VCS_STATUS_STAGED),
+            text("took theirs", scope::VCS_STATUS_STAGED),
             text("+5 \u{2212}6", scope::UI_TEXT_MUTED),
             text("+6", scope::UI_TEXT_MUTED),
             text("\u{2212}3", scope::UI_TEXT_MUTED),

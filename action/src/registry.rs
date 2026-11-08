@@ -81,7 +81,11 @@ use crate::{
             FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
             OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
-        git_status::{CloseGitStatus, GitStatus, GitStatusNext, GitStatusPrev},
+        git_status::{
+            CloseGitStatus, GitStatus, GitStatusAbort, GitStatusCommit, GitStatusNext,
+            GitStatusOpen, GitStatusPrev, GitStatusStage, GitStatusTakeOurs, GitStatusTakeTheirs,
+            GitStatusUnstage,
+        },
         help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
@@ -998,6 +1002,15 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CloseGitStatus::DEF, |_| Ok(Box::new(CloseGitStatus)));
     add(GitStatusNext::DEF, |_| Ok(Box::new(GitStatusNext)));
     add(GitStatusPrev::DEF, |_| Ok(Box::new(GitStatusPrev)));
+    add(GitStatusOpen::DEF, |_| Ok(Box::new(GitStatusOpen)));
+    add(GitStatusStage::DEF, |_| Ok(Box::new(GitStatusStage)));
+    add(GitStatusUnstage::DEF, |_| Ok(Box::new(GitStatusUnstage)));
+    add(GitStatusTakeOurs::DEF, |_| Ok(Box::new(GitStatusTakeOurs)));
+    add(GitStatusTakeTheirs::DEF, |_| {
+        Ok(Box::new(GitStatusTakeTheirs))
+    });
+    add(GitStatusCommit::DEF, |_| Ok(Box::new(GitStatusCommit)));
+    add(GitStatusAbort::DEF, |_| Ok(Box::new(GitStatusAbort)));
     add(CloseDiffChanges::DEF, |_| Ok(Box::new(CloseDiffChanges)));
     add(DiffChangesNext::DEF, |_| Ok(Box::new(DiffChangesNext)));
     add(DiffChangesPrev::DEF, |_| Ok(Box::new(DiffChangesPrev)));
@@ -1457,6 +1470,13 @@ mod tests {
         "CloseGitStatus",
         "GitStatusNext",
         "GitStatusPrev",
+        "GitStatusOpen",
+        "GitStatusStage",
+        "GitStatusUnstage",
+        "GitStatusTakeOurs",
+        "GitStatusTakeTheirs",
+        "GitStatusCommit",
+        "GitStatusAbort",
         "CloseDiffChanges",
         "DiffChangesNext",
         "DiffChangesPrev",
@@ -2140,7 +2160,8 @@ mod tests {
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
         // + 3 the git status panel actions.
-        assert_eq!(all().count(), 482);
+        // + 7 the git status panel's row and banner keys.
+        assert_eq!(all().count(), 489);
     }
 
     #[test]

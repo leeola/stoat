@@ -1546,6 +1546,12 @@ impl GitRepo for FakeGitRepo {
         state.conflicts.iter().find(|f| f.path == target).cloned()
     }
 
+    /// Stages the path within what the fake records, as `git add` does. A
+    /// conflict leaves the conflicts, an unstaged registration turns staged,
+    /// and an untracked path turns a staged addition with its lines.
+    ///
+    /// The fake holds no working text, so a registration seeded as a deletion
+    /// stages as an edit.
     fn mark_resolved(&self, path: &Path) -> Result<(), GitApplyError> {
         let target = if path.is_absolute() {
             path.to_path_buf()
@@ -1554,6 +1560,20 @@ impl GitRepo for FakeGitRepo {
         };
         let mut state = self.state.lock().unwrap();
         state.conflicts.retain(|f| f.path != target);
+        if state.untracked.remove(&target) {
+            let added = state.untracked_lines.remove(&target).unwrap_or(0);
+            let mut change = FakeChange::new(ChangedFile {
+                path: target.clone(),
+                staged: true,
+                staged_kind: None,
+                untracked: false,
+                renamed_from: None,
+            });
+            change.lines = (added, 0);
+            state.changed.push(change);
+        } else if let Some(change) = state.changed.iter_mut().find(|c| c.file.path == target) {
+            change.file.staged = true;
+        }
         state.resolved_paths.push(target);
         Ok(())
     }
@@ -3855,6 +3875,43 @@ mod tests {
                 (PathBuf::from("e.rs"), 0, 0),
                 (PathBuf::from("f.rs"), 0, 0),
             ],
+        );
+    }
+
+    /// Marking a path stages it as the fake records it. An unstaged
+    /// registration turns staged, and an untracked path turns a staged
+    /// addition that keeps its lines.
+    #[test]
+    fn mark_resolved_stages_registrations_and_untracked_paths() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "a")
+            .unstaged_file("a.rs", "edit")
+            .untracked("b.rs")
+            .lines("b.rs", 2, 0);
+        let repo = host.discover(&workdir()).unwrap();
+        repo.mark_resolved(Path::new("a.rs")).unwrap();
+        repo.mark_resolved(Path::new("b.rs")).unwrap();
+
+        let files: Vec<(PathBuf, bool, Option<StagedKind>, bool)> = repo
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged, file.staged_kind, file.untracked))
+            .collect();
+        assert_eq!(
+            (files, repo.change_line_stats().staged),
+            (
+                vec![
+                    (
+                        workdir().join("a.rs"),
+                        true,
+                        Some(StagedKind::Modified),
+                        false
+                    ),
+                    (workdir().join("b.rs"), true, Some(StagedKind::Added), false),
+                ],
+                vec![(PathBuf::from("a.rs"), 0, 0), (PathBuf::from("b.rs"), 2, 0)],
+            ),
         );
     }
 

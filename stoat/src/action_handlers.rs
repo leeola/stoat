@@ -55,6 +55,7 @@ use crate::{
     host::FsHost,
     jumplist::JumpList,
     keymap_state::{self, ActiveModal},
+    merge_view::Side,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
     workspace::diff::WorktreeBase,
 };
@@ -1217,6 +1218,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CloseGitStatus => git_status::close_git_status(stoat),
         ActionKind::GitStatusNext => git_status::git_status_step(stoat, 1),
         ActionKind::GitStatusPrev => git_status::git_status_step(stoat, -1),
+        ActionKind::GitStatusOpen => git_status::git_status_open(stoat),
+        ActionKind::GitStatusStage => git_status::git_status_stage(stoat),
+        ActionKind::GitStatusUnstage => git_status::git_status_unstage(stoat),
+        ActionKind::GitStatusTakeOurs => git_status::git_status_take(stoat, Side::Ours),
+        ActionKind::GitStatusTakeTheirs => git_status::git_status_take(stoat, Side::Theirs),
+        ActionKind::GitStatusCommit => git_status::git_status_commit(stoat),
+        ActionKind::GitStatusAbort => git_status::git_status_abort(stoat),
         ActionKind::CloseDiffChanges => diff_changes::close_diff_changes(stoat),
         ActionKind::DiffChangesNext => {
             let step = arming_step(stoat);

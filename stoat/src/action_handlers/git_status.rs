@@ -1,11 +1,20 @@
 //! The git status panel's actions, which open it, read its model, walk its
-//! rows, and close it.
+//! rows, act on the selected row, and close it.
 
 use crate::{
-    action_handlers::review,
+    action_handlers::{conflict_view, git_commit, git_merge, rebase, review},
     app::{Stoat, UpdateEffect},
+    auto_reload, buffer_lifecycle,
+    buffer_registry::OpenOrigin,
     git_jobs::{self, GitJob, GitLanding, GitWork},
-    git_status::{GitStatusModel, GitStatusPanel, RebaseProgress},
+    git_status::{GitStatusModel, GitStatusPanel, Note, OpKind, RebaseProgress, SectionKind},
+    host::{FsHost, GitApplyError, GitRepo},
+    merge_view::Side,
+    paths,
+};
+use std::{
+    io,
+    path::{Path, PathBuf},
 };
 
 /// Open the git status panel and queue the read of its model.
@@ -37,6 +46,254 @@ pub(super) fn git_status_step(stoat: &mut Stoat, delta: isize) -> UpdateEffect {
     };
     panel.step(delta);
     UpdateEffect::Redraw
+}
+
+/// Close the panel and open the selected file.
+///
+/// A conflicted file opens in the conflict view, a staged or unstaged file in
+/// the per-file diff view, and an untracked file as it is.
+pub(super) fn git_status_open(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((kind, path)) = selected(stoat) else {
+        return UpdateEffect::None;
+    };
+    stoat.git_status = None;
+
+    if kind == SectionKind::Conflicted {
+        open_conflicted(stoat, &path);
+        return UpdateEffect::Redraw;
+    }
+    let target = stoat.active_workspace().panes.focus();
+    if buffer_lifecycle::open_file_in_pane_now(stoat, target, &path, OpenOrigin::Visited).is_none()
+    {
+        return UpdateEffect::Redraw;
+    }
+    match kind {
+        SectionKind::Staged | SectionKind::Unstaged => review::diff(stoat, None),
+        SectionKind::Conflicted | SectionKind::Untracked => UpdateEffect::Redraw,
+    }
+}
+
+/// Stage the selected unstaged or untracked file as the working tree holds
+/// it, then read the panel again.
+pub(super) fn git_status_stage(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((kind, path)) = selected(stoat) else {
+        return UpdateEffect::None;
+    };
+    match kind {
+        SectionKind::Unstaged | SectionKind::Untracked => {
+            queue_index_write(stoat, path, IndexWrite::Stage);
+        },
+        SectionKind::Staged => review::emit_review_error_badge(stoat, "already staged", None),
+        SectionKind::Conflicted => review::emit_review_error_badge(
+            stoat,
+            "a conflicted file takes a side with o or t",
+            None,
+        ),
+    }
+    UpdateEffect::Redraw
+}
+
+/// Take the selected staged file out of the index, then read the panel again.
+pub(super) fn git_status_unstage(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((kind, path)) = selected(stoat) else {
+        return UpdateEffect::None;
+    };
+    match kind {
+        SectionKind::Staged => queue_index_write(stoat, path, IndexWrite::Unstage),
+        SectionKind::Conflicted | SectionKind::Unstaged | SectionKind::Untracked => {
+            review::emit_review_error_badge(stoat, "not staged", None);
+        },
+    }
+    UpdateEffect::Redraw
+}
+
+/// Resolve the selected conflicted file whole to `side`, stage it, note the
+/// side for its row, and read the panel again.
+pub(super) fn git_status_take(stoat: &mut Stoat, side: Side) -> UpdateEffect {
+    let Some((SectionKind::Conflicted, path)) = selected(stoat) else {
+        review::emit_review_error_badge(stoat, "only a conflicted file takes a side", None);
+        return UpdateEffect::Redraw;
+    };
+
+    let fs = stoat.fs_host.clone();
+    let job = GitJob::new("git status take side", None, move |stoat: &mut Stoat| {
+        let (repo, _) = git_commit::commit_repo(stoat)?;
+        Some(Box::new(move || {
+            let taken = take_side(&*repo, &*fs, &path, side);
+            Box::new(move |stoat: &mut Stoat| land_take(stoat, &path, side, taken)) as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    reload_git_status(stoat);
+    UpdateEffect::Redraw
+}
+
+/// Close the panel and commit what the banner names.
+///
+/// A merge commits through its message, a rebase goes on to its next step,
+/// and with neither the index commits.
+pub(super) fn git_status_commit(stoat: &mut Stoat) -> UpdateEffect {
+    let operation = operation(stoat);
+    stoat.git_status = None;
+    match operation {
+        Some(OpKind::Merge) => git_merge::git_merge_continue(stoat),
+        Some(OpKind::Rebase) => rebase::git_rebase_continue(stoat),
+        None => git_commit::git_commit(stoat),
+    }
+}
+
+/// Abort the merge or the rebase the banner names, then read the panel again.
+pub(super) fn git_status_abort(stoat: &mut Stoat) -> UpdateEffect {
+    match operation(stoat) {
+        Some(OpKind::Merge) => {
+            git_merge::git_merge_abort(stoat);
+        },
+        Some(OpKind::Rebase) => {
+            rebase::git_rebase_abort(stoat);
+        },
+        None => {
+            review::emit_review_error_badge(stoat, "no merge or rebase to abort", None);
+            return UpdateEffect::Redraw;
+        },
+    }
+    reload_git_status(stoat);
+    UpdateEffect::Redraw
+}
+
+/// The selected row's section and path, or `None` with the panel closed or
+/// no row.
+fn selected(stoat: &Stoat) -> Option<(SectionKind, PathBuf)> {
+    let (kind, row) = stoat.git_status.as_ref()?.selected_row()?;
+    Some((kind, row.path.clone()))
+}
+
+/// The operation the panel's last read found in progress.
+fn operation(stoat: &Stoat) -> Option<OpKind> {
+    let model = stoat.git_status.as_ref()?.model.as_ref()?;
+    model.op.as_ref().map(|op| op.kind)
+}
+
+/// Show the conflicted file at `path` in the conflict view.
+///
+/// An open conflict session that lists the file switches to it, since a fresh
+/// open toggles the session closed. Otherwise the file opens in the focused
+/// pane and the view opens on it.
+fn open_conflicted(stoat: &mut Stoat, path: &Path) {
+    let listed = stoat
+        .active_workspace()
+        .conflict
+        .as_ref()
+        .map(|session| session.files.iter().position(|file| file == path));
+    match listed {
+        Some(Some(index)) => conflict_view::switch_to_file(stoat, index),
+        Some(None) => {
+            conflict_view::close_conflict(stoat);
+            open_conflicted(stoat, path);
+        },
+        None => {
+            let target = stoat.active_workspace().panes.focus();
+            if buffer_lifecycle::open_file_in_pane_now(stoat, target, path, OpenOrigin::Visited)
+                .is_some()
+            {
+                conflict_view::open_conflict(stoat);
+            }
+        },
+    }
+}
+
+/// The index writes that `s` and `u` queue.
+#[derive(Clone, Copy)]
+enum IndexWrite {
+    Stage,
+    Unstage,
+}
+
+/// Queue `write` on `path` in the git queue, then a read of the panel behind
+/// it, so the read sees what the write left.
+fn queue_index_write(stoat: &mut Stoat, path: PathBuf, write: IndexWrite) {
+    let job = GitJob::new("git status index write", None, move |stoat: &mut Stoat| {
+        let (repo, _) = git_commit::commit_repo(stoat)?;
+        Some(Box::new(move || {
+            let written = match write {
+                IndexWrite::Stage => repo.mark_resolved(&path),
+                IndexWrite::Unstage => repo.unstage_path(&path),
+            }
+            .map_err(|GitApplyError::Backend { reason, .. }| reason);
+            Box::new(move |stoat: &mut Stoat| land_index_write(stoat, &path, write, written))
+                as GitLanding
+        }) as GitWork)
+    });
+    git_jobs::enqueue(stoat, job);
+    reload_git_status(stoat);
+}
+
+/// Recompute the diffs over the index `write` changed and name what it did,
+/// or badge why it failed.
+fn land_index_write(
+    stoat: &mut Stoat,
+    path: &Path,
+    write: IndexWrite,
+    written: Result<(), String>,
+) {
+    let (done, failed) = match write {
+        IndexWrite::Stage => ("staged", "stage failed"),
+        IndexWrite::Unstage => ("unstaged", "unstage failed"),
+    };
+    if let Err(reason) = written {
+        review::emit_review_error_badge(stoat, failed, Some(reason));
+        return;
+    }
+    stoat.active_workspace_mut().invalidate_all_diffs();
+    let name = paths::display_relative(path, &stoat.active_workspace().git_root);
+    stoat.set_status(format!("{done} {name}"));
+}
+
+/// Write `side`'s stage of the conflicted file at `path` over the file, then
+/// stage it.
+///
+/// The stage text is the side's blob as the index holds it, so the file keeps
+/// that side's line endings. A side that deleted the file deletes it here, so
+/// the stage records the deletion.
+fn take_side(repo: &dyn GitRepo, fs: &dyn FsHost, path: &Path, side: Side) -> Result<(), String> {
+    let stages = repo
+        .conflict_stages(path)
+        .ok_or_else(|| "the file holds no conflict".to_string())?;
+    let text = match side {
+        Side::Ours => stages.ours,
+        Side::Theirs => stages.theirs,
+    };
+    let written = match text {
+        Some(text) => fs.write_atomic(path, text.as_bytes()),
+        None => fs.remove_file(path).or_else(|err| match err.kind() {
+            io::ErrorKind::NotFound => Ok(()),
+            _ => Err(err),
+        }),
+    };
+    written.map_err(|err| err.to_string())?;
+    repo.mark_resolved(path)
+        .map_err(|GitApplyError::Backend { reason, .. }| reason)
+}
+
+/// Note the side a take landed for its row and bring the editor to the file
+/// it wrote, or badge why it failed.
+fn land_take(stoat: &mut Stoat, path: &Path, side: Side, taken: Result<(), String>) {
+    let (note, name) = match side {
+        Side::Ours => (Note::TookOurs, "ours"),
+        Side::Theirs => (Note::TookTheirs, "theirs"),
+    };
+    if let Err(reason) = taken {
+        review::emit_review_error_badge(stoat, &format!("take {name} failed"), Some(reason));
+        return;
+    }
+
+    stoat
+        .active_workspace_mut()
+        .resolved_conflicts
+        .insert(path.to_path_buf(), note);
+    auto_reload::reload_clean_buffers(stoat);
+    stoat.active_workspace_mut().invalidate_all_diffs();
+    let file = paths::display_relative(path, &stoat.active_workspace().git_root);
+    stoat.set_status(format!("took {name} for {file}"));
 }
 
 /// Queue a read of the panel's model behind every git write queued before it.
@@ -71,12 +328,15 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         app::Stoat,
-        git_status::Note,
-        host::FakeRepoBuilder,
+        git_status::{Note, SectionKind},
+        host::{FakeRepoBuilder, FsHost},
         keymap_state::{active_modal, ActiveModal},
         test_harness::TestHarness,
     };
-    use std::path::PathBuf;
+    use std::{
+        collections::HashMap,
+        path::{Path, PathBuf},
+    };
 
     /// A harness rooted in `/repo`, with HEAD on `main` and the files
     /// `seed` registers.
@@ -93,6 +353,208 @@ mod tests {
 
     fn selected(h: &TestHarness) -> Option<usize> {
         h.stoat.git_status.as_ref().map(|panel| panel.selected)
+    }
+
+    /// Each section the panel's last read holds, with its rows' paths.
+    fn sections(h: &TestHarness) -> Vec<(SectionKind, Vec<PathBuf>)> {
+        h.stoat
+            .git_status
+            .iter()
+            .filter_map(|panel| panel.model.as_ref())
+            .flat_map(|model| &model.sections)
+            .map(|section| {
+                let paths = section.rows.iter().map(|row| row.path.clone()).collect();
+                (section.kind, paths)
+            })
+            .collect()
+    }
+
+    /// Press `key` in the panel and let its write and the read behind it land.
+    fn press(h: &mut TestHarness, key: &str) {
+        h.type_keys(key);
+        h.settle();
+    }
+
+    /// A harness mid-merge with `a.rs` conflicted, its file on disk holding
+    /// the conflict markers.
+    fn merging_harness() -> TestHarness {
+        let h = repo_harness(|repo| {
+            repo.merge_in_progress("f00dfeed", Some("feature"), "Merge")
+                .conflicted_file("a.rs", Some("base\n"), Some("ours\n"), Some("theirs\n"));
+        });
+        h.fake_fs().insert_file(
+            "/repo/a.rs",
+            "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
+        );
+        h
+    }
+
+    /// `s` stages the selected unstaged file, and `u` takes it back out.
+    #[test]
+    fn s_stages_the_row_and_u_unstages_it() {
+        let mut h = repo_harness(|repo| {
+            repo.head_file("a.rs", "a").unstaged_file("a.rs", "edit");
+        });
+        run(&mut h, ":git status");
+        let path = PathBuf::from("/repo/a.rs");
+
+        press(&mut h, "s");
+        let staged = sections(&h);
+        press(&mut h, "u");
+        assert_eq!(
+            (staged, sections(&h)),
+            (
+                vec![(SectionKind::Staged, vec![path.clone()])],
+                vec![(SectionKind::Unstaged, vec![path])],
+            ),
+        );
+    }
+
+    /// `o` writes our side over a conflicted file, stages it, and notes the
+    /// side, so the conflicted row drops out.
+    #[test]
+    fn o_takes_our_side_of_a_conflicted_file() {
+        let mut h = merging_harness();
+        run(&mut h, ":git status");
+        press(&mut h, "o");
+
+        let path = PathBuf::from("/repo/a.rs");
+        let mut written = Vec::new();
+        h.fake_fs()
+            .read(&path, &mut written)
+            .expect("the file is on disk");
+        assert_eq!(
+            (
+                String::from_utf8(written).expect("utf-8"),
+                h.fake_git().resolved_paths(Path::new("/repo")),
+                h.stoat.active_workspace().resolved_conflicts.clone(),
+                sections(&h),
+            ),
+            (
+                "ours\n".to_string(),
+                vec![path.clone()],
+                HashMap::from([(path, Note::TookOurs)]),
+                Vec::new(),
+            ),
+        );
+    }
+
+    /// Enter on a conflicted row closes the panel and opens the conflict view
+    /// on the file.
+    #[test]
+    fn enter_on_a_conflicted_row_opens_the_conflict_view() {
+        let mut h = merging_harness();
+        run(&mut h, ":git status");
+        press(&mut h, "enter");
+
+        assert_eq!(
+            (active_modal(&h.stoat), h.stoat.current_view()),
+            (None, Some("conflict")),
+        );
+    }
+
+    /// Taking the side that deleted a conflicted file removes the file, so the
+    /// stage records the deletion.
+    #[test]
+    fn taking_a_side_that_deleted_the_file_removes_it() {
+        let mut h = repo_harness(|repo| {
+            repo.merge_in_progress("f00dfeed", Some("feature"), "Merge")
+                .conflicted_file("a.rs", Some("base\n"), None, Some("theirs\n"));
+        });
+        h.fake_fs().insert_file("/repo/a.rs", "theirs\n");
+        run(&mut h, ":git status");
+        press(&mut h, "o");
+
+        assert_eq!(
+            (
+                h.fake_fs().exists(Path::new("/repo/a.rs")),
+                h.fake_git().resolved_paths(Path::new("/repo")),
+            ),
+            (false, vec![PathBuf::from("/repo/a.rs")]),
+        );
+    }
+
+    /// Enter on an unstaged row closes the panel and opens the file's
+    /// per-file diff.
+    #[test]
+    fn enter_on_an_unstaged_row_opens_the_diff_view() {
+        let mut h = repo_harness(|repo| {
+            repo.head_file("a.rs", "a\n")
+                .unstaged_file("a.rs", "edit\n");
+        });
+        run(&mut h, ":git status");
+        press(&mut h, "enter");
+
+        assert_eq!(
+            (active_modal(&h.stoat), h.stoat.current_view()),
+            (None, Some("diff")),
+        );
+    }
+
+    /// Enter on a conflicted row switches an open conflict view to the file,
+    /// where a fresh open would close the view instead.
+    #[test]
+    fn enter_on_a_conflicted_row_switches_an_open_conflict_view() {
+        let mut h = repo_harness(|repo| {
+            repo.merge_in_progress("f00dfeed", Some("feature"), "Merge")
+                .conflicted_file("a.rs", Some("base\n"), Some("ours\n"), Some("theirs\n"))
+                .conflicted_file("b.rs", Some("base\n"), Some("ours\n"), Some("theirs\n"));
+        });
+        dispatch(&mut h.stoat, &stoat_action::Conflict);
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::GitStatus);
+        h.settle();
+        press(&mut h, "j");
+        press(&mut h, "enter");
+
+        let shown = h
+            .stoat
+            .active_workspace()
+            .conflict
+            .as_ref()
+            .map(|session| session.files[session.current].clone());
+        assert_eq!(
+            (h.stoat.current_view(), shown),
+            (Some("conflict"), Some(PathBuf::from("/repo/b.rs"))),
+        );
+    }
+
+    /// `a` aborts the merge the banner names, and the panel's next read finds
+    /// no merge.
+    #[test]
+    fn a_aborts_the_merge_in_progress() {
+        let mut h = merging_harness();
+        run(&mut h, ":git status");
+        press(&mut h, "a");
+
+        let merge = h
+            .stoat
+            .git_host
+            .discover(Path::new("/repo"))
+            .and_then(|repo| repo.merge_state());
+        let op = h
+            .stoat
+            .git_status
+            .as_ref()
+            .and_then(|panel| panel.model.as_ref())
+            .map(|model| model.op.is_some());
+        assert_eq!((merge, op), (None, Some(false)));
+    }
+
+    /// `C` closes the panel and commits the merge in progress through the
+    /// commit message buffer.
+    #[test]
+    fn c_commits_the_merge_through_the_message_buffer() {
+        let mut h = merging_harness();
+        run(&mut h, ":git status");
+        press(&mut h, "C");
+
+        let message = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(Path::new("/repo/.git/COMMIT_EDITMSG"));
+        assert_eq!((active_modal(&h.stoat), message.is_some()), (None, true),);
     }
 
     /// Run `command` on the command line and let the panel's read land.

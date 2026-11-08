@@ -349,12 +349,14 @@ pub trait GitRepo: Send + Sync {
     /// has no unmerged entry.
     fn conflict_stages(&self, path: &Path) -> Option<ConflictedFile>;
 
-    /// Stage `path`'s working-tree content at stage 0, collapsing its
-    /// stage 1/2/3 entries. This is the equivalent of `git add` on a
-    /// resolved file.
+    /// Stage `path` as the working tree holds it, as `git add <path>` does.
     ///
-    /// `path` may be absolute or repo-relative. Fails when the working-tree
-    /// file cannot be staged, e.g. it is missing on disk.
+    /// The index takes the file's content at stage 0 and drops any stage
+    /// 1/2/3 entries, which is how a resolved conflict is marked. A file gone
+    /// from the working tree leaves the index, which stages its deletion.
+    ///
+    /// Both an absolute and a repo-relative `path` work. Fails when the file
+    /// is on disk but the index does not take it.
     fn mark_resolved(&self, path: &Path) -> Result<(), GitApplyError>;
 
     /// Apply a unified-diff patch to the index. Most callers will want

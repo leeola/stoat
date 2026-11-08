@@ -788,11 +788,13 @@ impl ActiveModal {
     ///
     /// The file finder, help, and the workspace picker end in a footer of their
     /// own keys, and the box repeats those keys over the modal's lower right.
-    /// The palette keeps its box behind the toggle as well.
+    /// The git status panel names its keys in its section heads and its
+    /// banner, and in a short window the box covers its rows. The palette
+    /// keeps its box behind the toggle as well.
     pub(crate) fn hints_on_request(self) -> bool {
         matches!(
             self,
-            Self::FileFinder | Self::Help | Self::WorkspacePicker | Self::Palette
+            Self::FileFinder | Self::Help | Self::WorkspacePicker | Self::GitStatus | Self::Palette
         )
     }
 

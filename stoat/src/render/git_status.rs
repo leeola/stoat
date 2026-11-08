@@ -532,6 +532,8 @@ fn note_text(note: Note) -> Option<(String, &'static str)> {
             scope::VCS_STATUS_CONFLICTED,
         )),
         Note::Resolved => Some(("resolved".to_string(), scope::VCS_STATUS_STAGED)),
+        Note::TookOurs => Some(("took ours".to_string(), scope::VCS_STATUS_STAGED)),
+        Note::TookTheirs => Some(("took theirs".to_string(), scope::VCS_STATUS_STAGED)),
         Note::Lines { added, deleted } => {
             let text = [('+', added), ('\u{2212}', deleted)]
                 .into_iter()

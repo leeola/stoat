@@ -592,7 +592,7 @@ pub(super) fn conflict_step_file(stoat: &mut Stoat, forward: bool, count: usize)
 /// which drops the older alignment rather than showing a file the reader
 /// already stepped past. A parked target drops a pending switch for the same
 /// reason.
-fn switch_to_file(stoat: &mut Stoat, target: usize) {
+pub(super) fn switch_to_file(stoat: &mut Stoat, target: usize) {
     let (repo, target_path) = {
         let Some(session) = stoat.active_workspace().conflict.as_ref() else {
             return;

@@ -686,6 +686,23 @@ fn unstage_path_resets_each_index_entry_to_head() {
     );
 }
 
+/// Marking a file that the working tree no longer holds stages its deletion,
+/// as `git add` does on a removed path.
+#[test]
+fn mark_resolved_stages_a_deleted_file() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    std::fs::remove_file(tr.join("a.rs")).expect("remove file");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    repo.mark_resolved(Path::new("a.rs")).unwrap();
+
+    assert_eq!(
+        (staged_blob(tr.path(), "a.rs"), file_states(&*repo)),
+        (None, vec![(tr.join("a.rs"), true, false)]),
+    );
+}
+
 /// Before the first commit there is no HEAD entry to return to, so unstaging
 /// takes the path out of the index.
 #[test]

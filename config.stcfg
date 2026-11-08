@@ -718,13 +718,24 @@ on key {
         N -> QuitAllCancel();
         Escape -> QuitAllCancel();
     }
-    modal == git_status {
+    # The panel opens over a view whose keys rank by two predicates, such as
+    # the conflict view's `view == conflict && mode == normal`. The mode
+    # predicate ranks the panel's keys level with them, and a tie goes to the
+    # earlier block, so the panel's keys win over the view under it.
+    modal == git_status && mode == normal {
         Escape -> CloseGitStatus();
         q -> CloseGitStatus();
         j -> GitStatusNext();
         k -> GitStatusPrev();
         Down -> GitStatusNext();
         Up -> GitStatusPrev();
+        Enter -> GitStatusOpen();
+        s -> GitStatusStage();
+        u -> GitStatusUnstage();
+        o -> GitStatusTakeOurs();
+        t -> GitStatusTakeTheirs();
+        C -> GitStatusCommit();
+        a -> GitStatusAbort();
     }
     modal == jumplist && mode == insert {
         Up -> PickerPrev();

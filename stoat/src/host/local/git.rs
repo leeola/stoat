@@ -14,6 +14,7 @@ use git2::{
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, HashMap},
+    io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -493,7 +494,16 @@ impl GitRepo for LocalGitRepo {
         // the write puts stale entries back over any index change made since
         // that load.
         index.read(false).map_err(err_msg)?;
-        index.add_path(rel).map_err(err_msg)?;
+        // `add_path` refuses a file the working tree no longer holds, so a
+        // file gone from disk stages its deletion instead, as `git add` does.
+        let gone = workdir.as_deref().is_some_and(|wd| {
+            matches!(wd.join(rel).symlink_metadata(), Err(err) if err.kind() == io::ErrorKind::NotFound)
+        });
+        if gone {
+            index.remove_path(rel).map_err(err_msg)?;
+        } else {
+            index.add_path(rel).map_err(err_msg)?;
+        }
         index.write().map_err(err_msg)?;
         Ok(())
     }
