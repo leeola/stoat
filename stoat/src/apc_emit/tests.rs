@@ -4262,6 +4262,100 @@ fn a_stack_page_under_a_boxed_modal_shows_its_fade() {
     );
 }
 
+/// An editor page carries its pane's fade in its cells, so a glide over an
+/// unfocused pane or under a boxed modal never flashes the pane bright.
+///
+/// Each page equals the pane's own page from an emit with no fade, blended to
+/// the fade. The fade is 0.2 once the focus leaves the pane, and the modal's
+/// deeper 0.65 while a boxed modal is up.
+#[test]
+fn an_editor_page_carries_its_pane_fade() {
+    let (focused, unfocused) = editor_page_around(|h| {
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::FocusLeft);
+    });
+    let (open, boxed) = editor_page_around(|h| {
+        h.stoat.settings.ui_modal_dim = Some(0.65);
+        h.type_action("SwitchWorkspace()");
+    });
+
+    let theme = rgb_review_theme();
+    assert_eq!(
+        [unfocused, boxed],
+        [faded(&focused, &theme, 0.2), faded(&open, &theme, 0.65)],
+    );
+}
+
+/// Page 0 of the focused editor pane's pool, emitted while the pane shows a
+/// file with no fade, then again once `fade` gives the pane a fade and its
+/// target moves, since the emit holds a refill while the target rests.
+fn editor_page_around(
+    fade: impl FnOnce(&mut crate::test_harness::TestHarness),
+) -> (CellRows, CellRows) {
+    let mut h = crate::test_harness::TestHarness::with_size(80, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.theme = Arc::new(rgb_review_theme());
+    h.stoat.settings.ui_inactive_dim = Some(0.2);
+    // Relative numbers follow the focused editor's cursor line, which a focus
+    // change moves along with the fade.
+    h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    let text: String = (1..=60).map(|i| format!("line {i:02}\n")).collect();
+    let path = h.write_file("a.txt", &text);
+    h.type_action("SplitRight()");
+    h.open_file(&path);
+    h.settle();
+    let _ = h.stoat.render();
+
+    let (pool, editor_id, region) = {
+        let ws = h.stoat.active_workspace();
+        let pane = ws.panes.pane(ws.panes.focus());
+        let View::Editor(editor_id) = pane.view else {
+            panic!("the focused pane shows no editor");
+        };
+        let (_, _, region) = editor_pool_panes(&h.stoat)
+            .into_iter()
+            .find(|(pool, _, _)| *pool == pane.index)
+            .expect("the focused editor pools");
+        (pane.index, editor_id, region)
+    };
+    let mut page = |h: &mut crate::test_harness::TestHarness| {
+        let bytes = emit_raw(h, &mut rx);
+        page_cells(fill_payload(&bytes, pool, 0), region.width, region.height)
+    };
+
+    let plain = page(&mut h);
+    fade(&mut h);
+    let editor = &mut h.stoat.active_workspace_mut().editors[editor_id];
+    editor.scroll_offset = 0.5;
+    editor.scroll_glide = ScrollGlide::Page;
+    (plain, page(&mut h))
+}
+
+/// `rows` with each RGB color blended `dim` of the way toward `theme`'s
+/// background, as [`crate::render::pane::dim_pane_content`] fades a pane.
+fn faded(rows: &CellRows, theme: &crate::theme::Theme, dim: f32) -> CellRows {
+    let width = rows.first().map_or(0, Vec::len) as u16;
+    let area = Rect::new(0, 0, width, rows.len() as u16);
+    let mut buf = Buffer::empty(area);
+    for (y, row) in (0..).zip(rows) {
+        for (x, &(ch, fg, bg)) in (0..).zip(row) {
+            buf[(x, y)]
+                .set_char(ch)
+                .set_fg(fg.unwrap_or(Color::Reset))
+                .set_bg(bg.unwrap_or(Color::Reset));
+        }
+    }
+    let bg = crate::render::paint::style_rgb(
+        theme
+            .try_get(crate::theme::scope::UI_BACKGROUND)
+            .and_then(|style| style.bg),
+    )
+    .expect("the theme background is RGB");
+    crate::render::pane::dim_pane_content(&mut buf, area, bg, dim);
+    buffer_cells(&buf, area)
+}
+
 /// [`resident_stack`] under [`rgb_diff_gutter_theme`], painted again, so the
 /// stack's gutter draws as runs and bars in the pane's content lane.
 fn gutter_stack(
