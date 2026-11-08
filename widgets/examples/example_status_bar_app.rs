@@ -239,6 +239,7 @@ fn render_frame(
         left: &left,
         boxes: &[],
         dots: &[],
+        scales: &[],
         right: &right,
         scale: SCALES[state.scale],
         separator: SEPARATOR,
