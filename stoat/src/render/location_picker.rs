@@ -58,7 +58,7 @@ pub(crate) fn render_location_picker(
             label: "locations",
             prompt: FILTER_PROMPT,
             count: Some((picker.filtered().len(), picker.entries().len())),
-            chip: None,
+            chips: &[],
         },
         &picker.input,
         ws,

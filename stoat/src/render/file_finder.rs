@@ -182,6 +182,7 @@ pub(crate) fn render_file_finder(
         .browse
         .is_none()
         .then(|| format!("S-Tab \u{00B7} {}", scope_words(&finder.next_scope())));
+    let chips = chip.as_deref().map(|chip| [(chip, true)]);
     let count = {
         let list = &finder.active_core_ref().picklist;
         (list.filtered.len(), list.base.len())
@@ -193,7 +194,7 @@ pub(crate) fn render_file_finder(
             label: &label,
             prompt: FILTER_PROMPT,
             count: Some(count),
-            chip: chip.as_deref(),
+            chips: chips.as_ref().map_or(&[][..], |chips| &chips[..]),
         },
         &finder.input,
         ws,

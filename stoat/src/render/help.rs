@@ -136,10 +136,7 @@ pub(crate) fn render_help(
         HelpInput::Insert => FILTER_PROMPT,
         HelpInput::Normal => ":",
     };
-    let chip = match help.scope() {
-        HelpScope::Active => "applicable",
-        HelpScope::All => "all",
-    };
+    let applicable = matches!(help.scope(), HelpScope::Active);
     crate::render::picker::filter_header(
         buf,
         layout.inner,
@@ -147,7 +144,7 @@ pub(crate) fn render_help(
             label: "help",
             prompt,
             count: Some((help.filtered().len(), help.entries().len())),
-            chip: Some(chip),
+            chips: &[("applicable", applicable), ("all", !applicable)],
         },
         &help.input,
         ws,

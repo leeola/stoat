@@ -103,7 +103,7 @@ pub(crate) fn render_symbol_finder(
             label,
             prompt: FILTER_PROMPT,
             count: Some((finder.filtered.len(), finder.entries.len())),
-            chip: None,
+            chips: &[],
         },
         &finder.input,
         ws,

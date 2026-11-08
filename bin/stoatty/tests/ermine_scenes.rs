@@ -773,6 +773,40 @@ fn the_session_picker_ends_in_a_footer_on_the_raised_surface() {
     }
 }
 
+/// The help header names both scopes. The active `applicable` sits on the hover
+/// surface, and `all` follows one column later as text on the box's own
+/// surface.
+///
+/// The active chip reads `applicable` with one cell of padding at each end, so
+/// its cells form one run of 12 in one row, and no other cell of the frame
+/// takes the hover color. The inactive chip's five cells start one column past
+/// that run and keep the overlay fill.
+#[test]
+fn the_help_header_names_both_scopes() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "?<Settle>");
+
+    let chip = cells_of(&shot, HOVER);
+    let run = chip
+        .first()
+        .copied()
+        .filter(|&(col, row)| chip == (col..col + 12).map(|col| (col, row)).collect::<Vec<_>>());
+    let Some((col, row)) = run else {
+        let frame = keep_frame(&shot, &mut home, "help_scope_chips");
+        panic!(
+            "the hover cells {chip:?} are not one 12-cell run in one row; the frame is {}",
+            frame.display(),
+        );
+    };
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(col + 13, row, 5, 1),
+        OVERLAY,
+        "help_inactive_scope",
+    );
+}
+
 /// The help modal's detail pane fills with the raised surface.
 ///
 /// The pane spans most rows of the box's right side, so its raised cells reach

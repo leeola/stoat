@@ -63,7 +63,7 @@ pub(crate) fn render_jumplist_picker(
                 picker.picker.filtered().len(),
                 picker.picker.entries().len(),
             )),
-            chip: None,
+            chips: &[],
         },
         &picker.picker.input,
         ws,

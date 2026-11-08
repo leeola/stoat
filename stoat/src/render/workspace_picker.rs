@@ -105,6 +105,7 @@ pub(crate) fn render_workspace_picker(
         (false, None) => "sessions".to_owned(),
         (false, Some(family)) => format!("sessions \u{00B7} {family}"),
     };
+    let family = picker.family_title().is_some();
     crate::render::picker::filter_header(
         buf,
         inner,
@@ -112,10 +113,7 @@ pub(crate) fn render_workspace_picker(
             label: &label,
             prompt: FILTER_PROMPT,
             count: Some((picker.filtered().len(), picker.entries().len())),
-            chip: Some(match picker.family_title() {
-                Some(_) => "family",
-                None => "all",
-            }),
+            chips: &[("all", !family), ("family", family)],
         },
         &picker.input,
         ws,
@@ -726,32 +724,58 @@ mod tests {
         );
     }
 
-    /// The header's chip names the scope the list shows, `all` until S-Tab
-    /// narrows it to the active session's family.
+    /// The header names both scopes, `all` and `family`, and the one the list
+    /// shows takes the chip's background: `all` until S-Tab narrows the list
+    /// to the active session's family.
+    ///
+    /// The scene is dead, so the chip's cells carry its background rather than
+    /// a panel.
     #[test]
     fn the_header_chip_names_the_scope() {
-        let chip = |family: bool| {
+        let theme = {
+            let (config, _) = stoat_config::parse(r##"theme t { ui.chip.bg = "#040506"; }"##);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let header = |family: bool| {
             let (mut picker, mut workspaces, active) = picker_over(2);
             if family {
                 picker.toggle_scope();
             }
             let area = Rect::new(0, 0, 120, 30);
             let mut buf = Buffer::empty(area);
-            render(&mut picker, &mut workspaces, active, &mut buf, area);
+            let mut scene = ApcScene::new();
+            scene.set_live(false);
+            render_with(
+                &theme,
+                &mut picker,
+                &mut workspaces,
+                active,
+                &mut buf,
+                area,
+                &mut scene,
+            );
 
             let (_, inner) = workspace_picker_layout(area, 2).expect("the area hosts the modal");
+            let columns = inner.x..inner.x + inner.width;
             let header: String = row_text(&buf, inner.y)
                 .chars()
                 .skip(inner.x as usize)
                 .take(inner.width as usize)
                 .collect();
-            header
-                .split_whitespace()
-                .last()
-                .unwrap_or_default()
-                .to_owned()
+            let words: Vec<&str> = header.split_whitespace().collect();
+            let chip: String = columns
+                .filter(|&x| buf[(x, inner.y)].bg == Color::Rgb(4, 5, 6))
+                .map(|x| buf[(x, inner.y)].symbol())
+                .collect();
+            (words[words.len() - 2..].join(" "), chip.trim().to_owned())
         };
-        assert_eq!([chip(false), chip(true)], ["all", "family"]);
+        assert_eq!(
+            [header(false), header(true)],
+            [
+                ("all family".to_owned(), "all".to_owned()),
+                ("all family".to_owned(), "family".to_owned()),
+            ],
+        );
     }
 
     #[test]

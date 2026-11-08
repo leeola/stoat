@@ -61,13 +61,16 @@ pub(crate) struct FilterHeader<'a> {
     pub(crate) prompt: &'a str,
     /// How many entries the query keeps, and how many the list holds.
     pub(crate) count: Option<(usize, usize)>,
-    /// A note at the row's right end, such as the key that switches the list's
-    /// scope.
-    pub(crate) chip: Option<&'a str>,
+    /// The notes at the row's right end, left to right, each with whether it
+    /// is the active one.
+    ///
+    /// A scope switch names every scope and marks the one the list shows. A
+    /// lone active note names the key that switches the scope.
+    pub(crate) chips: &'a [(&'a str, bool)],
 }
 
 /// Paint a filter modal's header, which is the label, the prompt glyph, the
-/// live input, the count and chip right of it, and the separator ruling the
+/// live input, the count and chips right of it, and the separator ruling the
 /// row off from the body.
 ///
 /// `inner` is the modal's rect inside its border. The header claims its first
@@ -115,10 +118,11 @@ pub(crate) fn filter_header(
 /// Paint the words of the header row into `inner`'s first row, and return the
 /// rect left for the query.
 ///
-/// The count and the chip sit flush with the row's right end, one column apart,
-/// and one column clear of the query. The chip's box goes through
+/// The count and the chips sit flush with the row's right end, one column
+/// apart, and one column clear of the query. An active chip's box goes through
 /// [`chip_cells`](crate::render::chrome::chip_cells), so a live scene draws it
-/// as a panel.
+/// as a panel. An inactive chip is plain muted text on the row's background. A
+/// row too narrow for all of them drops the chips together, then the count.
 fn paint_header_row(
     buf: &mut Buffer,
     inner: Rect,
@@ -140,29 +144,38 @@ fn paint_header_row(
     let mut count = header
         .count
         .map(|(shown, total)| format!("{shown} of {total}"));
-    let mut chip = header.chip.map(|chip| format!(" {chip} "));
-    let fits = |count: &Option<String>, chip: &Option<String>| {
-        let trailing: u16 = [count, chip]
-            .into_iter()
-            .flatten()
+    let mut chips: Vec<(String, bool)> = header
+        .chips
+        .iter()
+        .map(|&(chip, active)| (format!(" {chip} "), active))
+        .collect();
+    let fits = |count: &Option<String>, chips: &[(String, bool)]| {
+        let trailing: u16 = count
+            .iter()
+            .chain(chips.iter().map(|(chip, _)| chip))
             .map(|part| part.width() as u16 + 1)
             .sum();
         query_x + MIN_QUERY_COLUMNS + trailing <= end
     };
-    if !fits(&count, &chip) {
-        chip = None;
+    if !fits(&count, &chips) {
+        chips.clear();
     }
-    if !fits(&count, &chip) {
+    if !fits(&count, &chips) {
         count = None;
     }
 
     let mut right = end;
-    if let Some(chip) = chip {
+    for (chip, active) in chips.iter().rev() {
         let width = chip.width() as u16;
         right -= width;
-        let cells = Rect::new(right, y, width, 1);
-        let style = crate::render::chrome::chip_cells(cells, theme.get(scope::UI_CHIP), scene);
-        write_str(buf, right, y, &chip, style);
+        let style = match active {
+            true => {
+                let cells = Rect::new(right, y, width, 1);
+                crate::render::chrome::chip_cells(cells, theme.get(scope::UI_CHIP), scene)
+            },
+            false => theme.get(scope::UI_TEXT_MUTED),
+        };
+        write_str(buf, right, y, chip, style);
         right -= 1;
     }
     if let Some(count) = count {
@@ -690,7 +703,7 @@ mod tests {
         label: "Files",
         prompt: FILTER_PROMPT,
         count: Some((14, 890)),
-        chip: Some("S-Tab \u{00B7} git only"),
+        chips: &[("S-Tab \u{00B7} git only", true)],
     };
 
     /// The text of a finder-like header painted `width` columns wide, and the
@@ -757,6 +770,57 @@ mod tests {
                 Rect::new(8, 0, 23, 1),
             ),
             "the chip ends the row, and the count stands one column left of it",
+        );
+    }
+
+    /// A scope header names every scope, right to left and one column apart.
+    /// The active one is a chip panel over its cells, and the other is plain
+    /// muted text with no box.
+    #[test]
+    fn a_scope_header_boxes_the_active_chip_and_leaves_the_other_plain() {
+        let theme = {
+            let src = r##"theme t {
+                ui.chip = { fg: "#010203", bg: "#040506" };
+                ui.text.muted.fg = "#070809";
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let header = FilterHeader {
+            label: "help",
+            prompt: FILTER_PROMPT,
+            count: Some((14, 214)),
+            chips: &[("applicable", true), ("all", false)],
+        };
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_header_row(&mut buf, area, &header, &theme, &mut scene);
+
+        let panels: Vec<_> = decode_stream(scene.bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) => Some((panel.left, panel.width)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (
+                test_support::row_text(&buf, 0)
+                    .chars()
+                    .skip(32)
+                    .collect::<String>(),
+                panels,
+                [43, 56].map(|x| (buf[(x, 0)].fg, buf[(x, 0)].bg)),
+            ),
+            (
+                "14 of 214  applicable   all ".to_owned(),
+                vec![(42, 12)],
+                [
+                    (Color::Rgb(1, 2, 3), Color::Reset),
+                    (Color::Rgb(7, 8, 9), Color::Reset)
+                ],
+            ),
         );
     }
 

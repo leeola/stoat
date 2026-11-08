@@ -51,7 +51,7 @@ pub(crate) fn render_code_search(
             label: &label,
             prompt: FILTER_PROMPT,
             count: None,
-            chip: None,
+            chips: &[],
         },
         &finder.input,
         ws,

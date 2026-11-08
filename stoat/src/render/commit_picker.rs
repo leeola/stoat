@@ -213,7 +213,7 @@ pub(crate) fn render_commit_picker(
             label: &label,
             prompt: FILTER_PROMPT,
             count: Some((picker.filtered.len(), picker.commits.len())),
-            chip: None,
+            chips: &[],
         },
         &picker.input,
         ws,

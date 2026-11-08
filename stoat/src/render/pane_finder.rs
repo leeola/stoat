@@ -57,7 +57,7 @@ pub(crate) fn render_pane_finder(
                 finder.picker.filtered().len(),
                 finder.picker.entries().len(),
             )),
-            chip: None,
+            chips: &[],
         },
         &finder.picker.input,
         ws,

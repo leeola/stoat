@@ -423,7 +423,7 @@ fn render_palette_prelude(
             label,
             prompt: ":",
             count,
-            chip: None,
+            chips: &[],
         },
         input,
         ws,
