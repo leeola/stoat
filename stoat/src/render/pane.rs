@@ -999,6 +999,7 @@ fn overlay_status_segments(
 
     let mut left: Vec<StatusSeg> = Vec::new();
     let mut cursor = area.x;
+    let mut chip_end = None;
     if is_focused {
         let (mode_label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
@@ -1009,6 +1010,7 @@ fn overlay_status_segments(
             format!(" {mode_label} "),
             mode_style,
         );
+        chip_end = Some(cursor);
         if !frame.tab_bar_shown {
             push_left(
                 &mut left,
@@ -1026,7 +1028,13 @@ fn overlay_status_segments(
         }),
     };
     if let Some((label, style, subject)) = label {
-        let left_pad = if cursor == area.x { " " } else { "" };
+        // A label that opens the row or meets the mode chip takes a pad cell,
+        // so it stands clear of the row's edge or of the chip's box.
+        let left_pad = if cursor == area.x || chip_end == Some(cursor) {
+            " "
+        } else {
+            ""
+        };
         let text = match subject {
             Some(subject) => format!("{left_pad}{label} \u{b7} {} ", subject.name),
             None => format!("{left_pad}{label} "),
@@ -1808,6 +1816,7 @@ fn status_segments(
     let conflict = frame
         .conflict_position
         .filter(|_| is_focused && frame.screen == Some("conflict"));
+    let mut chip_end = None;
     if is_focused {
         let (label, mode_bg) = frame.mode_label;
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
@@ -1818,6 +1827,7 @@ fn status_segments(
             format!(" {label} "),
             mode_style,
         );
+        chip_end = Some(cursor);
         if let Some(prompt) = prompt {
             push_prompt(&mut left, &mut cursor, lead_end, prompt, lead_style);
         } else {
@@ -1903,7 +1913,13 @@ fn status_segments(
         && sides.is_none()
         && conflict.is_none()
     {
-        let left_pad = if cursor == area.x { " " } else { "" };
+        // A name that opens the row or meets the mode chip takes a pad cell,
+        // so it stands clear of the row's edge or of the chip's box.
+        let left_pad = if cursor == area.x || chip_end == Some(cursor) {
+            " "
+        } else {
+            ""
+        };
         let modified = if status.dirty { " [+]" } else { "" };
         let text = format!("{left_pad}{name}{modified} ");
         push_left(&mut left, &mut cursor, lead_end, text, lead_style);
@@ -5337,7 +5353,8 @@ mod tests {
     }
 
     /// The overlay bar names the workspace until a second tab shows the tab
-    /// bar, which then carries the name.
+    /// bar, which then carries the name. The screen label then meets the mode
+    /// chip across a gap cell.
     #[test]
     fn the_overlay_bar_leaves_the_workspace_name_to_the_tab_bar() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 12);
@@ -5359,7 +5376,7 @@ mod tests {
             [one_tab, row(&mut h)],
             [
                 format!("{:<60}", " NOR  ws rebase"),
-                format!("{:<60}", " NOR rebase"),
+                format!("{:<60}", " NOR  rebase"),
             ],
         );
     }
@@ -5944,7 +5961,8 @@ mod tests {
     }
 
     /// The status row names the workspace until a second tab shows the tab
-    /// bar, which then carries the name.
+    /// bar, which then carries the name. The file name then meets the mode
+    /// chip across a gap cell.
     #[test]
     fn the_status_row_leaves_the_workspace_name_to_the_tab_bar() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 8);
@@ -5960,6 +5978,6 @@ mod tests {
         let one_tab = status_left(&mut h);
         dispatch(&mut h.stoat, &stoat_action::NewTab);
         let two_tabs = status_left(&mut h);
-        assert_eq!([one_tab, two_tabs], [" NOR  ws scratch ", " NOR scratch "]);
+        assert_eq!([one_tab, two_tabs], [" NOR  ws scratch ", " NOR  scratch "]);
     }
 }
