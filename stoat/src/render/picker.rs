@@ -824,6 +824,7 @@ mod tests {
                     width,
                     height: 4,
                     color,
+                    occludes: false,
                 })
             })
             .collect()

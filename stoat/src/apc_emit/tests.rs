@@ -2206,6 +2206,7 @@ fn pane_divider_emits_a_hairline_bar_inside_stoatty() {
         } else {
             [0x55, 0x66, 0x77]
         },
+        occludes: false,
     };
     let cmds = drain_apc(&mut rx);
     assert!(
@@ -4423,7 +4424,7 @@ fn content_lane_bytes(h: &crate::test_harness::TestHarness, pool: u32) -> Vec<u8
 /// sides of the frame around its base column, out of the pane's content lane.
 /// The frame's top edge and the minimap strip's declaration stay. The pool's
 /// pages carry the runs and the sides, and its composite covers the live grid.
-/// The top edge sits above the pool.
+/// The top edge occludes, so it holds over the composite.
 #[test]
 fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     use stoatty_protocol::command::Command;
@@ -4432,8 +4433,7 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
     let text: String = (1..=30).map(|i| format!("L{i}\n")).collect();
     let (mut h, mut rx, pool) = gutter_stack(&[("a.txt", &base, &text)], MinimapMode::PerPane);
     let tint = crate::render::pane::diff_base_tint(&h.stoat.theme).expect("an RGB tint");
-    let top_edge =
-        |command: &Command| matches!(command, Command::Bar(bar) if bar.color == tint && bar.y < 0);
+    let top_edge = |command: &Command| matches!(command, Command::Bar(bar) if bar.color == tint && bar.occludes);
     let (runs, rest): (Vec<Command>, Vec<Command>) =
         command::decode_stream(&content_lane_bytes(&h, pool))
             .into_iter()
@@ -4466,7 +4466,8 @@ fn a_scrolling_step_over_a_held_stack_keeps_its_runs_out_of_its_lane() {
 /// composite.
 ///
 /// While the terminal holds the stack, the lane keeps only the top edge of the
-/// frame around the base column, which sits above the pool.
+/// frame around the base column, which occludes, so it holds over the pool's
+/// composite.
 #[test]
 fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
     use stoatty_protocol::command::Command;
@@ -4480,7 +4481,7 @@ fn a_stack_the_terminal_lets_go_paints_its_runs_again() {
 
     let top_edge: Vec<Command> = command::decode_stream(&first)
         .into_iter()
-        .filter(|command| matches!(command, Command::Bar(bar) if bar.y < 0))
+        .filter(|command| matches!(command, Command::Bar(bar) if bar.occludes))
         .collect();
     crate::ssh::retire_terminal_state(&mut h.stoat);
     h.stoat.render();
@@ -5462,6 +5463,7 @@ fn the_finder_marks_its_selected_row_with_the_accent_bar() {
         width: 3,
         height: 16,
         color: [0x7f, 0xb0, 0xff],
+        occludes: false,
     };
     // The header's hairline starts at the list's column too, half a row above
     // the list, so only the bars from the list's top row down count.
@@ -6424,10 +6426,10 @@ fn a_split_diff_pane_s_pages_carry_the_base_frame() {
 
     let divider = crate::render::review::diff_divider_x(Rect::new(0, 0, region.width, 1))
         .expect("the region splits in two");
-    let side = |x: u16| (x as i16, 0, 3, region.height * 16, tint);
+    let side = |x: u16| (x as i16, 0, 6, region.height * 16, tint);
     assert_eq!(
         (pages > 0, frame),
-        (true, [side(0), side(divider * 16 + 8 - 3)].repeat(pages)),
+        (true, [side(0), side(divider * 16 + 8 - 6)].repeat(pages)),
         "each page carries both sides",
     );
 }

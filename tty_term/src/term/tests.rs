@@ -1872,6 +1872,7 @@ fn decoration_seq_stamps_declaration_order_and_resets() {
         width: 1,
         height: 16,
         color: [1, 2, 3],
+        occludes: false,
     }));
 
     let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -2441,6 +2442,7 @@ fn bar_frames(count: usize) -> Vec<u8> {
             width: 1,
             height: 1,
             color: [1, 2, 3],
+            occludes: false,
         }));
     }
     stream
@@ -2667,31 +2669,37 @@ fn a_resize_mid_fill_keeps_a_window_pools_page() {
     );
 }
 
+/// A bar frame sets a grid bar, and an occluding one keeps its flag.
 #[test]
 fn bar_apc_frame_sets_a_grid_bar() {
-    let frame = encode_bar(&BarCommand {
-        x: -4,
-        y: 32,
-        width: 3,
-        height: 16,
-        color: [220, 50, 47],
-    });
-
-    let mut terminal = Terminal::new(8, 8, Theme::default());
-    let mut grid = Grid::new(8, 8);
-    terminal.advance(&frame);
-    terminal.project(&mut grid);
-
-    assert_eq!(
-        grid.bars(),
-        [Bar {
+    let projected = |occludes: bool| {
+        let frame = encode_bar(&BarCommand {
             x: -4,
             y: 32,
             width: 3,
             height: 16,
-            color: Rgb::new(220, 50, 47),
-            seq: 1,
-        }]
+            color: [220, 50, 47],
+            occludes,
+        });
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+        grid.bars().to_vec()
+    };
+    let bar = |occludes: bool| Bar {
+        x: -4,
+        y: 32,
+        width: 3,
+        height: 16,
+        color: Rgb::new(220, 50, 47),
+        seq: 1,
+        occludes,
+    };
+
+    assert_eq!(
+        [projected(false), projected(true)],
+        [vec![bar(false)], vec![bar(true)]],
     );
 }
 
@@ -2718,6 +2726,7 @@ fn line_layout_shifts_a_bound_component_past_an_expansion() {
         width: 2,
         height: 16,
         color: [220, 50, 47],
+        occludes: false,
     });
 
     let mut terminal = Terminal::new(8, 8, Theme::default());
@@ -3061,6 +3070,7 @@ fn bar_at(x: i16) -> Vec<u8> {
         width: 1,
         height: 16,
         color: [1, 2, 3],
+        occludes: false,
     })
 }
 
@@ -4767,6 +4777,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
         width: 3,
         height: 16,
         color: [220, 50, 47],
+        occludes: false,
     }));
     stream.extend_from_slice(&encode_text_run(&TextRunCommand {
         col: 0,
@@ -4808,6 +4819,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
             height: 16,
             color: Rgb::new(220, 50, 47),
             seq: 0,
+            occludes: false,
         }]
     );
 
@@ -5019,6 +5031,7 @@ fn refilling_a_slot_clears_its_decorations() {
         width: 2,
         height: 16,
         color: [1, 2, 3],
+        occludes: false,
     }));
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);
@@ -5060,6 +5073,7 @@ fn a_page_paints_into_a_reused_context_without_the_previous_page() {
         width: 2,
         height: 16,
         color: [1, 2, 3],
+        occludes: false,
     }));
     stream.extend_from_slice(&encode_fill_end());
     terminal.advance(&stream);

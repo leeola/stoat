@@ -89,6 +89,7 @@ pub(crate) fn bar_from_command(command: &BarCommand, y: i16, seq: u32) -> Bar {
         height: command.height,
         color: Rgb::new(command.color[0], command.color[1], command.color[2]),
         seq,
+        occludes: command.occludes,
     }
 }
 

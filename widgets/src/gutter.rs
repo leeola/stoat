@@ -453,6 +453,7 @@ mod tests {
             width,
             height,
             color,
+            occludes: false,
         })
     }
 
@@ -516,6 +517,7 @@ mod tests {
                             width,
                             height,
                             color: batch.color,
+                            occludes: false,
                         })
                     })
                     .collect(),

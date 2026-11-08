@@ -1447,9 +1447,9 @@ mod tests {
     }
 
     /// A split changes view frames its content once around the base column, in
-    /// the base tint. The top edge leads the content, the header hairlines
-    /// follow, and the sides cross over them. No excerpt adds a bar of that
-    /// tint.
+    /// the base tint. The header hairlines lead the content and the sides cross
+    /// over them, and the top edge trails every row, over the first header's
+    /// hairline. No excerpt adds a bar of that tint.
     #[test]
     fn a_split_changes_view_frames_its_content_once() {
         let mut h = changes_view(
@@ -1474,16 +1474,17 @@ mod tests {
         // sixteenths in.
         assert_eq!(
             (
-                bars[..7].to_vec(),
+                bars[..6].to_vec(),
+                bars.last().copied(),
                 bars.iter().filter(|bar| bar.4 == TINT).count()
             ),
             (
                 [
-                    vec![(0, -3, 952, 3, TINT)],
                     header_hairlines(),
-                    vec![(0, 0, 3, 368, TINT), (949, 0, 3, 368, TINT)],
+                    vec![(0, 0, 6, 368, TINT), (946, 0, 6, 368, TINT)],
                 ]
                 .concat(),
+                Some((0, 0, 952, 3, TINT)),
                 3,
             ),
         );
@@ -1531,7 +1532,7 @@ mod tests {
             (
                 [
                     header_hairlines(),
-                    vec![(0, 0, 3, 192, TINT), (949, 0, 3, 192, TINT)],
+                    vec![(0, 0, 6, 192, TINT), (946, 0, 6, 192, TINT)],
                 ]
                 .concat(),
                 2,

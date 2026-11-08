@@ -21,10 +21,22 @@ pub struct Bar {
     pub color: [u8; 3],
 }
 
-impl StatefulWidget for Bar {
-    type State = ApcScene;
+impl Bar {
+    /// Write the bar into `scene`, placed in `area`, as one that hides what lies
+    /// under it as a panel's body does.
+    ///
+    /// The components written before it draw nothing inside its rect, and a
+    /// pane's pool composite leaves the rect alone, so the bar holds its place
+    /// over a pane that glides or rests composited beneath it. Write it after
+    /// the content it covers.
+    ///
+    /// See also:
+    /// - [`BarCommand::occludes`] for how the terminal layers it.
+    pub fn render_occluding(self, area: Rect, scene: &mut ApcScene) {
+        self.encode(area, true, scene);
+    }
 
-    fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
+    fn encode(self, area: Rect, occludes: bool, scene: &mut ApcScene) {
         let x = cells::to_sixteenths(area.x, self.x);
         let y = cells::to_sixteenths(area.y, self.y);
 
@@ -36,8 +48,17 @@ impl StatefulWidget for Bar {
                 width: self.width,
                 height: self.height,
                 color: self.color,
+                occludes,
             },
         );
+    }
+}
+
+impl StatefulWidget for Bar {
+    type State = ApcScene;
+
+    fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
+        self.encode(area, false, scene);
     }
 }
 
@@ -98,6 +119,7 @@ impl BarBatch {
                         width,
                         height,
                         color: group.color,
+                        occludes: false,
                     },
                 );
             }
@@ -112,28 +134,41 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{decode_stream, encode_bar, BarCommand, BarsCommand, Command};
 
+    /// A bar sits at absolute sixteenths, and an occluding render writes the
+    /// same bar with its flag set.
     #[test]
-    fn emits_a_bar_at_absolute_sixteenths() {
-        let mut scene = ApcScene::new();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
-
-        Bar {
+    fn emits_a_bar_at_absolute_sixteenths_plain_or_occluding() {
+        let bar = || Bar {
             x: 3,
             y: 0,
             width: 5,
             height: 16,
             color: [10, 20, 30],
-        }
-        .render(Rect::new(2, 4, 1, 1), &mut buf, &mut scene);
+        };
+        let area = Rect::new(2, 4, 1, 1);
+        let mut plain = ApcScene::new();
+        bar().render(
+            area,
+            &mut Buffer::empty(Rect::new(0, 0, 80, 24)),
+            &mut plain,
+        );
+        let mut occluding = ApcScene::new();
+        bar().render_occluding(area, &mut occluding);
 
-        let expected = encode_bar(&BarCommand {
-            x: 2 * 16 + 3,
-            y: 4 * 16,
-            width: 5,
-            height: 16,
-            color: [10, 20, 30],
-        });
-        assert_eq!(scene.buffer().as_slice(), expected.as_slice());
+        let expected = |occludes| {
+            encode_bar(&BarCommand {
+                x: 2 * 16 + 3,
+                y: 4 * 16,
+                width: 5,
+                height: 16,
+                color: [10, 20, 30],
+                occludes,
+            })
+        };
+        assert_eq!(
+            [plain.buffer().clone(), occluding.buffer().clone()],
+            [expected(false), expected(true)],
+        );
     }
 
     #[test]
@@ -156,6 +191,7 @@ mod tests {
             width: 5,
             height: 16,
             color: [10, 20, 30],
+            occludes: false,
         });
         assert_eq!(
             scene.buffer().as_slice(),
@@ -194,6 +230,7 @@ mod tests {
                 width: 2,
                 height: 16,
                 color,
+                occludes: false,
             })
         };
 

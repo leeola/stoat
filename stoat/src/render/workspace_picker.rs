@@ -1107,6 +1107,7 @@ mod tests {
                     width: DOT_WIDTH,
                     height: DOT_HEIGHT,
                     color: [r, g, b],
+                    ..
                 }) => Some((x, y, Color::Rgb(r, g, b))),
                 _ => None,
             })

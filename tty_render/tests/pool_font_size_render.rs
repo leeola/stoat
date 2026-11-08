@@ -192,6 +192,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         height: 16,
         color: bar_color,
         seq: 1,
+        occludes: false,
     }]);
     pool.set_text_runs(vec![TextRun {
         col: 0,

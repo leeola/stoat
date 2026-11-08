@@ -2108,6 +2108,10 @@ pub struct Bar {
     /// Monotonic declaration-order index across all non-cell components. See
     /// [`Panel::seq`].
     pub seq: u32,
+    /// The bar hides what lies under it as a panel's body does, as
+    /// [`BarCommand::occludes`](stoatty_protocol::command::BarCommand::occludes)
+    /// declares it.
+    pub occludes: bool,
 }
 
 /// A stroked path drawn off the cell grid in a solid color.
@@ -2553,6 +2557,7 @@ mod tests {
             width: 16,
             height: 16,
             color: [255, 0, 0],
+            occludes: false,
         }
     }
 
@@ -3119,6 +3124,7 @@ mod tests {
             height: 16,
             color: Rgb::new(220, 50, 47),
             seq: 0,
+            occludes: false,
         };
         grid.set_bars(vec![bar]);
 
@@ -3459,6 +3465,7 @@ mod region_blit_tests {
             height: 16,
             color: Rgb::new(1, 2, 3),
             seq: 0,
+            occludes: false,
         }]);
         grid.set_polylines(vec![Polyline {
             points: vec![[0, 0], [16, 16]],

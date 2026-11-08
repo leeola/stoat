@@ -212,10 +212,11 @@ fn the_split_diff_s_status_halves_take_their_side_tints() {
 }
 
 /// A frame in the base tint runs down both sides of the split diff's base
-/// column.
+/// column and along its top, inside the pane's first row.
 ///
 /// Row 3, `3 three`, is context with no hunk mark, so its only base-tint
-/// pixels are the frame's two sides.
+/// pixels are the frame's two sides. The top bar fills the top three pixel
+/// rows of row 1, under the tab bar.
 #[test]
 fn the_split_diff_frames_its_base_column() {
     let mut home = support::scratch_home();
@@ -226,6 +227,7 @@ fn the_split_diff_frames_its_base_column() {
         "<Space>df<Settle>",
     );
     expect_base_frame_sides(&shot, &mut home, 3, "diff_base_frame");
+    expect_base_frame_top(&shot, &mut home, 1, "diff_base_frame_top");
 }
 
 /// The split diff ends in a one-cell scroll overview on the window ground.
@@ -256,8 +258,10 @@ fn the_split_diff_ends_in_a_scroll_overview_on_chrome() {
 /// The changes view frames its base column once, across its file headers.
 ///
 /// Row 1 is the first file's header, which carries no hunk mark, so its only
-/// base-tint pixels are the frame's two sides. A frame for each excerpt leaves
-/// the header outside every frame.
+/// base-tint pixels down the whole row are the frame's two sides. A frame for
+/// each excerpt leaves the header outside every frame. The top bar fills the
+/// row's top three pixel rows over the header's hairline, although the view's
+/// stack stays composited at rest.
 #[test]
 fn the_changes_view_frames_its_base_column_across_the_headers() {
     let mut home = support::scratch_home();
@@ -268,6 +272,7 @@ fn the_changes_view_frames_its_base_column_across_the_headers() {
         "<Space>dc<Settle>",
     );
     expect_base_frame_sides(&shot, &mut home, 1, "changes_base_frame");
+    expect_base_frame_top(&shot, &mut home, 1, "changes_base_frame_top");
 }
 
 /// The changes view ends in the same one-cell scroll overview on the window
@@ -298,8 +303,10 @@ fn the_changes_view_ends_in_a_scroll_overview_on_chrome() {
 /// two hairlines.
 ///
 /// Row 1 is the first file's header. Its text is centered, so the cells from
-/// column 2 to column 31 hold none. The hairlines take the top and bottom
-/// pixel rows of the header row.
+/// column 2 to column 31 and from column 120 to column 149 hold none. The
+/// hairlines take the top and bottom pixel rows of the header row. Over the
+/// base column the frame's top bar covers the top one, so the check reads it
+/// over the live column.
 #[test]
 fn the_changes_view_heads_each_file_on_the_raised_surface() {
     let mut home = support::scratch_home();
@@ -318,10 +325,11 @@ fn the_changes_view_heads_each_file_on_the_raised_surface() {
         RAISED,
         "changes_header",
     );
+    let (live_x, ..) = cell_rect(120, 1, 30, 1);
     expect_region(
         &shot,
         &mut home,
-        (x, y, width, 1),
+        (live_x, y, width, 1),
         HAIRLINE,
         "changes_header_top",
     );
@@ -1164,10 +1172,10 @@ fn expect_region(shot: &Snapshot, home: &mut TempDir, rect: PixelRect, want: [u8
 /// Panics unless `row` of `shot` holds the two sides of the frame around a
 /// split diff's base column, and no other base-tint pixel.
 ///
-/// The left side lies in the pane's first cell, column 1. The right one lies
-/// in the divider column, 79, left of the hairline, which both diff screens
-/// place beside their one-cell overview. A miss saves the frame as
-/// [`expect_region`] does.
+/// The left side is the first three pixel columns of the pane's first cell,
+/// column 1, the boards' 3 px border. The right one lies in the divider
+/// column, 79, left of the hairline, which both diff screens place beside their
+/// one-cell overview. A miss saves the frame as [`expect_region`] does.
 fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
     let columns = bar_columns(shot, (y, height), SIDE_BASE);
@@ -1177,18 +1185,54 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
         x..x + width
     };
     let (left, right) = (cell(1), cell(79));
-    let sides = [&left, &right].map(|side| columns.iter().any(|x| side.contains(x)));
+    let left_side: Vec<u32> = columns
+        .iter()
+        .copied()
+        .filter(|x| left.contains(x))
+        .collect();
+    let right_side = columns.iter().any(|x| right.contains(x));
     let stray = columns
         .iter()
         .any(|x| !left.contains(x) && !right.contains(x));
-    if sides == [true, true] && !stray {
+    if left_side == [0, 1, 2].map(|dx| left.start + dx) && right_side && !stray {
         return;
     }
 
     let frame = keep_frame(shot, home, what);
     panic!(
-        "{what}: the base tint fills pixel columns {columns:?} of row {row}, not one side in \
-         each of {left:?} and {right:?}; the frame is {}",
+        "{what}: the base tint fills pixel columns {columns:?} of row {row}, not the first three \
+         of {left:?} and a side in {right:?}; the frame is {}",
+        frame.display(),
+    );
+}
+
+/// Panics unless the top three pixel rows of `row` in `shot` hold the top bar
+/// of the frame around a split diff's base column, and the pixel row under them
+/// does not.
+///
+/// The bar is one run of the base tint from the left side's first pixel column
+/// to the right side's last, where the sides are the columns the tint fills
+/// down the whole row. Below the bar the tint fills the sides alone. A miss
+/// saves the frame as [`expect_region`] does.
+fn expect_base_frame_top(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
+    let (_, y, _, height) = cell_rect(0, row, 1, 1);
+    let sides = bar_columns(shot, (y, height), SIDE_BASE);
+    let top = bar_columns(shot, (y, 3), SIDE_BASE);
+    let below = bar_columns(shot, (y + 3, 1), SIDE_BASE);
+
+    let span: Vec<u32> = match (sides.first(), sides.last()) {
+        (Some(&first), Some(&last)) => (first..=last).collect(),
+        _ => Vec::new(),
+    };
+    if !span.is_empty() && top == span && below == sides {
+        return;
+    }
+
+    let frame = keep_frame(shot, home, what);
+    panic!(
+        "{what}: the top three pixel rows of row {row} hold the base tint in columns {top:?} \
+         and the row under them in {below:?}, not one run across the sides {sides:?} and the \
+         sides alone; the frame is {}",
         frame.display(),
     );
 }

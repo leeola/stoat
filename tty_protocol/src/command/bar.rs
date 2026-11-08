@@ -5,6 +5,9 @@
 
 use crate::frame;
 
+/// The bit of a bar's flags byte that makes it occlude as a panel's body does.
+const OCCLUDES: u8 = 1;
+
 /// Fill a thin rectangle off the cell grid in a solid color.
 ///
 /// A non-cell component primitive: a gutter packs several variable-width status
@@ -20,11 +23,22 @@ pub struct BarCommand {
     pub width: u16,
     pub height: u16,
     pub color: [u8; 3],
+    /// The bar hides what lies under it as a panel's body does.
+    ///
+    /// The components declared before it draw nothing inside its rect, and a
+    /// pane pool's composite leaves the rect to the live grid, so the bar holds
+    /// its place while the pane glides or rests composited beneath it. This is
+    /// for chrome that frames a pane from inside the pane's first row. `false`
+    /// is a plain bar, which a later component and a pool composite draw over.
+    /// [`BarsCommand`] carries no flag, so an occluding bar goes out on its own
+    /// frame.
+    pub occludes: bool,
 }
 
 /// Encode a [`BarCommand`] as a full `Gstoatty;bar` frame for an emitter.
 ///
-/// The position, size, and color ride in a single fixed 11-byte argument.
+/// The position, size, color, and a flags byte ride in a single fixed 12-byte
+/// argument.
 pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
     let mut out = Vec::new();
     encode_bar_into(&mut out, command);
@@ -39,13 +53,14 @@ pub fn encode_bar_into(out: &mut Vec<u8>, command: &BarCommand) {
         w.write_all(&command.y.to_be_bytes())?;
         w.write_all(&command.width.to_be_bytes())?;
         w.write_all(&command.height.to_be_bytes())?;
-        w.write_all(&command.color)
+        w.write_all(&command.color)?;
+        w.write_all(&[if command.occludes { OCCLUDES } else { 0 }])
     });
     frame::end(out);
 }
 
 pub(super) fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
-    let arg: &[u8; 11] = args.first()?.get(..11)?.try_into().ok()?;
+    let arg: &[u8; 12] = args.first()?.get(..12)?.try_into().ok()?;
 
     Some(BarCommand {
         x: i16::from_be_bytes([arg[0], arg[1]]),
@@ -53,6 +68,7 @@ pub(super) fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
         width: u16::from_be_bytes([arg[4], arg[5]]),
         height: u16::from_be_bytes([arg[6], arg[7]]),
         color: [arg[8], arg[9], arg[10]],
+        occludes: arg[11] & OCCLUDES != 0,
     })
 }
 
@@ -143,22 +159,46 @@ mod tests {
     use super::*;
     use crate::command::{decode, decode_stream, Command};
 
+    /// A bar comes back whole, a plain one and an occluding one alike.
     #[test]
     fn bar_round_trips() {
-        let command = BarCommand {
+        let plain = BarCommand {
             x: -4,
             y: 32,
             width: 3,
             height: 16,
             color: [220, 50, 47],
+            occludes: false,
+        };
+        let occluding = BarCommand {
+            occludes: true,
+            ..plain
         };
 
-        assert_eq!(decode(&encode_bar(&command)), Some(Command::Bar(command)));
+        assert_eq!(
+            [plain, occluding].map(|command| decode(&encode_bar(&command))),
+            [Some(Command::Bar(plain)), Some(Command::Bar(occluding))],
+        );
     }
 
+    /// A bar's argument is a fixed 12 bytes, so the 11 bytes of a bar with no
+    /// flags byte decode to nothing.
     #[test]
     fn rejects_wrong_length_bar_payload() {
-        // The single arg here decodes to 3 bytes, not the 11 a bar needs.
+        let mut arg = frame::decode(&encode_bar(&BarCommand {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+            color: [5, 6, 7],
+            occludes: false,
+        }))
+        .expect("one frame")
+        .args
+        .remove(0);
+        arg.pop();
+
+        assert_eq!(decode_bar(&[arg]), None);
         assert!(decode(b"Gstoatty;bar;YWJj").is_none());
     }
 

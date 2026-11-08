@@ -2308,6 +2308,7 @@ mod tests {
                 width: 3,
                 height: 16,
                 color,
+                occludes: false,
             });
             decorations
                 .windows(command.len())
@@ -2469,7 +2470,7 @@ mod tests {
         assert_eq!(
             (&framed[..2], &framed[2..]),
             (
-                &[(0, 0, 3, 64, frame), (949, 0, 3, 64, frame)][..],
+                &[(0, 0, 6, 64, frame), (946, 0, 6, 64, frame)][..],
                 &plain[..]
             ),
         );

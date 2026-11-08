@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
 use stoatty_protocol::command::SketchShape;
 use stoatty_term::{
-    grid::{Grid, Panel, Rgb, Sketch},
+    grid::{Bar, Grid, Panel, Rgb, Sketch},
     term::Damage,
 };
 use wgpu::{Buffer, BufferDescriptor, BufferUsages, Device, Queue};
@@ -987,6 +987,40 @@ pub(crate) fn pool_occluders_into(
     above
 }
 
+/// Append to `out` an occluder for each bar in `bars` that occludes as a
+/// panel's body does.
+///
+/// The live list takes them after its panels and sketches. The pool list takes
+/// them after its panels, past the above-pools prefix, so a pane pool's
+/// composite leaves the bar's rect to the live grid while a box's content pool
+/// paints over it, as both treat a panel that is not above pools.
+pub(crate) fn push_bar_occluders(bars: &[Bar], out: &mut Vec<Occluder>) {
+    out.extend(bars.iter().filter(|bar| bar.occludes).map(bar_occluder));
+}
+
+/// The rect `bar` draws, as an occluder.
+///
+/// A pass discards a fragment only half a pixel inside an occluder's edge, which
+/// leaves a panel's anti-aliased rim standing. A bar has no such rim, so the box
+/// grows by that half pixel, and the hidden pixels are the ones whose centers
+/// lie inside the bar.
+fn bar_occluder(bar: &Bar) -> Occluder {
+    let sixteenths = |value: f32| value / BAR_CELL_FRACTION;
+    Occluder {
+        cell: [f32::from(bar.x), f32::from(bar.y)].map(sixteenths),
+        size: [f32::from(bar.width), f32::from(bar.height)].map(sixteenths),
+        seq: bar.seq,
+        corner_radius: 0.0,
+        inset_x: -0.5,
+        inset_y: -0.5,
+        corners: 0,
+        _pad: 0,
+    }
+}
+
+/// Sixteenths of a cell, which is the unit a bar states its rect in.
+const BAR_CELL_FRACTION: f32 = 16.0;
+
 /// One pool composite's share of a frame's occluder list.
 #[derive(Clone, Copy)]
 pub(crate) struct PoolOccluders<'frame> {
@@ -1183,10 +1217,10 @@ const PARTIAL_ROW_MIN: f32 = 1.0 / 3.0;
 mod tests {
     use super::{
         build_occluders_into, exposed_rows, globals_offset, globals_upload_needed, grid_dims,
-        grid_layout, grid_size, place_occluder_rows, pool_occluders_into, rotate_row_cache,
-        row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder,
-        PoolOccluders, RowAnchor, ALL_CORNERS, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
-        MAX_COMPOSITE_POOLS,
+        grid_layout, grid_size, place_occluder_rows, pool_occluders_into, push_bar_occluders,
+        rotate_row_cache, row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots,
+        GridLayout, Occluder, PoolOccluders, RowAnchor, ALL_CORNERS, GLOBALS_SLOTS,
+        GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
     };
 
     /// A bigger font means bigger cells, so the same surface holds fewer of
@@ -1349,7 +1383,7 @@ mod tests {
         SketchBounds, SketchCommand, SketchEasing, SketchFill, SketchFillStyle, SketchPhase,
         SketchShape, SketchStyle, SketchTiming,
     };
-    use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb, Sketch};
+    use stoatty_term::grid::{Bar, BorderStyle, Panel, PanelShadow, Rgb, Sketch};
 
     /// Every pool reads its own aligned slot, and none reads the live grid's.
     #[test]
@@ -1728,6 +1762,54 @@ mod tests {
             (seqs(&pool), above, seqs(&live)),
             (vec![3, 1], 1, vec![1, 3]),
             "both lists keep the two other panels and leave the backdrop out",
+        );
+    }
+
+    /// An occluding bar joins both lists behind the panels, past the prefix a
+    /// box's content pool reads, so a pane pool and the live decorations take
+    /// it as a panel that is not above pools. Its box is its rect in cells,
+    /// grown half a pixel, and a plain bar stays out of both lists.
+    #[test]
+    fn an_occluding_bar_occludes_as_a_panel_that_is_not_above_pools() {
+        let bar = |seq: u32, occludes: bool| Bar {
+            x: 16,
+            y: 24,
+            width: 952,
+            height: 3,
+            color: Rgb::new(1, 2, 3),
+            seq,
+            occludes,
+        };
+        let bars = [bar(4, true), bar(5, false)];
+        let panels = [panel(1, true), panel(2, false)];
+
+        let mut pool = Vec::new();
+        let above = pool_occluders_into(&panels, &[], 1.0, &mut pool);
+        push_bar_occluders(&bars, &mut pool);
+        let mut live = Vec::new();
+        build_occluders_into(&panels, &[], &[], 8.0, 1.0, &mut live);
+        push_bar_occluders(&bars, &mut live);
+
+        let seqs = |occluders: &[Occluder]| occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
+        let occluder = Occluder {
+            cell: [1.0, 1.5],
+            size: [59.5, 0.1875],
+            seq: 4,
+            corner_radius: 0.0,
+            inset_x: -0.5,
+            inset_y: -0.5,
+            corners: 0,
+            _pad: 0,
+        };
+        assert_eq!(
+            (seqs(&pool), above, seqs(&live), pool.last(), live.last()),
+            (
+                vec![1, 2, 4],
+                1,
+                vec![1, 2, 4],
+                Some(&occluder),
+                Some(&occluder)
+            ),
         );
     }
 

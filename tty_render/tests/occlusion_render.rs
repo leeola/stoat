@@ -95,6 +95,7 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         height: 16,
         color: bar_color,
         seq: 1,
+        occludes: false,
     }]);
     grid.set_text_runs(vec![TextRun {
         col: 0,
@@ -431,6 +432,7 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         height: 16,
         color: bar_color,
         seq: 50,
+        occludes: false,
     }]);
     // The three passes that occlude a live primitive each keep their own
     // occluder buffer, so each needs something of its own on the row below.
@@ -710,6 +712,7 @@ fn a_chip_occludes_only_the_box_it_draws() {
             height: 16,
             color: bar_color,
             seq: 1,
+            occludes: false,
         }]);
         grid.set_panels(vec![Panel {
             top: 1,
@@ -754,4 +757,128 @@ fn a_chip_occludes_only_the_box_it_draws() {
              and hides under the chip's middle and its square bottom corner",
         );
     }
+}
+
+/// An occluding bar hides what lies under it as a panel's body does.
+///
+/// Row 1 holds a text run whose background spans the row, under an occluding
+/// bar of a higher seq over cols 2 and 3. Runs draw after every bar, so the bar
+/// shows there only because it occludes. Row 3 lies under a pane pool
+/// composited across rows 3 and 4, and holds a plain bar over cols 0 and 1 and
+/// an occluding bar over cols 2 and 3. The composite paints over the plain bar
+/// and leaves the occluding one to the live grid. Fails without a GPU adapter.
+#[test]
+fn an_occluding_bar_hides_the_run_beneath_it_and_holds_over_a_pane_pool() {
+    let (device, queue) = require_headless_device();
+
+    let format = TextureFormat::Rgba8Unorm;
+    let font_size = 30;
+    let [cell_w, cell_h] = cell_size(font_size, 1.0);
+    let (cell_w, cell_h) = (cell_w.round() as u32, cell_h.round() as u32);
+    let (width, height) = (128u32, cell_h * 6);
+
+    let live_bg = Rgb::new(10, 20, 30);
+    let run_bg = Rgb::new(50, 200, 50);
+    let plain = Rgb::new(200, 50, 50);
+    let held = Rgb::new(80, 80, 220);
+    let pool_bg = Rgb::new(240, 180, 20);
+
+    let (target, view) = offscreen_target(&device, width, height);
+
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        [width, height],
+        build_font_system(),
+        FontConfig {
+            size: font_size,
+            scale_factor: 1.0,
+            family: &["JetBrains Mono".to_owned()],
+            ligatures: true,
+        },
+        Rgb::new(0, 0, 0),
+        Rgb::new(0, 0, 0),
+    );
+
+    let (rows, cols) = renderer.grid_size();
+    assert!(rows >= 5 && cols >= 4, "grid too small: {rows}x{cols}");
+
+    let mut live = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            live.get_mut(r, c).bg = live_bg;
+        }
+    }
+    let bar = |row: i16, col: i16, color: Rgb, seq: u32, occludes: bool| Bar {
+        x: col * 16,
+        y: row * 16,
+        width: 32,
+        height: 16,
+        color,
+        seq,
+        occludes,
+    };
+    live.set_bars(vec![
+        bar(1, 2, held, 2, true),
+        bar(3, 0, plain, 3, false),
+        bar(3, 2, held, 4, true),
+    ]);
+    live.set_text_runs(vec![TextRun {
+        col: 0,
+        row: 16,
+        scale: 256,
+        color: Rgb::new(0, 0, 0),
+        bg: Some(run_bg),
+        follow: 0,
+        anchor: None,
+        text: " ".repeat(cols).into(),
+        seq: 1,
+    }]);
+
+    let mut pool = Grid::new(rows, cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            pool.get_mut(r, c).bg = pool_bg;
+        }
+    }
+
+    let pools = [PoolComposite {
+        id: 0,
+        grid: &pool,
+        font_size: None,
+        origin_cells: [0.0, 3.0],
+        scissor: [0, 3 * cell_h, width, 2 * cell_h],
+        shift_rows: 0.0,
+        content_changed: true,
+        scrolled_rows: None,
+        occludable: true,
+        skip_clear: false,
+        changed_rows: None,
+        dim: 0.0,
+    }];
+    renderer.render_pools_into(
+        &device,
+        &queue,
+        &view,
+        &live,
+        still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
+        &pools,
+        &[],
+    );
+    let pixels = read_back(&device, &queue, &target, width, height);
+
+    let cell = |row: u32, col: u32| -> (u8, u8, u8) {
+        let x = col * cell_w + cell_w / 2;
+        let y = row * cell_h + cell_h / 2;
+        let [r, g, b] = pixel(&pixels, width, x, y);
+        (r, g, b)
+    };
+    let rgb = |c: Rgb| (c.r, c.g, c.b);
+
+    assert_eq!(
+        [cell(1, 0), cell(1, 3), cell(3, 1), cell(3, 3)],
+        [rgb(run_bg), rgb(held), rgb(pool_bg), rgb(held)],
+        "the run paints beside the bar and not under it, and the pool covers \
+         the plain bar and not the occluding one",
+    );
 }

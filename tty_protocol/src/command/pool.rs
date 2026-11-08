@@ -879,6 +879,7 @@ mod tests {
                 width: 2,
                 height: 16,
                 color: [1, 2, 3],
+                occludes: false,
             }))
         });
 

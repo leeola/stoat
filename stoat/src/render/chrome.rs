@@ -1288,6 +1288,7 @@ mod tests {
                 width: 64,
                 height: 1,
                 color: [1, 2, 3],
+                occludes: false,
             })
         );
     }
@@ -1320,6 +1321,7 @@ mod tests {
                     width: 64,
                     height: 1,
                     color: [1, 2, 3],
+                    occludes: false,
                 })
                 .as_slice()
             ),
@@ -1359,6 +1361,7 @@ mod tests {
                         width: 2,
                         height: 10,
                         color: [1, 2, 3],
+                        occludes: false,
                     })
                 ),
                 (
@@ -1369,6 +1372,7 @@ mod tests {
                         width: 2,
                         height: 4,
                         color: [1, 2, 3],
+                        occludes: false,
                     })
                 ),
             ],
@@ -1397,6 +1401,7 @@ mod tests {
                 width: 1,
                 height: 48,
                 color: [1, 2, 3],
+                occludes: false,
             })
         );
     }

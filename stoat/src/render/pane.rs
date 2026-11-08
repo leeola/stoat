@@ -157,7 +157,7 @@ pub(crate) fn render_pane(
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
                 if editor.diff_view {
-                    emit_pane_base_frame(content_area, FrameEdges::All, frame, scene);
+                    emit_pane_base_frame(content_area, FrameEdges::Sides, frame, scene);
                 }
 
                 let labels = if is_focused {
@@ -200,6 +200,9 @@ pub(crate) fn render_pane(
                     false,
                     None,
                 );
+                if editor.diff_view {
+                    emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
+                }
                 if !editor.diff_view
                     && editor.conflict_view.is_none()
                     && let Some(kind) = buffers.read_only(editor.buffer_id)
@@ -259,13 +262,6 @@ pub(crate) fn render_pane(
         // keeps it.
         View::DiffChanges(id) => {
             if let Some(state) = diff_changes_views.get_mut(*id) {
-                // The stack's rows draw the frame's sides, on the live paint
-                // and on a held stack's pages alike, so the sides go out over
-                // the header hairlines. An empty stack shows no base column to
-                // frame.
-                if !state.excerpts.is_empty() {
-                    emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
-                }
                 diff_changes::render_diff_changes(
                     pane,
                     is_focused,
@@ -278,6 +274,14 @@ pub(crate) fn render_pane(
                     buf,
                     &mut *scene,
                 );
+                // The stack's rows draw the frame's sides, on the live paint
+                // and on a held stack's pages alike, so the sides go out over
+                // the header hairlines. The top goes out after the rows, over
+                // the first row's hairline. An empty stack shows no base column
+                // to frame.
+                if !state.excerpts.is_empty() {
+                    emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
+                }
                 if let (Some(strip), Some(chrome)) = (state.minimap_rect, frame.minimap_chrome)
                     && let Some(content_id) = chrome.diff_changes_content
                 {
@@ -827,12 +831,13 @@ pub(crate) fn diff_base_tint(theme: &crate::theme::Theme) -> Option<[u8; 3]> {
 }
 
 /// Emit the `edges` of the frame around the base column of a diff pane whose
-/// content fills `content_area`, ahead of the pane's own paint.
+/// content fills `content_area`.
 ///
-/// The diff body leaves out the pane's scroll overview, so the frame does too.
-/// A changes view takes only the top edge here. Its stack rows draw the sides,
-/// so one frame spans the whole stack although each excerpt paints its own
-/// diff body.
+/// A pane emits the sides ahead of its own paint and the top after it, as
+/// [`review::emit_base_frame`] orders them. The diff body leaves out the pane's
+/// scroll overview, so the frame does too. A changes view takes only the top
+/// edge here. Its stack rows draw the sides, so one frame spans the whole stack
+/// although each excerpt paints its own diff body.
 ///
 /// Emits nothing on a dead scene or for a tint outside RGB.
 fn emit_pane_base_frame(

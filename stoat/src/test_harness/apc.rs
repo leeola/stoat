@@ -51,6 +51,11 @@ pub(crate) fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
                     set_cell(buf, c.left + 1 + i as u16, c.top + 1, ch, fg, None, above);
                 }
             },
+            // A thin occluding bar is the edge of a frame drawn over a row's
+            // content, such as the top of a split diff's base frame. It covers
+            // the row's top pixels and none of its text, so the row's cells keep
+            // the content's text rather than a rule.
+            Command::Bar(c) if c.occludes && c.height < 16 => {},
             Command::Bar(c) => {
                 let x = (c.x / 16).max(0) as u16;
                 let y = (c.y / 16).max(0) as u16;
@@ -59,8 +64,7 @@ pub(crate) fn composite_scene(buf: &mut Buffer, cmds: &[Command]) {
                 let color = rgb(c.color);
                 if c.height < 16 {
                     // A thin bar lies in the row its top edge falls in. One
-                    // above the grid, such as the top of a frame over a pane
-                    // on row 0, lies in no row of the buffer.
+                    // above the grid lies in no row of the buffer.
                     let Ok(row) = u16::try_from(c.y.div_euclid(16)) else {
                         continue;
                     };

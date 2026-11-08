@@ -42,7 +42,7 @@ use std::{
     time::Instant,
 };
 use stoatty_term::{
-    grid::{Grid, Panel, Rgb},
+    grid::{Bar, Grid, Panel, Rgb},
     term::Damage,
 };
 use wgpu::{
@@ -591,6 +591,7 @@ impl Renderer {
                 pool.grid,
                 self.pool_metrics(pool.font_size),
                 panels,
+                grid.bars(),
                 &riding,
                 pool.shift_rows,
                 pool.origin_cells,
@@ -679,6 +680,7 @@ impl Renderer {
             self.metrics.scale_factor,
             &mut self.occluders,
         );
+        crate::render::push_bar_occluders(grid.bars(), &mut self.occluders);
         crate::render::place_occluder_rows(&mut self.occluders, anchor, self.metrics.height);
 
         let resolution = [self.width as f32, self.height as f32];
@@ -1021,6 +1023,8 @@ impl Renderer {
             pool_grid,
             self.pool_metrics(font_size),
             panels,
+            // A standalone composite has no live grid, so no bar occludes it.
+            &[],
             // A standalone composite has no frame of rides around it.
             &[],
             shift_rows,
@@ -1071,6 +1075,9 @@ impl Renderer {
     /// riding one of them draws shifted, after the composites, so the rect it
     /// declared is not where it is and this pool must not occlude against it.
     ///
+    /// `bars` are the live grid's bars. The ones that occlude join `panels` as
+    /// occluders, as a pane pool takes them.
+    ///
     /// `metrics` is the cell box `pool_grid` lays out in, from
     /// [`Self::pool_metrics`]. `origin_cells` stays a cell of the live grid, and
     /// is restated in the pool's own cells for the passes.
@@ -1095,6 +1102,7 @@ impl Renderer {
         pool_grid: &Grid,
         metrics: CellMetrics,
         panels: &[Panel],
+        bars: &[Bar],
         riding: &[u32],
         shift_rows: f32,
         origin_cells: [f32; 2],
@@ -1132,6 +1140,7 @@ impl Renderer {
             self.metrics.scale_factor,
             &mut self.pool_occluders,
         );
+        crate::render::push_bar_occluders(bars, &mut self.pool_occluders);
         // The boxes sit on the live grid, so the live layout places their rows,
         // though the pool under them keeps the uniform pitch.
         let anchor = self.grid_layout().row_anchor();
@@ -2602,6 +2611,7 @@ impl GpuContext {
                 pool.grid,
                 self.renderer.pool_metrics(pool.font_size),
                 panels,
+                live_grid.bars(),
                 &riding,
                 pool.shift_rows,
                 pool.origin_cells,
@@ -3072,6 +3082,7 @@ mod tests {
                 renderer.metrics,
                 &[],
                 &[],
+                &[],
                 pool.shift_rows,
                 pool.origin_cells,
                 pool.content_changed,
@@ -3286,6 +3297,7 @@ mod tests {
             &queue,
             &pool,
             renderer.metrics,
+            &[],
             &[],
             &[],
             0.0,

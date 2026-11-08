@@ -101,9 +101,16 @@ pub(crate) fn diff_soften_scale(level: i8) -> f32 {
 /// `diff.*` colors for, so nothing above it would say more.
 pub(crate) const DIFF_TINT_MAX: i8 = 2;
 
-/// Width of each bar in the frame that marks a split diff's base half, in
+/// Width of each side bar in the frame that marks a split diff's base half, in
 /// sixteenths of a cell.
-const BASE_FRAME_WIDTH: u16 = 3;
+///
+/// A cell is half as wide as it is tall, so 6 sixteenths across draw the
+/// boards' 3 px border in a 9 px cell.
+const BASE_FRAME_WIDTH: u16 = 6;
+
+/// Height of the top bar in the frame that marks a split diff's base half, in
+/// sixteenths of a cell, which draw the boards' 3 px border in an 18 px row.
+const BASE_FRAME_TOP_HEIGHT: u16 = 3;
 
 /// Where the mid divider's hairline sits in the divider column, which is the
 /// column's middle, in sixteenths of a cell from its left edge.
@@ -836,15 +843,16 @@ pub(crate) fn diff_divider_x(inner: Rect) -> Option<u16> {
 }
 
 /// The edges of the base half's frame that one paint emits.
+///
+/// The sides go out ahead of the rows and the top after them, so a pane emits
+/// the two in separate paints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FrameEdges {
-    /// The two sides and the top, for a pane whose live grid shows.
-    All,
-    /// The two sides alone, for a pool page. A page scrolls, and the top edge
-    /// stays with the pane.
+    /// The two sides, for a pane ahead of its rows and for a pool page. A page
+    /// scrolls, and the top edge stays with the pane.
     Sides,
-    /// The top alone, for a pane whose pool covers its sides. The top sits
-    /// above the pool, so only the pane draws it.
+    /// The top, for a pane after its rows. It occludes, so it holds its place
+    /// over the pane's pool composite, and only the pane draws it.
     Top,
 }
 
@@ -854,15 +862,16 @@ pub(crate) enum FrameEdges {
 /// A bar runs down the half's left edge, where the status row's base half
 /// starts below, and one down its right edge, which ends at the divider's
 /// hairline. Each is the height of `inner`. A third bar runs from the left bar
-/// to the hairline just above `inner`'s first row. `edges` picks which of them
-/// emit.
+/// to the hairline along the top of `inner`'s first row. `edges` picks which of
+/// them emit.
 ///
 /// The right bar sits in the divider column rather than the half's last cell,
 /// so it covers no base text.
 ///
-/// Emit the frame ahead of the gutter, so the gutter's hunk lane, which shares
-/// the left bar's place, draws over it. A unified layout has no base half, so
-/// it emits nothing.
+/// Emit the sides ahead of the gutter, so the gutter's hunk lane, which shares
+/// the left bar's place, draws over it. Emit the top after the rows: it hides
+/// the first row's gutter runs and rules beneath it, as the boards draw the
+/// frame over the rows. A unified layout has no base half, so it emits nothing.
 ///
 /// See also:
 /// - [`PageGutter::framed`](crate::smooth_scroll::PageGutter::framed), which carries the side bars
@@ -878,21 +887,26 @@ pub(crate) fn emit_base_frame(
     };
 
     let rule = (divider - inner.x) * 16 + DIVIDER_RULE_X;
-    let height = inner.height * 16;
-    let width = BASE_FRAME_WIDTH;
-    let sides = [0, rule - width]
-        .map(|x| (x as i16, 0, width, height))
-        .into_iter()
-        .filter(|_| edges != FrameEdges::Top);
-    let top = (edges != FrameEdges::Sides).then_some((0, -(width as i16), rule, width));
+    if edges == FrameEdges::Top {
+        Bar {
+            x: 0,
+            y: 0,
+            width: rule,
+            height: BASE_FRAME_TOP_HEIGHT,
+            color,
+        }
+        .render_occluding(inner, scene);
+        return;
+    }
 
+    let (width, height) = (BASE_FRAME_WIDTH, inner.height * 16);
     let mut bars = BarBatch::default();
-    for (x, y, width, height) in sides.chain(top) {
+    for x in [0, rule - width] {
         bars.push(
             inner,
             Bar {
-                x,
-                y,
+                x: x as i16,
+                y: 0,
                 width,
                 height,
                 color,
@@ -4676,6 +4690,7 @@ mod tests {
                     width: offsets.bar_width,
                     height: 16,
                     color,
+                    occludes: false,
                 });
                 bytes
                     .windows(frame.len())
@@ -4796,6 +4811,7 @@ mod tests {
             width: 8,
             height: 2,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
+            occludes: false,
         };
         assert!(
             holds_bar(&bytes, tick),
@@ -4819,6 +4835,7 @@ mod tests {
             width: offsets.bar_width,
             height: 6,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
+            occludes: false,
         };
         assert!(
             holds_bar(&bytes, git_bar),
@@ -4925,9 +4942,10 @@ mod tests {
         );
     }
 
-    /// The frame bars the base half's two sides, the full height of the body,
-    /// and its top, just above the first row, and a paint emits the edges it
-    /// names. A unified diff has no base half to frame.
+    /// The frame bars the base half's two sides, 3 px wide and the full height
+    /// of the body, and its top, 3 px tall along the first row's top edge, which
+    /// occludes. A paint emits the edges it names. A unified diff has no base
+    /// half to frame.
     #[test]
     fn the_base_frame_bars_the_base_half_s_sides_and_top() {
         let bars = |inner: Rect, edges: FrameEdges| {
@@ -4936,7 +4954,9 @@ mod tests {
             decode_stream(scene.buffer())
                 .into_iter()
                 .map(|command| match command {
-                    Command::Bar(bar) => (bar.x, bar.y, bar.width, bar.height, bar.color),
+                    Command::Bar(bar) => {
+                        (bar.x, bar.y, bar.width, bar.height, bar.color, bar.occludes)
+                    },
                     other => panic!("the frame draws only bars, got {other:?}"),
                 })
                 .collect::<Vec<_>>()
@@ -4945,17 +4965,18 @@ mod tests {
         // The divider of a 120-wide body at column 2 sits at column 61, and its
         // hairline sits 952 sixteenths from the body's left edge.
         let wide = Rect::new(2, 1, 120, 10);
-        let left = (32, 16, 3, 160, [1, 2, 3]);
-        let right = (32 + 952 - 3, 16, 3, 160, [1, 2, 3]);
-        let top = (32, 13, 952, 3, [1, 2, 3]);
+        let left = (32, 16, 6, 160, [1, 2, 3], false);
+        let right = (32 + 952 - 6, 16, 6, 160, [1, 2, 3], false);
+        let top = (32, 16, 952, 3, [1, 2, 3], true);
+        let narrow = Rect::new(2, 1, 80, 10);
         assert_eq!(
             [
-                bars(wide, FrameEdges::All),
                 bars(wide, FrameEdges::Sides),
                 bars(wide, FrameEdges::Top),
-                bars(Rect::new(2, 1, 80, 10), FrameEdges::All)
+                bars(narrow, FrameEdges::Sides),
+                bars(narrow, FrameEdges::Top),
             ],
-            [vec![left, right, top], vec![left, right], vec![top], vec![]],
+            [vec![left, right], vec![top], vec![], vec![]],
         );
     }
 
@@ -5015,6 +5036,7 @@ mod tests {
                 width: 1,
                 height: rows * 16,
                 color: dim,
+                occludes: false,
             });
             assert!(
                 contains(scene.buffer(), &frame),
@@ -5037,6 +5059,7 @@ mod tests {
                             width: offsets.bar_width,
                             height: 16,
                             color,
+                            occludes: false,
                         }),
                     )
                 })
@@ -5773,7 +5796,7 @@ mod tests {
             .minimap_rect;
         let frame_sides: Vec<i16> = content_bars(&mut h)
             .into_iter()
-            .filter(|bar| bar.4 == [0x2a, 0x1d, 0x20] && bar.1 == 0)
+            .filter(|bar| bar.4 == [0x2a, 0x1d, 0x20] && bar.1 == 0 && !bar.5)
             .map(|bar| bar.0)
             .collect();
 
@@ -5789,7 +5812,7 @@ mod tests {
             (
                 Some(1),
                 [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)],
-                vec![0, 59 * 16 + 8 - 3],
+                vec![0, 59 * 16 + 8 - 6],
             ),
         );
     }
@@ -5836,12 +5859,13 @@ mod tests {
         );
     }
 
-    /// A split diff pane paints its base frame ahead of the rest of its
-    /// content, in the base tint. A unified diff and a plain pane paint none.
+    /// A split diff pane paints its base frame's sides ahead of the rest of its
+    /// content and the occluding top after it, in the base tint. A unified diff
+    /// and a plain pane paint none.
     #[test]
-    fn a_split_diff_pane_leads_its_content_with_the_base_frame() {
+    fn a_split_diff_pane_frames_its_content_sides_first_and_top_last() {
         let tint = [0x2a, 0x1d, 0x20];
-        let tinted = |bars: Vec<(i16, i16, u16, u16, [u8; 3])>| {
+        let tinted = |bars: Vec<(i16, i16, u16, u16, [u8; 3], bool)>| {
             bars.into_iter().filter(|bar| bar.4 == tint).count()
         };
 
@@ -5857,17 +5881,15 @@ mod tests {
         // the divider's hairline sits 952 sixteenths in.
         assert_eq!(
             (
-                bars[..3].to_vec(),
+                bars[..2].to_vec(),
+                bars.last().copied(),
                 tinted(bars),
                 tinted(content_bars(&mut unified)),
                 tinted(content_bars(&mut plain)),
             ),
             (
-                vec![
-                    (0, 0, 3, 144, tint),
-                    (949, 0, 3, 144, tint),
-                    (0, -3, 952, 3, tint)
-                ],
+                vec![(0, 0, 6, 144, tint, false), (946, 0, 6, 144, tint, false)],
+                Some((0, 0, 952, 3, tint, true)),
                 3,
                 0,
                 0,
@@ -5876,10 +5898,11 @@ mod tests {
     }
 
     /// Render a frame and return every bar the focused pane's content lane
-    /// draws, in draw order, as `(x, y, width, height, color)` in sixteenths.
+    /// draws, in draw order, as `(x, y, width, height, color, occludes)` with the
+    /// rect in sixteenths.
     fn content_bars(
         h: &mut crate::test_harness::TestHarness,
-    ) -> Vec<(i16, i16, u16, u16, [u8; 3])> {
+    ) -> Vec<(i16, i16, u16, u16, [u8; 3], bool)> {
         let _ = h.stoat.render();
         let ws = h.stoat.active_workspace();
         let index = ws.panes.pane(ws.panes.focus()).index;
@@ -5890,11 +5913,13 @@ mod tests {
         )
         .into_iter()
         .flat_map(|command| match command {
-            Command::Bar(bar) => vec![(bar.x, bar.y, bar.width, bar.height, bar.color)],
+            Command::Bar(bar) => {
+                vec![(bar.x, bar.y, bar.width, bar.height, bar.color, bar.occludes)]
+            },
             Command::Bars(group) => group
                 .bars
                 .into_iter()
-                .map(|(x, y, width, height)| (x, y, width, height, group.color))
+                .map(|(x, y, width, height)| (x, y, width, height, group.color, false))
                 .collect(),
             _ => Vec::new(),
         })

@@ -181,6 +181,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             height: 16,
             color: Rgb::new(220, 50, 47),
             seq: 0,
+            occludes: false,
         },
         Bar {
             x: 30,
@@ -189,6 +190,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             height: 96,
             color: Rgb::new(88, 88, 88),
             seq: 0,
+            occludes: false,
         },
     ]);
 

@@ -1908,6 +1908,7 @@ impl Terminal {
                         width,
                         height,
                         color: batch.color,
+                        occludes: false,
                     }));
                 }
             },

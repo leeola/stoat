@@ -661,6 +661,7 @@ mod tests {
                 height: 16,
                 color: Rgb::new(255, 0, 0),
                 seq: 0,
+                occludes: false,
             };
             let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
             bars.prepare(
@@ -734,6 +735,7 @@ mod tests {
             height: 16,
             color: red,
             seq: 0,
+            occludes: false,
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare_composite(
@@ -792,6 +794,7 @@ mod tests {
             height: 24,
             color: Rgb::new(220, 50, 47),
             seq: 7,
+            occludes: false,
         }];
 
         let mut scratch = build_bar_instances(&bars);
@@ -819,6 +822,7 @@ mod tests {
             height: 24,
             color: Rgb::new(220, 50, 47),
             seq: 7,
+            occludes: false,
         }];
         let first = build_bar_instances(&bars);
         assert!(
@@ -846,6 +850,7 @@ mod tests {
             height: 24,
             color: Rgb::new(220, 50, 47),
             seq: 7,
+            occludes: false,
         }];
 
         let instances = build_bar_instances(&bars);
@@ -869,6 +874,7 @@ mod tests {
             height: 16,
             color: Rgb::new(1, 2, 3),
             seq: 0,
+            occludes: false,
         }];
 
         let instances = build_bar_instances(&bars);
@@ -908,6 +914,7 @@ mod tests {
             height: 16,
             color: Rgb::new(1, 2, 3),
             seq: 0,
+            occludes: false,
         };
 
         pass.prepare_composite(

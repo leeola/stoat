@@ -160,9 +160,15 @@
 /// a screen-fixed panel and reads an anchored panel's anchor from them. This
 /// version drops a shorter head.
 ///
+/// Version 24 reads a fixed 12-byte `bar` argument, which ends in a flags byte.
+/// Bit 0 makes the bar occlude as a panel's body does: the components declared
+/// before it draw nothing in its rect, and no pane pool composites over it. A
+/// terminal that predates it ignores the byte and draws a plain bar. This
+/// version drops a shorter argument.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
