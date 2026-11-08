@@ -18,7 +18,7 @@ use ratatui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat_action::{Action, Conflict, ConflictPickOurs};
 use stoat_widgets::ApcScene;
-use stoatty_protocol::command::{decode_stream, Command};
+use stoatty_protocol::command::{decode_stream, BorderStyle, Command, PanelCommand, PanelShadow};
 
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
@@ -261,6 +261,45 @@ fn an_unresolved_chunk_bars_its_edited_sides_and_chips_its_first_row() {
             )),
         ),
         "each band row bars the merged column, and the chip ends on the column's edge",
+    );
+}
+
+/// A chip's panel is a backdrop, which no pool composite takes as an occluder.
+/// A glide of the pane's pool then covers the live chip, and the chip that
+/// the page paints travels with its row.
+#[test]
+fn a_chip_panel_sits_under_the_pane_pool() {
+    let shot = grid_shot(ONE_CHUNK, &[]);
+    let panels: Vec<PanelCommand> = shot
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Panel(panel) => Some(*panel),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        panels,
+        [PanelCommand {
+            top: 2,
+            left: shot.cols.merged.right() - 17,
+            width: 17,
+            height: 1,
+            style: BorderStyle::None_,
+            border: CHIP_CONFLICT,
+            corner_radius: 1,
+            fill: Some(CHIP_CONFLICT),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: true,
+            anchor: None,
+        }],
     );
 }
 

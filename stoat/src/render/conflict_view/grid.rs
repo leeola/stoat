@@ -922,6 +922,10 @@ fn push_hairlines(bars: &mut BarBatch, cols: &GridColumns, y: u16, rows: u16, co
 ///
 /// With `panel` set the box is a rounded panel. Without it the cells beneath
 /// already carry the box.
+///
+/// The panel is a backdrop, so the pane pool's composite covers it through a
+/// glide. The page under the composite paints the chip too, so the chip
+/// travels with its row and does not hold its settled place.
 fn draw_chip(
     area: Rect,
     text: &str,
@@ -944,7 +948,7 @@ fn draw_chip(
             fillets: 0,
             hatch: None,
             above_pools: false,
-            backdrop: false,
+            backdrop: true,
             anchor: None,
         }
         .draw_components(area, scene);
