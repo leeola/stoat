@@ -4,17 +4,18 @@ use crate::{
         picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::{write_str, write_str_clipped},
     },
+    theme::TypeRole,
     workspace::Workspace,
     workspace_picker::{WorkspacePicker, WorkspaceStatus},
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::Style,
     widgets::{Block, Borders, StatefulWidget},
 };
 use std::path::Path;
-use stoat_widgets::bar::Bar;
+use stoat_widgets::text_run::{self, TextRun};
 use unicode_width::UnicodeWidthStr;
 
 /// Rows of workspaces the modal shows at once. A longer list scrolls under the
@@ -43,29 +44,38 @@ const SESSION_HINTS: [(&str, &str); 6] = [
     ("S-Tab", "scope"),
 ];
 
-/// A status dot's geometry in sixteenths of the marker cell. The cell is twice
-/// as tall as it is wide, so the dot is twice as wide as tall to read square.
-const DOT_X: i16 = 5;
-const DOT_Y: i16 = 6;
-const DOT_WIDTH: u16 = 6;
-const DOT_HEIGHT: u16 = 3;
+/// Rows between the window's top and the box's top border.
+///
+/// The boards place the dialog 150 px down a window of 18 px rows.
+const SESSION_FINDER_TOP_ROWS: u16 = 8;
+
+/// The filled dot that marks the active session and one open in the
+/// background, in its row and in the footer legend.
+const FILLED_MARK: &str = "\u{25cf}";
+
+/// The ring that marks a saved session, in its row and in the footer legend.
+const SAVED_MARK: &str = "\u{25cb}";
 
 /// Lay the workspace picker's modal out within `area`, returning its outer box
 /// and the inner rect holding the header, the rows, and the footer, or
 /// [`None`] when `area` is too small to host it or there is nothing to list.
+///
+/// The box's top sits [`SESSION_FINDER_TOP_ROWS`] below `area`'s. In a short
+/// `area` the box rises until its bottom edge meets `area`'s.
 pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<(Rect, Rect)> {
     if entries_len == 0 {
         return None;
     }
     let entry_rows = (entries_len as u16).min(MAX_ENTRY_ROWS);
     let content_height = 2 + HEADER_ROWS + entry_rows + FOOTER_ROWS;
-    let modal = crate::render::chrome::modal_box(
+    let mut modal = crate::render::chrome::modal_box(
         area,
         (0, content_height),
         (RECOMMENDED_COLUMNS, 6),
         (60, 6),
         0,
     )?;
+    modal.y = (area.y + SESSION_FINDER_TOP_ROWS).min(area.y + area.height - modal.height);
     Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
 }
 
@@ -338,11 +348,14 @@ pub(crate) fn render_workspace_picker(
         FOOTER_ROWS,
     );
     let legend = [
-        ("\u{2022}", status_style(WorkspaceStatus::Active, theme)),
+        (FILLED_MARK, status_style(WorkspaceStatus::Active, theme)),
         (" active  ", header_style),
-        ("\u{2022}", status_style(WorkspaceStatus::Background, theme)),
+        (
+            FILLED_MARK,
+            status_style(WorkspaceStatus::Background, theme),
+        ),
         (" open  ", header_style),
-        ("\u{2022}", status_style(WorkspaceStatus::Inactive, theme)),
+        (SAVED_MARK, status_style(WorkspaceStatus::Inactive, theme)),
         (" saved", header_style),
     ];
     let parts = Footer {
@@ -353,26 +366,26 @@ pub(crate) fn render_workspace_picker(
     crate::render::picker::modal_footer(buf, footer, &parts, theme, scene);
 }
 
-/// The color a row's status dot takes, as a style whose foreground is the dot.
+/// The color a row's status mark takes, as a style whose foreground is the
+/// mark.
 ///
 /// The active session reads in `ui.toggle.active`, a session open in the
-/// background in `ui.text.dim`, and a saved one in the overlay's strong line.
+/// background in `ui.text.dim`, and a saved one in `ui.text.disabled`.
 fn status_style(status: WorkspaceStatus, theme: &crate::theme::Theme) -> Style {
     match status {
         WorkspaceStatus::Active => theme.get(crate::theme::scope::UI_TOGGLE_ACTIVE),
         WorkspaceStatus::Background => theme.get(crate::theme::scope::UI_TEXT_DIM),
-        WorkspaceStatus::Inactive => crate::render::picker::line_strong(theme)
-            .map_or_else(Style::default, |[r, g, b]| {
-                Style::default().fg(Color::Rgb(r, g, b))
-            }),
+        WorkspaceStatus::Inactive => theme.get(crate::theme::scope::UI_TEXT_DISABLED),
     }
 }
 
 /// Paint the mark of `status` into the marker cell at `(x, row)`.
 ///
-/// Under a live scene the mark is a square dot in [`status_style`]'s color.
-/// Otherwise, or when the theme gives the status no RGB color, it is a glyph
-/// in `glyph_style`, `*` for the active session and U+00B7 for a saved one.
+/// Under a live scene the mark is a round dot in [`status_style`]'s color, at
+/// the small type scale and centered in the cell. A saved session takes a ring,
+/// the others a filled dot. Otherwise, or when the theme gives the status no
+/// RGB color, it is a glyph in `glyph_style`, `*` for the active session and
+/// U+00B7 for a saved one.
 fn paint_marker(
     status: WorkspaceStatus,
     x: u16,
@@ -384,12 +397,20 @@ fn paint_marker(
 ) {
     let dot = style_rgb(status_style(status, theme).fg).filter(|_| scene.live());
     if let Some(color) = dot {
-        Bar {
-            x: DOT_X,
-            y: DOT_Y,
-            width: DOT_WIDTH,
-            height: DOT_HEIGHT,
+        let scale = theme.type_scale(TypeRole::Small);
+        let text = match status {
+            WorkspaceStatus::Inactive => SAVED_MARK,
+            WorkspaceStatus::Active | WorkspaceStatus::Background => FILLED_MARK,
+        };
+        TextRun {
+            col: ((16 - text_run::advance_sixteenths(1, scale).min(16)) / 2) as i16,
+            row: 0,
+            scale,
             color,
+            bg: None,
+            text,
+            follow: 0,
+            anchor: None,
         }
         .render(Rect::new(x, row, 1, 1), buf, scene);
         return;
@@ -453,8 +474,7 @@ fn tail_within(path: &str, room: usize) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::{
-        render_workspace_picker, workspace_picker_layout, DOT_HEIGHT, DOT_WIDTH, DOT_X, DOT_Y,
-        FOOTER_ROWS, HEADER_ROWS, MAX_ENTRY_ROWS,
+        render_workspace_picker, workspace_picker_layout, FOOTER_ROWS, HEADER_ROWS, MAX_ENTRY_ROWS,
     };
     use crate::{
         buffer::BufferId,
@@ -465,7 +485,7 @@ mod tests {
         },
         run::RunState,
         ssh::{RemoteTarget, Transport},
-        theme::Theme,
+        theme::{Theme, TypeRole},
         workspace::{
             registry::{RegistryEntry, WorkspaceMeta},
             Workspace, WorkspaceId, WorkspaceUid,
@@ -477,7 +497,7 @@ mod tests {
     use std::{path::PathBuf, sync::Arc, time::UNIX_EPOCH};
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_widgets::ApcScene;
-    use stoatty_protocol::command::{self, BarCommand, Command};
+    use stoatty_protocol::command::{self, Command, TextRunCommand};
 
     /// A picker over `count` workspaces named `ws00`..., the first of them
     /// active, alongside the slotmap the renderer paints its input through.
@@ -582,6 +602,18 @@ mod tests {
             HEADER_ROWS + 3 + FOOTER_ROWS,
             "the filter, separator, and column labels sit above the rows, and the footer below"
         );
+    }
+
+    /// The box opens eight rows below the window's top, as the boards place
+    /// it, and a window too short for that lifts it until its bottom meets the
+    /// window's.
+    #[test]
+    fn layout_opens_eight_rows_down_or_meets_a_short_window_s_bottom() {
+        let span = |height| {
+            workspace_picker_layout(Rect::new(0, 0, 120, height), 3)
+                .map(|(modal, _)| (modal.y, modal.bottom()))
+        };
+        assert_eq!([span(40), span(14)], [Some((8, 17)), Some((5, 14))]);
     }
 
     #[test]
@@ -1052,7 +1084,6 @@ mod tests {
     /// The foregrounds [`parts_theme`] gives the parts of a row.
     const ACTIVE: Color = Color::Rgb(0, 0, 1);
     const DIM: Color = Color::Rgb(0, 0, 2);
-    const SAVED: Color = Color::Rgb(0, 0, 3);
     const MUTED: Color = Color::Rgb(0, 0, 4);
     const DISABLED: Color = Color::Rgb(0, 0, 5);
     const RUN: Color = Color::Rgb(0, 0, 6);
@@ -1119,32 +1150,45 @@ mod tests {
         painted(&mut picker, &mut workspaces, active, live)
     }
 
+    /// Each row marks its status with a round dot at the small type scale in
+    /// its marker cell. The active and open rows take a filled dot in their
+    /// colors, and a saved row takes a ring in the disabled color.
+    ///
+    /// Under test every type role scales to a whole cell, so the dot fills its
+    /// cell from the left edge.
     #[test]
     fn each_status_marks_its_row_with_a_dot_in_its_color() {
         let (_, mut scene, inner) = painted_statuses(true);
-        let dots: Vec<(i16, i16, Color)> = command::decode_stream(scene.buffer())
+        let dots: Vec<(i16, i16, u16, String, Color)> = command::decode_stream(scene.buffer())
             .into_iter()
             .filter_map(|cmd| match cmd {
-                Command::Bar(BarCommand {
-                    x,
-                    y,
-                    width: DOT_WIDTH,
-                    height: DOT_HEIGHT,
+                Command::TextRun(TextRunCommand {
+                    col,
+                    row,
+                    scale,
                     color: [r, g, b],
+                    text,
                     ..
-                }) => Some((x, y, Color::Rgb(r, g, b))),
+                }) if ["\u{25cf}", "\u{25cb}"].contains(&text.as_str()) => {
+                    Some((col, row, scale, text, Color::Rgb(r, g, b)))
+                },
                 _ => None,
             })
             .collect();
 
+        let small = parts_theme().type_scale(TypeRole::Small);
         let sixteenths = |cell: u16| cell as i16 * 16;
-        let dot = |row: u16, color: Color| {
-            let y = sixteenths(inner.y + HEADER_ROWS + row) + DOT_Y;
-            (sixteenths(inner.x + 1) + DOT_X, y, color)
+        let dot = |row: u16, text: &str, color: Color| {
+            let y = sixteenths(inner.y + HEADER_ROWS + row);
+            (sixteenths(inner.x + 1), y, small, text.to_owned(), color)
         };
         assert_eq!(
             dots,
-            [dot(0, ACTIVE), dot(1, DIM), dot(2, SAVED)],
+            [
+                dot(0, "\u{25cf}", ACTIVE),
+                dot(1, "\u{25cf}", DIM),
+                dot(2, "\u{25cb}", DISABLED)
+            ],
             "the active, open, and saved rows each carry one dot"
         );
     }
@@ -1160,8 +1204,8 @@ mod tests {
         assert_eq!(marks, ["*", " ", "\u{00b7}"]);
     }
 
-    /// The footer leads with a legend of the three status dots, then lists the
-    /// bound keys.
+    /// The footer leads with a legend of the three status marks, each the
+    /// shape its rows draw, then lists the bound keys.
     #[test]
     fn the_footer_leads_with_the_status_legend() {
         let (buf, _, inner) = painted_statuses(true);
@@ -1173,18 +1217,18 @@ mod tests {
             .collect();
         assert_eq!(
             text.trim_end(),
-            " \u{2022} active  \u{2022} open  \u{2022} saved  Enter switch  A-Enter sub-session  \
+            " \u{25cf} active  \u{25cf} open  \u{25cb} saved  Enter switch  A-Enter sub-session  \
              C-r rename  C-x close  Del delete  S-Tab scope"
         );
 
         let dots: Vec<Color> = (inner.x..inner.x + inner.width)
-            .filter(|&x| buf[(x, row)].symbol() == "\u{2022}")
+            .filter(|&x| ["\u{25cf}", "\u{25cb}"].contains(&buf[(x, row)].symbol()))
             .map(|x| buf[(x, row)].fg)
             .collect();
         assert_eq!(
             dots,
-            [ACTIVE, DIM, SAVED],
-            "each legend dot takes its status color"
+            [ACTIVE, DIM, DISABLED],
+            "each legend mark takes its status color"
         );
     }
 
