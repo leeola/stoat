@@ -2,7 +2,7 @@ mod rebase;
 mod tree;
 
 use crate::host::git::{
-    BackendSnafu, ChangedFile, CherryPickOutcome, CommitChanges, CommitFileChange,
+    BackendSnafu, ChangeLineStats, ChangedFile, CherryPickOutcome, CommitChanges, CommitFileChange,
     CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies,
     MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
 };
@@ -891,6 +891,89 @@ impl GitRepo for LocalGitRepo {
         let upstream_name = repo.branch_upstream_name(head.name().ok()?).ok()?;
         let upstream = repo.refname_to_id(upstream_name.as_str().ok()?).ok()?;
         repo.graph_ahead_behind(local, upstream).ok()
+    }
+
+    fn upstream_name(&self) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let head = repo.head().ok()?;
+        if !head.is_branch() {
+            return None;
+        }
+        let branch = repo
+            .find_branch(head.shorthand().ok()?, BranchType::Local)
+            .ok()?;
+        let upstream = branch.upstream().ok()?;
+        upstream.name().ok().flatten().map(str::to_string)
+    }
+
+    fn divergence(&self, from: &str, to: &str) -> Option<(usize, usize)> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let commit = |rev: &str| Some(repo.revparse_single(rev).ok()?.peel_to_commit().ok()?.id());
+        repo.graph_ahead_behind(commit(from)?, commit(to)?).ok()
+    }
+
+    fn change_line_stats(&self) -> ChangeLineStats {
+        let repo = self.repo.lock().expect("git repo lock");
+        // `None` diffs against the empty tree, which is all an unborn branch
+        // has, so every staged file reads as added.
+        let head_tree = repo.head().ok().and_then(|head| head.peel_to_tree().ok());
+
+        let mut staged_opts = DiffOptions::new();
+        staged_opts.context_lines(0);
+        let staged = repo
+            .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut staged_opts))
+            .map_or_else(
+                |_| Vec::new(),
+                |mut diff| {
+                    let _ = diff.find_similar(Some(&mut rename_detection(false)));
+                    per_file_lines(&diff)
+                },
+            );
+
+        let mut unstaged_opts = DiffOptions::new();
+        unstaged_opts
+            .context_lines(0)
+            .include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .show_untracked_content(true);
+        let unstaged = repo
+            .diff_index_to_workdir(None, Some(&mut unstaged_opts))
+            .map_or_else(
+                |_| Vec::new(),
+                |mut diff| {
+                    let _ = diff.find_similar(Some(&mut rename_detection(true)));
+                    per_file_lines(&diff)
+                },
+            );
+
+        ChangeLineStats { staged, unstaged }
+    }
+
+    fn unstage_path(&self, path: &Path) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let workdir = repo.workdir().map(Path::to_path_buf);
+        let rel = workdir
+            .as_deref()
+            .and_then(|wd| path.strip_prefix(wd).ok())
+            .unwrap_or(path);
+
+        // An unborn branch has no commit to reset to. `None` takes the path out
+        // of the index, which is what a reset does before the first commit.
+        let head = match repo.head() {
+            Ok(head) => Some(head.peel_to_commit().map_err(err_msg)?),
+            Err(err) if err.code() == ErrorCode::UnbornBranch => None,
+            Err(err) => return Err(err_msg(err)),
+        };
+
+        // The reset diffs and writes the index this handle loaded first. Without
+        // this reload, the write puts stale entries back over any index change
+        // made since that load.
+        repo.index()
+            .map_err(err_msg)?
+            .read(false)
+            .map_err(err_msg)?;
+        repo.reset_default(head.as_ref().map(Commit::as_object), [rel])
+            .map_err(err_msg)
     }
 
     fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
@@ -1814,12 +1897,7 @@ fn delta_summary(
         Delta::Typechange => CommitFileChangeKind::TypeChange,
         _ => CommitFileChangeKind::Modified,
     };
-    let (additions, deletions) = git2::Patch::from_diff(diff, index)
-        .ok()
-        .flatten()
-        .and_then(|patch| patch.line_stats().ok())
-        .map(|(_context, additions, deletions)| (additions as u32, deletions as u32))
-        .unwrap_or((0, 0));
+    let (additions, deletions) = delta_line_stats(diff, index);
 
     CommitFileChange {
         rel_path,
@@ -1827,6 +1905,41 @@ fn delta_summary(
         additions,
         deletions,
     }
+}
+
+/// The lines the delta `index` names in `diff` adds and deletes, read off that
+/// delta's own patch. A binary delta counts none.
+fn delta_line_stats(diff: &Diff<'_>, index: usize) -> (u32, u32) {
+    git2::Patch::from_diff(diff, index)
+        .ok()
+        .flatten()
+        .and_then(|patch| patch.line_stats().ok())
+        .map(|(_context, additions, deletions)| (additions as u32, deletions as u32))
+        .unwrap_or((0, 0))
+}
+
+/// Each path `diff` touches with its added and deleted lines, sorted by path,
+/// for [`GitRepo::change_line_stats`].
+///
+/// A delta names its new path, except a deletion, which has only an old one.
+fn per_file_lines(diff: &Diff<'_>) -> Vec<(PathBuf, u32, u32)> {
+    // Without typechange records, a file that turns into a symlink arrives as
+    // a deletion and an addition of one path, so the two fold together here.
+    let mut lines: BTreeMap<PathBuf, (u32, u32)> = BTreeMap::new();
+    for (index, delta) in diff.deltas().enumerate() {
+        let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
+            continue;
+        };
+        let (added, deleted) = delta_line_stats(diff, index);
+        let entry = lines.entry(path.to_path_buf()).or_default();
+        entry.0 += added;
+        entry.1 += deleted;
+    }
+
+    lines
+        .into_iter()
+        .map(|(path, (added, deleted))| (path, added, deleted))
+        .collect()
 }
 
 /// Find options that pair a diff's deletions and additions back into renames.
@@ -2765,7 +2878,54 @@ mod tests {
     fn upstream_divergence_counts_both_sides_of_a_fork() {
         let (dir, repo, shas) = seeded_repo();
         let no_upstream = discover(&dir).upstream_divergence();
+        track_forked_upstream(&repo, &shas);
 
+        assert_eq!(
+            (no_upstream, discover(&dir).upstream_divergence()),
+            (None, Some((1, 2))),
+        );
+    }
+
+    /// HEAD's branch names the upstream it tracks by its short name, and a
+    /// branch that tracks none or a detached HEAD names none.
+    #[test]
+    fn upstream_name_reads_the_tracked_branch_short_name() {
+        let (dir, repo, shas) = seeded_repo();
+        let untracked = discover(&dir).upstream_name();
+        track_forked_upstream(&repo, &shas);
+        let tracked = discover(&dir).upstream_name();
+        repo.set_head_detached(Oid::from_str(&shas[2]).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            (untracked, tracked, discover(&dir).upstream_name()),
+            (None, Some("origin/main".to_string()), None),
+        );
+    }
+
+    /// Each side counts the commits it holds that the other lacks, whatever
+    /// names the two revisions, and a name that resolves to no commit has no
+    /// answer.
+    #[test]
+    fn divergence_counts_each_side_of_two_revisions() {
+        let (dir, repo, shas) = seeded_repo();
+        track_forked_upstream(&repo, &shas);
+        let git = discover(&dir);
+
+        assert_eq!(
+            (
+                git.divergence("HEAD", "origin/main"),
+                git.divergence("origin/main", "main"),
+                git.divergence(&shas[0], "main"),
+                git.divergence("main", "nope"),
+            ),
+            (Some((1, 2)), Some((2, 1)), Some((0, 2)), None),
+        );
+    }
+
+    /// Make `main` track `origin/main`, which sits two commits past the fork
+    /// at `shas[1]`, so `main` is one commit ahead and two behind.
+    fn track_forked_upstream(repo: &Repository, shas: &[String]) {
         let fork = repo.find_commit(Oid::from_str(&shas[1]).unwrap()).unwrap();
         let sig = Signature::now("test", "t@t").unwrap();
         let tree = fork.tree().unwrap();
@@ -2785,11 +2945,6 @@ mod tests {
         config
             .set_str("branch.main.merge", "refs/heads/main")
             .unwrap();
-
-        assert_eq!(
-            (no_upstream, discover(&dir).upstream_divergence()),
-            (None, Some((1, 2))),
-        );
     }
 
     /// A remote branch and a tag each pair with the commit they name, an

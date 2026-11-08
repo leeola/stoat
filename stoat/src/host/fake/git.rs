@@ -3,9 +3,9 @@ mod rebase;
 use crate::host::{
     fake::FakeFs,
     git::{
-        BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-        CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo, HunkTallies, MergeOutcome,
-        MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
+        BackendSnafu, ChangeLineStats, ChangedFile, CherryPickOutcome, CommitFileChange,
+        CommitFileChangeKind, CommitInfo, ConflictedFile, GitApplyError, GitHost, GitRepo,
+        HunkTallies, MergeOutcome, MergeState, RebaseError, RebaseTodo, RewriteResult, StagedKind,
     },
 };
 use std::{
@@ -351,6 +351,32 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Set the lines `rel_path` adds and deletes, as
+    /// [`GitRepo::change_line_stats`] reports them.
+    ///
+    /// The path's registration counts none until this sets them. An untracked
+    /// path takes `added` as the lines its content holds, since a file with no
+    /// index entry has nothing to delete.
+    ///
+    /// Silently does nothing for a path that is neither registered nor
+    /// untracked, since the builder's other methods are what create one.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `deleted` is not zero for an untracked path.
+    pub fn lines(&mut self, rel_path: impl AsRef<Path>, added: u32, deleted: u32) -> &mut Self {
+        let abs = self.workdir.join(rel_path.as_ref());
+        self.mutate_repo(|state| {
+            if let Some(change) = state.changed.iter_mut().find(|c| c.file.path == abs) {
+                change.lines = (added, deleted);
+            } else if state.untracked.contains(&abs) {
+                assert_eq!(deleted, 0, "an untracked file deletes no line");
+                state.untracked_lines.insert(abs, added);
+            }
+        });
+        self
+    }
+
     /// Record `rel_path` as modified in the working tree. Writes `working`
     /// to the attached [`FakeFs`] at the absolute path if one was attached.
     pub fn unstaged_file(&mut self, rel_path: impl AsRef<Path>, working: &str) -> &mut Self {
@@ -462,6 +488,7 @@ impl<'a> FakeRepoBuilder<'a> {
                     renamed_from: Some(old_abs),
                 },
                 hunks: 0,
+                lines: (0, 0),
             });
         });
         if let Some(fs) = self.fs {
@@ -712,10 +739,15 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
-    /// Give HEAD's branch an upstream it is `ahead` of and `behind`, as
-    /// [`GitRepo::upstream_divergence`] reports it.
-    pub fn upstream(&mut self, ahead: usize, behind: usize) -> &mut Self {
-        self.mutate_repo(|state| state.upstream = Some((ahead, behind)));
+    /// Give HEAD's branch the upstream `name`, which it is `ahead` of and
+    /// `behind`, as [`GitRepo::upstream_name`] and
+    /// [`GitRepo::upstream_divergence`] report it.
+    ///
+    /// [`GitRepo::divergence`] answers the same counts between `HEAD` and
+    /// `name`, with no commit graph behind them.
+    pub fn upstream(&mut self, name: &str, ahead: usize, behind: usize) -> &mut Self {
+        let name = name.to_string();
+        self.mutate_repo(|state| state.upstream = Some((name, ahead, behind)));
         self
     }
 
@@ -831,21 +863,30 @@ pub struct FakeGitRepo {
     rename_source_calls: AtomicUsize,
 }
 
-/// A changed-file registration and the hunks it stands for.
+/// A changed-file registration and the hunks and lines it stands for.
 ///
 /// The tallies count hunks, so a fixture meaning "two separated edits in one
 /// file" has to say so through [`FakeRepoBuilder::hunks`]. Every registration
 /// means one until then, which keeps a fixture written before hunks were
 /// counted reading exactly as it did.
+///
+/// `lines` is the added and deleted line counts that
+/// [`GitRepo::change_line_stats`] reports. A registration holds no text to
+/// count, so it counts none until [`FakeRepoBuilder::lines`] sets them.
 #[derive(Clone, Debug)]
 struct FakeChange {
     file: ChangedFile,
     hunks: usize,
+    lines: (u32, u32),
 }
 
 impl FakeChange {
     fn new(file: ChangedFile) -> FakeChange {
-        FakeChange { file, hunks: 1 }
+        FakeChange {
+            file,
+            hunks: 1,
+            lines: (0, 0),
+        }
     }
 }
 
@@ -877,6 +918,10 @@ struct FakeRepoState {
     /// [`GitRepo::has_tracked_changes`] can exclude them while
     /// [`GitRepo::changed_files`] still reports them.
     untracked: BTreeSet<PathBuf>,
+    /// Lines each untracked path holds, as [`FakeRepoBuilder::lines`] sets
+    /// them. A path with no entry holds none, so a fixture that seeds an
+    /// untracked path and never counts its lines reads as it always did.
+    untracked_lines: HashMap<PathBuf, u32>,
     /// Absolute paths [`GitRepo::is_path_ignored`] reports as gitignored, seeded
     /// via [`FakeRepoBuilder::ignored`]. Empty by default.
     ignored: HashSet<PathBuf>,
@@ -935,9 +980,10 @@ struct FakeRepoState {
     /// which is the default because a seeded repo has no branch until a test
     /// asks for one.
     head_branch: Option<String>,
-    /// What [`GitRepo::upstream_divergence`] answers, as set by
-    /// [`FakeRepoBuilder::upstream`]. `None` models a branch with no upstream.
-    upstream: Option<(usize, usize)>,
+    /// The upstream's name and the `(ahead, behind)` counts against it, as set
+    /// by [`FakeRepoBuilder::upstream`]. `None` models a branch with no
+    /// upstream.
+    upstream: Option<(String, usize, usize)>,
     /// When set, rewrite/rebase calls that touch this sha return a
     /// conflict error without mutating state. Used by error-path tests.
     conflict_at: Option<String>,
@@ -1725,7 +1771,135 @@ impl GitRepo for FakeGitRepo {
     }
 
     fn upstream_divergence(&self) -> Option<(usize, usize)> {
-        self.state.lock().unwrap().upstream
+        let state = self.state.lock().unwrap();
+        state
+            .upstream
+            .as_ref()
+            .map(|(_, ahead, behind)| (*ahead, *behind))
+    }
+
+    fn upstream_name(&self) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.upstream.as_ref().map(|(name, ..)| name.clone())
+    }
+
+    /// The seeded upstream answers against `HEAD` with its seeded counts,
+    /// which stand in for a graph the fake never holds. Any other pair walks
+    /// the seeded commits, and both sides must resolve to one.
+    fn divergence(&self, from: &str, to: &str) -> Option<(usize, usize)> {
+        {
+            let state = self.state.lock().unwrap();
+            if let Some((name, ahead, behind)) = &state.upstream {
+                if from == "HEAD" && to == name {
+                    return Some((*ahead, *behind));
+                }
+                if from == name && to == "HEAD" {
+                    return Some((*behind, *ahead));
+                }
+            }
+        }
+
+        let from = self.resolve_rev(from)?;
+        let to = self.resolve_rev(to)?;
+        let state = self.state.lock().unwrap();
+        if !state.commits.contains_key(&from) || !state.commits.contains_key(&to) {
+            return None;
+        }
+        let from_reach = state.ancestors_inclusive(&from);
+        let to_reach = state.ancestors_inclusive(&to);
+
+        Some((
+            from_reach.difference(&to_reach).count(),
+            to_reach.difference(&from_reach).count(),
+        ))
+    }
+
+    /// Reports each registration's seeded lines on its own side, and each
+    /// untracked path's lines as unstaged additions.
+    fn change_line_stats(&self) -> ChangeLineStats {
+        let state = self.state.lock().unwrap();
+        let relative = |path: &Path| {
+            path.strip_prefix(&self.workdir)
+                .unwrap_or(path)
+                .to_path_buf()
+        };
+
+        let mut stats = ChangeLineStats::default();
+        for change in &state.changed {
+            let (added, deleted) = change.lines;
+            let side = if change.file.staged {
+                &mut stats.staged
+            } else {
+                &mut stats.unstaged
+            };
+            side.push((relative(&change.file.path), added, deleted));
+        }
+        for path in &state.untracked {
+            let added = state.untracked_lines.get(path).copied().unwrap_or(0);
+            stats.unstaged.push((relative(path), added, 0));
+        }
+
+        stats.staged.sort();
+        stats.unstaged.sort();
+        stats
+    }
+
+    /// Moves a staged registration to the working-tree side, as a reset leaves
+    /// it. A path HEAD lacks turns untracked with its added lines, and a move
+    /// splits into its untracked new path and a staged deletion of its source.
+    ///
+    /// The apply failure knob fails it as it fails [`GitRepo::stage_tracked`].
+    fn unstage_path(&self, path: &Path) -> Result<(), GitApplyError> {
+        let target = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.workdir.join(path)
+        };
+        let mut state = self.state.lock().unwrap();
+        if let Some(reason) = &state.apply_error {
+            return BackendSnafu {
+                reason: reason.clone(),
+            }
+            .fail();
+        }
+        let Some(at) = state
+            .changed
+            .iter()
+            .position(|c| c.file.path == target && c.file.staged)
+        else {
+            return Ok(());
+        };
+
+        let relative = |path: &Path| {
+            path.strip_prefix(&self.workdir)
+                .unwrap_or(path)
+                .to_path_buf()
+        };
+        state.index_contents.remove(&relative(&target));
+        let kind = state.staged_kind(&self.workdir, &state.changed[at].file);
+        match kind {
+            StagedKind::Modified => state.changed[at].file.staged = false,
+            StagedKind::Deleted => {
+                state.removed_index_entries.remove(&relative(&target));
+                state.changed[at].file.staged = false;
+            },
+            StagedKind::Added | StagedKind::Renamed => {
+                let change = state.changed.remove(at);
+                if let Some(source) = change.file.renamed_from {
+                    state.removed_index_entries.insert(relative(&source));
+                    state.changed.push(FakeChange::new(ChangedFile {
+                        path: source,
+                        staged: true,
+                        staged_kind: None,
+                        untracked: false,
+                        renamed_from: None,
+                    }));
+                }
+                state.untracked_lines.insert(target.clone(), change.lines.0);
+                state.untracked.insert(target);
+            },
+        }
+        Ok(())
     }
 
     fn amend_head(&self, tree_oid: &str, message: Option<&str>) -> Result<String, GitApplyError> {
@@ -3198,23 +3372,41 @@ mod tests {
         assert_eq!(repo.head_branch().as_deref(), Some("feature"));
     }
 
-    /// The seeded remotes and tags each report by name, in name order rather
-    /// than the order the test seeds them in.
-    /// A repo reports the divergence its builder seeds, and none without one.
+    /// A repo reports the upstream its builder seeds by name and by the counts
+    /// against it, from either side of `HEAD`, and none without one.
     #[test]
-    fn upstream_divergence_reports_the_seeded_counts() {
+    fn upstream_reports_the_seeded_name_and_counts() {
         let host = FakeGit::new();
-        host.add_repo(workdir()).upstream(2, 1);
-        let seeded = host.discover(&workdir()).unwrap().upstream_divergence();
+        host.add_repo(workdir()).upstream("origin/main", 2, 1);
         host.add_repo("/other");
-        let bare = host
-            .discover(Path::new("/other"))
-            .unwrap()
-            .upstream_divergence();
+        let read = |repo: Arc<dyn GitRepo>| {
+            (
+                repo.upstream_name(),
+                repo.upstream_divergence(),
+                repo.divergence("HEAD", "origin/main"),
+                repo.divergence("origin/main", "HEAD"),
+            )
+        };
 
-        assert_eq!((seeded, bare), (Some((2, 1)), None));
+        assert_eq!(
+            (
+                read(host.discover(&workdir()).unwrap()),
+                read(host.discover(Path::new("/other")).unwrap()),
+            ),
+            (
+                (
+                    Some("origin/main".to_string()),
+                    Some((2, 1)),
+                    Some((2, 1)),
+                    Some((1, 2)),
+                ),
+                (None, None, None, None),
+            ),
+        );
     }
 
+    /// The seeded remotes and tags each report by name, in name order rather
+    /// than the order the test seeds them in.
     #[test]
     fn remote_branches_and_tags_report_seeded_refs() {
         let host = FakeGit::new();
@@ -3548,6 +3740,147 @@ mod tests {
 
         assert_eq!(repo.head_branch(), None);
         assert!(repo.local_branches().is_empty());
+    }
+
+    /// Each side counts the seeded commits it reaches that the other does not,
+    /// and a side that names no seeded commit has no answer.
+    #[test]
+    fn divergence_walks_the_seeded_commit_graph() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[])
+            .commit_with_parent("c2", "c1", &[])
+            .commit_with_parent("c3", "c1", &[])
+            .commit_with_parent("c4", "c3", &[])
+            .branch("main", "c2")
+            .branch("feature", "c4")
+            .branch("ghost", "c9")
+            .set_head("c2");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(
+            (
+                repo.divergence("main", "feature"),
+                repo.divergence("feature", "HEAD"),
+                repo.divergence("main", "nope"),
+                repo.divergence("ghost", "main"),
+            ),
+            (Some((1, 2)), Some((2, 1)), None, None),
+        );
+    }
+
+    /// Each registration reports its seeded lines on its own side, an untracked
+    /// path its lines as additions, and a path with no seeded lines none.
+    #[test]
+    fn change_line_stats_report_the_seeded_lines_on_each_side() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .staged_file("b.rs", "b")
+            .lines("b.rs", 3, 1)
+            .staged_file("a.rs", "a")
+            .unstaged_file("z.rs", "z")
+            .lines("z.rs", 2, 0)
+            .untracked("new.rs")
+            .lines("new.rs", 4, 0)
+            .untracked("bare.rs");
+
+        assert_eq!(
+            host.discover(&workdir()).unwrap().change_line_stats(),
+            ChangeLineStats {
+                staged: vec![(PathBuf::from("a.rs"), 0, 0), (PathBuf::from("b.rs"), 3, 1)],
+                unstaged: vec![
+                    (PathBuf::from("bare.rs"), 0, 0),
+                    (PathBuf::from("new.rs"), 4, 0),
+                    (PathBuf::from("z.rs"), 2, 0),
+                ],
+            },
+        );
+    }
+
+    /// Unstaging leaves each staged kind where a reset does. An edit and a
+    /// deletion return to the working tree over HEAD's text, and an addition
+    /// turns untracked with its lines. A move splits into an untracked new path
+    /// and a staged deletion of its source. An unstaged path stays as it is.
+    #[test]
+    fn unstage_path_leaves_each_staged_kind_where_a_reset_does() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "a")
+            .staged_file("a.rs", "edit")
+            .index_file("a.rs", "edit")
+            .staged_file("b.rs", "new")
+            .lines("b.rs", 1, 0)
+            .head_file("c.rs", "c")
+            .staged_file("c.rs", "")
+            .remove_index_file("c.rs")
+            .renamed("d.rs", "e.rs", "d")
+            .unstaged_file("f.rs", "edit");
+        let repo = host.discover(&workdir()).unwrap();
+        for path in ["a.rs", "b.rs", "c.rs", "e.rs", "f.rs"] {
+            repo.unstage_path(Path::new(path)).unwrap();
+        }
+
+        let files: Vec<(PathBuf, bool, Option<StagedKind>, bool)> = repo
+            .changed_files()
+            .into_iter()
+            .map(|file| (file.path, file.staged, file.staged_kind, file.untracked))
+            .collect();
+        let at = |rel: &str| workdir().join(rel);
+        assert_eq!(
+            files,
+            [
+                (at("d.rs"), true, Some(StagedKind::Deleted), false),
+                (at("a.rs"), false, None, false),
+                (at("b.rs"), false, None, true),
+                (at("c.rs"), false, None, false),
+                (at("e.rs"), false, None, true),
+                (at("f.rs"), false, None, false),
+            ],
+        );
+        assert_eq!(
+            (
+                repo.index_content(&at("a.rs")),
+                repo.index_content(&at("c.rs")),
+                repo.index_content(&at("d.rs")),
+            ),
+            (Some("a".to_string()), Some("c".to_string()), None),
+            "the edit and the deletion read HEAD's text, and the source stays out",
+        );
+        assert_eq!(
+            repo.change_line_stats().unstaged,
+            [
+                (PathBuf::from("a.rs"), 0, 0),
+                (PathBuf::from("b.rs"), 1, 0),
+                (PathBuf::from("c.rs"), 0, 0),
+                (PathBuf::from("e.rs"), 0, 0),
+                (PathBuf::from("f.rs"), 0, 0),
+            ],
+        );
+    }
+
+    #[test]
+    fn unstage_path_fails_under_the_apply_failure_knob() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .staged_file("a.rs", "a")
+            .fail_apply_with("index locked");
+        let repo = host.discover(&workdir()).unwrap();
+
+        let failed = repo
+            .unstage_path(Path::new("a.rs"))
+            .map_err(|err| err.to_string());
+        let staged: Vec<bool> = repo
+            .changed_files()
+            .iter()
+            .map(|file| file.staged)
+            .collect();
+        assert_eq!(
+            (failed, staged),
+            (
+                Err("git backend failure: index locked".to_string()),
+                vec![true],
+            ),
+        );
     }
 
     #[test]

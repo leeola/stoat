@@ -4504,7 +4504,7 @@ mod tests {
                     repo.untracked("new.txt");
                 }
                 if let Some((ahead, behind)) = upstream {
-                    repo.upstream(ahead, behind);
+                    repo.upstream("origin/main", ahead, behind);
                 }
                 if let Some(head_name) = merge {
                     repo.merge_in_progress("f00dfeed1234", head_name, "Merge");

@@ -61,6 +61,22 @@ pub struct HunkTallies {
     pub conflicted: Vec<PathBuf>,
 }
 
+/// Added and deleted lines per changed file, as
+/// [`GitRepo::change_line_stats`] reports them.
+///
+/// The git status panel notes each file row with these counts. An entry is a
+/// repo-relative path, then its added lines, then its deleted lines, and each
+/// side is sorted by path. A moved file lists under its new path and counts
+/// only the lines the move edited.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChangeLineStats {
+    /// Lines the index changes against HEAD.
+    pub staged: Vec<(PathBuf, u32, u32)>,
+    /// Lines the working tree changes against the index, untracked files
+    /// included.
+    pub unstaged: Vec<(PathBuf, u32, u32)>,
+}
+
 /// One changed path in a repository's working tree or index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChangedFile {
@@ -516,6 +532,41 @@ pub trait GitRepo: Send + Sync {
     /// `None` when HEAD is detached, its branch tracks no upstream, or the
     /// upstream ref does not exist, such as before a first fetch.
     fn upstream_divergence(&self) -> Option<(usize, usize)>;
+
+    /// Short name of the upstream that HEAD's branch tracks, e.g.
+    /// `"origin/main"`.
+    ///
+    /// `None` in each case where [`Self::upstream_divergence`] is `None`.
+    fn upstream_name(&self) -> Option<String>;
+
+    /// How far `from` and `to` have moved apart, as the commits `from` holds
+    /// that `to` lacks and the commits `to` holds that `from` lacks.
+    ///
+    /// Each side is a revision as `git rev-parse` reads it, such as a branch,
+    /// `HEAD`, or a remote-tracking name. A local branch therefore shadows a
+    /// remote-tracking branch of the same short name. `None` when either side
+    /// names no commit.
+    fn divergence(&self, from: &str, to: &str) -> Option<(usize, usize)>;
+
+    /// Added and deleted lines per changed file, on each side of the index.
+    ///
+    /// The sides split as [`Self::hunk_tallies`] splits them. An untracked
+    /// file counts as unstaged, with each of its lines added. A binary file
+    /// counts no lines.
+    ///
+    /// This reads the content of every changed file and every untracked
+    /// file, so it costs a full diff of the tree.
+    fn change_line_stats(&self) -> ChangeLineStats;
+
+    /// Take `path`'s staged change out of the index, as `git reset -- <path>`
+    /// does.
+    ///
+    /// The index entry returns to HEAD's, or leaves the index for a path HEAD
+    /// lacks, which leaves that file untracked. The working tree keeps its
+    /// content. A path with nothing staged stays as it is.
+    ///
+    /// Both an absolute and a repo-relative `path` work.
+    fn unstage_path(&self, path: &Path) -> Result<(), GitApplyError>;
 
     /// Per-file summary of what changed between `sha` and its first
     /// parent (empty tree for a root commit). Lighter than building a

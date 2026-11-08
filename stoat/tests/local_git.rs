@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stoat::host::{
-    CommitFileChangeKind, GitApplyError, GitHost, LocalGit, RebaseTodo, RebaseTodoOp,
+    CommitFileChangeKind, GitApplyError, GitHost, GitRepo, LocalGit, RebaseTodo, RebaseTodoOp,
 };
 
 /// On-disk git repo for integration-testing [`LocalGit`].
@@ -168,6 +168,15 @@ fn staged_blob(workdir: &Path, rel: &str) -> Option<String> {
     let entry = index.get_path(Path::new(rel), 0)?;
     let blob = repo.find_blob(entry.id).ok()?;
     std::str::from_utf8(blob.content()).ok().map(String::from)
+}
+
+/// Each changed file as its path, whether it is staged, and whether it is
+/// untracked.
+fn file_states(repo: &dyn GitRepo) -> Vec<(PathBuf, bool, bool)> {
+    repo.changed_files()
+        .into_iter()
+        .map(|file| (file.path, file.staged, file.untracked))
+        .collect()
 }
 
 #[test]
@@ -578,6 +587,131 @@ fn hunk_tallies_count_only_the_edit_in_a_move_plus_edit() {
         "the one edited line is the only hunk the move carries",
     );
     assert_eq!(tallies.per_file, vec![(PathBuf::from("new.rs"), 1)]);
+}
+
+/// Each side counts the lines it changes against its own neighbor, the index
+/// against HEAD and the working tree against the index. An untracked file adds
+/// every line it holds.
+#[test]
+fn change_line_stats_count_each_side_against_its_neighbor() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "one\ntwo\nthree\n");
+    tr.write_and_stage("a.rs", "ONE\ntwo\nthree\nfour\n")
+        .write("a.rs", "ONE\ntwo\n")
+        .write_and_stage("b.rs", "b\n")
+        .write("new.rs", "x\ny\n");
+
+    let stats = LocalGit::new()
+        .discover(tr.path())
+        .unwrap()
+        .change_line_stats();
+    assert_eq!(
+        (stats.staged, stats.unstaged),
+        (
+            vec![(PathBuf::from("a.rs"), 2, 1), (PathBuf::from("b.rs"), 1, 0)],
+            vec![
+                (PathBuf::from("a.rs"), 0, 2),
+                (PathBuf::from("new.rs"), 2, 0)
+            ],
+        ),
+    );
+}
+
+/// A move lists under its new path and counts only the lines it edits, both
+/// when the index holds it and when only the working tree does.
+#[test]
+fn change_line_stats_count_only_the_edit_in_a_move() {
+    let tr = TestRepo::new();
+    tr.commit_file("old.rs", "a\nb\nc\nd\ne\nf\ng\nh\n")
+        .commit_file("left.rs", "fn main() {}\n");
+    tr.git_mv("old.rs", "new.rs");
+    tr.write_and_stage("new.rs", "a\nb\nc\nD\ne\nf\ng\nh\n");
+    std::fs::rename(tr.join("left.rs"), tr.join("right.rs")).expect("rename file");
+
+    let stats = LocalGit::new()
+        .discover(tr.path())
+        .unwrap()
+        .change_line_stats();
+    assert_eq!(
+        (stats.staged, stats.unstaged),
+        (
+            vec![(PathBuf::from("new.rs"), 1, 1)],
+            vec![(PathBuf::from("right.rs"), 0, 0)],
+        ),
+    );
+}
+
+/// A file that turns into a symlink arrives as a deletion and an addition of
+/// one path, and the two count together as that path's lines.
+#[cfg(unix)]
+#[test]
+fn change_line_stats_fold_a_type_change_into_one_entry() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "x\ny\n");
+    std::fs::remove_file(tr.join("a.rs")).expect("remove file");
+    std::os::unix::fs::symlink("target", tr.join("a.rs")).expect("create symlink");
+
+    let stats = LocalGit::new()
+        .discover(tr.path())
+        .unwrap()
+        .change_line_stats();
+    assert_eq!(
+        (stats.staged, stats.unstaged),
+        (vec![], vec![(PathBuf::from("a.rs"), 1, 2)]),
+    );
+}
+
+/// Unstaging returns an index entry to HEAD's, or takes it out of the index
+/// for a path HEAD lacks, and the working tree keeps both edits.
+#[test]
+fn unstage_path_resets_each_index_entry_to_head() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    tr.write_and_stage("a.rs", "v2")
+        .write_and_stage("b.rs", "new");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    repo.unstage_path(&tr.join("a.rs")).unwrap();
+    repo.unstage_path(Path::new("b.rs")).unwrap();
+
+    assert_eq!(
+        (staged_blob(tr.path(), "a.rs"), file_states(&*repo)),
+        (
+            Some("v1".to_string()),
+            vec![
+                (tr.join("a.rs"), false, false),
+                (tr.join("b.rs"), false, true)
+            ],
+        ),
+    );
+}
+
+/// Before the first commit there is no HEAD entry to return to, so unstaging
+/// takes the path out of the index.
+#[test]
+fn unstage_path_on_an_unborn_branch_leaves_the_file_untracked() {
+    let tr = TestRepo::new();
+    tr.write_and_stage("a.rs", "new");
+
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    repo.unstage_path(Path::new("a.rs")).unwrap();
+
+    assert_eq!(file_states(&*repo), [(tr.join("a.rs"), false, true)]);
+}
+
+/// The reset writes the whole index, so an entry that another handle staged
+/// after this handle first read the index survives the write.
+#[test]
+fn unstage_path_keeps_an_entry_another_handle_wrote() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1");
+    let repo = LocalGit::new().discover(tr.path()).unwrap();
+    repo.unstage_path(Path::new("a.rs")).unwrap();
+
+    tr.write_and_stage("b.rs", "new");
+    repo.unstage_path(Path::new("a.rs")).unwrap();
+
+    assert_eq!(staged_blob(tr.path(), "b.rs").as_deref(), Some("new"));
 }
 
 #[test]
