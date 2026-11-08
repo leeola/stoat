@@ -3275,7 +3275,10 @@ mod tests {
             let strip = state.minimap_rect.expect("the paint reserved a strip");
             (strip, rows, state.viewport_rows)
         };
-        let top_cell_row = usize::from(LINES_PER_CELL / 2);
+        // Each excerpt takes a header row and two diff rows. The strip's top
+        // cell points at its middle line, stack row 3, which is the second
+        // excerpt's header, so the cursor lands on that excerpt's first row.
+        let top_cell_row = 4;
 
         h.stoat.update(mouse_event(
             MouseEventKind::Down(MouseButton::Left),
@@ -3330,7 +3333,7 @@ mod tests {
             .update(last_cell(MouseEventKind::Drag(MouseButton::Left)));
         assert_eq!(
             (pressed, diff_changes_place(&mut h)),
-            ((181, 169), (250, 239))
+            ((136, 124), (208, 196))
         );
     }
 
@@ -3365,6 +3368,9 @@ mod tests {
 
     /// The single band scrubs a focused changes view, as it scrubs a focused
     /// editor.
+    ///
+    /// The band's top cell points at stack row 3, the second excerpt's header,
+    /// so the cursor lands on that excerpt's first row.
     #[test]
     fn the_single_band_scrubs_a_focused_changes_view() {
         let mut h = diff_changes_harness(MinimapMode::Single, 20);
@@ -3385,10 +3391,7 @@ mod tests {
         ));
         assert_eq!(
             (diff_changes_place(&mut h), h.stoat.minimap_drag),
-            (
-                (usize::from(LINES_PER_CELL / 2), 0),
-                Some(MinimapDrag::DiffChanges(id))
-            ),
+            ((4, 0), Some(MinimapDrag::DiffChanges(id))),
         );
     }
 

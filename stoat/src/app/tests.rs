@@ -11644,14 +11644,14 @@ fn minimap_click_scrolls_to_the_proportional_line() {
     let mut h = Stoat::test();
     let editor_id = open_with_minimap_strip(&mut h);
 
-    // Strip cell row 5 of a fits-file (60 <= 10*8) points at line 5*8+4 = 44,
-    // centered in the 20-row viewport -> scroll 34.
+    // Strip cell row 5 of a fits-file (60 <= 10*6) points at line 5*6+3 = 33,
+    // centered in the 20-row viewport -> scroll 23.
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 5));
 
     let editor = &h.stoat.active_workspace().editors[editor_id];
     assert_eq!(
-        editor.scroll_row, 34,
+        editor.scroll_row, 23,
         "the click eases to the centered proportional row"
     );
     assert_eq!(
@@ -11668,8 +11668,8 @@ fn minimap_click_scrolls_to_the_proportional_line() {
 
 /// A follow or a jump leaves the eased offset on its old sub-row, and a strip
 /// press reads the declared rest instead, as the emit does. Strip cell row 5
-/// points at line 50 under the window of row 10 and at line 51 under 10.75, so
-/// the press centers row 40 or row 41.
+/// points at line 40 under the window of row 10 and at line 41 under 10.75, so
+/// the press centers row 30 or row 31.
 #[test]
 fn minimap_click_reads_the_declared_rest() {
     let mut h = Stoat::test();
@@ -11701,8 +11701,8 @@ fn minimap_click_reads_the_declared_rest() {
     assert_eq!(
         (press_at_rest(0.0), press_at_rest(0.75)),
         (
-            (40, 10.0, ScrollGlide::Page),
-            (41, 10.75, ScrollGlide::Page)
+            (30, 10.0, ScrollGlide::Page),
+            (31, 10.75, ScrollGlide::Page)
         ),
         "a stale sub-row resolves and glides from the row, a wheel rest from its fraction"
     );
@@ -11732,7 +11732,7 @@ fn minimap_click_targets_the_clicked_buffer_line_when_wrapped() {
     assert_eq!(display_rows, 120, "every line must wrap into two rows");
 
     // The 60-line file fits the strip's 10 * LINES_PER_CELL rows, so cell
-    // row 5 points at buffer line 5*8+4.
+    // row 5 points at buffer line 5*6+3.
     h.stoat
         .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 74, 5));
 
@@ -11746,7 +11746,7 @@ fn minimap_click_targets_the_clicked_buffer_line_when_wrapped() {
         .row;
     assert_eq!(
         (scroll_row, centered),
-        (78, 44),
+        (56, 33),
         "the click centers the buffer line under the pointer, not the display row"
     );
 }

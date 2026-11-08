@@ -710,7 +710,9 @@ fn rgb_opaque_f32(color: Rgb) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_strip, minimap_top, thumb_geometry, MinimapPass, MIN_THUMB_PX};
+    use super::{
+        build_strip, minimap_top, strip_layout, thumb_geometry, MinimapPass, MIN_THUMB_PX,
+    };
     use crate::{
         render::{panel_occluder, CellMetrics, GridLayout, Occluder},
         test_support::{read_back, require_headless_device},
@@ -921,6 +923,25 @@ mod tests {
 
         let second_run = instances[2];
         assert_eq!(second_run.origin[0], 60.0 + 6.0 * 0.4);
+    }
+
+    /// Six lines a cell give an 18-pixel cell a 3-pixel line pitch, whose run
+    /// fills 2 pixels and leaves a 1-pixel gap, as the boards draw the bars.
+    #[test]
+    fn six_lines_in_an_eighteen_pixel_cell_draw_two_pixel_runs() {
+        let strip = MinimapStrip {
+            lines_per_cell: 6,
+            ..command()
+        };
+        let metrics = CellMetrics {
+            font_size: 15.0,
+            width: 9.0,
+            height: 18.0,
+            scale_factor: 1.0,
+        };
+        let layout = strip_layout(&strip, metrics, uniform_layout());
+
+        assert_eq!((layout.line_h, layout.run_h), (3.0, 2.0));
     }
 
     #[test]

@@ -92,7 +92,10 @@ const MAX_LINES: usize = 2_000_000;
 
 /// Buffer lines drawn per vertical strip cell, matching the strip's declared
 /// `lines_per_cell`. A pointer row therefore spans this many lines.
-pub const LINES_PER_CELL: u8 = 8;
+///
+/// Six lines give each line a 3 px pitch in an 18 px cell, which the terminal
+/// fills with a 2 px mark, as the boards draw the minimap's bars.
+pub const LINES_PER_CELL: u8 = 6;
 
 /// Columns reserved on a line's left edge for the diff/diagnostic mark lane, so
 /// a mark never overwrites the code silhouette. Content starts after it.

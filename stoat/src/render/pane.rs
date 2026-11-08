@@ -64,7 +64,10 @@ use stoatty_protocol::command::{
 };
 
 /// Buffer lines the minimap strip draws per vertical cell.
-pub(super) const MINIMAP_LINES_PER_CELL: u8 = 8;
+///
+/// It matches [`crate::minimap::LINES_PER_CELL`], which maps a click on the
+/// strip back to a line.
+pub(super) const MINIMAP_LINES_PER_CELL: u8 = 6;
 
 /// Widest line, in minimap columns, a strip renders before clipping.
 pub(super) const MINIMAP_MAX_COLUMNS: u8 = 120;

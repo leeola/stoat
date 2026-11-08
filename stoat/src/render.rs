@@ -3205,8 +3205,8 @@ mod minimap_chrome_tests {
     use crate::{render::paint::style_rgb, test_harness::TestHarness, theme::scope};
     use stoatty_protocol::command::{self, Command};
 
-    /// A pane's minimap strip is seven cells wide, and its viewport thumb
-    /// washes the focus accent at nine percent with no outline.
+    /// A pane's minimap strip is seven cells wide at six lines a cell, and its
+    /// viewport thumb washes the focus accent at nine percent with no outline.
     #[test]
     fn the_strip_is_seven_cells_with_an_accent_thumb() {
         let mut h = TestHarness::with_size(120, 24);
@@ -3223,8 +3223,13 @@ mod minimap_chrome_tests {
         let [r, g, b] = style_rgb(h.stoat.theme.get(scope::UI_BORDER_FOCUSED).fg)
             .expect("the theme's focus accent is RGB");
         assert_eq!(
-            (strip.width, strip.thumb, strip.thumb_border),
-            (7, [r, g, b, 23], None)
+            (
+                strip.width,
+                strip.lines_per_cell,
+                strip.thumb,
+                strip.thumb_border
+            ),
+            (7, 6, [r, g, b, 23], None)
         );
     }
 }

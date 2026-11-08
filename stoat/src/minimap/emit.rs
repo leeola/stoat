@@ -1492,7 +1492,7 @@ mod tests {
     }
 
     /// The window pads the view by two strip spans on each side. A strip draws
-    /// its cells times eight lines and rides at most one span past the view,
+    /// its cells times six lines and rides at most one span past the view,
     /// so the window holds every line it draws, plus a span of scroll margin.
     /// A strip shorter than the viewport pads by the viewport.
     #[test]
@@ -1528,7 +1528,7 @@ mod tests {
                 minimap_build_window(&snapshot, editor, strip(40)),
                 minimap_build_window(&snapshot, editor, strip(20)),
             ],
-            [window(520..1510), window(360..1670), window(520..1510)],
+            [window(640..1390), window(520..1510), window(640..1390)],
         );
     }
 
