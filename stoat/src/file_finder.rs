@@ -3234,6 +3234,7 @@ mod tests {
         };
 
         let warning = Color::Rgb(0xe8, 0xbd, 0x6a);
+        let accent = Color::Rgb(0x7f, 0xb0, 0xff);
         let muted = Color::Rgb(0x83, 0x8a, 0x98);
         let body = Color::Rgb(0xdf, 0xe2, 0xe8);
         let last = list.width - 1;
@@ -3251,7 +3252,7 @@ mod tests {
                 ("r".to_owned(), warning),
                 ("s".to_owned(), muted),
                 ("a".to_owned(), body),
-                ("M".to_owned(), warning),
+                ("M".to_owned(), accent),
                 (" ".to_owned(), body),
                 ("b".to_owned(), body),
                 (" ".to_owned(), body),

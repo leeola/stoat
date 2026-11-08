@@ -39,7 +39,6 @@ const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
 const TINT_ACCENT: [u8; 3] = [0x22, 0x30, 0x49];
 const DANGER: [u8; 3] = [0xf2, 0x77, 0x7f];
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
-const WARNING: [u8; 3] = [0xe8, 0xbd, 0x6a];
 const SIDE_BASE: [u8; 3] = [0x2a, 0x1d, 0x20];
 const SIDE_TARGET: [u8; 3] = [0x1d, 0x2a, 0x1f];
 const WASH: [u8; 3] = [0x2a, 0x3c, 0x5a];
@@ -102,7 +101,7 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, _, height) = cell_rect(1, 4, 1, 1);
 
-    expect_region(&shot, &mut home, (x, y, 2, height), WARNING, "hunk_lane");
+    expect_region(&shot, &mut home, (x, y, 2, height), ACCENT, "hunk_lane");
     expect_region(
         &shot,
         &mut home,
@@ -130,7 +129,7 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     );
     let (_, y, _, height) = cell_rect(0, 4, 1, 1);
     let [removed, added, modified] =
-        [DANGER, SUCCESS, WARNING].map(|color| bar_columns(&shot, (y, height), color));
+        [DANGER, SUCCESS, ACCENT].map(|color| bar_columns(&shot, (y, height), color));
 
     let apart = removed
         .last()

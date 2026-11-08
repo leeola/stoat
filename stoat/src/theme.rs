@@ -1541,7 +1541,7 @@ mod tests {
                 scope::UI_TEXT_MUTED,
                 scope::DIFF_ADDED,
                 scope::DIFF_DELETED,
-                scope::DIFF_MODIFIED,
+                scope::UI_DIAGNOSTIC_WARNING,
                 scope::UI_STATUSLINE_RUN,
             ]
             .map(|name| theme.get(name).fg),

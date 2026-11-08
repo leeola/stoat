@@ -372,6 +372,7 @@ theme ermine_night inherits default_dark {
     vcs.status.kind.untracked.fg = muted;
     vcs.status.kind.unmerged.fg  = danger;
 
+    diff.modified.fg = accent;
     diff.moved.fg    = accent;
     diff.staged.fg   = info;
     diff.unstaged.fg = disabled;
