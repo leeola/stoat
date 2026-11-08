@@ -3247,7 +3247,7 @@ mod tests {
                 right_content_w: 55,
                 rich: Some(RichGutterOffsets {
                     number_right: 44,
-                    bars: [0, 4],
+                    bars: [0, 5],
                     bar_width: 3,
                     separator_x: 75,
                 }),
@@ -4793,7 +4793,7 @@ mod tests {
         let tick = BarCommand {
             x: (columns.right_x * 16 + offsets.bars[0]) as i16,
             y: 16,
-            width: 7,
+            width: 8,
             height: 2,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
         };

@@ -2314,9 +2314,9 @@ mod tests {
         assert_eq!(
             [
                 bar(0, 16, modified),
-                bar(4, 16, unstaged),
+                bar(5, 16, unstaged),
                 bar(0, 32, modified),
-                bar(4, 32, unstaged),
+                bar(5, 32, unstaged),
             ],
             [true; 4],
             "both lanes on rows 1 and 2, the hunk bar at full color on both",

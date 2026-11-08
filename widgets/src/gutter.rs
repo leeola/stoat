@@ -408,16 +408,15 @@ mod tests {
     const BLUE: [u8; 3] = [97, 175, 239];
 
     /// Both lanes at scale 160 and two digits. The icon cell lands at cell 2
-    /// (the lanes 7, the number 20, and the gap 4 round up to 32 sixteenths),
-    /// so the number ends at 28. The tail (two gaps and the hairline) rounds
-    /// up to one cell, so the gutter is four cells wide and the hairline sits
-    /// at 59.
+    /// (the lanes 8, the number 20, and the gap 4 fill 32 sixteenths), so the
+    /// number ends at 28. The tail (two gaps and the hairline) rounds up to
+    /// one cell, so the gutter is four cells wide and the hairline sits at 59.
     fn config(lines: &[GutterLine]) -> Gutter<'_> {
         Gutter {
             lines,
             left_bars: 2,
             left_bar_width: 3,
-            pad: 1,
+            pad: 2,
             number_scale: 160,
             width_digits: 2,
             number_fg: [99, 109, 131],
@@ -570,7 +569,7 @@ mod tests {
                 .cell_width(),
             ],
             [4, 6],
-            "a 31-sixteenth lead fits two cells, and four digits (a 51-sixteenth lead) take four",
+            "a 32-sixteenth lead fits two cells, and four digits (a 52-sixteenth lead) take four",
         );
     }
 
@@ -584,7 +583,7 @@ mod tests {
                 [0, 1].map(|slot| gutter.bar_x(slot)),
                 gutter.separator_x(),
             ),
-            (32, 28, [0, 4], 59),
+            (32, 28, [0, 5], 59),
         );
     }
 
@@ -680,7 +679,7 @@ mod tests {
             "the hunk bar marks only the code row"
         );
         assert!(
-            contains(&scene, &bar(4, 0, 3, 32, GRAY)),
+            contains(&scene, &bar(5, 0, 3, 32, GRAY)),
             "the state bar spans the full line height"
         );
         assert!(
@@ -768,7 +767,7 @@ mod tests {
         let scene = emit(&config(&lines), 2);
 
         assert!(
-            contains(&scene, &bar(4, 16, 3, 16, GRAY)),
+            contains(&scene, &bar(5, 16, 3, 16, GRAY)),
             "the state bar stops at the area bottom"
         );
         assert!(
@@ -787,7 +786,7 @@ mod tests {
         assert_eq!(
             [
                 contains(&scene, &bar(0, 0, 3, 6, RED)),
-                contains(&scene, &bar(4, 0, 3, 16, GRAY)),
+                contains(&scene, &bar(5, 0, 3, 16, GRAY)),
             ],
             [true; 2],
             "slot 0 draws the short deletion bar, and slot 1 fills the row"

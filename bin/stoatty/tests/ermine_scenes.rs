@@ -89,12 +89,13 @@ fn the_basic_diff_scene_draws_on_the_ermine_palette() {
 }
 
 /// The modified row's git lanes sit left of its number, the hunk lane in the
-/// modified color and the state lane in the unstaged color.
+/// modified color and the state lane in the unstaged color, one pixel apart.
 ///
 /// The pane starts one column in, past the window's chrome margin. At 9-pixel
-/// cells the two 3/16 lanes snap to the first two pixel columns of that cell,
-/// and the next two. The tab bar takes row 0, so the changed row is row 4,
-/// `4 four changed`.
+/// cells the hunk lane's 3/16 snaps to the first two pixel columns of that
+/// cell. The state lane starts two sixteenths later, which leaves the third
+/// column on the base surface and takes the fourth and fifth. The tab bar
+/// takes row 0, so the changed row is row 4, `4 four changed`.
 #[test]
 fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     let mut home = support::scratch_home();
@@ -102,10 +103,11 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
     let (x, y, _, height) = cell_rect(1, 4, 1, 1);
 
     expect_region(&shot, &mut home, (x, y, 2, height), ACCENT, "hunk_lane");
+    expect_region(&shot, &mut home, (x + 2, y, 1, height), BASE, "lane_gap");
     expect_region(
         &shot,
         &mut home,
-        (x + 2, y, 2, height),
+        (x + 3, y, 2, height),
         DISABLED,
         "state_lane",
     );

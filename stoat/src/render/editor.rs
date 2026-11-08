@@ -1509,7 +1509,13 @@ pub(crate) fn resolve_rich_gutter(
     let colors = severity_colors(theme)?;
     let diff = DiffMarkColors::resolve(theme);
     let number_fg = style_rgb(theme.get(s::UI_TEXT_MUTED).fg)?;
-    let separator = style_rgb(theme.get(s::UI_BORDER_INACTIVE).fg).unwrap_or(number_fg);
+    // The rule is a divider, so it takes the theme's divider color. A theme
+    // with no divider keeps the inactive border.
+    let separator = theme
+        .try_get(s::UI_DIVIDER)
+        .and_then(|style| style.fg)
+        .or(theme.get(s::UI_BORDER_INACTIVE).fg);
+    let separator = style_rgb(separator).unwrap_or(number_fg);
     let bg = style_rgb(
         fallback_style
             .bg
@@ -1862,11 +1868,18 @@ pub(crate) fn gutter_component_lines(
 /// The width of every rich gutter lane, in sixteenths.
 const GUTTER_LANE_WIDTH: u16 = 3;
 
+/// The gap between the two rich gutter lanes, in sixteenths.
+///
+/// One sixteenth of a 9-pixel cell rounds to no pixel, and the lanes touch.
+/// Two keep one pixel between them.
+const GUTTER_LANE_GAP: u16 = 2;
+
 /// The sub-cell [`Gutter`] widget for `lines`, carrying the geometry the live
 /// and pooled-page renders share.
 ///
 /// The hunk and state lanes sit left of the number, each [`GUTTER_LANE_WIDTH`]
-/// wide. The diff view lays its sides out from the same widget.
+/// wide and [`GUTTER_LANE_GAP`] apart. The diff view lays its sides out from
+/// the same widget.
 ///
 /// The `colors` are the number, separator, and background colors. The numbers
 /// draw at `number_scale`, which also sets the gutter's width, so a measure and
@@ -1881,7 +1894,7 @@ pub(crate) fn rich_gutter(
         lines,
         left_bars: 2,
         left_bar_width: GUTTER_LANE_WIDTH,
-        pad: 1,
+        pad: GUTTER_LANE_GAP,
         number_scale,
         width_digits,
         number_fg,
@@ -5335,13 +5348,13 @@ mod tests {
         };
         let (modified, unstaged) = (color(s::DIFF_MODIFIED), color(s::DIFF_UNSTAGED));
         // The hunk lane sits at the gutter's left edge, and the state lane a
-        // 3/16 lane and a 1/16 pad right of it.
+        // 3/16 lane and a 2/16 gap right of it.
         assert_eq!(
             [
                 bar(0, 16, modified),
-                bar(4, 16, unstaged),
+                bar(5, 16, unstaged),
                 bar(0, 32, modified),
-                bar(4, 32, unstaged),
+                bar(5, 32, unstaged),
             ],
             [true; 4],
             "both lanes on each marked row, the unreached row's hunk bar at full color: {frame:?}",
