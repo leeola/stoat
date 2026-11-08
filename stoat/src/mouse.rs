@@ -31,6 +31,7 @@ use crate::{
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 use std::ops::Range;
+use stoat_action::GitStatusOpen;
 use stoat_config::MinimapMode;
 use stoat_text::{Bias, SelectionGoal};
 use stoat_widgets::minimap;
@@ -584,9 +585,9 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             selected: 0,
         }),
         // The panel's rows interleave its section heads, so no list of one
-        // row per line maps a press to its file. It owns the pointer all the
-        // same, so a press never reaches the panes it covers.
-        // FIXME: A press on a git status row does not select the row.
+        // row per line maps a press to its file, and `press_git_status_row`
+        // maps it instead. It owns the pointer all the same, so a press never
+        // reaches the panes it covers.
         ActiveModal::GitStatus => Some(ModalSurfaces {
             list: Rect::new(0, 0, 0, 0),
             preview: None,
@@ -636,6 +637,9 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     if arm_modal_separator(stoat, mouse) {
         return UpdateEffect::Redraw;
     }
+    if active_modal(stoat) == Some(ActiveModal::GitStatus) {
+        return press_git_status_row(stoat, mouse);
+    }
 
     let Some(surfaces) = boxed_modal_surfaces(stoat) else {
         return UpdateEffect::None;
@@ -652,6 +656,31 @@ fn handle_modal_mouse(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
     }
 
     action_handlers::picker::picker_step(stoat, index as i32 - surfaces.selected as i32)
+}
+
+/// Select the git status file row under a left press, or open it when the
+/// press lands on the row already selected, as a picker's row takes a second
+/// press.
+///
+/// The panel's rows interleave its section heads, so the press maps through
+/// the panel's own layout rather than the one-row-per-line list that
+/// [`ModalSurfaces::row_at`] reads. A press off every file row does nothing.
+fn press_git_status_row(stoat: &mut Stoat, mouse: MouseEvent) -> UpdateEffect {
+    let size = stoat.size();
+    let Some(panel) = stoat.git_status.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let Some(index) =
+        crate::render::git_status::git_status_row_at(panel, size, mouse.column, mouse.row)
+    else {
+        return UpdateEffect::None;
+    };
+
+    if index == panel.selected {
+        return action_handlers::dispatch(stoat, &GitStatusOpen);
+    }
+    panel.selected = index;
+    UpdateEffect::Redraw
 }
 
 /// The bordered box `kind`'s modal would occupy at `zoom`, sized from the
@@ -3957,6 +3986,87 @@ mod tests {
 
     /// A press selects the clicked row, and a press on the row already
     /// selected acts on it. The two-step keeps a misclick from navigating.
+    /// A `width` by `height` harness rooted in `/repo` with `files` unstaged
+    /// files, its git status panel open and painted.
+    fn git_status_harness(
+        width: u16,
+        height: u16,
+        files: usize,
+    ) -> crate::test_harness::TestHarness {
+        let mut h = crate::test_harness::TestHarness::with_size(width, height);
+        {
+            let mut repo = h.fake_git().add_repo("/repo").with_fs(h.fake_fs());
+            repo.set_head_branch("main");
+            for i in 0..files {
+                repo.modified(format!("f{i:02}.rs"), "a\n", "b\n");
+            }
+        }
+        h.stoat.active_workspace_mut().git_root = "/repo".into();
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::GitStatus);
+        h.settle();
+        h.snapshot();
+        h
+    }
+
+    fn left_press(h: &mut crate::test_harness::TestHarness, column: u16, row: u16) {
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+        ));
+    }
+
+    fn git_status_selected(h: &crate::test_harness::TestHarness) -> Option<usize> {
+        h.stoat.git_status.as_ref().map(|panel| panel.selected)
+    }
+
+    /// A press beside the box or on a section head selects nothing, a press on
+    /// a file row selects it, and a second press on that row opens its diff.
+    ///
+    /// At 80 by 24 the box's inner rect starts at column 29 and row 3. Row 3
+    /// holds the header, row 4 heads the unstaged section, and rows 5 and 6
+    /// hold its two files.
+    #[test]
+    fn presses_on_a_git_status_row_select_it_then_open_it() {
+        let mut h = git_status_harness(80, 24, 2);
+        left_press(&mut h, 5, 6);
+        let beside = git_status_selected(&h);
+        left_press(&mut h, 33, 4);
+        let on_head = git_status_selected(&h);
+        left_press(&mut h, 33, 6);
+        let on_row = git_status_selected(&h);
+        left_press(&mut h, 33, 6);
+        h.settle();
+
+        assert_eq!(
+            (
+                beside,
+                on_head,
+                on_row,
+                active_modal(&h.stoat),
+                h.stoat.current_view()
+            ),
+            (Some(0), Some(0), Some(1), None, Some("diff")),
+        );
+    }
+
+    /// A press in a scrolled body names the row drawn under it.
+    ///
+    /// At 80 by 14 the body holds eight lines. Selecting the last of twelve
+    /// files scrolls the body to start at the sixth, which row 5 shows under
+    /// the head on row 4.
+    #[test]
+    fn a_press_in_a_scrolled_git_status_body_names_the_row_drawn_there() {
+        let mut h = git_status_harness(80, 14, 12);
+        for _ in 0..11 {
+            h.type_keys("j");
+        }
+        h.snapshot();
+        left_press(&mut h, 33, 5);
+
+        assert_eq!(git_status_selected(&h), Some(5));
+    }
+
     #[test]
     fn two_presses_on_a_diagnostics_row_select_it_then_jump() {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};

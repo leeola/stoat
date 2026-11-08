@@ -18,7 +18,7 @@ use crate::{
 };
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Modifier, Style},
     widgets::{Block, Borders, StatefulWidget},
 };
@@ -117,12 +117,7 @@ pub(crate) fn render_git_status(
     let Some((rect, inner)) = git_status_layout(area, panel.model.as_ref()) else {
         return;
     };
-    let banner = if panel.model.as_ref().is_some_and(|model| model.op.is_some()) {
-        BANNER_ROWS
-    } else {
-        0
-    };
-    let body_top = inner.y + 1 + banner;
+    let body_top = body_top(inner, panel.model.as_ref());
     panel.scroll_into_view(usize::from(inner.bottom().saturating_sub(body_top)));
     let panel = &*panel;
     let model = panel.model.as_ref();
@@ -179,6 +174,41 @@ pub(crate) fn render_git_status(
         }
         y += 1;
     }
+}
+
+/// The index among [`GitStatusPanel::rows`] of the file row that the cell at
+/// `column` and `row` shows, or `None` off every file row.
+///
+/// The answer reads the layout and the panel's [`GitStatusPanel::top`] that
+/// the last paint drew with, so a press names the row drawn under it. A
+/// section head, the header, and the banner name no row.
+pub(crate) fn git_status_row_at(
+    panel: &GitStatusPanel,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<usize> {
+    let model = panel.model.as_ref()?;
+    let (_, inner) = git_status_layout(area, Some(model))?;
+    if !inner.contains(Position::new(column, row)) {
+        return None;
+    }
+    let line = usize::from(row.checked_sub(body_top(inner, Some(model)))?);
+    match panel.body_lines().nth(line)? {
+        BodyLine::Row(_, index, _) => Some(index),
+        BodyLine::Head(_) => None,
+    }
+}
+
+/// The first row of the body inside `inner`, under the header and any
+/// banner.
+fn body_top(inner: Rect, model: Option<&GitStatusModel>) -> u16 {
+    let banner = if model.is_some_and(|model| model.op.is_some()) {
+        BANNER_ROWS
+    } else {
+        0
+    };
+    inner.y + 1 + banner
 }
 
 /// Rows the panel's content takes, before the box clips it.
