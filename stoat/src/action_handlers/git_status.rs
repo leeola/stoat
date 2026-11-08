@@ -644,6 +644,23 @@ mod tests {
         assert_eq!([notes_after_tally(true), notes_after_tally(false)], [1, 0]);
     }
 
+    /// A list longer than the box scrolls to keep the selection in view, under
+    /// the head of its section.
+    #[test]
+    fn snapshot_git_status_scrolled() {
+        let mut h = repo_harness(|repo| {
+            for i in 0..12 {
+                repo.modified(format!("f{i:02}.rs"), "a", "b");
+            }
+        });
+        h.resize(80, 14);
+        run(&mut h, ":git status");
+        for _ in 0..11 {
+            h.type_keys("j");
+        }
+        h.assert_snapshot("git_status_scrolled");
+    }
+
     /// The board's dirty state at 80 by 20, as the cells hold it.
     #[test]
     fn snapshot_git_status_dirty() {

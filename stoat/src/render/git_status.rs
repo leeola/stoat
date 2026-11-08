@@ -10,7 +10,9 @@
 //! `▎`, the chip becomes plain text, and the small text draws at full size.
 
 use crate::{
-    git_status::{Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner, Section},
+    git_status::{
+        BodyLine, Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner, Section,
+    },
     render::{chrome, clear_modal, paint::style_rgb, text::write_str},
     theme::{scope, Theme, TypeRole},
 };
@@ -102,18 +104,28 @@ pub(crate) fn git_status_layout(
 
 /// Paint the panel over `area`, the window.
 ///
-/// Until the first read lands, the box holds one blank row.
+/// The panel's top moves first, so the selected row shows in the box at the
+/// height the window leaves it. Until the first read lands, the box holds one
+/// blank row.
 pub(crate) fn render_git_status(
-    panel: &GitStatusPanel,
+    panel: &mut GitStatusPanel,
     theme: &Theme,
     area: Rect,
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let model = panel.model.as_ref();
-    let Some((rect, inner)) = git_status_layout(area, model) else {
+    let Some((rect, inner)) = git_status_layout(area, panel.model.as_ref()) else {
         return;
     };
+    let banner = if panel.model.as_ref().is_some_and(|model| model.op.is_some()) {
+        BANNER_ROWS
+    } else {
+        0
+    };
+    let body_top = inner.y + 1 + banner;
+    panel.scroll_into_view(usize::from(inner.bottom().saturating_sub(body_top)));
+    let panel = &*panel;
+    let model = panel.model.as_ref();
 
     clear_modal(rect, buf, theme, theme.get(scope::UI_BACKGROUND));
     let border = Style {
@@ -155,23 +167,17 @@ pub(crate) fn render_git_status(
         return;
     }
 
-    // FIXME: Rows past the box's bottom never show, and the selection walks
-    // past them without scrolling the box.
-    let mut index = 0;
-    for section in &model.sections {
+    for line in panel.body_lines() {
         if y >= inner.bottom() {
             return;
         }
-        painter.section_head(row(y), section);
-        y += 1;
-        for file in &section.rows {
-            if y >= inner.bottom() {
-                return;
-            }
-            painter.file_row(row(y), section, file, index == panel.selected, &model.root);
-            y += 1;
-            index += 1;
+        match line {
+            BodyLine::Head(section) => painter.section_head(row(y), section),
+            BodyLine::Row(section, index, file) => {
+                painter.file_row(row(y), section, file, index == panel.selected, &model.root);
+            },
         }
+        y += 1;
     }
 }
 

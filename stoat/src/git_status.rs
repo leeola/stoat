@@ -180,6 +180,18 @@ pub(crate) struct GitStatusPanel {
     pub(crate) model: Option<GitStatusModel>,
     /// The selected row, as an index into [`Self::rows`].
     pub(crate) selected: usize,
+    /// The first row the body shows, as an index into [`Self::rows`], which
+    /// [`Self::scroll_into_view`] moves to keep the selected row in view.
+    pub(crate) top: usize,
+}
+
+/// One line of the panel's body, which lists each section's head over its
+/// rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BodyLine<'a> {
+    Head(&'a Section),
+    /// A file row, with its index among the rows of every section.
+    Row(&'a Section, usize, &'a FileRow),
 }
 
 impl GitStatusPanel {
@@ -214,6 +226,53 @@ impl GitStatusPanel {
     pub(crate) fn land(&mut self, model: GitStatusModel) {
         self.model = Some(model);
         self.step(0);
+    }
+
+    /// The body's lines from the row at [`Self::top`], in the order the panel
+    /// paints them.
+    ///
+    /// The section of the first row keeps its head above it, so a scrolled
+    /// body still names the section its first rows belong to. The sections
+    /// before it show nothing.
+    pub(crate) fn body_lines(&self) -> impl Iterator<Item = BodyLine<'_>> {
+        let top = self.top;
+        let mut start = 0;
+        self.model
+            .iter()
+            .flat_map(|model| &model.sections)
+            .flat_map(move |section| {
+                let offset = start;
+                start += section.rows.len();
+                let skipped = top.saturating_sub(offset).min(section.rows.len());
+                let head = (skipped < section.rows.len()).then_some(BodyLine::Head(section));
+                let rows = section
+                    .rows
+                    .iter()
+                    .enumerate()
+                    .skip(skipped)
+                    .map(move |(i, row)| BodyLine::Row(section, offset + i, row));
+                head.into_iter().chain(rows)
+            })
+    }
+
+    /// Move [`Self::top`] so the selected row shows among the body's first
+    /// `height` lines.
+    ///
+    /// A move down stops at the first top that shows the row, so the row lands
+    /// on the body's last line. A move up sets the top to the row, so the row
+    /// shows under its section's head.
+    pub(crate) fn scroll_into_view(&mut self, height: usize) {
+        self.top = self.top.min(self.selected);
+        while self.top < self.selected && !self.shows_selected(height) {
+            self.top += 1;
+        }
+    }
+
+    /// Whether the selected row is among the body's first `height` lines.
+    fn shows_selected(&self, height: usize) -> bool {
+        self.body_lines()
+            .take(height)
+            .any(|line| matches!(line, BodyLine::Row(_, index, _) if index == self.selected))
     }
 }
 

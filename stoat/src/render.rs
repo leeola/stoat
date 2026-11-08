@@ -1816,7 +1816,7 @@ pub(crate) fn frame(
             }
         },
         Some(ActiveModal::GitStatus) => {
-            if let Some(panel) = &stoat.git_status {
+            if let Some(panel) = &mut stoat.git_status {
                 git_status::render_git_status(panel, &stoat.theme, full, buf, &mut *scene);
                 if modal_hints {
                     cached_modal_hints(

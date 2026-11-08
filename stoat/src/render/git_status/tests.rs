@@ -1,10 +1,14 @@
-use super::{divergence_text, git_status_layout, note_text};
+use super::{divergence_text, git_status_layout, note_text, render_git_status};
 use crate::{
-    git_status::{Divergence, FileRow, GitStatusModel, Note, RowKind, Section, SectionKind},
-    theme::scope,
+    git_status::{
+        Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner, OpKind, RowKind,
+        Section, SectionKind,
+    },
+    theme::{scope, Theme},
 };
-use ratatui::layout::Rect;
+use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::PathBuf;
+use stoat_widgets::ApcScene;
 
 /// A model with one section of `rows` files and no banner.
 fn model(rows: usize) -> GitStatusModel {
@@ -129,4 +133,30 @@ fn each_note_reads_as_the_board_draws_it() {
             None,
         ],
     );
+}
+
+/// The banner's rows come out of the body, so with a banner the paint scrolls
+/// further to keep the same row in view.
+#[test]
+fn the_banner_rows_come_out_of_the_body_the_scroll_keeps() {
+    let (config, _) = stoat_config::parse("theme t { }");
+    let theme = Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads");
+    let top = |op: Option<OpBanner>| {
+        let mut panel = GitStatusPanel::default();
+        panel.land(GitStatusModel { op, ..model(12) });
+        panel.selected = 11;
+        let area = Rect::new(0, 0, 80, 14);
+        let mut buf = Buffer::empty(area);
+        render_git_status(&mut panel, &theme, area, &mut buf, &mut ApcScene::new());
+        panel.top
+    };
+    let banner = OpBanner {
+        kind: OpKind::Merge,
+        head: String::new(),
+        message: String::new(),
+        detail: String::new(),
+        keys: Vec::new(),
+    };
+
+    assert_eq!((top(None), top(Some(banner))), (5, 8));
 }

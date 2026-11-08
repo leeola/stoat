@@ -1,6 +1,6 @@
 use super::{
-    merge_banner, Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner, OpKind,
-    RebaseProgress, RowKind, Section, SectionKind,
+    merge_banner, BodyLine, Divergence, FileRow, GitStatusModel, GitStatusPanel, Note, OpBanner,
+    OpKind, RebaseProgress, RowKind, Section, SectionKind,
 };
 use crate::{
     host::{
@@ -524,4 +524,83 @@ fn an_indent_only_chunk_counts_as_settled() {
             )],
         )],
     );
+}
+
+/// A panel whose staged section holds `staged` rows and whose unstaged
+/// section holds `unstaged` rows, indexed in that order.
+fn two_sections(staged: usize, unstaged: usize) -> GitStatusPanel {
+    let rows = |prefix: &str, count: usize| {
+        (0..count)
+            .map(|i| row(&format!("{prefix}{i}.rs"), RowKind::Modified, Note::None))
+            .collect()
+    };
+    let mut panel = GitStatusPanel::default();
+    panel.land(GitStatusModel {
+        root: PathBuf::from(ROOT),
+        branch: None,
+        divergence: Divergence::Unknown,
+        upstream: String::new(),
+        op: None,
+        sections: vec![
+            section(SectionKind::Staged, rows("s", staged)),
+            section(SectionKind::Unstaged, rows("u", unstaged)),
+        ],
+    });
+    panel
+}
+
+/// The body's lines, as each head's section and each row's section and
+/// index.
+fn body(panel: &GitStatusPanel) -> Vec<(SectionKind, Option<usize>)> {
+    panel
+        .body_lines()
+        .map(|line| match line {
+            BodyLine::Head(section) => (section.kind, None),
+            BodyLine::Row(section, index, _) => (section.kind, Some(index)),
+        })
+        .collect()
+}
+
+/// A body scrolled into a section keeps that section's head over its first
+/// shown row, and the sections above it show nothing.
+#[test]
+fn a_scrolled_body_keeps_the_head_of_its_first_row() {
+    let mut panel = two_sections(3, 2);
+    panel.top = 2;
+    let in_first = body(&panel);
+    panel.top = 4;
+
+    assert_eq!(
+        (in_first, body(&panel)),
+        (
+            vec![
+                (SectionKind::Staged, None),
+                (SectionKind::Staged, Some(2)),
+                (SectionKind::Unstaged, None),
+                (SectionKind::Unstaged, Some(3)),
+                (SectionKind::Unstaged, Some(4)),
+            ],
+            vec![
+                (SectionKind::Unstaged, None),
+                (SectionKind::Unstaged, Some(4))
+            ],
+        ),
+    );
+}
+
+/// Walking down past the body's last line moves the top just far enough to
+/// show the row, and walking back up puts the top on the row.
+#[test]
+fn the_top_follows_the_selection_down_and_back_up() {
+    let mut panel = two_sections(5, 5);
+    let tops: Vec<usize> = [3, 7, 9, 6, 0]
+        .into_iter()
+        .map(|selected| {
+            panel.selected = selected;
+            panel.scroll_into_view(6);
+            panel.top
+        })
+        .collect();
+
+    assert_eq!(tops, [0, 4, 5, 5, 0]);
 }
