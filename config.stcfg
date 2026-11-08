@@ -412,9 +412,10 @@ theme ermine_night inherits default_dark {
 on init {
     theme = ermine_night;
 
-    # When the tab bar occupies the top row: auto shows it only once a
-    # workspace holds a second tab, always pins it, never hides it.
-    ui.tab_bar = auto;
+    # The tab bar holds the top row with one tab or many, and carries the
+    # session name. auto shows it only once a workspace holds a second tab,
+    # and never hides it.
+    ui.tab_bar = always;
 
     # How far an unfocused pane's colors blend toward the theme background,
     # from 0 (no fade) to 1.

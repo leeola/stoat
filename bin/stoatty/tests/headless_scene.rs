@@ -21,7 +21,7 @@ mod support;
 /// The wait for the frame that follows a few keys.
 const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The scene's editor font size, which also sizes the status row the golden
+/// The scene's editor font size, which also sizes the tab bar row the golden
 /// comparison leaves out.
 const FONT_SIZE: u32 = 14;
 
@@ -105,8 +105,8 @@ fn the_basic_diff_frame_changes_when_the_cursor_moves() {
 /// Why `shot` does not match the golden PNG at `golden`, or `None` when it
 /// does.
 ///
-/// The comparison leaves out the bottom grid row, the status row, because it
-/// holds the workspace name, which stoat draws from the clock. A pixel matches
+/// The comparison leaves out the top grid row, the tab bar, because it leads
+/// with the workspace name, which stoat draws from the clock. A pixel matches
 /// when no channel differs by more than [`CHANNEL_TOLERANCE`], and the frame
 /// matches when at most [`MISMATCH_LIMIT`] of the compared pixels do not. A
 /// missing golden or a frame that does not match writes the whole frame to
@@ -139,15 +139,15 @@ fn golden_mismatch(shot: &Snapshot, golden: &Path) -> Option<String> {
         ));
     }
 
-    let status_row = render::cell_size(FONT_SIZE, 1.0)[1] as u32;
-    let compared = (shot.width * (shot.height - status_row)) as usize;
+    let tab_bar = (shot.width * render::cell_size(FONT_SIZE, 1.0)[1] as u32) as usize;
+    let compared = (shot.width * shot.height) as usize - tab_bar;
     let differing = expected
         .as_raw()
         .as_chunks::<4>()
         .0
         .iter()
         .zip(shot.rgba.as_chunks::<4>().0)
-        .take(compared)
+        .skip(tab_bar)
         .filter(|(want, got)| {
             want.iter()
                 .zip(got.iter())
@@ -160,7 +160,7 @@ fn golden_mismatch(shot: &Snapshot, golden: &Path) -> Option<String> {
 
     support::save(shot, &fresh);
     Some(format!(
-        "{differing} of {compared} pixels above the status row differ from {} by more than \
+        "{differing} of {compared} pixels below the tab bar differ from {} by more than \
          {CHANNEL_TOLERANCE}; review {} and move it over",
         golden.display(),
         fresh.display(),

@@ -979,10 +979,12 @@ pub(crate) fn render_overlay_status(
 /// Build the overlay status bar's left segments in paint order, with the column
 /// where they end.
 ///
-/// Mode and workspace show only when focused, then a screen label that shows
-/// unconditionally, left-padded when it leads. The screen segment differs from
-/// the pane status's focus-gated one. The end column stops at the right edge of
-/// `area`, and the right segments fit between it and that edge.
+/// Mode shows only when focused, and the workspace name only when focused
+/// with the tab bar hidden, since a shown bar leads with the name. A screen
+/// label follows unconditionally, left-padded when it leads. The screen
+/// segment differs from the pane status's focus-gated one. The end column
+/// stops at the right edge of `area`, and the right segments fit between it
+/// and that edge.
 ///
 /// A focused bar names an open picker modal in place of the screen, as the
 /// pane status does. The label then agrees with the prompt chip beside it, and
@@ -1014,13 +1016,15 @@ fn overlay_status_segments(
             format!(" {mode_label} "),
             mode_style,
         );
-        push_left(
-            &mut left,
-            &mut cursor,
-            end_x,
-            format!(" {} ", frame.workspace_name),
-            base_style.add_modifier(Modifier::BOLD),
-        );
+        if !frame.tab_bar_shown {
+            push_left(
+                &mut left,
+                &mut cursor,
+                end_x,
+                format!(" {} ", frame.workspace_name),
+                base_style.add_modifier(Modifier::BOLD),
+            );
+        }
     }
     let label = match frame.modal_label.filter(|_| is_focused) {
         Some(modal_label) => Some((modal_label, base_style, None)),
@@ -5307,6 +5311,34 @@ mod tests {
                 format!("{:<60}", " PMT  (unnamed) palette"),
                 format!("{:<60}", " NOR  (unnamed) rebase"),
                 format!("{:<60}", " rebase"),
+            ],
+        );
+    }
+
+    /// The overlay bar names the workspace until a second tab shows the tab
+    /// bar, which then carries the name.
+    #[test]
+    fn the_overlay_bar_leaves_the_workspace_name_to_the_tab_bar() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 12);
+        let ws = h.stoat.active_workspace_mut();
+        ws.name = "ws".to_string();
+        ws.rebase = Some(RebaseState::new(
+            PathBuf::from("/overlay"),
+            "onto".into(),
+            vec![],
+        ));
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let buf = h.render_composited();
+            status_row(&buf, buf.area)
+        };
+
+        let one_tab = row(&mut h);
+        dispatch(&mut h.stoat, &stoat_action::NewTab);
+        assert_eq!(
+            [one_tab, row(&mut h)],
+            [
+                format!("{:<60}", " NOR  ws rebase"),
+                format!("{:<60}", " NOR rebase"),
             ],
         );
     }

@@ -22,7 +22,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use stoat_config::Settings;
+use stoat_config::{Settings, TabBarMode};
 use stoat_scheduler::TestScheduler;
 use stoatty_protocol::command;
 use unicode_width::UnicodeWidthStr;
@@ -130,7 +130,12 @@ impl TestHarness {
         Self::new_with_settings(width, height, Settings::default())
     }
 
-    pub(crate) fn new_with_settings(width: u16, height: u16, settings: Settings) -> Self {
+    pub(crate) fn new_with_settings(width: u16, height: u16, mut settings: Settings) -> Self {
+        // The harness frames keep the top row for the panes until a second tab
+        // opens, so their snapshots and row arithmetic hold under the shipped
+        // `always`. A test that names a mode keeps it, since these settings
+        // layer over the shipped config.
+        settings.ui_tab_bar.get_or_insert(TabBarMode::Auto);
         let scheduler = Arc::new(TestScheduler::new());
         let executor = scheduler.executor();
         let fake_fs = Arc::new(crate::host::FakeFs::new());
