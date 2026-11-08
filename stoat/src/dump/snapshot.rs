@@ -37,6 +37,10 @@ pub(crate) struct ActiveRebaseSnap {
     /// finishes detached at the tip.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Absent from a snapshot written before the field existed, which then
+    /// counts no progress.
+    #[serde(default)]
+    pub total: usize,
 }
 
 /// Serializable variants of [`RebasePause`]. Omits `Reword` because
@@ -111,6 +115,7 @@ impl ActiveRebaseSnap {
                 last_message: active.last_message.clone(),
                 pause,
                 branch: active.branch.clone(),
+                total: active.total,
             },
             dropped,
         }
@@ -121,6 +126,7 @@ impl ActiveRebaseSnap {
             workdir: self.workdir,
             onto: self.onto,
             remaining: self.remaining,
+            total: self.total,
             current_head: self.current_head,
             last_pick_sha: self.last_pick_sha,
             last_message: self.last_message,

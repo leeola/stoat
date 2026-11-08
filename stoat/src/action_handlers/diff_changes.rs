@@ -1588,22 +1588,6 @@ mod tests {
         );
     }
 
-    /// `:git status` and `:git st` open the changes view, as `space d c` does.
-    #[test]
-    fn git_status_opens_the_changes_view() {
-        let opened = |command: &str| {
-            let mut h = two_files();
-            h.type_text(command);
-            h.type_keys("enter");
-            h.settle();
-            h.stoat.current_view()
-        };
-        assert_eq!(
-            [opened(":git status"), opened(":git st")],
-            [Some("diff_changes"); 2],
-        );
-    }
-
     #[test]
     fn an_empty_stack_says_no_changes_to_a_hop_and_an_open() {
         let mut h = empty_stack();

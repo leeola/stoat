@@ -718,6 +718,14 @@ on key {
         N -> QuitAllCancel();
         Escape -> QuitAllCancel();
     }
+    modal == git_status {
+        Escape -> CloseGitStatus();
+        q -> CloseGitStatus();
+        j -> GitStatusNext();
+        k -> GitStatusPrev();
+        Down -> GitStatusNext();
+        Up -> GitStatusPrev();
+    }
     modal == jumplist && mode == insert {
         Up -> PickerPrev();
         Down -> PickerNext();
@@ -1834,6 +1842,10 @@ on key {
     # lands, with the pane and the cursor left where they are, until a second
     # `R` stops it.
     #
+    # `t` opens the git status panel at the window's top right, which lists
+    # the changed files by section under the branch and any merge or rebase
+    # in progress.
+    #
     # The mouse side buttons ride the same hops, forward as p and back as n, so
     # a pinned chord walks changes from the mouse exactly as the keys do. The
     # forward button sits above the back button, so the upper button walks up
@@ -1868,6 +1880,7 @@ on key {
             e -> [SetMode(normal), DiffBaseEdit()];
             f -> [FollowChanges(), SetMode(normal)];
             l -> GitLs();
+            t -> [SetMode(normal), GitStatus()];
         }
 
         git && changes {

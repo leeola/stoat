@@ -120,6 +120,9 @@ pub(crate) struct ActiveRebase {
     /// `current_head` after the first entry lands.
     pub onto: String,
     pub remaining: VecDeque<RebaseEntry>,
+    /// How many entries the plan held when it started, which the git status
+    /// panel counts the rebase's progress against.
+    pub total: usize,
     /// The commit at the tip of the rebase-so-far.
     pub current_head: String,
     /// Latest Pick/Reword-produced commit. Squash/Fixup merge into it.
@@ -193,6 +196,7 @@ impl ActiveRebase {
         Self {
             workdir: state.workdir,
             onto: state.onto.clone(),
+            total: state.todo.len(),
             remaining: state.todo.into(),
             current_head: state.onto,
             last_pick_sha: None,

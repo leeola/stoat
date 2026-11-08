@@ -7,6 +7,7 @@ pub mod dump;
 pub mod editor;
 pub mod file;
 pub mod file_finder;
+pub mod git_status;
 pub mod help;
 pub mod lsp;
 pub mod palette;

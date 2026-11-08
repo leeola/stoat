@@ -20,6 +20,7 @@ use crate::{
     emoji_expand,
     file_finder::{FileFinder, FinderPathCache},
     git_jobs::{self, GitJobs},
+    git_status::GitStatusPanel,
     help::Help,
     host::{
         ClipboardKind, EnvHost, FsEventKind, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs,
@@ -1057,6 +1058,8 @@ pub struct Stoat {
     /// render path.
     pub(crate) symbol_finder: Option<SymbolFinder>,
     pub(crate) workspace_picker: Option<WorkspacePicker>,
+    /// The git status panel, or `None` while it is closed.
+    pub(crate) git_status: Option<GitStatusPanel>,
     /// Confirmation modal shown when [`stoat_action::QuitAll`] fires
     /// with at least one dirty buffer in any workspace. `Some` while
     /// the user is being prompted to discard or cancel; cleared on
@@ -2694,6 +2697,7 @@ impl Stoat {
             finder_path_epoch: 0,
             symbol_finder: None,
             workspace_picker: None,
+            git_status: None,
             quit_all_confirm: None,
             jumplist_picker: None,
             walkthrough_picker: None,
@@ -6824,8 +6828,9 @@ impl Stoat {
     /// open or the open one has no input of its own.
     ///
     /// A picker without an input (the jumplist, diagnostics, and location pickers,
-    /// the quit prompt, a modal run) answers `None` so the caller keeps resolving
-    /// through the panes behind it, which is where the keys it does handle land.
+    /// the quit prompt, a modal run, the git status panel) answers `None` so the
+    /// caller keeps resolving through the panes behind it, which is where the
+    /// keys it does handle land.
     pub(crate) fn active_modal_input(&self) -> Option<(EditorId, BufferId)> {
         let input = match active_modal(self)? {
             ActiveModal::WorkspacePicker => &self.workspace_picker.as_ref()?.input,
@@ -6845,7 +6850,7 @@ impl Stoat {
             ActiveModal::Jumplist => &self.jumplist_picker.as_ref()?.picker.input,
             ActiveModal::WalkthroughPicker => &self.walkthrough_picker.as_ref()?.picker.input,
             ActiveModal::PaneFinder => &self.pane_finder.as_ref()?.picker.input,
-            ActiveModal::Run | ActiveModal::QuitConfirm => return None,
+            ActiveModal::Run | ActiveModal::QuitConfirm | ActiveModal::GitStatus => return None,
         };
 
         Some((input.editor_id, input.buffer_id))

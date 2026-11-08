@@ -47,6 +47,7 @@ mod diff_changes;
 pub mod fixture;
 pub mod fuzzy;
 mod git_jobs;
+pub(crate) mod git_status;
 pub(crate) mod goto_word;
 pub mod help;
 pub mod host;

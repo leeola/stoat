@@ -14,6 +14,7 @@ pub(crate) mod diff_changes;
 pub(crate) mod dock;
 pub(crate) mod editor;
 pub(crate) mod file_finder;
+pub(crate) mod git_status;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
@@ -1804,6 +1805,27 @@ pub(crate) fn frame(
                         "workspace_picker",
                         None,
                         Some("picker"),
+                        on_request,
+                        toggles,
+                        &stoat.theme,
+                        full,
+                        buf,
+                        &mut *scene,
+                    );
+                }
+            }
+        },
+        Some(ActiveModal::GitStatus) => {
+            if let Some(panel) = &stoat.git_status {
+                git_status::render_git_status(panel, &stoat.theme, full, buf, &mut *scene);
+                if modal_hints {
+                    cached_modal_hints(
+                        &mut stoat.hints_cache,
+                        &stoat.keymap,
+                        mode,
+                        "git_status",
+                        None,
+                        Some("status"),
                         on_request,
                         toggles,
                         &stoat.theme,

@@ -1,9 +1,11 @@
 use crate::{
+    host::ConflictedFile,
     review,
     review::{ReviewRow, ReviewSide},
 };
 use std::{ops::Range, sync::Arc};
 use stoat_language::{structural_diff::TreeCache, Language};
+use stoat_text::LineEnding;
 
 /// One row of the three-column merge view, aligning the common ancestor with
 /// the two sides of a conflict.
@@ -145,6 +147,24 @@ impl MergeDoc {
         }
 
         Self { rows, chunks }
+    }
+
+    /// [`Self::build`] over a conflicted file's index stages, with an absent
+    /// stage read as empty.
+    ///
+    /// The stages carry the file's own line endings. Each one is normalized
+    /// first, or the carriage returns align as content and the chunks differ
+    /// from the ones the conflict view shows.
+    pub(crate) fn from_stages(stages: &ConflictedFile, language: Option<&Arc<Language>>) -> Self {
+        let normalized = |side: Option<&String>| {
+            LineEnding::normalize(side.map(String::as_str).unwrap_or("")).into_owned()
+        };
+        Self::build(
+            &normalized(stages.ancestor.as_ref()),
+            &normalized(stages.ours.as_ref()),
+            &normalized(stages.theirs.as_ref()),
+            language,
+        )
     }
 
     /// The initial center-column text plus the byte range each chunk occupies

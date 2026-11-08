@@ -2190,6 +2190,7 @@ mod tests {
                 workdir: PathBuf::from("/rebasing"),
                 onto: "c1".to_string(),
                 remaining: VecDeque::new(),
+                total: 1,
                 current_head: "c2".to_string(),
                 last_pick_sha: Some("c2".to_string()),
                 last_message: None,

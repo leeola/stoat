@@ -13,6 +13,7 @@ pub(crate) mod filter_selections;
 pub(crate) mod git_commit;
 mod git_merge;
 mod git_stash;
+mod git_status;
 pub(crate) mod help;
 pub(crate) mod jump;
 pub(crate) mod lsp;
@@ -1212,7 +1213,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
         ActionKind::DiffChanges => diff_changes::toggle_diff_changes(stoat),
-        ActionKind::GitStatus => diff_changes::toggle_diff_changes(stoat),
+        ActionKind::GitStatus => git_status::open_git_status(stoat),
+        ActionKind::CloseGitStatus => git_status::close_git_status(stoat),
+        ActionKind::GitStatusNext => git_status::git_status_step(stoat, 1),
+        ActionKind::GitStatusPrev => git_status::git_status_step(stoat, -1),
         ActionKind::CloseDiffChanges => diff_changes::close_diff_changes(stoat),
         ActionKind::DiffChangesNext => {
             let step = arming_step(stoat);

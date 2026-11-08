@@ -583,6 +583,16 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
             len: 0,
             selected: 0,
         }),
+        // The panel's rows interleave its section heads, so no list of one
+        // row per line maps a press to its file. It owns the pointer all the
+        // same, so a press never reaches the panes it covers.
+        // FIXME: A press on a git status row does not select the row.
+        ActiveModal::GitStatus => Some(ModalSurfaces {
+            list: Rect::new(0, 0, 0, 0),
+            preview: None,
+            len: 0,
+            selected: 0,
+        }),
         // Nothing to point at. It owns the pointer all the same, so a press
         // never reaches the panes it covers, and keys alone answer it.
         ActiveModal::QuitConfirm => Some(ModalSurfaces {

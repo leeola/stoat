@@ -26,6 +26,7 @@ use crate::{
     diff_changes::{self, DiffChangesId, DiffChangesState},
     display_map::{syntax_theme::SyntaxStyles, CachedHighlightEndpoints, DisplayPoint},
     editor_state::{EditorId, EditorState},
+    git_status::Note,
     host::{git::MergeState, GitHost},
     input_history::InputHistory,
     pane::{DockId, DockPanel, DockSide, FocusTarget, PaneId, PaneTree, View},
@@ -327,6 +328,13 @@ pub struct Workspace {
     /// workspace level so a resolve outlives the pane showing it. Dropped on
     /// `CloseConflict`.
     pub(crate) conflict: Option<ConflictSession>,
+    /// The note the git status panel gives each file that the conflict view
+    /// resolved during the merge in progress, keyed by absolute path.
+    ///
+    /// The index records only that the file is staged, so the panel learns
+    /// how it was resolved here. A tally that finds no merge clears it, so a
+    /// later merge starts with no notes.
+    pub(crate) resolved_conflicts: HashMap<PathBuf, Note>,
     /// Every open commits list in the workspace, keyed from the
     /// [`View::Commits`] pane that shows it.
     ///
@@ -589,6 +597,7 @@ impl Workspace {
             trail: None,
             walkthrough_exit: None,
             conflict: None,
+            resolved_conflicts: HashMap::new(),
             commit_lists: SlotMap::with_key(),
             restored_commit_lists: HashMap::new(),
             diff_changes_views: SlotMap::with_key(),
@@ -1621,9 +1630,22 @@ impl Workspace {
             .diff
             .drive_tally(&self.git_root, executor, git_host, redraw_notify);
         if landed {
-            self.diff_changes_epoch += 1;
+            self.land_tally();
         }
         landed
+    }
+
+    /// Bring the state read off the repository tally up to date with a tally
+    /// that just landed.
+    ///
+    /// The changes view lists its files from the tally, so its lists go stale.
+    /// The resolution notes belong to the merge the tally last saw, so a
+    /// tally with no merge ends them.
+    fn land_tally(&mut self) {
+        self.diff_changes_epoch += 1;
+        if self.diff.merge.is_none() {
+            self.resolved_conflicts.clear();
+        }
     }
 
     /// Install `diff_map` on `id` as if a job had produced it. See
@@ -1661,9 +1683,8 @@ impl Workspace {
             base_cache,
             redraw_notify,
         );
-        // The changes view lists its files from the tally.
         if tally_landed {
-            self.diff_changes_epoch += 1;
+            self.land_tally();
         }
         self.visible_buffers = visible;
     }

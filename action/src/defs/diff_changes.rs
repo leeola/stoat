@@ -18,21 +18,6 @@ define_action!(
 );
 
 define_action!(
-    GitStatusDef,
-    GitStatus,
-    "GitStatus",
-    ActionKind::GitStatus,
-    "show the working-tree changes",
-    "Open the changes view, as DiffChanges does, from the git command group. \
-     The view lists every working-tree change against the diff base in one \
-     hunk list. Run on the changes view, it closes the view as DiffChanges \
-     does.",
-    ActionPriority::Common,
-    aliases = &["git st"],
-    command_name = "git status"
-);
-
-define_action!(
     CloseDiffChangesDef,
     CloseDiffChanges,
     "CloseDiffChanges",

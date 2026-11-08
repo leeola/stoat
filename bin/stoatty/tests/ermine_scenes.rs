@@ -50,6 +50,10 @@ const TINT_THEIRS: [u8; 3] = [0x23, 0x1d, 0x2e];
 const TINT_CONFLICT: [u8; 3] = [0x2a, 0x1b, 0x1d];
 const MERGED_HEAD: [u8; 3] = [0x1b, 0x1d, 0x22];
 const CHIP_CONFLICT: [u8; 3] = [0x33, 0x20, 0x1f];
+const CONFLICT: [u8; 3] = [0xf5, 0x9a, 0xa0];
+const TINT_MERGE: [u8; 3] = [0x2a, 0x1d, 0x21];
+const INFO: [u8; 3] = [0x6c, 0xc7, 0xd6];
+const MUTED: [u8; 3] = [0x83, 0x8a, 0x98];
 
 /// The primary cursor's opaque block, the terminal palette's cursor color. The
 /// color comes from stoatty's own palette rather than a theme scope.
@@ -914,6 +918,79 @@ fn the_tab_bar_ends_in_the_conflict_chip() {
         CHIP_CONFLICT,
         "conflict_chip",
     );
+}
+
+/// The git status panel names the merge in progress in its banner and leads
+/// its sections with the conflicted file.
+///
+/// The box hangs from row 2 with its right edge one cell in from the window's,
+/// so its inner cells span columns 109 to 157 from row 3. Row 3 is the header,
+/// whose rule is the row's last pixel row. Rows 4 to 6 are the banner, whose
+/// bar is the first pixel column of column 109. Row 7 heads the conflicted
+/// section, and row 8 holds its file, whose bar sits 4/16 into column 109.
+#[test]
+fn the_git_status_panel_names_the_merge_in_its_banner() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "conflict",
+        "file.txt",
+        ":git status<Enter><Settle>",
+    );
+
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(157, 3, 1, 1),
+        BASE,
+        "inner_top_right",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(140, 4, 15, 3),
+        TINT_MERGE,
+        "banner_rows",
+    );
+    let (x, y, width, _) = cell_rect(130, 3, 25, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x, y + 17, width, 1),
+        RAISED,
+        "header_rule",
+    );
+    let (x, y, _, height) = cell_rect(109, 4, 1, 3);
+    expect_region(&shot, &mut home, (x, y, 1, height), CONFLICT, "banner_bar");
+    let (x, y, _, height) = cell_rect(109, 8, 1, 1);
+    expect_region(
+        &shot,
+        &mut home,
+        (x + 2, y, 2, height),
+        DANGER,
+        "conflicted_bar",
+    );
+}
+
+/// The git status panel colors each file's bar by its section, the staged
+/// file's in info and the unstaged file's in muted.
+///
+/// With no banner, row 4 heads the staged section over its file on row 5, and
+/// row 6 heads the unstaged section over its file on row 7.
+#[test]
+fn the_git_status_panel_bars_each_file_in_its_section_color() {
+    let mut home = support::scratch_home();
+    let shot = settled_frame(
+        home.path(),
+        "basic-diff",
+        "unstaged.txt",
+        ":git status<Enter><Settle>",
+    );
+
+    for (row, want, what) in [(5, INFO, "staged_bar"), (7, MUTED, "unstaged_bar")] {
+        let (x, y, _, height) = cell_rect(109, row, 1, 1);
+        expect_region(&shot, &mut home, (x + 2, y, 2, height), want, what);
+    }
 }
 
 /// The frame the `fixture` scene with `file` open settles on after `keys` play.

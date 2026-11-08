@@ -7,6 +7,7 @@ use crate::{
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
     editor_state::{EditorId, EditorState},
     git_jobs::{self, GitJob, GitLanding, GitWork},
+    git_status::Note,
     host::{
         git::{GitHost, GitRepo},
         ConflictedFile,
@@ -284,18 +285,12 @@ fn read_conflict(
     };
 
     let language = language_registry.for_path(&path);
-    // The stages carry the conflicted file's own line endings, and the center
-    // buffer is built out of them. Without normalizing here the carriage
-    // returns become marker-block content, and resolving the file writes them
-    // back doubled or mixed depending on which rows the user touched.
+    // The center buffer is built out of the normalized stages. Their own
+    // ending is kept, so resolving the file writes it back rather than
+    // carriage returns doubled or mixed depending on which rows the user
+    // touched.
     let ending = stage_line_ending(&stages);
-    let normalized = |side: Option<&String>| {
-        LineEnding::normalize(side.map(String::as_str).unwrap_or("")).into_owned()
-    };
-    let ancestor = normalized(stages.ancestor.as_ref());
-    let ours = normalized(stages.ours.as_ref());
-    let theirs = normalized(stages.theirs.as_ref());
-    let doc = MergeDoc::build(&ancestor, &ours, &theirs, language.as_ref());
+    let doc = MergeDoc::from_stages(&stages, language.as_ref());
 
     Ok(ConflictLoad {
         doc: ConflictDoc {
@@ -794,6 +789,10 @@ fn land_resolved(stoat: &mut Stoat, current: usize, path: &Path, marked: Result<
         stoat.set_status(format!("mark resolved failed: {err}"));
         return;
     }
+    stoat
+        .active_workspace_mut()
+        .resolved_conflicts
+        .insert(path.to_path_buf(), Note::Resolved);
     let still_open = stoat
         .active_workspace()
         .conflict

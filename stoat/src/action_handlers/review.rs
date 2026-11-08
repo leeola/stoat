@@ -4666,6 +4666,7 @@ mod tests {
             workdir: workdir.to_path_buf(),
             onto: "c1".to_string(),
             remaining: std::collections::VecDeque::new(),
+            total: 1,
             current_head: "c1".to_string(),
             last_pick_sha: Some("c1".to_string()),
             last_message: None,

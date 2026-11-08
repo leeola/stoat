@@ -17,7 +17,7 @@ use crate::{
         diff_changes::{
             CloseDiffChanges, DiffChanges, DiffChangesFirst, DiffChangesHalfPageDown,
             DiffChangesHalfPageUp, DiffChangesLast, DiffChangesNext, DiffChangesOpen,
-            DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev, GitStatus,
+            DiffChangesPageDown, DiffChangesPageUp, DiffChangesPrev,
         },
         dump::Dump,
         editor::{
@@ -81,6 +81,7 @@ use crate::{
             FileFinderScopeToggle, OpenBufferPicker, OpenChangedFilePicker, OpenFileFinder,
             OpenFileFinderHSplit, OpenFileFinderVSplit, OpenWorkspaceFileFinder,
         },
+        git_status::{CloseGitStatus, GitStatus, GitStatusNext, GitStatusPrev},
         help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
         lsp::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
@@ -994,6 +995,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
     add(DiffChanges::DEF, |_| Ok(Box::new(DiffChanges)));
     add(GitStatus::DEF, |_| Ok(Box::new(GitStatus)));
+    add(CloseGitStatus::DEF, |_| Ok(Box::new(CloseGitStatus)));
+    add(GitStatusNext::DEF, |_| Ok(Box::new(GitStatusNext)));
+    add(GitStatusPrev::DEF, |_| Ok(Box::new(GitStatusPrev)));
     add(CloseDiffChanges::DEF, |_| Ok(Box::new(CloseDiffChanges)));
     add(DiffChangesNext::DEF, |_| Ok(Box::new(DiffChangesNext)));
     add(DiffChangesPrev::DEF, |_| Ok(Box::new(DiffChangesPrev)));
@@ -1450,6 +1454,9 @@ mod tests {
         "CommitsOpenReview",
         "DiffChanges",
         "GitStatus",
+        "CloseGitStatus",
+        "GitStatusNext",
+        "GitStatusPrev",
         "CloseDiffChanges",
         "DiffChangesNext",
         "DiffChangesPrev",
@@ -2132,7 +2139,8 @@ mod tests {
         // + 1 DiffPair.
         // + 5 the diff styling dials.
         // + 11 the changes view actions.
-        assert_eq!(all().count(), 479);
+        // + 3 the git status panel actions.
+        assert_eq!(all().count(), 482);
     }
 
     #[test]

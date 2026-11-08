@@ -656,6 +656,7 @@ pub(crate) enum ActiveModal {
     Run,
     QuitConfirm,
     WorkspacePicker,
+    GitStatus,
     Jumplist,
     WalkthroughPicker,
     PaneFinder,
@@ -684,6 +685,7 @@ impl ActiveModal {
             Self::Run => "run",
             Self::QuitConfirm => "quit_confirm",
             Self::WorkspacePicker => "workspace_picker",
+            Self::GitStatus => "git_status",
             Self::Jumplist => "jumplist",
             Self::WalkthroughPicker => "walkthrough_picker",
             Self::PaneFinder => "pane_finder",
@@ -725,6 +727,7 @@ impl ActiveModal {
             Self::WalkthroughPicker => Some("walkthroughs"),
             Self::Run
             | Self::QuitConfirm
+            | Self::GitStatus
             | Self::Rename
             | Self::Search
             | Self::SplitSelection
@@ -853,6 +856,7 @@ pub(crate) fn close_topmost_modal(stoat: &mut Stoat) -> bool {
             }
         },
         ActiveModal::QuitConfirm => stoat.quit_all_confirm = None,
+        ActiveModal::GitStatus => stoat.git_status = None,
         ActiveModal::WorkspacePicker => {
             if let Some(picker) = stoat.workspace_picker.take() {
                 picker.dispose(stoat.active_workspace_mut());
@@ -923,6 +927,8 @@ pub(crate) fn active_modal(stoat: &Stoat) -> Option<ActiveModal> {
         Some(ActiveModal::QuitConfirm)
     } else if stoat.workspace_picker.is_some() {
         Some(ActiveModal::WorkspacePicker)
+    } else if stoat.git_status.is_some() {
+        Some(ActiveModal::GitStatus)
     } else if stoat.jumplist_picker.is_some() {
         Some(ActiveModal::Jumplist)
     } else if stoat.walkthrough_picker.is_some() {
@@ -983,6 +989,7 @@ fn open_modal_count(stoat: &Stoat) -> usize {
         stoat.modal_run.is_some(),
         stoat.quit_all_confirm.is_some(),
         stoat.workspace_picker.is_some(),
+        stoat.git_status.is_some(),
         stoat.jumplist_picker.is_some(),
         stoat.walkthrough_picker.is_some(),
         stoat.pane_finder.is_some(),
@@ -1857,10 +1864,11 @@ mod tests {
     }
 
     /// Every variant, in the canonical order [`active_modal`] resolves them.
-    const ALL_MODALS: [ActiveModal; 19] = [
+    const ALL_MODALS: [ActiveModal; 20] = [
         ActiveModal::Run,
         ActiveModal::QuitConfirm,
         ActiveModal::WorkspacePicker,
+        ActiveModal::GitStatus,
         ActiveModal::Jumplist,
         ActiveModal::WalkthroughPicker,
         ActiveModal::PaneFinder,
@@ -1893,6 +1901,7 @@ mod tests {
                 "run",
                 "quit_confirm",
                 "workspace_picker",
+                "git_status",
                 "jumplist",
                 "walkthrough_picker",
                 "pane_finder",
@@ -1919,6 +1928,7 @@ mod tests {
             "run",
             "quit_confirm",
             "workspace_picker",
+            "git_status",
             "jumplist",
             "walkthrough_picker",
             "pane_finder",

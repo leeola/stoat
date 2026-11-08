@@ -346,12 +346,14 @@ mod tests {
     use super::ConflictLabels;
     use crate::{
         app::Stoat,
+        git_status::Note,
         host::git::MergeState,
         merge_view::MergeDoc,
         pane::View,
         rebase::{ActiveRebase, RebaseState},
         test_harness::TestHarness,
     };
+    use std::collections::HashMap;
     use stoat_action::{
         Action, CloseConflict, Conflict, ConflictApply, ConflictNextChunk, ConflictNextFile,
         ConflictPickBoth, ConflictPickOurs, ConflictPickOursLine, ConflictPickTheirs,
@@ -1084,6 +1086,25 @@ mod tests {
             .expect("resolved file written");
         assert_eq!(String::from_utf8(written).unwrap(), "ours\n");
         assert_eq!(h.fake_git().resolved_paths(&git_root), vec![path]);
+    }
+
+    /// The index records only that an applied file is staged, so the
+    /// workspace notes that the view resolved it, which the git status panel
+    /// shows.
+    #[test]
+    fn apply_notes_the_file_resolved_for_the_status_panel() {
+        let mut h = Stoat::test();
+        let git_root = h.stoat.active_workspace().git_root.clone();
+        seed_conflict(&mut h);
+        dispatch_conflict(&mut h);
+
+        pick(&mut h, &ConflictPickOurs);
+        pick(&mut h, &ConflictApply);
+
+        assert_eq!(
+            h.stoat.active_workspace().resolved_conflicts,
+            HashMap::from([(git_root.join("f.txt"), Note::Resolved)]),
+        );
     }
 
     /// The index write waits its turn in the git queue, so the view stays on
