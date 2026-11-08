@@ -2230,6 +2230,7 @@ pub(crate) fn frame(
         let pane = pane_predicate(ws);
         let token = cursor_token(ws);
         let focus = focus_flags(ws, &stoat.diagnostics, &stoat.lsp_registry);
+        let own_box = screen_own_box(screen, mode, touring);
         let key = hints_cache_key(
             mode,
             screen,
@@ -2262,7 +2263,7 @@ pub(crate) fn frame(
             };
             let rows = match &chord {
                 Some(chord) => hints::chord_rows(chord),
-                None => hint_rows(&stoat.keymap, &state, mode, screen, pane),
+                None => hint_rows(&stoat.keymap, &state, mode, screen, own_box, pane),
             };
             stoat.hints_cache = Some(hints::HintsCache::new(key, rows, footer_keys));
         }
@@ -2279,7 +2280,6 @@ pub(crate) fn frame(
                 ),
                 style: stoat.theme.get(crate::theme::scope::UI_TEXT),
             });
-        let own_box = screen_own_box(screen, mode, touring);
         let diff_footer = hunk_position
             .filter(|_| own_box == Some("diff"))
             .map(|position| hints::HintsFooter {
@@ -2332,13 +2332,15 @@ pub(crate) fn frame(
 
 /// The rows the hints box lists from `state`, its bindings grouped by action.
 ///
-/// The conflict screen rides on normal mode, so it scopes to its own `view ==
-/// conflict` bindings. A terminal or agent pane at rest sends every other key
-/// to its child, so it scopes to the bindings that name its pane kind. A
-/// primary mode narrows to the chord entries and the context-bound keys,
-/// because the whole editor keymap is what the help screen is for. A chord
-/// sub-mode, the walkthrough's among them, lists the keys its own mode binds,
-/// so the root keys every mode answers stay off its box.
+/// A screen with its own box, which `own_box` names, scopes to the bindings
+/// that name its view, such as `view == conflict`. The screen rides on the
+/// editor's modes, so its mode alone names the editor's keys rather than the
+/// screen's. A terminal or agent pane at rest sends every other key to its
+/// child, so it scopes to the bindings that name its pane kind. A primary mode
+/// narrows to the chord entries and the context-bound keys, because the whole
+/// editor keymap is what the help screen is for. A chord sub-mode, the
+/// walkthrough's among them, lists the keys its own mode binds, so the root
+/// keys every mode answers stay off its box.
 ///
 /// A chord's binding that only returns to a primary mode is its exit, the
 /// Escape every chord binds, so it makes no row. In a primary mode such a
@@ -2348,10 +2350,11 @@ fn hint_rows(
     state: &dyn KeymapState,
     mode: &str,
     screen: Option<&str>,
+    own_box: Option<&str>,
     pane: Option<&str>,
 ) -> Vec<hints::HintRow> {
-    let (raw, chord) = if screen == Some("conflict") {
-        (keymap.scoped_bindings(state, "view", "conflict"), false)
+    let (raw, chord) = if let Some(view) = screen.filter(|_| own_box.is_some()) {
+        (keymap.scoped_bindings(state, "view", view), false)
     } else if let Some(kind @ ("terminal" | "agent")) = pane.filter(|_| mode == "normal") {
         (keymap.scoped_bindings(state, "pane", kind), false)
     } else if PRIMARY_MODES.contains(&mode) {
@@ -4229,6 +4232,66 @@ mod lsp_filter_tests {
         assert_eq!(
             (h.stoat.current_view(), above, on, hidden),
             (Some("diff_changes"), edges("-"), edges("1"), None),
+        );
+    }
+
+    /// The diff views' own box lists the keys their view blocks bind, grouped
+    /// by action, and none of the editor's other context keys. A wheel notch
+    /// is no key to press, so the Alt notches stay off the box.
+    #[test]
+    fn the_diff_box_lists_the_view_s_own_keys() {
+        let box_keys = |h: &mut TestHarness| {
+            h.render_composited();
+            h.stoat
+                .hints_cache
+                .as_ref()
+                .expect("the view keeps its box up")
+                .rows
+                .iter()
+                .map(|row| row.keys.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut h = TestHarness::with_size(150, 50);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .set_diff_view(true);
+        let split = box_keys(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle_diff_jobs();
+        let changes = box_keys(&mut h);
+
+        let keys = |groups: &[&[&str]]| -> Vec<String> {
+            groups.concat().into_iter().map(str::to_owned).collect()
+        };
+        let dials = ["C-6", "C-7", "C-8", "C-9", "C-0"];
+        let buttons = ["MBk", "MFw", "S-MBk", "S-MFw"];
+        assert_eq!(
+            (split, changes),
+            (
+                keys(&[&dials[..], &buttons[..], &["C-t"]]),
+                keys(&[
+                    &dials[..],
+                    &[
+                        "q",
+                        "C-t",
+                        "Ret",
+                        "j, Dn",
+                        "k, Up",
+                        "n",
+                        "p",
+                        "C-f, PgDn",
+                        "C-b, PgUp",
+                        "C-d",
+                        "C-u",
+                    ],
+                    &buttons[..],
+                    &[":"],
+                ]),
+            ),
         );
     }
 

@@ -10,7 +10,12 @@ use ratatui::{
     widgets::{Block, Borders, StatefulWidget, Widget},
 };
 use std::path::Path;
-use stoat_widgets::{bar::Bar, panel::Panel, text_run::TextRun, ApcScene};
+use stoat_widgets::{
+    bar::Bar,
+    panel::Panel,
+    text_run::{self, TextRun},
+    ApcScene,
+};
 use stoatty_protocol::command::{BorderStyle, PanelShadow};
 
 /// Cells left bare between a modal box and the edge of the area it floats over,
@@ -36,6 +41,12 @@ const ZOOM_STEP_DIVISOR: u16 = 10;
 /// The width of the accent bar on a list's selected row, in sixteenths of a
 /// cell.
 const SELECTION_BAR_WIDTH: u16 = 3;
+
+/// The mark of a toggle that is on, U+25CF BLACK CIRCLE.
+const TOGGLE_ON_MARK: &str = "\u{25cf}";
+
+/// The mark of a toggle that is off, U+25CB WHITE CIRCLE.
+const TOGGLE_OFF_MARK: &str = "\u{25cb}";
 
 /// The small colored tag a tab, a finder row, or a changes header shows in
 /// place of a file's extension, and the theme scope that colors it.
@@ -556,37 +567,38 @@ pub(crate) fn selection_bar(x: u16, y: u16, theme: &Theme, buf: &mut Buffer, sce
 /// Draw the on or off mark of a toggle beside its key, where `(x, y)` is the
 /// cell directly right of the key.
 ///
-/// The fallback is taken when `scene` is dead, or when `style`'s foreground
-/// does not resolve to RGB. It writes a small filled square for on and a small
-/// hollow square for off into that cell, styled with `style`. Otherwise it
-/// emits one [`Bar`] two sixteenths wide, tall for on and short for off, and
-/// writes no glyph.
+/// The mark is a round dot in `style`'s foreground, filled for on and a ring
+/// for off. Under a live scene with an RGB foreground it is a [`TextRun`] at
+/// `scale`, centered in the cell, so a scale below the row's reads as a mark
+/// rather than a letter. Otherwise the glyph goes into the cell, styled with
+/// `style`.
 pub(crate) fn toggle_mark(
     buf: &mut Buffer,
     x: u16,
     y: u16,
     on: bool,
     style: Style,
+    scale: u16,
     scene: &mut ApcScene,
 ) {
+    let glyph = match on {
+        true => TOGGLE_ON_MARK,
+        false => TOGGLE_OFF_MARK,
+    };
     match style_rgb(style.fg).filter(|_| scene.live()) {
-        Some(color) => {
-            // The negative x puts the bar in the strip of the key's last cell
-            // that the key run leaves clear, because bars draw under every
-            // text-run box.
-            Bar {
-                x: -2,
-                y: if on { 3 } else { 6 },
-                width: 2,
-                height: if on { 10 } else { 4 },
-                color,
-            }
-            .render(Rect::new(x, y, 1, 1), buf, scene);
-        },
+        Some(color) => TextRun {
+            col: ((16 - text_run::advance_sixteenths(1, scale).min(16)) / 2) as i16,
+            row: 0,
+            scale,
+            color,
+            bg: None,
+            text: glyph,
+            follow: 0,
+            anchor: None,
+        }
+        .render(Rect::new(x, y, 1, 1), buf, scene),
         None => {
-            buf[(x, y)]
-                .set_char(if on { '\u{25aa}' } else { '\u{25ab}' })
-                .set_style(style);
+            buf[(x, y)].set_symbol(glyph).set_style(style);
         },
     }
 }
@@ -1328,12 +1340,14 @@ mod tests {
         );
     }
 
+    /// At scale 160 a glyph advances 10 sixteenths, so the mark centers 3
+    /// sixteenths into its cell.
     #[test]
-    fn toggle_mark_fallback_draws_a_square_and_stoatty_emits_a_bar() {
+    fn toggle_mark_draws_a_dot_on_and_a_ring_off() {
         let mark = |on: bool, style: Style| {
             let mut buf = Buffer::empty(Rect::new(0, 0, 8, 4));
             let mut scene = ApcScene::new();
-            toggle_mark(&mut buf, 3, 1, on, style, &mut scene);
+            toggle_mark(&mut buf, 3, 1, on, style, 160, &mut scene);
             let symbol = buf
                 .cell((3, 1))
                 .expect("cell in bounds")
@@ -1341,42 +1355,34 @@ mod tests {
                 .to_string();
             (symbol, scene.buffer().to_vec())
         };
+        let run = |text: &str| {
+            encode_text_run(&TextRunCommand {
+                col: 51,
+                row: 16,
+                scale: 160,
+                color: [1, 2, 3],
+                bg: None,
+                follow: 0,
+                anchor: None,
+                text: text.to_owned(),
+            })
+        };
 
         assert_eq!(
             [mark(true, plain_style()), mark(false, plain_style())],
             [
-                ("\u{25aa}".to_string(), Vec::new()),
-                ("\u{25ab}".to_string(), Vec::new()),
+                ("\u{25cf}".to_string(), Vec::new()),
+                ("\u{25cb}".to_string(), Vec::new()),
             ],
-            "the fallback draws a filled square on and a hollow one off",
+            "the fallback writes a dot on and a ring off into the cell",
         );
         assert_eq!(
             [mark(true, rgb_style()), mark(false, rgb_style())],
             [
-                (
-                    " ".to_string(),
-                    encode_bar(&BarCommand {
-                        x: 46,
-                        y: 19,
-                        width: 2,
-                        height: 10,
-                        color: [1, 2, 3],
-                        occludes: false,
-                    })
-                ),
-                (
-                    " ".to_string(),
-                    encode_bar(&BarCommand {
-                        x: 46,
-                        y: 22,
-                        width: 2,
-                        height: 4,
-                        color: [1, 2, 3],
-                        occludes: false,
-                    })
-                ),
+                (" ".to_string(), run("\u{25cf}")),
+                (" ".to_string(), run("\u{25cb}")),
             ],
-            "stoatty draws a tall bar on and a short one off, and no glyph",
+            "stoatty draws the glyph as a small run centered in the cell",
         );
     }
 

@@ -261,6 +261,7 @@ pub(crate) fn render_hints_grouped(
     let rule_style = theme.get(crate::theme::scope::UI_BORDER_INACTIVE);
     let end_x = inner.x + inner.width;
     let row_scale = theme.type_scale(TypeRole::Ui);
+    let mark_scale = theme.type_scale(TypeRole::Small);
 
     // The title row is the frame's top row. A cell frame's border rules that
     // row off by itself, so only the card draws the hairline under it.
@@ -346,6 +347,7 @@ pub(crate) fn render_hints_grouped(
                     row,
                     on,
                     if on { toggle_on } else { toggle_off },
+                    mark_scale,
                     &mut *scene,
                 );
             }
@@ -1195,15 +1197,15 @@ mod tests {
 
         assert_eq!(
             (
-                on.contains("f\u{25aa}  follow"),
-                off.contains("f\u{25ab}  follow"),
+                on.contains("f\u{25cf}  follow"),
+                off.contains("f\u{25cb}  follow"),
                 unmarked.contains("f   follow"),
             ),
             (true, true, true),
             "the mark sits in the cell after the key:\n{on}\n{off}\n{unmarked}",
         );
         assert_eq!(
-            (on.replace('\u{25aa}', " "), off.replace('\u{25ab}', " ")),
+            (on.replace('\u{25cf}', " "), off.replace('\u{25cb}', " ")),
             (unmarked.clone(), unmarked),
             "the mark moves no text in the box",
         );

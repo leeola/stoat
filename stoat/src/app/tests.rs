@@ -4672,8 +4672,9 @@ fn the_git_chord_marks_its_toggles() {
     use crate::{render::paint::style_rgb, theme::scope};
     use stoatty_protocol::command::{decode_stream, Command};
 
-    // The harness paints a stoatty frame, where the mark is a bar the text
-    // snapshot does not show, so the glyph checks run on the fallback frame.
+    // The harness paints a stoatty frame, where the mark is a text run the
+    // text snapshot does not show, so the glyph checks run on the fallback
+    // frame.
     let mut h = Stoat::test();
     h.stoat.stoatty = false;
     // Wide enough that the box's columns of eight keep every label whole.
@@ -4682,7 +4683,7 @@ fn the_git_chord_marks_its_toggles() {
     h.stage_review_scenario("/repo", &[("a.rs", "a\n", "b\n")]);
     h.type_keys("space h");
     assert!(
-        h.rendered_text().contains("f\u{25ab}  follow every change"),
+        h.rendered_text().contains("f\u{25cb}  follow every change"),
         "follow starts off: {}",
         h.rendered_text(),
     );
@@ -4690,7 +4691,7 @@ fn the_git_chord_marks_its_toggles() {
     h.stoat.follow_changes = true;
     h.snapshot();
     assert!(
-        h.rendered_text().contains("f\u{25aa}  follow every change"),
+        h.rendered_text().contains("f\u{25cf}  follow every change"),
         "a flip repaints the cached rows: {}",
         h.rendered_text(),
     );
@@ -4700,16 +4701,24 @@ fn the_git_chord_marks_its_toggles() {
     h.stoat.paint_into(&mut buf, None);
     let rgb = |name| style_rgb(h.stoat.theme.get(name).fg).expect("the theme colors the mark");
     let (active, inactive) = (rgb(scope::UI_TOGGLE_ACTIVE), rgb(scope::UI_TOGGLE_INACTIVE));
-    let marks: Vec<(u16, [u8; 3])> = decode_stream(&h.stoat.apc_scene.all_bytes())
+    let (on, off) = ("\u{25cf}", "\u{25cb}");
+    let marks: Vec<(String, [u8; 3])> = decode_stream(&h.stoat.apc_scene.all_bytes())
         .into_iter()
         .filter_map(|command| match command {
-            Command::Bar(bar) if bar.width == 2 && bar.height < 16 => Some((bar.height, bar.color)),
+            Command::TextRun(run) if run.text == on || run.text == off => {
+                Some((run.text, run.color))
+            },
             _ => None,
         })
         .collect();
     assert_eq!(
         marks,
-        [(4, inactive), (10, active), (10, active), (4, inactive)],
+        [
+            (off.to_string(), inactive),
+            (on.to_string(), active),
+            (on.to_string(), active),
+            (off.to_string(), inactive),
+        ],
         "d and R are off, and c and f are on",
     );
 }
