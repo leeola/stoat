@@ -46,9 +46,12 @@ const SHADOW_MARGIN: f32 = 16.0;
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
 /// Height in logical pixels of a tucked shadow's interior bottom band, the band
-/// a raised card darkens inside its bottom edge. It peaks at 0.45 opacity at the
-/// edge and fades out as it rises.
-const SHADOW_MARGIN_TUCKED: f32 = 6.0;
+/// a raised card darkens inside its bottom edge.
+///
+/// The band is a gaussian edge whose sigma is a third of this height, 4 logical
+/// pixels as the boards blur it. It lays 0.27 of black on the bottom logical
+/// pixel row and fades out as it rises.
+const SHADOW_MARGIN_TUCKED: f32 = 12.0;
 
 /// Height in logical pixels of an overhang shadow's interior bottom band. Shorter
 /// than a tucked band and fainter, at 0.14, so it reads as a faint shadow cast
@@ -886,7 +889,8 @@ mod tests {
         let (device, queue) = require_headless_device();
         let blue = Some(Rgb::new(0, 0, 255));
         // Pixel (24, 24) sits twelve pixels inside every edge of a two-cell box,
-        // and (18, 18) is the middle of a one-cell box.
+        // and (18, 18) is the middle of a one-cell box. Pixel (24, 23) sits past
+        // the twelve pixels a tucked band rises from the bottom edge.
         let pixel = |cells, fill, shadow, at| panel_pixel(&device, &queue, cells, fill, shadow, at);
 
         assert_eq!(
@@ -894,7 +898,7 @@ mod tests {
                 pixel(2, None, PanelShadow::Drop, (24, 24)),
                 pixel(2, blue, PanelShadow::Drop, (24, 24)),
                 pixel(1, blue, PanelShadow::Drop, (18, 18)),
-                pixel(2, blue, PanelShadow::Tucked, (24, 24)),
+                pixel(2, blue, PanelShadow::Tucked, (24, 23)),
             ),
             (GROUND, [0, 0, 255], [0, 0, 255], [0, 0, 255]),
             "the ground shows through an unfilled interior, and a fill covers it whole, \
@@ -909,20 +913,20 @@ mod tests {
             "the overhang band darkens the fill above the bottom edge, got {overhung:?}",
         );
         // Row 35 sits half a pixel above the bottom edge, where the tucked band
-        // lays 0.44 of black, which is 143 of the fill's 255 blue. Row 33 lies
-        // more than a pixel inside the edge, where the band still lays 0.28, which
-        // is 183 of the blue and keeps 72 percent of an unfilled box's ground.
+        // lays 0.27 of black, which is 186 of the fill's 255 blue. Row 33 lies
+        // two and a half pixels inside the edge, where the band lays 0.16, which
+        // is 214 of the blue and keeps 84 percent of an unfilled box's ground.
         let tucked = [
             pixel(2, blue, PanelShadow::Tucked, (24, 35)),
             pixel(2, blue, PanelShadow::Tucked, (24, 33)),
         ];
         assert!(
-            matches!(tucked, [[0, 0, 136..=150], [0, 0, 176..=190]]),
+            matches!(tucked, [[0, 0, 183..=189], [0, 0, 211..=217]]),
             "the tucked band darkens the fill's last rows, deepest at the edge, got {tucked:?}",
         );
         let ground = pixel(2, None, PanelShadow::Tucked, (24, 33));
         assert!(
-            matches!(ground, [30..=43, 104..=117, 67..=80]),
+            matches!(ground, [40..=46, 126..=132, 83..=89]),
             "the tucked band darkens the ground under an unfilled box, got {ground:?}",
         );
     }
@@ -934,8 +938,9 @@ mod tests {
     fn a_tucked_box_shades_nothing_outside_and_a_halo_stops_at_the_bottom() {
         let (device, queue) = require_headless_device();
         let blue = Some(Rgb::new(0, 0, 255));
-        // A two-cell box spans pixels 12 to 36, and the shadow margin pads both
-        // quads by six pixels, so every pixel read here rasterizes.
+        // A two-cell box spans pixels 12 to 36. The tucked margin pads its quad
+        // by twelve pixels and the halo's pads by six, so every pixel read here
+        // rasterizes.
         let tucked = |at| panel_pixel(&device, &queue, 2, blue, PanelShadow::Tucked, at);
         let halo = |at| panel_pixel(&device, &queue, 2, blue, PanelShadow::Halo, at);
 

@@ -54,10 +54,12 @@ const STYLE_DASHED: u32 = 5u;
 // edge carries half of it, and three sigma out it reaches zero.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const SHADOW_ALPHA: f32 = 0.32;
-// Peak opacity of a tucked shadow's interior bottom band, at the box's bottom
-// edge, falling to zero across the margin as it rises. The band is a raised
-// card's own shading, so it is the darkest of the shadows.
-const SHADOW_ALPHA_TUCKED: f32 = 0.45;
+// Opacity of a tucked shadow's interior bottom band, the alpha of the boards'
+// `box-shadow: inset 0 -6px 8px -6px rgba(0, 0, 0, 0.6)`. That shadow's
+// negative spread cancels its offset, so only its blur reaches inside the box.
+// The blur is a gaussian edge at the bottom edge, which lays half this opacity
+// at the edge and fades out across the margin as it rises.
+const SHADOW_ALPHA_TUCKED: f32 = 0.6;
 // Peak opacity of an overhang shadow's interior bottom band, at the box's bottom
 // edge, falling to zero across the margin as it rises. Fainter than SHADOW_ALPHA
 // so it reads as a soft cast rather than a hard line.
@@ -500,12 +502,14 @@ fn coverage_of(in: VsOut) -> Coverage {
     ) * (1.0 - interior) * clip;
     // Tucked (mode 1) and overhang (mode 2): a band inside the box that rises
     // from its bottom edge and fades out across the margin. Tucked shades a
-    // raised card, and the fainter overhang reads as a panel tucked under
-    // whatever overhangs it above.
-    let band_alpha = select(SHADOW_ALPHA_OVERHANG, SHADOW_ALPHA_TUCKED, in.shadow_mode < 1.5);
+    // raised card with the gaussian edge an inset blur casts, and the fainter
+    // overhang reads as a panel tucked under whatever overhangs it above.
+    let rise = in.box_max.y - p.y;
+    let tucked = SHADOW_ALPHA_TUCKED * 0.5 * (1.0 - erf(vec2<f32>(rise * sqrt(0.5) / sigma)).x);
+    let overhang = SHADOW_ALPHA_OVERHANG * (1.0 - smoothstep(0.0, margin, rise));
     let band = select(
         0.0,
-        band_alpha * (1.0 - smoothstep(0.0, margin, in.box_max.y - p.y)) * interior,
+        select(overhang, tucked, in.shadow_mode < 1.5) * interior,
         casts_band(in.shadow_mode)
     );
 

@@ -390,13 +390,17 @@ fn the_panes_sit_one_chrome_column_in_from_each_window_edge() {
 ///
 /// The pane starts at pixel column 9, past the one-column margin, so pixel
 /// column 8 keeps the chrome ground. Row 48 is the pane's last content row,
-/// above the status row. The band rises six pixels from the pane's bottom edge,
-/// so row 47 keeps the base surface, and row 48's last pixel row and the fifth
-/// from its bottom both read darker than it in every channel. The fifth lies
+/// above the status row. The band rises twelve pixels from the pane's bottom
+/// edge, so row 47 keeps the base surface. Row 48's last pixel row reads the
+/// boards' bottom row within one in every channel, and the fifth from its
+/// bottom reads darker than the base surface in every channel. The fifth lies
 /// past the island's two-pixel corner radius, so it reads the band only where
 /// the band reaches past the corner arcs.
 #[test]
 fn the_island_s_bottom_band_darkens_inside_the_pane() {
+    // The base surface under 0.27 of black, the boards' bottom pixel row.
+    const BAND_EDGE: [u8; 3] = [0x11, 0x12, 0x16];
+
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (_, y, _, height) = cell_rect(0, 4, 1, 1);
@@ -417,19 +421,27 @@ fn the_island_s_bottom_band_darkens_inside_the_pane() {
     );
 
     let (x, y, width, height) = cell_rect(80, ROWS - 2, 1, 1);
-    for from_bottom in [1, 5] {
-        let band = dominant_color(&shot, (x, y + height - from_bottom, width, 1));
-        if band.iter().zip(BASE).any(|(&band, base)| band >= base) {
-            let frame = keep_frame(&shot, &mut home, "bottom_band");
-            panic!(
-                "pixel row {from_bottom} from the pane's bottom reads {}, not darker than {}; \
-                 the frame is {}",
-                hex(band),
-                hex(BASE),
-                frame.display(),
-            );
-        }
+    let edge = dominant_color(&shot, (x, y + height - 1, width, 1));
+    let fifth = dominant_color(&shot, (x, y + height - 5, width, 1));
+    let at_edge = edge
+        .iter()
+        .zip(BAND_EDGE)
+        .all(|(&edge, board)| edge.abs_diff(board) <= 1);
+    let darker = fifth.iter().zip(BASE).all(|(&fifth, base)| fifth < base);
+    if at_edge && darker {
+        return;
     }
+
+    let frame = keep_frame(&shot, &mut home, "bottom_band");
+    panic!(
+        "the pane's bottom pixel row reads {}, not within one of {}, or the fifth from the \
+         bottom reads {}, not darker than {}; the frame is {}",
+        hex(edge),
+        hex(BAND_EDGE),
+        hex(fifth),
+        hex(BASE),
+        frame.display(),
+    );
 }
 
 /// The status row sits on chrome, and its hairline takes the bar's own color,
