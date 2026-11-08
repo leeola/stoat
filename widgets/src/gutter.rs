@@ -407,16 +407,16 @@ mod tests {
     const GRAY: [u8; 3] = [80, 90, 100];
     const BLUE: [u8; 3] = [97, 175, 239];
 
-    /// Both lanes at scale 160 and two digits. The icon cell lands at cell 2
-    /// (the lanes 8, the number 20, and the gap 4 fill 32 sixteenths), so the
-    /// number ends at 28. The tail (two gaps and the hairline) rounds up to
-    /// one cell, so the gutter is four cells wide and the hairline sits at 59.
+    /// Both lanes at scale 160 and two digits. The lanes 13, the number 20, and
+    /// the gap 4 fill 37 sixteenths, so the icon cell lands at cell 3 and the
+    /// number ends at 44. The tail (two gaps and the hairline) rounds up to one
+    /// cell, so the gutter is five cells wide and the hairline sits at 75.
     fn config(lines: &[GutterLine]) -> Gutter<'_> {
         Gutter {
             lines,
             left_bars: 2,
-            left_bar_width: 3,
-            pad: 2,
+            left_bar_width: 6,
+            pad: 1,
             number_scale: 160,
             width_digits: 2,
             number_fg: [99, 109, 131],
@@ -570,8 +570,8 @@ mod tests {
                 }
                 .cell_width(),
             ],
-            [4, 6],
-            "a 32-sixteenth lead fits two cells, and four digits (a 52-sixteenth lead) take four",
+            [5, 6],
+            "a 37-sixteenth lead takes three cells, and four digits (a 57-sixteenth lead) take four",
         );
     }
 
@@ -585,7 +585,7 @@ mod tests {
                 [0, 1].map(|slot| gutter.bar_x(slot)),
                 gutter.separator_x(),
             ),
-            (32, 28, [0, 5], 59),
+            (48, 44, [0, 7], 75),
         );
     }
 
@@ -613,7 +613,7 @@ mod tests {
                 .map(|x| buf.cell((x, y)).expect("cell").symbol())
                 .collect()
         };
-        assert_eq!([row(0), row(1)], [" 7E ", "12H "]);
+        assert_eq!([row(0), row(1)], ["  7E ", " 12H "]);
     }
 
     #[test]
@@ -622,11 +622,11 @@ mod tests {
         let scene = emit(&config(&lines), 1);
 
         assert!(
-            contains(&scene, &bar(59, 0, 1, 16, [60, 66, 77])),
+            contains(&scene, &bar(75, 0, 1, 16, [60, 66, 77])),
             "separator bar frame"
         );
         assert!(
-            contains(&scene, &icon_at(0, 2, IconKind::Error, RED)),
+            contains(&scene, &icon_at(0, 3, IconKind::Error, RED)),
             "an error icon in the icon cell"
         );
     }
@@ -645,9 +645,9 @@ mod tests {
         let scene = emit(&config(&lines), 1);
 
         // The dot advances 10 sixteenths at scale 160, so it starts 3 into the
-        // cell at 32.
+        // cell at 48.
         let dot = encode_text_run(&TextRunCommand {
-            col: 35,
+            col: 51,
             row: 0,
             scale: 160,
             color: BLUE,
@@ -677,15 +677,15 @@ mod tests {
         let scene = emit(&config(&lines), 2);
 
         assert!(
-            contains(&scene, &bar(0, 0, 3, 16, GREEN)),
+            contains(&scene, &bar(0, 0, 6, 16, GREEN)),
             "the hunk bar marks only the code row"
         );
         assert!(
-            contains(&scene, &bar(5, 0, 3, 32, GRAY)),
+            contains(&scene, &bar(7, 0, 6, 32, GRAY)),
             "the state bar spans the full line height"
         );
         assert!(
-            contains(&scene, &icon_at(0, 2, IconKind::Error, RED)),
+            contains(&scene, &icon_at(0, 3, IconKind::Error, RED)),
             "the icon marks the line's first row"
         );
     }
@@ -706,17 +706,17 @@ mod tests {
             gutter.bound_to_line_layout = bound;
             emit(&gutter, 3)
         };
-        let icon = icon_at(2, 2, IconKind::Error, RED);
+        let icon = icon_at(2, 3, IconKind::Error, RED);
 
         assert!(
             contains(
                 &emit(false),
-                &[bar(0, 32, 3, 16, RED), icon.clone()].concat()
+                &[bar(0, 32, 6, 16, RED), icon.clone()].concat()
             ),
             "unbound, the widget folds the expansion into a physical row"
         );
         assert!(
-            contains(&emit(true), &[bar(0, 16, 3, 16, RED), icon].concat()),
+            contains(&emit(true), &[bar(0, 16, 6, 16, RED), icon].concat()),
             "bound, the terminal folds the bar, and the icon keeps its physical cell"
         );
     }
@@ -731,7 +731,7 @@ mod tests {
 
         let number_at = |row, text: &str| {
             encode_text_run(&TextRunCommand {
-                col: 18,
+                col: 34,
                 row,
                 scale: 160,
                 color: [99, 109, 131],
@@ -750,7 +750,7 @@ mod tests {
             "the line past the bottom draws nothing"
         );
         assert!(
-            contains(&scene, &bar(59, 0, 1, 32, [60, 66, 77])),
+            contains(&scene, &bar(75, 0, 1, 32, [60, 66, 77])),
             "the separator spans the area, not the line total"
         );
     }
@@ -769,11 +769,11 @@ mod tests {
         let scene = emit(&config(&lines), 2);
 
         assert!(
-            contains(&scene, &bar(5, 16, 3, 16, GRAY)),
+            contains(&scene, &bar(7, 16, 6, 16, GRAY)),
             "the state bar stops at the area bottom"
         );
         assert!(
-            contains(&scene, &icon_at(1, 2, IconKind::Error, RED)),
+            contains(&scene, &icon_at(1, 3, IconKind::Error, RED)),
             "the icon still marks the line's first row"
         );
     }
@@ -787,8 +787,8 @@ mod tests {
 
         assert_eq!(
             [
-                contains(&scene, &bar(0, 0, 3, 6, RED)),
-                contains(&scene, &bar(5, 0, 3, 16, GRAY)),
+                contains(&scene, &bar(0, 0, 6, 6, RED)),
+                contains(&scene, &bar(7, 0, 6, 16, GRAY)),
             ],
             [true; 2],
             "slot 0 draws the short deletion bar, and slot 1 fills the row"

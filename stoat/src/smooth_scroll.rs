@@ -2305,7 +2305,7 @@ mod tests {
             let command = encode_bar(&BarCommand {
                 x,
                 y,
-                width: 3,
+                width: 6,
                 height: 16,
                 color,
                 occludes: false,
@@ -2318,9 +2318,9 @@ mod tests {
         assert_eq!(
             [
                 bar(0, 16, modified),
-                bar(5, 16, unstaged),
+                bar(7, 16, unstaged),
                 bar(0, 32, modified),
-                bar(5, 32, unstaged),
+                bar(7, 32, unstaged),
             ],
             [true; 4],
             "both lanes on rows 1 and 2, the hunk bar at full color on both",

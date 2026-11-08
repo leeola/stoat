@@ -3252,8 +3252,12 @@ mod tests {
             "a wide diff body puts base text left and buffer text right"
         );
 
+        // The shipped small type scale, which the rich gutter's numbers draw at.
+        // Two digits at it fit five cells with both lanes, where the cell
+        // gutter takes six.
+        let small = 208;
         assert_eq!(
-            DiffColumns::compute(wide, DiffLayout::diff_view(2, Some(FULL_CELL_SCALE))),
+            DiffColumns::compute(wide, DiffLayout::diff_view(2, Some(small))),
             DiffColumns {
                 left_text_x: 8,
                 left_content_w: 55,
@@ -3261,8 +3265,8 @@ mod tests {
                 right_content_w: 55,
                 rich: Some(RichGutterOffsets {
                     number_right: 44,
-                    bars: [0, 5],
-                    bar_width: 3,
+                    bars: [0, 7],
+                    bar_width: 6,
                     separator_x: 75,
                 }),
                 ..cell
@@ -4808,7 +4812,7 @@ mod tests {
         let tick = BarCommand {
             x: (columns.right_x * 16 + offsets.bars[0]) as i16,
             y: 16,
-            width: 8,
+            width: 13,
             height: 2,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
             occludes: false,

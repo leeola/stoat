@@ -1866,13 +1866,17 @@ pub(crate) fn gutter_component_lines(
 }
 
 /// The width of every rich gutter lane, in sixteenths.
-const GUTTER_LANE_WIDTH: u16 = 3;
+///
+/// A cell is half as wide as it is tall, so 6 sixteenths draw the boards' 3 px
+/// lane in a 9 px cell.
+const GUTTER_LANE_WIDTH: u16 = 6;
 
 /// The gap between the two rich gutter lanes, in sixteenths.
 ///
-/// One sixteenth of a 9-pixel cell rounds to no pixel, and the lanes touch.
-/// Two keep one pixel between them.
-const GUTTER_LANE_GAP: u16 = 2;
+/// Each lane's edges round to whole pixels. In a 9 px cell the first lane ends
+/// at 3.4 px and the second starts at 3.9 px, which round to 3 and 4, so the
+/// lanes take pixel columns 0 to 2 and 4 to 6 with one pixel between them.
+const GUTTER_LANE_GAP: u16 = 1;
 
 /// The sub-cell [`Gutter`] widget for `lines`, carrying the geometry the live
 /// and pooled-page renders share.
@@ -5340,7 +5344,7 @@ mod tests {
             let command = encode_bar(&BarCommand {
                 x,
                 y,
-                width: 3,
+                width: 6,
                 height: 16,
                 color,
                 occludes: false,
@@ -5349,13 +5353,13 @@ mod tests {
         };
         let (modified, unstaged) = (color(s::DIFF_MODIFIED), color(s::DIFF_UNSTAGED));
         // The hunk lane sits at the gutter's left edge, and the state lane a
-        // 3/16 lane and a 2/16 gap right of it.
+        // 6/16 lane and a 1/16 gap right of it.
         assert_eq!(
             [
                 bar(0, 16, modified),
-                bar(5, 16, unstaged),
+                bar(7, 16, unstaged),
                 bar(0, 32, modified),
-                bar(5, 32, unstaged),
+                bar(7, 32, unstaged),
             ],
             [true; 4],
             "both lanes on each marked row, the unreached row's hunk bar at full color: {frame:?}",
@@ -6759,14 +6763,14 @@ mod tests {
         h.settle();
 
         h.snapshot();
-        // Column 5 is the line-number gutter width the cursor sits past.
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((5, 0)));
+        // Column 6 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((6, 0)));
 
         for _ in 0..6 {
             dispatch(&mut h.stoat, &MoveRight);
         }
         h.snapshot();
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((11, 0)));
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((12, 0)));
     }
 
     #[test]
@@ -6780,8 +6784,8 @@ mod tests {
         h.settle();
 
         h.snapshot();
-        // Column 5 is the line-number gutter width the cursor sits past.
-        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((5, 0)));
+        // Column 6 is the line-number gutter width the cursor sits past.
+        assert_eq!(h.stoat.primary_cursor_screen_pos(), Some((6, 0)));
 
         dispatch(&mut h.stoat, &OpenFileFinder);
         h.settle();
