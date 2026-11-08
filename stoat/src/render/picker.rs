@@ -123,6 +123,9 @@ pub(crate) fn filter_header(
 /// [`chip_cells`](crate::render::chrome::chip_cells), so a live scene draws it
 /// as a panel. An inactive chip is plain muted text on the row's background. A
 /// row too narrow for all of them drops the chips together, then the count.
+///
+/// The count reads muted. A count of no shown entries paints its zero in
+/// `diff.deleted`'s foreground, which flags a query that matches nothing.
 fn paint_header_row(
     buf: &mut Buffer,
     inner: Rect,
@@ -180,7 +183,15 @@ fn paint_header_row(
     }
     if let Some(count) = count {
         right -= count.width() as u16;
-        write_str(buf, right, y, &count, theme.get(scope::UI_TEXT_MUTED));
+        let muted = theme.get(scope::UI_TEXT_MUTED);
+        write_str(buf, right, y, &count, muted);
+        if let Some((0, _)) = header.count {
+            let zero = match theme.get(scope::DIFF_DELETED).fg {
+                Some(fg) => muted.fg(fg),
+                None => muted,
+            };
+            write_str(buf, right, y, "0", zero);
+        }
         right -= 1;
     }
     Rect::new(query_x, y, right.saturating_sub(query_x), 1)
@@ -820,6 +831,48 @@ mod tests {
                     (Color::Rgb(1, 2, 3), Color::Reset),
                     (Color::Rgb(7, 8, 9), Color::Reset)
                 ],
+            ),
+        );
+    }
+
+    /// A count of no shown entries reads its zero in `diff.deleted`'s
+    /// foreground over the muted background, and the rest of the count muted.
+    #[test]
+    fn a_zero_count_reads_its_zero_in_the_deleted_color() {
+        let theme = {
+            let src = r##"theme t {
+                diff.deleted = { fg: "#010203", bg: "#040506" };
+                ui.text.muted = { fg: "#070809", bg: "#0a0b0c" };
+            }"##;
+            let (config, _) = stoat_config::parse(src);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let header = FilterHeader {
+            label: "Files",
+            prompt: FILTER_PROMPT,
+            count: Some((0, 214)),
+            chips: &[],
+        };
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_header_row(&mut buf, area, &header, &theme, &mut scene);
+
+        let muted = (Color::Rgb(7, 8, 9), Color::Rgb(10, 11, 12));
+        assert_eq!(
+            (
+                test_support::row_text(&buf, 0),
+                (32..40)
+                    .map(|x| (buf[(x, 0)].fg, buf[(x, 0)].bg))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                format!("Files \u{203A} {}0 of 214", " ".repeat(24)),
+                [
+                    vec![(Color::Rgb(1, 2, 3), Color::Rgb(10, 11, 12))],
+                    vec![muted; 7],
+                ]
+                .concat(),
             ),
         );
     }

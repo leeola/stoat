@@ -31,7 +31,7 @@ use crate::{
     test_fixture::{
         fake_term_session, finder_layout, focused_editor_pane_area, mouse_event,
         open_indent_buffer, open_scratch_file, open_with_minimap_strip, palette_sizing,
-        picker_layout, store_two_tours, target_picker_rows,
+        picker_layout, seed, store_two_tours, target_picker_rows,
     },
     test_harness::{
         keys::{ctrl, key},
@@ -12001,21 +12001,14 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
             .expect("fits");
             (list, preview)
         },
+        ModalKind::FileFinder => {
+            let layout = finder_layout(h);
+            (layout.list, layout.preview)
+        },
         _ => {
-            let size = h.stoat.size();
-            let (declared, layout_of): (_, fn(_, _, _, _) -> _) = match kind {
-                ModalKind::FileFinder => (
-                    h.stoat.file_finder.as_ref().expect("open").content_size,
-                    crate::render::file_finder::file_finder_layout_with_chrome,
-                ),
-                _ => (
-                    (u16::MAX, u16::MAX),
-                    crate::render::file_finder::file_finder_layout,
-                ),
-            };
-            let layout = layout_of(
-                size,
-                declared,
+            let layout = crate::render::file_finder::file_finder_layout(
+                h.stoat.size(),
+                (u16::MAX, u16::MAX),
                 modal_zoom_steps(&h.stoat.modal_zoom, kind),
                 modal_split_percent(&h.stoat.modal_split, kind),
             )
@@ -12028,8 +12021,12 @@ fn side_by_side_layout(h: &crate::test_harness::TestHarness, kind: ModalKind) ->
 
 /// A harness with the file finder open over a terminal wide enough that the
 /// modal splits into a list and a preview.
+///
+/// The workspace holds one file, because a finder that lists no row collapses
+/// to its header and shows neither pane.
 fn wide_finder_harness() -> crate::test_harness::TestHarness {
     let mut h = crate::test_harness::TestHarness::with_size(140, 40);
+    seed(&mut h, &[("a.rs", "fn a() {}\n")]);
     action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenFileFinder);
     h.settle();
     h

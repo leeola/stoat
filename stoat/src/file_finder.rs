@@ -399,6 +399,18 @@ impl FileFinder {
         }
     }
 
+    /// Whether the list on display holds no row for the query, with every path
+    /// delivered.
+    ///
+    /// The finder then collapses to its header row. A walk that still streams
+    /// does not count, so a fresh open keeps its full box rather than drawing
+    /// it short until the first paths arrive. A scan for a longer query keeps
+    /// the answer, so the box stays short while the user types on past the
+    /// last match.
+    pub(crate) fn shows_no_match(&self) -> bool {
+        self.active_core_ref().rows_empty()
+    }
+
     /// Whether the fallback of ignored files stands in for the list.
     ///
     /// Only browse and [`FinderScope::All`] fall back. A Modified or buffer list
@@ -947,7 +959,10 @@ mod tests {
     use super::*;
     use crate::{test_fixture, test_harness::keys};
     use crossterm::event::{Event, KeyCode};
-    use ratatui::style::{Color, Modifier};
+    use ratatui::{
+        layout::Rect,
+        style::{Color, Modifier},
+    };
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
@@ -3284,6 +3299,66 @@ mod tests {
             ),
             (vec!["src/", "a.rs", "lines", "1\u{2013}3"], true),
             "the header row reads {text:?}",
+        );
+    }
+
+    /// A query that matches nothing, with no ignored file to fall back on,
+    /// collapses the box to its query row and rule at the full box's top. The
+    /// count's zero reads in the deleted color.
+    #[test]
+    fn snapshot_finder_with_no_match_collapses_to_its_header() {
+        let mut h = TestHarness::with_size(120, 30);
+        seed_finder_workspace(&mut h, &[("src/a.rs", "one"), ("b.txt", "two")]);
+        h.type_keys("space p");
+        h.settle();
+        let full = test_fixture::finder_layout(&h).modal;
+
+        h.type_text("zzqxj");
+        h.settle();
+        assert_eq!(
+            test_fixture::finder_layout(&h).modal,
+            Rect { height: 4, ..full },
+            "the box keeps its top and width",
+        );
+        h.assert_snapshot("file_finder_no_match");
+    }
+
+    /// A walk that still streams keeps the full box though no row has arrived,
+    /// so a fresh open does not draw the box short and then grow it.
+    ///
+    /// The harness walk delivers inside the key that opens the finder, so the
+    /// test holds a fresh walk open in its place.
+    #[test]
+    fn a_finder_keeps_its_full_box_while_the_walk_streams() {
+        let mut h = TestHarness::with_size(120, 30);
+        seed_finder_workspace(&mut h, &[("a.rs", "one")]);
+        h.type_keys("space p");
+        h.settle();
+        let full = test_fixture::finder_layout(&h).modal;
+
+        let (_walk, rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = h.stoat.executor.spawn(async {});
+        h.stoat
+            .file_finder
+            .as_mut()
+            .expect("the finder is open")
+            .core
+            .reset_walk(rx, task);
+
+        let core = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("the finder is open")
+            .active_core_ref();
+        assert_eq!(
+            (
+                core.walking(),
+                core.picklist.filtered.len(),
+                test_fixture::finder_layout(&h).modal,
+            ),
+            (true, 0, full),
+            "a walk with no row yet keeps the full box",
         );
     }
 

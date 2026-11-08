@@ -27,7 +27,8 @@ pub(crate) struct FinderLayout {
     pub(crate) modal: Rect,
     /// Inside the border: prompt, input, separator, and body.
     pub(crate) inner: Rect,
-    /// The result list, also the smooth-scroll pool region.
+    /// The result list, also the smooth-scroll pool region. It is empty when
+    /// the finder collapses to its header for a query with no match.
     pub(crate) list: Rect,
     /// The preview pane's editor, present only when the body is wide enough.
     pub(crate) preview: Option<Rect>,
@@ -43,6 +44,10 @@ pub(crate) struct FinderLayout {
 /// Rows the finder's preview gives its path header, the header row and the
 /// rule under it.
 const PREVIEW_HEADER_ROWS: u16 = 2;
+
+/// Rows of a finder box that shows no list, which are the two border rows and
+/// the filter header's query row and rule.
+const HEADER_BOX_ROWS: u16 = 4;
 
 /// The finder's footer hints, each a bound key and the word for what it does.
 const FINDER_HINTS: [(&str, &str); 4] = [
@@ -117,13 +122,40 @@ pub(crate) fn file_finder_layout(
 /// the rect the pooled preview page fills and a wheel scrolls. A body of one row
 /// keeps no footer, and a preview too short to keep an editor row under the
 /// header gets no header.
+///
+/// `no_match` collapses the box to its header rows, as
+/// [`FileFinder::shows_no_match`] asks. The box keeps the full box's top and
+/// width, so the query row stays in place while a query loses and regains its
+/// matches. The list is then an empty rect, and there is no preview, preview
+/// header, or footer.
 pub(crate) fn file_finder_layout_with_chrome(
     area: Rect,
     content: (u16, u16),
     zoom: i8,
     list_percent: u16,
+    no_match: bool,
 ) -> Option<FinderLayout> {
     let mut layout = file_finder_layout(area, content, zoom, list_percent)?;
+    if no_match {
+        let modal = Rect {
+            height: HEADER_BOX_ROWS,
+            ..layout.modal
+        };
+        let inner = Block::default().borders(Borders::ALL).inner(modal);
+        return Some(FinderLayout {
+            modal,
+            inner,
+            list: Rect {
+                y: inner.y + inner.height,
+                height: 0,
+                ..inner
+            },
+            preview: None,
+            preview_header: None,
+            footer: None,
+        });
+    }
+
     if layout.list.height > 1 {
         let inner = layout.inner;
         layout.footer = Some(Rect::new(
@@ -164,9 +196,13 @@ pub(crate) fn render_file_finder(
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let Some(layout) =
-        file_finder_layout_with_chrome(area, finder.content_size, zoom, list_percent)
-    else {
+    let Some(layout) = file_finder_layout_with_chrome(
+        area,
+        finder.content_size,
+        zoom,
+        list_percent,
+        finder.shows_no_match(),
+    ) else {
         return;
     };
 
@@ -453,7 +489,7 @@ fn shown_lines(editor: &mut EditorState) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::file_finder_layout;
+    use super::{file_finder_layout, file_finder_layout_with_chrome};
     use crate::render::picker::DEFAULT_LIST_PERCENT;
     use ratatui::layout::Rect;
 
@@ -482,6 +518,38 @@ mod tests {
             box_of(area, (120, 44)),
             Rect::new(20, 8, 160, 44),
             "a list past the recommended height takes the rows it asks for"
+        );
+    }
+
+    /// The full box for this content is 160x32 at (20, 14), so the collapsed
+    /// box keeps that top and width.
+    #[test]
+    fn a_finder_with_no_match_keeps_its_header_rows_alone() {
+        let layout = file_finder_layout_with_chrome(
+            Rect::new(0, 0, 200, 60),
+            (120, 9),
+            0,
+            DEFAULT_LIST_PERCENT,
+            true,
+        )
+        .expect("the area hosts the finder");
+        assert_eq!(
+            (
+                layout.modal,
+                layout.inner,
+                layout.list,
+                layout.preview,
+                layout.preview_header,
+                layout.footer,
+            ),
+            (
+                Rect::new(20, 14, 160, 4),
+                Rect::new(21, 15, 158, 2),
+                Rect::new(21, 17, 158, 0),
+                None,
+                None,
+                None,
+            ),
         );
     }
 

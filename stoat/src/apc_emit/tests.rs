@@ -5174,6 +5174,48 @@ fn file_finder_list_is_pooled_and_retired() {
     );
 }
 
+/// A finder whose query matches nothing shows its header alone, so the emit
+/// declares no list pool and retires the one the matches had.
+#[test]
+fn a_finder_with_no_match_retires_its_list_pool() {
+    use stoatty_protocol::command::{Command, PoolDropCommand};
+
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+
+    let root = PathBuf::from("/finder");
+    h.fake_fs().insert_file(root.join("a.rs"), b"x\n");
+    h.stoat.active_workspace_mut().git_root = root;
+    h.type_keys("space p");
+    h.settle();
+    emit_smooth_scroll(&mut h.stoat);
+    drain_apc(&mut rx);
+
+    h.type_text("zzqxj");
+    h.settle();
+    emit_smooth_scroll(&mut h.stoat);
+    let finder_pool: Vec<_> = drain_apc(&mut rx)
+        .into_iter()
+        .filter(|command| match command {
+            Command::PoolRegion(region) => {
+                region.pool == crate::smooth_scroll::non_pane_pool::FINDER
+            },
+            Command::PoolDrop(retired) => {
+                retired.pool == crate::smooth_scroll::non_pane_pool::FINDER
+            },
+            _ => false,
+        })
+        .collect();
+    assert_eq!(
+        finder_pool,
+        [Command::PoolDrop(PoolDropCommand {
+            pool: crate::smooth_scroll::non_pane_pool::FINDER,
+        })],
+        "the finder pool's only command is its drop",
+    );
+}
+
 #[test]
 fn code_search_list_is_pooled_and_retired() {
     use stoat_action::OpenCodeSearch;

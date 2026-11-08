@@ -776,7 +776,8 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
     };
 
     // The file finder is a modal over normal mode (not a full-screen overlay
-    // mode); its result list pools as a non-pane surface above the panes.
+    // mode); its result list pools as a non-pane surface above the panes. A
+    // finder with no match shows its header alone, so it has no list to pool.
     let finder_list = (!overlay)
         .then_some(stoat.file_finder.as_ref())
         .flatten()
@@ -786,9 +787,11 @@ pub(crate) fn emit_smooth_scroll(stoat: &mut Stoat) {
                 finder.content_size,
                 modal_zoom_steps(&stoat.modal_zoom, ModalKind::FileFinder),
                 modal_split_percent(&stoat.modal_split, ModalKind::FileFinder),
+                finder.shows_no_match(),
             )
         })
-        .map(|layout| layout.list);
+        .map(|layout| layout.list)
+        .filter(|list| list.height > 0);
 
     // Every boxed modal previews through a scratch editor pane, and only one
     // modal is ever open, so one pool serves whichever is up. The pairing

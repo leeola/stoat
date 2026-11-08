@@ -388,6 +388,7 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
                 finder.content_size,
                 zoom(ModalKind::FileFinder),
                 split(ModalKind::FileFinder),
+                finder.shows_no_match(),
             )?;
             let core = finder.active_core_ref();
             Some(ModalSurfaces {
@@ -843,6 +844,7 @@ pub(crate) fn open_modal_separator(stoat: &Stoat) -> Option<(ModalKind, SplitSep
             finder.content_size,
             modal_zoom_steps(&stoat.modal_zoom, kind),
             modal_split_percent(&stoat.modal_split, kind),
+            finder.shows_no_match(),
         )?;
         (kind, layout.inner, layout.list, layout.preview)
     } else if stoat.code_search.is_some() {

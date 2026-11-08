@@ -71,6 +71,7 @@ pub(crate) fn finder_layout(h: &TestHarness) -> crate::render::file_finder::Find
         finder.content_size,
         modal_zoom_steps(&h.stoat.modal_zoom, ModalKind::FileFinder),
         modal_split_percent(&h.stoat.modal_split, ModalKind::FileFinder),
+        finder.shows_no_match(),
     )
     .expect("the finder fits the test terminal")
 }
