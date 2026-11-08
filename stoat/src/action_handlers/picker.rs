@@ -50,6 +50,7 @@ pub(crate) fn picker_step(stoat: &mut Stoat, delta: i32) -> UpdateEffect {
             super::palette::palette_move_selection(stoat, delta).unwrap_or(UpdateEffect::Redraw)
         },
         Some(ActiveModal::Help) => super::help::help_move(stoat, delta),
+        Some(ActiveModal::GitStatus) => super::git_status::git_status_step(stoat, delta as isize),
         _ => UpdateEffect::None,
     }
 }

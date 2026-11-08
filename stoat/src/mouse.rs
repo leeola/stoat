@@ -4067,6 +4067,29 @@ mod tests {
         assert_eq!(git_status_selected(&h), Some(5));
     }
 
+    /// The wheel walks the selection one row per line of travel and stops at
+    /// the first and the last row, as it walks a picker's.
+    #[test]
+    fn the_wheel_walks_the_git_status_selection_by_its_travel() {
+        let mut h = git_status_harness(80, 24, 4);
+        let walk = [2.0, 3.0, -1.0, -5.0].map(|lines: f32| {
+            let kind = match lines > 0.0 {
+                true => MouseEventKind::ScrollDown,
+                false => MouseEventKind::ScrollUp,
+            };
+            let over_first_row = MouseEvent {
+                kind,
+                column: 33,
+                row: 5,
+                modifiers: KeyModifiers::NONE,
+            };
+            handle_mouse_scroll(&mut h.stoat, over_first_row, lines);
+            git_status_selected(&h)
+        });
+
+        assert_eq!(walk, [Some(2), Some(3), Some(2), Some(0)]);
+    }
+
     #[test]
     fn two_presses_on_a_diagnostics_row_select_it_then_jump() {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
