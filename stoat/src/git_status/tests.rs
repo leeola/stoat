@@ -4,10 +4,10 @@ use super::{
 };
 use crate::{
     host::{
-        git::MergeState, CommitInfo, FakeFs, FakeGit, FakeRepoBuilder, FsHost, GitHost, LocalFs,
-        LocalGit, RebaseTodoOp,
+        git::MergeState, CommitInfo, ConflictedFile, FakeFs, FakeGit, FakeRepoBuilder, FsHost,
+        GitHost, LocalFs, LocalGit, RebaseTodoOp,
     },
-    rebase::{ActiveRebase, RebaseEntry, RebaseState},
+    rebase::{ActiveRebase, ConflictResolution, RebaseEntry, RebasePause, RebaseState},
     theme::scope,
 };
 use git2::{Repository, Signature};
@@ -380,6 +380,7 @@ fn a_rebase_counts_its_progress_and_names_its_next_entries() {
             (RebaseTodoOp::Drop, "bbb".to_string()),
             (RebaseTodoOp::Edit, "ccc".to_string()),
         ],
+        conflicts: Vec::new(),
     };
     let model = read(
         |repo| {
@@ -603,4 +604,98 @@ fn the_top_follows_the_selection_down_and_back_up() {
         .collect();
 
     assert_eq!(tops, [0, 4, 5, 5, 0]);
+}
+
+/// A stage set where both sides edit the middle line, which leaves one chunk
+/// open.
+fn conflict(path: &str) -> ConflictedFile {
+    ConflictedFile {
+        path: PathBuf::from(path),
+        ancestor: Some("a\nb\nc\n".to_string()),
+        ours: Some("a\nB\nc\n".to_string()),
+        theirs: Some("a\nX\nc\n".to_string()),
+    }
+}
+
+/// A rebase paused on a conflict lists a file that waits for a side as a
+/// conflicted row with its open chunks, and a resolved file as a staged row
+/// under the side it took.
+#[test]
+fn a_rebase_pause_lists_its_conflicts() {
+    let progress = RebaseProgress {
+        done: 1,
+        total: 2,
+        onto: "c1".to_string(),
+        head: "c1".to_string(),
+        message: None,
+        next: Vec::new(),
+        conflicts: vec![
+            (conflict("render/chrome.rs"), None),
+            (conflict("theme.rs"), Some(Note::TookOurs)),
+        ],
+    };
+    let model = read(|_| {}, Some(&progress), &HashMap::new());
+
+    assert_eq!(
+        model.sections,
+        [
+            section(
+                SectionKind::Conflicted,
+                vec![row(
+                    "render/chrome.rs",
+                    RowKind::Unmerged,
+                    Note::Open { open: 1, total: 1 }
+                )],
+            ),
+            section(
+                SectionKind::Staged,
+                vec![row("theme.rs", RowKind::Modified, Note::TookOurs)],
+            ),
+        ],
+    );
+}
+
+/// The progress copies a conflict pause's files, each with the side its
+/// resolution takes, and a skipped file reads as still waiting.
+#[test]
+fn rebase_progress_copies_the_pause_conflicts() {
+    let mut active = ActiveRebase::new(
+        RebaseState::new(
+            PathBuf::from(ROOT),
+            "base".to_string(),
+            vec![entry(RebaseTodoOp::Pick, "sha0")],
+        ),
+        None,
+    );
+    active.pause = Some(RebasePause::Conflict {
+        source_sha: "sha0".to_string(),
+        files: vec![
+            conflict("a.rs"),
+            conflict("b.rs"),
+            conflict("c.rs"),
+            conflict("d.rs"),
+        ],
+        selected: 0,
+        resolutions: HashMap::from([
+            (PathBuf::from("a.rs"), ConflictResolution::TakeTheirs),
+            (PathBuf::from("b.rs"), ConflictResolution::TakeOurs),
+            (PathBuf::from("c.rs"), ConflictResolution::SkipEntry),
+        ]),
+        merge_rows: vec![None, None, None, None],
+    });
+
+    let copied: Vec<(PathBuf, Option<Note>)> = RebaseProgress::of(&active)
+        .conflicts
+        .into_iter()
+        .map(|(file, note)| (file.path, note))
+        .collect();
+    assert_eq!(
+        copied,
+        [
+            (PathBuf::from("a.rs"), Some(Note::TookTheirs)),
+            (PathBuf::from("b.rs"), Some(Note::TookOurs)),
+            (PathBuf::from("c.rs"), None),
+            (PathBuf::from("d.rs"), None),
+        ],
+    );
 }

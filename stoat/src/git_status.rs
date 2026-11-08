@@ -10,9 +10,11 @@
 //! editor state, so the panel runs it on the blocking pool.
 
 use crate::{
-    host::{git::MergeState, ChangedFile, FsHost, GitRepo, RebaseTodoOp, StagedKind},
+    host::{
+        git::MergeState, ChangedFile, ConflictedFile, FsHost, GitRepo, RebaseTodoOp, StagedKind,
+    },
     merge_view::MergeDoc,
-    rebase::ActiveRebase,
+    rebase::{ActiveRebase, ConflictResolution, RebasePause},
     theme::scope,
     workspace::diff,
 };
@@ -158,7 +160,7 @@ pub(crate) enum Note {
 ///
 /// The copy exists because the model reads on the blocking pool, and the
 /// rebase stays behind with the workspace on the loop.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub(crate) struct RebaseProgress {
     pub(crate) done: usize,
     pub(crate) total: usize,
@@ -170,6 +172,13 @@ pub(crate) struct RebaseProgress {
     pub(crate) message: Option<String>,
     /// The first entries left to apply, each as its op and its commit's sha.
     pub(crate) next: Vec<(RebaseTodoOp, String)>,
+    /// The files a pause on a conflict holds, each with the note of the side
+    /// its resolution takes, or `None` while it waits for one. Empty unless
+    /// the rebase is paused on a conflict.
+    ///
+    /// The pause keeps these in memory rather than in the index, so
+    /// [`GitRepo::conflicted_paths`] never lists them.
+    pub(crate) conflicts: Vec<(ConflictedFile, Option<Note>)>,
 }
 
 /// The git status panel while it is open.
@@ -308,7 +317,14 @@ impl GitStatusModel {
         // The repository's own workdir, because every `ChangedFile` path joins
         // it, so a line count's path joined to it compares equal.
         let root = repo.workdir().unwrap_or_default();
-        let sections = read_sections(repo, fs, languages, &root, resolved);
+        let sections = read_sections(
+            repo,
+            fs,
+            languages,
+            &root,
+            rebase.map_or(&[][..], |rebase| &rebase.conflicts),
+            resolved,
+        );
         let op = match (rebase, repo.merge_state()) {
             (Some(rebase), _) => Some(rebase_banner(rebase)),
             (None, Some(merge)) => {
@@ -426,8 +442,34 @@ impl RebaseProgress {
                 .take(NEXT_SHOWN)
                 .map(|entry| (entry.op, entry.commit.sha.clone()))
                 .collect(),
+            conflicts: paused_conflicts(active),
         }
     }
+}
+
+/// The files of `active`'s conflict pause, each with the note of the side its
+/// resolution takes.
+///
+/// A file skipped by [`ConflictResolution::SkipEntry`] reads as still waiting,
+/// since that resolution picks no side of the file.
+fn paused_conflicts(active: &ActiveRebase) -> Vec<(ConflictedFile, Option<Note>)> {
+    let Some(RebasePause::Conflict {
+        files, resolutions, ..
+    }) = &active.pause
+    else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .map(|file| {
+            let note = match resolutions.get(&file.path) {
+                Some(ConflictResolution::TakeOurs) => Some(Note::TookOurs),
+                Some(ConflictResolution::TakeTheirs) => Some(Note::TookTheirs),
+                Some(ConflictResolution::SkipEntry) | None => None,
+            };
+            (file.clone(), note)
+        })
+        .collect()
 }
 
 /// How far HEAD has moved from the branch it follows, and the header's name
@@ -485,6 +527,7 @@ fn read_sections(
     fs: &dyn FsHost,
     languages: &LanguageRegistry,
     workdir: &Path,
+    paused: &[(ConflictedFile, Option<Note>)],
     resolved: &HashMap<PathBuf, Note>,
 ) -> Vec<Section> {
     let stats = repo.change_line_stats();
@@ -495,21 +538,38 @@ fn read_sections(
     };
     let (staged_lines, unstaged_lines) = (lines(&stats.staged), lines(&stats.unstaged));
 
-    let conflicted = repo
+    let mut conflicted: Vec<FileRow> = repo
         .conflicted_paths()
         .into_iter()
         .map(|path| FileRow {
-            note: open_note(repo, languages, &path),
+            note: repo
+                .conflict_stages(&path)
+                .map_or(Note::None, |stages| open_note(&stages, languages)),
             kind: RowKind::Unmerged,
             path,
         })
         .collect();
-    // FIXME: A rebase pause holds its conflicts in memory rather than in the
-    // index, so they never list as conflicted rows.
 
     let mut staged = Vec::new();
     let mut unstaged = Vec::new();
     let mut untracked = Vec::new();
+    // A pause's file waiting for a side lists as conflicted, and a resolved
+    // one as staged under the side it took, as the rebase board lists them.
+    for (file, taken) in paused {
+        let path = workdir.join(&file.path);
+        match taken {
+            Some(note) => staged.push(FileRow {
+                path,
+                kind: RowKind::Modified,
+                note: *note,
+            }),
+            None => conflicted.push(FileRow {
+                note: open_note(file, languages),
+                kind: RowKind::Unmerged,
+                path,
+            }),
+        }
+    }
     for file in repo.changed_files() {
         if file.untracked {
             untracked.push(FileRow {
@@ -572,13 +632,9 @@ fn read_sections(
     .collect()
 }
 
-/// The open note of the conflicted file at `path`, or no note when the index
-/// holds no stages for it.
-fn open_note(repo: &dyn GitRepo, languages: &LanguageRegistry, path: &Path) -> Note {
-    let Some(stages) = repo.conflict_stages(path) else {
-        return Note::None;
-    };
-    let doc = MergeDoc::from_stages(&stages, languages.for_path(path).as_ref());
+/// The open note of a conflicted file, counted from its stages.
+fn open_note(stages: &ConflictedFile, languages: &LanguageRegistry) -> Note {
+    let doc = MergeDoc::from_stages(stages, languages.for_path(&stages.path).as_ref());
     Note::Open {
         open: doc
             .chunks
