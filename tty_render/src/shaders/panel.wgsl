@@ -43,6 +43,10 @@ const STYLE_DASHED: u32 = 5u;
 // edge carries half of it, and three sigma out it reaches zero.
 const SHADOW_COLOR: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
 const SHADOW_ALPHA: f32 = 0.32;
+// Peak opacity of a tucked shadow's interior bottom band, at the box's bottom
+// edge, falling to zero across the margin as it rises. The band is a raised
+// card's own shading, so it is the darkest of the shadows.
+const SHADOW_ALPHA_TUCKED: f32 = 0.45;
 // Peak opacity of an overhang shadow's interior bottom band, at the box's bottom
 // edge, falling to zero across the margin as it rises. Fainter than SHADOW_ALPHA
 // so it reads as a soft cast rather than a hard line.
@@ -66,8 +70,9 @@ struct VsOut {
     // This panel's draw index, so the fragment shader can occlude against every
     // later (higher-index, on-top) panel.
     @location(9) @interpolate(flat) instance: u32,
-    // Shadow mode: 0.0 drop (exterior, offset), 1.0 tucked (exterior, clipped at
-    // the box bottom), 2.0 overhang (a small interior band along the bottom edge).
+    // Shadow mode: 0.0 drop (exterior, offset), 1.0 tucked (an interior band along
+    // the bottom edge), 2.0 overhang (a fainter, shorter interior band along the
+    // bottom edge), 3.0 halo (exterior, clipped at the box bottom).
     @location(10) @interpolate(flat) shadow_mode: f32,
 }
 
@@ -86,12 +91,12 @@ struct PanelIn {
     @location(10) shadow_mode: f32,
 }
 
-// The shadow, the fill, and the overhang band.
+// The shadow, the fill, and the bottom band.
 //
 // The interior rectangle sits two pixels past the corner arcs, where the fill
-// alone reaches a pixel, so an unfilled panel leaves it out. An overhang casts
-// its band inside the bottom edge even with no fill, so the bottom inset also
-// clears the band.
+// alone reaches a pixel, so an unfilled panel leaves it out. A tucked or
+// overhang panel casts its band inside the bottom edge even with no fill, so
+// the bottom inset also clears the band.
 @vertex
 fn vs_under(
     @builtin(vertex_index) vertex_index: u32,
@@ -100,7 +105,11 @@ fn vs_under(
 ) -> VsOut {
     let radius = panel_radius(panel);
     let side = radius + 2.0;
-    let bottom = select(side, max(radius, panel.shadow_margin) + 2.0, panel.shadow_mode > 1.5);
+    let bottom = select(
+        side,
+        max(radius, panel.shadow_margin) + 2.0,
+        casts_band(panel.shadow_mode)
+    );
     return panel_vertex(
         vertex_index,
         instance_index,
@@ -323,7 +332,13 @@ struct Coverage {
     stroke: f32,
     fill: f32,
     shadow: f32,
-    overhang: f32,
+    band: f32,
+}
+
+/// Whether shadow `mode` casts a band inside the box's bottom edge, as tucked
+/// (1) and overhang (2) do, rather than a shadow outside it.
+fn casts_band(mode: f32) -> bool {
+    return mode > 0.5 && mode < 2.5;
 }
 
 /// The corner radius the box draws with, held to its shorter half side.
@@ -389,31 +404,34 @@ fn coverage_of(in: VsOut) -> Coverage {
     let sigma = margin / 3.0;
     let shadow_min = in.box_min + offset;
     let shadow_max = in.box_max + offset;
-    // A tucked shadow (mode 1) paints nothing below the box's bottom edge, so the
-    // seam with whatever sits below the panel stays clean. The cut ends over one
-    // pixel rather than mid-pixel.
+    // A halo (mode 3) paints nothing below the box's bottom edge, so the panel
+    // meets whatever sits below it with no shadow between them. The cut ends over
+    // one pixel rather than mid-pixel.
     let clip = select(
         1.0,
         clamp(in.box_max.y - p.y + 0.5, 0.0, 1.0),
-        in.shadow_mode > 0.5 && in.shadow_mode < 1.5
+        in.shadow_mode > 2.5
     );
-    // Exterior shadow for drop (mode 0) and tucked (mode 1), gated to the box
+    // Exterior shadow for drop (mode 0) and halo (mode 3), gated to the box
     // exterior so an unfilled panel's interior is not washed by its own shadow.
     // `interior` is 1 inside the box and 0 outside.
     let shadow_base = select(
         0.0,
         SHADOW_ALPHA * shadow_alpha(p, shadow_min, shadow_max, radius, sigma),
-        margin > 0.0 && in.shadow_mode < 1.5
+        margin > 0.0 && !casts_band(in.shadow_mode)
     ) * (1.0 - interior) * clip;
-    // Overhang (mode 2): a small interior band rising from the box's bottom edge,
-    // so the panel reads as tucked under whatever overhangs it above.
-    let overhang = select(
+    // Tucked (mode 1) and overhang (mode 2): a band inside the box that rises
+    // from its bottom edge and fades out across the margin. Tucked shades a
+    // raised card, and the fainter overhang reads as a panel tucked under
+    // whatever overhangs it above.
+    let band_alpha = select(SHADOW_ALPHA_OVERHANG, SHADOW_ALPHA_TUCKED, in.shadow_mode < 1.5);
+    let band = select(
         0.0,
-        SHADOW_ALPHA_OVERHANG * (1.0 - smoothstep(0.0, margin, in.box_max.y - p.y)) * interior,
-        in.shadow_mode > 1.5
+        band_alpha * (1.0 - smoothstep(0.0, margin, in.box_max.y - p.y)) * interior,
+        casts_band(in.shadow_mode)
     );
 
-    return Coverage(stroke, fill_alpha, shadow_base, overhang);
+    return Coverage(stroke, fill_alpha, shadow_base, band);
 }
 
 /// Hand an accumulated premultiplied color back as the unpremultiplied color the
@@ -426,7 +444,7 @@ fn unpremultiply(acc: vec4<f32>) -> vec4<f32> {
 }
 
 /// Everything of the panel that sits beneath the text it frames: the exterior
-/// shadow, the optional fill, and the overhang band cast onto that fill.
+/// shadow, the optional fill, and the bottom band cast onto that fill.
 @fragment
 fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     if occluded(in.clip.xy, in.instance) {
@@ -434,11 +452,12 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     }
 
     // More than a pixel inside the edge, the interior coverage is whole, so the
-    // exterior shadow is zero and the fill alone reaches the pixel. These
-    // fragments return before coverage_of, which pays for the blur on every
-    // fragment it runs for, and a modal's box is most of its quad. An overhang
-    // (mode 2) casts its band inside the box, so it keeps the full path.
-    if box_distance(in) < -1.0 && in.shadow_mode < 1.5 {
+    // exterior shadow is zero, and above a band's margin the band is zero too.
+    // The fill alone reaches such a pixel. These fragments return before
+    // coverage_of, which pays for the blur on every fragment it runs for, and a
+    // modal's box is most of its quad.
+    let above_band = !casts_band(in.shadow_mode) || in.box_max.y - in.quad_px.y > in.shadow.z;
+    if box_distance(in) < -1.0 && above_band {
         if in.fill_flag <= 0.0 {
             discard;
         }
@@ -450,7 +469,7 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     acc = over(acc, SHADOW_COLOR, c.shadow);
     acc = over(acc, in.fill, c.fill);
-    acc = over(acc, SHADOW_COLOR, c.overhang);
+    acc = over(acc, SHADOW_COLOR, c.band);
     return unpremultiply(acc);
 }
 

@@ -1711,17 +1711,19 @@ pub enum BorderStyle {
 ///
 /// [`PanelShadow::None_`] draws no shadow. [`PanelShadow::Drop`] displaces and
 /// blurs the shadow so the panel reads as floating above the grid.
-/// [`PanelShadow::Tucked`] leaves it undisplaced and clipped above the panel's
-/// bottom edge, so the panel reads as emerging from beneath what sits below it.
-/// [`PanelShadow::Overhang`] drops the exterior halo entirely for a small shadow
-/// band inside the panel's bottom edge, so it reads as tucked under what overhangs
-/// it above.
+/// [`PanelShadow::Tucked`] draws nothing outside the panel, only a dark band
+/// inside its bottom edge, so the panel reads as a raised card.
+/// [`PanelShadow::Overhang`] draws a fainter, shorter band in the same place, so
+/// it reads as tucked under what overhangs it above. [`PanelShadow::Halo`] leaves
+/// the shadow undisplaced and clipped above the panel's bottom edge, so the panel
+/// reads as emerging from beneath what sits below it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PanelShadow {
     None_,
     Drop,
     Tucked,
     Overhang,
+    Halo,
 }
 
 /// A cell's role in a scaled glyph block.

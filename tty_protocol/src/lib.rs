@@ -149,9 +149,14 @@
 /// with no outline. A terminal that predates it reads the presence byte as the
 /// outline's red and strokes every thumb. This version drops a shorter head.
 ///
+/// Version 22 reads shadow code 4 in a `panel` as a halo clipped at the panel's
+/// bottom edge, and draws code 2 (tucked) as a band inside the panel along that
+/// edge. A terminal that predates it reads code 4 as a drop shadow and draws
+/// code 2 as the halo.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 21;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

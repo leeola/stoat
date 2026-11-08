@@ -370,14 +370,18 @@ fn the_panes_sit_one_chrome_column_in_from_each_window_edge() {
     }
 }
 
-/// Each pane's island halo shades the margin beside it, darkest at the pane's
-/// edge and gone a few pixels out.
+/// Each pane's island darkens a band inside its bottom edge and shades nothing
+/// on the margin beside it.
 ///
-/// The pane starts at pixel column 9, past the one-column margin. The tucked
-/// halo reaches 6 pixels out, so pixel column 8 takes a shade darker than the
-/// ground in every channel, and columns 0 and 1 keep the chrome ground.
+/// The pane starts at pixel column 9, past the one-column margin, so pixel
+/// column 8 keeps the chrome ground. Row 48 is the pane's last content row,
+/// above the status row. The band rises six pixels from the pane's bottom edge,
+/// so row 47 keeps the base surface, and row 48's last pixel row and the fifth
+/// from its bottom both read darker than it in every channel. The fifth lies
+/// past the island's two-pixel corner radius, so it reads the band only where
+/// the band reaches past the corner arcs.
 #[test]
-fn the_island_halo_shades_the_margin_beside_the_pane() {
+fn the_island_s_bottom_band_darkens_inside_the_pane() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (_, y, _, height) = cell_rect(0, 4, 1, 1);
@@ -385,23 +389,31 @@ fn the_island_halo_shades_the_margin_beside_the_pane() {
     expect_region(
         &shot,
         &mut home,
-        (0, y, 2, height),
+        (8, y, 1, height),
         CHROME,
-        "margin_past_the_halo",
+        "margin_beside_the_pane",
     );
-    let shade = dominant_color(&shot, (8, y, 1, height));
-    if shade
-        .iter()
-        .zip(CHROME)
-        .any(|(&shade, chrome)| shade >= chrome)
-    {
-        let frame = keep_frame(&shot, &mut home, "halo_edge");
-        panic!(
-            "the margin's last pixel column reads {}, not darker than {}; the frame is {}",
-            hex(shade),
-            hex(CHROME),
-            frame.display(),
-        );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(80, ROWS - 3, 1, 1),
+        BASE,
+        "row_above_the_band",
+    );
+
+    let (x, y, width, height) = cell_rect(80, ROWS - 2, 1, 1);
+    for from_bottom in [1, 5] {
+        let band = dominant_color(&shot, (x, y + height - from_bottom, width, 1));
+        if band.iter().zip(BASE).any(|(&band, base)| band >= base) {
+            let frame = keep_frame(&shot, &mut home, "bottom_band");
+            panic!(
+                "pixel row {from_bottom} from the pane's bottom reads {}, not darker than {}; \
+                 the frame is {}",
+                hex(band),
+                hex(BASE),
+                frame.display(),
+            );
+        }
     }
 }
 

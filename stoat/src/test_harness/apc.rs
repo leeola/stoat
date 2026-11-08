@@ -351,7 +351,7 @@ mod tests {
     }
 
     /// The which-key box draws as the docked card, a borderless panel in the
-    /// card's fill at radius 2, whose shadow tucks under its bottom edge.
+    /// card's fill at radius 2, whose halo stops at its bottom edge.
     #[test]
     fn the_which_key_box_draws_as_the_docked_card() {
         let mut h = frame_after("space");
@@ -374,7 +374,7 @@ mod tests {
                 .collect();
         assert_eq!(
             filled,
-            [(BorderStyle::None_, PanelShadow::Tucked, 2, fill)],
+            [(BorderStyle::None_, PanelShadow::Halo, 2, fill)],
             "the box is the frame's one filled panel"
         );
     }

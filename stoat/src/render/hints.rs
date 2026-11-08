@@ -435,7 +435,7 @@ fn docked_frame(
         border: fill,
         corner_radius: 2,
         fill: Some(fill),
-        shadow: PanelShadow::Tucked,
+        shadow: PanelShadow::Halo,
         inset_x: 0,
         above_pools: true,
         backdrop: false,

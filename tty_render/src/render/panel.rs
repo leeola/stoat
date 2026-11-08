@@ -45,18 +45,25 @@ const SHADOW_MARGIN: f32 = 16.0;
 /// panel reads as floating above the grid rather than pasted onto it.
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
-/// Blur radius in logical pixels for a tucked shadow. Tighter than
-/// [`SHADOW_MARGIN`] so the undisplaced halo reads as a seam rather than a float.
+/// Height in logical pixels of a tucked shadow's interior bottom band, the band
+/// a raised card darkens inside its bottom edge. It peaks at 0.45 opacity at the
+/// edge and fades out as it rises.
 const SHADOW_MARGIN_TUCKED: f32 = 6.0;
 
-/// Height in logical pixels of an overhang shadow's interior bottom band. Small,
-/// so it reads as a faint shadow cast onto the panel by whatever overhangs it.
+/// Height in logical pixels of an overhang shadow's interior bottom band. Shorter
+/// than a tucked band and fainter, at 0.14, so it reads as a faint shadow cast
+/// onto the panel by whatever overhangs it.
 const SHADOW_MARGIN_OVERHANG: f32 = 5.0;
+
+/// Blur radius in logical pixels for a halo shadow. Tighter than
+/// [`SHADOW_MARGIN`], so the undisplaced halo stays a thin dark edge close to the
+/// panel and does not read as the panel floating.
+const SHADOW_MARGIN_HALO: f32 = 6.0;
 
 /// The per-panel instance data. Carries the anchor cell, the size in cells, the
 /// fill and stroke colors, the shadow displacement and blur radius, the corner
 /// radius, a flag selecting whether the fill is painted, the border style code,
-/// and the shadow mode (0 drop, 1 tucked, 2 overhang).
+/// and the shadow mode (0 drop, 1 tucked, 2 overhang, 3 halo).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct PanelInstance {
@@ -467,6 +474,7 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
             PanelShadow::Drop => (SHADOW_OFFSET, SHADOW_MARGIN, 0.0),
             PanelShadow::Tucked => ([0.0, 0.0], SHADOW_MARGIN_TUCKED, 1.0),
             PanelShadow::Overhang => ([0.0, 0.0], SHADOW_MARGIN_OVERHANG, 2.0),
+            PanelShadow::Halo => ([0.0, 0.0], SHADOW_MARGIN_HALO, 3.0),
             PanelShadow::None_ => ([0.0, 0.0], 0.0, 0.0),
         };
         PanelInstance {
@@ -524,6 +532,9 @@ mod tests {
     /// padding.
     const TARGET: u32 = 64;
 
+    /// The ground [`panel_pixel`] draws its panel over.
+    const GROUND: [u8; 3] = [51, 153, 102];
+
     /// Which halves of the panel pass a fixture draws.
     ///
     /// The frame is recorded above the text it surrounds, so a fixture reading
@@ -543,6 +554,54 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate panel");
+    }
+
+    /// The color at pixel `(x, y)` once a `cells`-square panel at cell (1, 1) in
+    /// `fill` and `shadow` draws over [`GROUND`].
+    ///
+    /// Cells are 12 pixels at scale 1, so a two-cell box spans pixels 12 to 36
+    /// on each axis and a one-cell box spans 12 to 24. The panel's corner
+    /// radius is 6 and its frame is light, and the fixture leaves the frame off.
+    fn panel_pixel(
+        device: &Device,
+        queue: &Queue,
+        cells: u16,
+        fill: Option<Rgb>,
+        shadow: PanelShadow,
+        (x, y): (u32, u32),
+    ) -> [u8; 3] {
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let ground = Color {
+            r: f64::from(GROUND[0]) / 255.0,
+            g: f64::from(GROUND[1]) / 255.0,
+            b: f64::from(GROUND[2]) / 255.0,
+            a: 1.0,
+        };
+        let mut grid = Grid::new(4, 4);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 1,
+            width: cells,
+            height: cells,
+            style: BorderStyle::Light,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 6,
+            fill,
+            shadow,
+            inset_x: 0,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 0,
+        }]);
+        let rgba = render_rgba(device, queue, &grid, metrics, ground, Halves::Under);
+        let at = ((y * TARGET + x) * 4) as usize;
+        [rgba[at], rgba[at + 1], rgba[at + 2]]
     }
 
     /// Draw `grid`'s panels alone onto a [`TARGET`]-square target cleared to
@@ -768,68 +827,81 @@ mod tests {
     /// A box too small for an interior rectangle gets its middle from the edge
     /// bands, which meet there, so its fill covers that middle whole too.
     ///
-    /// An overhang is the exception. It casts its band onto the fill from inside
-    /// the bottom edge, so a pixel just above that edge reads darker than the
-    /// fill.
+    /// A tucked panel and an overhang are the exceptions. Each casts a band onto
+    /// the fill from inside the bottom edge, so a pixel just above that edge
+    /// reads darker than the fill, the tucked band the darker of the two.
     #[test]
     fn a_panel_interior_paints_the_fill_alone() {
         let (device, queue) = require_headless_device();
-
-        let metrics = CellMetrics {
-            font_size: 10.0,
-            width: 12.0,
-            height: 12.0,
-            scale_factor: 1.0,
-        };
-        let ground = Color {
-            r: 51.0 / 255.0,
-            g: 153.0 / 255.0,
-            b: 102.0 / 255.0,
-            a: 1.0,
-        };
-        let blue = Rgb::new(0, 0, 255);
-        // A two-cell box spans pixels 12 to 36 on each axis. Pixel (24, 24) sits
-        // twelve pixels inside every edge, and row 33 two and a half above the
-        // bottom. A one-cell box spans 12 to 24, so (18, 18) is its middle.
-        let pixel = |cells: u16, fill, shadow, (x, y): (u32, u32)| {
-            let mut grid = Grid::new(4, 4);
-            grid.set_panels(vec![Panel {
-                top: 1,
-                left: 1,
-                width: cells,
-                height: cells,
-                style: BorderStyle::Light,
-                border: Rgb::new(255, 0, 0),
-                corner_radius: 6,
-                fill,
-                shadow,
-                inset_x: 0,
-                above_pools: false,
-                backdrop: false,
-                anchor: None,
-                seq: 0,
-            }]);
-            let rgba = render_rgba(&device, &queue, &grid, metrics, ground, Halves::Under);
-            let at = ((y * TARGET + x) * 4) as usize;
-            [rgba[at], rgba[at + 1], rgba[at + 2]]
-        };
+        let blue = Some(Rgb::new(0, 0, 255));
+        // Pixel (24, 24) sits twelve pixels inside every edge of a two-cell box,
+        // and (18, 18) is the middle of a one-cell box.
+        let pixel = |cells, fill, shadow, at| panel_pixel(&device, &queue, cells, fill, shadow, at);
 
         assert_eq!(
             (
                 pixel(2, None, PanelShadow::Drop, (24, 24)),
-                pixel(2, Some(blue), PanelShadow::Drop, (24, 24)),
-                pixel(1, Some(blue), PanelShadow::Drop, (18, 18)),
+                pixel(2, blue, PanelShadow::Drop, (24, 24)),
+                pixel(1, blue, PanelShadow::Drop, (18, 18)),
+                pixel(2, blue, PanelShadow::Tucked, (24, 24)),
             ),
-            ([51, 153, 102], [0, 0, 255], [0, 0, 255]),
+            (GROUND, [0, 0, 255], [0, 0, 255], [0, 0, 255]),
             "the ground shows through an unfilled interior, and a fill covers it whole, \
-             the one-cell box's middle included",
+             the one-cell box's middle and a tucked box above its band included",
         );
-        // The band lays 0.07 of black there, which is 237 of the fill's 255 blue,
-        // give or take the rounding a driver does.
-        let overhung = pixel(2, Some(blue), PanelShadow::Overhang, (24, 33));
+        // Row 33 sits two and a half pixels above the bottom edge. The band lays
+        // 0.07 of black there, which is 237 of the fill's 255 blue, give or take
+        // the rounding a driver does.
+        let overhung = pixel(2, blue, PanelShadow::Overhang, (24, 33));
         assert!(
             matches!(overhung, [0, 0, 230..=245]),
             "the overhang band darkens the fill above the bottom edge, got {overhung:?}",
+        );
+        // Row 35 sits half a pixel above the bottom edge, where the tucked band
+        // lays 0.44 of black, which is 143 of the fill's 255 blue. Row 33 lies
+        // more than a pixel inside the edge, where the band still lays 0.28, which
+        // is 183 of the blue and keeps 72 percent of an unfilled box's ground.
+        let tucked = [
+            pixel(2, blue, PanelShadow::Tucked, (24, 35)),
+            pixel(2, blue, PanelShadow::Tucked, (24, 33)),
+        ];
+        assert!(
+            matches!(tucked, [[0, 0, 136..=150], [0, 0, 176..=190]]),
+            "the tucked band darkens the fill's last rows, deepest at the edge, got {tucked:?}",
+        );
+        let ground = pixel(2, None, PanelShadow::Tucked, (24, 33));
+        assert!(
+            matches!(ground, [30..=43, 104..=117, 67..=80]),
+            "the tucked band darkens the ground under an unfilled box, got {ground:?}",
+        );
+    }
+
+    /// A tucked panel shades nothing outside its box, so the ground beside,
+    /// above, and below it keeps its color. A halo shades the ground beside the
+    /// box and stops at its bottom edge.
+    #[test]
+    fn a_tucked_box_shades_nothing_outside_and_a_halo_stops_at_the_bottom() {
+        let (device, queue) = require_headless_device();
+        let blue = Some(Rgb::new(0, 0, 255));
+        // A two-cell box spans pixels 12 to 36, and the shadow margin pads both
+        // quads by six pixels, so every pixel read here rasterizes.
+        let tucked = |at| panel_pixel(&device, &queue, 2, blue, PanelShadow::Tucked, at);
+        let halo = |at| panel_pixel(&device, &queue, 2, blue, PanelShadow::Halo, at);
+
+        assert_eq!(
+            [
+                tucked((10, 24)),
+                tucked((24, 10)),
+                tucked((24, 38)),
+                halo((24, 38))
+            ],
+            [GROUND; 4],
+            "no tucked shade beside, above, or below the box, and no halo below it",
+        );
+        let beside = halo((10, 24));
+        assert!(
+            matches!(beside, [r, g, b] if r < GROUND[0] && g < GROUND[1] && b < GROUND[2]),
+            "the halo darkens the ground beside the box, got {beside:?}",
         );
     }
 
@@ -1139,30 +1211,42 @@ mod tests {
         assert_eq!(instances[0].shadow_mode, 0.0);
     }
 
+    /// A tucked band and a halo both stay on the box, so neither displaces its
+    /// shadow. Each reaches the shader as its own mode and margin.
     #[test]
-    fn tucked_panel_undisplaces_and_clips_the_shadow() {
-        let panels = [Panel {
-            top: 2,
-            left: 2,
-            width: 6,
-            height: 3,
-            style: BorderStyle::Light,
-            border: Rgb::new(1, 2, 3),
-            corner_radius: 0,
-            fill: Some(Rgb::new(4, 5, 6)),
-            shadow: PanelShadow::Tucked,
-            inset_x: 4,
-            above_pools: false,
-            backdrop: false,
-            anchor: None,
-            seq: 0,
-        }];
+    fn tucked_and_halo_panels_keep_their_shadows_on_the_box() {
+        let instance = |shadow| {
+            let panels = [Panel {
+                top: 2,
+                left: 2,
+                width: 6,
+                height: 3,
+                style: BorderStyle::Light,
+                border: Rgb::new(1, 2, 3),
+                corner_radius: 0,
+                fill: Some(Rgb::new(4, 5, 6)),
+                shadow,
+                inset_x: 4,
+                above_pools: false,
+                backdrop: false,
+                anchor: None,
+                seq: 0,
+            }];
+            let instance = build_panel_instances(&panels)[0];
+            (
+                instance.shadow_offset,
+                instance.shadow_margin,
+                instance.shadow_mode,
+            )
+        };
 
-        let instances = build_panel_instances(&panels);
-
-        assert_eq!(instances[0].shadow_offset, [0.0, 0.0], "no displacement");
-        assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN_TUCKED);
-        assert_eq!(instances[0].shadow_mode, 1.0, "clipped below the box");
+        assert_eq!(
+            [instance(PanelShadow::Tucked), instance(PanelShadow::Halo)],
+            [
+                ([0.0, 0.0], super::SHADOW_MARGIN_TUCKED, 1.0),
+                ([0.0, 0.0], super::SHADOW_MARGIN_HALO, 3.0),
+            ],
+        );
     }
 
     /// A panel that reaches the last row arrives with that row's place in its
