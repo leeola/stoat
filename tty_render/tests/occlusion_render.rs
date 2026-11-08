@@ -12,7 +12,9 @@
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, HostRide, PoolComposite, Renderer},
     render::cell_size,
-    test_support::{offscreen_target, pixel, read_back, require_headless_device, still_frame},
+    test_support::{
+        offscreen_target, pixel, read_back, renderer, require_headless_device, still_frame,
+    },
 };
 use stoatty_term::{
     grid::{Bar, BorderStyle, Grid, Icon, IconKind, Panel, PanelShadow, Polyline, Rgb, TextRun},
@@ -669,4 +671,87 @@ fn a_box_riding_a_pool_stops_occluding_it() {
         rgb(pool_bg),
         "and inside it too, since the rect the box declared is not where it is",
     );
+}
+
+/// A chip's occluder is the box the panel pass draws: shaved by its vertical
+/// inset, square at the corners its mask leaves out, and scaled to the display.
+/// So a bar of lower seq shows through the chip's bare strip and stays hidden
+/// under its square corner, at scale 1 and at scale 2.
+///
+/// The chip covers columns 2 to 5 of row 1 and shaves 6 logical pixels off the
+/// row's top and bottom. Its top corners round at 8 and its bottom corners stay
+/// square. The probe 4 logical pixels down the row lies in the bare strip,
+/// and at scale 2 past the 6 physical pixels an unscaled inset would leave.
+#[test]
+fn a_chip_occludes_only_the_box_it_draws() {
+    let (device, queue) = require_headless_device();
+    let ground = Rgb::new(10, 20, 30);
+    let bar_color = Rgb::new(200, 50, 50);
+    let rgb = |c: Rgb| [c.r, c.g, c.b];
+
+    for scale in [1u32, 2] {
+        let font_size = 30;
+        let [cell_w, cell_h] = cell_size(font_size, scale as f32).map(|side| side.round() as u32);
+        let (width, height) = (cell_w * 7, cell_h * 3);
+        let (target, view) = offscreen_target(&device, width, height);
+        let mut renderer = renderer(&device, [width, height], font_size, scale as f32, ground);
+        let (rows, cols) = renderer.grid_size();
+
+        let mut grid = Grid::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                grid.get_mut(r, c).bg = ground;
+            }
+        }
+        grid.set_bars(vec![Bar {
+            x: 0,
+            y: 16,
+            width: cols as u16 * 16,
+            height: 16,
+            color: bar_color,
+            seq: 1,
+        }]);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 1,
+            style: BorderStyle::None_,
+            border: ground,
+            corner_radius: 8,
+            fill: None,
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 6,
+            corners: 0b0011,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 100,
+        }]);
+        renderer.render_into(
+            &device,
+            &queue,
+            &view,
+            &grid,
+            still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
+        );
+        let shot = read_back(&device, &queue, &target, width, height);
+        let at = |x: u32, y: u32| pixel(&shot, width, x, y);
+
+        let (left, top, bottom, inset) = (2 * cell_w, cell_h, 2 * cell_h, 6 * scale);
+        assert_eq!(
+            [
+                at(3 * cell_w, top + 4 * scale),
+                at(3 * cell_w + cell_w / 2, top + cell_h / 2),
+                at(left + 2, bottom - inset - 3),
+                at(left + 2, top + inset + 2),
+            ],
+            [rgb(bar_color), rgb(ground), rgb(ground), rgb(bar_color)],
+            "scale {scale}: the bar shows in the bare strip and at the rounded top corner, \
+             and hides under the chip's middle and its square bottom corner",
+        );
+    }
 }

@@ -707,7 +707,7 @@ mod tests {
         let gliding = composite(PoolOccluders::new(&[], 0, true));
 
         let mut boxes = Vec::new();
-        let above = pool_occluders_into(&[covering_panel()], &[], &mut boxes);
+        let above = pool_occluders_into(&[covering_panel()], &[], 1.0, &mut boxes);
         let covered = composite(PoolOccluders::new(&boxes, above, true));
 
         let (x, y) = at_rest.expect("the live icon paints");

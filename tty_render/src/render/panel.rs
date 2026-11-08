@@ -515,7 +515,7 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
 
 /// The corners a panel rounds, as four bits from top-left clockwise. A panel
 /// that names no corner rounds all four.
-fn corner_mask(corners: u8) -> u8 {
+pub(crate) fn corner_mask(corners: u8) -> u8 {
     match corners & 0b1111 {
         0 => 0b1111,
         mask => mask,
@@ -1034,6 +1034,71 @@ mod tests {
             ],
             [red, blue, red, red],
             "the hatch lines repeat every 14 pixels, on the edge pixels as inside",
+        );
+    }
+
+    /// A later panel hides an earlier panel's fill only inside the box it draws.
+    /// The fill shows in the bare strip that the chip's vertical inset leaves,
+    /// and at the chip's rounded corner. It stays hidden under the chip's middle
+    /// and its square corner.
+    ///
+    /// The fill covers the whole grid. The chip covers columns 1 to 3 of rows 1
+    /// and 2, which is pixels 12 to 48 across and 12 to 36 down. It shaves 4
+    /// pixels off the top and the bottom, so its box spans pixels 16 to 32
+    /// down. Its top corners round at 6, and its bottom corners stay square.
+    #[test]
+    fn a_chip_hides_the_panel_beneath_only_inside_its_box() {
+        let (device, queue) = require_headless_device();
+
+        let beneath = Panel {
+            top: 0,
+            left: 0,
+            width: 5,
+            height: 5,
+            style: BorderStyle::None_,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: Some(Rgb::new(255, 0, 0)),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 0,
+        };
+        let chip = Panel {
+            top: 1,
+            left: 1,
+            width: 3,
+            height: 2,
+            corner_radius: 6,
+            fill: None,
+            inset_y: 4,
+            corners: 0b0011,
+            seq: 1,
+            ..beneath
+        };
+        let mut grid = Grid::new(5, 5);
+        grid.set_panels(vec![beneath, chip]);
+
+        let metrics = CellMetrics {
+            font_size: 10.0,
+            width: 12.0,
+            height: 12.0,
+            scale_factor: 1.0,
+        };
+        let red = render_red(&device, &queue, &grid, metrics, Halves::Under);
+        let at = |x: u32, y: u32| red[(y * TARGET + x) as usize];
+
+        assert_eq!(
+            [at(30, 13), at(13, 17), at(30, 24), at(13, 30)],
+            [255, 255, 0, 0],
+            "the fill shows in the bare strip and at the rounded top corner, \
+             and hides under the chip's middle and its square bottom corner",
         );
     }
 

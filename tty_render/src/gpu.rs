@@ -676,6 +676,7 @@ impl Renderer {
             grid.sketches(),
             &self.riding,
             self.metrics.width,
+            self.metrics.scale_factor,
             &mut self.occluders,
         );
         crate::render::place_occluder_rows(&mut self.occluders, anchor, self.metrics.height);
@@ -1125,7 +1126,12 @@ impl Renderer {
         // Every pool of a frame builds the same list and reads as much of it as
         // its own occludability names, so a second pool leaves the first one's
         // bytes alone and the upload dedup recognizes them.
-        let above = crate::render::pool_occluders_into(panels, riding, &mut self.pool_occluders);
+        let above = crate::render::pool_occluders_into(
+            panels,
+            riding,
+            self.metrics.scale_factor,
+            &mut self.pool_occluders,
+        );
         // The boxes sit on the live grid, so the live layout places their rows,
         // though the pool under them keeps the uniform pitch.
         let anchor = self.grid_layout().row_anchor();

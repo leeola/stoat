@@ -1437,6 +1437,7 @@ mod tests {
             &[],
             &[],
             CELL_METRICS.width,
+            1.0,
             &mut occluders,
         );
         let mut pass = BackgroundPass::new(&device, TextureFormat::Rgba8Unorm, CELL_METRICS);

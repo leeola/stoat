@@ -1358,7 +1358,7 @@ fn a_later_filled_box_hides_the_stroke_beneath_it() {
         seq: 2,
     };
     let mut occluders = Vec::new();
-    render::build_occluders_into(&[modal], &[], &[], metrics().width, &mut occluders);
+    render::build_occluders_into(&[modal], &[], &[], metrics().width, 1.0, &mut occluders);
 
     let open = render_red(&device, &queue, &list, &[1.0], &[], &[]);
     let hidden = render_red(&device, &queue, &list, &[1.0], &[], &occluders);

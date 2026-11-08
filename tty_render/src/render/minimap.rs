@@ -1497,7 +1497,7 @@ mod tests {
             // Above the strip's own seq, which is what makes it occlude.
             seq: 1,
         };
-        let occluders: [Occluder; 1] = [panel_occluder(&panel)];
+        let occluders: [Occluder; 1] = [panel_occluder(&panel, 1.0)];
 
         let red = render_red(&device, &queue, &grid, &occluders, metrics());
         let at = |x: u32, y: u32| red[(y * TARGET + x) as usize];

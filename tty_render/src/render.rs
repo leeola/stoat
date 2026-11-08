@@ -288,12 +288,14 @@ impl RowAnchor {
 /// drawn fragment is discarded when it lies inside an occluder whose `seq`
 /// exceeds the drawn instance's own seq, so a box declared later (higher seq)
 /// hides the lower chrome beneath its body while a box's own runs and bars
-/// (seq above their panel) survive. Padded to 32 bytes so the storage-array
+/// (seq above their panel) survive. Padded to 40 bytes so the storage-array
 /// stride matches the 8-byte-aligned `vec2` layout WGSL computes.
 ///
-/// The radius and inset ride along because a panel does not fill the rect it
-/// declares. Occluding by the bare rect notches a square hole out of the chrome
-/// beneath each rounded corner.
+/// The radius, the insets, and the corner mask ride along because a panel does
+/// not fill the rect it declares. Occluding by the bare rect notches a square
+/// hole out of the chrome beneath each rounded corner, and hides what shows in
+/// a chip's bare strips. The radius and insets are physical pixels, scaled as
+/// the panel pass scales the box it draws.
 ///
 /// A box that reaches the last row holds fractional rows once
 /// [`place_occluder_rows`] has placed it, so the shader's plain scaling lands it
@@ -306,8 +308,14 @@ pub(crate) struct Occluder {
     seq: u32,
     corner_radius: f32,
     inset_x: f32,
+    inset_y: f32,
+    /// The rounded corners, bits 0-3 from top-left clockwise.
+    corners: u32,
     _pad: u32,
 }
+
+/// An [`Occluder`]'s corner mask with every corner rounded.
+const ALL_CORNERS: u32 = 0b1111;
 
 /// The most pool regions one live draw skips.
 ///
@@ -839,12 +847,14 @@ pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
 /// since it sits under everything it overlaps.
 ///
 /// `cell_width` is the live cell width in physical pixels, which a sketch box's
-/// corner radius is stated against.
+/// corner radius is stated against. `scale_factor` is the display scale, which
+/// a panel's radius and insets take as the panel pass draws them.
 pub(crate) fn build_occluders_into(
     panels: &[Panel],
     sketches: &[Sketch],
     riding: &[u32],
     cell_width: f32,
+    scale_factor: f32,
     out: &mut Vec<Occluder>,
 ) {
     out.clear();
@@ -852,7 +862,7 @@ pub(crate) fn build_occluders_into(
         panels
             .iter()
             .filter(|panel| !panel.backdrop && !rides(panel, riding))
-            .map(panel_occluder),
+            .map(|panel| panel_occluder(panel, scale_factor)),
     );
     out.extend(
         sketches
@@ -921,6 +931,8 @@ fn sketch_occluder(sketch: &Sketch, cell_width: f32) -> Option<Occluder> {
         seq: sketch.seq,
         corner_radius: f32::from(radius) / SKETCH_CELL_FRACTION * cell_width,
         inset_x: 0.0,
+        inset_y: 0.0,
+        corners: ALL_CORNERS,
         _pad: 0,
     })
 }
@@ -944,11 +956,15 @@ const SKETCH_CELL_FRACTION: f32 = 16.0;
 /// sits in the list changes nothing drawn, since the shader walks to that count
 /// and returns on the first box that covers the fragment.
 ///
+/// `scale_factor` is the display scale, which a panel's radius and insets take
+/// as the panel pass draws them.
+///
 /// See also:
 /// - [`PoolOccluders`] for what one pool reads off this list.
 pub(crate) fn pool_occluders_into(
     panels: &[Panel],
     riding: &[u32],
+    scale_factor: f32,
     out: &mut Vec<Occluder>,
 ) -> usize {
     out.clear();
@@ -958,7 +974,7 @@ pub(crate) fn pool_occluders_into(
             .iter()
             .filter(covers)
             .filter(|panel| panel.above_pools)
-            .map(panel_occluder),
+            .map(|panel| panel_occluder(panel, scale_factor)),
     );
     let above = out.len();
     out.extend(
@@ -966,7 +982,7 @@ pub(crate) fn pool_occluders_into(
             .iter()
             .filter(covers)
             .filter(|panel| !panel.above_pools)
-            .map(panel_occluder),
+            .map(|panel| panel_occluder(panel, scale_factor)),
     );
     above
 }
@@ -1020,13 +1036,20 @@ pub(crate) fn rides(panel: &Panel, riding: &[u32]) -> bool {
     panel.anchor.is_some_and(|(host, _)| riding.contains(&host))
 }
 
-fn panel_occluder(panel: &Panel) -> Occluder {
+/// The box `panel` draws at `scale_factor`, as an occluder.
+///
+/// The radius and insets round to whole physical pixels as the panel pass rounds
+/// them, so the occluder's edge lands on the box's own.
+fn panel_occluder(panel: &Panel, scale_factor: f32) -> Occluder {
+    let physical = |logical: u8| (f32::from(logical) * scale_factor).round();
     Occluder {
         cell: [panel.left as f32, panel.top as f32],
         size: [panel.width as f32, panel.height as f32],
         seq: panel.seq,
-        corner_radius: panel.corner_radius as f32,
-        inset_x: panel.inset_x as f32,
+        corner_radius: physical(panel.corner_radius),
+        inset_x: physical(panel.inset_x),
+        inset_y: physical(panel.inset_y),
+        corners: u32::from(panel::corner_mask(panel.corners)),
         _pad: 0,
     }
 }
@@ -1162,7 +1185,8 @@ mod tests {
         build_occluders_into, exposed_rows, globals_offset, globals_upload_needed, grid_dims,
         grid_layout, grid_size, place_occluder_rows, pool_occluders_into, rotate_row_cache,
         row_runs, row_uploads, upload_needed, CellMetrics, CompositeSlots, GridLayout, Occluder,
-        PoolOccluders, RowAnchor, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE, MAX_COMPOSITE_POOLS,
+        PoolOccluders, RowAnchor, ALL_CORNERS, GLOBALS_SLOTS, GLOBALS_SLOT_STRIDE,
+        MAX_COMPOSITE_POOLS,
     };
 
     /// A bigger font means bigger cells, so the same surface holds fewer of
@@ -1275,6 +1299,8 @@ mod tests {
             seq: 0,
             corner_radius: 0.0,
             inset_x: 0.0,
+            inset_y: 0.0,
+            corners: ALL_CORNERS,
             _pad: 0,
         });
 
@@ -1633,7 +1659,7 @@ mod tests {
     fn a_frame_s_two_pools_read_one_list_from_the_front() {
         let panels = [panel(1, false), panel(2, true), panel(3, false)];
         let mut occluders = Vec::new();
-        let above = pool_occluders_into(&panels, &[], &mut occluders);
+        let above = pool_occluders_into(&panels, &[], 1.0, &mut occluders);
 
         assert_eq!(
             (occluders.iter().map(|o| o.seq).collect::<Vec<_>>(), above),
@@ -1662,7 +1688,12 @@ mod tests {
     #[test]
     fn a_box_content_pool_with_no_box_above_pools_reads_nothing() {
         let mut occluders = Vec::new();
-        let above = pool_occluders_into(&[panel(1, false), panel(2, false)], &[], &mut occluders);
+        let above = pool_occluders_into(
+            &[panel(1, false), panel(2, false)],
+            &[],
+            1.0,
+            &mut occluders,
+        );
 
         assert_eq!(
             (occluders.len(), above),
@@ -1688,9 +1719,9 @@ mod tests {
         let panels = [panel(1, false), backdrop, panel(3, true)];
 
         let mut pool = Vec::new();
-        let above = pool_occluders_into(&panels, &[], &mut pool);
+        let above = pool_occluders_into(&panels, &[], 1.0, &mut pool);
         let mut live = Vec::new();
-        build_occluders_into(&panels, &[], &[], 8.0, &mut live);
+        build_occluders_into(&panels, &[], &[], 8.0, 1.0, &mut live);
 
         let seqs = |occluders: &[Occluder]| occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
         assert_eq!(
@@ -1711,10 +1742,10 @@ mod tests {
         let panels = [panel(1, false), riding];
 
         let mut occluders = Vec::new();
-        pool_occluders_into(&panels, &[7], &mut occluders);
+        pool_occluders_into(&panels, &[7], 1.0, &mut occluders);
         let pool = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
-        build_occluders_into(&panels, &[], &[7], metrics().width, &mut occluders);
+        build_occluders_into(&panels, &[], &[7], metrics().width, 1.0, &mut occluders);
         let base = occluders.iter().map(|o| o.seq).collect::<Vec<_>>();
 
         assert_eq!(
@@ -1725,7 +1756,7 @@ mod tests {
 
         // With the host parked, a live frame has placed the panel, so it
         // occludes from its own rect exactly as any other panel does.
-        pool_occluders_into(&panels, &[], &mut occluders);
+        pool_occluders_into(&panels, &[], 1.0, &mut occluders);
         assert_eq!(
             occluders.iter().map(|o| o.seq).collect::<Vec<_>>(),
             [2, 1],
@@ -1749,6 +1780,7 @@ mod tests {
             &[],
             &[],
             metrics().width,
+            1.0,
             &mut held,
         );
 
@@ -1758,6 +1790,7 @@ mod tests {
             &[],
             &[],
             metrics().width,
+            1.0,
             &mut again,
         );
         assert!(
@@ -1771,6 +1804,7 @@ mod tests {
             &[],
             &[],
             metrics().width,
+            1.0,
             &mut moved,
         );
         moved[1].cell[0] += 1.0;
@@ -1785,6 +1819,7 @@ mod tests {
             &[],
             &[],
             metrics().width,
+            1.0,
             &mut resequenced,
         );
         assert!(
@@ -1793,7 +1828,14 @@ mod tests {
         );
 
         let mut fewer = Vec::new();
-        build_occluders_into(&[panel(1, false)], &[], &[], metrics().width, &mut fewer);
+        build_occluders_into(
+            &[panel(1, false)],
+            &[],
+            &[],
+            metrics().width,
+            1.0,
+            &mut fewer,
+        );
         assert!(
             upload_needed(&fewer, &held),
             "a closed box leaves a shorter list"
@@ -1857,6 +1899,7 @@ mod tests {
             &[sketch_box(3, solid(), None)],
             &[],
             metrics().width,
+            1.0,
             &mut filled,
         );
         assert_eq!(filled.len(), 1, "a filled box joins the list");
@@ -1868,6 +1911,7 @@ mod tests {
             &[sketch_box(3, None, None)],
             &[],
             metrics().width,
+            1.0,
             &mut open,
         );
         assert_eq!(open, Vec::new(), "an open one hides nothing");
@@ -1884,6 +1928,7 @@ mod tests {
             &[sketch_box(1, solid(), None)],
             &[],
             metrics().width,
+            1.0,
             &mut occluders,
         );
 
@@ -1905,7 +1950,7 @@ mod tests {
         }
 
         let mut occluders = Vec::new();
-        build_occluders_into(&[], &[rounded], &[], metrics().width, &mut occluders);
+        build_occluders_into(&[], &[rounded], &[], metrics().width, 1.0, &mut occluders);
 
         assert_eq!(
             occluders[0].corner_radius,
@@ -1925,6 +1970,7 @@ mod tests {
             &[sketch_box(1, solid(), Some((7, 0.0)))],
             &[7],
             metrics().width,
+            1.0,
             &mut riding,
         );
         assert_eq!(riding, Vec::new(), "its host is gliding, so it is dropped");
@@ -1935,6 +1981,7 @@ mod tests {
             &[sketch_box(1, solid(), Some((7, 0.0)))],
             &[],
             metrics().width,
+            1.0,
             &mut still,
         );
         assert_eq!(still.len(), 1, "a host that is not gliding keeps it");
@@ -2031,10 +2078,10 @@ mod tests {
         let panels = [panel(1, false), panel(2, true)];
 
         let mut first = Vec::new();
-        let above_first = pool_occluders_into(&panels, &[], &mut first);
+        let above_first = pool_occluders_into(&panels, &[], 1.0, &mut first);
 
         let mut second = Vec::new();
-        let above_second = pool_occluders_into(&panels, &[], &mut second);
+        let above_second = pool_occluders_into(&panels, &[], 1.0, &mut second);
 
         let seqs = |list: &[Occluder]| list.iter().map(|o| o.seq).collect::<Vec<_>>();
         assert_eq!(

@@ -353,7 +353,9 @@ fn occluded(frag: vec2<f32>, instance: u32) -> bool {
             size_j,
             globals.cell_size,
             instances[base + 13u],
-            instances[base + 16u]
+            instances[base + 16u],
+            instances[base + 18u],
+            bitcast<u32>(instances[base + 19u]) & 15u
         );
         if sdf < -0.5 {
             return true;
