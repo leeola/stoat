@@ -16,7 +16,7 @@ use crate::{
             DIFF_OVERVIEW_COLS,
         },
         layout::split_pane_status,
-        paint::{dim_rgb, style_rgb},
+        paint::{blend, dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
             wrap_popout_lines,
@@ -51,13 +51,17 @@ use std::{
     path::Path,
 };
 use stoat_widgets::{
+    bar::Bar,
     minimap::Minimap,
     panel::Panel,
-    status_bar::{StatusBar, StatusSegment},
+    status_bar::{self, SegmentBox, StatusBar, StatusSegment},
     text_run::{self, TextRun},
     ApcScene,
 };
-use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_protocol::command::{
+    panel::{CORNER_TOP_LEFT, CORNER_TOP_RIGHT, FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT},
+    BorderStyle, PanelShadow,
+};
 
 /// Buffer lines the minimap strip draws per vertical cell.
 pub(super) const MINIMAP_LINES_PER_CELL: u8 = 8;
@@ -85,6 +89,19 @@ const SIDE_NAME_LIFT: f32 = 0.4;
 
 /// The tab bar's conflict chip's `padding: 0 8px`, in sixteenths.
 const CHIP_PAD: u16 = 8;
+
+/// The top of the hairline that parts the tab bar's workspace name from its
+/// tabs, in sixteenths down the row.
+const TAB_DIVIDER_TOP: i16 = 1;
+
+/// The height of that hairline in sixteenths, which centers it in the row, as
+/// the Editor board draws a 14 px rule in the tab bar.
+const TAB_DIVIDER_HEIGHT: u16 = 14;
+
+/// How much of a tag's color the dot joining it to a tab's name keeps over
+/// the tab's background, in percent, as the Editor board draws the dot at
+/// 55 percent opacity.
+const TAG_DOT_PERCENT: u16 = 55;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_pane(
@@ -977,7 +994,8 @@ pub(crate) fn render_overlay_status(
         left,
         right,
         hairline: true,
-        mode_chip: is_focused,
+        boxes: mode_chip_box(is_focused),
+        dots: Vec::new(),
     };
     render_status_runs(&[run], frame, buf, scene, None);
 }
@@ -1176,9 +1194,45 @@ struct StatusRun {
     /// Whether the run draws the bar's hairline along its top. A half's tint
     /// already sets it apart from the content, so the halves draw none.
     hairline: bool,
-    /// Whether the first left segment is the mode chip, which a live scene
-    /// draws as a chip box of whole cells ahead of the other segments.
-    mode_chip: bool,
+    /// Runs of left segments that a live scene draws in one box of whole
+    /// cells each, such as the mode chip and a tab.
+    boxes: Vec<RunBox>,
+    /// The left segments that a live scene draws as a small square in their
+    /// foreground in place of their text, such as the dot that joins a tab's
+    /// name to its tag.
+    dots: Vec<usize>,
+}
+
+/// A run of a [`StatusRun`]'s left segments that a live scene draws in one
+/// box of whole cells, as a [`SegmentBox`] lays it out.
+#[derive(Clone, Hash)]
+struct RunBox {
+    /// The run, as indices into [`StatusRun::left`].
+    segments: Range<usize>,
+    /// The panel the box draws as, or `None` for a box that only aligns the
+    /// run to whole cells.
+    shape: Option<BoxShape>,
+}
+
+/// The panel a [`RunBox`] draws as, in its first segment's background.
+#[derive(Clone, Copy, Hash)]
+enum BoxShape {
+    /// A chip one logical pixel inside the row, as [`Panel::chip`] draws it.
+    Chip,
+    /// The active tab, as [`tab_panel`] draws it.
+    Tab,
+}
+
+/// The box a run that leads with the mode chip draws it in, or none for a run
+/// without the chip.
+fn mode_chip_box(leads: bool) -> Vec<RunBox> {
+    match leads {
+        true => vec![RunBox {
+            segments: 0..1,
+            shape: Some(BoxShape::Chip),
+        }],
+        false => Vec::new(),
+    }
 }
 
 /// The status row that [`render_pane`] paints for `pane`.
@@ -1336,8 +1390,9 @@ pub(crate) struct StatusSceneCache {
 /// `ui.statusbar.separator`, or `ui.border.inactive` where the theme leaves that
 /// unset.
 ///
-/// A run that leads with the mode chip hands that segment to the bar as its
-/// [`StatusBar::chip`], so the chip draws as a box of whole cells.
+/// A run's [`RunBox`]es reach the bar as [`SegmentBox`]es, each with its
+/// shape's panel in its first segment's background, and its dots as the
+/// bar's [`StatusBar::dots`].
 ///
 /// With a `cache`, a repaint whose runs and colors all hold splices the
 /// recorded frame. Splicing is only sound because
@@ -1395,13 +1450,23 @@ fn render_status_runs(
     let start = scene.bytes().len();
     let scale = frame.theme.type_scale(TypeRole::Ui);
     for (run, (bg, left, right)) in runs.iter().zip(&rich) {
-        let (chip, left) = match left.split_first() {
-            Some((chip, rest)) if run.mode_chip => (Some(chip), rest),
-            _ => (None, &left[..]),
-        };
+        let boxes: Vec<SegmentBox> =
+            run.boxes
+                .iter()
+                .map(|run_box| SegmentBox {
+                    segments: run_box.segments.clone(),
+                    panel: run_box.shape.zip(left.get(run_box.segments.start)).map(
+                        |(shape, first)| match shape {
+                            BoxShape::Chip => Panel::chip(first.bg),
+                            BoxShape::Tab => tab_panel(first.bg),
+                        },
+                    ),
+                })
+                .collect();
         StatusBar {
-            chip,
             left,
+            boxes: &boxes,
+            dots: &run.dots,
             right,
             scale,
             separator: if run.hairline { separator } else { *bg },
@@ -1443,11 +1508,17 @@ fn status_scene_key(runs: &[StatusRun], separator: [u8; 3]) -> u64 {
 ///
 /// The name leads in bold, since the status row leaves it out while the bar
 /// shows. A tab reads as its [`Workspace::tab_label`], and a tagged file's
-/// extension follows it as a tag in the tag's color, joined by a muted dot.
-/// A gzip file's tab adds a second muted dot and a `gz` tag in the same color.
-/// Painting through the status-bar segment path means the bar picks up the
-/// same scaled-run rendering under stoatty and the same cell fallback
-/// elsewhere.
+/// extension follows it as a tag in the tag's color, joined by a dot. A gzip
+/// file's tab adds a second dot and a `gz` tag in the same color. Painting
+/// through the status-bar segment path means the bar picks up the same
+/// scaled-run rendering under stoatty and the same cell fallback elsewhere.
+///
+/// Under a live scene a hairline in `ui.border.inactive` follows the name,
+/// each tab takes whole cells with its text centered, and the active tab
+/// draws as a [`tab_panel`] in its background. A dot draws as a square in the
+/// color [`tag_dot`] gives it. In cells the active tab is its background, and
+/// a dot is a U+00B7. Every tab takes a box, so no tab moves when another
+/// becomes the active one.
 ///
 /// While the split pane in focus shows a diff view or a changes view, the bar
 /// ends in two chips, `files` and `changes`, which name the two diff layouts.
@@ -1485,37 +1556,35 @@ pub(crate) fn render_tab_bar(
         ),
         (" ".to_string(), inactive),
     ];
-    let mut owners = vec![None, None];
+    let mut boxes = Vec::new();
+    let mut dots = Vec::new();
     for idx in 0..ws.tabs.len() {
-        let style = if idx == ws.active_tab {
-            active
-        } else {
-            inactive
-        };
+        let is_active = idx == ws.active_tab;
+        let style = if is_active { active } else { inactive };
+        let first = left.len();
         let (label, tag) = ws.tab_label(idx);
         if let Some(mark) = ws.tab_conflict_mark(idx) {
             left.push(tab_mark(mark, style, theme));
-            owners.push(Some(idx));
         }
         left.push((format!(" {label} "), style));
-        owners.push(Some(idx));
         if let Some(TypeTag {
             tag,
             scope: tag_scope,
             gzip,
         }) = tag
         {
-            let dot = tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED);
             let tag_style = tinted(style, theme, tag_scope);
-            left.push(("\u{b7}".to_string(), dot));
-            left.push((format!(" {tag} "), tag_style));
-            owners.extend([Some(idx), Some(idx)]);
-            if gzip {
+            let dot = tag_dot(style, tag_style, theme);
+            for name in [Some(tag), gzip.then_some("gz")].into_iter().flatten() {
+                dots.push(left.len());
                 left.push(("\u{b7}".to_string(), dot));
-                left.push((" gz ".to_string(), tag_style));
-                owners.extend([Some(idx), Some(idx)]);
+                left.push((format!("{name} "), tag_style));
             }
         }
+        boxes.push(RunBox {
+            segments: first..left.len(),
+            shape: is_active.then_some(BoxShape::Tab),
+        });
     }
 
     // The right run packs from the bar's edge in slice order, so the chips
@@ -1553,27 +1622,102 @@ pub(crate) fn render_tab_bar(
         left,
         right,
         hairline: true,
-        mode_chip: false,
+        boxes,
+        dots,
     }];
     let rich = render_status_runs(&runs, frame, buf, scene, None);
-    if let Some(chip) = chip {
-        let rect = Rect::new(segments.right(), area.y, chip.cells, 1);
-        draw_conflict_chip(&chip, rect, theme, buf, scene);
-    }
-
     let scale = if rich {
         theme.type_scale(TypeRole::Ui)
     } else {
         FULL_CELL_SCALE
     };
-    tab_spans(
-        owners
-            .into_iter()
-            .zip(runs[0].left.iter().map(|(text, _)| text.chars().count())),
-        scale,
-        segments.width,
-        spans,
-    );
+    if rich {
+        draw_tab_divider(&runs[0], scale, theme, buf, scene);
+    }
+    if let Some(chip) = chip {
+        let rect = Rect::new(segments.right(), area.y, chip.cells, 1);
+        draw_conflict_chip(&chip, rect, theme, buf, scene);
+    }
+
+    let texts: Vec<&str> = runs[0].left.iter().map(|(text, _)| text.as_str()).collect();
+    let tabs: Vec<Range<usize>> = runs[0]
+        .boxes
+        .iter()
+        .map(|run_box| run_box.segments.clone())
+        .collect();
+    spans.extend(status_bar::box_spans(&texts, &tabs, scale, segments.width));
+}
+
+/// Draw the hairline that parts the workspace name from the tabs in the tab
+/// bar's `run`, at the end of the name, its first segment, at `scale`.
+///
+/// The hairline takes `ui.border.inactive`, and a theme without an RGB color
+/// there draws none. A name that fills the bar leaves no room for it.
+fn draw_tab_divider(
+    run: &StatusRun,
+    scale: u16,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    scene: &mut ApcScene,
+) {
+    let Some(color) = style_rgb(theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg) else {
+        return;
+    };
+    let Some((name, _)) = run.left.first() else {
+        return;
+    };
+    let x = text_run::advance_sixteenths(name.chars().count(), scale);
+    if u32::from(x) >= u32::from(run.segments.width) * 16 {
+        return;
+    }
+
+    Bar {
+        x: x as i16,
+        y: TAB_DIVIDER_TOP,
+        width: 1,
+        height: TAB_DIVIDER_HEIGHT,
+        color,
+    }
+    .render(run.area, buf, scene);
+}
+
+/// The panel the active tab draws as, in `fill`.
+///
+/// Its top corners round at 2 and its bottom corners stay square, with a
+/// fillet beside each that joins the tab to the pane below it, as the Editor
+/// board draws the active tab.
+fn tab_panel(fill: [u8; 3]) -> Panel {
+    Panel {
+        style: BorderStyle::None_,
+        border: fill,
+        corner_radius: 2,
+        fill: Some(fill),
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        inset_y: 0,
+        corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
+        fillets: FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    }
+}
+
+/// The style of the dot that joins a tab's name to its tag, in a tab painted
+/// in `style` with a tag in `tag_style`.
+///
+/// The dot takes the tag's color mixed [`TAG_DOT_PERCENT`] into the tab's
+/// background, as the Editor board fades the dot over the tab. A theme that
+/// gives either color as other than RGB mutes the dot to `ui.text.muted`.
+fn tag_dot(style: Style, tag_style: Style, theme: &crate::theme::Theme) -> Style {
+    match (style_rgb(style.bg), style_rgb(tag_style.fg)) {
+        (Some(bg), Some(tag)) => {
+            let [r, g, b] = blend(bg, tag, TAG_DOT_PERCENT);
+            style.fg(Color::Rgb(r, g, b))
+        },
+        _ => tinted(style, theme, crate::theme::scope::UI_TEXT_MUTED),
+    }
 }
 
 /// The segment ahead of a tab's label that marks its file as unmerged or as
@@ -1716,39 +1860,6 @@ fn focused_diff_layout(ws: &Workspace) -> Option<&'static str> {
         },
         View::DiffChanges(_) => Some("changes"),
         _ => None,
-    }
-}
-
-/// Records the extent of each tab in the tab bar, in sixteenths of a cell from
-/// the bar's left edge.
-///
-/// `segments` pairs each bar segment with the tab it belongs to and its
-/// character count. A segment of no tab, such as the workspace name, takes room
-/// but makes no span, so the list indexes the tabs alone. A tab cut at the
-/// bar's right edge ends there, and a tab past the edge has no entry, so the
-/// list holds only the tabs on screen.
-fn tab_spans(
-    segments: impl Iterator<Item = (Option<usize>, usize)>,
-    scale: u16,
-    width: u16,
-    spans: &mut Vec<Range<u16>>,
-) {
-    spans.clear();
-    let limit = (u32::from(width) * 16).min(u32::from(u16::MAX)) as u16;
-    let mut cursor = 0u16;
-    for (tab, count) in segments {
-        if cursor >= limit {
-            break;
-        }
-        let end = cursor
-            .saturating_add(text_run::advance_sixteenths(count, scale))
-            .min(limit);
-        match tab {
-            Some(tab) if tab < spans.len() => spans[tab].end = end,
-            Some(_) => spans.push(cursor..end),
-            None => {},
-        }
-        cursor = end;
     }
 }
 
@@ -2210,7 +2321,8 @@ fn status_segments(
                 left,
                 right: base_right,
                 hairline: false,
-                mode_chip: chip_end.is_some(),
+                boxes: mode_chip_box(chip_end.is_some()),
+                dots: Vec::new(),
             },
             StatusRun {
                 area: target,
@@ -2219,7 +2331,8 @@ fn status_segments(
                 left: target_left,
                 right,
                 hairline: false,
-                mode_chip: false,
+                boxes: Vec::new(),
+                dots: Vec::new(),
             },
         ],
         None => vec![StatusRun {
@@ -2229,7 +2342,8 @@ fn status_segments(
             left,
             right,
             hairline: true,
-            mode_chip: chip_end.is_some(),
+            boxes: mode_chip_box(chip_end.is_some()),
+            dots: Vec::new(),
         }],
     }
 }
@@ -3131,7 +3245,7 @@ fn render_image_pane(
 mod tests {
     use super::{
         byte_size, diff_base_lead, focused_staged_label, paint_status_fallback, read_only_note,
-        repo_segments, split_halves, split_side_segments, status_filename, tab_mark, tab_spans,
+        repo_segments, split_halves, split_side_segments, status_filename, tab_mark,
         DiffSideColors, DiffSidesColors,
     };
     use crate::{
@@ -5638,49 +5752,6 @@ mod tests {
         );
     }
 
-    /// The scale is a literal, because every type role answers a full cell
-    /// under `cfg(test)`.
-    #[test]
-    fn tab_spans_follow_the_scale_and_stop_at_the_bar_edge() {
-        let spans_at = |(scale, width): (u16, u16)| {
-            let mut spans = Vec::new();
-            tab_spans(
-                [(Some(0), 5), (Some(1), 7)].into_iter(),
-                scale,
-                width,
-                &mut spans,
-            );
-            spans
-                .iter()
-                .map(|span| (span.start, span.end))
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(
-            [(160, 20), (256, 20), (160, 6), (160, 3)].map(spans_at),
-            [
-                vec![(0, 50), (50, 120)],
-                vec![(0, 80), (80, 192)],
-                vec![(0, 50), (50, 96)],
-                vec![(0, 48)],
-            ],
-        );
-    }
-
-    /// The workspace name takes room but makes no span, and a tab's label, dot,
-    /// and tag join into one span.
-    #[test]
-    fn tab_spans_skip_the_name_and_join_a_tabs_segments() {
-        let mut spans = Vec::new();
-        tab_spans(
-            [(None, 4), (Some(0), 5), (Some(0), 1), (Some(1), 7)].into_iter(),
-            160,
-            30,
-            &mut spans,
-        );
-        assert_eq!(spans, [40..100, 100..170]);
-    }
-
     /// The tab bar ends in the `files` and `changes` chips while a diff view or
     /// a changes view has the focus. It shows neither over a plain editor, over
     /// a diff whose split pane gave the focus to a dock, or where the chips do
@@ -5724,7 +5795,7 @@ mod tests {
         assert_eq!(
             [plain, diff, docked, narrow, changes],
             [
-                "repo a \u{b7} rs",
+                "repo a \u{b7}rs",
                 "repo \u{b1} a.rs files changes",
                 "repo \u{b1} a.rs",
                 "repo \u{b1} a.rs",
@@ -5767,10 +5838,133 @@ mod tests {
     /// The bar leads with the workspace name and a one-cell gap. A tagged file's
     /// tab trades its extension for the tag after a dot. A gzip file's tab
     /// trades both extensions for the inner tag and a `gz` tag in the tag's
-    /// color, after a second muted dot. Each tab's click span covers its label
-    /// and its tags.
+    /// color, after a second dot. A dot takes the tag's color mixed into its
+    /// tab's background. Each tab's click span covers its label and its tags.
     #[test]
     fn the_tab_bar_leads_with_the_workspace_and_tags_each_file() {
+        use super::{style_rgb, TAG_DOT_PERCENT};
+        use ratatui::style::Color;
+
+        let mut h = tagged_tabs_harness();
+        h.stoat.stoatty = false;
+        h.snapshot();
+
+        let text = h.rendered_text();
+        let bar = text.lines().next().expect("the tab bar row");
+        let lead = " ws   chrome \u{b7}rs  panel \u{b7}rs  CHANGELOG \u{b7}md \u{b7}gz ";
+        let fg_at = |needle: &str| {
+            let col = lead[..lead.find(needle).expect("the bar names it")]
+                .chars()
+                .count();
+            h.rendered_buffer()[(col as u16, 0)].fg
+        };
+        let theme = &h.stoat.theme;
+        let rgb = |color: Option<Color>| style_rgb(color).expect("the theme colors it in RGB");
+        let md = rgb(theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg);
+        let base = rgb(theme.get(crate::theme::scope::UI_TABBAR_ACTIVE).bg);
+        let [r, g, b] = crate::render::paint::blend(base, md, TAG_DOT_PERCENT);
+        assert_eq!(
+            (bar.trim_end(), fg_at("md"), fg_at("\u{b7}gz"), fg_at("gz")),
+            (
+                lead.trim_end(),
+                Color::Rgb(md[0], md[1], md[2]),
+                Color::Rgb(r, g, b),
+                Color::Rgb(md[0], md[1], md[2])
+            ),
+            "the bar text, then the active gzip tab's inner tag, second dot, and gz tag",
+        );
+        assert_eq!(
+            h.stoat.tab_bar_spans,
+            [(5, 17), (17, 28), (28, 47)].map(|(start, end): (u16, u16)| start * 16..end * 16),
+            "each tab's span in sixteenths, from its label's lead space to its last tag",
+        );
+    }
+
+    /// Under a live scene a hairline parts the workspace name from the tabs, the
+    /// active tab draws as a panel rounded at its top corners and filleted into
+    /// the pane, and each dot draws as a square in the color its tag mixes.
+    ///
+    /// The cells match the plain bar, since every role scales to a whole cell
+    /// under `cfg(test)`. The name ends at column 4, and the dots sit in
+    /// columns 13, 24, 39, and 43, each square 6 sixteenths into its cell.
+    #[test]
+    fn the_live_tab_bar_divides_the_name_rounds_the_active_tab_and_dots_each_tag() {
+        use super::{
+            style_rgb, BorderStyle, PanelShadow, CORNER_TOP_LEFT, CORNER_TOP_RIGHT,
+            FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT, TAG_DOT_PERCENT,
+        };
+        use ratatui::style::Color;
+        use stoatty_protocol::command::{Command, PanelCommand};
+
+        let mut h = tagged_tabs_harness();
+        h.render_composited();
+
+        let theme = &h.stoat.theme;
+        let rgb = |color: Option<Color>| style_rgb(color).expect("the theme colors it in RGB");
+        let base = rgb(theme.get(crate::theme::scope::UI_TABBAR_ACTIVE).bg);
+        let chrome = rgb(theme.get(crate::theme::scope::UI_TABBAR_INACTIVE).bg);
+        let rust = rgb(theme.get(crate::theme::scope::UI_TAG_RUST).fg);
+        let md = rgb(theme.get(crate::theme::scope::UI_TAG_MARKDOWN).fg);
+        let divider = rgb(theme.get(crate::theme::scope::UI_BORDER_INACTIVE).fg);
+        let dot = |column: i16, ground, tag| {
+            let color = crate::render::paint::blend(ground, tag, TAG_DOT_PERCENT);
+            (column * 16 + 6, 7, 3, 3, color)
+        };
+
+        let scene = stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes());
+        let panels: Vec<PanelCommand> = scene
+            .iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) if panel.top == 0 => Some(*panel),
+                _ => None,
+            })
+            .collect();
+        let marks: Vec<_> = scene
+            .iter()
+            .filter_map(|command| match command {
+                Command::Bar(bar) if bar.y < 16 && (2..16).contains(&bar.height) => {
+                    Some((bar.x, bar.y, bar.width, bar.height, bar.color))
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            (panels, marks),
+            (
+                vec![PanelCommand {
+                    top: 0,
+                    left: 28,
+                    width: 19,
+                    height: 1,
+                    style: BorderStyle::None_,
+                    border: base,
+                    corner_radius: 2,
+                    fill: Some(base),
+                    shadow: PanelShadow::None_,
+                    inset_x: 0,
+                    inset_y: 0,
+                    corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
+                    fillets: FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT,
+                    hatch: None,
+                    above_pools: false,
+                    backdrop: false,
+                    anchor: None,
+                }],
+                vec![
+                    dot(13, chrome, rust),
+                    dot(24, chrome, rust),
+                    dot(39, base, md),
+                    dot(43, base, md),
+                    (64, 1, 1, 14, divider),
+                ],
+            ),
+            "the active tab's panel, then each dot's square and the name's hairline",
+        );
+    }
+
+    /// Tabs over `chrome.rs`, `panel.rs`, and a gzip `CHANGELOG.md.gz`, the last
+    /// one active, in a 60 by 8 harness whose workspace is `ws`.
+    fn tagged_tabs_harness() -> crate::test_harness::TestHarness {
         let mut h = crate::test_harness::TestHarness::with_size(60, 8);
         h.stoat.active_workspace_mut().name = "ws".to_string();
         let chrome = h.write_file("chrome.rs", "fn a() {}\n");
@@ -5786,41 +5980,7 @@ mod tests {
         h.settle();
         // A gzip file reads on the blocking pool, and the read installs here.
         buffer_lifecycle::install_pending_opens(&mut h.stoat);
-        h.snapshot();
-
-        let text = h.rendered_text();
-        let bar = text.lines().next().expect("the tab bar row");
-        let lead = " ws   chrome \u{b7} rs  panel \u{b7} rs  CHANGELOG \u{b7} md \u{b7} gz ";
-        let fg_at = |needle: &str| {
-            let col = lead[..lead.find(needle).expect("the bar names it")]
-                .chars()
-                .count();
-            h.rendered_buffer()[(col as u16, 0)].fg
-        };
-        let theme = &h.stoat.theme;
-        let md = theme
-            .get(crate::theme::scope::UI_TAG_MARKDOWN)
-            .fg
-            .expect("the theme colors a markdown tag");
-        let muted = theme
-            .get(crate::theme::scope::UI_TEXT_MUTED)
-            .fg
-            .expect("the theme mutes text");
-        assert_eq!(
-            (
-                bar.trim_end_matches('─'),
-                fg_at("md"),
-                fg_at("\u{b7} gz"),
-                fg_at("gz")
-            ),
-            (lead, md, muted, md),
-            "the bar text, then the gzip tab's inner tag, second dot, and gz tag",
-        );
-        assert_eq!(
-            h.stoat.tab_bar_spans,
-            [(5, 18), (18, 30), (30, 51)].map(|(start, end): (u16, u16)| start * 16..end * 16),
-            "each tab's span in sixteenths, from its label's lead space to its last tag",
-        );
+        h
     }
 
     /// A conflicted file's tab leads with `!` in the conflict mark's color once
@@ -5843,12 +6003,15 @@ mod tests {
         h.settle();
         let buf = h.render_composited();
         let scene = stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes());
-        let chip = scene.iter().find_map(|command| match command {
-            stoatty_protocol::command::Command::Panel(panel) if panel.top == 0 => {
-                Some((panel.left, panel.width, panel.fill))
-            },
-            _ => None,
-        });
+        let panels: Vec<_> = scene
+            .iter()
+            .filter_map(|command| match command {
+                stoatty_protocol::command::Command::Panel(panel) if panel.top == 0 => {
+                    Some((panel.left, panel.width, panel.fill))
+                },
+                _ => None,
+            })
+            .collect();
         let chip_text = scene.iter().find_map(|command| match command {
             stoatty_protocol::command::Command::TextRun(run) if run.text.contains("unresolved") => {
                 Some((run.col, run.text.clone(), run.color))
@@ -5862,17 +6025,21 @@ mod tests {
                 file_bar.chars().take(30).collect::<String>(),
                 tab_bar_row(&buf).chars().take(30).collect::<String>(),
                 buf[(6, 0)].fg,
-                chip,
+                panels,
                 chip_text,
             ),
             (
                 format!("{:<30}", " ws   ! f.txt"),
                 format!("{:<30}", " ws   ! f.txt"),
                 ratatui::style::Color::Rgb(0xf5, 0x9a, 0xa0),
-                Some((71, 28, Some([0x33, 0x20, 0x1f]))),
+                vec![
+                    (5, 9, Some([0x17, 0x19, 0x1e])),
+                    (71, 28, Some([0x33, 0x20, 0x1f])),
+                ],
                 Some((71 * 16 + 8, text.to_string(), [0xf2, 0x77, 0x7f])),
             ),
-            "the chip ends one cell before the bar's edge, its text 8/16 in",
+            "the active tab's box, then the chip one cell before the bar's edge, its \
+             text 8/16 in",
         );
     }
 

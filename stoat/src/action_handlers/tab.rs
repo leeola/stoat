@@ -333,7 +333,8 @@ mod tests {
     }
 
     /// The moved tab takes its neighbor's place, which is what the bar shows
-    /// after the workspace name.
+    /// after the workspace name and the hairline that the composite draws as
+    /// U+2500.
     #[test]
     fn move_tab_left_moves_the_tab_left_in_the_bar() {
         let mut h = Stoat::test();
@@ -349,8 +350,8 @@ mod tests {
         let buf = h.render_composited();
         let row: String = (0..buf.area.width).map(|x| buf[(x, 0)].symbol()).collect();
         assert_eq!(
-            row.split_whitespace().take(3).collect::<Vec<_>>(),
-            ["(unnamed)", "two", "scratch"],
+            row.split_whitespace().take(4).collect::<Vec<_>>(),
+            ["(unnamed)", "\u{2500}", "two", "scratch"],
         );
     }
 

@@ -6,6 +6,14 @@ use crate::{
     ApcScene,
 };
 use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
+use std::ops::Range;
+
+/// The side of a dot segment's square, in sixteenths of a cell.
+const DOT_SIZE: u16 = 3;
+
+/// How far down the row a dot segment's square starts, in sixteenths of a
+/// cell, which puts its center where a middle dot's glyph sits.
+const DOT_TOP: i16 = 7;
 
 /// A status bar composed of left- and right-anchored scaled text segments and a
 /// top hairline separator that reads across the background between them.
@@ -36,19 +44,18 @@ use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 /// bar are the informative ones, paths and branch names, and a caller's cell
 /// fallback clips them the same way.
 ///
-/// A [`Self::chip`] leads the left run, as an editor's mode label does. It
-/// takes whole cells, because the [`Panel`] that draws its box takes whole
-/// cells, and the left segments pack from its end.
+/// A [`SegmentBox`] gathers a run of left segments into one box of whole
+/// cells, as an editor's mode chip and a tab bar's tabs are.
 pub struct StatusBar<'a> {
-    /// A chip ahead of the left segments, or `None` for a bar that opens with
-    /// its first left segment.
-    ///
-    /// The chip spans the fewest whole cells that hold its text, with the text
-    /// centered, and draws as a [`Panel::chip`] in its background. A bar too
-    /// narrow for the chip draws no left run.
-    pub chip: Option<&'a StatusSegment<'a>>,
     /// Segments packed left-to-right from the left edge.
     pub left: &'a [StatusSegment<'a>],
+    /// Runs of [`Self::left`] that each draw in one box of whole cells, in
+    /// order and apart.
+    pub boxes: &'a [SegmentBox],
+    /// The indices of the [`Self::left`] segments that draw as a small square
+    /// in their foreground in place of their text, centered across the text's
+    /// advance.
+    pub dots: &'a [usize],
     /// Segments packed right-to-left from the right edge, in slice order.
     pub right: &'a [StatusSegment<'a>],
     /// Glyph size in 256ths of the cell size.
@@ -76,6 +83,34 @@ pub struct StatusSegment<'a> {
     pub bg: [u8; 3],
 }
 
+/// A run of a [`StatusBar`]'s left segments that draws in one box of whole
+/// cells, such as a tab or an editor's mode chip.
+///
+/// The box starts on the first whole cell the run reaches, spans the fewest
+/// whole cells that hold the run, and centers the run in it. A [`Panel`] takes
+/// whole cells, so whole cells are what lets a panel draw the box exactly
+/// where the run sits.
+pub struct SegmentBox {
+    /// The run, as indices into [`StatusBar::left`].
+    pub segments: Range<usize>,
+    /// The panel that draws the box behind the run, or `None` for a box that
+    /// only aligns the run. The bar places the panel on the box's cells.
+    ///
+    /// A box with a panel draws no background bar for its segments, because
+    /// the panel is their background.
+    pub panel: Option<Panel>,
+}
+
+/// One step of a left run's layout, in the order the bar draws it.
+enum LeftItem<'t> {
+    /// Box `index` of [`StatusBar::boxes`] covers `cells`, counted from the
+    /// bar's left edge.
+    Box { index: usize, cells: Range<u16> },
+    /// Left segment `index` draws `text`, the part of its text that fits, from
+    /// `x` sixteenths.
+    Segment { index: usize, x: u16, text: &'t str },
+}
+
 impl StatusBar<'_> {
     /// Draw the scaled segments and the top hairline as off-grid components.
     ///
@@ -100,165 +135,301 @@ impl StatusBar<'_> {
         scene: &mut ApcScene,
     ) {
         let limit = cells::span_sixteenths(segments_width.min(area.width));
+        let layout = layout_left(
+            self.left.len(),
+            |index| self.left[index].text,
+            self.boxes
+                .iter()
+                .map(|segment_box| segment_box.segments.clone()),
+            self.scale,
+            limit,
+        );
 
-        Bar {
-            x: 0,
-            y: 0,
-            width: cells::span_sixteenths(area.width),
-            height: 1,
-            color: self.separator,
+        // A panel hides a component of lower seq only half a pixel inside its
+        // box, so one whole hairline still crosses the box's top edge. The
+        // hairline breaks over each box with a panel, as a segment's background
+        // bar breaks it.
+        let mut from = 0;
+        for item in &layout {
+            if let LeftItem::Box { index, cells } = item
+                && self.boxes[*index].panel.is_some()
+            {
+                self.draw_hairline(from..cells.start, area, buf, scene);
+                from = cells.end;
+            }
         }
-        .render(area, buf, scene);
+        self.draw_hairline(from..area.width, area, buf, scene);
 
         let mut cursor = 0u16;
-        let mut left = self.left;
-        if let Some(chip) = self.chip {
-            match self.draw_chip(chip, limit, area, buf, scene) {
-                Some(span) => cursor = span,
-                None => left = &[],
-            }
-        }
-
-        for seg in left {
-            let text = self.clip_to_room(seg.text, limit - cursor);
-            if text.is_empty() && !seg.text.is_empty() {
-                break;
-            }
-
-            let advance = self.segment_advance(text);
-            let fitted = StatusSegment {
-                text,
-                fg: seg.fg,
-                bg: seg.bg,
-            };
-            self.draw_segment(cursor, advance, &fitted, area, buf, scene);
-            cursor += advance;
-
-            if text.len() < seg.text.len() {
-                break;
+        let mut paneled = 0..0;
+        for item in layout {
+            match item {
+                LeftItem::Box { index, cells } => {
+                    let segment_box = &self.boxes[index];
+                    paneled = 0..0;
+                    if let Some(panel) = &segment_box.panel {
+                        let rect = Rect::new(area.x + cells.start, area.y, cells.len() as u16, 1);
+                        panel.draw_components(rect, scene);
+                        paneled = segment_box.segments.clone();
+                    }
+                    cursor = cursor.max(cells::span_sixteenths(cells.end));
+                },
+                LeftItem::Segment { index, x, text } => {
+                    let seg = &self.left[index];
+                    let advance = advance(text, self.scale);
+                    if !paneled.contains(&index) {
+                        self.draw_backing(x, advance, seg.bg, area, buf, scene);
+                    }
+                    match self.dots.contains(&index) {
+                        true => self.draw_dot(x, advance, seg.fg, area, buf, scene),
+                        false => self.draw_run(x, text, seg.fg, area, buf, scene),
+                    }
+                    cursor = cursor.max(x + advance);
+                },
             }
         }
 
         let mut anchor = limit;
         for seg in self.right {
-            let advance = self.segment_advance(seg.text);
+            let advance = advance(seg.text, self.scale);
             let start = anchor.saturating_sub(advance);
             if start < cursor {
                 continue;
             }
-            self.draw_segment(start, advance, seg, area, buf, scene);
+            self.draw_backing(start, advance, seg.bg, area, buf, scene);
+            self.draw_run(start, seg.text, seg.fg, area, buf, scene);
             anchor = start;
         }
     }
 
-    /// Draw `chip` as a [`Panel::chip`] box at the bar's left edge with its
-    /// text centered in a run, and return the sixteenths the box spans.
-    ///
-    /// The box comes after the hairline and before the run. So the box hides
-    /// the hairline where they overlap, and the run draws over the box.
-    /// Returns `None`, and draws nothing, for a chip wider than `limit`.
-    fn draw_chip(
-        &self,
-        chip: &StatusSegment<'_>,
-        limit: u16,
-        area: Rect,
-        buf: &mut Buffer,
-        scene: &mut ApcScene,
-    ) -> Option<u16> {
-        let advance = self.segment_advance(chip.text);
-        let width = advance.div_ceil(16);
-        let span = cells::span_sixteenths(width);
-        if span > limit {
-            return None;
+    /// Draw the hairline along the top of `cells`, counted from the bar's left
+    /// edge, or nothing for an empty range.
+    fn draw_hairline(&self, cells: Range<u16>, area: Rect, buf: &mut Buffer, scene: &mut ApcScene) {
+        if cells.is_empty() {
+            return;
         }
 
-        Panel::chip(chip.bg).draw_components(Rect::new(area.x, area.y, width, 1), scene);
-        TextRun {
-            col: cells::signed_sixteenths((span - advance) / 2),
-            row: 0,
-            scale: self.scale,
-            color: chip.fg,
-            bg: None,
-            text: chip.text,
-            follow: 0,
-            anchor: None,
+        Bar {
+            x: cells::signed_sixteenths(cells::span_sixteenths(cells.start)),
+            y: 0,
+            width: cells::span_sixteenths(cells.end - cells.start),
+            height: 1,
+            color: self.separator,
         }
         .render(area, buf, scene);
-        Some(span)
     }
 
-    /// Draw one segment as a box-less text run, over a full-row background bar
-    /// when the segment's background differs from the bar's own.
+    /// Draw a full-row bar in `bg` behind the segment `advance` sixteenths wide
+    /// at `x`, when `bg` differs from the bar's own.
     ///
     /// The bar carries the segment background and spans the row's full height,
     /// so it covers the top hairline emitted before it and the segment reads
-    /// flush with the bar's top edge. A box on the run instead would paint from
-    /// the later text pass and bury the segment's own background.
+    /// flush with the bar's top edge. A box on the run paints from the later
+    /// text pass instead, and it buries the segment's own background.
     ///
     /// A segment matching [`StatusBar::bg`] emits no bar. The cell grid already
-    /// paints that color under the whole row, so the only thing such a bar
-    /// would do is erase the hairline over the segment's text.
-    fn draw_segment(
+    /// paints that color under the whole row, so such a bar only erases the
+    /// hairline over the segment's text.
+    fn draw_backing(
         &self,
         x: u16,
         advance: u16,
-        seg: &StatusSegment<'_>,
+        bg: [u8; 3],
         area: Rect,
         buf: &mut Buffer,
         scene: &mut ApcScene,
     ) {
-        let x = cells::signed_sixteenths(x);
-
-        if seg.bg != self.bg {
-            Bar {
-                x,
-                y: 0,
-                width: advance,
-                height: 16,
-                color: seg.bg,
-            }
-            .render(area, buf, scene);
+        if bg == self.bg {
+            return;
         }
+
+        Bar {
+            x: cells::signed_sixteenths(x),
+            y: 0,
+            width: advance,
+            height: 16,
+            color: bg,
+        }
+        .render(area, buf, scene);
+    }
+
+    /// Draw `text` as a box-less run in `color` at `x`.
+    fn draw_run(
+        &self,
+        x: u16,
+        text: &str,
+        color: [u8; 3],
+        area: Rect,
+        buf: &mut Buffer,
+        scene: &mut ApcScene,
+    ) {
         TextRun {
-            col: x,
+            col: cells::signed_sixteenths(x),
             row: 0,
             scale: self.scale,
-            color: seg.fg,
+            color,
             bg: None,
-            text: seg.text,
+            text,
             follow: 0,
             anchor: None,
         }
         .render(area, buf, scene);
     }
 
-    /// Sixteenths a segment's `text` advances at [`Self::scale`].
-    fn segment_advance(&self, text: &str) -> u16 {
-        text_run::advance_sixteenths(text.chars().count(), self.scale)
+    /// Draw a dot segment's square in `color` in place of its glyph, centered
+    /// across the `advance` sixteenths at `x`.
+    fn draw_dot(
+        &self,
+        x: u16,
+        advance: u16,
+        color: [u8; 3],
+        area: Rect,
+        buf: &mut Buffer,
+        scene: &mut ApcScene,
+    ) {
+        Bar {
+            x: cells::signed_sixteenths(x + advance.saturating_sub(DOT_SIZE) / 2),
+            y: DOT_TOP,
+            width: DOT_SIZE,
+            height: DOT_SIZE,
+            color,
+        }
+        .render(area, buf, scene);
+    }
+}
+
+/// The extent of each box of `boxes` that a bar of left segments `texts`
+/// draws at `scale` in `segments_width` cells, in sixteenths from the bar's
+/// left edge.
+///
+/// These are the boxes [`StatusBar::draw_components_within`] draws, so a press
+/// hit-tests against what is on screen. A box past the bar's edge has no
+/// entry, and one that the edge cuts ends there.
+pub fn box_spans(
+    texts: &[&str],
+    boxes: &[Range<usize>],
+    scale: u16,
+    segments_width: u16,
+) -> Vec<Range<u16>> {
+    layout_left(
+        texts.len(),
+        |index| texts[index],
+        boxes.iter().cloned(),
+        scale,
+        cells::span_sixteenths(segments_width),
+    )
+    .into_iter()
+    .filter_map(|item| match item {
+        LeftItem::Box { cells, .. } => {
+            Some(cells::span_sixteenths(cells.start)..cells::span_sixteenths(cells.end))
+        },
+        LeftItem::Segment { .. } => None,
+    })
+    .collect()
+}
+
+/// Lay out a left run of `count` segments, whose texts `text` gives, at
+/// `scale` in `limit` sixteenths, with each run of `boxes` in one box of whole
+/// cells.
+///
+/// A plain segment packs at the cursor. A box starts on the next whole cell,
+/// spans the fewest whole cells that hold its run, and centers the run. A
+/// segment or a box that crosses `limit` is cut there and ends the layout.
+fn layout_left<'t>(
+    count: usize,
+    text: impl Fn(usize) -> &'t str,
+    boxes: impl Iterator<Item = Range<usize>>,
+    scale: u16,
+    limit: u16,
+) -> Vec<LeftItem<'t>> {
+    let mut items = Vec::new();
+    let mut boxes = boxes.enumerate().peekable();
+    let mut cursor = 0u16;
+    let mut index = 0;
+    while index < count {
+        let Some((box_index, run)) = boxes.next_if(|(_, run)| run.start == index) else {
+            let full = text(index);
+            let fitted = clip_to_room(full, limit - cursor, scale);
+            if fitted.is_empty() && !full.is_empty() {
+                break;
+            }
+            items.push(LeftItem::Segment {
+                index,
+                x: cursor,
+                text: fitted,
+            });
+            cursor += advance(fitted, scale);
+            if fitted.len() < full.len() {
+                break;
+            }
+            index += 1;
+            continue;
+        };
+
+        let start = cursor.div_ceil(16).saturating_mul(16);
+        if start >= limit {
+            break;
+        }
+        let natural = run.clone().fold(0u16, |sum, segment| {
+            sum.saturating_add(advance(text(segment), scale))
+        });
+        let span = natural.div_ceil(16).saturating_mul(16);
+        let end = start.saturating_add(span).min(limit);
+        items.push(LeftItem::Box {
+            index: box_index,
+            cells: start / 16..end / 16,
+        });
+
+        let mut x = start + (span - natural) / 2;
+        for segment in run.clone() {
+            let full = text(segment);
+            let fitted = clip_to_room(full, limit.saturating_sub(x), scale);
+            if fitted.is_empty() && !full.is_empty() {
+                return items;
+            }
+            items.push(LeftItem::Segment {
+                index: segment,
+                x,
+                text: fitted,
+            });
+            x += advance(fitted, scale);
+            if fitted.len() < full.len() {
+                return items;
+            }
+        }
+        cursor = end;
+        index = run.end;
+    }
+    items
+}
+
+/// Sixteenths a segment's `text` advances at `scale`.
+fn advance(text: &str, scale: u16) -> u16 {
+    text_run::advance_sixteenths(text.chars().count(), scale)
+}
+
+/// The prefix of `text` that advances no further than `room` sixteenths at
+/// `scale`.
+///
+/// Inverts [`advance`], so the prefix ends on the last glyph that starts and
+/// finishes inside the room rather than one past it. A zero scale advances
+/// nothing, so every segment fits.
+fn clip_to_room(text: &str, room: u16, scale: u16) -> &str {
+    if scale == 0 {
+        return text;
     }
 
-    /// The prefix of `text` that advances no further than `room` sixteenths.
-    ///
-    /// Inverts [`Self::segment_advance`], so the prefix ends on the last glyph
-    /// that starts and finishes inside the room rather than one past it. A zero
-    /// scale advances nothing, so every segment fits.
-    fn clip_to_room<'t>(&self, text: &'t str, room: u16) -> &'t str {
-        if self.scale == 0 {
-            return text;
-        }
-
-        let fits = (u32::from(room) * 16 / u32::from(self.scale)) as usize;
-        match text.char_indices().nth(fits) {
-            Some((byte, _)) => &text[..byte],
-            None => text,
-        }
+    let fits = (u32::from(room) * 16 / u32::from(scale)) as usize;
+    match text.char_indices().nth(fits) {
+        Some((byte, _)) => &text[..byte],
+        None => text,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{StatusBar, StatusSegment};
-    use crate::ApcScene;
+    use super::{box_spans, SegmentBox, StatusBar, StatusSegment};
+    use crate::{panel::Panel, ApcScene};
     use ratatui::{buffer::Buffer, layout::Rect};
     use stoatty_protocol::command::{
         encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
@@ -290,8 +461,9 @@ mod tests {
             },
         ];
         let status = StatusBar {
-            chip: None,
             left: &left,
+            boxes: &[],
+            dots: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -364,8 +536,9 @@ mod tests {
             bg: [4, 5, 6],
         }];
         let status = StatusBar {
-            chip: None,
             left: &[],
+            boxes: &[],
+            dots: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -415,8 +588,9 @@ mod tests {
             bg: [4, 5, 6],
         }];
         let status = StatusBar {
-            chip: None,
             left: &[],
+            boxes: &[],
+            dots: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -467,8 +641,9 @@ mod tests {
             bg: [4, 5, 6],
         }];
         let status = StatusBar {
-            chip: None,
             left: &left,
+            boxes: &[],
+            dots: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -516,8 +691,9 @@ mod tests {
             },
         ];
         let status = StatusBar {
-            chip: None,
             left: &left,
+            boxes: &[],
+            dots: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -610,8 +786,9 @@ mod tests {
             bg: [4, 4, 4],
         }];
         let status = StatusBar {
-            chip: None,
             left: &left,
+            boxes: &[],
+            dots: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -655,8 +832,9 @@ mod tests {
     #[test]
     fn the_top_hairline_separator_is_emitted() {
         let status = StatusBar {
-            chip: None,
             left: &[],
+            boxes: &[],
+            dots: &[],
             right: &[],
             scale: 160,
             separator: [60, 66, 77],
@@ -694,8 +872,9 @@ mod tests {
             bg: [10, 11, 12],
         }];
         let status = StatusBar {
-            chip: None,
             left: &left,
+            boxes: &[],
+            dots: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -762,8 +941,9 @@ mod tests {
             bg: [10, 11, 12],
         }];
         let status = StatusBar {
-            chip: None,
             left: &left,
+            boxes: &[],
+            dots: &[],
             right: &right,
             scale: 160,
             separator: [60, 66, 77],
@@ -824,26 +1004,33 @@ mod tests {
         );
     }
 
-    /// A chip takes the fewest whole cells that hold its text and centers the
-    /// text in them. Its panel comes between the hairline and its run, and the
-    /// left run packs from the chip's end. A bar too narrow for the chip draws
-    /// no left run.
+    /// A box takes the fewest whole cells that hold its run and centers the run
+    /// in them. Its panel breaks the hairline and comes before its run, and the
+    /// left run packs on from the box's end. A bar too narrow for the box cuts
+    /// it at the edge.
     #[test]
-    fn a_chip_leads_the_left_run_in_whole_cells() {
-        let chip = StatusSegment {
-            text: " NOR ",
-            fg: [1, 2, 3],
-            bg: [4, 5, 6],
-        };
-        let left = [StatusSegment {
-            text: "ab",
-            fg: [7, 8, 9],
-            bg: [0, 0, 0],
+    fn a_box_holds_its_run_in_whole_cells() {
+        let left = [
+            StatusSegment {
+                text: " NOR ",
+                fg: [1, 2, 3],
+                bg: [4, 5, 6],
+            },
+            StatusSegment {
+                text: "ab",
+                fg: [7, 8, 9],
+                bg: [0, 0, 0],
+            },
+        ];
+        let boxes = [SegmentBox {
+            segments: 0..1,
+            panel: Some(Panel::chip([4, 5, 6])),
         }];
         let draw = |width: u16| {
             let status = StatusBar {
-                chip: Some(&chip),
                 left: &left,
+                boxes: &boxes,
+                dots: &[],
                 right: &[],
                 scale: 232,
                 separator: [60, 66, 77],
@@ -855,13 +1042,34 @@ mod tests {
             status.draw_components(area, &mut buf, &mut scene);
             scene.bytes().to_vec()
         };
-        let hairline = |width: u16| {
+        let hairline = |from: u16, to: u16| {
             encode_bar(&BarCommand {
-                x: 32,
+                x: 32 + from as i16 * 16,
                 y: 48,
-                width: width * 16,
+                width: (to - from) * 16,
                 height: 1,
                 color: [60, 66, 77],
+            })
+        };
+        let panel = |width: u16| {
+            encode_panel(&PanelCommand {
+                top: 3,
+                left: 2,
+                width,
+                height: 1,
+                style: BorderStyle::None_,
+                border: [4, 5, 6],
+                corner_radius: 1,
+                fill: Some([4, 5, 6]),
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                inset_y: 1,
+                corners: 0,
+                fillets: 0,
+                hatch: None,
+                above_pools: false,
+                backdrop: false,
+                anchor: None,
             })
         };
         let run = |col: i16, text: &str, color: [u8; 3]| {
@@ -879,16 +1087,88 @@ mod tests {
 
         // " NOR " advances 73 sixteenths at scale 232, so the box takes five
         // cells and its run sits (80 - 73) / 2 = 3 sixteenths in. The left run
-        // starts at the box's end, 32 + 80.
+        // goes on at the box's end, 32 + 80. Four cells hold the box's first
+        // 61 sixteenths of text, four glyphs.
+        assert_eq!(
+            [draw(20), draw(4)],
+            [
+                [
+                    hairline(5, 20),
+                    panel(5),
+                    run(35, " NOR ", [1, 2, 3]),
+                    run(112, "ab", [7, 8, 9]),
+                ]
+                .concat(),
+                [panel(4), run(35, " NOR", [1, 2, 3])].concat(),
+            ],
+        );
+    }
+
+    /// A box after a plain segment starts on the next whole cell and centers
+    /// its whole run. A box with a panel breaks the hairline and draws no
+    /// background bar for its segments, and a dot segment draws a square in
+    /// place of its glyph.
+    #[test]
+    fn a_box_aligns_its_run_and_a_dot_draws_a_square() {
+        let segment = |text, fg, bg| StatusSegment { text, fg, bg };
+        let left = [
+            segment("a", [1, 1, 1], [0, 0, 0]),
+            segment("bc", [2, 2, 2], [9, 9, 9]),
+            segment(".", [3, 3, 3], [9, 9, 9]),
+            segment("d", [4, 4, 4], [9, 9, 9]),
+        ];
+        let boxes = [SegmentBox {
+            segments: 1..4,
+            panel: Some(Panel::chip([9, 9, 9])),
+        }];
+        let status = StatusBar {
+            left: &left,
+            boxes: &boxes,
+            dots: &[2],
+            right: &[],
+            scale: 160,
+            separator: [60, 66, 77],
+            bg: [0, 0, 0],
+        };
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = ApcScene::new();
+        status.draw_components(area, &mut buf, &mut scene);
+
+        let run = |col: i16, text: &str, color: [u8; 3]| {
+            encode_text_run(&TextRunCommand {
+                col,
+                row: 0,
+                scale: 160,
+                color,
+                bg: None,
+                follow: 0,
+                anchor: None,
+                text: text.to_owned(),
+            })
+        };
+        let bar = |x: i16, y: i16, width: u16, height: u16, color: [u8; 3]| {
+            encode_bar(&BarCommand {
+                x,
+                y,
+                width,
+                height,
+                color,
+            })
+        };
+        // "a" advances 10 sixteenths at scale 160, so the box starts on cell 1.
+        // Its run advances 20 + 10 + 10 = 40, so it takes three cells and starts
+        // 4 in: "bc" at 20, the dot's 10 from 40 with its square at 43, and "d"
+        // at 50.
         let panel = encode_panel(&PanelCommand {
-            top: 3,
-            left: 2,
-            width: 5,
+            top: 0,
+            left: 1,
+            width: 3,
             height: 1,
             style: BorderStyle::None_,
-            border: [4, 5, 6],
+            border: [9, 9, 9],
             corner_radius: 1,
-            fill: Some([4, 5, 6]),
+            fill: Some([9, 9, 9]),
             shadow: PanelShadow::None_,
             inset_x: 0,
             inset_y: 1,
@@ -900,16 +1180,43 @@ mod tests {
             anchor: None,
         });
         assert_eq!(
-            [draw(20), draw(4)],
+            scene.bytes(),
             [
-                [
-                    hairline(20),
-                    panel,
-                    run(35, " NOR ", [1, 2, 3]),
-                    run(112, "ab", [7, 8, 9]),
-                ]
-                .concat(),
-                hairline(4),
+                bar(0, 0, 16, 1, [60, 66, 77]),
+                bar(64, 0, 256, 1, [60, 66, 77]),
+                run(0, "a", [1, 1, 1]),
+                panel,
+                run(20, "bc", [2, 2, 2]),
+                bar(43, 7, 3, 3, [3, 3, 3]),
+                run(50, "d", [4, 4, 4]),
+            ]
+            .concat(),
+        );
+    }
+
+    /// The spans are the boxes the bar draws. A plain segment takes no span, a
+    /// box rounds out to whole cells at any scale, and the bar's edge cuts the
+    /// box it crosses and drops the boxes past it.
+    #[test]
+    fn box_spans_are_the_boxes_the_bar_draws() {
+        let texts = ["ab", "cde", "fghij", "k"];
+        let boxes = [1..3, 3..4];
+        let spans = |scale: u16, width: u16| {
+            box_spans(&texts, &boxes, scale, width)
+                .into_iter()
+                .map(|span| (span.start, span.end))
+                .collect::<Vec<_>>()
+        };
+
+        // At 160 "ab" advances 20, "cde" and "fghij" 30 and 50, and "k" 10. At
+        // 256 each glyph takes a cell.
+        assert_eq!(
+            [spans(160, 20), spans(256, 20), spans(160, 6), spans(160, 2)],
+            [
+                vec![(32, 112), (112, 128)],
+                vec![(32, 160), (160, 176)],
+                vec![(32, 96)],
+                vec![],
             ],
         );
     }

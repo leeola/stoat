@@ -465,17 +465,43 @@ fn the_status_row_sits_on_chrome_with_no_hairline() {
 }
 
 /// The tab bar sits on chrome over a lone tab, with the active tab on the base
-/// surface.
+/// surface, its top corners rounded off.
 ///
 /// The bar leads with the workspace name, whose length follows the session's
 /// random name, so the check reads row 0 as runs of color rather than at a
-/// fixed column.
+/// fixed column. The tab's left edge is the first base pixel of the row's
+/// middle, where the edge runs straight, and the rounding takes the base
+/// out of that column's top pixel.
 #[test]
 fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "many-files", "src/alpha.txt", "");
 
     expect_row_runs(&shot, &mut home, 0, &[CHROME, BASE, CHROME], "tab_bar");
+
+    let (_, top, _, height) = cell_rect(0, 0, 1, 1);
+    let pixel = |x: u32, y: u32| {
+        let at = ((y * shot.width + x) * 4) as usize;
+        [shot.rgba[at], shot.rgba[at + 1], shot.rgba[at + 2]]
+    };
+    let middle = top + height / 2;
+    let Some(left) = (0..shot.width).find(|&x| pixel(x, middle) == BASE) else {
+        let frame = keep_frame(&shot, &mut home, "tab_bar_middle");
+        panic!(
+            "no pixel of row 0's middle reads {}; the frame is {}",
+            hex(BASE),
+            frame.display(),
+        );
+    };
+    if pixel(left, top) == BASE {
+        let frame = keep_frame(&shot, &mut home, "tab_corner");
+        panic!(
+            "the active tab's top-left pixel at x {left} reads {}, not rounded off; the frame \
+             is {}",
+            hex(BASE),
+            frame.display(),
+        );
+    }
 }
 
 /// The file finder's box fills with the overlay surface where no text covers
