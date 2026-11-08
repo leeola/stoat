@@ -1601,7 +1601,6 @@ pub(crate) fn frame(
         && let (Some(band), Some(chrome)) = (single_minimap_rect, frame.minimap_chrome)
         && let Some((content_id, palette)) = single_band_content(ws, chrome)
     {
-        let [tr, tg, tb, _] = chrome.thumb;
         let strip = Minimap {
             strip_id: SINGLE_MINIMAP_STRIP_ID,
             content_id,
@@ -1609,7 +1608,7 @@ pub(crate) fn frame(
             max_columns: pane::MINIMAP_MAX_COLUMNS,
             bg: [0, 0, 0, 0],
             thumb: chrome.thumb,
-            thumb_border: [tr, tg, tb],
+            thumb_border: None,
             palette,
         };
         match single_band_overview(ws) {
@@ -3207,7 +3206,7 @@ mod minimap_chrome_tests {
     use stoatty_protocol::command::{self, Command};
 
     /// A pane's minimap strip is seven cells wide, and its viewport thumb
-    /// washes the focus accent at nine percent.
+    /// washes the focus accent at nine percent with no outline.
     #[test]
     fn the_strip_is_seven_cells_with_an_accent_thumb() {
         let mut h = TestHarness::with_size(120, 24);
@@ -3223,7 +3222,10 @@ mod minimap_chrome_tests {
             .expect("the pane declares a strip");
         let [r, g, b] = style_rgb(h.stoat.theme.get(scope::UI_BORDER_FOCUSED).fg)
             .expect("the theme's focus accent is RGB");
-        assert_eq!((strip.width, strip.thumb), (7, [r, g, b, 23]));
+        assert_eq!(
+            (strip.width, strip.thumb, strip.thumb_border),
+            (7, [r, g, b, 23], None)
+        );
     }
 }
 

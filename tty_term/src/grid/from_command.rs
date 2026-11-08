@@ -162,11 +162,7 @@ pub(crate) fn minimap_strip_from_command(command: &MinimapCommand) -> MinimapStr
             command.thumb[2],
             command.thumb[3],
         ),
-        thumb_border: Rgb::new(
-            command.thumb_border[0],
-            command.thumb_border[1],
-            command.thumb_border[2],
-        ),
+        thumb_border: command.thumb_border.map(|[r, g, b]| Rgb::new(r, g, b)),
         palette: command
             .palette
             .iter()

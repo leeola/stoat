@@ -25,8 +25,8 @@ pub struct Minimap<'a> {
     pub bg: [u8; 4],
     /// Viewport-thumb fill, rgba.
     pub thumb: [u8; 4],
-    /// Viewport-thumb outline, rgb.
-    pub thumb_border: [u8; 3],
+    /// Viewport-thumb outline, rgb. `None` shows the viewport by the fill alone.
+    pub thumb_border: Option<[u8; 3]>,
     /// Run-class palette, up to 256 rgb entries a summary's classes index.
     ///
     /// Borrowed, since a strip is redeclared every frame and the palette it
@@ -117,7 +117,7 @@ mod tests {
             max_columns: 120,
             bg: [40, 44, 52, 0],
             thumb: [99, 109, 131, 64],
-            thumb_border: [60, 66, 77],
+            thumb_border: Some([60, 66, 77]),
             palette: &PALETTE,
         }
     }
@@ -141,7 +141,7 @@ mod tests {
             max_columns: 120,
             bg: [40, 44, 52, 0],
             thumb: [99, 109, 131, 64],
-            thumb_border: [60, 66, 77],
+            thumb_border: Some([60, 66, 77]),
             palette: PALETTE.to_vec(),
         });
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());

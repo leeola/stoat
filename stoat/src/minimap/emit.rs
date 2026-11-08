@@ -1153,9 +1153,8 @@ mod tests {
             "the unfocused thumb dims its rgb and keeps its alpha"
         );
         assert_eq!(
-            unfocused.thumb_border,
-            [dr, dg, db],
-            "the unfocused thumb border dims"
+            unfocused.thumb_border, None,
+            "the unfocused thumb carries no outline to dim"
         );
 
         // The blend is held across frames rather than redone on each one, so a

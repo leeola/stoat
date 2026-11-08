@@ -47,9 +47,9 @@ pub type LineSummary = Arc<[MinimapRun]>;
 /// [`Self::content_id`] the line-summary store it renders (see
 /// [`MinimapLinesCommand`]). Each summarized line is drawn `lines_per_cell` to a
 /// cell, up to `max_columns` wide. [`Self::bg`] and [`Self::thumb`] are rgba, the
-/// thumb being the viewport overlay; [`Self::thumb_border`] is its rgb outline.
-/// [`Self::palette`] holds up to 256 rgb entries, one per class a run's `u8`
-/// names.
+/// thumb being the viewport overlay. [`Self::thumb_border`] is its rgb outline,
+/// and `None` draws the thumb as its fill alone. [`Self::palette`] holds up to
+/// 256 rgb entries, one per class a run's `u8` names.
 ///
 /// The palette is generic over its container so an emitter declaring a strip per
 /// frame can hand a borrowed slice, while a decoded command owns its copy. It
@@ -67,7 +67,7 @@ pub struct MinimapCommand<P = Vec<[u8; 3]>> {
     pub max_columns: u8,
     pub bg: [u8; 4],
     pub thumb: [u8; 4],
-    pub thumb_border: [u8; 3],
+    pub thumb_border: Option<[u8; 3]>,
     pub palette: P,
 }
 
@@ -120,7 +120,7 @@ pub struct MinimapDropCommand {
 
 /// Encode a [`MinimapCommand`] as a full `Gstoatty;minimap` frame for an emitter.
 ///
-/// The fixed head rides in a 29-byte first argument and the palette in a second
+/// The fixed head rides in a 30-byte first argument and the palette in a second
 /// argument of consecutive rgb triples.
 pub fn encode_minimap<P: AsRef<[[u8; 3]]>>(command: &MinimapCommand<P>) -> Vec<u8> {
     let mut out = Vec::new();
@@ -141,7 +141,8 @@ pub fn encode_minimap_into<P: AsRef<[[u8; 3]]>>(out: &mut Vec<u8>, command: &Min
         w.write_all(&[command.lines_per_cell, command.max_columns])?;
         w.write_all(&command.bg)?;
         w.write_all(&command.thumb)?;
-        w.write_all(&command.thumb_border)
+        w.write_all(&[u8::from(command.thumb_border.is_some())])?;
+        w.write_all(&command.thumb_border.unwrap_or([0, 0, 0]))
     });
     frame::push_arg(out, |w| {
         for entry in command.palette.as_ref() {
@@ -326,7 +327,7 @@ pub fn encode_minimap_drop_into(out: &mut Vec<u8>, command: &MinimapDropCommand)
 }
 
 pub(super) fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
-    let head: &[u8; 29] = args.first()?.get(..29)?.try_into().ok()?;
+    let head: &[u8; 30] = args.first()?.get(..30)?.try_into().ok()?;
     let palette_bytes = args.get(1)?;
     if palette_bytes.len() % 3 != 0 || palette_bytes.len() / 3 > 256 {
         return None;
@@ -350,7 +351,7 @@ pub(super) fn decode_minimap(args: &[Vec<u8>]) -> Option<MinimapCommand> {
         max_columns: head[17],
         bg: [head[18], head[19], head[20], head[21]],
         thumb: [head[22], head[23], head[24], head[25]],
-        thumb_border: [head[26], head[27], head[28]],
+        thumb_border: (head[26] != 0).then_some([head[27], head[28], head[29]]),
         palette,
     })
 }
@@ -466,7 +467,7 @@ mod tests {
             max_columns: 120,
             bg: [10, 20, 30, 0],
             thumb: [200, 200, 200, 48],
-            thumb_border: [255, 255, 255],
+            thumb_border: Some([255, 255, 255]),
             palette: vec![[0, 0, 0], [1, 2, 3]],
         };
 
@@ -489,7 +490,7 @@ mod tests {
             max_columns: 120,
             bg: [0, 0, 0, 0],
             thumb: [0, 0, 0, 0],
-            thumb_border: [0, 0, 0],
+            thumb_border: None,
             palette: vec![],
         };
 
@@ -501,15 +502,15 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_minimap_head() {
-        // A 28-byte head is one short of the 29 a minimap declaration needs.
-        let bytes = frame_bytes("minimap", vec![vec![0u8; 28], vec![0u8; 3]]);
+        // A 29-byte head is one short of the 30 a minimap declaration needs.
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 3]]);
         assert!(decode(&bytes).is_none());
     }
 
     #[test]
     fn rejects_oversized_minimap_palette() {
         // 257 rgb entries (771 bytes) exceeds the 256-entry palette cap.
-        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 771]]);
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 30], vec![0u8; 771]]);
         assert!(decode(&bytes).is_none());
     }
 
@@ -518,7 +519,7 @@ mod tests {
     #[test]
     fn accepts_a_full_palette() {
         let palette: Vec<[u8; 3]> = (0..=255u8).map(|i| [i, 0, 255 - i]).collect();
-        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], palette.concat()]);
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 30], palette.concat()]);
         let Some(Command::Minimap(command)) = decode(&bytes) else {
             panic!("a 256-entry palette decodes");
         };
@@ -528,7 +529,7 @@ mod tests {
     #[test]
     fn rejects_misaligned_minimap_palette() {
         // 4 palette bytes is not a whole number of rgb triples.
-        let bytes = frame_bytes("minimap", vec![vec![0u8; 29], vec![0u8; 4]]);
+        let bytes = frame_bytes("minimap", vec![vec![0u8; 30], vec![0u8; 4]]);
         assert!(decode(&bytes).is_none());
     }
 

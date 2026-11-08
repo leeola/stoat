@@ -389,7 +389,7 @@ fn render_frame(frame: &mut Frame<'_>, scene: &mut ApcScene, document: &[String]
             max_columns: MAX_COLUMNS,
             bg: [0, 0, 0, 0],
             thumb: [99, 109, 131, 64],
-            thumb_border: [60, 66, 77],
+            thumb_border: Some([60, 66, 77]),
             palette: &PALETTE,
         },
         STRIP,

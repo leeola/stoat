@@ -144,9 +144,14 @@
 /// predates it reads the bit as above pools, so an emitter sends a backdrop
 /// only to a terminal at [`BACKDROP_PANEL_PROTOCOL`] or later.
 ///
+/// Version 21 reads a fixed 30-byte `minimap` head, which ends in a presence
+/// byte and the rgb of the thumb outline. A zero presence byte declares a thumb
+/// with no outline. A terminal that predates it reads the presence byte as the
+/// outline's red and strokes every thumb. This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

@@ -2185,7 +2185,9 @@ pub struct MinimapStrip {
     pub bg: Rgba,
     /// The viewport overlay, drawn over them.
     pub thumb: Rgba,
-    pub thumb_border: Rgb,
+    /// The overlay's one-pixel outline. A strip with none shows the viewport by
+    /// its tint alone.
+    pub thumb_border: Option<Rgb>,
     /// Colors a run's class indexes, up to 256 entries.
     pub palette: Vec<Rgb>,
 }
@@ -2953,7 +2955,7 @@ mod tests {
                 max_columns: 1,
                 bg: Rgba::new(0, 0, 0, 255),
                 thumb: Rgba::new(0, 0, 0, 255),
-                thumb_border: Rgb::new(0, 0, 0),
+                thumb_border: Some(Rgb::new(0, 0, 0)),
                 palette: Vec::new(),
             },
             seq: 0,

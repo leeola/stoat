@@ -729,7 +729,7 @@ mod tests {
                     max_columns: 8,
                     bg: [9, 10, 11, 12],
                     thumb: [13, 14, 15, 16],
-                    thumb_border: [17, 18, 19],
+                    thumb_border: Some([17, 18, 19]),
                     palette: vec![[20, 21, 22]],
                 }),
             ),
@@ -1207,7 +1207,7 @@ mod tests {
                 max_columns: 120,
                 bg: [10, 20, 30, 0],
                 thumb: [200, 200, 200, 48],
-                thumb_border: [255, 255, 255],
+                thumb_border: Some([255, 255, 255]),
                 palette: vec![[0, 0, 0], [1, 2, 3], [4, 5, 6]],
             }),
             Command::MinimapLines(MinimapLinesCommand {

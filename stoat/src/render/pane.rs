@@ -586,7 +586,7 @@ fn pane_minimap<'a>(
         max_columns: MINIMAP_MAX_COLUMNS,
         bg: [0, 0, 0, 0],
         thumb: [thumb[0], thumb[1], thumb[2], ta],
-        thumb_border: thumb,
+        thumb_border: None,
         palette,
     };
     match kind {
@@ -599,9 +599,9 @@ fn pane_minimap<'a>(
 /// its text strip over the overview palette.
 ///
 /// The overview fills its cell with the window ground and shows the viewport as
-/// a band of the thumb color at [`DIFF_OVERVIEW_THUMB_ALPHA`], with no outline
-/// of its own. Its columns end at [`DIFF_OVERVIEW_MAX_COLUMNS`]. A per-pane
-/// strip and the single band declare it alike.
+/// a band of the thumb color at [`DIFF_OVERVIEW_THUMB_ALPHA`], with no outline.
+/// Its columns end at [`DIFF_OVERVIEW_MAX_COLUMNS`]. A per-pane strip and the
+/// single band declare it alike.
 pub(super) fn overview_minimap(strip: Minimap<'_>) -> Minimap<'_> {
     let [tr, tg, tb, _] = strip.thumb;
     let thumb = [tr, tg, tb];
@@ -609,18 +609,11 @@ pub(super) fn overview_minimap(strip: Minimap<'_>) -> Minimap<'_> {
     // Every class but the marks takes the ground at the palette's own fade, so
     // the first class is the strip's fill.
     let ground = strip.palette.first().copied().unwrap_or(thumb);
-    let band = dim_rgb(
-        ground,
-        thumb,
-        f32::from(DIFF_OVERVIEW_THUMB_ALPHA) / f32::from(u8::MAX),
-    );
     Minimap {
         max_columns: DIFF_OVERVIEW_MAX_COLUMNS,
         bg: [ground[0], ground[1], ground[2], u8::MAX],
         thumb: [tr, tg, tb, DIFF_OVERVIEW_THUMB_ALPHA],
-        // The outline takes the band's own color, so the band reads as a tint
-        // with no edge.
-        thumb_border: band,
+        thumb_border: None,
         ..strip
     }
 }
@@ -3116,7 +3109,7 @@ mod tests {
     ///
     /// The overview fills its cell with the window ground, and its columns end
     /// at twice the mark lane. The viewport is the thumb color at 31 of 255
-    /// with an outline in the band's own color, over the overview palette.
+    /// with no outline, over the overview palette.
     #[test]
     fn a_diff_screen_declares_its_strip_as_a_scroll_overview() {
         let screens: [(&str, EnterScreen); 2] = [
@@ -3170,7 +3163,7 @@ mod tests {
                     4,
                     [ground[0], ground[1], ground[2], 255],
                     [thumb[0], thumb[1], thumb[2], 31],
-                    super::dim_rgb(ground, thumb, 31.0 / 255.0),
+                    None,
                     crate::render::review::diff_overview_palette(table, table.palette(), ground),
                 );
                 assert_eq!(strips.last(), Some(&declared), "{screen} in {mode:?}");

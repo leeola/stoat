@@ -567,8 +567,8 @@ fn thumb_geometry(
     (offset, height)
 }
 
-/// One strip's instances (background, run blocks, thumb) and its pixel scissor
-/// rect `[x, y, w, h]`.
+/// One strip's instances (background, run blocks, thumb, and any thumb outline)
+/// and its pixel scissor rect `[x, y, w, h]`.
 ///
 /// Walks only the visible line slice `[top, top + visible_lines)`, so the cost is
 /// bounded by the strip height, never the file size. A line index past the
@@ -650,10 +650,13 @@ fn build_strip(
         seq,
     });
 
+    let Some(border) = strip.strip.thumb_border else {
+        return (instances, rect);
+    };
+
     // The thumb's outline, one logical pixel wide on rounded rows so the
-    // hairline stays crisp. A translucent fill alone leaves the viewport's
-    // extent to a shift in tint, which a reader loses against a busy strip.
-    let border = rgb_opaque_f32(strip.strip.thumb_border);
+    // hairline stays crisp.
+    let border = rgb_opaque_f32(border);
     let weight = metrics.scale_factor.round().max(1.0);
     let top_y = (layout.strip_y + thumb_offset).round();
     let bottom_y = (top_y + thumb_height).round();
@@ -769,7 +772,7 @@ mod tests {
             max_columns: 120,
             bg: Rgba::new(0, 0, 0, 0),
             thumb: Rgba::new(200, 200, 200, 48),
-            thumb_border: Rgb::new(255, 255, 255),
+            thumb_border: Some(Rgb::new(255, 255, 255)),
             palette: vec![
                 Rgb::new(10, 20, 30),
                 Rgb::new(40, 50, 60),
@@ -944,6 +947,32 @@ mod tests {
         // Background + one run (the single line) + thumb + its four border
         // edges, nothing for the missing lines the strip window covers.
         assert_eq!(instances.len(), 7);
+    }
+
+    /// A strip that declares no outline shows the viewport by the thumb's tint
+    /// alone, so no edge crosses the runs at the band's rim.
+    #[test]
+    fn a_borderless_thumb_builds_no_outline() {
+        let mut borderless = strip(None);
+        borderless.strip.thumb_border = None;
+        let (instances, _) = build_strip(
+            &borderless,
+            &summaries(vec![Vec::new()]),
+            metrics(),
+            uniform_layout(),
+        );
+
+        assert_eq!(
+            instances
+                .iter()
+                .map(|instance| instance.color)
+                .collect::<Vec<_>>(),
+            [
+                [0.0, 0.0, 0.0, 0.0],
+                [200.0 / 255.0, 200.0 / 255.0, 200.0 / 255.0, 48.0 / 255.0],
+            ],
+            "the background and the thumb fill, with no edge after them",
+        );
     }
 
     #[test]
@@ -1380,7 +1409,7 @@ mod tests {
             max_columns,
             bg: Rgba::new(0, 0, 0, 0),
             thumb: Rgba::new(0, 0, 0, 0),
-            thumb_border: Rgb::new(0, 0, 0),
+            thumb_border: Some(Rgb::new(0, 0, 0)),
             palette: vec![Rgb::new(255, 0, 0)],
         }
     }
@@ -1569,7 +1598,7 @@ mod tests {
         // No view, so the thumb spans the whole four-cell strip: 6 px wide and
         // 48 tall, with the border on rows 0 and 47 and columns 0 and 5.
         let mut strip = red_strip(1, 4, 6, 12);
-        strip.thumb_border = Rgb::new(255, 0, 0);
+        strip.thumb_border = Some(Rgb::new(255, 0, 0));
         let grid = red_grid(strip, vec![Vec::new(); 10], None);
 
         let red = render_red(&device, &queue, &grid, &[], metrics());
