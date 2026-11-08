@@ -24,6 +24,20 @@ pub struct Panel {
     /// draws narrower than its cell rect. `0` is cell-exact. The fallback border
     /// ignores it (cell borders are whole cells).
     pub inset_x: u8,
+    /// Pixels shaved off the top and bottom edges in the APC frame, as
+    /// [`Self::inset_x`] shaves the sides. The fallback border ignores it.
+    pub inset_y: u8,
+    /// The corners [`Self::corner_radius`] rounds in the APC frame, as
+    /// [`PanelCommand::corners`] names them. Zero rounds all four. The fallback
+    /// border ignores it.
+    pub corners: u8,
+    /// The bottom corners the APC frame joins to the surface below with a
+    /// fillet, as [`PanelCommand::fillets`] names them. The fallback border
+    /// ignores it.
+    pub fillets: u8,
+    /// The color of the hatch over the APC frame's fill, or `None` for a plain
+    /// fill. The fallback border ignores it.
+    pub hatch: Option<[u8; 3]>,
     /// The panel floats above every pooled surface, so pool composites must not
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it. The fallback border
@@ -73,6 +87,10 @@ impl Panel {
                 fill: self.fill,
                 shadow: self.shadow,
                 inset_x: self.inset_x,
+                inset_y: self.inset_y,
+                corners: self.corners,
+                fillets: self.fillets,
+                hatch: self.hatch,
                 above_pools: self.above_pools,
                 backdrop: self.backdrop,
                 anchor: self.anchor,
@@ -125,6 +143,10 @@ mod tests {
             fill: Some([40, 44, 52]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -142,6 +164,10 @@ mod tests {
             fill: Some([40, 44, 52]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -162,6 +188,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -189,6 +219,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -214,6 +248,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -245,6 +283,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -267,6 +309,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,

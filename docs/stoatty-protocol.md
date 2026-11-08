@@ -127,7 +127,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | Sub-command | Lane | Head | Notes |
 |---|---|---|---|
 | `border` | D | 12 B | Rectangle, style, color |
-| `panel` | D | 19 B+ | Rectangle, fill, border, radius, shadow |
+| `panel` | D | 27 B, +8 B with anchor | Rectangle, fill, border, radius, shadow, insets, corners, fillets, hatch |
 | `scale` | D | 5 B | Draw the cell's glyph at N times cell size |
 | `popover` | D | 23 B, + 1 B count and 10 B per span | + streamed content, closed by `popover_end`; a span colors and weights a run of the content |
 | `popover_end` | D | -- | Commits the capture |

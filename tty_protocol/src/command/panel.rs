@@ -17,6 +17,25 @@ const ABOVE_POOLS: u8 = 1;
 /// takes as an occluder.
 const BACKDROP: u8 = 2;
 
+/// The bit of [`PanelCommand::corners`] that rounds the top-left corner.
+pub const CORNER_TOP_LEFT: u8 = 1;
+/// The bit of [`PanelCommand::corners`] that rounds the top-right corner.
+pub const CORNER_TOP_RIGHT: u8 = 2;
+/// The bit of [`PanelCommand::corners`] that rounds the bottom-right corner.
+pub const CORNER_BOTTOM_RIGHT: u8 = 4;
+/// The bit of [`PanelCommand::corners`] that rounds the bottom-left corner.
+pub const CORNER_BOTTOM_LEFT: u8 = 8;
+
+/// The bit of [`PanelCommand::fillets`] that joins the bottom-left corner to the
+/// surface below the panel.
+pub const FILLET_BOTTOM_LEFT: u8 = 1;
+/// The bit of [`PanelCommand::fillets`] that joins the bottom-right corner to the
+/// surface below the panel.
+pub const FILLET_BOTTOM_RIGHT: u8 = 2;
+
+/// The length of a panel frame's fixed head, which the optional anchor follows.
+const HEAD_LEN: usize = 27;
+
 /// How a panel's shadow is drawn.
 ///
 /// [`PanelShadow::None_`] draws no shadow. [`PanelShadow::Drop`] is a displaced,
@@ -48,6 +67,12 @@ pub enum PanelShadow {
 ///
 /// `fill` is [`Some`] to paint the interior that color, or [`None`] to leave the
 /// cells' own SGR backgrounds showing through.
+///
+/// [`Self::inset_x`] and [`Self::inset_y`] shrink the box inside its cells, and
+/// [`Self::corners`] picks the corners the radius rounds. [`Self::fillets`] join
+/// the bottom corners to the surface below, and [`Self::hatch`] stripes the
+/// fill. Together they draw a chip shorter than its row, a tab rounded at the
+/// top alone, and a hatched row.
 // `Eq` is absent because [`Self::anchor`] carries a fractional row offset and
 // `f32` is only `PartialEq`.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -66,6 +91,27 @@ pub struct PanelCommand {
     /// and shadow all follow the inset rect, leaving the strip outside it showing
     /// the cells behind.
     pub inset_x: u8,
+    /// Logical pixels shaved off the top and bottom edges, as [`Self::inset_x`]
+    /// shaves the sides, so a chip draws shorter than the row it sits in.
+    pub inset_y: u8,
+    /// The corners [`Self::corner_radius`] rounds, one bit each, from
+    /// [`CORNER_TOP_LEFT`] to [`CORNER_BOTTOM_LEFT`]. Zero rounds all four, so a
+    /// panel that names no corner keeps every corner round. A tab sets the top
+    /// two alone and meets the surface below it square.
+    pub corners: u8,
+    /// The bottom corners joined to the surface below by a fillet,
+    /// [`FILLET_BOTTOM_LEFT`] and [`FILLET_BOTTOM_RIGHT`].
+    ///
+    /// A fillet is a 2 logical pixel concave curve in the fill color just
+    /// outside the corner, so a tab or a docked box flows into the surface it
+    /// stands on. A panel with no fill draws none.
+    pub fillets: u8,
+    /// The color of a hatch over the fill, or `None` for a plain fill.
+    ///
+    /// The hatch is a 1 logical pixel line every 7 at 135 degrees, placed by the
+    /// screen pixel, so the stripes run on unbroken across neighboring panels.
+    /// A panel with no fill draws none.
+    pub hatch: Option<[u8; 3]>,
     /// The panel floats above every pooled surface, so pool composites must not
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.
@@ -113,8 +159,11 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&[shadow_code(command.shadow)])?;
         w.write_all(&[command.inset_x])?;
         w.write_all(&[flags(command)])?;
-        // Trailing and optional, so a receiver built before the anchor existed
-        // reads the frame whole and treats the panel as screen-fixed.
+        w.write_all(&[command.inset_y, command.corners, command.fillets])?;
+        w.write_all(&[u8::from(command.hatch.is_some())])?;
+        w.write_all(&command.hatch.unwrap_or([0, 0, 0]))?;
+        // The anchor trails the fixed head, and a screen-fixed panel leaves it
+        // out.
         if let Some((host, top_rows)) = command.anchor {
             w.write_all(&host.to_be_bytes())?;
             w.write_all(&top_rows.to_be_bytes())?;
@@ -145,7 +194,7 @@ pub fn decode_panels(bytes: &[u8]) -> impl Iterator<Item = PanelCommand> {
 
 pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
     let arg = args.first()?;
-    if arg.len() < 19 {
+    if arg.len() < HEAD_LEN {
         return None;
     }
 
@@ -162,9 +211,13 @@ pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         inset_x: arg[18],
         // A bit this decoder does not know reads as above pools, the layer every
         // nonzero byte meant before the flags had more than one bit.
-        above_pools: arg.get(19).is_some_and(|byte| byte & !BACKDROP != 0),
-        backdrop: arg.get(19).is_some_and(|byte| byte & BACKDROP != 0),
-        anchor: arg.get(20..28).map(|tail| {
+        above_pools: arg[19] & !BACKDROP != 0,
+        backdrop: arg[19] & BACKDROP != 0,
+        inset_y: arg[20],
+        corners: arg[21],
+        fillets: arg[22],
+        hatch: (arg[23] != 0).then_some([arg[24], arg[25], arg[26]]),
+        anchor: arg.get(HEAD_LEN..HEAD_LEN + 8).map(|tail| {
             (
                 u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]),
                 f32::from_be_bytes([tail[4], tail[5], tail[6], tail[7]]),
@@ -220,6 +273,10 @@ mod tests {
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -244,6 +301,10 @@ mod tests {
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: true,
             backdrop: false,
             anchor: None,
@@ -269,6 +330,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -295,6 +360,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::Tucked,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: true,
             anchor: None,
@@ -319,6 +388,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -343,6 +416,10 @@ mod tests {
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Tucked,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -367,6 +444,10 @@ mod tests {
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Overhang,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor: None,
@@ -391,6 +472,10 @@ mod tests {
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Halo,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: true,
             backdrop: false,
             anchor: None,
@@ -428,6 +513,10 @@ mod tests {
             fill: None,
             shadow: PanelShadow::None_,
             inset_x: 0,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: false,
             backdrop: false,
             anchor,
@@ -444,49 +533,38 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_panel_payload() {
-        // The single arg here decodes to 3 bytes, not the 18 a panel needs.
+        // The single arg here decodes to 3 bytes, not the 27 a panel head needs.
         assert!(decode(b"Gstoatty;panel;YWJj").is_none());
     }
 
+    /// The shape bytes carry a vertical inset, a corner mask, a fillet mask, and
+    /// a hatch, and the anchor follows them, so a tab that rides a pane keeps
+    /// every part of its shape.
     #[test]
-    fn panel_decode_tolerates_legacy_title_gap_bytes() {
-        // A 22-byte arg carries three trailing bytes past the 19-byte base from an
-        // emitter that still wrote the retired title-gap span. The decoder reads
-        // what it knows rather than rejecting the frame. Byte 19 now holds the
-        // above_pools flag, so the retired gap start's nonzero low byte reads as a
-        // set flag and only the two bytes past it are ignored.
-        let mut arg = Vec::new();
-        arg.extend_from_slice(&3u16.to_be_bytes());
-        arg.extend_from_slice(&12u16.to_be_bytes());
-        arg.extend_from_slice(&40u16.to_be_bytes());
-        arg.extend_from_slice(&10u16.to_be_bytes());
-        arg.push(style_code(BorderStyle::Rounded));
-        arg.extend_from_slice(&[200, 40, 90]);
-        arg.push(6);
-        arg.push(1);
-        arg.extend_from_slice(&[20, 22, 30]);
-        arg.push(1);
-        arg.extend_from_slice(&16u16.to_be_bytes());
-        arg.extend_from_slice(&80u16.to_be_bytes());
-        assert_eq!(arg.len(), 22);
+    fn panel_shape_fields_round_trip_before_the_anchor() {
+        let command = PanelCommand {
+            top: 3,
+            left: 12,
+            width: 40,
+            height: 1,
+            style: BorderStyle::None_,
+            border: [1, 2, 3],
+            corner_radius: 2,
+            fill: Some([20, 22, 30]),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 1,
+            corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
+            fillets: FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT,
+            hatch: Some([7, 8, 9]),
+            above_pools: false,
+            backdrop: false,
+            anchor: Some((7, 12.5)),
+        };
 
         assert_eq!(
-            decode_panel(&[arg]),
-            Some(PanelCommand {
-                top: 3,
-                left: 12,
-                width: 40,
-                height: 10,
-                style: BorderStyle::Rounded,
-                border: [200, 40, 90],
-                corner_radius: 6,
-                fill: Some([20, 22, 30]),
-                shadow: PanelShadow::Drop,
-                inset_x: 0,
-                above_pools: true,
-                backdrop: false,
-                anchor: None,
-            })
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
         );
     }
 
@@ -503,6 +581,10 @@ mod tests {
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
             inset_x: 4,
+            inset_y: 0,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
             above_pools: true,
             backdrop: false,
             anchor: Some((7, 12.5)),
@@ -514,68 +596,13 @@ mod tests {
         );
     }
 
+    /// A head shorter than the fixed 27 bytes decodes to nothing, whatever an
+    /// older emitter wrote into the bytes it has.
     #[test]
-    fn panel_decode_defaults_an_anchorless_frame_to_screen_fixed() {
-        // A 20-byte arg carries the above_pools flag but predates the anchor.
-        // An emitter left over from before a mid-session rebuild still decodes,
-        // its panel holding its screen position as it did when written.
-        let mut arg = Vec::new();
-        arg.extend_from_slice(&3u16.to_be_bytes());
-        arg.extend_from_slice(&12u16.to_be_bytes());
-        arg.extend_from_slice(&40u16.to_be_bytes());
-        arg.extend_from_slice(&10u16.to_be_bytes());
-        arg.push(style_code(BorderStyle::Rounded));
-        arg.extend_from_slice(&[200, 40, 90]);
-        arg.push(6);
-        arg.push(0);
-        arg.extend_from_slice(&[0, 0, 0]);
-        arg.push(shadow_code(PanelShadow::Drop));
-        arg.push(4);
-        arg.push(1);
-        assert_eq!(arg.len(), 20);
+    fn a_short_panel_head_decodes_to_nothing() {
+        let head = |len: usize| decode_panel(&[vec![1u8; len]]);
 
-        assert_eq!(
-            decode_panel(&[arg]).map(|panel| (panel.above_pools, panel.anchor)),
-            Some((true, None)),
-        );
-    }
-
-    #[test]
-    fn panel_decode_defaults_a_flagless_frame_to_grid_layering() {
-        // A 19-byte arg predates the above_pools flag. An emitter left over from
-        // before a mid-session rebuild still decodes, its panel layered with the
-        // grid as it was when the frame was written.
-        let mut arg = Vec::new();
-        arg.extend_from_slice(&3u16.to_be_bytes());
-        arg.extend_from_slice(&12u16.to_be_bytes());
-        arg.extend_from_slice(&40u16.to_be_bytes());
-        arg.extend_from_slice(&10u16.to_be_bytes());
-        arg.push(style_code(BorderStyle::Rounded));
-        arg.extend_from_slice(&[200, 40, 90]);
-        arg.push(6);
-        arg.push(0);
-        arg.extend_from_slice(&[0, 0, 0]);
-        arg.push(shadow_code(PanelShadow::Tucked));
-        arg.push(4);
-        assert_eq!(arg.len(), 19);
-
-        assert_eq!(
-            decode_panel(&[arg]),
-            Some(PanelCommand {
-                top: 3,
-                left: 12,
-                width: 40,
-                height: 10,
-                style: BorderStyle::Rounded,
-                border: [200, 40, 90],
-                corner_radius: 6,
-                fill: None,
-                shadow: PanelShadow::Tucked,
-                inset_x: 4,
-                above_pools: false,
-                backdrop: false,
-                anchor: None,
-            })
-        );
+        assert_eq!([19, 20, 22, 26].map(head), [None; 4]);
+        assert!(head(27).is_some(), "the full head decodes");
     }
 }

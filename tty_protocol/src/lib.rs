@@ -154,9 +154,15 @@
 /// edge. A terminal that predates it reads code 4 as a drop shadow and draws
 /// code 2 as the halo.
 ///
+/// Version 23 reads a fixed 27-byte `panel` head, which ends in a vertical
+/// inset, a corner mask, a fillet mask, and a hatch as a presence byte and rgb,
+/// with the anchor after it. A terminal that predates it ignores those bytes on
+/// a screen-fixed panel and reads an anchored panel's anchor from them. This
+/// version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

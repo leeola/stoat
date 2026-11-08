@@ -1838,6 +1838,19 @@ pub struct Panel {
     /// than its cell rect. Carried from the panel command and applied by the
     /// renderer to the frame, fill, corners, and shadow.
     pub inset_x: u8,
+    /// Logical pixels shaved off the top and bottom edges, as [`Self::inset_x`]
+    /// shaves the sides. Carried from the panel command.
+    pub inset_y: u8,
+    /// The corners the radius rounds, one bit each from top-left clockwise to
+    /// bottom-left, with zero rounding all four. Carried from the panel command.
+    pub corners: u8,
+    /// The bottom corners joined to the surface below by a fillet in the fill
+    /// color, bit 0 bottom-left and bit 1 bottom-right. Carried from the panel
+    /// command.
+    pub fillets: u8,
+    /// The color of the hatch over the fill, or `None` for a plain fill. Carried
+    /// from the panel command.
+    pub hatch: Option<Rgb>,
     /// The panel floats above every pooled surface, so pool composites must not
     /// paint over its rect. `false` layers the panel with the grid, where a pool
     /// composite covering the same cells draws over it.

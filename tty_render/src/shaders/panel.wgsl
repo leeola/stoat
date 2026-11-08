@@ -27,7 +27,18 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> instances: array<f32>;
 
-const INSTANCE_STRIDE: u32 = 18u;
+const INSTANCE_STRIDE: u32 = 24u;
+
+// Bits of a panel's shape word past its four corner bits, one per bottom
+// corner that a fillet joins to the surface below.
+const FILLET_BOTTOM_LEFT: u32 = 16u;
+const FILLET_BOTTOM_RIGHT: u32 = 32u;
+
+// A fillet's radius in logical pixels.
+const FILLET_RADIUS: f32 = 2.0;
+
+// The hatch's line pitch in logical pixels, measured along x plus y.
+const HATCH_PITCH: f32 = 7.0;
 
 // Border style codes, matching the protocol's border style ordering.
 const STYLE_LIGHT: u32 = 0u;
@@ -74,6 +85,12 @@ struct VsOut {
     // the bottom edge), 2.0 overhang (a fainter, shorter interior band along the
     // bottom edge), 3.0 halo (exterior, clipped at the box bottom).
     @location(10) @interpolate(flat) shadow_mode: f32,
+    // The rounded corners in bits 0-3, top-left clockwise, and the fillets in
+    // FILLET_BOTTOM_LEFT and FILLET_BOTTOM_RIGHT.
+    @location(11) @interpolate(flat) shape: u32,
+    // The hatch color, and 1.0 to stripe the fill with it.
+    @location(12) @interpolate(flat) hatch: vec3<f32>,
+    @location(13) @interpolate(flat) hatch_flag: f32,
 }
 
 // One panel instance's vertex attributes, read by both vertex stages.
@@ -89,6 +106,10 @@ struct PanelIn {
     @location(8) style: u32,
     @location(9) inset_x: f32,
     @location(10) shadow_mode: f32,
+    @location(11) inset_y: f32,
+    @location(12) shape: u32,
+    @location(13) hatch: vec3<f32>,
+    @location(14) hatch_flag: f32,
 }
 
 // The shadow, the fill, and the bottom band.
@@ -138,7 +159,7 @@ fn vs_stroke(
 fn panel_radius(panel: PanelIn) -> f32 {
     let half = vec2<f32>(
         panel.size.x * globals.cell_size.x - 2.0 * panel.inset_x,
-        panel.size.y * globals.cell_size.y
+        panel.size.y * globals.cell_size.y - 2.0 * panel.inset_y
     ) * 0.5;
     return min(panel.corner_radius, min(half.x, half.y));
 }
@@ -180,16 +201,22 @@ fn panel_vertex(
 
     // Expand the quad so the offset, blurred shadow is fully contained on every
     // side. The down-right edge must reach box + offset + margin, so pad by the
-    // larger offset component plus the margin.
-    let pad = panel.shadow_margin + max(abs(panel.shadow_offset.x), abs(panel.shadow_offset.y));
+    // larger offset component plus the margin. A fillet reaches its radius past
+    // the box's side, so a panel with one pads at least that far.
+    let shadow_pad = panel.shadow_margin + max(abs(panel.shadow_offset.x), abs(panel.shadow_offset.y));
+    let filleted = (panel.shape & (FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT)) != 0u;
+    let pad = max(shadow_pad, select(0.0, fillet_radius(), filleted));
     let quad_min_px = box_min_px - vec2<f32>(pad, pad);
     let quad_size_px = box_size_px + vec2<f32>(2.0 * pad, 2.0 * pad);
 
-    // Shave inset_x off each x edge so the frame, fill, corners, and shadow all
-    // draw narrower than the cell rect; the quad still spans the full rect, so
-    // the inset strip rasterizes as transparent cells.
-    let box_min = vec2<f32>(pad + panel.inset_x, pad);
-    let box_max = vec2<f32>(pad + box_size_px.x - panel.inset_x, pad + box_size_px.y);
+    // Shave inset_x off each x edge and inset_y off each y edge, so the frame,
+    // fill, corners, and shadow all draw inside the cell rect. The quad still
+    // spans the full rect, so the inset strips rasterize as transparent cells.
+    let box_min = vec2<f32>(pad + panel.inset_x, pad + panel.inset_y);
+    let box_max = vec2<f32>(
+        pad + box_size_px.x - panel.inset_x,
+        pad + box_size_px.y - panel.inset_y
+    );
 
     let inner_min = min(box_min + inset.xy, box_max);
     let inner_max = max(box_max - inset.zw, inner_min);
@@ -241,7 +268,16 @@ fn panel_vertex(
     out.style = panel.style;
     out.instance = instance_index;
     out.shadow_mode = panel.shadow_mode;
+    out.shape = panel.shape;
+    out.hatch = panel.hatch;
+    out.hatch_flag = panel.hatch_flag;
     return out;
+}
+
+// A fillet's radius in physical pixels, whole so its curve lands on the same
+// pixels in every frame.
+fn fillet_radius() -> f32 {
+    return round(FILLET_RADIUS * globals.scale_factor);
 }
 
 // Lay a layer of `color` at `alpha` over the premultiplied `under`, returning
@@ -349,10 +385,43 @@ fn box_radius(in: VsOut) -> f32 {
 
 /// Signed distance in pixels from the fragment to the panel's rounded box,
 /// negative inside.
+///
+/// The fragment's quadrant names the corner it lies toward, bit 0 top-left and
+/// then clockwise, and a corner the shape's mask leaves out stays square.
 fn box_distance(in: VsOut) -> f32 {
     let center = (in.box_min + in.box_max) * 0.5;
     let half = (in.box_max - in.box_min) * 0.5;
-    return rounded_box_sdf(in.quad_px - center, half, box_radius(in));
+    let p = in.quad_px - center;
+    let corner = select(select(0u, 1u, p.x > 0.0), select(3u, 2u, p.x > 0.0), p.y > 0.0);
+    let rounded = ((in.shape >> corner) & 1u) == 1u;
+    return rounded_box_sdf(p, half, select(0.0, box_radius(in), rounded));
+}
+
+/// Coverage of the fillet beside the bottom corner at `corner`, reaching out
+/// to the `side` of it (-1 left, 1 right).
+///
+/// The fillet is the square of side `r` past the corner and above it, less the
+/// quarter disc of radius `r` centered on the square's outer top corner. It
+/// curves the box's straight side into the surface below.
+fn fillet_coverage(p: vec2<f32>, corner: vec2<f32>, side: f32, r: f32) -> f32 {
+    let outer = corner + vec2<f32>(side * r, -r);
+    let lo = min(corner, outer);
+    let hi = max(corner, outer);
+    let square = max(max(lo.x - p.x, p.x - hi.x), max(lo.y - p.y, p.y - hi.y));
+    let disc = r - distance(p, outer);
+    return clamp(0.5 - max(square, disc), 0.0, 1.0);
+}
+
+/// The fill's color at the fragment.
+///
+/// A hatched panel takes the hatch color on its lines, one logical pixel wide
+/// and HATCH_PITCH apart along x plus y, which run at 135 degrees. The lines
+/// are placed by the framebuffer pixel, so they run on unbroken across
+/// neighboring panels.
+fn fill_color(in: VsOut) -> vec3<f32> {
+    let diagonal = (in.clip.x + in.clip.y) / globals.scale_factor;
+    let on_line = diagonal - HATCH_PITCH * floor(diagonal / HATCH_PITCH) < 1.0;
+    return select(in.fill, in.hatch, in.hatch_flag > 0.5 && on_line);
 }
 
 /// 1.0 where a dashed frame's band is on at the fragment, 0.0 in a gap.
@@ -395,7 +464,14 @@ fn coverage_of(in: VsOut) -> Coverage {
     // inside the rounded edge. The ramp is one pixel wide, so an opaque box
     // meets what surrounds it at a crisp edge.
     let interior = clamp(0.5 - box_sdf, 0.0, 1.0);
-    let fill_alpha = in.fill_flag * interior;
+    // A fillet carries the fill past a bottom corner, outside the box.
+    let r = fillet_radius();
+    let bottom_left = vec2<f32>(in.box_min.x, in.box_max.y);
+    let fillet = max(
+        select(0.0, fillet_coverage(p, bottom_left, -1.0, r), (in.shape & FILLET_BOTTOM_LEFT) != 0u),
+        select(0.0, fillet_coverage(p, in.box_max, 1.0, r), (in.shape & FILLET_BOTTOM_RIGHT) != 0u)
+    );
+    let fill_alpha = in.fill_flag * max(interior, fillet);
 
     // The shadow rectangle is the box shifted by the offset, blurred by a
     // gaussian that reaches zero at the margin. A zero margin means no shadow.
@@ -461,14 +537,14 @@ fn fs_under(in: VsOut) -> @location(0) vec4<f32> {
         if in.fill_flag <= 0.0 {
             discard;
         }
-        return unpremultiply(over(vec4<f32>(0.0), in.fill, in.fill_flag));
+        return unpremultiply(over(vec4<f32>(0.0), fill_color(in), in.fill_flag));
     }
 
     let c = coverage_of(in);
 
     var acc = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     acc = over(acc, SHADOW_COLOR, c.shadow);
-    acc = over(acc, in.fill, c.fill);
+    acc = over(acc, fill_color(in), c.fill);
     acc = over(acc, SHADOW_COLOR, c.band);
     return unpremultiply(acc);
 }
