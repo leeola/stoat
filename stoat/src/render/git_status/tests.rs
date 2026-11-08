@@ -25,6 +25,7 @@ fn model(rows: usize) -> GitStatusModel {
                     path: PathBuf::from(format!("/repo/{i}.rs")),
                     kind: RowKind::Modified,
                     note: Note::None,
+                    from_pause: false,
                 })
                 .collect(),
         }],

@@ -38,6 +38,15 @@ fn row(rel: &str, kind: RowKind, note: Note) -> FileRow {
         path: Path::new(ROOT).join(rel),
         kind,
         note,
+        from_pause: false,
+    }
+}
+
+/// `row` as a row of a rebase's conflict pause.
+fn from_pause(row: FileRow) -> FileRow {
+    FileRow {
+        from_pause: true,
+        ..row
     }
 }
 
@@ -328,11 +337,13 @@ fn a_file_changed_on_both_sides_lists_twice() {
                         path: at("both.rs"),
                         kind: RowKind::Modified,
                         note: lines(1, 1),
+                        from_pause: false,
                     },
                     FileRow {
                         path: at("gone.rs"),
                         kind: RowKind::Deleted,
                         note: lines(0, 1),
+                        from_pause: false,
                     },
                 ],
             ),
@@ -343,11 +354,13 @@ fn a_file_changed_on_both_sides_lists_twice() {
                         path: at("a.rs"),
                         kind: RowKind::Modified,
                         note: lines(1, 1),
+                        from_pause: false,
                     },
                     FileRow {
                         path: at("both.rs"),
                         kind: RowKind::Modified,
                         note: lines(1, 1),
+                        from_pause: false,
                     },
                 ],
             ),
@@ -357,6 +370,7 @@ fn a_file_changed_on_both_sides_lists_twice() {
                     path: at("gone.rs"),
                     kind: RowKind::Untracked,
                     note: Note::None,
+                    from_pause: false,
                 }],
             ),
         ],
@@ -640,15 +654,19 @@ fn a_rebase_pause_lists_its_conflicts() {
         [
             section(
                 SectionKind::Conflicted,
-                vec![row(
+                vec![from_pause(row(
                     "render/chrome.rs",
                     RowKind::Unmerged,
                     Note::Open { open: 1, total: 1 }
-                )],
+                ))],
             ),
             section(
                 SectionKind::Staged,
-                vec![row("theme.rs", RowKind::Modified, Note::TookOurs)],
+                vec![from_pause(row(
+                    "theme.rs",
+                    RowKind::Modified,
+                    Note::TookOurs
+                ))],
             ),
         ],
     );

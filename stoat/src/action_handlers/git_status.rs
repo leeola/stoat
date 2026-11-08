@@ -2,7 +2,10 @@
 //! rows, act on the selected row, and close it.
 
 use crate::{
-    action_handlers::{conflict, conflict_view, git_commit, git_merge, rebase, review},
+    action_handlers::{
+        conflict::{self, ConflictChoice},
+        conflict_view, git_commit, git_merge, rebase, review,
+    },
     app::{Stoat, UpdateEffect},
     auto_reload, buffer_lifecycle,
     buffer_registry::OpenOrigin,
@@ -17,6 +20,10 @@ use std::{
     io,
     path::{Path, PathBuf},
 };
+
+/// The badge for `s` and `u` on a conflicted row, which only `o` and `t`
+/// resolve.
+const TAKES_A_SIDE: &str = "a conflicted file takes a side with o or t";
 
 /// Open the git status panel and queue the read of its model.
 ///
@@ -52,12 +59,22 @@ pub(super) fn git_status_step(stoat: &mut Stoat, delta: isize) -> UpdateEffect {
 /// Close the panel and open the selected file.
 ///
 /// A conflicted file opens in the conflict view, a staged or unstaged file in
-/// the per-file diff view, and an untracked file as it is.
+/// the per-file diff view, and an untracked file as it is. A file of a
+/// rebase's conflict pause opens in the rebase conflict screen instead,
+/// because the index holds none of the pause's conflicts.
 pub(super) fn git_status_open(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((kind, path)) = selected(stoat) else {
+    let Some(target) = selected(stoat) else {
         return UpdateEffect::None;
     };
     stoat.git_status = None;
+
+    let (kind, path) = match target {
+        Selected::Repo(kind, path) => (kind, path),
+        Selected::Pause(index) => {
+            conflict::conflict_select(stoat, index);
+            return UpdateEffect::Redraw;
+        },
+    };
 
     if kind == SectionKind::Conflicted {
         open_conflicted(stoat, &path);
@@ -76,44 +93,63 @@ pub(super) fn git_status_open(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Stage the selected unstaged or untracked file as the working tree holds
 /// it, then read the panel again.
+///
+/// A file of a rebase's conflict pause badges instead, since only `o` and `t`
+/// change it.
 pub(super) fn git_status_stage(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((kind, path)) = selected(stoat) else {
+    let Some(target) = selected(stoat) else {
         return UpdateEffect::None;
     };
-    match kind {
-        SectionKind::Unstaged | SectionKind::Untracked => {
+    match target {
+        Selected::Repo(SectionKind::Unstaged | SectionKind::Untracked, path) => {
             queue_index_write(stoat, path, IndexWrite::Stage);
         },
-        SectionKind::Staged => review::emit_review_error_badge(stoat, "already staged", None),
-        SectionKind::Conflicted => review::emit_review_error_badge(
-            stoat,
-            "a conflicted file takes a side with o or t",
-            None,
-        ),
+        Selected::Repo(SectionKind::Staged, _) => {
+            review::emit_review_error_badge(stoat, "already staged", None);
+        },
+        Selected::Repo(SectionKind::Conflicted, _) | Selected::Pause(_) => {
+            review::emit_review_error_badge(stoat, TAKES_A_SIDE, None);
+        },
     }
     UpdateEffect::Redraw
 }
 
 /// Take the selected staged file out of the index, then read the panel again.
+///
+/// A file of a rebase's conflict pause badges instead, since only `o` and `t`
+/// change it.
 pub(super) fn git_status_unstage(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((kind, path)) = selected(stoat) else {
+    let Some(target) = selected(stoat) else {
         return UpdateEffect::None;
     };
-    match kind {
-        SectionKind::Staged => queue_index_write(stoat, path, IndexWrite::Unstage),
-        SectionKind::Conflicted | SectionKind::Unstaged | SectionKind::Untracked => {
+    match target {
+        Selected::Repo(SectionKind::Staged, path) => {
+            queue_index_write(stoat, path, IndexWrite::Unstage);
+        },
+        Selected::Repo(
+            SectionKind::Conflicted | SectionKind::Unstaged | SectionKind::Untracked,
+            _,
+        ) => {
             review::emit_review_error_badge(stoat, "not staged", None);
         },
+        Selected::Pause(_) => review::emit_review_error_badge(stoat, TAKES_A_SIDE, None),
     }
     UpdateEffect::Redraw
 }
 
 /// Resolve the selected conflicted file whole to `side`, stage it, note the
 /// side for its row, and read the panel again.
+///
+/// A file of a rebase's conflict pause takes `side` as the pause's resolution
+/// instead, which the rebase commits when it goes on.
 pub(super) fn git_status_take(stoat: &mut Stoat, side: Side) -> UpdateEffect {
-    let Some((SectionKind::Conflicted, path)) = selected(stoat) else {
-        review::emit_review_error_badge(stoat, "only a conflicted file takes a side", None);
-        return UpdateEffect::Redraw;
+    let path = match selected(stoat) {
+        Some(Selected::Repo(SectionKind::Conflicted, path)) => path,
+        Some(Selected::Pause(index)) => return take_paused(stoat, index, side),
+        _ => {
+            review::emit_review_error_badge(stoat, "only a conflicted file takes a side", None);
+            return UpdateEffect::Redraw;
+        },
     };
 
     let fs = stoat.fs_host.clone();
@@ -186,11 +222,42 @@ pub(super) fn git_status_skip(stoat: &mut Stoat) -> UpdateEffect {
     effect
 }
 
-/// The selected row's section and path, or `None` with the panel closed or
-/// no row.
-fn selected(stoat: &Stoat) -> Option<(SectionKind, PathBuf)> {
-    let (kind, row) = stoat.git_status.as_ref()?.selected_row()?;
-    Some((kind, row.path.clone()))
+/// What a key on the selected row acts on.
+enum Selected {
+    /// A file of the index or the working tree, in the section it sits in.
+    Repo(SectionKind, PathBuf),
+    /// The file at this index of the rebase's conflict pause.
+    Pause(usize),
+}
+
+/// What a key on the selected row acts on, or `None` with the panel closed
+/// or no row.
+///
+/// A pause row whose file the pause no longer holds also gives `None`, since
+/// its pause ended after the panel's last read.
+fn selected(stoat: &Stoat) -> Option<Selected> {
+    let panel = stoat.git_status.as_ref()?;
+    let (kind, row) = panel.selected_row()?;
+    if !row.from_pause {
+        return Some(Selected::Repo(kind, row.path.clone()));
+    }
+
+    // The pause names its files relative to the repository, and the read
+    // joined each pause row's path to the model's root.
+    let root = &panel.model.as_ref()?.root;
+    let pause = stoat
+        .active_workspace()
+        .rebase_active
+        .as_ref()?
+        .pause
+        .as_ref()?;
+    let RebasePause::Conflict { files, .. } = pause else {
+        return None;
+    };
+    files
+        .iter()
+        .position(|file| root.join(&file.path) == row.path)
+        .map(Selected::Pause)
 }
 
 /// The operation the panel's last read found in progress.
@@ -272,6 +339,22 @@ fn land_index_write(
     stoat.active_workspace_mut().invalidate_all_diffs();
     let name = paths::display_relative(path, &stoat.active_workspace().git_root);
     stoat.set_status(format!("{done} {name}"));
+}
+
+/// Set `side` as the rebase pause's resolution of its file at `index`, then
+/// read the panel again.
+///
+/// The pause resolves its selected file, so the file also becomes the rebase
+/// conflict screen's selection.
+fn take_paused(stoat: &mut Stoat, index: usize, side: Side) -> UpdateEffect {
+    let choice = match side {
+        Side::Ours => ConflictChoice::Ours,
+        Side::Theirs => ConflictChoice::Theirs,
+    };
+    conflict::conflict_select(stoat, index);
+    conflict::conflict_set(stoat, choice);
+    reload_git_status(stoat);
+    UpdateEffect::Redraw
 }
 
 /// Write `side`'s stage of the conflicted file at `path` over the file, then
@@ -358,6 +441,7 @@ mod tests {
         git_status::{Note, SectionKind},
         host::{FakeRepoBuilder, FsHost},
         keymap_state::{active_modal, ActiveModal},
+        rebase::{ConflictResolution, RebasePause},
         test_harness::TestHarness,
     };
     use std::{
@@ -414,6 +498,54 @@ mod tests {
             "<<<<<<< ours\nours\n=======\ntheirs\n>>>>>>> theirs\n",
         );
         h
+    }
+
+    /// A harness whose rebase stopped on a conflict over `a.rs` and `b.rs`,
+    /// with the panel open on the pause.
+    fn paused_harness() -> TestHarness {
+        let mut h = Stoat::test();
+        h.resize(90, 14);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "c1: root", &[("a.rs", "a1\n"), ("b.rs", "b1\n")]),
+                ("c2", "c2: middle", &[("a.rs", "a2\n"), ("b.rs", "b2\n")]),
+                ("c3", "c3: tip", &[("a.rs", "a3\n"), ("b.rs", "b3\n")]),
+            ],
+        );
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        for key in ["G", "i", "Enter"] {
+            h.type_keys(key);
+        }
+        h.settle();
+        dispatch(&mut h.stoat, &stoat_action::GitStatus);
+        h.settle();
+        h
+    }
+
+    /// The rebase pause's selected file and its resolutions, or `None` with
+    /// no rebase stopped on a conflict.
+    fn pause(h: &TestHarness) -> Option<(usize, HashMap<PathBuf, ConflictResolution>)> {
+        let active = h.stoat.active_workspace().rebase_active.as_ref()?;
+        let Some(RebasePause::Conflict {
+            selected,
+            resolutions,
+            ..
+        }) = &active.pause
+        else {
+            return None;
+        };
+        Some((*selected, resolutions.clone()))
+    }
+
+    /// The label of the review badge, which names why a key did nothing.
+    fn review_badge(h: &TestHarness) -> Option<String> {
+        let ws = h.stoat.active_workspace();
+        ws.badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|badge| badge.label.clone())
     }
 
     /// `s` stages the selected unstaged file, and `u` takes it back out.
@@ -572,25 +704,8 @@ mod tests {
     /// past it to its end.
     #[test]
     fn capital_s_skips_the_rebase_entry_stopped_on_a_conflict() {
-        let mut h = Stoat::test();
-        h.resize(90, 14);
-        h.seed_linear_history(
-            "/repo",
-            &[
-                ("c1", "c1: root", &[("a.rs", "line1\n")]),
-                ("c2", "c2: middle", &[("a.rs", "line1\nline2\n")]),
-                ("c3", "c3: tip", &[("a.rs", "line1\nline2\nline3\n")]),
-            ],
-        );
-        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
-        h.open_commits("/repo");
-        for key in ["G", "i", "Enter"] {
-            h.type_keys(key);
-        }
-        h.settle();
+        let mut h = paused_harness();
         let stopped = h.stoat.current_view();
-        dispatch(&mut h.stoat, &stoat_action::GitStatus);
-        h.settle();
         press(&mut h, "S");
 
         assert_eq!(
@@ -607,18 +722,89 @@ mod tests {
         run(&mut h, ":git status");
         press(&mut h, "S");
 
-        let ws = h.stoat.active_workspace();
-        let badge = ws
-            .badges
-            .find_by_source(BadgeSource::Review)
-            .and_then(|id| ws.badges.get(id))
-            .map(|badge| badge.label.clone());
         assert_eq!(
-            (badge.as_deref(), active_modal(&h.stoat)),
+            (review_badge(&h).as_deref(), active_modal(&h.stoat)),
             (
                 Some("no rebase stopped on a conflict"),
                 Some(ActiveModal::GitStatus)
             ),
+        );
+    }
+
+    /// Enter on a pause row closes the panel and selects the row's file in
+    /// the rebase conflict screen, since the index holds none of the pause's
+    /// conflicts.
+    ///
+    /// Our side of `a.rs` lists it under staged, so `b.rs` heads the list at
+    /// row 0 while the pause holds it at index 1.
+    #[test]
+    fn enter_on_a_pause_row_selects_its_file_in_the_conflict_screen() {
+        let mut h = paused_harness();
+        press(&mut h, "o");
+        let before = pause(&h).map(|(selected, _)| selected);
+        press(&mut h, "enter");
+
+        assert_eq!(
+            (
+                before,
+                active_modal(&h.stoat),
+                h.stoat.current_view(),
+                pause(&h).map(|(selected, _)| selected),
+            ),
+            (Some(0), None, Some("rebase_conflict"), Some(1)),
+        );
+    }
+
+    /// `t` on a pause row takes their side as the pause's resolution, and the
+    /// panel's next read lists the file as staged. `o` on that staged row
+    /// takes our side in its place.
+    ///
+    /// The pause starts on `a.rs`, so the side lands on `b.rs` only when the
+    /// key selects it first.
+    #[test]
+    fn t_then_o_on_a_pause_row_set_its_resolution() {
+        let mut h = paused_harness();
+        press(&mut h, "j");
+        press(&mut h, "t");
+        let took_theirs = (pause(&h), sections(&h));
+        press(&mut h, "o");
+
+        let b = PathBuf::from("b.rs");
+        assert_eq!(
+            (took_theirs, pause(&h)),
+            (
+                (
+                    Some((
+                        1,
+                        HashMap::from([(b.clone(), ConflictResolution::TakeTheirs)])
+                    )),
+                    vec![
+                        (SectionKind::Conflicted, vec![PathBuf::from("/repo/a.rs")]),
+                        (SectionKind::Staged, vec![PathBuf::from("/repo/b.rs")]),
+                    ],
+                ),
+                Some((1, HashMap::from([(b, ConflictResolution::TakeOurs)]))),
+            ),
+        );
+    }
+
+    /// `u` and `s` on a resolved pause row badge and leave the file to the
+    /// pause, since the index holds none of the pause's conflicts.
+    #[test]
+    fn u_and_s_on_a_resolved_pause_row_badge() {
+        let mut h = paused_harness();
+        press(&mut h, "o");
+        press(&mut h, "j");
+        let badges = ["u", "s"].map(|key| {
+            press(&mut h, key);
+            review_badge(&h)
+        });
+
+        let takes_a_side = Some("a conflicted file takes a side with o or t".to_string());
+        let took_ours = HashMap::from([(PathBuf::from("a.rs"), ConflictResolution::TakeOurs)]);
+        assert_eq!(
+            (badges, pause(&h)),
+            ([takes_a_side.clone(), takes_a_side], Some((0, took_ours))),
         );
     }
 

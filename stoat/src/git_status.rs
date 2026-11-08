@@ -119,6 +119,12 @@ pub(crate) struct FileRow {
     pub(crate) path: PathBuf,
     pub(crate) kind: RowKind,
     pub(crate) note: Note,
+    /// Whether the row lists a file that a rebase's conflict pause holds,
+    /// rather than a file of the index or the working tree.
+    ///
+    /// The pause keeps its files in memory, so the panel's keys act on such a
+    /// row through the pause and not through the index.
+    pub(crate) from_pause: bool,
 }
 
 /// What a row's change does to its file, as its kind letter names it.
@@ -547,6 +553,7 @@ fn read_sections(
                 .map_or(Note::None, |stages| open_note(&stages, languages)),
             kind: RowKind::Unmerged,
             path,
+            from_pause: false,
         })
         .collect();
 
@@ -562,11 +569,13 @@ fn read_sections(
                 path,
                 kind: RowKind::Modified,
                 note: *note,
+                from_pause: true,
             }),
             None => conflicted.push(FileRow {
                 note: open_note(file, languages),
                 kind: RowKind::Unmerged,
                 path,
+                from_pause: true,
             }),
         }
     }
@@ -576,6 +585,7 @@ fn read_sections(
                 path: file.path,
                 kind: RowKind::Untracked,
                 note: Note::None,
+                from_pause: false,
             });
             continue;
         }
@@ -584,6 +594,7 @@ fn read_sections(
                 kind: unstaged_kind(&file, fs),
                 note: lines_note(unstaged_lines.get(&file.path)),
                 path: file.path,
+                from_pause: false,
             });
             continue;
         }
@@ -599,11 +610,13 @@ fn read_sections(
                     path: file.path.clone(),
                     kind: RowKind::Untracked,
                     note: Note::None,
+                    from_pause: false,
                 }),
                 _ => unstaged.push(FileRow {
                     path: file.path.clone(),
                     kind: deletion_or_edit(&file.path, fs),
                     note: lines_note(Some(lines)),
+                    from_pause: false,
                 }),
             }
         }
@@ -614,6 +627,7 @@ fn read_sections(
                 .unwrap_or_else(|| lines_note(staged_lines.get(&file.path))),
             kind,
             path: file.path,
+            from_pause: false,
         });
     }
 
