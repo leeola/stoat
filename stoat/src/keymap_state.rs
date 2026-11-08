@@ -715,7 +715,7 @@ impl ActiveModal {
         match self {
             Self::FileFinder => Some("find file"),
             Self::Help => Some("help"),
-            Self::WorkspacePicker => Some("sessions"),
+            Self::WorkspacePicker => Some("session finder"),
             Self::Palette => Some("palette"),
             Self::SymbolFinder => Some("symbols"),
             Self::CodeSearch => Some("search"),
