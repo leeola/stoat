@@ -3984,8 +3984,6 @@ mod tests {
         );
     }
 
-    /// A press selects the clicked row, and a press on the row already
-    /// selected acts on it. The two-step keeps a misclick from navigating.
     /// A `width` by `height` harness rooted in `/repo` with `files` unstaged
     /// files, its git status panel open and painted.
     fn git_status_harness(
@@ -4090,6 +4088,8 @@ mod tests {
         assert_eq!(walk, [Some(2), Some(3), Some(2), Some(0)]);
     }
 
+    /// A press selects the clicked row, and a press on the row already
+    /// selected acts on it. The two-step keeps a misclick from navigating.
     #[test]
     fn two_presses_on_a_diagnostics_row_select_it_then_jump() {
         use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
