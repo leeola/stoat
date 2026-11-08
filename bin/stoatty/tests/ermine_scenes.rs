@@ -9,7 +9,7 @@
 //! The token constants restate the `ermine_night` theme block in config.stcfg.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -405,15 +405,28 @@ fn the_island_halo_shades_the_margin_beside_the_pane() {
 }
 
 /// The status row sits on chrome, and its hairline takes the bar's own color,
-/// so no line shows above the bar.
+/// so no line shows above the bar. Its branch glyph draws as a glyph.
 ///
 /// The hairline is the top pixel row of the status row, read here over a
-/// blank cell of the bar.
+/// blank cell of the bar. The branch glyph, U+2387, sits in column 119, where
+/// the right-aligned repo segment starts. A glyph's strokes blend through many
+/// colors there, and the empty box that a missing glyph draws keeps to a few
+/// along its straight edges.
 #[test]
 fn the_status_row_sits_on_chrome_with_no_hairline() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, width, _) = cell_rect(80, ROWS - 1, 1, 1);
+
+    let colors = distinct_colors(&shot, cell_rect(119, ROWS - 1, 1, 1));
+    if colors <= 12 {
+        let frame = keep_frame(&shot, &mut home, "branch_glyph");
+        panic!(
+            "the branch glyph's cell holds {colors} colors, as few as an empty box draws; the \
+             frame is {}",
+            frame.display(),
+        );
+    }
 
     expect_region(
         &shot,
@@ -1221,6 +1234,19 @@ fn dominant_color(shot: &Snapshot, (x, y, width, height): PixelRect) -> [u8; 3] 
         .max_by_key(|&(color, count)| (count, color))
         .map(|(color, _)| color)
         .expect("the rectangle holds pixels")
+}
+
+/// How many distinct RGB colors the pixels of `rect` in `shot` hold.
+fn distinct_colors(shot: &Snapshot, (x, y, width, height): PixelRect) -> usize {
+    let mut colors: HashSet<[u8; 3]> = HashSet::new();
+    for row in y..y + height {
+        let start = ((row * shot.width + x) * 4) as usize;
+        let end = start + (width * 4) as usize;
+        for pixel in shot.rgba[start..end].as_chunks::<4>().0 {
+            colors.insert([pixel[0], pixel[1], pixel[2]]);
+        }
+    }
+    colors.len()
 }
 
 fn hex([red, green, blue]: [u8; 3]) -> String {

@@ -1119,10 +1119,17 @@ pub fn shape_words_cached(
         .sum()
 }
 
-/// Register the bundled faces into `db` so they resolve regardless of which
-/// fonts are installed system-wide: the JetBrains Mono variable faces (the
-/// [`BUNDLED_FAMILY`] family) and the Symbols Nerd Font Mono symbol face
-/// ([`SYMBOLS_FAMILY`]) that backs the Private-Use-Area fallback.
+/// Register the bundled faces into `db`, so they resolve whatever fonts the
+/// system installs.
+///
+/// The bundled faces are the JetBrains Mono variable faces of the
+/// [`BUNDLED_FAMILY`] family, the Symbols Nerd Font Mono face of the
+/// [`SYMBOLS_FAMILY`] family that backs the Private-Use-Area fallback, and
+/// DejaVu Sans.
+///
+/// DejaVu Sans carries the dingbats the status row draws, such as U+2387 and
+/// U+271A, which neither other face maps. It comes last, so the fallback walk
+/// reaches it only for a character the faces before it lack.
 ///
 /// Called before any system font is added, so the bundled faces take the lowest
 /// ids and a database seeded from this one keeps them at those ids.
@@ -1133,10 +1140,12 @@ pub(super) fn load_bundled_fonts(db: &mut Database) {
         include_bytes!("../../../assets/fonts/JetBrainsMono/JetBrainsMono-Italic[wght].ttf");
     const SYMBOLS: &[u8] =
         include_bytes!("../../../assets/fonts/SymbolsNerdFont/SymbolsNerdFontMono-Regular.ttf");
+    const DINGBATS: &[u8] = include_bytes!("../../../assets/fonts/DejaVuSans/DejaVuSans.ttf");
 
     db.load_font_data(REGULAR.to_vec());
     db.load_font_data(ITALIC.to_vec());
     db.load_font_data(SYMBOLS.to_vec());
+    db.load_font_data(DINGBATS.to_vec());
 }
 
 /// The first family in `cascade` present in `font_system`'s db, or `None` when
@@ -1658,6 +1667,42 @@ mod tests {
         assert_ne!(
             shaped[0].1.glyph_id, shaped[1].1.glyph_id,
             "and the two separators are distinct glyphs rather than one repeated"
+        );
+    }
+
+    /// The status row's branch, staged, and unstaged dingbats, which neither
+    /// the text face nor the symbols face maps, shape from the bundled DejaVu
+    /// Sans and not to an empty box.
+    ///
+    /// The grid puts each glyph on its cell's advance whatever face it comes
+    /// from, so the face is what decides the drawing, and the test reads no
+    /// advance.
+    #[test]
+    fn the_status_dingbats_shape_from_the_bundled_dejavu_face() {
+        let mut font_system = bundled();
+        let dejavu = face_of(&font_system, Family::Name("DejaVu Sans"))
+            .expect("the bundled database holds DejaVu Sans");
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+
+        let shaped: Vec<Option<(bool, bool)>> = "\u{2387}\u{271a}\u{270e}"
+            .chars()
+            .map(|ch| {
+                shape_char(
+                    &mut font_system,
+                    ch,
+                    1.0,
+                    metrics,
+                    Family::Name(BUNDLED_FAMILY),
+                    FaceStyle::REGULAR,
+                    &mut None,
+                )
+                .map(|key| (key.font_id == dejavu, key.glyph_id != 0))
+            })
+            .collect();
+        assert_eq!(
+            shaped,
+            [Some((true, true)); 3],
+            "face is DejaVu, glyph is no box"
         );
     }
 
