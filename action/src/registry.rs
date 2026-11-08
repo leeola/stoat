@@ -83,8 +83,8 @@ use crate::{
         },
         git_status::{
             CloseGitStatus, GitStatus, GitStatusAbort, GitStatusCommit, GitStatusNext,
-            GitStatusOpen, GitStatusPrev, GitStatusStage, GitStatusTakeOurs, GitStatusTakeTheirs,
-            GitStatusUnstage,
+            GitStatusOpen, GitStatusPrev, GitStatusSkip, GitStatusStage, GitStatusTakeOurs,
+            GitStatusTakeTheirs, GitStatusUnstage,
         },
         help::{CloseHelp, DismissKeyHints, HelpScopeToggle, OpenHelp, ToggleKeyHints},
         lsp::{
@@ -1011,6 +1011,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GitStatusCommit::DEF, |_| Ok(Box::new(GitStatusCommit)));
     add(GitStatusAbort::DEF, |_| Ok(Box::new(GitStatusAbort)));
+    add(GitStatusSkip::DEF, |_| Ok(Box::new(GitStatusSkip)));
     add(CloseDiffChanges::DEF, |_| Ok(Box::new(CloseDiffChanges)));
     add(DiffChangesNext::DEF, |_| Ok(Box::new(DiffChangesNext)));
     add(DiffChangesPrev::DEF, |_| Ok(Box::new(DiffChangesPrev)));
@@ -1477,6 +1478,7 @@ mod tests {
         "GitStatusTakeTheirs",
         "GitStatusCommit",
         "GitStatusAbort",
+        "GitStatusSkip",
         "CloseDiffChanges",
         "DiffChangesNext",
         "DiffChangesPrev",
@@ -2161,7 +2163,8 @@ mod tests {
         // + 11 the changes view actions.
         // + 3 the git status panel actions.
         // + 7 the git status panel's row and banner keys.
-        assert_eq!(all().count(), 489);
+        // + 1 GitStatusSkip.
+        assert_eq!(all().count(), 490);
     }
 
     #[test]

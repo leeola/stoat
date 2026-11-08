@@ -736,6 +736,7 @@ on key {
         t -> GitStatusTakeTheirs();
         C -> GitStatusCommit();
         a -> GitStatusAbort();
+        S -> GitStatusSkip();
     }
     modal == jumplist && mode == insert {
         Up -> PickerPrev();

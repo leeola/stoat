@@ -2,7 +2,7 @@
 //! rows, act on the selected row, and close it.
 
 use crate::{
-    action_handlers::{conflict_view, git_commit, git_merge, rebase, review},
+    action_handlers::{conflict, conflict_view, git_commit, git_merge, rebase, review},
     app::{Stoat, UpdateEffect},
     auto_reload, buffer_lifecycle,
     buffer_registry::OpenOrigin,
@@ -11,6 +11,7 @@ use crate::{
     host::{FsHost, GitApplyError, GitRepo},
     merge_view::Side,
     paths,
+    rebase::RebasePause,
 };
 use std::{
     io,
@@ -158,6 +159,31 @@ pub(super) fn git_status_abort(stoat: &mut Stoat) -> UpdateEffect {
     }
     reload_git_status(stoat);
     UpdateEffect::Redraw
+}
+
+/// Skip the rebase entry stopped on a conflict, as the banner's skip key reads,
+/// then read the panel again.
+///
+/// A skip applies only to a conflict stop, as `git rebase --skip` skips the
+/// patch that stopped. An edit or a reword stop comes after its commit
+/// landed, so with no conflict stop a badge says so.
+pub(super) fn git_status_skip(stoat: &mut Stoat) -> UpdateEffect {
+    let stopped_on_conflict = matches!(
+        stoat
+            .active_workspace()
+            .rebase_active
+            .as_ref()
+            .and_then(|active| active.pause.as_ref()),
+        Some(RebasePause::Conflict { .. })
+    );
+    if !stopped_on_conflict {
+        review::emit_review_error_badge(stoat, "no rebase stopped on a conflict", None);
+        return UpdateEffect::Redraw;
+    }
+
+    let effect = conflict::conflict_skip_entry(stoat);
+    reload_git_status(stoat);
+    effect
 }
 
 /// The selected row's section and path, or `None` with the panel closed or
@@ -328,6 +354,7 @@ mod tests {
     use crate::{
         action_handlers::dispatch,
         app::Stoat,
+        badge::BadgeSource,
         git_status::{Note, SectionKind},
         host::{FakeRepoBuilder, FsHost},
         keymap_state::{active_modal, ActiveModal},
@@ -539,6 +566,60 @@ mod tests {
             .and_then(|panel| panel.model.as_ref())
             .map(|model| model.op.is_some());
         assert_eq!((merge, op), (None, Some(false)));
+    }
+
+    /// `S` skips the rebase entry stopped on a conflict, so the rebase runs
+    /// past it to its end.
+    #[test]
+    fn capital_s_skips_the_rebase_entry_stopped_on_a_conflict() {
+        let mut h = Stoat::test();
+        h.resize(90, 14);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("c1", "c1: root", &[("a.rs", "line1\n")]),
+                ("c2", "c2: middle", &[("a.rs", "line1\nline2\n")]),
+                ("c3", "c3: tip", &[("a.rs", "line1\nline2\nline3\n")]),
+            ],
+        );
+        h.fake_git().add_repo("/repo").simulate_conflict_at("c3");
+        h.open_commits("/repo");
+        for key in ["G", "i", "Enter"] {
+            h.type_keys(key);
+        }
+        h.settle();
+        let stopped = h.stoat.current_view();
+        dispatch(&mut h.stoat, &stoat_action::GitStatus);
+        h.settle();
+        press(&mut h, "S");
+
+        assert_eq!(
+            (stopped, h.stoat.active_workspace().rebase_active.is_some()),
+            (Some("rebase_conflict"), false),
+        );
+    }
+
+    /// With no rebase stopped on a conflict, `S` badges and keeps the panel
+    /// open.
+    #[test]
+    fn capital_s_with_no_conflict_stop_badges() {
+        let mut h = repo_harness(|_| {});
+        run(&mut h, ":git status");
+        press(&mut h, "S");
+
+        let ws = h.stoat.active_workspace();
+        let badge = ws
+            .badges
+            .find_by_source(BadgeSource::Review)
+            .and_then(|id| ws.badges.get(id))
+            .map(|badge| badge.label.clone());
+        assert_eq!(
+            (badge.as_deref(), active_modal(&h.stoat)),
+            (
+                Some("no rebase stopped on a conflict"),
+                Some(ActiveModal::GitStatus)
+            ),
+        );
     }
 
     /// `C` closes the panel and commits the merge in progress through the

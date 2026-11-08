@@ -1225,6 +1225,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GitStatusTakeTheirs => git_status::git_status_take(stoat, Side::Theirs),
         ActionKind::GitStatusCommit => git_status::git_status_commit(stoat),
         ActionKind::GitStatusAbort => git_status::git_status_abort(stoat),
+        ActionKind::GitStatusSkip => git_status::git_status_skip(stoat),
         ActionKind::CloseDiffChanges => diff_changes::close_diff_changes(stoat),
         ActionKind::DiffChangesNext => {
             let step = arming_step(stoat);

@@ -738,13 +738,12 @@ fn rebase_banner(rebase: &RebaseProgress) -> OpBanner {
             .unwrap_or_default()
             .to_string(),
         detail,
-        // FIXME: The panel binds no key for `s skip` or `Space r plan`, since
-        // its `s` stages the selected row.
+        // The skip takes `S`, since the panel's `s` stages the selected row.
+        // No plan key shows, because no plan exists while a rebase runs.
         keys: vec![
             ("C", "continue", scope::VCS_STATUS_STAGED),
-            ("s", "skip", scope::UI_DIAGNOSTIC_WARNING),
+            ("S", "skip", scope::UI_DIAGNOSTIC_WARNING),
             ("a", "abort", scope::VCS_STATUS_CONFLICTED),
-            ("Space r", "plan", scope::VCS_STATUS_STAGED),
         ],
     }
 }

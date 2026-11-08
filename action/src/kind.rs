@@ -447,6 +447,7 @@ action_kinds! {
     GitStatusTakeTheirs,
     GitStatusCommit,
     GitStatusAbort,
+    GitStatusSkip,
     CloseDiffChanges,
     DiffChangesNext,
     DiffChangesPrev,

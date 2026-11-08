@@ -405,9 +405,8 @@ fn a_rebase_counts_its_progress_and_names_its_next_entries() {
                 detail: "next: reword 91bb2c4, squash, drop, edit".to_string(),
                 keys: vec![
                     ("C", "continue", scope::VCS_STATUS_STAGED),
-                    ("s", "skip", scope::UI_DIAGNOSTIC_WARNING),
+                    ("S", "skip", scope::UI_DIAGNOSTIC_WARNING),
                     ("a", "abort", scope::VCS_STATUS_CONFLICTED),
-                    ("Space r", "plan", scope::VCS_STATUS_STAGED),
                 ],
             }),
         ),

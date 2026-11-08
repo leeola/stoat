@@ -134,3 +134,16 @@ define_action!(
      progress, a badge says so and nothing changes.",
     ActionPriority::Rare
 );
+
+define_action!(
+    GitStatusSkipDef,
+    GitStatusSkip,
+    "GitStatusSkip",
+    ActionKind::GitStatusSkip,
+    "skip the rebase entry stopped on a conflict",
+    "Skip the rebase entry that stopped on a conflict, as the git status \
+     panel's banner names it, and read the panel again. The rebase goes on \
+     without that commit. With no rebase stopped on a conflict, a badge says \
+     so and nothing changes.",
+    ActionPriority::Rare
+);
