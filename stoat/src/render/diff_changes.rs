@@ -733,6 +733,9 @@ mod tests {
     fn changes_view(width: u16, height: u16, files: &[(&str, &str, &str)]) -> TestHarness {
         let mut h = TestHarness::with_size(width, height);
         h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+        // The changes view keeps its hints box up over the lower right, across
+        // the rows the checks read.
+        h.stoat.screen_hints_hidden = true;
         h.stage_review_scenario("/repo", files);
         h.open_file(&Path::new("/repo").join(files[0].0));
         h.cover_with_diff_changes(false);
@@ -1571,6 +1574,9 @@ mod tests {
         h.stoat.set_apc_tx(tx);
         h.stoat.stoatty_protocol = 13;
         h.stoat.settings.editor_minimap = Some(mode);
+        // The changes view keeps its hints box up over the lower right, across
+        // the strip's lower rows.
+        h.stoat.screen_hints_hidden = true;
         h.stage_review_scenario("/repo", &[("a.txt", "a\n", "A\n"), ("b.txt", "b\n", "B\n")]);
         h.open_file(Path::new("/repo/a.txt"));
         h.cover_with_diff_changes(false);

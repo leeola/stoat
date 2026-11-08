@@ -3653,6 +3653,9 @@ fn resident_stack(
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
     h.stoat.settings.editor_minimap = Some(minimap);
     h.stoat.settings.editor_line_numbers = Some(LineNumbers::Absolute);
+    // The changes view keeps its hints box up, a panel over the lower right
+    // that cuts the stack pool's mask.
+    h.stoat.screen_hints_hidden = true;
     h.stage_review_scenario("/repo", files);
     h.open_file(&PathBuf::from("/repo/a.txt"));
     h.cover_with_diff_changes(false);
@@ -3998,6 +4001,9 @@ fn a_changes_view_over_a_held_editor_pool_leaves_the_mask() {
     h.stoat.set_apc_tx(tx);
     h.stoat.stoatty_protocol = RESIDENT_POOL_PROTOCOL;
     h.stoat.settings.editor_minimap = Some(MinimapMode::Off);
+    // The changes view keeps its hints box up, a panel over the lower right
+    // that cuts the stack pool's mask.
+    h.stoat.screen_hints_hidden = true;
     h.stage_review_scenario("/repo", TWO_FILES);
     h.open_file(&PathBuf::from("/repo/a.txt"));
     h.settle();

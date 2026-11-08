@@ -2386,16 +2386,17 @@ fn hint_rows(
 
 /// Whether `screen` keeps a hints box up while it is in the foreground.
 ///
-/// The conflict screen and the diff view keep one up. Their box shows with
-/// the hints toggle off, and the toggle hides it there instead.
+/// The conflict screen, the diff view, and the changes view keep one up. Their
+/// box shows with the hints toggle off, and the toggle hides it there instead.
 ///
-/// With `touring` set, a tour is open, and the diff view leaves its box to
-/// the toggle. The box covers the lower right of the view and hides a stop
-/// whose code sits there, and the tour's own slide and box guide the reader.
+/// With `touring` set, a tour is open, and the diff and changes views leave
+/// their box to the toggle. The box covers the lower right of the view and
+/// hides a stop whose code sits there, and the tour's own slide and box guide
+/// the reader.
 pub(crate) fn keeps_hints_up(screen: Option<&str>, touring: bool) -> bool {
     match screen {
         Some("conflict") => true,
-        Some("diff") => !touring,
+        Some("diff" | "diff_changes") => !touring,
         _ => false,
     }
 }
@@ -2405,16 +2406,17 @@ pub(crate) fn keeps_hints_up(screen: Option<&str>, touring: bool) -> bool {
 ///
 /// Only a screen that [`keeps_hints_up`] has a box of its own, so a box that
 /// the toggle forces on during a tour reads as the mode's. The conflict
-/// screen's box lists the screen's bindings in every mode. The diff view's
-/// box lists the editor's keys, so a chord sub-mode over the view shows the
-/// mode's own box in its place, under the mode's title.
+/// screen's box lists the screen's bindings in every mode. The diff and
+/// changes views share the `diff` box, which lists the editor's keys, so a
+/// chord sub-mode over either view shows the mode's own box in its place,
+/// under the mode's title.
 fn screen_own_box(screen: Option<&str>, mode: &str, touring: bool) -> Option<&'static str> {
     if !keeps_hints_up(screen, touring) {
         return None;
     }
     match screen {
         Some("conflict") => Some("conflict"),
-        Some("diff") if PRIMARY_MODES.contains(&mode) => Some("diff"),
+        Some("diff" | "diff_changes") if PRIMARY_MODES.contains(&mode) => Some("diff"),
         _ => None,
     }
 }
@@ -3390,9 +3392,9 @@ mod dispatch_tests {
         );
     }
 
-    /// The conflict screen's own box shows in every mode. The diff view's
-    /// shows in a primary mode with no tour open, and a chord sub-mode over
-    /// the view shows the mode's box.
+    /// The conflict screen's own box shows in every mode. The diff and changes
+    /// views share the `diff` box, which shows in a primary mode with no tour
+    /// open, and a chord sub-mode over either view shows the mode's box.
     #[test]
     fn a_screen_s_own_box_shows_in_its_modes() {
         assert_eq!(
@@ -3402,6 +3404,9 @@ mod dispatch_tests {
                 screen_own_box(Some("diff"), "select", false),
                 screen_own_box(Some("diff"), "normal", true),
                 screen_own_box(Some("diff"), "space", false),
+                screen_own_box(Some("diff_changes"), "normal", false),
+                screen_own_box(Some("diff_changes"), "normal", true),
+                screen_own_box(Some("diff_changes"), "space", false),
                 screen_own_box(Some("file"), "normal", false),
                 screen_own_box(None, "normal", false),
             ],
@@ -3411,14 +3416,17 @@ mod dispatch_tests {
                 Some("diff"),
                 None,
                 None,
+                Some("diff"),
+                None,
+                None,
                 None,
                 None
             ],
         );
     }
 
-    /// The conflict screen and the diff view keep a box up, and an open tour
-    /// leaves the diff view's box to the toggle.
+    /// The conflict screen and the diff and changes views keep a box up, and
+    /// an open tour leaves the two diff views' box to the toggle.
     #[test]
     fn an_open_tour_leaves_the_diff_view_box_to_the_toggle() {
         assert_eq!(
@@ -3426,10 +3434,12 @@ mod dispatch_tests {
                 keeps_hints_up(Some("conflict"), true),
                 keeps_hints_up(Some("diff"), false),
                 keeps_hints_up(Some("diff"), true),
+                keeps_hints_up(Some("diff_changes"), false),
+                keeps_hints_up(Some("diff_changes"), true),
                 keeps_hints_up(Some("file"), false),
                 keeps_hints_up(None, false),
             ],
-            [true, true, false, false, false],
+            [true, true, false, true, false, false, false],
         );
     }
 
@@ -4189,6 +4199,36 @@ mod lsp_filter_tests {
                 edges("1"),
                 Some("\u{2502} Esc ? help \u{2502}".to_string()),
             ),
+        );
+    }
+
+    /// The changes view keeps the diff view's box up with the toggle off, and
+    /// the toggle hides it. The footer reads the hunk under the cursor in the
+    /// focused excerpt, `-` above the first one.
+    #[test]
+    fn the_changes_view_keeps_the_diff_box_up_with_the_hunk_position() {
+        let mut h = TestHarness::with_size(150, 50);
+        h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/a.rs"));
+        h.settle_diff_jobs();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle_diff_jobs();
+        let above = box_edges(&mut h, "diff");
+        h.type_keys("j j j");
+        let on = box_edges(&mut h, "diff");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleKeyHints);
+        let hidden = box_edges(&mut h, "diff");
+
+        let edges = |at: &str| {
+            Some([
+                "\u{250c} diff stays up on this view \u{2510}".to_string(),
+                format!("\u{2502} hunk {at}/1 C-? hide \u{b7} ? help \u{2502}"),
+            ])
+        };
+        assert_eq!(
+            (h.stoat.current_view(), above, on, hidden),
+            (Some("diff_changes"), edges("-"), edges("1"), None),
         );
     }
 
