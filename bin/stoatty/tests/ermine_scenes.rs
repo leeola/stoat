@@ -409,17 +409,17 @@ fn the_island_halo_shades_the_margin_beside_the_pane() {
 /// so no line shows above the bar. Its branch glyph draws as a glyph.
 ///
 /// The hairline is the top pixel row of the status row, read here over a
-/// blank cell of the bar. The branch glyph, U+2387, sits in column 119, where
-/// the right-aligned repo segment starts. A glyph's strokes blend through many
-/// colors there, and the empty box that a missing glyph draws keeps to a few
-/// along its straight edges.
+/// blank cell of the bar. The branch glyph, U+2387, draws in column 117, the
+/// first glyph cell of the right-aligned repo segment. A glyph's strokes blend
+/// through many colors there, and the empty box that a missing glyph draws
+/// keeps to a few along its straight edges.
 #[test]
 fn the_status_row_sits_on_chrome_with_no_hairline() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
     let (x, y, width, _) = cell_rect(80, ROWS - 1, 1, 1);
 
-    let colors = distinct_colors(&shot, cell_rect(119, ROWS - 1, 1, 1));
+    let colors = distinct_colors(&shot, cell_rect(117, ROWS - 1, 1, 1));
     if colors <= 12 {
         let frame = keep_frame(&shot, &mut home, "branch_glyph");
         panic!(
