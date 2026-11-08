@@ -69,6 +69,20 @@ pub(crate) fn workspace_picker_layout(area: Rect, entries_len: usize) -> Option<
     Some((modal, Block::default().borders(Borders::ALL).inner(modal)))
 }
 
+/// The rows the list paints in, inside the modal's `inner` rect, below the
+/// filter input, its rule, and the column header, and above the footer.
+///
+/// The paint and the pointer's hit test both read it, so a press lands on the
+/// row drawn under it.
+pub(crate) fn workspace_picker_list(inner: Rect) -> Rect {
+    Rect::new(
+        inner.x,
+        inner.y + HEADER_ROWS,
+        inner.width,
+        inner.height.saturating_sub(HEADER_ROWS + FOOTER_ROWS),
+    )
+}
+
 pub(crate) fn render_workspace_picker(
     picker: &mut WorkspacePicker,
     ws: &mut Workspace,
@@ -186,8 +200,9 @@ pub(crate) fn render_workspace_picker(
         );
     }
 
-    let entries_top = inner.y + HEADER_ROWS;
-    let rows = inner.height.saturating_sub(HEADER_ROWS + FOOTER_ROWS) as usize;
+    let list = workspace_picker_list(inner);
+    let entries_top = list.y;
+    let rows = list.height as usize;
     picker.viewport_rows = Some(rows);
     let selected = picker.selected();
     let entries = picker.entries();

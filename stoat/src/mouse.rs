@@ -380,15 +380,6 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
     let zoom = |kind| modal_zoom_steps(&stoat.modal_zoom, kind);
     let split = |kind| modal_split_percent(&stoat.modal_split, kind);
 
-    let plain = |rect: Option<(Rect, Rect)>, len: usize, selected: usize| {
-        rect.map(|(_, inner)| ModalSurfaces {
-            list: inner,
-            preview: None,
-            len,
-            selected,
-        })
-    };
-
     match active_modal(stoat)? {
         ActiveModal::FileFinder => {
             let finder = stoat.file_finder.as_ref()?;
@@ -567,14 +558,16 @@ pub(crate) fn boxed_modal_surfaces(stoat: &Stoat) -> Option<ModalSurfaces> {
         },
         ActiveModal::WorkspacePicker => {
             let picker = stoat.workspace_picker.as_ref()?;
-            plain(
-                crate::render::workspace_picker::workspace_picker_layout(
-                    size,
-                    picker.entries().len(),
-                ),
+            let (_, inner) = crate::render::workspace_picker::workspace_picker_layout(
+                size,
                 picker.entries().len(),
-                picker.selected(),
-            )
+            )?;
+            Some(ModalSurfaces {
+                list: crate::render::workspace_picker::workspace_picker_list(inner),
+                preview: None,
+                len: picker.filtered().len(),
+                selected: picker.selected(),
+            })
         },
         // The run modal is all output, so the whole screen reads as its
         // preview and the wheel scrolls that output.
@@ -4086,6 +4079,81 @@ mod tests {
         });
 
         assert_eq!(walk, [Some(2), Some(3), Some(2), Some(0)]);
+    }
+
+    /// A 120 by 40 harness with the workspace picker open over one workspace
+    /// per name, and the picker's inner rect.
+    fn workspace_picker_harness(names: &[&str]) -> (crate::test_harness::TestHarness, Rect) {
+        let mut h = crate::test_harness::TestHarness::with_size(120, 40);
+        for _ in names {
+            h.type_action("NewWorkspace()");
+        }
+        let active = h.stoat.active_workspace;
+        let listed: Vec<_> = h
+            .stoat
+            .workspaces
+            .keys()
+            .filter(|&id| id != active)
+            .collect();
+        for (id, name) in listed.into_iter().zip(names) {
+            h.stoat.workspaces[id].name = (*name).into();
+        }
+        h.type_action("SwitchWorkspace()");
+
+        let (_, inner) =
+            crate::render::workspace_picker::workspace_picker_layout(h.stoat.size(), names.len())
+                .expect("the box fits 120 by 40");
+        (h, inner)
+    }
+
+    fn workspace_selected(h: &crate::test_harness::TestHarness) -> Option<usize> {
+        h.stoat
+            .workspace_picker
+            .as_ref()
+            .map(|picker| picker.selected())
+    }
+
+    /// A press on the last or the first painted workspace row selects it, and
+    /// a press on the filter input selects nothing.
+    ///
+    /// Row 0 of the inner rect holds the filter input, and rows 1 and 2 its
+    /// rule and the column header, so the four rows paint from row 3.
+    #[test]
+    fn presses_on_workspace_picker_rows_select_the_row_drawn_there() {
+        let (mut h, inner) = workspace_picker_harness(&["a", "b", "c", "d"]);
+        let walk = [inner.y + 6, inner.y + 3, inner.y].map(|row| {
+            left_press(&mut h, inner.x + 10, row);
+            workspace_selected(&h)
+        });
+
+        assert_eq!(walk, [Some(3), Some(0), Some(0)]);
+    }
+
+    /// A press in a scrolled workspace list names the row drawn under it.
+    ///
+    /// Twelve rows show ten at a time, so with the last one selected the
+    /// window starts at row 2, which paints at row 3 of the inner rect.
+    #[test]
+    fn a_press_in_a_scrolled_workspace_picker_names_the_row_drawn_there() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
+        let (mut h, inner) = workspace_picker_harness(&names);
+        for _ in 1..names.len() {
+            h.type_keys("Down");
+        }
+        left_press(&mut h, inner.x + 10, inner.y + 3);
+
+        assert_eq!(workspace_selected(&h), Some(2));
+    }
+
+    /// A press on a row past the workspaces the query keeps selects nothing,
+    /// since the list paints only those.
+    #[test]
+    fn a_press_past_the_filtered_workspace_rows_selects_nothing() {
+        let (mut h, inner) = workspace_picker_harness(&["alpha", "alps", "beta", "gamma"]);
+        h.type_text("alp");
+        left_press(&mut h, inner.x + 10, inner.y + 5);
+
+        assert_eq!(workspace_selected(&h), Some(0));
     }
 
     /// A press selects the clicked row, and a press on the row already
