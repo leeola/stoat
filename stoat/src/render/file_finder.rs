@@ -203,6 +203,15 @@ pub(crate) fn render_file_finder(
     );
 
     if let Some(preview_rect) = layout.preview {
+        // The preview's editor paints only the cells it has content for, so
+        // the pane takes the editor surface first, as a pane does and as the
+        // pages that pool it blank to.
+        if scene.live() {
+            crate::render::clear_surface(preview_rect, buf, theme);
+            if let Some(header) = layout.preview_header {
+                crate::render::clear_surface(header, buf, theme);
+            }
+        }
         crate::render::chrome::vline(
             buf,
             layout.list.x + layout.list.width,
@@ -352,9 +361,10 @@ fn row_prefix(finder: &FileFinder) -> &str {
 /// shown source's directory and name, the lines the pane shows at the right,
 /// and the rule under them.
 ///
-/// The header keeps the modal's fill, which the preview below it shares. A
-/// blank pane leaves the header row empty, and a source with no path shows
-/// only its lines.
+/// Under a live scene the header sits on the editor surface, which the
+/// preview below it shares, and a plain terminal keeps the modal's fill under
+/// both. A blank pane leaves the header row empty, and a source with no path
+/// shows only its lines.
 fn paint_preview_header(
     finder: &FileFinder,
     header: Rect,

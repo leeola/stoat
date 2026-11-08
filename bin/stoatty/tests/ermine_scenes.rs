@@ -505,7 +505,11 @@ fn the_tab_bar_sits_on_chrome_with_the_active_tab_on_base() {
 }
 
 /// The file finder's box fills with the overlay surface where no text covers
-/// it. The cell sits in the list column, under the fixture's two file rows.
+/// it, and its preview pane sits on the base surface.
+///
+/// The overlay cell sits in the list column, under the fixture's two file
+/// rows. The base cell sits in the preview, under the six lines of the file it
+/// shows.
 #[test]
 fn the_file_finder_box_draws_on_the_overlay_surface() {
     let mut home = support::scratch_home();
@@ -522,6 +526,13 @@ fn the_file_finder_box_draws_on_the_overlay_surface() {
         cell_rect(40, 25, 1, 1),
         OVERLAY,
         "finder_box",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(111, 27, 1, 1),
+        BASE,
+        "finder_preview",
     );
 }
 
