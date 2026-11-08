@@ -456,6 +456,9 @@ pub struct Availability {
     /// `workspace.repo_root.is_some()`: the workspace root sits inside a git
     /// repository, so the git commands have one to act on.
     pub in_repo: bool,
+    /// `workspace.merge_state().is_some()`: the last tally read a merge in
+    /// progress, so the merge's abort and continue commands have one to end.
+    pub in_merge: bool,
 }
 
 impl Availability {
@@ -498,6 +501,7 @@ impl Availability {
             run_focused,
             pair_open: ws.pair_panes().is_some(),
             in_repo: ws.repo_root.is_some(),
+            in_merge: ws.merge_state().is_some(),
         }
     }
 }
@@ -554,12 +558,10 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         ReviewNextCommit | ReviewPrevCommit | ReviewDone => ctx.review_walk_open,
 
-        // FIXME: The merge abort and continue commands list in any repository,
-        // where the rebase pair waits for a rebase. The gate needs the merge
-        // state, which the workspace does not cache.
         GitLs | GitReview | Review | GitCheckout | GitBranch | GitCommit | GitAmend | GitAdd
         | GitRebase | GitStatus | GitDiff | GitDiffCached | GitStash | GitStashPush
-        | GitStashPop | GitStashList | GitMerge | GitMergeAbort | GitMergeContinue => ctx.in_repo,
+        | GitStashPop | GitStashList | GitMerge => ctx.in_repo,
+        GitMergeAbort | GitMergeContinue => ctx.in_repo && ctx.in_merge,
 
         // WalkthroughOpen is absent on purpose. A reader opens a tour when none
         // plays, so a gate on one hides it exactly when it is wanted.
@@ -1719,7 +1721,8 @@ mod tests {
     /// `:git ` lists the group inside a repository and no command outside one,
     /// where the group has no repository to act on. The rebase continue and
     /// abort commands wait for a rebase, so a repository with none leaves them
-    /// out.
+    /// out, and the merge abort and continue commands wait for a merge the
+    /// tally reads.
     #[test]
     fn the_git_group_lists_its_commands_only_inside_a_repository() {
         let listed = |mut h: TestHarness| {
@@ -1731,13 +1734,34 @@ mod tests {
                 .map(|entry| entry.command_name.as_str())
                 .collect::<Vec<_>>()
         };
-        let no_rebase: Vec<&str> = names_for("git ")
-            .into_iter()
-            .filter(|name| !matches!(*name, "git rebase continue" | "git rebase abort"))
-            .collect();
+        let without = |left_out: &[&str]| -> Vec<&str> {
+            names_for("git ")
+                .into_iter()
+                .filter(|name| !left_out.contains(name))
+                .collect()
+        };
+        let rebase_pair = ["git rebase continue", "git rebase abort"];
+        let merge_pair = ["git merge abort", "git merge continue"];
+        let mut merging = repo_harness();
+        merging.fake_git().add_repo("/repo").merge_in_progress(
+            "f00dfeed",
+            Some("feature"),
+            "Merge branch 'feature'",
+        );
+        merging.stoat.set_diff_warm_auto(true);
+        merging.settle_diff_jobs();
+
         assert_eq!(
-            (listed(Stoat::test()), listed(repo_harness())),
-            (Vec::new(), no_rebase),
+            [
+                listed(Stoat::test()),
+                listed(repo_harness()),
+                listed(merging)
+            ],
+            [
+                Vec::new(),
+                without(&[rebase_pair, merge_pair].concat()),
+                without(&rebase_pair),
+            ],
         );
     }
 
@@ -1952,9 +1976,10 @@ mod tests {
     }
 
     /// The git group acts on the workspace's repository, so the Active scope
-    /// lists its commands only inside one, and the rebase continue and abort
-    /// commands only while a rebase runs there. The All scope lists them
-    /// anywhere.
+    /// lists its commands only inside one, the rebase continue and abort
+    /// commands only while a rebase runs there, and the merge abort and
+    /// continue commands only while a merge is in progress. The All scope lists
+    /// them anywhere.
     #[test]
     fn active_scope_lists_the_git_group_only_in_a_repository() {
         let git_group = |scope, ctx: Availability| {
@@ -1988,11 +2013,15 @@ mod tests {
             "GitStashPush",
             "GitStatus",
         ];
-        let no_rebase: Vec<&str> = group
-            .iter()
-            .copied()
-            .filter(|name| !matches!(*name, "GitRebaseAbort" | "GitRebaseContinue"))
-            .collect();
+        let without = |left_out: &[&str]| -> Vec<&str> {
+            group
+                .iter()
+                .copied()
+                .filter(|name| !left_out.contains(name))
+                .collect()
+        };
+        let rebase_pair = ["GitRebaseAbort", "GitRebaseContinue"];
+        let merge_pair = ["GitMergeAbort", "GitMergeContinue"];
         let in_repo = Availability {
             in_repo: true,
             ..Availability::default()
@@ -2001,14 +2030,33 @@ mod tests {
             in_rebase_exec: true,
             ..in_repo
         };
+        let merging = Availability {
+            in_merge: true,
+            ..in_repo
+        };
+        // A merge the last tally read, with the root since moved out of the
+        // repository.
+        let stale_merge = Availability {
+            in_merge: true,
+            ..Availability::default()
+        };
         assert_eq!(
             [
                 git_group(PaletteScope::Active, Availability::default()),
                 git_group(PaletteScope::Active, in_repo),
                 git_group(PaletteScope::Active, rebasing),
+                git_group(PaletteScope::Active, merging),
+                git_group(PaletteScope::Active, stale_merge),
                 git_group(PaletteScope::All, Availability::default()),
             ],
-            [Vec::new(), no_rebase, group.clone(), group],
+            [
+                Vec::new(),
+                without(&[rebase_pair, merge_pair].concat()),
+                without(&merge_pair),
+                without(&rebase_pair),
+                Vec::new(),
+                group.clone(),
+            ],
         );
     }
 
@@ -2149,6 +2197,7 @@ mod tests {
             run_focused: true,
             pair_open: true,
             in_repo: true,
+            in_merge: true,
         };
         for entry in registry::all() {
             assert!(
