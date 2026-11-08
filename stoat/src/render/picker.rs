@@ -90,7 +90,7 @@ pub(crate) fn filter_header(
     chrome: &ResolvedChrome,
     scene: &mut stoat_widgets::ApcScene,
 ) {
-    let input_area = paint_header_row(buf, inner, header, theme);
+    let input_area = paint_header_row(buf, inner, header, theme, scene);
     input.render(
         &mut ws.editors,
         input_area,
@@ -116,12 +116,15 @@ pub(crate) fn filter_header(
 /// rect left for the query.
 ///
 /// The count and the chip sit flush with the row's right end, one column apart,
-/// and one column clear of the query.
+/// and one column clear of the query. The chip's box goes through
+/// [`chip_cells`](crate::render::chrome::chip_cells), so a live scene draws it
+/// as a panel.
 fn paint_header_row(
     buf: &mut Buffer,
     inner: Rect,
     header: &FilterHeader<'_>,
     theme: &Theme,
+    scene: &mut stoat_widgets::ApcScene,
 ) -> Rect {
     let (y, end) = (inner.y, inner.x + inner.width);
 
@@ -154,12 +157,17 @@ fn paint_header_row(
     }
 
     let mut right = end;
-    for (part, style) in [(chip, scope::UI_CHIP), (count, scope::UI_TEXT_MUTED)] {
-        let Some(part) = part else {
-            continue;
-        };
-        right -= part.width() as u16;
-        write_str(buf, right, y, &part, theme.get(style));
+    if let Some(chip) = chip {
+        let width = chip.width() as u16;
+        right -= width;
+        let cells = Rect::new(right, y, width, 1);
+        let style = crate::render::chrome::chip_cells(cells, theme.get(scope::UI_CHIP), scene);
+        write_str(buf, right, y, &chip, style);
+        right -= 1;
+    }
+    if let Some(count) = count {
+        right -= count.width() as u16;
+        write_str(buf, right, y, &count, theme.get(scope::UI_TEXT_MUTED));
         right -= 1;
     }
     Rect::new(query_x, y, right.saturating_sub(query_x), 1)
@@ -673,21 +681,68 @@ mod tests {
     use crate::picker::INDEXED_ROWS;
     use ratatui::style::Color;
     use std::path::PathBuf;
-    use stoatty_protocol::command::{encode_bar, BarCommand};
+    use stoatty_protocol::command::{
+        decode_stream, encode_bar, BarCommand, BorderStyle, Command, PanelCommand, PanelShadow,
+    };
+
+    /// The header a finder-like modal paints, its chip at the row's end.
+    const FINDER_HEADER: FilterHeader<'static> = FilterHeader {
+        label: "Files",
+        prompt: FILTER_PROMPT,
+        count: Some((14, 890)),
+        chip: Some("S-Tab \u{00B7} git only"),
+    };
 
     /// The text of a finder-like header painted `width` columns wide, and the
     /// rect it leaves the query.
     fn header_row(width: u16) -> (String, Rect) {
         let area = Rect::new(0, 0, width, 1);
         let mut buf = Buffer::empty(area);
-        let header = FilterHeader {
-            label: "Files",
-            prompt: FILTER_PROMPT,
-            count: Some((14, 890)),
-            chip: Some("S-Tab \u{00B7} git only"),
-        };
-        let query = paint_header_row(&mut buf, area, &header, &Theme::empty());
+        let mut scene = stoat_widgets::ApcScene::new();
+        let query = paint_header_row(&mut buf, area, &FINDER_HEADER, &Theme::empty(), &mut scene);
         (test_support::row_text(&buf, 0), query)
+    }
+
+    /// Under a live scene the chip's box is a chip panel over its 18 cells, and
+    /// the cells take the chip's text color over the row's own background.
+    #[test]
+    fn a_live_header_draws_its_chip_box_as_a_panel() {
+        let theme = {
+            let (config, _) =
+                stoat_config::parse(r##"theme t { ui.chip = { fg: "#010203", bg: "#040506" }; }"##);
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_header_row(&mut buf, area, &FINDER_HEADER, &theme, &mut scene);
+
+        let cells: Vec<_> = (42..60).map(|x| (buf[(x, 0)].fg, buf[(x, 0)].bg)).collect();
+        assert_eq!(
+            (cells, decode_stream(scene.bytes())),
+            (
+                vec![(Color::Rgb(1, 2, 3), Color::Reset); 18],
+                vec![Command::Panel(PanelCommand {
+                    top: 0,
+                    left: 42,
+                    width: 18,
+                    height: 1,
+                    style: BorderStyle::None_,
+                    border: [4, 5, 6],
+                    corner_radius: 1,
+                    fill: Some([4, 5, 6]),
+                    shadow: PanelShadow::None_,
+                    inset_x: 0,
+                    inset_y: 1,
+                    corners: 0,
+                    fillets: 0,
+                    hatch: None,
+                    above_pools: false,
+                    backdrop: false,
+                    anchor: None,
+                })],
+            ),
+        );
     }
 
     #[test]

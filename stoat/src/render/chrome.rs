@@ -513,6 +513,25 @@ pub(crate) fn vline(
     }
 }
 
+/// Draw the box of a chip over `cells` as a [`Panel::chip`] in `style`'s
+/// background, and return the style the chip's cells take.
+///
+/// The box needs a live scene and an RGB background. The cells then take
+/// `style` with no background, so the row's own background shows in the
+/// logical pixel above and below the box. Otherwise the cells take `style`
+/// whole and are the chip.
+///
+/// A pool page captures no panel, so a painter that also paints pages takes
+/// `style` whole there and does not call this.
+pub(crate) fn chip_cells(cells: Rect, style: Style, scene: &mut ApcScene) -> Style {
+    let Some(fill) = style_rgb(style.bg).filter(|_| scene.live()) else {
+        return style;
+    };
+
+    Panel::chip(fill).draw_components(cells, scene);
+    Style { bg: None, ..style }
+}
+
 /// Draw the accent bar that marks a list's selected row, at the left edge of
 /// the cell at column `x` and row `y`.
 ///

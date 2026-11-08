@@ -236,6 +236,7 @@ fn render_frame(
     }
 
     StatusBar {
+        chip: None,
         left: &left,
         right: &right,
         scale: SCALES[state.scale],

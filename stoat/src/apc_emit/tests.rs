@@ -652,7 +652,7 @@ fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
 
 #[test]
 fn status_bar_emits_sub_cell_components_inside_stoatty() {
-    use stoatty_protocol::command::Command;
+    use stoatty_protocol::command::{BorderStyle, Command, PanelCommand, PanelShadow};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -678,10 +678,34 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
             .any(|c| matches!(c, Command::TextRun(t) if t.col == 0 && t.bg.is_none())),
         "the mode segment emits as a box-less text run at col 0, got {cmds:?}"
     );
+    let chip = PanelCommand {
+        top: 23,
+        left: 0,
+        width: 5,
+        height: 1,
+        style: BorderStyle::None_,
+        border: [127, 176, 255],
+        corner_radius: 1,
+        fill: Some([127, 176, 255]),
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        inset_y: 1,
+        corners: 0,
+        fillets: 0,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: None,
+    };
     assert!(
-        cmds.iter()
+        cmds.contains(&Command::Panel(chip)),
+        "the mode chip's box emits as a chip panel over its five cells, got {cmds:?}"
+    );
+    assert!(
+        !cmds
+            .iter()
             .any(|c| matches!(c, Command::Bar(b) if b.height == 16)),
-        "the mode segment background emits as a full-row bar, got {cmds:?}"
+        "and no segment emits a full-row bar, got {cmds:?}"
     );
     assert!(
         cmds.iter()

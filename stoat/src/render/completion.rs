@@ -280,6 +280,7 @@ pub(crate) fn render_completion(
         layout.viewport_top,
         layout.inner,
         &stoat.theme,
+        true,
         buf,
         scene,
     );
@@ -314,6 +315,10 @@ pub(crate) fn render_completion(
 /// Shared by the live popup, which derives `start_row` from the viewport, and
 /// the smooth-scroll pool, which paints absolute pages, so both render
 /// identical rows. The selected row's accent bar goes into `scene`.
+///
+/// With `panels`, a badge's box goes through
+/// [`chip_cells`](crate::render::chrome::chip_cells). A pool page captures no
+/// panel, so a page passes `false` and paints the box into the badge's cell.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn paint_completion_rows(
     popup: &CompletionPopup,
@@ -322,6 +327,7 @@ pub(crate) fn paint_completion_rows(
     start_row: usize,
     area: Rect,
     theme: &crate::theme::Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -356,17 +362,21 @@ pub(crate) fn paint_completion_rows(
             for col in area.x..area.x + area.width {
                 buf[(col, row)].set_char(' ').set_style(row_style);
             }
+            // A badge's box hides the chrome sent before it in its rect, so it
+            // goes out ahead of the selection bar that shares its cell.
+            if let Some((glyph, kind_scope)) = kind_glyph(item.kind).filter(|_| width > 0) {
+                let badge = match panels {
+                    true => crate::render::chrome::chip_cells(
+                        Rect::new(area.x, row, 1, 1),
+                        theme.get(kind_scope),
+                        scene,
+                    ),
+                    false => theme.get(kind_scope),
+                };
+                write_str(buf, area.x, row, glyph, row_style.patch(badge));
+            }
             if item_idx == selected_idx {
                 crate::render::chrome::selection_bar(area.x, row, theme, buf, scene);
-            }
-            if let Some((glyph, kind_scope)) = kind_glyph(item.kind).filter(|_| width > 0) {
-                write_str(
-                    buf,
-                    area.x,
-                    row,
-                    glyph,
-                    row_style.patch(theme.get(kind_scope)),
-                );
             }
 
             let label = clip_to_width(&item.label, width.saturating_sub(LABEL_COLUMN));
@@ -513,6 +523,9 @@ mod tests {
     };
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoat_widgets::ApcScene;
+    use stoatty_protocol::command::{
+        decode_stream, BorderStyle, Command, PanelCommand, PanelShadow,
+    };
 
     fn make_item(label: &str) -> CompletionItem {
         CompletionItem {
@@ -673,7 +686,12 @@ mod tests {
     }
 
     /// The badge cell of each kind class as (glyph, foreground, background),
-    /// with an item of a kind that has no badge last.
+    /// with an item of a kind that has no badge last, and the chip panels the
+    /// badges' boxes draw as.
+    ///
+    /// A badge cell keeps its row's background, the selection's on the first
+    /// row and the box's on the rest, and its box is a panel in the kind's
+    /// tint.
     #[test]
     fn each_kind_class_leads_its_row_with_its_badge() {
         let kinds = [
@@ -688,7 +706,7 @@ mod tests {
             kind: Some(kind),
             ..make_item("x")
         });
-        let (buf, inner) = painted(items.to_vec());
+        let (buf, inner, h) = painted(items.to_vec());
 
         let badges: Vec<(&str, Color, Color)> = (inner.y..inner.y + kinds.len() as u16)
             .map(|y| {
@@ -696,17 +714,103 @@ mod tests {
                 (cell.symbol(), cell.fg, cell.bg)
             })
             .collect();
-        let rgb = |hex: u32| Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let scene = decode_stream(&h.stoat.apc_scene.all_bytes());
+        let panels: Vec<PanelCommand> = scene
+            .iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) if panel.width == 1 => Some(*panel),
+                _ => None,
+            })
+            .collect();
+        let (x, y) = ((inner.x * 16) as i16, (inner.y * 16) as i16);
+        let first_box = scene.iter().position(|command| {
+            matches!(command, Command::Panel(panel) if (panel.left, panel.top) == (inner.x, inner.y))
+        });
+        let selection_bar = scene.iter().position(|command| {
+            matches!(command, Command::Bar(bar) if (bar.x, bar.y, bar.height) == (x, y, 16))
+        });
+        assert!(
+            matches!((first_box, selection_bar), (Some(at), Some(bar)) if at < bar),
+            "the first badge's box goes out ahead of the selection bar in its cell, got \
+             {first_box:?} and {selection_bar:?}"
+        );
+        let selected = h
+            .stoat
+            .theme
+            .list_selected(scope::UI_SELECTION)
+            .bg
+            .expect("the selection fills its row");
+        let bytes = |hex: u32| [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8];
+        let rgb = |hex: u32| {
+            let [r, g, b] = bytes(hex);
+            Color::Rgb(r, g, b)
+        };
+        let chip = |row: u16, hex: u32| PanelCommand {
+            top: inner.y + row,
+            left: inner.x,
+            width: 1,
+            height: 1,
+            style: BorderStyle::None_,
+            border: bytes(hex),
+            corner_radius: 1,
+            fill: Some(bytes(hex)),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 1,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        };
         assert_eq!(
-            badges,
-            [
-                ("f", rgb(0x7fb0ff), rgb(0x223049)),
-                ("c", rgb(0x6cc7d6), rgb(0x1e3237)),
-                ("m", rgb(0xc59af0), rgb(0x2a2236)),
-                ("v", rgb(0xa3a9b5), rgb(0x2c3039)),
-                ("k", rgb(0xe8bd6a), rgb(0x2c3039)),
-                (" ", rgb(0xdfe2e8), rgb(0x252830)),
-            ]
+            (badges, panels),
+            (
+                vec![
+                    ("f", rgb(0x7fb0ff), selected),
+                    ("c", rgb(0x6cc7d6), rgb(0x252830)),
+                    ("m", rgb(0xc59af0), rgb(0x252830)),
+                    ("v", rgb(0xa3a9b5), rgb(0x252830)),
+                    ("k", rgb(0xe8bd6a), rgb(0x252830)),
+                    (" ", rgb(0xdfe2e8), rgb(0x252830)),
+                ],
+                vec![
+                    chip(0, 0x223049),
+                    chip(1, 0x1e3237),
+                    chip(2, 0x2a2236),
+                    chip(3, 0x2c3039),
+                    chip(4, 0x2c3039),
+                ],
+            ),
+        );
+    }
+
+    /// A pool page captures no panel, so a completion page paints its badge's
+    /// box into the badge's cell and emits no panel.
+    #[test]
+    fn a_completion_page_paints_the_badge_box_into_its_cell() {
+        let theme = {
+            let (config, _) = stoat_config::parse(
+                r##"theme t { ui.completion.kind.function = { fg: "#010203", bg: "#040506" }; }"##,
+            );
+            Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+        };
+        let popup = CompletionPopup::showing(vec![CompletionItem {
+            kind: Some(CompletionItemKind::Function),
+            ..make_item("x")
+        }]);
+        let page = crate::smooth_scroll::render_completion_page(&popup, 0, "", 0, &theme, 10, 1);
+
+        let panels = decode_stream(&page)
+            .into_iter()
+            .filter(|command| matches!(command, Command::Panel(_)))
+            .count();
+        let tinted = page.windows(10).any(|bytes| bytes == b"48;2;4;5;6");
+        assert_eq!(
+            (panels, tinted),
+            (0, true),
+            "the badge's cell carries the tint, and the page sends no panel"
         );
     }
 
@@ -720,7 +824,7 @@ mod tests {
             detail: detail.map(str::to_owned),
             ..make_item(label)
         };
-        let (buf, inner) = painted(vec![
+        let (buf, inner, _) = painted(vec![
             item(
                 "modal_frame",
                 Some(CompletionItemKind::Function),
@@ -834,7 +938,9 @@ mod tests {
             let area = Rect::new(0, 0, width, 1);
             let mut buf = Buffer::empty(area);
             let mut scene = ApcScene::new();
-            super::paint_completion_rows(&popup, 0, "", 0, area, &theme, &mut buf, &mut scene);
+            super::paint_completion_rows(
+                &popup, 0, "", 0, area, &theme, true, &mut buf, &mut scene,
+            );
             (0..width).map(|x| buf[(x, 0)].symbol()).collect()
         };
         assert_eq!(
@@ -861,8 +967,8 @@ mod tests {
     }
 
     /// The popup over `items`, the first selected, painted into a 40 by 12
-    /// frame, alongside its row region.
-    fn painted(items: Vec<CompletionItem>) -> (Buffer, Rect) {
+    /// frame, alongside its row region and the harness that painted it.
+    fn painted(items: Vec<CompletionItem>) -> (Buffer, Rect, TestHarness) {
         let mut h = TestHarness::with_size(40, 12);
         let _path = open_scratch_file(&mut h, "");
         h.type_keys("i");
@@ -870,6 +976,6 @@ mod tests {
 
         let buf = h.stoat.render();
         let (_, layout) = super::completion_popup_layout(&mut h.stoat).expect("the popup lays out");
-        (buf, layout.inner)
+        (buf, layout.inner, h)
     }
 }

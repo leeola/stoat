@@ -977,6 +977,7 @@ pub(crate) fn render_overlay_status(
         left,
         right,
         hairline: true,
+        mode_chip: is_focused,
     };
     render_status_runs(&[run], frame, buf, scene, None);
 }
@@ -1175,6 +1176,9 @@ struct StatusRun {
     /// Whether the run draws the bar's hairline along its top. A half's tint
     /// already sets it apart from the content, so the halves draw none.
     hairline: bool,
+    /// Whether the first left segment is the mode chip, which a live scene
+    /// draws as a chip box of whole cells ahead of the other segments.
+    mode_chip: bool,
 }
 
 /// The status row that [`render_pane`] paints for `pane`.
@@ -1332,6 +1336,9 @@ pub(crate) struct StatusSceneCache {
 /// `ui.statusbar.separator`, or `ui.border.inactive` where the theme leaves that
 /// unset.
 ///
+/// A run that leads with the mode chip hands that segment to the bar as its
+/// [`StatusBar::chip`], so the chip draws as a box of whole cells.
+///
 /// With a `cache`, a repaint whose runs and colors all hold splices the
 /// recorded frame. Splicing is only sound because
 /// [`StatusBar::draw_components_within`] reads nothing outside those, and
@@ -1388,7 +1395,12 @@ fn render_status_runs(
     let start = scene.bytes().len();
     let scale = frame.theme.type_scale(TypeRole::Ui);
     for (run, (bg, left, right)) in runs.iter().zip(&rich) {
+        let (chip, left) = match left.split_first() {
+            Some((chip, rest)) if run.mode_chip => (Some(chip), rest),
+            _ => (None, &left[..]),
+        };
         StatusBar {
+            chip,
             left,
             right,
             scale,
@@ -1541,6 +1553,7 @@ pub(crate) fn render_tab_bar(
         left,
         right,
         hairline: true,
+        mode_chip: false,
     }];
     let rich = render_status_runs(&runs, frame, buf, scene, None);
     if let Some(chip) = chip {
@@ -2197,6 +2210,7 @@ fn status_segments(
                 left,
                 right: base_right,
                 hairline: false,
+                mode_chip: chip_end.is_some(),
             },
             StatusRun {
                 area: target,
@@ -2205,6 +2219,7 @@ fn status_segments(
                 left: target_left,
                 right,
                 hairline: false,
+                mode_chip: false,
             },
         ],
         None => vec![StatusRun {
@@ -2214,6 +2229,7 @@ fn status_segments(
             left,
             right,
             hairline: true,
+            mode_chip: chip_end.is_some(),
         }],
     }
 }

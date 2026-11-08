@@ -880,6 +880,7 @@ pub(crate) fn render_completion_page(
                 start_row,
                 area,
                 theme,
+                false,
                 buf,
                 scene,
             )
@@ -951,7 +952,9 @@ pub(crate) fn render_commits_page(
         region_height,
         page,
         theme,
-        |buf, area, start_row, scene| paint_commit_rows(state, area, start_row, theme, buf, scene),
+        |buf, area, start_row, scene| {
+            paint_commit_rows(state, area, start_row, theme, false, buf, scene)
+        },
     )
 }
 

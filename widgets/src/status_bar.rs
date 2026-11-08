@@ -1,6 +1,7 @@
 use crate::{
     bar::Bar,
     cells,
+    panel::Panel,
     text_run::{self, TextRun},
     ApcScene,
 };
@@ -34,7 +35,18 @@ use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
 /// The left run is cut rather than dropped because the segments that outgrow a
 /// bar are the informative ones, paths and branch names, and a caller's cell
 /// fallback clips them the same way.
+///
+/// A [`Self::chip`] leads the left run, as an editor's mode label does. It
+/// takes whole cells, because the [`Panel`] that draws its box takes whole
+/// cells, and the left segments pack from its end.
 pub struct StatusBar<'a> {
+    /// A chip ahead of the left segments, or `None` for a bar that opens with
+    /// its first left segment.
+    ///
+    /// The chip spans the fewest whole cells that hold its text, with the text
+    /// centered, and draws as a [`Panel::chip`] in its background. A bar too
+    /// narrow for the chip draws no left run.
+    pub chip: Option<&'a StatusSegment<'a>>,
     /// Segments packed left-to-right from the left edge.
     pub left: &'a [StatusSegment<'a>],
     /// Segments packed right-to-left from the right edge, in slice order.
@@ -99,7 +111,15 @@ impl StatusBar<'_> {
         .render(area, buf, scene);
 
         let mut cursor = 0u16;
-        for seg in self.left {
+        let mut left = self.left;
+        if let Some(chip) = self.chip {
+            match self.draw_chip(chip, limit, area, buf, scene) {
+                Some(span) => cursor = span,
+                None => left = &[],
+            }
+        }
+
+        for seg in left {
             let text = self.clip_to_room(seg.text, limit - cursor);
             if text.is_empty() && !seg.text.is_empty() {
                 break;
@@ -129,6 +149,42 @@ impl StatusBar<'_> {
             self.draw_segment(start, advance, seg, area, buf, scene);
             anchor = start;
         }
+    }
+
+    /// Draw `chip` as a [`Panel::chip`] box at the bar's left edge with its
+    /// text centered in a run, and return the sixteenths the box spans.
+    ///
+    /// The box comes after the hairline and before the run. So the box hides
+    /// the hairline where they overlap, and the run draws over the box.
+    /// Returns `None`, and draws nothing, for a chip wider than `limit`.
+    fn draw_chip(
+        &self,
+        chip: &StatusSegment<'_>,
+        limit: u16,
+        area: Rect,
+        buf: &mut Buffer,
+        scene: &mut ApcScene,
+    ) -> Option<u16> {
+        let advance = self.segment_advance(chip.text);
+        let width = advance.div_ceil(16);
+        let span = cells::span_sixteenths(width);
+        if span > limit {
+            return None;
+        }
+
+        Panel::chip(chip.bg).draw_components(Rect::new(area.x, area.y, width, 1), scene);
+        TextRun {
+            col: cells::signed_sixteenths((span - advance) / 2),
+            row: 0,
+            scale: self.scale,
+            color: chip.fg,
+            bg: None,
+            text: chip.text,
+            follow: 0,
+            anchor: None,
+        }
+        .render(area, buf, scene);
+        Some(span)
     }
 
     /// Draw one segment as a box-less text run, over a full-row background bar
@@ -204,7 +260,10 @@ mod tests {
     use super::{StatusBar, StatusSegment};
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect};
-    use stoatty_protocol::command::{encode_bar, encode_text_run, BarCommand, TextRunCommand};
+    use stoatty_protocol::command::{
+        encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
+        PanelShadow, TextRunCommand,
+    };
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
         position(haystack, needle).is_some()
@@ -231,6 +290,7 @@ mod tests {
             },
         ];
         let status = StatusBar {
+            chip: None,
             left: &left,
             right: &[],
             scale: 160,
@@ -304,6 +364,7 @@ mod tests {
             bg: [4, 5, 6],
         }];
         let status = StatusBar {
+            chip: None,
             left: &[],
             right: &right,
             scale: 160,
@@ -354,6 +415,7 @@ mod tests {
             bg: [4, 5, 6],
         }];
         let status = StatusBar {
+            chip: None,
             left: &[],
             right: &right,
             scale: 160,
@@ -405,6 +467,7 @@ mod tests {
             bg: [4, 5, 6],
         }];
         let status = StatusBar {
+            chip: None,
             left: &left,
             right: &[],
             scale: 160,
@@ -453,6 +516,7 @@ mod tests {
             },
         ];
         let status = StatusBar {
+            chip: None,
             left: &left,
             right: &[],
             scale: 160,
@@ -546,6 +610,7 @@ mod tests {
             bg: [4, 4, 4],
         }];
         let status = StatusBar {
+            chip: None,
             left: &left,
             right: &right,
             scale: 160,
@@ -590,6 +655,7 @@ mod tests {
     #[test]
     fn the_top_hairline_separator_is_emitted() {
         let status = StatusBar {
+            chip: None,
             left: &[],
             right: &[],
             scale: 160,
@@ -628,6 +694,7 @@ mod tests {
             bg: [10, 11, 12],
         }];
         let status = StatusBar {
+            chip: None,
             left: &left,
             right: &right,
             scale: 160,
@@ -695,6 +762,7 @@ mod tests {
             bg: [10, 11, 12],
         }];
         let status = StatusBar {
+            chip: None,
             left: &left,
             right: &right,
             scale: 160,
@@ -753,6 +821,96 @@ mod tests {
         assert!(
             contains(frames, &distinct_bar),
             "a distinct-background segment keeps covering the hairline"
+        );
+    }
+
+    /// A chip takes the fewest whole cells that hold its text and centers the
+    /// text in them. Its panel comes between the hairline and its run, and the
+    /// left run packs from the chip's end. A bar too narrow for the chip draws
+    /// no left run.
+    #[test]
+    fn a_chip_leads_the_left_run_in_whole_cells() {
+        let chip = StatusSegment {
+            text: " NOR ",
+            fg: [1, 2, 3],
+            bg: [4, 5, 6],
+        };
+        let left = [StatusSegment {
+            text: "ab",
+            fg: [7, 8, 9],
+            bg: [0, 0, 0],
+        }];
+        let draw = |width: u16| {
+            let status = StatusBar {
+                chip: Some(&chip),
+                left: &left,
+                right: &[],
+                scale: 232,
+                separator: [60, 66, 77],
+                bg: [0, 0, 0],
+            };
+            let area = Rect::new(2, 3, width, 1);
+            let mut buf = Buffer::empty(area);
+            let mut scene = ApcScene::new();
+            status.draw_components(area, &mut buf, &mut scene);
+            scene.bytes().to_vec()
+        };
+        let hairline = |width: u16| {
+            encode_bar(&BarCommand {
+                x: 32,
+                y: 48,
+                width: width * 16,
+                height: 1,
+                color: [60, 66, 77],
+            })
+        };
+        let run = |col: i16, text: &str, color: [u8; 3]| {
+            encode_text_run(&TextRunCommand {
+                col,
+                row: 48,
+                scale: 232,
+                color,
+                bg: None,
+                follow: 0,
+                anchor: None,
+                text: text.to_owned(),
+            })
+        };
+
+        // " NOR " advances 73 sixteenths at scale 232, so the box takes five
+        // cells and its run sits (80 - 73) / 2 = 3 sixteenths in. The left run
+        // starts at the box's end, 32 + 80.
+        let panel = encode_panel(&PanelCommand {
+            top: 3,
+            left: 2,
+            width: 5,
+            height: 1,
+            style: BorderStyle::None_,
+            border: [4, 5, 6],
+            corner_radius: 1,
+            fill: Some([4, 5, 6]),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 1,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        });
+        assert_eq!(
+            [draw(20), draw(4)],
+            [
+                [
+                    hairline(20),
+                    panel,
+                    run(35, " NOR ", [1, 2, 3]),
+                    run(112, "ab", [7, 8, 9]),
+                ]
+                .concat(),
+                hairline(4),
+            ],
         );
     }
 }

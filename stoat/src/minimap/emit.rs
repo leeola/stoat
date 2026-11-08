@@ -1858,9 +1858,10 @@ mod tests {
             .iter()
             .position(|c| matches!(c, Command::Minimap(m) if m.strip_id == u32::MAX))
             .expect("the single strip stays declared under the hints box");
+        // The status row's mode chip is a panel too, one row tall.
         let panel_idx = cmds
             .iter()
-            .position(|c| matches!(c, Command::Panel(_)))
+            .position(|c| matches!(c, Command::Panel(panel) if panel.height > 1))
             .expect("the hints box emits a panel");
         assert!(
             strip_idx < panel_idx,

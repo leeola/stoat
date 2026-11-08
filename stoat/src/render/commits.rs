@@ -265,7 +265,7 @@ fn render_commit_list_pane(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let top = state.scroll_top.min(state.commits.len().saturating_sub(1));
-    paint_commit_rows(state, area, top, theme, buf, scene);
+    paint_commit_rows(state, area, top, theme, true, buf, scene);
 }
 
 /// Paint the graph island's header into `row`.
@@ -368,11 +368,16 @@ fn legend_tips(state: &CommitListState) -> Vec<(u16, &str)> {
 /// Shared by the live list, which derives `start_row` from `scroll_top`, and the
 /// smooth-scroll pool, which paints absolute pages, so both render identical
 /// rows. The selected row's accent bar and the graph's strokes go into `scene`.
+///
+/// With `panels`, a filled badge's box goes through
+/// [`chip_cells`](crate::render::chrome::chip_cells). A pool page captures no
+/// panel, so a page passes `false` and paints the box into the badge's cells.
 pub(crate) fn paint_commit_rows(
     state: &CommitListState,
     area: Rect,
     start_row: usize,
     theme: &crate::theme::Theme,
+    panels: bool,
     buf: &mut Buffer,
     scene: &mut stoat_widgets::ApcScene,
 ) {
@@ -462,6 +467,7 @@ pub(crate) fn paint_commit_rows(
             end: summary_end,
             y,
             lane_color: tip_color(rows.get(index).map_or(0, |row| row.node_lane)),
+            panels,
         };
         let summary_x = paint_badges(
             row_badges(&state.refs, &commit.sha),
@@ -580,6 +586,8 @@ struct BadgeRow {
     y: u16,
     /// The color of the lane the row's node sits in.
     lane_color: [u8; 3],
+    /// Whether a filled badge's box draws as a chip panel.
+    panels: bool,
 }
 
 /// The badges of the row that shows `sha`, in the order the row paints them:
@@ -624,6 +632,9 @@ fn row_badges<'a>(refs: &'a CommitRefs, sha: &str) -> impl Iterator<Item = RefBa
 /// leaves the summary fewer than [`MIN_SUMMARY_COLUMNS`] cells before
 /// `row.end` stays off the row, with every badge after it, so the badges that
 /// show keep their order.
+///
+/// With [`BadgeRow::panels`], a filled badge's box goes through
+/// [`chip_cells`](crate::render::chrome::chip_cells).
 fn paint_badges<'a>(
     badges: impl Iterator<Item = RefBadge<'a>>,
     row: BadgeRow,
@@ -639,9 +650,16 @@ fn paint_badges<'a>(
             break;
         }
 
-        let width = width as u16;
-        let style = styles.style(badge.kind, row.lane_color);
-        for col in x..x + width {
+        let cells = Rect::new(x, row.y, width as u16, 1);
+        let style = match row.panels {
+            true => crate::render::chrome::chip_cells(
+                cells,
+                styles.style(badge.kind, row.lane_color),
+                scene,
+            ),
+            false => styles.style(badge.kind, row.lane_color),
+        };
+        for col in cells.x..cells.right() {
             buf[(col, row.y)].set_char(' ').set_style(style);
         }
         write_str(buf, x + 1, row.y, badge.prefix, style);
@@ -649,7 +667,7 @@ fn paint_badges<'a>(
         write_str(buf, name_x, row.y, badge.name, style);
 
         if let Some(color) = styles.ring(badge.kind) {
-            ring(Rect::new(x, row.y, width, 1), color, buf, scene);
+            ring(cells, color, buf, scene);
         }
         x = summary_x as u16;
     }
@@ -743,16 +761,7 @@ fn render_commit_detail_pane(
         area.width.saturating_sub(2 * TEXT_INSET),
         area.height,
     );
-    let body = state.bodies.get(&sha).map(String::as_str);
-    let header_rows = render_commit_header(
-        commit,
-        body,
-        &state.refs,
-        state.now_epoch,
-        theme,
-        text_area,
-        buf,
-    );
+    let header_rows = render_commit_header(state, commit, theme, text_area, buf, scene);
 
     let end_y = area.y + area.height;
     let files_y = area.y + header_rows + 1;
@@ -828,19 +837,20 @@ fn render_commit_detail_pane(
     }
 }
 
-/// Paint the header of `commit` into `area`, and return the rows it took.
+/// Paint the header of `commit`, a commit of `state`'s list, into `area`, and
+/// return the rows it took.
 ///
 /// The first row is the summary in bold, and the second its meta row, which
-/// [`paint_commit_meta`] lays out. The message `body` follows in
-/// `ui.text.dim`, word-wrapped into at most [`BODY_ROWS`] rows.
+/// [`paint_commit_meta`] lays out. The message body that `state` holds for the
+/// commit follows in `ui.text.dim`, word-wrapped into at most [`BODY_ROWS`]
+/// rows.
 fn render_commit_header(
+    state: &CommitListState,
     commit: &CommitInfo,
-    body: Option<&str>,
-    refs: &CommitRefs,
-    now_epoch: i64,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) -> u16 {
     use crate::theme::scope as s;
     if area.width == 0 || area.height == 0 {
@@ -854,10 +864,21 @@ fn render_commit_header(
     }
 
     let meta = Rect::new(area.x, area.y + 1, area.width, 1);
-    paint_commit_meta(commit, refs, now_epoch, theme, meta, buf);
+    paint_commit_meta(
+        commit,
+        &state.refs,
+        state.now_epoch,
+        theme,
+        meta,
+        buf,
+        scene,
+    );
 
     let room = usize::from(area.height - 2);
-    let lines = body.map_or_else(Vec::new, |body| body_rows(body, usize::from(area.width)));
+    let lines = state
+        .bodies
+        .get(&commit.sha)
+        .map_or_else(Vec::new, |body| body_rows(body, usize::from(area.width)));
     let dim = theme.get(s::UI_TEXT_DIM);
     for (row, line) in lines.iter().take(room).enumerate() {
         write_str_clipped(buf, area.x, area.y + 2 + row as u16, line, dim, end_x);
@@ -870,7 +891,8 @@ fn render_commit_header(
 /// The row reads the short sha, the author, and the age in words, then a
 /// divider and a chip per parent. A chip reads the parent's number, its short
 /// sha, and the first local branch that points at it. The first parent's chip
-/// takes `vcs.commit.parent` and the rest `vcs.commit.parent.merged`.
+/// takes `vcs.commit.parent` and the rest `vcs.commit.parent.merged`, and its
+/// box goes through [`chip_cells`](crate::render::chrome::chip_cells).
 ///
 /// A chip that does not fit stays off the row with every chip after it. A root
 /// commit has no parent, so its row ends at the age.
@@ -881,6 +903,7 @@ fn paint_commit_meta(
     theme: &crate::theme::Theme,
     row: Rect,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     use crate::theme::scope as s;
     let end_x = row.x + row.width;
@@ -926,6 +949,7 @@ fn paint_commit_meta(
             0 => theme.get(s::VCS_COMMIT_PARENT),
             _ => theme.get(s::VCS_COMMIT_PARENT_MERGED),
         };
+        let style = crate::render::chrome::chip_cells(Rect::new(x, row.y, width, 1), style, scene);
         for col in x..x + width {
             buf[(col, row.y)].set_char(' ').set_style(style);
         }
@@ -1642,10 +1666,10 @@ pub(crate) fn render_commit_preview(
 mod tests {
     use super::{
         body_rows, commit_list_width, commits_detail_rect, commits_header_rect, file_at_row,
-        initials, legend_tips, paint_file_path, preview_row_count, render_commit_preview,
-        render_preview_label, row_badges, stat_share, PreviewDials, MIN_DETAIL_COLUMNS,
-        MIN_LIST_COLUMNS, RING_PERCENT, RULE_STROKE, STAT_BAR_CELLS, STAT_BAR_HEIGHT,
-        SWATCH_HEIGHT, SWATCH_WIDTH, TEXT_INSET,
+        initials, legend_tips, paint_badges, paint_commit_meta, paint_file_path, preview_row_count,
+        render_commit_preview, render_preview_label, row_badges, stat_share, BadgeRow, BadgeStyles,
+        PreviewDials, RefBadge, RefKind, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT,
+        RULE_STROKE, STAT_BAR_CELLS, STAT_BAR_HEIGHT, SWATCH_HEIGHT, SWATCH_WIDTH, TEXT_INSET,
     };
     use crate::{
         app::Stoat,
@@ -1674,7 +1698,7 @@ mod tests {
         sync::Arc,
     };
     use stoat_language::{Language, LanguageRegistry};
-    use stoatty_protocol::command::{self, Command};
+    use stoatty_protocol::command::{self, BorderStyle, Command, PanelCommand, PanelShadow};
 
     /// The same RGB theme the diff-view tests use, so the washes engage.
     fn rgb_theme() -> Theme {
@@ -2525,6 +2549,175 @@ mod tests {
             [frame_of("origin/main", 0), frame_of("v1.0", 2)],
             "four hairlines around each ringed badge, inset from the row's top and bottom",
         );
+    }
+
+    /// A filled badge's box is a chip panel over its cells, which keep the
+    /// row's own background. A pool page, which captures no panel, paints the
+    /// box into the cells.
+    #[test]
+    fn a_filled_badge_box_is_a_chip_panel_or_its_cells() {
+        let theme = chip_theme(r##"vcs.ref.head = { fg: "#010203", bg: "#040506" };"##);
+        let styles = BadgeStyles::new(&theme);
+        let head = RefBadge {
+            kind: RefKind::Head,
+            prefix: "HEAD",
+            name: "",
+        };
+        let paint = |panels| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 40, 1));
+            let mut scene = stoat_widgets::ApcScene::new();
+            let row = BadgeRow {
+                x: 2,
+                end: 40,
+                y: 0,
+                lane_color: [0, 0, 0],
+                panels,
+            };
+            paint_badges([head].into_iter(), row, &styles, &mut buf, &mut scene);
+            let cells: Vec<Color> = (2..8).map(|x| buf[(x, 0)].bg).collect();
+            (cells, command::decode_stream(scene.bytes()))
+        };
+
+        assert_eq!(
+            [paint(true), paint(false)],
+            [
+                (vec![Color::Reset; 6], vec![chip_panel(2, 6, [4, 5, 6])]),
+                (vec![Color::Rgb(4, 5, 6); 6], Vec::new()),
+            ],
+        );
+    }
+
+    /// Each parent chip's box is a chip panel in its parent's color over its
+    /// cells, which keep the row's own background.
+    ///
+    /// The row reads `m A just now │ parents`, so the chips `1 · p` and `2 · q`
+    /// start at columns 23 and 31, seven cells each.
+    #[test]
+    fn each_parent_chip_draws_its_box_as_a_chip_panel() {
+        let theme = chip_theme(
+            r##"vcs.commit.parent = { fg: "#010203", bg: "#040506" };
+                vcs.commit.parent.merged = { fg: "#070809", bg: "#0a0b0c" };"##,
+        );
+        let commit = CommitInfo {
+            sha: "m".into(),
+            short_sha: "m".into(),
+            summary: String::new(),
+            author_name: "A".into(),
+            author_email: String::new(),
+            time: 0,
+            parents: vec!["p".into(), "q".into()],
+        };
+        let row = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(row);
+        let mut scene = stoat_widgets::ApcScene::new();
+        paint_commit_meta(
+            &commit,
+            &CommitRefs::default(),
+            0,
+            &theme,
+            row,
+            &mut buf,
+            &mut scene,
+        );
+
+        let cells: Vec<Color> = (23..30).chain(31..38).map(|x| buf[(x, 0)].bg).collect();
+        assert_eq!(
+            (cells, command::decode_stream(scene.bytes())),
+            (
+                vec![Color::Reset; 14],
+                vec![
+                    chip_panel(23, 7, [4, 5, 6]),
+                    chip_panel(31, 7, [10, 11, 12]),
+                ],
+            ),
+        );
+    }
+
+    /// The commits screen draws the mode chip's box and the HEAD badge's box as
+    /// chip panels, each on its own row. A pool page of the list paints the
+    /// badge's box into its cells and sends no panel.
+    #[test]
+    fn the_commits_screen_draws_its_chip_boxes_as_panels() {
+        let mut h = Stoat::test();
+        h.resize(160, 12);
+        h.fake_git()
+            .add_repo("/repo")
+            .commit_with_message("a1000000", "feat: root", &[]);
+        h.open_commits("/repo");
+        h.render_composited();
+
+        let theme = h.stoat.theme.clone();
+        let text = h.rendered_text();
+        let ((badge, badge_row), (mode, mode_row)) =
+            (cell_of(&text, "HEAD"), cell_of(&text, "NOR"));
+        let (_, mode_color) =
+            crate::render::pane::mode_segment("normal", &theme, &Default::default());
+        let mut panels: Vec<(u16, u16, Option<[u8; 3]>)> =
+            command::decode_stream(&h.stoat.apc_scene.all_bytes())
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::Panel(panel) if (panel.height, panel.inset_y) == (1, 1) => {
+                        Some((panel.top, panel.left, panel.fill))
+                    },
+                    _ => None,
+                })
+                .collect();
+        panels.sort();
+
+        let list = h
+            .stoat
+            .active_workspace()
+            .focused_commits()
+            .expect("the commit list");
+        let page = crate::smooth_scroll::render_commits_page(list, 0, &theme, 60, 4);
+        let page_panels = command::decode_stream(&page)
+            .into_iter()
+            .filter(|command| matches!(command, Command::Panel(_)))
+            .count();
+        assert_eq!(
+            (panels, page_panels),
+            (
+                vec![
+                    (
+                        badge_row,
+                        badge - 1,
+                        style_rgb(theme.get(scope::VCS_REF_HEAD).bg)
+                    ),
+                    (mode_row, mode - 1, style_rgb(Some(mode_color))),
+                ],
+                0,
+            ),
+        );
+    }
+
+    /// A theme of `lets`, the scopes a chip test colors.
+    fn chip_theme(lets: &str) -> Theme {
+        let (config, _) = stoat_config::parse(&format!("theme t {{ {lets} }}"));
+        Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
+    }
+
+    /// The chip panel a chip's box draws as, `width` cells from column `left`
+    /// of row 0, in `fill`.
+    fn chip_panel(left: u16, width: u16, fill: [u8; 3]) -> Command {
+        Command::Panel(PanelCommand {
+            top: 0,
+            left,
+            width,
+            height: 1,
+            style: BorderStyle::None_,
+            border: fill,
+            corner_radius: 1,
+            fill: Some(fill),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 1,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        })
     }
 
     /// The cell where `needle` first starts in `text`, as `(column, row)`.

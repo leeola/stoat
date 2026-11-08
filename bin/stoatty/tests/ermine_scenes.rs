@@ -65,20 +65,27 @@ const LSP_DEADLINE: Duration = Duration::from_secs(90);
 /// A pixel rectangle as `(x, y, width, height)`.
 type PixelRect = (u32, u32, u32, u32);
 
-/// The normal-mode chip fills with the accent, and a blank text cell with the
-/// base surface.
+/// The normal-mode chip fills with the accent one pixel inside the status
+/// row's top and bottom edges, and a blank text cell with the base surface.
+///
+/// The chip's cell keeps the row's chrome in its top and bottom pixel rows,
+/// as the Editor board draws a 16 px chip on its row.
 #[test]
 fn the_basic_diff_scene_draws_on_the_ermine_palette() {
     let mut home = support::scratch_home();
     let shot = settled_frame(home.path(), "basic-diff", "unstaged.txt", "");
 
+    let (x, y, width, height) = cell_rect(2, ROWS - 1, 1, 1);
     expect_region(
         &shot,
         &mut home,
-        cell_rect(2, ROWS - 1, 1, 1),
+        (x, y + 1, width, height - 2),
         ACCENT,
         "mode_chip",
     );
+    for (edge, what) in [(y, "mode_chip_top"), (y + height - 1, "mode_chip_bottom")] {
+        expect_region(&shot, &mut home, (x, edge, width, 1), CHROME, what);
+    }
     expect_region(
         &shot,
         &mut home,

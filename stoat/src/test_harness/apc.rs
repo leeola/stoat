@@ -222,6 +222,11 @@ fn draw_box(
     }
 }
 
+/// Fill the cells a box's fill covers with `bg`.
+///
+/// A box with a border leaves its perimeter to [`draw_box`], so the fill
+/// covers the cells inside it. A box too thin for a border, such as a one-row
+/// chip, is fill to its edges.
 fn fill_interior(
     buf: &mut Buffer,
     left: u16,
@@ -231,11 +236,12 @@ fn fill_interior(
     bg: Color,
     above: &[(usize, Rect)],
 ) {
-    if width < 3 || height < 3 {
-        return;
-    }
-    for y in top + 1..top + height - 1 {
-        for x in left + 1..left + width - 1 {
+    let inner = match width < 2 || height < 2 {
+        true => Rect::new(left, top, width, height),
+        false => Rect::new(left + 1, top + 1, width - 2, height - 2),
+    };
+    for y in inner.top()..inner.bottom() {
+        for x in inner.left()..inner.right() {
             set_bg(buf, x, y, bg, above);
         }
     }
@@ -245,7 +251,7 @@ fn fill_interior(
 mod tests {
     use super::composite_scene;
     use crate::{action_handlers::dispatch, Stoat};
-    use ratatui::{buffer::Buffer, layout::Rect};
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoatty_protocol::command::{BorderStyle, Command, PanelCommand, PanelShadow};
 
     /// The compositor replays every component over the finished main pass, so
@@ -290,6 +296,47 @@ mod tests {
                 "    └──────┘",
             ],
             "the earlier box stops at the later box's edge"
+        );
+    }
+
+    /// A box with a border keeps its fill inside the border, and a box too thin
+    /// for a border, such as a one-row chip, is fill to its edges.
+    #[test]
+    fn a_panel_too_thin_for_a_border_fills_every_cell() {
+        let filled = |left, top, width, height| {
+            Command::Panel(PanelCommand {
+                top,
+                left,
+                width,
+                height,
+                style: BorderStyle::None_,
+                border: [1, 2, 3],
+                corner_radius: 1,
+                fill: Some([4, 5, 6]),
+                shadow: PanelShadow::None_,
+                inset_x: 0,
+                inset_y: 1,
+                corners: 0,
+                fillets: 0,
+                hatch: None,
+                above_pools: false,
+                backdrop: false,
+                anchor: None,
+            })
+        };
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 5, 4));
+        composite_scene(&mut buf, &[filled(1, 0, 3, 1), filled(0, 1, 3, 3)]);
+
+        let fill = Color::Rgb(4, 5, 6);
+        let cells: Vec<(u16, u16)> = (0..4)
+            .flat_map(|y| (0..5).map(move |x| (x, y)))
+            .filter(|&at| buf[at].bg == fill)
+            .collect();
+        assert_eq!(
+            cells,
+            [(1, 0), (2, 0), (3, 0), (1, 2)],
+            "the chip's row whole, and the bordered box's middle cell alone"
         );
     }
 
@@ -355,7 +402,8 @@ mod tests {
     }
 
     /// The which-key box draws as the docked card, a borderless panel in the
-    /// card's fill at radius 2, whose halo stops at its bottom edge.
+    /// card's fill at radius 2, whose halo stops at its bottom edge. The status
+    /// row's mode chip is the frame's only other filled panel.
     #[test]
     fn the_which_key_box_draws_as_the_docked_card() {
         let mut h = frame_after("space");
@@ -366,6 +414,12 @@ mod tests {
                 .get(crate::theme::scope::UI_MODAL_HINTS_CARD)
                 .bg,
         );
+        let (_, mode) = crate::render::pane::mode_segment(
+            "space",
+            &h.stoat.theme,
+            &std::collections::BTreeMap::new(),
+        );
+        let chip = crate::render::paint::style_rgb(Some(mode));
         let filled: Vec<_> =
             stoatty_protocol::command::decode_stream(&h.stoat.apc_scene.all_bytes())
                 .into_iter()
@@ -378,8 +432,11 @@ mod tests {
                 .collect();
         assert_eq!(
             filled,
-            [(BorderStyle::None_, PanelShadow::Halo, 2, fill)],
-            "the box is the frame's one filled panel"
+            [
+                (BorderStyle::None_, PanelShadow::None_, 1, chip),
+                (BorderStyle::None_, PanelShadow::Halo, 2, fill),
+            ],
+            "the mode chip, then the box"
         );
     }
 

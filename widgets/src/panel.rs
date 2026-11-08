@@ -68,6 +68,31 @@ impl StatefulWidget for Panel {
 }
 
 impl Panel {
+    /// A chip's box in `fill`, one row of cells that holds a short label.
+    ///
+    /// The box stands one logical pixel inside the row's top and bottom edges,
+    /// with corners of radius 1, so a chip reads as a box inside its row and
+    /// not as a band across the row. It draws no line and no shadow. The cells
+    /// under it keep the row's background, and their glyphs draw over the
+    /// fill.
+    pub fn chip(fill: [u8; 3]) -> Panel {
+        Panel {
+            style: BorderStyle::None_,
+            border: fill,
+            corner_radius: 1,
+            fill: Some(fill),
+            shadow: PanelShadow::None_,
+            inset_x: 0,
+            inset_y: 1,
+            corners: 0,
+            fillets: 0,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+        }
+    }
+
     /// Draw only the off-grid panel frame.
     ///
     /// An app that composites rich chrome itself calls this instead of the
