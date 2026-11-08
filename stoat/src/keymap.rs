@@ -1176,29 +1176,6 @@ fn collect_mode_targets(predicate: &Predicate, out: &mut HashSet<String>) {
     }
 }
 
-/// Collect every state field name `predicate` references, walking through
-/// `And`/`Or`/`Not`.
-///
-/// Consumed by the help detail pane to annotate a binding's conditions with the
-/// current value of each field they test.
-pub(crate) fn collect_predicate_fields(predicate: &Predicate, out: &mut Vec<String>) {
-    match predicate {
-        Predicate::Eq(field, _)
-        | Predicate::NotEq(field, _)
-        | Predicate::Gt(field, _)
-        | Predicate::Lt(field, _)
-        | Predicate::Gte(field, _)
-        | Predicate::Lte(field, _)
-        | Predicate::Matches(field, _)
-        | Predicate::Bool(field) => out.push(field.node.clone()),
-        Predicate::Not(p) => collect_predicate_fields(&p.node, out),
-        Predicate::And(l, r) | Predicate::Or(l, r) => {
-            collect_predicate_fields(&l.node, out);
-            collect_predicate_fields(&r.node, out);
-        },
-    }
-}
-
 fn collect_functions(
     stmts: &[stoat_config::Spanned<Statement>],
     functions: &mut HashMap<String, Vec<stoat_config::Spanned<Statement>>>,

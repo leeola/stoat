@@ -1,6 +1,6 @@
 use crate::{
     help::{format_arg, Help, HelpEntry, SnapshotState},
-    keymap::{collect_predicate_fields, evaluate, KeymapState, ResolvedAction, StateValue},
+    keymap::{KeymapState, ResolvedAction, StateValue},
     render::{
         picker::{FilterHeader, Footer, FILTER_PROMPT},
         text::{wrap_text, write_str_clipped},
@@ -14,7 +14,6 @@ use ratatui::{
 };
 use std::ops::Range;
 use stoat_action::registry;
-use stoat_config::Predicate;
 use unicode_width::UnicodeWidthStr;
 
 /// Box rows the chrome takes around the body, which are the two borders, the
@@ -411,7 +410,16 @@ fn detail_lines(
     }
 
     lines.push(DetailLine::default());
-    lines.push(DetailLine::text("bindings", bold));
+    lines.push(DetailLine {
+        spans: vec![
+            ("bindings".to_owned(), bold),
+            (
+                "  evaluated where help opened".to_owned(),
+                theme.get(crate::theme::scope::UI_TEXT_MUTED),
+            ),
+        ],
+        status: None,
+    });
     lines.extend(binding_lines(help, entry, theme));
 
     let params = entry.def.params();
@@ -471,11 +479,10 @@ fn binding_lines(help: &Help, entry: &HelpEntry, theme: &crate::theme::Theme) ->
             true => (live_key, dim, live),
             false => (off_key, muted, not_here),
         };
-        let mut predicates = binding.predicates.iter().map(|predicate| {
-            predicate_line(predicate, help.context())
-                .trim_start()
-                .to_owned()
-        });
+        let mut predicates = binding
+            .predicates
+            .iter()
+            .map(|predicate| predicate.to_string());
         lines.push(DetailLine {
             spans: vec![
                 (format!("{:>key_width$}  ", binding.label), key_style),
@@ -519,45 +526,6 @@ fn format_action(action: &ResolvedAction) -> String {
     }
 }
 
-/// Render one predicate of a binding's condition. A `[x]`/`[ ]` box marks whether
-/// it holds in `context`, followed by the predicate source and each field it
-/// tests with its current value (`unset` when the field is absent).
-fn predicate_line(predicate: &Predicate, context: &SnapshotState) -> String {
-    let mark = if evaluate(predicate, context) {
-        "[x]"
-    } else {
-        "[ ]"
-    };
-
-    let mut fields = Vec::new();
-    collect_predicate_fields(predicate, &mut fields);
-    fields.dedup();
-    let values: Vec<String> = fields
-        .iter()
-        .map(|field| {
-            let value = context
-                .get(field)
-                .map_or_else(|| "unset".to_string(), display_state_value);
-            format!("{field}: {value}")
-        })
-        .collect();
-
-    if values.is_empty() {
-        format!("    {mark} {predicate}")
-    } else {
-        format!("    {mark} {predicate}   {}", values.join(", "))
-    }
-}
-
-/// Render a snapshot [`StateValue`] as the text shown in the help context.
-fn display_state_value(value: &StateValue) -> String {
-    match value {
-        StateValue::String(text) => text.to_string(),
-        StateValue::Number(number) => number.to_string(),
-        StateValue::Bool(flag) => flag.to_string(),
-    }
-}
-
 /// Summarize the captured help context for the footer's note. Each set string
 /// field renders as `field value` and each true boolean as the bare field,
 /// joined by ` · `.
@@ -580,37 +548,7 @@ fn context_summary(context: &SnapshotState) -> String {
 mod tests {
     use super::*;
     use crate::keymap::ResolvedArg;
-    use stoat_config::{Spanned, Value};
-
-    fn context(fields: &[(&str, &str)]) -> SnapshotState {
-        SnapshotState(
-            fields
-                .iter()
-                .map(|(field, value)| (field.to_string(), StateValue::String((*value).into())))
-                .collect(),
-        )
-    }
-
-    #[test]
-    fn predicate_line_marks_holds_and_annotates_the_field() {
-        let predicate = Predicate::Eq(
-            Spanned::new("view".to_string(), 0..0),
-            Spanned::new(Value::Ident("diff".to_string()), 0..0),
-        );
-
-        assert_eq!(
-            predicate_line(&predicate, &context(&[("view", "file")])),
-            "    [ ] view == diff   view: file"
-        );
-        assert_eq!(
-            predicate_line(&predicate, &context(&[("view", "diff")])),
-            "    [x] view == diff   view: diff"
-        );
-        assert_eq!(
-            predicate_line(&predicate, &context(&[])),
-            "    [ ] view == diff   view: unset"
-        );
-    }
+    use stoat_config::Value;
 
     #[test]
     fn format_action_renders_args_then_bare() {
