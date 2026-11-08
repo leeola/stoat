@@ -14,9 +14,11 @@
 use git2::Repository;
 use serde_json::Value;
 use std::{
-    io,
+    fmt::{self, Display, Formatter},
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use stoat::{
@@ -30,6 +32,7 @@ use stoat::{
 };
 use tempfile::TempDir;
 use tokio::time::{self, Instant};
+use tracing::subscriber::{self, DefaultGuard};
 
 /// rust-analyzer indexing plus an initial `cargo check` on a fresh crate takes
 /// several seconds, and CI machines are slower, so budget generously.
@@ -42,6 +45,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// A walkthrough step opens a file and glides to it, which is slower than a
 /// keystroke but nothing like an LSP round trip.
 const WALKTHROUGH_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// A step onto another commit waits on a git checkout, which shares the
+/// repository lock with the status walks a checkout sets off. On a saturated
+/// machine that ran past [`WALKTHROUGH_TIMEOUT`], and a wait that matches
+/// returns at once, so only a failing run pays for the length.
+const CHECKOUT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[test]
 fn diff_view_shows_fixture_change() {
@@ -288,6 +297,7 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
         .commit
         .clone()
         .expect("the first stop names a commit");
+    let (_capture, git_log) = GitLog::capture();
 
     harness.run(|mut handle| async move {
         handle
@@ -297,10 +307,12 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
         let frame = handle
             .await_frame(
                 |text| text.contains("1/6") && text.contains("reviewing"),
-                WALKTHROUGH_TIMEOUT,
+                CHECKOUT_TIMEOUT,
             )
             .await
-            .expect("the tour lands on its first stop once the checkout does");
+            .unwrap_or_else(|err| {
+                panic!("the tour lands on its first stop once the checkout does: {err}\n{git_log}")
+            });
         assert!(
             !frame.contains("drifted"),
             "the first stop reads what it captured, got frame:\n{frame}",
@@ -329,10 +341,10 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
             let frame = handle
                 .await_frame(
                     |text| text.contains(&format!("{step}/6")) && text.contains(landing),
-                    WALKTHROUGH_TIMEOUT,
+                    CHECKOUT_TIMEOUT,
                 )
                 .await
-                .unwrap_or_else(|err| panic!("stop {step} lands on {landing:?}: {err}"));
+                .unwrap_or_else(|err| panic!("stop {step} lands on {landing:?}: {err}\n{git_log}"));
             assert!(
                 !frame.contains("drifted"),
                 "stop {step} reads what it captured, got frame:\n{frame}",
@@ -341,9 +353,9 @@ fn walkthrough_commits_fixture_checks_each_commit_out() {
 
         handle.send_keys("d").await.expect("end the tour");
         handle
-            .await_frame(|text| !text.contains("reviewing"), WALKTHROUGH_TIMEOUT)
+            .await_frame(|text| !text.contains("reviewing"), CHECKOUT_TIMEOUT)
             .await
-            .expect("ending the tour ends its walk");
+            .unwrap_or_else(|err| panic!("ending the tour ends its walk: {err}\n{git_log}"));
         assert_eq!(
             head_of(&root),
             "main",
@@ -364,6 +376,58 @@ fn head_of(root: &Path) -> String {
             .id()
             .to_string(),
         false => head.shorthand().expect("the branch has a name").to_owned(),
+    }
+}
+
+/// The `stoat::git` log a live session writes, kept for a failure message.
+///
+/// A frame timeout shows the screen but not the git queue behind it, so a
+/// landing that never queued, one still waiting, and one whose work ran long
+/// all read the same. The log tells them apart, since the queue writes a line
+/// as each job queues, gives way to a later one, and lands with its wait and
+/// work times.
+#[derive(Clone)]
+struct GitLog(Arc<Mutex<Vec<u8>>>);
+
+impl GitLog {
+    /// Start keeping the log of every session this thread runs, until the
+    /// returned guard drops.
+    ///
+    /// The harness runs its session on the calling thread, so a thread default
+    /// subscriber sees each line the event loop writes.
+    fn capture() -> (DefaultGuard, Self) {
+        let log = Self(Arc::new(Mutex::new(Vec::new())));
+        let make_writer = {
+            let log = log.clone();
+            move || log.clone()
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("stoat::git=debug")
+            .with_ansi(false)
+            .with_writer(make_writer)
+            .finish();
+        (subscriber::set_default(subscriber), log)
+    }
+}
+
+impl Display for GitLog {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let text = self.0.lock().expect("the git log lock");
+        write!(f, "stoat::git log:\n{}", String::from_utf8_lossy(&text))
+    }
+}
+
+impl Write for GitLog {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the git log lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
