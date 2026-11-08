@@ -469,11 +469,11 @@ pub(crate) fn read_register_fragments(
     }
 }
 
-/// The focused buffer's name, as the status row above it shows it.
+/// The focused buffer's name, as the status row above it shows a path.
 ///
-/// A buffer with no path is `[scratch]`, which is what the row shows too. What
-/// pastes is therefore what the reader sees named, rather than an absolute path
-/// they never looked at.
+/// What pastes is what the reader sees named, rather than an absolute path they
+/// never looked at. A buffer with no path pastes `[scratch]`, whose brackets
+/// keep it apart from a file named `scratch`.
 ///
 /// While a prompt is open, the buffer behind the prompt answers. The prompt's
 /// own input is a scratch buffer that the reader did not open.
@@ -2273,7 +2273,8 @@ mod tests {
         assert_eq!(h.buffer_text_at(&path), "xbuf.txt\n");
     }
 
-    /// A buffer with no path names itself the way the status row does.
+    /// A buffer with no path pastes a bracketed name, apart from a file named
+    /// `scratch`.
     #[test]
     fn document_path_register_names_a_pathless_buffer() {
         let mut h = TestHarness::with_size(40, 10);

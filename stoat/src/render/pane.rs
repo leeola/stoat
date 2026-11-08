@@ -1799,6 +1799,9 @@ fn status_segments(
     // The typed text is what the user needs to read mid-type. The workspace,
     // screen and file names are context they already have.
     let prompt = frame.status_prompt.filter(|_| is_focused);
+    // An open modal's label names what the keys reach, and the file under the
+    // modal is not where they go, so the label stands alone.
+    let modal = frame.modal_label.filter(|_| is_focused);
     // The conflict screen's lead names the operation and the chunk at the
     // cursor in place of the file name. The pane's buffer is the scratch
     // merged result, which the grid's header already names after its file.
@@ -1827,7 +1830,7 @@ fn status_segments(
                     lead_style.add_modifier(Modifier::BOLD),
                 );
             }
-            if let Some(modal_label) = frame.modal_label {
+            if let Some(modal_label) = modal {
                 push_left(
                     &mut left,
                     &mut cursor,
@@ -1896,6 +1899,7 @@ fn status_segments(
     let cursor_pos = status.cursor_pos;
     if let Some(name) = &status.filename
         && prompt.is_none()
+        && modal.is_none()
         && sides.is_none()
         && conflict.is_none()
     {
@@ -1987,26 +1991,35 @@ fn status_segments(
         let muted = tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED);
         // The block reads left to right as the servers and then the sources the
         // file's diagnostics name, and right segments push leftward, so the
-        // sources push first.
+        // sources push first. The first piece that fits ends the block with a
+        // space, and each piece left of it ends with the dot that joins it to
+        // the next.
         let sources = focused_diagnostic_sources(view, editors, buffers, frame.diagnostics);
-        let sources = (!sources.is_empty()).then(|| format!(" {} ", sources.join(" \u{b7} ")));
+        let sources = (!sources.is_empty()).then(|| sources.join(" \u{b7} "));
+        let spinner = SPINNER_FRAMES[frame.spinner_phase as usize];
         let servers = frame
             .lsp_servers
             .iter()
             .rev()
-            .map(|server| match server.busy {
-                true => format!(
-                    " {} {} ",
-                    SPINNER_FRAMES[frame.spinner_phase as usize], server.name
-                ),
-                false => format!(" {} ", server.name),
-            });
-        for text in sources.into_iter().chain(servers) {
+            .map(|server| (server.busy.then_some(spinner), server.name.as_str()));
+        let mut joined = false;
+        for (spinner, name) in sources
+            .as_deref()
+            .map(|sources| (None, sources))
+            .into_iter()
+            .chain(servers)
+        {
+            let end = if joined { " \u{b7}" } else { " " };
+            let text = match spinner {
+                Some(spinner) => format!(" {spinner} {name}{end}"),
+                None => format!(" {name}{end}"),
+            };
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
                 right.push((text, muted));
                 right_anchor = start;
+                joined = true;
             }
         }
         if right_anchor < badge_right {
@@ -2563,11 +2576,12 @@ fn focused_staged_label(
 /// mode chip's style over `ui.statusline.rebase`'s color. While a merge is in
 /// progress a `MERGE` chip follows in the mode chip's style over
 /// `vcs.merge.banner`'s color, and then the merge head's name in `ui.text.dim`.
-/// Each count the
-/// repository holds follows in its own color, the staged hunks in
-/// `diff.staged`, the unstaged hunks in `ui.text.muted`, and the untracked
-/// files in `ui.text.dim`. A repository that holds none reads `clean` in
-/// `ui.statusbar.clean` in their place.
+/// A `U+2502` divider in the fg of `ui.surface.overlay` parts all of that
+/// from the counts. A repository with no head, divergence, or chip shows no
+/// divider. Each count the repository holds follows in its own color, the
+/// staged hunks in `diff.staged`, the unstaged hunks in `ui.text.muted`, and
+/// the untracked files in `ui.text.dim`. A repository that holds none reads
+/// `clean` in `ui.statusbar.clean` in their place.
 fn repo_segments(
     repo: &RepoStatus,
     base_style: Style,
@@ -2608,6 +2622,12 @@ fn repo_segments(
         segments.push((
             format!(" {merge_head}"),
             tinted(base_style, theme, s::UI_TEXT_DIM),
+        ));
+    }
+    if !segments.is_empty() {
+        segments.push((
+            " \u{2502}".to_string(),
+            tinted(base_style, theme, s::UI_SURFACE_OVERLAY),
         ));
     }
 
@@ -2882,7 +2902,7 @@ fn pane_status_info(
         View::Editor(editor_id) => {
             editor_status_info(*editor_id, workspace_root, home, editors, buffers)
         },
-        View::Run(_) => owned("[run]"),
+        View::Run(_) => owned("run"),
         View::Agent(id) => owned(
             terms
                 .get(*id)
@@ -3005,7 +3025,7 @@ fn status_filename<'a>(
     if !fresh {
         let rendered = match path {
             Some(path) => crate::paths::display_relative_with_home(path, workspace_root, home),
-            None => "[scratch]".to_string(),
+            None => "scratch".to_string(),
         };
         editor.status_filename = Some(crate::editor_state::StatusFilename {
             path: path.map(Path::to_path_buf),
@@ -3237,7 +3257,7 @@ mod tests {
         );
         assert_eq!(
             status_filename(&mut editor, None, root, Some(home)),
-            "[scratch]",
+            "scratch",
             "a pathless buffer names itself",
         );
     }
@@ -3394,7 +3414,7 @@ mod tests {
 
         let bar = bar_row(&h.render_composited());
         assert!(
-            bar.contains(" rust-analyzer  rustc \u{b7} clippy "),
+            bar.contains(" rust-analyzer \u{b7} rustc \u{b7} clippy "),
             "the server, then each source once:\n{bar}"
         );
     }
@@ -3836,17 +3856,17 @@ mod tests {
     fn the_staged_label_pairs_the_repo_hunks_with_the_focused_file() {
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((2, 3)), Some((1, 4)), None).as_deref(),
-            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · \u{270e}4 \u{271a}1 "),
+            Some(" \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged · \u{270e}4 \u{271a}1 "),
             "both pairs read side by side"
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((2, 3)), None, None).as_deref(),
-            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged "),
+            Some(" \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged "),
             "a file with no diff map drops its half"
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((2, 3)), Some((0, 0)), None).as_deref(),
-            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged "),
+            Some(" \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged "),
             "and so does a file whose diff map holds no hunks"
         );
         assert_eq!(
@@ -3861,12 +3881,12 @@ mod tests {
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((0, 0)), Some((0, 0)), None).as_deref(),
-            Some(" \u{2387} main \u{2713} clean "),
+            Some(" \u{2387} main \u{2502} \u{2713} clean "),
             "a clean repo says so beside an unchanged file"
         );
         assert_eq!(
             staged_label(MarkKind::Staged, None, Some((0, 0)), Some((1, 0)), None).as_deref(),
-            Some(" \u{2387} main \u{2713} clean · \u{270e}0 \u{271a}1 "),
+            Some(" \u{2387} main \u{2502} \u{2713} clean · \u{270e}0 \u{271a}1 "),
             "a stale clean tally still shows against a file that has hunks"
         );
     }
@@ -3894,8 +3914,8 @@ mod tests {
                 label(status(None, 0, false)),
             ],
             [
-                Some(" \u{2387} abc1234 \u{270e} 1 unstaged ? 2 untracked ".to_string()),
-                Some(" \u{2387} main  REB  \u{270e} 1 unstaged ".to_string()),
+                Some(" \u{2387} abc1234 \u{2502} \u{270e} 1 unstaged ? 2 untracked ".to_string()),
+                Some(" \u{2387} main  REB  \u{2502} \u{270e} 1 unstaged ".to_string()),
                 Some(" \u{270e} 1 unstaged ".to_string()),
             ],
         );
@@ -3921,16 +3941,17 @@ mod tests {
         assert_eq!(
             [label(2, 0), label(0, 3), label(0, 0)],
             [
-                Some(" \u{2387} main \u{2191}2 \u{2713} clean ".to_string()),
-                Some(" \u{2387} main \u{2193}3 \u{2713} clean ".to_string()),
-                Some(" \u{2387} main \u{2713} clean ".to_string()),
+                Some(" \u{2387} main \u{2191}2 \u{2502} \u{2713} clean ".to_string()),
+                Some(" \u{2387} main \u{2193}3 \u{2502} \u{2713} clean ".to_string()),
+                Some(" \u{2387} main \u{2502} \u{2713} clean ".to_string()),
             ],
         );
     }
 
     /// Each piece of the repo segment reads in its own color. The glyph is dim,
     /// the head bold, the divergence muted, the rebase chip on the rebase
-    /// color, and each count in its scope.
+    /// color, the divider in the overlay's line color, and each count in its
+    /// scope.
     #[test]
     fn the_repo_segment_colors_each_piece() {
         use ratatui::style::{Color, Modifier, Style};
@@ -3981,6 +4002,12 @@ mod tests {
                 ),
                 (" ".to_string(), None, None, false),
                 (" REB ".to_string(), chip, rebase, true),
+                (
+                    " \u{2502}".to_string(),
+                    fg(crate::theme::scope::UI_SURFACE_OVERLAY),
+                    None,
+                    false
+                ),
                 (
                     " \u{271a} 1 staged".to_string(),
                     fg(crate::theme::scope::DIFF_STAGED),
@@ -4161,7 +4188,7 @@ mod tests {
                 Some(&at_second_file)
             )
             .as_deref(),
-            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk 2/7 "),
+            Some(" \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk 2/7 "),
             "the file's place leads its counts, and the hunk position closes the label"
         );
         assert_eq!(
@@ -4173,7 +4200,7 @@ mod tests {
                 Some(&at_second_file)
             )
             .as_deref(),
-            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · hunk 2/7 "),
+            Some(" \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · hunk 2/7 "),
             "a file with no hunks keeps its place and drops its counts"
         );
         assert_eq!(
@@ -4185,7 +4212,7 @@ mod tests {
                 Some(&hunk_position(2, 4, None, 7))
             )
             .as_deref(),
-            Some(" \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk -/7 "),
+            Some(" \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · \u{270e}4 \u{271a}1 · hunk -/7 "),
             "a cursor above the first hunk stands at no position"
         );
         assert_eq!(
@@ -4279,7 +4306,7 @@ mod tests {
             [
                 Some(" diff vs main base0 · file 1 approved / 4 unapproved ".to_string()),
                 Some(
-                    " \u{2387} main \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · 1 approved / 4 unapproved · hunk 1/5 "
+                    " \u{2387} main \u{2502} \u{271a} 2 staged \u{270e} 3 unstaged · file 2/4 · 1 approved / 4 unapproved · hunk 1/5 "
                         .to_string()
                 ),
                 Some(" 1 approved / 4 unapproved ".to_string()),
@@ -4523,12 +4550,12 @@ mod tests {
                 row(Some("main"), false, false, None, Some(None)),
             ],
             [
-                "NOR repo f.txt \u{2387} main \u{2713} clean 1:1",
-                "NOR repo f.txt \u{2387} main REB \u{2713} clean 1:1",
-                "NOR repo f.txt \u{2387} a100000 ? 1 untracked 1:1",
-                "NOR repo f.txt \u{2387} main \u{2191}2 \u{2193}1 \u{2713} clean 1:1",
-                "NOR repo f.txt \u{2387} main MERGE feature \u{2713} clean 1:1",
-                "NOR repo f.txt \u{2387} main MERGE f00dfee \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main \u{2502} \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main REB \u{2502} \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} a100000 \u{2502} ? 1 untracked 1:1",
+                "NOR repo f.txt \u{2387} main \u{2191}2 \u{2193}1 \u{2502} \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main MERGE feature \u{2502} \u{2713} clean 1:1",
+                "NOR repo f.txt \u{2387} main MERGE f00dfee \u{2502} \u{2713} clean 1:1",
             ],
         );
     }
@@ -5012,7 +5039,7 @@ mod tests {
                 .collect::<String>()
                 .replace('─', " ");
             assert_eq!(
-                left_of_the_box, " NOR  (unnamed) [scratch] [+] walkthroug 1:1 ",
+                left_of_the_box, " NOR  (unnamed) scratch [+] walkthrough  1:1 ",
                 "stoatty {stoatty}",
             );
         }
@@ -5234,15 +5261,16 @@ mod tests {
         assert_eq!(
             [two, status_row(&buf, buf.area)],
             [
-                format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]  2 sel "),
-                format!("{:<56}2:1 ", " NOR  (unnamed) [scratch] [+]"),
+                format!("{:<56}2:1 ", " NOR  (unnamed) scratch [+]  2 sel "),
+                format!("{:<56}2:1 ", " NOR  (unnamed) scratch [+]"),
             ],
         );
     }
 
     /// An open picker shows the prompt chip and its own name where a screen
-    /// label sits. A closed picker gives the row back to the mode. The search
-    /// input has no name, so its row keeps the mode chip.
+    /// label sits, with no file name after it. A closed picker gives the row
+    /// back to the mode and the file. The search input has no name, so its row
+    /// keeps the mode chip.
     #[test]
     fn the_status_row_names_an_open_picker() {
         let mut h = crate::test_harness::TestHarness::with_size(60, 12);
@@ -5260,8 +5288,8 @@ mod tests {
         assert_eq!(
             [open, closed, row(&mut h)],
             [
-                format!("{:<56}1:1 ", " PMT  (unnamed)  find file [scratch] [+]"),
-                format!("{:<56}1:1 ", " NOR  (unnamed) [scratch] [+]"),
+                format!("{:<56}1:1 ", " PMT  (unnamed)  find file"),
+                format!("{:<56}1:1 ", " NOR  (unnamed) scratch [+]"),
                 format!("{:<56}1:1 ", " INS /"),
             ],
         );
@@ -5388,7 +5416,7 @@ mod tests {
         let width = bar.chars().count() - "1:1 ".len();
         assert_eq!(
             (ws.panes.focus() != counted, bar.clone()),
-            (true, format!("{:<width$}1:1 ", " [scratch] [+]  2 sel ")),
+            (true, format!("{:<width$}1:1 ", " scratch [+]  2 sel ")),
             "the split moves the focus away, and the pane keeps its count",
         );
     }
@@ -5932,9 +5960,6 @@ mod tests {
         let one_tab = status_left(&mut h);
         dispatch(&mut h.stoat, &stoat_action::NewTab);
         let two_tabs = status_left(&mut h);
-        assert_eq!(
-            [one_tab, two_tabs],
-            [" NOR  ws [scratch] ", " NOR [scratch] "]
-        );
+        assert_eq!([one_tab, two_tabs], [" NOR  ws scratch ", " NOR scratch "]);
     }
 }
