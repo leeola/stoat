@@ -1306,15 +1306,17 @@ fn status_segments_area(row: Rect, cover: Option<Rect>) -> Rect {
 /// Everything a detached pane's status bar draws, assembled but not yet
 /// painted.
 ///
-/// The pair `(base_style, left, right)` determines the painted row exactly,
-/// given the rectangle. A caller that caches the painted bytes can therefore
-/// compare this instead of repainting and diffing, which is why the assembly is
-/// exposed apart from [`paint_pane_status_cells`].
+/// The runs and the ground determine the painted row exactly, given the
+/// rectangle. A caller that caches the painted bytes hashes this in place of a
+/// repaint and a diff, which is why the assembly is exposed apart from
+/// [`paint_pane_status_cells`].
+#[derive(Hash)]
 pub(crate) struct PaneStatusCells {
-    /// Fill style of the row, and the style every plain segment inherits.
-    pub(crate) base_style: Style,
-    pub(crate) left: Vec<StatusSeg>,
-    pub(crate) right: Vec<StatusSeg>,
+    /// The row's runs from left to right, as [`status_row`] lays them out for
+    /// a pane in the main window.
+    runs: Vec<StatusRun>,
+    /// The window ground, which shows in the cell between two runs.
+    ground: Color,
 }
 
 /// Assemble a detached pane's status bar for [`paint_pane_status_cells`].
@@ -1325,13 +1327,15 @@ pub(crate) struct PaneStatusCells {
 /// style on either bar, so its digit reads against its box. The focused window
 /// gets none, since the chord starts from that pane and does not pick it.
 ///
-/// The bar runs whole for every view. A detached diff view keeps the file name
-/// and the staged label, and names no sides.
+/// `content` is the pane's content in the row's coordinates. A diff view's row
+/// splits at the divider that its diff body takes there, and names the base
+/// and the target as a split row in the main window does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn pane_status_cells(
     view: &View,
     is_focused: bool,
     area: Rect,
+    content: Rect,
     frame: FrameCtx<'_>,
     editors: &mut SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
@@ -1339,47 +1343,41 @@ pub(crate) fn pane_status_cells(
     changes: &SlotMap<DiffChangesId, DiffChangesState>,
     badge: Option<u32>,
 ) -> PaneStatusCells {
-    let StatusRun {
-        style: base_style,
-        mut left,
-        right,
-        ..
-    } = status_segments(
-        view, is_focused, area, None, frame, editors, buffers, terms, changes, &mut None,
-    )
-    .into_iter()
-    .next()
-    .unwrap_or_default();
+    let sides = sides_layout(view, content, frame, editors);
+    let mut runs = status_segments(
+        view, is_focused, area, sides, frame, editors, buffers, terms, changes, &mut None,
+    );
 
-    if let Some(digit) = badge {
+    if let (Some(digit), Some(first)) = (badge, runs.first_mut()) {
         let badge_style = frame
             .theme
             .get(crate::theme::scope::UI_STATUSBAR_FOCUSED)
             .add_modifier(Modifier::BOLD);
-        left.insert(0, (format!("[{digit}]"), badge_style));
+        first.left.insert(0, (format!("[{digit}]"), badge_style));
     }
 
     PaneStatusCells {
-        base_style,
-        left,
-        right,
+        runs,
+        ground: crate::render::themed_bg(frame.theme),
     }
 }
 
-/// Paint assembled status segments into `buf` as plain cells, for a detached
+/// Paint assembled status runs into `buf` as plain cells, for a detached
 /// pane's aux window where no rich APC scene is available.
 pub(crate) fn paint_pane_status_cells(cells: &PaneStatusCells, area: Rect, buf: &mut Buffer) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    let y = area.y;
-    let end_x = area.x + area.width;
-    for x in area.x..end_x {
-        buf[(x, y)].set_char(' ').set_style(cells.base_style);
+    for x in area.left()..area.right() {
+        buf[(x, area.y)].set_char(' ').set_bg(cells.ground);
     }
-
-    paint_status_fallback(buf, area, &cells.left, &cells.right);
+    for run in &cells.runs {
+        for x in run.area.left()..run.area.right() {
+            buf[(x, run.area.y)].set_char(' ').set_style(run.style);
+        }
+    }
+    paint_runs_fallback(buf, &cells.runs);
 }
 
 /// The APC frame a status bar last emitted, held so an unchanged repaint

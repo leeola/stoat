@@ -667,10 +667,17 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
         // whether it moved without painting it. Assembling a handful of
         // short strings is the cheap half of what the row used to cost
         // every frame. Filling its cells and serializing them is the rest.
+        //
+        // The status rect shares the content's left edge, and the row paints
+        // that edge at its own x.
         let cells = crate::render::pane::pane_status_cells(
             &view,
             is_focused,
             row,
+            Rect {
+                x: row.x,
+                ..content
+            },
             frame,
             &mut ws.editors,
             &ws.buffers,
@@ -682,9 +689,7 @@ fn emit_window_content(stoat: &mut Stoat, out: &mut Vec<u8>) -> Vec<Vec<u8>> {
             let mut hasher = DefaultHasher::new();
             stoat.theme_epoch.hash(&mut hasher);
             region.hash(&mut hasher);
-            cells.base_style.hash(&mut hasher);
-            cells.left.hash(&mut hasher);
-            cells.right.hash(&mut hasher);
+            cells.hash(&mut hasher);
             hasher.finish()
         };
         if stoat

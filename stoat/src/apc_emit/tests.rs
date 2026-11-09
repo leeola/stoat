@@ -2570,6 +2570,102 @@ fn detached_pane_status_row_names_its_file_and_no_sides() {
     );
 }
 
+/// A detached diff view's status row splits at the diff's divider and names
+/// its sides there, as a split row in the main window does, and so does a
+/// detached changes view's row. The base half takes the base tint past the
+/// mode chip, the divider's cell keeps the window ground, and the target half
+/// takes the target tint.
+#[test]
+fn a_detached_diff_view_s_row_names_its_sides_at_the_divider() {
+    let split = detached_diff_row(|h| {
+        action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .set_diff_view(true);
+    });
+    let changes = detached_diff_row(|h| {
+        action_handlers::dispatch(&mut h.stoat, &stoat_action::DiffChanges);
+        h.settle_diff_jobs();
+    });
+
+    let rgb = |hex: u32| Some(Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8));
+    let halves = vec![
+        (rgb(0x7fb0ff), 5),
+        (rgb(0x2a1d20), 54),
+        (rgb(0x121418), 1),
+        (rgb(0x1d2a1f), 60),
+    ];
+    let row = |base: &str| {
+        (
+            halves.clone(),
+            [base.to_string(), "+ working tree 1:1".into()],
+        )
+    };
+    assert_eq!(
+        [split, changes],
+        [
+            row("NOR structural diff hunk - / 1 \u{2212} HEAD"),
+            row("NOR changes hunk - / 1 \u{b7} 1 file \u{b7} +1 \u{2212}1 \u{2212} HEAD"),
+        ],
+    );
+}
+
+/// The status row of a detached 120-column window whose pane `show` turns to a
+/// diff of `/repo/a.rs`, as the runs of its background and the words of each
+/// half.
+///
+/// The halves lie either side of column 59, the divider of a 120-column diff
+/// body.
+fn detached_diff_row(
+    show: impl FnOnce(&mut crate::test_harness::TestHarness),
+) -> (Vec<(Option<Color>, usize)>, [String; 2]) {
+    let mut h = crate::test_harness::TestHarness::with_size(120, 24);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.window_ipc_connected = true;
+    h.stage_review_scenario("/repo", &[("a.rs", "a\nb\nc\nold\n", "a\nb\nc\nnew\n")]);
+    h.stoat.set_diff_warm_auto(true);
+    h.open_file(&PathBuf::from("/repo/a.rs"));
+    h.settle_diff_jobs();
+    h.type_action("SplitRight()");
+    h.settle();
+    show(&mut h);
+    action_handlers::dispatch(&mut h.stoat, &DetachPane);
+
+    let (window, pool) = {
+        let panes = &h.stoat.active_workspace().panes;
+        let pane = panes.pane(panes.focus());
+        let window = match &pane.placement {
+            Placement::Window(window) => *window,
+            other => panic!("the pane detaches into a window, got {other:?}"),
+        };
+        let pool = crate::smooth_scroll::non_pane_pool::WINDOW_STATUS + pane.index;
+        (window, pool)
+    };
+    app::deliver_window_event(
+        &mut h.stoat,
+        WindowIpcEvent::Resized {
+            window,
+            cols: 120,
+            rows: 10,
+        },
+    );
+    let bytes = emit_raw(&mut h, &mut rx);
+    let row = page_cells(fill_payload(&bytes, pool, 0), 120, 1).remove(0);
+
+    let mut runs: Vec<(Option<Color>, usize)> = Vec::new();
+    for &(_, _, bg) in &row {
+        match runs.last_mut() {
+            Some((color, count)) if *color == bg => *count += 1,
+            _ => runs.push((bg, 1)),
+        }
+    }
+    let words = |cells: &[(char, Option<Color>, Option<Color>)]| {
+        let text: String = cells.iter().map(|cell| cell.0).collect();
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    (runs, [words(&row[..59]), words(&row[60..])])
+}
+
 /// A detached run pane that holds focus reads the run chip and names its
 /// directory whole, as a run pane's row in the main window does. The prompt
 /// shortens the same directory to `/d/r/dir`.
