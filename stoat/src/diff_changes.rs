@@ -561,6 +561,82 @@ pub(crate) fn follow_cursor(stoat: &mut Stoat, scrolloff: u32) -> bool {
     state.scroll != before
 }
 
+/// Open the rows around the focused changes view's cursor where a fold hides
+/// it, fold them again once the cursor leaves them, and report whether a fold
+/// changed.
+///
+/// A fold change moves the rows above the cursor, so the next paint holds the
+/// cursor's line on the screen row it held before the change.
+///
+/// See also:
+/// - [`follow_cursor`], which the key epilogue runs after this.
+pub(crate) fn reveal_cursor(stoat: &mut Stoat) -> bool {
+    let ws = stoat.active_workspace_mut();
+    let Some(id) = ws.focused_diff_changes_id() else {
+        return false;
+    };
+    let Workspace {
+        diff_changes_views,
+        editors,
+        ..
+    } = ws;
+    let Some(state) = diff_changes_views.get_mut(id) else {
+        return false;
+    };
+    layout_stack(state, editors);
+    let Some(editor_id) = state
+        .focused_excerpt()
+        .filter(|excerpt| excerpt.folded_version.is_some())
+        .map(|excerpt| excerpt.editor_id)
+    else {
+        return false;
+    };
+    let screen_row = cursor_stack_row(state, editors)
+        .and_then(|row| row.checked_sub(state.scroll))
+        .filter(|&row| row < state.viewport_rows)
+        .and_then(|row| u16::try_from(row).ok());
+
+    let Some(editor) = editors.get_mut(editor_id) else {
+        return false;
+    };
+    let insert = editor.mode == "insert";
+    let row = reveal_row(editor, insert);
+    let Some((_, _, changed)) = fold_excerpt(editor, row) else {
+        return false;
+    };
+    if changed && screen_row.is_some() {
+        state.held_screen_row = screen_row;
+    }
+    changed
+}
+
+/// The row that `editor`'s cursor holds open, or `None` when the folds the
+/// diff cuts leave the cursor in sight.
+///
+/// A fold hides its rows past its first position, and that first position
+/// shows as the fold row. So a cursor past a fold's start holds its row open,
+/// and so does a cursor on the start while `insert` is set, because an insert
+/// there types into the hidden line. A fold of the empty row after a final
+/// newline hides no line, so it holds nothing open.
+///
+/// The test reads the folds the diff's own runs cut, not the folds the display
+/// holds. A row this holds open shows no fold, so a test of the display's folds
+/// releases the row on the next key and hides the cursor again.
+fn reveal_row(editor: &mut EditorState, insert: bool) -> Option<u32> {
+    let cursor = cursor_point(editor);
+    let snapshot = editor.display_map.snapshot();
+    let map = snapshot.diff_map()?;
+    let rope = snapshot.buffer_snapshot().rope();
+    let line_count = rope.max_point().row + 1;
+    let fold = gaps(&kept_runs(map, line_count, None), line_count)
+        .into_iter()
+        .map(|gap| gap_fold(rope, gap))
+        .filter(|(_, placeholder)| !placeholder.text.is_empty())
+        .map(|(range, _)| range)
+        .find(|fold| fold.start <= cursor && cursor < fold.end)?;
+    (cursor > fold.start || insert).then_some(cursor.row)
+}
+
 /// Center the focused changes view on a change walk's landed `span`, as an
 /// editor centers a jump, and report whether the scroll moved.
 ///
@@ -682,7 +758,7 @@ pub(crate) fn kept_rows(editor: &mut EditorState) -> Vec<Range<u32>> {
     let line_count = snapshot.buffer_snapshot().rope().max_point().row + 1;
     snapshot
         .diff_map()
-        .map_or_else(Vec::new, |map| kept_runs(map, line_count))
+        .map_or_else(Vec::new, |map| kept_runs(map, line_count, None))
 }
 
 /// The row a landing on `row` takes in an excerpt that shows `kept`.
@@ -1015,7 +1091,8 @@ fn drop_excerpt(stoat: &mut Stoat, excerpt: Excerpt) {
 /// folds were cut, and report whether any did.
 ///
 /// An excerpt cut for the first time puts its cursor on a row it shows, by
-/// [`landing_row`], unless a landing waits on its file.
+/// [`landing_row`], unless a landing waits on its file. A later cut keeps the
+/// cursor's row open where [`reveal_row`] holds it.
 fn refold(ws: &mut Workspace) -> bool {
     let Workspace {
         diff_changes_views,
@@ -1035,10 +1112,19 @@ fn refold(ws: &mut Workspace) -> bool {
             let Some(editor) = editors.get_mut(excerpt.editor_id) else {
                 continue;
             };
-            let Some((folded, kept)) = fold_excerpt(editor) else {
+            // A first cut comes before the cursor is placed, so no cursor holds
+            // a row open yet.
+            let first = excerpt.folded_version.is_none();
+            let cursor = match first {
+                true => None,
+                false => {
+                    let insert = editor.mode == "insert";
+                    reveal_row(editor, insert)
+                },
+            };
+            let Some((folded, kept, _)) = fold_excerpt(editor, cursor) else {
                 continue;
             };
-            let first = excerpt.folded_version.is_none();
             excerpt.folded_version = Some(folded);
             any = true;
 
@@ -1143,21 +1229,25 @@ fn land(
 }
 
 /// Fold every run of `editor`'s buffer that [`kept_runs`] leaves out, and
-/// answer the diff map version the folds were cut from with the rows left
-/// showing.
+/// answer the diff map version the folds were cut from, the rows left showing,
+/// and whether a fold changed.
 ///
 /// A fold that already hides a wanted gap stays. Only the gaps that opened or
 /// closed since the last cut change the display map, so a landing that moves no
-/// gap changes nothing.
+/// gap changes nothing. A `cursor` row stays open with its context, as
+/// [`kept_runs`] keeps it.
 ///
 /// `None`, with nothing folded, while the buffer has no diff map.
-fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
+fn fold_excerpt(
+    editor: &mut EditorState,
+    cursor: Option<u32>,
+) -> Option<(usize, Vec<Range<u32>>, bool)> {
     let (version, kept, stale, fresh) = {
         let snapshot = editor.display_map.snapshot();
         let map = snapshot.diff_map()?;
         let rope = snapshot.buffer_snapshot().rope();
         let line_count = rope.max_point().row + 1;
-        let kept = kept_runs(map, line_count);
+        let kept = kept_runs(map, line_count, cursor);
         let wanted: Vec<(Range<Point>, FoldPlaceholder)> = gaps(&kept, line_count)
             .into_iter()
             .map(|gap| gap_fold(rope, gap))
@@ -1179,13 +1269,14 @@ fn fold_excerpt(editor: &mut EditorState) -> Option<(usize, Vec<Range<u32>>)> {
             .collect();
         (map.version(), kept, stale, fresh)
     };
+    let changed = !stale.is_empty() || !fresh.is_empty();
     if !stale.is_empty() {
         editor.display_map.unfold(stale);
     }
     if !fresh.is_empty() {
         editor.display_map.fold_with(fresh);
     }
-    Some((version, kept))
+    Some((version, kept, changed))
 }
 
 /// The buffer range each fold of `folds` hides, sorted by start and then end.
@@ -1220,30 +1311,38 @@ fn holds(ranges: &[Range<Point>], range: &Range<Point>) -> bool {
 /// body of a block the formatter re-indented, fold away. The last live row
 /// stays because, where the layout pairs base rows with live rows, the base
 /// lines left over hang below it.
-fn kept_runs(map: &DiffMap, line_count: u32) -> Vec<Range<u32>> {
+///
+/// A `cursor` row keeps its context as a hunk's rows do, so a cursor outside
+/// every hunk's run shows with the rows around it.
+fn kept_runs(map: &DiffMap, line_count: u32, cursor: Option<u32>) -> Vec<Range<u32>> {
+    let mut wanted: Vec<Range<u32>> = Vec::new();
+    for hunk in map.hunks() {
+        let rows = &hunk.buffer_line_range;
+        if rows.is_empty() {
+            wanted.push(hunk.buffer_start_line..hunk.buffer_start_line + 1);
+        } else if hunk.status == DiffHunkStatus::Modified && hunk.refined() {
+            wanted.extend(hunk.marked_rows.iter().cloned());
+            wanted.push(rows.end - 1..rows.end);
+        } else {
+            wanted.push(rows.clone());
+        }
+    }
+    wanted.extend(cursor.map(|row| row..row + 1));
+    // The merge below joins a run only to the one before it, so the rows go in
+    // in buffer order. A cursor row falls anywhere, even between a refined
+    // hunk's marked runs.
+    wanted.sort_by_key(|rows| rows.start);
+
     let mut runs: Vec<Range<u32>> = Vec::new();
-    let mut keep = |rows: Range<u32>| {
+    for rows in wanted {
         let run =
             rows.start.saturating_sub(CONTEXT_ROWS)..(rows.end + CONTEXT_ROWS).min(line_count);
         if run.is_empty() {
-            return;
+            continue;
         }
         match runs.last_mut() {
             Some(last) if run.start <= last.end => last.end = last.end.max(run.end),
             _ => runs.push(run),
-        }
-    };
-    for hunk in map.hunks() {
-        let rows = &hunk.buffer_line_range;
-        if rows.is_empty() {
-            keep(hunk.buffer_start_line..hunk.buffer_start_line + 1);
-        } else if hunk.status == DiffHunkStatus::Modified && hunk.refined() {
-            for marked in &hunk.marked_rows {
-                keep(marked.clone());
-            }
-            keep(rows.end - 1..rows.end);
-        } else {
-            keep(rows.clone());
         }
     }
     runs
@@ -1417,8 +1516,27 @@ mod tests {
         // and THIRTY on row 28. The buffer has 30 rows, the empty last one
         // included.
         assert_eq!(
-            kept_runs(&map_of(&base, &text), 30),
+            kept_runs(&map_of(&base, &text), 30, None),
             [0..12, 16..23, 25..30],
+        );
+    }
+
+    /// The cursor's row keeps three rows each side as a hunk does, alone where
+    /// it sits apart from every hunk and merged where its run touches one.
+    #[test]
+    fn kept_runs_keep_the_cursor_row_with_its_context() {
+        let base = numbered(60);
+        let map = map_of(&base, &base.replace("\n41\n", "\nFORTY-ONE\n"));
+        let runs = |cursor| {
+            kept_runs(&map, 61, Some(cursor))
+                .into_iter()
+                .map(|run| (run.start, run.end))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            [runs(10), runs(36)],
+            [vec![(7, 14), (37, 44)], vec![(33, 44)]],
+            "the runs as start and end rows, for a cursor apart from the hunk and one touching it",
         );
     }
 
@@ -1447,8 +1565,8 @@ mod tests {
         };
         assert_eq!(
             [
-                kept_runs(&map(vec![10..12, 58..60]), 80),
-                kept_runs(&map(std::iter::once(10..12).collect()), 80),
+                kept_runs(&map(vec![10..12, 58..60]), 80, None),
+                kept_runs(&map(std::iter::once(10..12).collect()), 80, None),
             ],
             [vec![7..15, 55..63], vec![7..15, 56..63]],
         );
@@ -1542,7 +1660,7 @@ mod tests {
         buffer.diff_map = Some(map);
         let shared = Arc::new(RwLock::new(buffer));
         let mut editor = EditorState::new(BufferId::new(0), shared, executor, crate::test_notify());
-        fold_excerpt(&mut editor);
+        fold_excerpt(&mut editor, None);
 
         let snapshot = editor.display_map.snapshot();
         let folds = snapshot.fold_snapshot();

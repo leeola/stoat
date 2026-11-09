@@ -1044,13 +1044,15 @@ mod tests {
         buffer_lifecycle,
         diff_changes::{self, DiffChangesId, DiffChangesState, StackStamp},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap, TokenDetail},
+        display_map::DisplayPoint,
         editor_state::EditorId,
         pane::{Axis, DockPanel, DockSide, DockVisibility, FocusTarget, View},
         run::pty::PtyNotification,
         term_session::TermId,
-        test_harness::{editor, TestHarness},
+        test_harness::{editor, keys, TestHarness},
         workspace::Workspace,
     };
+    use crossterm::event::{Event, KeyCode};
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
@@ -1605,6 +1607,143 @@ mod tests {
             buffer.resolve_anchor(&newest.tail()),
             buffer.resolve_anchor(&newest.head()),
         )
+    }
+
+    /// A search lands its cursor on a row a fold hides, and the rows around the
+    /// match open, so the cursor's display row is the match's own row.
+    #[test]
+    fn a_search_into_a_fold_shows_the_rows_around_the_match() {
+        let mut h = folded_long_files();
+
+        h.type_keys("/ 5 9 Enter");
+        assert_eq!(
+            (place(&mut h), cursor_shown_row(&mut h)),
+            (at("a.txt", 58), Some(58)),
+        );
+    }
+
+    /// A motion on a row the cursor opened keeps the row open, so the cursor
+    /// stays in sight while it moves there.
+    #[test]
+    fn a_motion_on_a_revealed_row_keeps_it_shown() {
+        let mut h = folded_long_files();
+
+        h.type_keys("/ 5 9 Enter h");
+        assert_eq!(
+            (place(&mut h), cursor_shown_row(&mut h)),
+            (at("a.txt", 58), Some(58)),
+        );
+    }
+
+    /// An insert-mode Down from the last row a hunk's context shows lands on
+    /// the fold row's first position, which opens four rows around it. The
+    /// next paint holds the cursor's line on the screen row of that fold row.
+    #[test]
+    fn an_insert_mode_down_at_the_last_context_row_shows_the_next_row() {
+        let mut h = folded_long_files();
+        put_cursor(&mut h, 43);
+        let rows = focused_excerpt_rows(&mut h);
+        h.type_keys("i");
+        let fold_row = cursor_screen_row(&mut h).map(|row| row + 1);
+
+        h.stoat.update(Event::Key(keys::key(KeyCode::Down)));
+        let held = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .and_then(|state| state.held_screen_row);
+        assert_eq!(
+            (place(&mut h), focused_excerpt_rows(&mut h), held),
+            (at("a.txt", 44), rows + 4, fold_row),
+        );
+    }
+
+    /// The `j` walk takes a step onto a fold row in normal mode, and that row
+    /// stays folded.
+    #[test]
+    fn a_j_onto_the_fold_row_stays_on_it() {
+        let mut h = folded_long_files();
+        put_cursor(&mut h, 43);
+        let rows = focused_excerpt_rows(&mut h);
+
+        h.type_keys("j");
+        assert_eq!(
+            (place(&mut h), focused_excerpt_rows(&mut h)),
+            (at("a.txt", 44), rows),
+        );
+    }
+
+    /// The rows a cursor opened fold again once the cursor leaves them.
+    #[test]
+    fn the_revealed_rows_fold_again_once_the_cursor_leaves() {
+        let mut h = folded_long_files();
+        put_cursor(&mut h, 43);
+        let rows = focused_excerpt_rows(&mut h);
+
+        h.type_keys("i Down");
+        let revealed = focused_excerpt_rows(&mut h);
+        h.type_keys("Escape k k k k");
+        assert_eq!([revealed, focused_excerpt_rows(&mut h)], [rows + 4, rows]);
+    }
+
+    /// [`long_files`] in a changes view, settled and painted, so both excerpts
+    /// are folded and the stack has a viewport.
+    fn folded_long_files() -> TestHarness {
+        let mut h = long_files(24);
+        h.cover_with_diff_changes(false);
+        h.settle();
+        h.render_composited();
+        h
+    }
+
+    /// Put the focused excerpt's cursor at the start of buffer row `row`.
+    fn put_cursor(h: &mut TestHarness, row: u32) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("a focused excerpt");
+        diff_changes::place_cursor(editor, Point::new(row, 0));
+    }
+
+    /// The display rows the focused excerpt shows.
+    fn focused_excerpt_rows(h: &mut TestHarness) -> usize {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws.focused_diff_changes_id().expect("a changes view");
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        let excerpt = diff_changes_views[id]
+            .focused_excerpt()
+            .expect("a focused excerpt");
+        diff_changes::excerpt_rows(excerpt, editors)
+    }
+
+    /// The row of the stack's view that the focused excerpt's cursor sits on.
+    fn cursor_screen_row(h: &mut TestHarness) -> Option<u16> {
+        let ws = h.stoat.active_workspace_mut();
+        let id = ws.focused_diff_changes_id()?;
+        let Workspace {
+            diff_changes_views,
+            editors,
+            ..
+        } = ws;
+        let state = diff_changes_views.get_mut(id)?;
+        diff_changes::layout_stack(state, editors);
+        let row = diff_changes::cursor_stack_row(state, editors)?;
+        u16::try_from(row.checked_sub(state.scroll)?).ok()
+    }
+
+    /// The buffer row that the focused editor's cursor display row starts with.
+    ///
+    /// A fold row starts with its fold's first row, so a cursor that a fold
+    /// hides answers that row and not its own.
+    fn cursor_shown_row(h: &mut TestHarness) -> Option<u32> {
+        let editor = focused_editor_mut(&mut h.stoat)?;
+        let row = view::cursor_display_row(editor);
+        editor
+            .display_map
+            .snapshot()
+            .display_to_buffer(DisplayPoint::new(row, 0))
+            .map(|point| point.row)
     }
 
     /// A changes view with no excerpt has no focused editor, so the editor

@@ -5715,9 +5715,13 @@ impl Stoat {
                 // cursor rather than stranding it on the edge. A keyboard scroll
                 // (z j / z k) never moves the cursor, so its view stays put. A
                 // changes view scrolls its stack, since each excerpt paints at
-                // the stack rows the layout gives it.
+                // the stack rows the layout gives it. It first opens a fold
+                // that hides the cursor, which moves the rows the follow reads.
                 let scrolled = if self.active_workspace().focused_diff_changes_id().is_some() {
-                    cursor_moved && crate::diff_changes::follow_cursor(self, scrolloff)
+                    let revealed = crate::diff_changes::reveal_cursor(self);
+                    let scrolled =
+                        cursor_moved && crate::diff_changes::follow_cursor(self, scrolloff);
+                    revealed || scrolled
                 } else {
                     match action_handlers::focused_editor_mut(self) {
                         Some(editor) => {
