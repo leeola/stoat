@@ -1305,9 +1305,11 @@ fn expect_hatch(
 /// split diff's base column, and no other base-tint pixel.
 ///
 /// The left side is the first three pixel columns of the pane's first cell,
-/// column 1, the boards' 3 px border. The right one lies in the divider
-/// column, 79, left of the hairline, which both diff screens place beside their
-/// one-cell overview. A miss saves the frame as [`expect_region`] does.
+/// column 1, the boards' 3 px border. The right one is three pixel columns of
+/// the divider column, 79, which both diff screens place beside their one-cell
+/// overview. It starts a pixel into the cell and stops a pixel short of the
+/// hairline, since the divider column is odd. A miss saves the frame as
+/// [`expect_region`] does.
 fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: &str) {
     let (_, y, _, height) = cell_rect(0, row, 1, 1);
     let columns = bar_columns(shot, (y, height), SIDE_BASE);
@@ -1317,23 +1319,19 @@ fn expect_base_frame_sides(shot: &Snapshot, home: &mut TempDir, row: u16, what: 
         x..x + width
     };
     let (left, right) = (cell(1), cell(79));
-    let left_side: Vec<u32> = columns
-        .iter()
-        .copied()
-        .filter(|x| left.contains(x))
+    let sides: Vec<u32> = [0, 1, 2]
+        .map(|dx| left.start + dx)
+        .into_iter()
+        .chain([1, 2, 3].map(|dx| right.start + dx))
         .collect();
-    let right_side = columns.iter().any(|x| right.contains(x));
-    let stray = columns
-        .iter()
-        .any(|x| !left.contains(x) && !right.contains(x));
-    if left_side == [0, 1, 2].map(|dx| left.start + dx) && right_side && !stray {
+    if columns == sides {
         return;
     }
 
     let frame = keep_frame(shot, home, what);
     panic!(
-        "{what}: the base tint fills pixel columns {columns:?} of row {row}, not the first three \
-         of {left:?} and a side in {right:?}; the frame is {}",
+        "{what}: the base tint fills pixel columns {columns:?} of row {row}, not {sides:?}, the \
+         first three of {left:?} and the three past the first of {right:?}; the frame is {}",
         frame.display(),
     );
 }

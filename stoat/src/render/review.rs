@@ -114,6 +114,15 @@ const BASE_FRAME_WIDTH: u16 = 6;
 /// sixteenths of a cell, which draw the boards' 3 px border in an 18 px row.
 const BASE_FRAME_TOP_HEIGHT: u16 = 3;
 
+/// Sixteenths between the frame's right side and the divider's hairline.
+///
+/// The hairline sits half a pixel into the 9 px divider cell, and the bar
+/// shader rounds each edge half to even. A side flush with the hairline draws
+/// 4 px at an odd divider column and 3 px at an even one. One sixteenth short,
+/// it draws the boards' 3 px at both and leaves a pixel before the hairline at
+/// an odd column, where the boards leave about half a pixel.
+const BASE_FRAME_RULE_GAP: u16 = 1;
+
 /// Where the mid divider's hairline sits in the divider column, which is the
 /// column's middle, in sixteenths of a cell from its left edge.
 const DIVIDER_RULE_X: u16 = 8;
@@ -937,10 +946,10 @@ pub(crate) enum FrameEdges {
 /// `color`.
 ///
 /// A bar runs down the half's left edge, where the status row's base half
-/// starts below, and one down its right edge, which ends at the divider's
-/// hairline. Each is the height of `inner`. A third bar runs from the left bar
-/// to the hairline along the top of `inner`'s first row. `edges` picks which of
-/// them emit.
+/// starts below, and one down its right edge, which ends a sixteenth short of
+/// the divider's hairline (see [`BASE_FRAME_RULE_GAP`]). Each is the height of
+/// `inner`. A third bar runs from the left bar's outer edge to the right bar's
+/// along the top of `inner`'s first row. `edges` picks which of them emit.
 ///
 /// The right bar sits in the divider column rather than the half's last cell,
 /// so it covers no base text.
@@ -963,12 +972,12 @@ pub(crate) fn emit_base_frame(
         return;
     };
 
-    let rule = (divider - inner.x) * 16 + DIVIDER_RULE_X;
+    let right = (divider - inner.x) * 16 + DIVIDER_RULE_X - BASE_FRAME_RULE_GAP;
     if edges == FrameEdges::Top {
         Bar {
             x: 0,
             y: 0,
-            width: rule,
+            width: right,
             height: BASE_FRAME_TOP_HEIGHT,
             color,
         }
@@ -978,7 +987,7 @@ pub(crate) fn emit_base_frame(
 
     let (width, height) = (BASE_FRAME_WIDTH, inner.height * 16);
     let mut bars = BarBatch::default();
-    for x in [0, rule - width] {
+    for x in [0, right - width] {
         bars.push(
             inner,
             Bar {
@@ -5218,11 +5227,12 @@ mod tests {
         };
 
         // The divider of a 120-wide body at column 2 sits at column 61, and its
-        // hairline sits 952 sixteenths from the body's left edge.
+        // hairline sits 952 sixteenths from the body's left edge. The frame
+        // stops a sixteenth short of it.
         let wide = Rect::new(2, 1, 120, 10);
         let left = (32, 16, 6, 160, [1, 2, 3], false);
-        let right = (32 + 952 - 6, 16, 6, 160, [1, 2, 3], false);
-        let top = (32, 16, 952, 3, [1, 2, 3], true);
+        let right = (32 + 951 - 6, 16, 6, 160, [1, 2, 3], false);
+        let top = (32, 16, 951, 3, [1, 2, 3], true);
         let narrow = Rect::new(2, 1, 80, 10);
         assert_eq!(
             [
@@ -6039,7 +6049,7 @@ mod tests {
     /// A diff view's one-cell scroll overview narrows the diff body, so at an
     /// odd width the body's divider sits one column left of the content's
     /// middle, 59 of 121. The status halves meet there, and the frame's right
-    /// side ends at its hairline.
+    /// side ends a sixteenth short of its hairline.
     #[test]
     fn the_status_halves_meet_at_the_divider_beside_the_overview() {
         use ratatui::style::Color;
@@ -6069,7 +6079,7 @@ mod tests {
             (
                 Some(1),
                 [rgb(0x2a1d20), rgb(0x121418), rgb(0x1d2a1f)],
-                vec![0, 59 * 16 + 8 - 6],
+                vec![0, 59 * 16 + 7 - 6],
             ),
         );
     }
@@ -6135,7 +6145,8 @@ mod tests {
             .set_diff_view(false);
 
         // The body spans the 120 columns and 9 rows above the status row, and
-        // the divider's hairline sits 952 sixteenths in.
+        // the divider's hairline sits 952 sixteenths in. The frame stops a
+        // sixteenth short of it.
         assert_eq!(
             (
                 bars[..2].to_vec(),
@@ -6145,8 +6156,8 @@ mod tests {
                 tinted(content_bars(&mut plain)),
             ),
             (
-                vec![(0, 0, 6, 144, tint, false), (946, 0, 6, 144, tint, false)],
-                Some((0, 0, 952, 3, tint, true)),
+                vec![(0, 0, 6, 144, tint, false), (945, 0, 6, 144, tint, false)],
+                Some((0, 0, 951, 3, tint, true)),
                 3,
                 0,
                 0,

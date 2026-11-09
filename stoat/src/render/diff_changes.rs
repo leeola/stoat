@@ -1494,7 +1494,7 @@ mod tests {
 
         // The stack spans the 120 columns and 23 rows above the status row, its
         // headers lie on rows 0 and 4, and the divider's hairline sits 952
-        // sixteenths in.
+        // sixteenths in. The frame stops a sixteenth short of it.
         assert_eq!(
             (
                 bars[..6].to_vec(),
@@ -1504,10 +1504,10 @@ mod tests {
             (
                 [
                     header_hairlines(),
-                    vec![(0, 0, 6, 368, TINT), (946, 0, 6, 368, TINT)],
+                    vec![(0, 0, 6, 368, TINT), (945, 0, 6, 368, TINT)],
                 ]
                 .concat(),
-                Some((0, 0, 952, 3, TINT)),
+                Some((0, 0, 951, 3, TINT)),
                 3,
             ),
         );
@@ -1555,7 +1555,7 @@ mod tests {
             (
                 [
                     header_hairlines(),
-                    vec![(0, 0, 6, 192, TINT), (946, 0, 6, 192, TINT)],
+                    vec![(0, 0, 6, 192, TINT), (945, 0, 6, 192, TINT)],
                 ]
                 .concat(),
                 2,

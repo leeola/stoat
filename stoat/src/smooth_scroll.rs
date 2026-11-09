@@ -2467,11 +2467,12 @@ mod tests {
         let framed = bars(&gutter.clone().framed(Some(frame)));
         let plain = bars(&gutter);
         // A 120-wide page's divider sits at column 59, and its hairline 952
-        // sixteenths from the page's left edge.
+        // sixteenths from the page's left edge. The frame stops a sixteenth
+        // short of it.
         assert_eq!(
             (&framed[..2], &framed[2..]),
             (
-                &[(0, 0, 6, 64, frame), (946, 0, 6, 64, frame)][..],
+                &[(0, 0, 6, 64, frame), (945, 0, 6, 64, frame)][..],
                 &plain[..]
             ),
         );

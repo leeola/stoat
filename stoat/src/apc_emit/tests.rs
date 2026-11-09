@@ -6558,9 +6558,11 @@ fn a_split_diff_pane_s_pages_carry_the_base_frame() {
     let divider = crate::render::review::diff_divider_x(Rect::new(0, 0, region.width, 1))
         .expect("the region splits in two");
     let side = |x: u16| (x as i16, 0, 6, region.height * 16, tint);
+    // The hairline sits 8 sixteenths into the divider column, and the right
+    // side stops a sixteenth short of it.
     assert_eq!(
         (pages > 0, frame),
-        (true, [side(0), side(divider * 16 + 8 - 6)].repeat(pages)),
+        (true, [side(0), side(divider * 16 + 7 - 6)].repeat(pages)),
         "each page carries both sides",
     );
 }
