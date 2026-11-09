@@ -139,6 +139,7 @@ fn open_commit_tour(stoat: &mut Stoat, run: WalkthroughRun, git_root: &Path) -> 
         commits,
         WalkLandingKind::Walkthrough,
         WalkSpan::Commits,
+        None,
     );
     stoat.set_status(format!("checking out {first:.7}"));
     UpdateEffect::Redraw

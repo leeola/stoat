@@ -1007,6 +1007,12 @@ pub mod scope {
     /// The chip of every parent after the first, the branches a merge brings
     /// in. A theme that leaves it unset paints them as [`VCS_COMMIT_PARENT`].
     pub const VCS_COMMIT_PARENT_MERGED: &str = "vcs.commit.parent.merged";
+    /// The background of a line the commit added, in the commits view's
+    /// preview. A theme that leaves it unset tints no row.
+    pub const VCS_COMMIT_ROW_ADDED: &str = "vcs.commit.row.added";
+    /// The background of a line the commit removed, in the commits view's
+    /// preview. A theme that leaves it unset tints no row.
+    pub const VCS_COMMIT_ROW_REMOVED: &str = "vcs.commit.row.removed";
     /// The colors the commit graph's lanes cycle through, by lane index.
     ///
     /// A lane index carries no meaning of its own, so the six only need to

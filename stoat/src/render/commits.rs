@@ -22,6 +22,7 @@ use crate::{
     },
     review::{ReviewRow, ReviewSide},
     review_session::DiffDocument,
+    theme::TypeRole,
 };
 use ratatui::{
     buffer::Buffer,
@@ -29,8 +30,11 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::StatefulWidget,
 };
-use std::{collections::BTreeMap, path::Path, sync::Arc};
-use stoat_widgets::bar::Bar;
+use std::{collections::BTreeMap, fmt::Write, path::Path, sync::Arc};
+use stoat_widgets::{
+    bar::Bar,
+    text_run::{self, TextRun, TextRunBatch},
+};
 
 pub(crate) fn render_commits(
     pane: &Pane,
@@ -170,6 +174,10 @@ const PREVIEW_HINTS: [(&str, &str); 2] = [("C-d/C-u", "scroll"), ("Enter", "revi
 
 /// The text between two of the preview's hints.
 const HINT_SEPARATOR: &str = " \u{b7} ";
+
+/// Width of a preview row's lane bar in sixteenths of a cell, the Commits
+/// board's 3 px.
+const LANE_BAR_WIDTH: u16 = 6;
 
 /// The commit list's rows within an overlay pane, or `None` when the pane is
 /// too small. Shared by the renderer, the smooth-scroll emit, and the pointer,
@@ -784,17 +792,18 @@ fn render_commit_detail_pane(
         Preview::Unbuilt => None,
     };
     if let Some(Some(document)) = &preview {
-        // Clamped here, where the diff's row count and the pane's height
+        // Clamped here, where the diff's line count and the pane's height
         // are both known. Written back so the wheel and the keys step from
         // the offset actually painted rather than past the last page.
-        state.preview_scroll = crate::render::commit_picker::clamped_preview_scroll(
-            state.preview_scroll,
-            document,
-            preview_area.height,
-        );
+        state.preview_scroll =
+            clamped_line_scroll(document, state.preview_scroll, preview_area.height);
     }
-    let current = match &preview {
-        Some(Some(document)) => file_at_row(document, state.preview_scroll),
+    let shown = match &preview {
+        Some(Some(document)) => file_at_line(document, state.preview_scroll),
+        _ => None,
+    };
+    let current = match (&preview, shown) {
+        (Some(Some(document)), Some((file, _))) => Some(document.files[file].rel_path.as_str()),
         _ => None,
     };
 
@@ -821,15 +830,20 @@ fn render_commit_detail_pane(
         return;
     }
     match preview {
-        Some(Some(document)) => render_commit_preview(
-            &document,
-            theme,
-            preview_area,
-            state.preview_scroll,
-            dials,
-            buf,
-            scene,
-        ),
+        Some(Some(document)) => {
+            if let Some((file, skip)) = shown {
+                render_file_preview(
+                    &document,
+                    file,
+                    skip,
+                    theme,
+                    preview_area,
+                    dials,
+                    buf,
+                    scene,
+                );
+            }
+        },
         Some(None) => write_str(buf, text_area.x, preview_area.y, "no changes", dim),
         None => write_str(buf, text_area.x, preview_area.y, "loading preview...", dim),
     }
@@ -1228,19 +1242,262 @@ fn render_preview_label(
     }
 }
 
-/// The path of the file that holds row `row` of `doc`'s preview, counting the
-/// rows [`preview_row_count`] counts, or `None` past the preview's last row.
-fn file_at_row(doc: &DiffDocument, row: usize) -> Option<&str> {
-    let mut end = 0;
-    doc.files.iter().find_map(|file| {
-        end += file
-            .chunks
-            .iter()
-            .filter_map(|chunk_id| doc.chunks.get(chunk_id))
-            .map(|chunk| 1 + chunk.hunk.rows.len())
-            .sum::<usize>();
-        (row < end).then_some(file.rel_path.as_str())
+/// Paint file `file` of `doc` into `area` from its line `skip` on, one line per
+/// row, as the Commits board draws its preview.
+///
+/// A row holds a lane mark at its left edge in the line's change color, the
+/// line's number, and its text. An added line's row takes
+/// `vcs.commit.row.added` and a removed line's row `vcs.commit.row.removed`.
+///
+/// A removed line's text takes `ui.text.dim` with no token colors, since the
+/// commit leaves it behind. An added line keeps its token colors at full
+/// strength, and the tint behind it marks the change. A context line recedes
+/// as the commit picker's context does, so both answer the same dials.
+#[allow(clippy::too_many_arguments)]
+fn render_file_preview(
+    doc: &DiffDocument,
+    file: usize,
+    skip: usize,
+    theme: &crate::theme::Theme,
+    area: Rect,
+    dials: PreviewDials,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    use crate::theme::scope as s;
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    // The widest number in the whole file sets the field, so the text column
+    // holds still while the preview scrolls.
+    let digits = file_lines(doc, file)
+        .map(|(_, side)| side.line_num)
+        .max()
+        .and_then(u32::checked_ilog10)
+        .map_or(1, |log| log as u16 + 1);
+    let num_x = area.x + 1;
+    let text_x = num_x + digits + 1;
+    let end_x = area.x + area.width;
+    let text_width = usize::from(end_x.saturating_sub(text_x));
+
+    let muted = theme.get(s::UI_TEXT_MUTED);
+    let removed_text = theme.get(s::UI_TEXT_DIM);
+    let added_bg = theme.get(s::VCS_COMMIT_ROW_ADDED).bg;
+    let removed_bg = theme.get(s::VCS_COMMIT_ROW_REMOVED).bg;
+    let tints = resolve_diff_tints(theme);
+    // line_num is 1-based, and the highlight index is 0-based per line. An off
+    // syntax toggle withholds the spans, as it does in the picker's preview.
+    let highlights = doc.files[file]
+        .buffer_highlights
+        .as_deref()
+        .filter(|_| dials.syntax);
+    let tokens = |side: &ReviewSide| {
+        highlights
+            .and_then(|lines| lines.get(side.line_num.saturating_sub(1) as usize))
+            .map_or(&[][..], Vec::as_slice)
+    };
+    let number_scale = theme.type_scale(TypeRole::Small);
+    let number_color = style_rgb(muted.fg).filter(|_| scene.live());
+
+    let mut numbers = TextRunBatch::default();
+    let mut num_text = String::new();
+
+    let lines = file_lines(doc, file)
+        .skip(skip)
+        .take(usize::from(area.height));
+    for (y, (kind, side)) in (area.y..).zip(lines) {
+        let row_bg = match kind {
+            LineKind::Context => None,
+            LineKind::Added => added_bg,
+            LineKind::Removed => removed_bg,
+        };
+        if let Some(bg) = row_bg {
+            for x in area.x..end_x {
+                buf[(x, y)].set_bg(bg);
+            }
+        }
+        paint_lane(kind, side, theme, Rect::new(area.x, y, 1, 1), buf, scene);
+
+        match number_color {
+            Some(color) => {
+                num_text.clear();
+                write!(num_text, "{}", side.line_num).expect("writing to a String is infallible");
+                let advance = text_run::advance_sixteenths(num_text.len(), number_scale);
+                numbers.push(
+                    Rect::new(num_x, y, 1, 1),
+                    TextRun {
+                        col: (digits * 16).saturating_sub(advance) as i16,
+                        row: 0,
+                        scale: number_scale,
+                        color,
+                        bg: None,
+                        text: &num_text,
+                        follow: 0,
+                        anchor: None,
+                    },
+                );
+            },
+            None => render_side_num(
+                buf,
+                &mut num_text,
+                num_x,
+                y,
+                side.line_num,
+                muted,
+                usize::from(digits),
+            ),
+        }
+
+        let (token_spans, fallback, soften_row) = match kind {
+            LineKind::Removed => (&[][..], removed_text, None),
+            LineKind::Added => (tokens(side), Style::default(), None),
+            LineKind::Context => (
+                tokens(side),
+                Style::default(),
+                tints.as_ref().map(|tints| tints.bg),
+            ),
+        };
+        paint_base_row(
+            buf,
+            text_x,
+            y,
+            &side.text,
+            text_width,
+            DEFAULT_TAB_SIZE,
+            token_spans,
+            fallback,
+            &[],
+            tints.as_ref(),
+            soften_row,
+            None,
+            dials.paint,
+            None,
+        );
+    }
+    numbers.flush(scene);
+}
+
+/// Mark the lane cell `cell` of a preview row that shows `side` as a line of
+/// `kind`.
+///
+/// A live scene draws a bar at the cell's left edge, and a plain terminal a
+/// left quarter block in the same color. A context line takes no mark. A moved
+/// line takes the moved color on either side, as the split diff's gutter does.
+fn paint_lane(
+    kind: LineKind,
+    side: &ReviewSide,
+    theme: &crate::theme::Theme,
+    cell: Rect,
+    buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
+) {
+    use crate::theme::scope as s;
+    let scope = match kind {
+        LineKind::Context => return,
+        _ if !side.moved_spans.is_empty() => s::DIFF_MOVED,
+        LineKind::Added => s::DIFF_ADDED,
+        LineKind::Removed => s::DIFF_DELETED,
+    };
+    let fg = theme.get(scope).fg;
+    match style_rgb(fg).filter(|_| scene.live()) {
+        Some(color) => Bar {
+            x: 0,
+            y: 0,
+            width: LANE_BAR_WIDTH,
+            height: 16,
+            color,
+        }
+        .render(cell, buf, scene),
+        None => {
+            let mark = Style {
+                fg,
+                ..Style::default()
+            };
+            buf[(cell.x, cell.y)].set_char('\u{258e}').set_style(mark);
+        },
+    }
+}
+
+/// What one row of the commits view's preview shows, which decides its lane
+/// mark, its background, and how its text paints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LineKind {
+    /// A line both sides hold, shown as its live line.
+    Context,
+    /// A base line the commit removed.
+    Removed,
+    /// A live line the commit added.
+    Added,
+}
+
+/// The lines of file `file` of `doc`, in the order the commits view's preview
+/// shows them.
+///
+/// Each hunk reads as a unified diff, so a run of changed rows shows all its
+/// base lines and then all its live lines. A side-by-side row pairs the two,
+/// and one column has room for only one line per row.
+fn file_lines(doc: &DiffDocument, file: usize) -> impl Iterator<Item = (LineKind, &ReviewSide)> {
+    doc.files[file]
+        .chunks
+        .iter()
+        .filter_map(|chunk_id| doc.chunks.get(chunk_id))
+        .flat_map(|chunk| {
+            chunk.hunk.rows.chunk_by(|a, b| {
+                matches!(a, ReviewRow::Changed { .. }) && matches!(b, ReviewRow::Changed { .. })
+            })
+        })
+        .flat_map(|run| {
+            let removed = run.iter().filter_map(|row| match row {
+                ReviewRow::Changed { left, .. } => {
+                    left.as_ref().map(|side| (LineKind::Removed, side))
+                },
+                ReviewRow::Context { .. } => None,
+            });
+            let shown = run.iter().filter_map(|row| match row {
+                ReviewRow::Context { right, .. } => Some((LineKind::Context, right)),
+                ReviewRow::Changed { right, .. } => {
+                    right.as_ref().map(|side| (LineKind::Added, side))
+                },
+            });
+            removed.chain(shown)
+        })
+}
+
+/// The file of `doc` that holds line `line` of the commits view's preview,
+/// and the line's place within that file, or `None` past the last line.
+///
+/// The preview counts every file's [`file_lines`] end to end, so its one
+/// scroll offset names both the file the files table marks and the line the
+/// preview starts on.
+fn file_at_line(doc: &DiffDocument, line: usize) -> Option<(usize, usize)> {
+    let mut start = 0;
+    (0..doc.files.len()).find_map(|file| {
+        let lines = file_lines(doc, file).count();
+        let found = (line < start + lines).then(|| (file, line - start));
+        start += lines;
+        found
     })
+}
+
+/// The repo-relative path of the file the commits view's preview of `doc`
+/// shows at scroll offset `scroll`, or `None` past its last line.
+pub(crate) fn previewed_file(doc: &DiffDocument, scroll: usize) -> Option<&str> {
+    file_at_line(doc, scroll).map(|(file, _)| doc.files[file].rel_path.as_str())
+}
+
+/// `scroll` held to the lines of `doc` that a commits view preview `height`
+/// rows tall reaches.
+///
+/// The preview shows one file at a time, so the offset stops at the later of
+/// two lines. The first line of the last file that holds any keeps a short
+/// last file reachable. The line that fills the last page stops a long one on
+/// a full page.
+fn clamped_line_scroll(doc: &DiffDocument, scroll: usize, height: u16) -> usize {
+    let mut counts = (0..doc.files.len()).map(|file| file_lines(doc, file).count());
+    let total: usize = counts.clone().sum();
+    let last = counts.rfind(|&lines| lines > 0).unwrap_or(0);
+    scroll.min((total - last).max(total.saturating_sub(usize::from(height))))
 }
 
 /// Rows [`render_commit_preview`] would paint for `session` in full, counting
@@ -1400,8 +1657,8 @@ fn paint_preview_side(
 }
 /// Render a compact preview of a [`DiffDocument`]: each chunk's rows
 /// painted sequentially with a yellow file/chunk header, top-to-bottom
-/// within `area`. Does not rely on editor machinery; used by the
-/// commits view's right pane.
+/// within `area`. Does not rely on editor machinery. The commit picker's
+/// preview paints through it.
 ///
 /// `skip_rows` drops that many rows off the top, counting the same rows
 /// [`preview_row_count`] does, so a caller scrolls the diff by holding a row
@@ -1663,11 +1920,12 @@ pub(crate) fn render_commit_preview(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_rows, commit_list_width, commits_detail_rect, commits_header_rect, file_at_row,
-        initials, legend_tips, paint_badges, paint_commit_meta, paint_file_path, preview_row_count,
-        render_commit_preview, render_preview_label, row_badges, stat_share, BadgeRow, BadgeStyles,
-        PreviewDials, RefBadge, RefKind, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT,
-        RULE_STROKE, STAT_BAR_CELLS, STAT_BAR_HEIGHT, SWATCH_HEIGHT, SWATCH_WIDTH, TEXT_INSET,
+        body_rows, clamped_line_scroll, commit_list_width, commits_detail_rect,
+        commits_header_rect, file_at_line, initials, legend_tips, paint_badges, paint_commit_meta,
+        paint_file_path, render_commit_preview, render_file_preview, render_preview_label,
+        row_badges, stat_share, BadgeRow, BadgeStyles, PreviewDials, RefBadge, RefKind,
+        LANE_BAR_WIDTH, MIN_DETAIL_COLUMNS, MIN_LIST_COLUMNS, RING_PERCENT, RULE_STROKE,
+        STAT_BAR_CELLS, STAT_BAR_HEIGHT, SWATCH_HEIGHT, SWATCH_WIDTH, TEXT_INSET,
     };
     use crate::{
         app::Stoat,
@@ -1680,7 +1938,7 @@ mod tests {
             paint::{blend, dim_rgb, luma, style_rgb},
             review::{DiffDials, CONTEXT_SOFTEN, MODIFIED_ROW_SOFTEN},
         },
-        review::ReviewFileInput,
+        review::{ReviewFileInput, ReviewHunk, ReviewRow, ReviewSide},
         review_session::DiffDocument,
         test_harness::TestHarness,
         theme::{scope, Theme},
@@ -1692,6 +1950,7 @@ mod tests {
     };
     use std::{
         collections::HashMap,
+        iter,
         path::{Path, PathBuf},
         sync::Arc,
     };
@@ -2287,27 +2546,275 @@ mod tests {
         row.trim_end().to_string()
     }
 
+    /// A document over one file per `(name, base, buffer)` triple, in order.
+    fn doc_of(files: &[(&str, &str, &str)]) -> DiffDocument {
+        let mut doc = DiffDocument::default();
+        doc.add_files(
+            files
+                .iter()
+                .map(|(name, base, buffer)| ReviewFileInput {
+                    path: PathBuf::from(format!("/w/{name}")),
+                    rel_path: (*name).into(),
+                    language: None,
+                    base_text: Arc::new(base.to_string()),
+                    buffer_text: Arc::new(buffer.to_string()),
+                })
+                .collect(),
+        );
+        doc
+    }
+
+    /// `n` lines a file adds whole, each its own text.
+    fn added_lines(n: usize) -> String {
+        (0..n).map(|i| format!("line {i}\n")).collect()
+    }
+
+    /// Each file's lines continue the count after the file before it, so one
+    /// offset names a file and the line the preview starts on within it.
     #[test]
-    fn each_preview_row_belongs_to_the_file_whose_rows_hold_it() {
-        let input = |name: &str| ReviewFileInput {
-            path: PathBuf::from(format!("/w/{name}")),
-            rel_path: name.into(),
-            language: None,
-            base_text: Arc::new("x\n".to_string()),
-            buffer_text: Arc::new("y\nz\n".to_string()),
-        };
-        let doc_of = |names: &[&str]| {
-            let mut doc = DiffDocument::default();
-            doc.add_files(names.iter().map(|name| input(name)).collect());
-            doc
-        };
-        let doc = doc_of(&["a.rs", "b.rs"]);
-        let first = preview_row_count(&doc_of(&["a.rs"]));
+    fn each_preview_line_belongs_to_the_file_that_holds_it() {
+        let doc = doc_of(&[("a.rs", "x\n", "y\nz\n"), ("b.rs", "x\n", "y\nz\n")]);
 
         assert_eq!(
-            [0, first - 1, first, preview_row_count(&doc)].map(|row| file_at_row(&doc, row)),
-            [Some("a.rs"), Some("a.rs"), Some("b.rs"), None],
+            [0, 2, 3, 5, 6].map(|line| file_at_line(&doc, line)),
+            [Some((0, 0)), Some((0, 2)), Some((1, 0)), Some((1, 2)), None],
         );
+    }
+
+    /// A short last file stays reachable from its first line, and a long one
+    /// stops on its last full page.
+    #[test]
+    fn the_preview_scroll_stops_on_the_last_file_s_top_or_its_last_page() {
+        let (three, twenty) = (added_lines(3), added_lines(20));
+        let short = doc_of(&[("a.rs", "", &three), ("b.rs", "", &three)]);
+        let long = doc_of(&[("a.rs", "", &three), ("b.rs", "", &twenty)]);
+
+        assert_eq!(
+            [
+                clamped_line_scroll(&short, 100, 10),
+                clamped_line_scroll(&long, 100, 10),
+                clamped_line_scroll(&long, 5, 10),
+            ],
+            [3, 13, 5],
+        );
+    }
+
+    /// A file's preview reads as a unified diff in one column. A changed run
+    /// shows its removed lines before its added ones, each row tinted whole,
+    /// with a lane bar and a number right-aligned in a field as wide as the
+    /// file's largest.
+    ///
+    /// A context line's token recedes, a removed line takes the dim text color,
+    /// and an added line keeps its token color.
+    #[test]
+    fn the_preview_paints_one_file_as_a_unified_diff() {
+        let base: String = (1..=12).map(|n| format!("l{n}\n")).collect();
+        let buffer = base.replace("l10\nl11\n", "m10\nm11\n");
+        let doc = session(&base, &buffer, true);
+        let theme = row_theme();
+        let rgb = |scope: &str, bg: bool| {
+            let style = theme.get(scope);
+            style_rgb(if bg { style.bg } else { style.fg }).expect("an RGB color")
+        };
+        let (removed, added) = (
+            Some(rgb(scope::VCS_COMMIT_ROW_REMOVED, true)),
+            Some(rgb(scope::VCS_COMMIT_ROW_ADDED, true)),
+        );
+        let (red, green, muted) = (
+            rgb(scope::DIFF_DELETED, false),
+            rgb(scope::DIFF_ADDED, false),
+            rgb(scope::UI_TEXT_MUTED, false),
+        );
+
+        let (buf, commands) = painted_file(&doc, &theme, true);
+        let bars: Vec<_> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) => Some((bar.x, bar.y, bar.width, bar.height, bar.color)),
+                _ => None,
+            })
+            .collect();
+        let numbers: Vec<_> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::TextRun(run) => Some((run.col, run.row, run.color, run.text.as_str())),
+                _ => None,
+            })
+            .collect();
+        let row_bg = |y: u16| [0, 19].map(|x| style_rgb(Some(buf[(x, y)].bg)));
+
+        assert_eq!(
+            (
+                (0..8).map(|y| row_text_at(&buf, y)).collect::<Vec<_>>(),
+                (0..8).map(row_bg).collect::<Vec<_>>(),
+                [0, 3, 5].map(|y| style_rgb(Some(buf[(4, y)].fg))),
+            ),
+            (
+                [
+                    "    l7", "    l8", "    l9", "    l10", "    l11", "    m10", "    m11",
+                    "    l12"
+                ]
+                .map(String::from)
+                .to_vec(),
+                [None, None, None, removed, removed, added, added, None]
+                    .map(|bg| [bg; 2])
+                    .to_vec(),
+                [
+                    Some(dim_rgb(TOKEN_FG, BG, CONTEXT_SOFTEN)),
+                    Some(rgb(scope::UI_TEXT_DIM, false)),
+                    Some(TOKEN_FG),
+                ],
+            ),
+            "rows, their tints, and the text of a context, a removed, and an added line",
+        );
+        assert_eq!(
+            bars,
+            [3, 4, 5, 6].map(|row: i16| {
+                let color = if row < 5 { red } else { green };
+                (0, row * 16, LANE_BAR_WIDTH, 16, color)
+            }),
+        );
+        assert_eq!(
+            numbers,
+            [
+                (32, 0, muted, "7"),
+                (32, 16, muted, "8"),
+                (32, 32, muted, "9"),
+                (16, 48, muted, "10"),
+                (16, 64, muted, "11"),
+                (16, 80, muted, "10"),
+                (16, 96, muted, "11"),
+                (16, 112, muted, "12"),
+            ],
+        );
+    }
+
+    /// A plain terminal marks the lane with a quarter block in the lane's color
+    /// and writes the numbers into cells.
+    #[test]
+    fn a_plain_terminal_marks_the_lane_and_numbers_in_cells() {
+        let base: String = (1..=12).map(|n| format!("l{n}\n")).collect();
+        let buffer = base.replace("l11\n", "m11\n");
+        let doc = doc_of(&[("a.rs", &base, &buffer)]);
+        let theme = row_theme();
+
+        let (buf, commands) = painted_file(&doc, &theme, false);
+        let lane_fg = |y: u16| buf[(0, y)].fg;
+
+        assert_eq!(
+            (
+                (0..6).map(|y| row_text_at(&buf, y)).collect::<Vec<_>>(),
+                [3, 4].map(lane_fg),
+                commands.len(),
+            ),
+            (
+                [
+                    "  8 l8",
+                    "  9 l9",
+                    " 10 l10",
+                    "\u{258e}11 l11",
+                    "\u{258e}11 m11",
+                    " 12 l12",
+                ]
+                .map(String::from)
+                .to_vec(),
+                [
+                    theme.get(scope::DIFF_DELETED).fg.expect("a deleted color"),
+                    theme.get(scope::DIFF_ADDED).fg.expect("an added color"),
+                ],
+                0,
+            ),
+        );
+    }
+
+    /// A line that moved takes the moved lane where it left and where it
+    /// arrived, rather than the removed or added lane.
+    #[test]
+    fn a_moved_line_takes_the_moved_lane_on_either_side() {
+        let moved = |line_num| ReviewSide {
+            text: "moved".into(),
+            line_num,
+            change_spans: Vec::new(),
+            moved_spans: iter::once(0..5).collect(),
+            move_provenance: None,
+        };
+        let mut doc = DiffDocument::default();
+        doc.add_files_with_hunks(
+            vec![ReviewFileInput {
+                path: PathBuf::from("/w/a.rs"),
+                rel_path: "a.rs".into(),
+                language: None,
+                base_text: Arc::new("moved\n".to_string()),
+                buffer_text: Arc::new("moved\n".to_string()),
+            }],
+            vec![vec![ReviewHunk {
+                rows: vec![
+                    ReviewRow::Changed {
+                        left: Some(moved(1)),
+                        right: None,
+                    },
+                    ReviewRow::Changed {
+                        left: None,
+                        right: Some(moved(9)),
+                    },
+                ],
+            }]],
+        );
+        let theme = row_theme();
+
+        let (_, commands) = painted_file(&doc, &theme, true);
+        let lanes: Vec<_> = commands
+            .iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) => Some((bar.y, bar.color)),
+                _ => None,
+            })
+            .collect();
+
+        let blue = style_rgb(theme.get(scope::DIFF_MOVED).fg).expect("an RGB moved color");
+        assert_eq!(lanes, [(0, blue), (16, blue)]);
+    }
+
+    /// A theme with RGB lane, number, and row colors for the one-file preview.
+    fn row_theme() -> Theme {
+        let src = r##"theme rows {
+            diff.added.fg    = "#00ff00";
+            diff.deleted.fg  = "#ff0000";
+            diff.moved.fg    = "#0000ff";
+            ui.text.muted.fg = "#808080";
+            ui.text.dim.fg   = "#606060";
+            ui.background.bg = "#282c34";
+            vcs.commit.row.added.bg   = "#18241b";
+            vcs.commit.row.removed.bg = "#2a1b1d";
+        }"##;
+        let (config, _) = stoat_config::parse(src);
+        Theme::from_config(&config.expect("theme config parses"), "rows").expect("row theme builds")
+    }
+
+    /// The first file of `doc` painted from its first line into a 20 by 8
+    /// area, under a live or a dead scene, with the scene's commands.
+    fn painted_file(doc: &DiffDocument, theme: &Theme, live: bool) -> (Buffer, Vec<Command>) {
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::empty(area);
+        let mut scene = stoat_widgets::ApcScene::new();
+        scene.set_live(live);
+        render_file_preview(
+            doc,
+            0,
+            0,
+            theme,
+            area,
+            PreviewDials::untinted(),
+            &mut buf,
+            &mut scene,
+        );
+        (buf, command::decode_stream(&scene.all_bytes()))
+    }
+
+    /// Row `y` of `buf` as text, its trailing blanks trimmed.
+    fn row_text_at(buf: &Buffer, y: u16) -> String {
+        let row: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+        row.trim_end().to_string()
     }
 
     /// The files table marks the file the preview stands on and the label names
@@ -2350,7 +2857,7 @@ mod tests {
         };
         let top = marks(&mut h);
         if let Some(list) = h.stoat.active_workspace_mut().focused_commits_mut() {
-            list.preview_scroll = 11;
+            list.preview_scroll = 10;
         }
         let scrolled = marks(&mut h);
 

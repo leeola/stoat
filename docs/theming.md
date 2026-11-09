@@ -324,6 +324,9 @@ The typed UI scopes, by group (syntax scopes are open-ended):
 - `vcs.commit.parent`, `vcs.commit.parent.merged` -- the chips that name a
   commit's parents in the commits view's detail header: the first parent,
   then the branches a merge brings in.
+- `vcs.commit.row.added`, `vcs.commit.row.removed` -- the backgrounds of the
+  lines a commit added and removed, in the commits view's preview. A theme
+  that leaves them unset tints no row.
 - `vcs.ref.head`, `vcs.ref.remote`, `vcs.ref.tag` -- the badges beside a
   commits list row: HEAD and its branch, a remote-tracking branch, and a tag.
   A local branch's badge takes its lane's color instead. Inside stoatty a

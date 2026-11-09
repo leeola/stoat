@@ -74,7 +74,14 @@ pub(crate) fn review(stoat: &mut Stoat, from: Option<&str>, against: Option<&str
             let resolved = resolve_review(&*repo, &from, against.as_deref());
             Box::new(move |stoat: &mut Stoat| match resolved {
                 Ok((commit, span)) => {
-                    queue_walk_start(stoat, workdir, vec![commit], WalkLandingKind::Walk, span);
+                    queue_walk_start(
+                        stoat,
+                        workdir,
+                        vec![commit],
+                        WalkLandingKind::Walk,
+                        span,
+                        None,
+                    );
                 },
                 Err((label, detail)) => {
                     review_error(stoat, label, detail);
@@ -725,6 +732,7 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
         commits,
         WalkLandingKind::Walk,
         WalkSpan::Commits,
+        None,
     );
     UpdateEffect::Redraw
 }
@@ -746,12 +754,17 @@ fn install_walk(stoat: &mut Stoat) -> UpdateEffect {
 /// A walkthrough's walk, of `kind` [`WalkLandingKind::Walkthrough`], starts
 /// only while a tour that spans commits still plays. A refusal closes that
 /// tour, since no landing comes to carry it on.
+///
+/// `open` names the file the first landing shows in place of the commit's first
+/// changed file, for a caller that knows which file the reader stands on. Every
+/// later step shows its own commit's first file.
 pub(super) fn queue_walk_start(
     stoat: &mut Stoat,
     workdir: PathBuf,
     commits: Vec<CommitInfo>,
     kind: WalkLandingKind,
     span: WalkSpan,
+    open: Option<PathBuf>,
 ) {
     let job = GitJob::new(
         "walk start",
@@ -799,7 +812,7 @@ pub(super) fn queue_walk_start(
             });
 
             let (workdir, sha, standing) = walk_position(stoat)?;
-            walk_checkout_work(stoat, kind, workdir, sha, standing)
+            walk_checkout_work(stoat, kind, workdir, sha, standing, open)
         },
     );
     git_jobs::enqueue(stoat, job);
@@ -832,7 +845,8 @@ fn walk_return_ref(stoat: &mut Stoat, workdir: &Path) -> Result<ReturnRef, Updat
     }
 }
 
-/// Start a walk over `commit` alone and land on it.
+/// Start a walk over `commit` alone and land on it, on `open` when given and on
+/// the commit's first changed file otherwise.
 ///
 /// The commits view opens a commit this way. A walk of one steps nowhere, but
 /// it carries the same checkout and the same return ref, so `:done` puts the
@@ -844,6 +858,7 @@ pub(super) fn walk_one_commit(
     stoat: &mut Stoat,
     workdir: PathBuf,
     commit: CommitInfo,
+    open: Option<PathBuf>,
 ) -> UpdateEffect {
     queue_walk_start(
         stoat,
@@ -851,6 +866,7 @@ pub(super) fn walk_one_commit(
         vec![commit],
         WalkLandingKind::Walk,
         WalkSpan::Commits,
+        open,
     );
     UpdateEffect::Redraw
 }
@@ -1331,7 +1347,7 @@ pub(super) fn queue_walk_landing(
     let job = GitJob::new(
         "walk landing",
         Some(GitJobKey::WalkLanding),
-        move |stoat: &mut Stoat| walk_checkout_work(stoat, kind, workdir, sha, standing),
+        move |stoat: &mut Stoat| walk_checkout_work(stoat, kind, workdir, sha, standing, None),
     );
     git_jobs::enqueue(stoat, job);
 }
@@ -1342,6 +1358,9 @@ pub(super) fn queue_walk_landing(
 /// The span is read here, at the job's start, so the work knows which base a
 /// range review lands against. A rebase pause has no walk and reads none.
 ///
+/// `open` is the file the landing shows in place of the one the commit or the
+/// range changed first.
+///
 /// Returns `None`, with the failure reported, when `workdir` holds no
 /// repository.
 fn walk_checkout_work(
@@ -1350,6 +1369,7 @@ fn walk_checkout_work(
     workdir: PathBuf,
     sha: String,
     standing: String,
+    open: Option<PathBuf>,
 ) -> Option<GitWork> {
     let range_base = stoat
         .active_workspace()
@@ -1365,7 +1385,7 @@ fn walk_checkout_work(
         return None;
     };
     Some(Box::new(move || {
-        let landed = walk_landing(&*repo, kind, &workdir, &sha, range_base.as_deref());
+        let landed = walk_landing(&*repo, kind, &workdir, &sha, range_base.as_deref(), open);
         Box::new(move |stoat: &mut Stoat| {
             land_walk_checkout(stoat, kind, &workdir, &standing, &sha, landed);
         }) as GitLanding
@@ -1376,13 +1396,16 @@ fn walk_checkout_work(
 ///
 /// Under a `range_base` the first path is the first tracked file the whole
 /// range changed against that base, rather than the first file the commit
-/// touched, since the review reads as one diff against the base.
+/// touched, since the review reads as one diff against the base. An `open` path
+/// is the first path under either, since its caller knows the file the reader
+/// stands on.
 fn walk_landing(
     repo: &dyn crate::host::GitRepo,
     kind: WalkLandingKind,
     workdir: &Path,
     sha: &str,
     range_base: Option<&str>,
+    open: Option<PathBuf>,
 ) -> Result<WalkLanding, WalkFailure> {
     if repo.resolve_rev("HEAD").as_deref() != Some(sha) {
         if kind.follows_walk() && repo.has_tracked_changes() {
@@ -1393,13 +1416,14 @@ fn walk_landing(
         }
     }
 
-    let first_path = match range_base {
-        Some(base) => repo
+    let first_path = match (open, range_base) {
+        (Some(path), _) => Some(path),
+        (None, Some(base)) => repo
             .changed_files_from(base)
             .into_iter()
             .find(|file| !file.untracked)
             .and_then(|file| file.path.strip_prefix(workdir).ok().map(Path::to_path_buf)),
-        None => repo.commit_first_path(sha),
+        (None, None) => repo.commit_first_path(sha),
     };
     Ok(WalkLanding {
         parent: repo.parent_sha(sha),
@@ -3290,7 +3314,7 @@ mod tests {
                 .next()
                 .expect("the tip commit")
         };
-        walk_one_commit(&mut h.stoat, PathBuf::from("/repo"), commit);
+        walk_one_commit(&mut h.stoat, PathBuf::from("/repo"), commit, None);
         assert_eq!(
             (
                 h.stoat.active_workspace().review_walk.is_none(),
@@ -3361,6 +3385,7 @@ mod tests {
             vec![tip],
             WalkLandingKind::Walk,
             span,
+            None,
         );
         h.settle();
         let landed = (

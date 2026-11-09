@@ -6,6 +6,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     buffer::BufferId,
     buffer_registry::OpenOrigin,
+    commit_list::Preview,
     diff_cache::{DiffCache, DiffCacheKey},
     diff_map::{hunk_base_lines, line_starts},
     display_map::{syntax_theme::SyntaxStyles, DisplaySnapshot},
@@ -15,6 +16,7 @@ use crate::{
     jumplist::JumpEntry,
     multi_buffer::MultiBufferSnapshot,
     pane::{FocusTarget, PaneId, View},
+    render::commits,
     review::{ReviewFileInput, ReviewHunk},
     review_apply::{
         base_line_ranges, hunk_rows, hunk_to_patch, line_restricted_rows, rows_to_unified_diff,
@@ -81,18 +83,31 @@ pub(super) fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Op
     });
 }
 
+/// Walk the commits view's selected commit, landing on the file its preview
+/// shows.
+///
+/// A preview still loading names no file, so the walk lands on the commit's
+/// first changed file, as it does for a commit with no preview at all.
 pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
-    let Some((workdir, commit)) = stoat
-        .active_workspace()
-        .focused_commits()
-        .and_then(|state| {
-            let commit = state.commits.get(state.selected)?;
-            Some((state.workdir.clone(), commit.clone()))
-        })
+    let Some((workdir, commit, open)) =
+        stoat
+            .active_workspace()
+            .focused_commits()
+            .and_then(|state| {
+                let commit = state.commits.get(state.selected)?;
+                let open = match state.preview_sessions.get(&commit.sha) {
+                    Preview::Built(document) => {
+                        commits::previewed_file(document, state.preview_scroll)
+                            .map(std::path::PathBuf::from)
+                    },
+                    Preview::Empty | Preview::Unbuilt => None,
+                };
+                Some((state.workdir.clone(), commit.clone(), open))
+            })
     else {
         return UpdateEffect::None;
     };
-    super::review_walk::walk_one_commit(stoat, workdir, commit)
+    super::review_walk::walk_one_commit(stoat, workdir, commit, open)
 }
 
 /// Land an agent's proposed edits as unsaved buffer edits over their own base.

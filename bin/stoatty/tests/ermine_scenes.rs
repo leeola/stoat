@@ -602,6 +602,9 @@ fn the_space_box_docks_as_a_card_on_the_raised_surface() {
 /// header's row, with the lane graph left of its rows. The header row stays on
 /// the base. A blank cell on the selected first row, the row under the header,
 /// fills with the select surface, and one two rows below stays on the base.
+///
+/// The selected commit adds `ast.txt`, so the preview's one row under its label
+/// is an added line, tinted whole past its text.
 #[test]
 fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
     let mut home = support::scratch_home();
@@ -632,6 +635,13 @@ fn the_commits_view_selects_its_first_row_beside_the_lane_graph() {
         cell_rect(30, 4, 1, 1),
         BASE,
         "unselected_commit_row",
+    );
+    expect_region(
+        &shot,
+        &mut home,
+        cell_rect(120, 8, 1, 1),
+        TINT_OURS,
+        "added_preview_row",
     );
 }
 

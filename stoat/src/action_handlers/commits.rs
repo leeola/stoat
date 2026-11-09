@@ -1031,6 +1031,45 @@ mod tests {
         );
     }
 
+    /// The review opens the file the preview shows rather than the commit's
+    /// first, so a reader who scrolled to a file reads that file's diff.
+    #[test]
+    fn review_opens_the_file_the_preview_shows() {
+        let mut h = Stoat::test();
+        h.resize(90, 16);
+        h.seed_linear_history(
+            "/repo",
+            &[
+                ("a1b2c3d4", "one", &[("a.rs", "1\n"), ("b.rs", "1\n")]),
+                ("b2c3d4e5", "two", &[("a.rs", "2\n"), ("b.rs", "2\n")]),
+            ],
+        );
+        h.fake_git()
+            .add_repo("/repo")
+            .branch("main", "b2c3d4e5")
+            .set_head_branch("main");
+        h.fake_fs().insert_file("/repo/a.rs", b"2\n");
+        h.fake_fs().insert_file("/repo/b.rs", b"2\n");
+        h.open_commits("/repo");
+        h.snapshot();
+        if let Some(list) = h.stoat.active_workspace_mut().focused_commits_mut() {
+            list.preview_scroll = 2;
+        }
+        h.snapshot();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CommitsOpenReview);
+        h.settle();
+
+        assert_eq!(
+            (
+                h.stoat.current_view(),
+                crate::test_harness::editor::focused_buffer_path(&h.stoat),
+            ),
+            (Some("diff"), std::path::PathBuf::from("/repo/b.rs")),
+            "line 2 is the first line of b.rs, after a.rs's removed and added lines"
+        );
+    }
+
     #[test]
     fn a_new_tab_shows_its_own_editor_beside_an_open_list() {
         let mut h = Stoat::test();

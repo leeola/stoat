@@ -85,12 +85,14 @@ pub(crate) struct CommitListState {
     /// pending task (if the user scrolled past) can be discarded on
     /// completion.
     pub requested_preview: Option<String>,
-    /// First preview row shown in the detail pane, in the rows
-    /// [`crate::render::commits::preview_row_count`] counts.
+    /// First preview line shown in the detail pane, counted over every changed
+    /// file's lines end to end as a unified diff shows them.
     ///
-    /// Clamped by the render, where the diff's row count and the pane's height
-    /// are both known. Reset to zero whenever the selection moves, because the
-    /// offset belongs to the diff under it rather than to the pane.
+    /// The file that holds the line is the file the preview shows, and the one
+    /// `Enter` opens. Clamped by the render, where the diff's line count and
+    /// the pane's height are both known. Reset to zero whenever the selection
+    /// moves, because the offset belongs to the diff under it rather than to
+    /// the pane.
     pub preview_scroll: usize,
     /// The input mode while the list's pane is focused, which the keymap's
     /// `mode == normal` guard on the commits bindings reads.

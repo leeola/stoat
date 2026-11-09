@@ -402,6 +402,8 @@ theme ermine_night inherits default_dark {
     vcs.ref.head.fg = chrome;
     vcs.commit.parent.bg        = tint_accent;
     vcs.commit.parent.merged.bg = tint_special;
+    vcs.commit.row.added.bg     = tint_ours;
+    vcs.commit.row.removed.bg   = tint_conflict;
 
     ui.panel.island  = { radius: 2, shadow: tucked, inset_x: 0 };
     ui.panel.popout  = { radius: 1, shadow: overhang };

@@ -475,7 +475,12 @@ mod tests {
                 .next()
                 .expect("the tip commit")
         };
-        super::super::review_walk::walk_one_commit(&mut h.stoat, PathBuf::from("/repo"), commit);
+        super::super::review_walk::walk_one_commit(
+            &mut h.stoat,
+            PathBuf::from("/repo"),
+            commit,
+            None,
+        );
         h.settle();
         h
     }
