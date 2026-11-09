@@ -29,7 +29,9 @@ define_action_def!(
      list spans everything committed since. `index` and `HEAD` name the \
      working tree's two bases rather than revisions. Running it again closes \
      the diff, and a revision gives way to the working tree's base. On the \
-     changes view it opens the per-file diff at the cursor's hunk.",
+     changes view the bare command opens the per-file diff at the cursor's \
+     hunk. With a revision, `index`, or `HEAD` the changes view stays and \
+     shows the changes against that base.",
     ActionPriority::Common,
     params = DIFF_PARAMS
 );
@@ -153,7 +155,8 @@ define_action!(
      text, its gutter marks what the index holds over HEAD, and the right \
      column shows only unstaged edits. Under a revision or a commit review \
      this returns the diff to the working tree, and :review-done still \
-     returns the checkout.",
+     returns the checkout. On the changes view the base changes and the \
+     changes view stays.",
     ActionPriority::Normal,
     command_name = "diff-against-index"
 );
@@ -168,7 +171,8 @@ define_action!(
      every change since the commit, a staged hunk marked in the staged color \
      and an unstaged one in the unstaged color. The base holds after the \
      diff closes, so the gutter keeps marking against HEAD until \
-     DiffAgainstIndex picks the index.",
+     DiffAgainstIndex picks the index. On the changes view the base changes \
+     and the changes view stays.",
     ActionPriority::Normal,
     command_name = "diff-against-head"
 );
@@ -180,7 +184,8 @@ define_action!(
     ActionKind::GitDiff,
     "diff the working tree against the index",
     "Open the diff view against the index, as DiffAgainstIndex does, from the \
-     git command group. The right column shows only unstaged edits.",
+     git command group. The right column shows only unstaged edits. On the \
+     changes view the base changes and the changes view stays.",
     ActionPriority::Common,
     aliases = &["git df"],
     command_name = "git diff"
@@ -195,7 +200,8 @@ define_action!(
     "Open the diff view against HEAD, as DiffAgainstHead does, from the git \
      command group. The right column is the live buffer, so a staged hunk \
      shows in the staged color beside the unstaged ones. No view shows the \
-     index alone.",
+     index alone. On the changes view the base changes and the changes view \
+     stays.",
     ActionPriority::Common,
     aliases = &["git dc"],
     command_name = "git diff-cached"

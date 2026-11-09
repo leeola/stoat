@@ -172,6 +172,9 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 /// a revision land somewhere worth reading: with a base further back, the file
 /// the reader wants is rarely the one on screen.
 ///
+/// On a changes view a revision, `index`, or `HEAD` changes the base and the
+/// changes view stays. The bare command there opens the per-file diff.
+///
 /// The focused file's pair gives way to the revision, and a pair over any other
 /// file holds.
 ///
@@ -219,7 +222,7 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
     // Turned on rather than toggled. Naming a revision asks to look at it, so a
     // second `:diff-files <rev>` re-targets the view rather than closing it;
     // only the bare command closes.
-    reopen_diff_view(stoat);
+    show_installed_base(stoat);
     UpdateEffect::Redraw
 }
 
@@ -232,6 +235,8 @@ pub(super) fn diff(stoat: &mut Stoat, rev: Option<&str>) -> UpdateEffect {
 ///
 /// The base already installed with the view open costs nothing, not even a
 /// re-diff. With the view closed, the view opens over that base.
+///
+/// On a changes view the base changes and the changes view stays.
 pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffect {
     let paired = drop_focused_pair(stoat);
     let ws = stoat.active_workspace();
@@ -240,7 +245,9 @@ pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffec
             (ws.diff_base(), base),
             (None, WorktreeBase::Index) | (Some(DiffBase::Head), WorktreeBase::Head)
         );
-    let view_on = super::focused_editor_mut(stoat).is_some_and(|editor| editor.diff_view);
+    let changes = ws.focused_diff_changes_id().is_some();
+    let view_on =
+        changes || super::focused_editor_mut(stoat).is_some_and(|editor| editor.diff_view);
     if same && view_on && !paired {
         return UpdateEffect::Redraw;
     }
@@ -249,7 +256,7 @@ pub(super) fn diff_against(stoat: &mut Stoat, base: WorktreeBase) -> UpdateEffec
         stoat.active_workspace_mut().set_worktree_base(base);
     }
     // Turned on rather than toggled, as a named revision is.
-    reopen_diff_view(stoat);
+    show_installed_base(stoat);
     UpdateEffect::Redraw
 }
 
@@ -408,6 +415,18 @@ pub(super) fn diff_pair(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn reopen_diff_view(stoat: &mut Stoat) {
     exit_diff_view(stoat);
     toggle_diff_view(stoat);
+}
+
+/// Show the diff over a base the caller installed, in the layout the reader
+/// has.
+///
+/// A changes view stays, since its stack follows the base. Any other view
+/// opens the per-file diff, as [`reopen_diff_view`] opens it.
+fn show_installed_base(stoat: &mut Stoat) {
+    if stoat.active_workspace().focused_diff_changes_id().is_some() {
+        return;
+    }
+    reopen_diff_view(stoat);
 }
 
 /// Arm the focused pane's diff latch, and show the diff where the reader stands
@@ -2553,6 +2572,81 @@ mod tests {
             ),
             (true, true),
             "the index base with the view still open",
+        );
+    }
+
+    /// Each base pick on the changes view changes the base and leaves the
+    /// changes view in place, so the stack follows the base.
+    #[test]
+    fn a_base_pick_on_the_changes_view_keeps_the_changes_view() {
+        let mut h = half_staged_harness();
+        run(&mut h, &stoat_action::DiffChanges);
+
+        let picks: [&dyn Action; 5] = [
+            &stoat_action::DiffAgainstIndex,
+            &stoat_action::DiffAgainstHead,
+            &stoat_action::DiffBaseToggle,
+            &stoat_action::DiffFiles {
+                rev: Some("HEAD".into()),
+            },
+            &stoat_action::DiffFiles {
+                rev: Some("index".into()),
+            },
+        ];
+        let seen: Vec<_> = picks
+            .into_iter()
+            .map(|action| {
+                run(&mut h, action);
+                let base = h.stoat.active_workspace().worktree_base();
+                (h.stoat.current_view(), base)
+            })
+            .collect();
+        let (index, head) = (WorktreeBase::Index, WorktreeBase::Head);
+        assert_eq!(
+            seen,
+            [index, head, index, head, index].map(|base| (Some("diff_changes"), base)),
+        );
+    }
+
+    /// A revision on the changes view points the stack at the revision, so the
+    /// stack lists what changed since it. `a.rs` changed against HEAD, so the
+    /// stack holds a file before the revision too.
+    #[test]
+    fn a_revision_on_the_changes_view_lists_the_changes_since_it() {
+        let (mut h, workdir) = diff_rev_harness();
+        h.fake_git()
+            .add_repo(&workdir)
+            .with_fs(h.fake_fs())
+            .modified("a.rs", "a\n", "A\n")
+            .commit("base0", &[("a.rs", "a\n"), ("b.rs", "fn b() {}\n")]);
+        h.open_file(&workdir.join("b.rs"));
+        run(&mut h, &stoat_action::DiffChanges);
+
+        run(
+            &mut h,
+            &stoat_action::DiffFiles {
+                rev: Some("base0".to_string()),
+            },
+        );
+        let listed: Vec<String> = h
+            .stoat
+            .active_workspace()
+            .focused_diff_changes()
+            .map(|state| {
+                state
+                    .excerpts
+                    .iter()
+                    .map(|excerpt| excerpt.rel_path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            (h.stoat.current_view(), diff_state(&h).0, listed),
+            (
+                Some("diff_changes"),
+                Some("base0".to_string()),
+                vec!["a.rs".to_string(), "b.rs".to_string()]
+            ),
         );
     }
 
