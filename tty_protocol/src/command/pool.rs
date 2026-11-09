@@ -880,6 +880,7 @@ mod tests {
                 height: 16,
                 color: [1, 2, 3],
                 occludes: false,
+                hatch: None,
             }))
         });
 

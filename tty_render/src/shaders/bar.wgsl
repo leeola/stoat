@@ -14,7 +14,9 @@ struct Globals {
     // Cell fractions every origin is shifted down by, so a gliding pool moves
     // its bars without rebuilding them. Zero for the live grid.
     shift_rows: f32,
-    pad0: u32,
+    // The display scale, which turns the hatch's logical pixel pitch into
+    // framebuffer pixels.
+    scale_factor: f32,
     // Cell the grid's own (0, 0) is drawn at, which vs_main adds before the
     // pixel conversion. A pool composite is positioned within its region, so
     // this is what puts it on the screen. Zero for the live grid.
@@ -38,10 +40,16 @@ var<uniform> globals: Globals;
 @group(0) @binding(1)
 var<storage, read> occluders: array<Occluder>;
 
+// The hatch's line pitch in logical pixels, measured along x plus y, which a
+// panel's hatch shares so the stripes run on from one to the other.
+const HATCH_PITCH: f32 = 7.0;
+
 struct VsOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat) color: vec3<f32>,
     @location(1) @interpolate(flat) seq: u32,
+    // The hatch color, and 1.0 to stripe the fill with it.
+    @location(2) @interpolate(flat) hatch: vec4<f32>,
 }
 
 @vertex
@@ -51,6 +59,7 @@ fn vs_main(
     @location(1) size: vec2<f32>,
     @location(2) color: vec3<f32>,
     @location(3) seq: u32,
+    @location(4) hatch: vec4<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -103,7 +112,21 @@ fn vs_main(
     out.clip = vec4<f32>(ndc, 0.0, 1.0);
     out.color = color;
     out.seq = seq;
+    out.hatch = hatch;
     return out;
+}
+
+/// The bar's color at the fragment.
+///
+/// A hatched bar takes the hatch color on its lines, one logical pixel wide and
+/// HATCH_PITCH apart along x plus y, which run at 135 degrees. The lines are
+/// placed by the framebuffer pixel less the pool's glide, so they run on
+/// unbroken across neighboring bars and travel with a gliding pool's content.
+fn bar_color(in: VsOut) -> vec3<f32> {
+    let shifted = in.clip.y - globals.shift_rows * globals.cell_size.y;
+    let diagonal = (in.clip.x + shifted) / globals.scale_factor;
+    let on_line = diagonal - HATCH_PITCH * floor(diagonal / HATCH_PITCH) < 1.0;
+    return select(in.color, in.hatch.rgb, in.hatch.w > 0.5 && on_line);
 }
 
 @fragment
@@ -130,5 +153,5 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(in.color, 1.0);
+    return vec4<f32>(bar_color(in), 1.0);
 }

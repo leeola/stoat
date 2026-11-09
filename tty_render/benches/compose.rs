@@ -183,6 +183,7 @@ fn add_chrome(grid: &mut Grid) {
             color: Rgb::new(220, 50, 47),
             seq: 0,
             occludes: false,
+            hatch: None,
         },
         Bar {
             x: 30,
@@ -192,6 +193,7 @@ fn add_chrome(grid: &mut Grid) {
             color: Rgb::new(88, 88, 88),
             seq: 0,
             occludes: false,
+            hatch: None,
         },
     ]);
 }

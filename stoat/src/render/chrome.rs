@@ -1301,6 +1301,7 @@ mod tests {
                 height: 1,
                 color: [1, 2, 3],
                 occludes: false,
+                hatch: None,
             })
         );
     }
@@ -1334,6 +1335,7 @@ mod tests {
                     height: 1,
                     color: [1, 2, 3],
                     occludes: false,
+                    hatch: None,
                 })
                 .as_slice()
             ),
@@ -1408,6 +1410,7 @@ mod tests {
                 height: 48,
                 color: [1, 2, 3],
                 occludes: false,
+                hatch: None,
             })
         );
     }

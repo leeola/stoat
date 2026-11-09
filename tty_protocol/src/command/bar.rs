@@ -1,4 +1,5 @@
-//! The bar command fills a thin rectangle off the cell grid in a solid color.
+//! The bar command fills a thin rectangle off the cell grid in a solid color,
+//! or striped with a hatch.
 //!
 //! A non-cell component packs several of them into a fraction of a cell, so a
 //! gutter draws its status and git marks without spending a column on each.
@@ -7,6 +8,14 @@ use crate::frame;
 
 /// The bit of a bar's flags byte that makes it occlude as a panel's body does.
 const OCCLUDES: u8 = 1;
+
+/// The bit of a bar's flags byte that stripes it with the hatch color the
+/// argument ends in.
+const HATCHED: u8 = 2;
+
+/// Bytes a `bar` argument takes, which hold the rect, the color, the flags
+/// byte, and the hatch color.
+const BAR_ARG: usize = 15;
 
 /// Fill a thin rectangle off the cell grid in a solid color.
 ///
@@ -33,12 +42,21 @@ pub struct BarCommand {
     /// [`BarsCommand`] carries no flag, so an occluding bar goes out on its own
     /// frame.
     pub occludes: bool,
+    /// The color of a hatch over [`Self::color`], or `None` for a solid bar.
+    ///
+    /// The hatch is a 1 logical pixel line every 7 at 135 degrees, placed as a
+    /// panel's hatch is, so the stripes run on unbroken across neighboring bars
+    /// and panels. A hatched bar is a surface for other marks: it draws before
+    /// every plain bar, so the plain bars and the text runs over its rect show
+    /// whatever order they were declared in. [`BarsCommand`] carries no hatch.
+    pub hatch: Option<[u8; 3]>,
 }
 
 /// Encode a [`BarCommand`] as a full `Gstoatty;bar` frame for an emitter.
 ///
-/// The position, size, color, and a flags byte ride in a single fixed 12-byte
-/// argument.
+/// The position, size, color, a flags byte, and the hatch color ride in a
+/// single fixed 15-byte argument. A bar with no hatch writes the hatch color as
+/// zeros.
 pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
     let mut out = Vec::new();
     encode_bar_into(&mut out, command);
@@ -54,13 +72,16 @@ pub fn encode_bar_into(out: &mut Vec<u8>, command: &BarCommand) {
         w.write_all(&command.width.to_be_bytes())?;
         w.write_all(&command.height.to_be_bytes())?;
         w.write_all(&command.color)?;
-        w.write_all(&[if command.occludes { OCCLUDES } else { 0 }])
+        let occludes = if command.occludes { OCCLUDES } else { 0 };
+        let hatched = if command.hatch.is_some() { HATCHED } else { 0 };
+        w.write_all(&[occludes | hatched])?;
+        w.write_all(&command.hatch.unwrap_or([0, 0, 0]))
     });
     frame::end(out);
 }
 
 pub(super) fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
-    let arg: &[u8; 12] = args.first()?.get(..12)?.try_into().ok()?;
+    let arg: &[u8; BAR_ARG] = args.first()?.get(..BAR_ARG)?.try_into().ok()?;
 
     Some(BarCommand {
         x: i16::from_be_bytes([arg[0], arg[1]]),
@@ -69,6 +90,7 @@ pub(super) fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
         height: u16::from_be_bytes([arg[6], arg[7]]),
         color: [arg[8], arg[9], arg[10]],
         occludes: arg[11] & OCCLUDES != 0,
+        hatch: (arg[11] & HATCHED != 0).then_some([arg[12], arg[13], arg[14]]),
     })
 }
 
@@ -159,7 +181,8 @@ mod tests {
     use super::*;
     use crate::command::{decode, decode_stream, Command};
 
-    /// A bar comes back whole, a plain one and an occluding one alike.
+    /// A bar comes back whole, a plain one, an occluding one, and a hatched one
+    /// alike.
     #[test]
     fn bar_round_trips() {
         let plain = BarCommand {
@@ -169,20 +192,29 @@ mod tests {
             height: 16,
             color: [220, 50, 47],
             occludes: false,
+            hatch: None,
         };
         let occluding = BarCommand {
             occludes: true,
             ..plain
         };
+        let hatched = BarCommand {
+            hatch: Some([27, 29, 34]),
+            ..plain
+        };
 
         assert_eq!(
-            [plain, occluding].map(|command| decode(&encode_bar(&command))),
-            [Some(Command::Bar(plain)), Some(Command::Bar(occluding))],
+            [plain, occluding, hatched].map(|command| decode(&encode_bar(&command))),
+            [
+                Some(Command::Bar(plain)),
+                Some(Command::Bar(occluding)),
+                Some(Command::Bar(hatched)),
+            ],
         );
     }
 
-    /// A bar's argument is a fixed 12 bytes, so the 11 bytes of a bar with no
-    /// flags byte decode to nothing.
+    /// A bar's argument is a fixed 15 bytes, so the 14 bytes of a bar cut short
+    /// of its hatch color decode to nothing.
     #[test]
     fn rejects_wrong_length_bar_payload() {
         let mut arg = frame::decode(&encode_bar(&BarCommand {
@@ -192,6 +224,7 @@ mod tests {
             height: 4,
             color: [5, 6, 7],
             occludes: false,
+            hatch: None,
         }))
         .expect("one frame")
         .args

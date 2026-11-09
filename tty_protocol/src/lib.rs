@@ -166,9 +166,15 @@
 /// terminal that predates it ignores the byte and draws a plain bar. This
 /// version drops a shorter argument.
 ///
+/// Version 25 reads a fixed 15-byte `bar` argument, which ends in a hatch
+/// color after the flags byte. Bit 1 of the flags stripes the bar with that
+/// color as a panel's hatch stripes a fill, and a hatched bar draws before
+/// every plain bar. A terminal that predates it ignores the color and draws the
+/// bar solid. This version drops a shorter argument.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

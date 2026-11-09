@@ -2112,6 +2112,10 @@ pub struct Bar {
     /// [`BarCommand::occludes`](stoatty_protocol::command::BarCommand::occludes)
     /// declares it.
     pub occludes: bool,
+    /// The color of the hatch over [`Self::color`], or `None` for a solid bar,
+    /// as [`BarCommand::hatch`](stoatty_protocol::command::BarCommand::hatch)
+    /// declares it.
+    pub hatch: Option<Rgb>,
 }
 
 /// A stroked path drawn off the cell grid in a solid color.
@@ -2558,6 +2562,7 @@ mod tests {
             height: 16,
             color: [255, 0, 0],
             occludes: false,
+            hatch: None,
         }
     }
 
@@ -3125,6 +3130,7 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             seq: 0,
             occludes: false,
+            hatch: None,
         };
         grid.set_bars(vec![bar]);
 
@@ -3466,6 +3472,7 @@ mod region_blit_tests {
             color: Rgb::new(1, 2, 3),
             seq: 0,
             occludes: false,
+            hatch: None,
         }]);
         grid.set_polylines(vec![Polyline {
             points: vec![[0, 0], [16, 16]],

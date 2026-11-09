@@ -513,6 +513,7 @@ mod tests {
             height: 16,
             color: [4, 5, 6],
             occludes: false,
+            hatch: None,
         });
         let first = encode_text_run(&TextRunCommand {
             col: 0,
@@ -531,6 +532,7 @@ mod tests {
             height: 16,
             color: [10, 11, 12],
             occludes: false,
+            hatch: None,
         });
         let second = encode_text_run(&TextRunCommand {
             col: 20,
@@ -591,6 +593,7 @@ mod tests {
             height: 16,
             color: [4, 5, 6],
             occludes: false,
+            hatch: None,
         });
         let run = encode_text_run(&TextRunCommand {
             col: 300,
@@ -646,6 +649,7 @@ mod tests {
             height: 1,
             color: [60, 66, 77],
             occludes: false,
+            hatch: None,
         });
         let run = encode_text_run(&TextRunCommand {
             col: 108,
@@ -772,6 +776,7 @@ mod tests {
             height: 16,
             color: [10, 11, 12],
             occludes: false,
+            hatch: None,
         });
         let overruns = encode_text_run(&TextRunCommand {
             col: 20,
@@ -790,6 +795,7 @@ mod tests {
             height: 16,
             color: [10, 11, 12],
             occludes: false,
+            hatch: None,
         });
         assert!(
             contains(scene.buffer(), &fits),
@@ -860,6 +866,7 @@ mod tests {
             height: 16,
             color: [4, 4, 4],
             occludes: false,
+            hatch: None,
         });
         assert!(
             !contains(scene.buffer(), &dropped_run),
@@ -896,6 +903,7 @@ mod tests {
             height: 1,
             color: [60, 66, 77],
             occludes: false,
+            hatch: None,
         });
         assert!(
             contains(scene.buffer(), &separator),
@@ -938,6 +946,7 @@ mod tests {
             height: 1,
             color: [60, 66, 77],
             occludes: false,
+            hatch: None,
         });
         // advance(" NOR ") = 5 * 160 / 16 = 50; right start = 320 - 50 = 270.
         let left_bar = encode_bar(&BarCommand {
@@ -947,6 +956,7 @@ mod tests {
             height: 16,
             color: [4, 5, 6],
             occludes: false,
+            hatch: None,
         });
         let right_bar = encode_bar(&BarCommand {
             x: 270,
@@ -955,6 +965,7 @@ mod tests {
             height: 16,
             color: [10, 11, 12],
             occludes: false,
+            hatch: None,
         });
 
         let frames = scene.buffer();
@@ -1012,6 +1023,7 @@ mod tests {
             height: 16,
             color: bar_bg,
             occludes: false,
+            hatch: None,
         });
         let base_run = encode_text_run(&TextRunCommand {
             col: 0,
@@ -1030,6 +1042,7 @@ mod tests {
             height: 1,
             color: [60, 66, 77],
             occludes: false,
+            hatch: None,
         });
         let distinct_bar = encode_bar(&BarCommand {
             x: 300,
@@ -1038,6 +1051,7 @@ mod tests {
             height: 16,
             color: [10, 11, 12],
             occludes: false,
+            hatch: None,
         });
 
         let frames = scene.buffer();
@@ -1103,6 +1117,7 @@ mod tests {
                 height: 1,
                 color: [60, 66, 77],
                 occludes: false,
+                hatch: None,
             })
         };
         let panel = |width: u16| {
@@ -1210,6 +1225,7 @@ mod tests {
                 height,
                 color,
                 occludes: false,
+                hatch: None,
             })
         };
         // "a" advances 10 sixteenths at scale 160, so the box starts on cell 1.
@@ -1331,6 +1347,7 @@ mod tests {
             height: 1,
             color: [60, 66, 77],
             occludes: false,
+            hatch: None,
         });
         let runs: Vec<Range<usize>> = boxes
             .iter()

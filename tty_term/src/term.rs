@@ -1909,6 +1909,7 @@ impl Terminal {
                         height,
                         color: batch.color,
                         occludes: false,
+                        hatch: None,
                     }));
                 }
             },

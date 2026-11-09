@@ -2309,6 +2309,7 @@ mod tests {
                 height: 16,
                 color,
                 occludes: false,
+                hatch: None,
             });
             decorations
                 .windows(command.len())

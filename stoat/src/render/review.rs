@@ -4695,6 +4695,7 @@ mod tests {
                     height: 16,
                     color,
                     occludes: false,
+                    hatch: None,
                 });
                 bytes
                     .windows(frame.len())
@@ -4816,6 +4817,7 @@ mod tests {
             height: 2,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
             occludes: false,
+            hatch: None,
         };
         assert!(
             holds_bar(&bytes, tick),
@@ -4840,6 +4842,7 @@ mod tests {
             height: 6,
             color: style_rgb(rgb_diff_theme().get(s::DIFF_DELETED).fg).expect("an rgb color"),
             occludes: false,
+            hatch: None,
         };
         assert!(
             holds_bar(&bytes, git_bar),
@@ -5041,6 +5044,7 @@ mod tests {
                 height: rows * 16,
                 color: dim,
                 occludes: false,
+                hatch: None,
             });
             assert!(
                 contains(scene.buffer(), &frame),
@@ -5064,6 +5068,7 @@ mod tests {
                             height: 16,
                             color,
                             occludes: false,
+                            hatch: None,
                         }),
                     )
                 })

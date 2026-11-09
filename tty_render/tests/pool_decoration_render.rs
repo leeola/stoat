@@ -73,6 +73,7 @@ fn pool_decorations_composite_and_glide_with_the_shift() {
         color: bar_color,
         seq: 0,
         occludes: false,
+        hatch: None,
     }]);
     pool.set_text_runs(vec![TextRun {
         col: 0,

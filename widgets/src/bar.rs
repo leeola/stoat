@@ -33,10 +33,22 @@ impl Bar {
     /// See also:
     /// - [`BarCommand::occludes`] for how the terminal layers it.
     pub fn render_occluding(self, area: Rect, scene: &mut ApcScene) {
-        self.encode(area, true, scene);
+        self.encode(area, true, None, scene);
     }
 
-    fn encode(self, area: Rect, occludes: bool, scene: &mut ApcScene) {
+    /// Write the bar into `scene`, placed in `area`, as a surface striped with
+    /// `hatch` over its color.
+    ///
+    /// A hatched bar draws before every plain bar, so the marks over its rect
+    /// show whatever order they were written in.
+    ///
+    /// See also:
+    /// - [`BarCommand::hatch`] for the stripes and the layering.
+    pub fn render_hatched(self, hatch: [u8; 3], area: Rect, scene: &mut ApcScene) {
+        self.encode(area, false, Some(hatch), scene);
+    }
+
+    fn encode(self, area: Rect, occludes: bool, hatch: Option<[u8; 3]>, scene: &mut ApcScene) {
         let x = cells::to_sixteenths(area.x, self.x);
         let y = cells::to_sixteenths(area.y, self.y);
 
@@ -49,6 +61,7 @@ impl Bar {
                 height: self.height,
                 color: self.color,
                 occludes,
+                hatch,
             },
         );
     }
@@ -58,7 +71,7 @@ impl StatefulWidget for Bar {
     type State = ApcScene;
 
     fn render(self, area: Rect, _buf: &mut Buffer, scene: &mut ApcScene) {
-        self.encode(area, false, scene);
+        self.encode(area, false, None, scene);
     }
 }
 
@@ -120,6 +133,7 @@ impl BarBatch {
                         height,
                         color: group.color,
                         occludes: false,
+                        hatch: None,
                     },
                 );
             }
@@ -134,10 +148,10 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
     use stoatty_protocol::command::{decode_stream, encode_bar, BarCommand, BarsCommand, Command};
 
-    /// A bar sits at absolute sixteenths, and an occluding render writes the
-    /// same bar with its flag set.
+    /// A bar sits at absolute sixteenths. An occluding render writes the same
+    /// bar with its flag set, and a hatched render with its hatch color.
     #[test]
-    fn emits_a_bar_at_absolute_sixteenths_plain_or_occluding() {
+    fn emits_a_bar_at_absolute_sixteenths_plain_occluding_or_hatched() {
         let bar = || Bar {
             x: 3,
             y: 0,
@@ -154,8 +168,10 @@ mod tests {
         );
         let mut occluding = ApcScene::new();
         bar().render_occluding(area, &mut occluding);
+        let mut hatched = ApcScene::new();
+        bar().render_hatched([40, 50, 60], area, &mut hatched);
 
-        let expected = |occludes| {
+        let expected = |occludes, hatch| {
             encode_bar(&BarCommand {
                 x: 2 * 16 + 3,
                 y: 4 * 16,
@@ -163,11 +179,20 @@ mod tests {
                 height: 16,
                 color: [10, 20, 30],
                 occludes,
+                hatch,
             })
         };
         assert_eq!(
-            [plain.buffer().clone(), occluding.buffer().clone()],
-            [expected(false), expected(true)],
+            [
+                plain.buffer().clone(),
+                occluding.buffer().clone(),
+                hatched.buffer().clone(),
+            ],
+            [
+                expected(false, None),
+                expected(true, None),
+                expected(false, Some([40, 50, 60])),
+            ],
         );
     }
 
@@ -192,6 +217,7 @@ mod tests {
             height: 16,
             color: [10, 20, 30],
             occludes: false,
+            hatch: None,
         });
         assert_eq!(
             scene.buffer().as_slice(),
@@ -231,6 +257,7 @@ mod tests {
                 height: 16,
                 color,
                 occludes: false,
+                hatch: None,
             })
         };
 

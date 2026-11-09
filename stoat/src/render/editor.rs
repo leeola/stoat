@@ -5348,6 +5348,7 @@ mod tests {
                 height: 16,
                 color,
                 occludes: false,
+                hatch: None,
             });
             frame.contains(String::from_utf8_lossy(&command).as_ref())
         };

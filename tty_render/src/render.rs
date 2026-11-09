@@ -1779,6 +1779,7 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             seq,
             occludes,
+            hatch: None,
         };
         let bars = [bar(4, true), bar(5, false)];
         let panels = [panel(1, true), panel(2, false)];

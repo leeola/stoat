@@ -207,6 +207,7 @@ mod tests {
                 height: 16,
                 color: [0x7f, 0xb0, 0xff],
                 occludes: false,
+                hatch: None,
             })],
         );
     }

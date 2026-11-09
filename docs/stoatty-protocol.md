@@ -134,7 +134,7 @@ session control. "Head" is the fixed prefix of the first argument.
 | `icon` | D | 9 B, 13 B with offset | Renderer-drawn status sigil |
 | `text_run` | D | 12 B legacy, 13 B with bg flag, 26 B with follow and anchor | + streamed text, closed by `text_run_end` |
 | `text_run_end` | D | -- | Commits the capture |
-| `bar` | D | 12 B | Thin rect in sixteenths of a cell, flags byte (bit 0 occludes as a panel body) |
+| `bar` | D | 15 B | Thin rect in sixteenths of a cell, flags byte (bit 0 occludes as a panel body, bit 1 hatches), hatch rgb |
 | `polyline` | D | 5 B + 4 B per point | Max 12283 points |
 | `sketch_ellipse` | D | 35 B, 43 B with anchor | Hand-drawn ellipse the terminal generates, optionally hatched |
 | `sketch_rect` | D | 36 B, 44 B with anchor | Hand-drawn box, optionally filled |

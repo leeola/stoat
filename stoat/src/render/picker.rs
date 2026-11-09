@@ -942,6 +942,7 @@ mod tests {
                     height: 4,
                     color,
                     occludes: false,
+                    hatch: None,
                 })
             })
             .collect()

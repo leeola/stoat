@@ -1,11 +1,11 @@
 //! Instanced color-bar pass.
 //!
-//! Fills each [`Bar`] as a solid sub-cell rectangle off the cell grid, above the
-//! grid with its own z-order. Bars are not cell attributes: like the overlays
-//! and icons they float over the grid, so a gutter can pack thin status bars and
-//! a hairline separator into a fraction of a cell. The rectangle rides in
-//! cell-fraction units and the vertex shader scales it by the cell size of the
-//! grid it sits on, so bars track font zoom.
+//! Fills each [`Bar`] as a sub-cell rectangle off the cell grid, solid or
+//! striped with its hatch, above the grid with its own z-order. Bars are not
+//! cell attributes. Like the overlays and icons, they float over the grid, so a
+//! gutter packs thin status bars and a hairline separator into a fraction of a
+//! cell. The rectangle rides in cell-fraction units and the vertex shader
+//! scales it by the cell size of the grid it sits on, so bars track font zoom.
 
 use crate::render::{
     globals_offset, rgb_f32, CellMetrics, CompositeSlot, CompositeSlots, Occluder, OccluderBuffer,
@@ -31,8 +31,9 @@ const INITIAL_CAPACITY: usize = 16;
 const SIXTEENTHS: f32 = 16.0;
 
 /// The per-bar instance data. Carries the top-left and the size in
-/// cell-fraction units, the fill color, and the declaration-order seq the
-/// fragment shader occludes by.
+/// cell-fraction units, the fill color, the declaration-order seq the fragment
+/// shader occludes by, and the hatch color with 1.0 in its last lane when the
+/// bar is hatched.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct BarInstance {
@@ -40,6 +41,7 @@ struct BarInstance {
     size: [f32; 2],
     color: [f32; 3],
     seq: u32,
+    hatch: [f32; 4],
 }
 
 /// The uniform shared by every instance. Carries the surface resolution and
@@ -61,7 +63,9 @@ struct Globals {
     /// reuse the instances it built when its content last changed. A glide moves
     /// every bar by the same amount, so nothing per-instance has to change.
     shift_rows: f32,
-    _pad0: u32,
+    /// The display scale, which turns the hatch's logical pixel pitch into
+    /// framebuffer pixels.
+    scale_factor: f32,
     /// Cell the grid's own (0, 0) is drawn at, which the vertex stage adds to
     /// each origin.
     ///
@@ -192,6 +196,7 @@ impl BarPass {
                         1 => Float32x2,
                         2 => Float32x3,
                         3 => Uint32,
+                        4 => Float32x4,
                     ],
                 })],
             },
@@ -293,7 +298,7 @@ impl BarPass {
             occlude_all: 0,
             // The live grid does not glide, so its bars sit where they are given.
             shift_rows: 0.0,
-            _pad0: 0,
+            scale_factor: self.metrics.scale_factor,
             origin_cells: [0.0; 2],
             occluder_cell: [self.metrics.width, self.metrics.height],
             bottom_row_y: anchor.bottom_row_y,
@@ -402,7 +407,7 @@ impl BarPass {
             panel_count,
             occlude_all,
             shift_rows,
-            _pad0: 0,
+            scale_factor: self.metrics.scale_factor,
             origin_cells,
             occluder_cell: [self.metrics.width, self.metrics.height],
             bottom_row_y: RowAnchor::UNIFORM.bottom_row_y,
@@ -537,7 +542,10 @@ fn make_bind_group(
 /// here outlive every frame that only moves the pool.
 fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
     out.clear();
-    out.extend(bars.iter().map(|bar| BarInstance {
+    // A hatched bar is a surface for the marks over it, so the hatched bars
+    // build ahead of the plain ones and draw under them whatever order the
+    // terminal received them in.
+    let instance = |bar: &Bar| BarInstance {
         origin: [f32::from(bar.x) / SIXTEENTHS, f32::from(bar.y) / SIXTEENTHS],
         size: [
             f32::from(bar.width) / SIXTEENTHS,
@@ -545,7 +553,13 @@ fn build_bar_instances_into(bars: &[Bar], out: &mut Vec<BarInstance>) {
         ],
         color: rgb_f32(bar.color),
         seq: bar.seq,
-    }));
+        hatch: bar.hatch.map_or([0.0; 4], |hatch| {
+            let [r, g, b] = rgb_f32(hatch);
+            [r, g, b, 1.0]
+        }),
+    };
+    out.extend(bars.iter().filter(|bar| bar.hatch.is_some()).map(instance));
+    out.extend(bars.iter().filter(|bar| bar.hatch.is_none()).map(instance));
 }
 
 #[cfg(test)]
@@ -662,6 +676,7 @@ mod tests {
                 color: Rgb::new(255, 0, 0),
                 seq: 0,
                 occludes: false,
+                hatch: None,
             };
             let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
             bars.prepare(
@@ -736,6 +751,7 @@ mod tests {
             color: red,
             seq: 0,
             occludes: false,
+            hatch: None,
         };
         let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
         bars.prepare_composite(
@@ -785,6 +801,90 @@ mod tests {
             .expect("validate bar");
     }
 
+    /// A hatched bar is a surface for the bars over it, so it builds ahead of
+    /// every plain bar whatever order the bars arrived in, and the plain ones
+    /// keep their own order.
+    #[test]
+    fn hatched_bars_build_before_plain_ones() {
+        let bar = |seq: u32, hatch: Option<Rgb>| Bar {
+            x: 0,
+            y: 0,
+            width: 16,
+            height: 16,
+            color: Rgb::new(255, 0, 0),
+            seq,
+            occludes: false,
+            hatch,
+        };
+        let instances = build_bar_instances(&[
+            bar(0, None),
+            bar(1, Some(Rgb::new(0, 255, 0))),
+            bar(2, None),
+        ]);
+
+        assert_eq!(
+            instances
+                .iter()
+                .map(|instance| (instance.seq, instance.hatch))
+                .collect::<Vec<_>>(),
+            [(1, [0.0, 1.0, 0.0, 1.0]), (0, [0.0; 4]), (2, [0.0; 4])],
+        );
+    }
+
+    /// A hatched bar takes its hatch color on every pixel whose center lies on
+    /// a line of the 7 pixel pitch, here at scale 1, and its fill elsewhere.
+    /// A pixel center sits half a pixel in on each axis, so the lines take the
+    /// pixels whose column and row add to one short of a multiple of 7.
+    #[test]
+    fn a_hatched_bar_stripes_its_fill_at_135_degrees() {
+        let (device, queue) = require_headless_device();
+        let metrics = CellMetrics {
+            font_size: 16.0,
+            width: 16.0,
+            height: 16.0,
+            scale_factor: 1.0,
+        };
+        let bar = Bar {
+            x: 0,
+            y: 0,
+            width: 64,
+            height: 64,
+            color: Rgb::new(255, 0, 0),
+            seq: 0,
+            occludes: false,
+            hatch: Some(Rgb::new(0, 255, 0)),
+        };
+        let mut bars = BarPass::new(&device, TextureFormat::Rgba8Unorm, metrics);
+        bars.prepare(
+            &device,
+            &queue,
+            &[bar],
+            &[],
+            [TARGET as f32, TARGET as f32],
+            RowAnchor::UNIFORM,
+        );
+        let rgba = render_rgba(&device, &queue, |pass| bars.draw(pass));
+
+        let row = 3;
+        let painted: String = (0..TARGET)
+            .map(|col| {
+                let texel = ((row * TARGET + col) * 4) as usize;
+                match (rgba[texel], rgba[texel + 1]) {
+                    (255, 0) => 'f',
+                    (0, 255) => 'h',
+                    _ => '?',
+                }
+            })
+            .collect();
+        let expected: String = (0..TARGET)
+            .map(|col| match (col + row + 1) % 7 {
+                0 => 'h',
+                _ => 'f',
+            })
+            .collect();
+        assert_eq!(painted, expected, "row 3, fill f and hatch h");
+    }
+
     #[test]
     fn a_reused_bar_scratch_holds_only_this_frame_s_bars() {
         let bars = [Bar {
@@ -795,6 +895,7 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             seq: 7,
             occludes: false,
+            hatch: None,
         }];
 
         let mut scratch = build_bar_instances(&bars);
@@ -823,6 +924,7 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             seq: 7,
             occludes: false,
+            hatch: None,
         }];
         let first = build_bar_instances(&bars);
         assert!(
@@ -851,6 +953,7 @@ mod tests {
             color: Rgb::new(220, 50, 47),
             seq: 7,
             occludes: false,
+            hatch: None,
         }];
 
         let instances = build_bar_instances(&bars);
@@ -875,6 +978,7 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             seq: 0,
             occludes: false,
+            hatch: None,
         }];
 
         let instances = build_bar_instances(&bars);
@@ -915,6 +1019,7 @@ mod tests {
             color: Rgb::new(1, 2, 3),
             seq: 0,
             occludes: false,
+            hatch: None,
         };
 
         pass.prepare_composite(
