@@ -3673,6 +3673,130 @@ fn space_l_f_formats_document() {
     assert_eq!(h.buffer_text_at(&path), "fn foo() {}\n");
 }
 
+/// `main.rs` seeded with `text` and open, on a server that formats when
+/// `format` holds.
+fn comment_buffer(text: &str, format: bool) -> (TestHarness, PathBuf) {
+    let mut h = TestHarness::with_size(80, 24);
+    if format {
+        enable_format(&h);
+    }
+    let root = seed(&mut h, &[("main.rs", text)]);
+    let path = root.join("main.rs");
+    open_buffer(&mut h, path.clone());
+    (h, path)
+}
+
+/// Run `ReflowComment` with the cursor where `keys` walk it.
+fn run_reflow(h: &mut TestHarness, keys: &str) {
+    h.type_keys(keys);
+    crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReflowComment);
+    h.settle();
+}
+
+/// The text of `main.rs` after a reflow at `keys`, on a formatter that
+/// answers no edits.
+fn reflowed(text: &str, keys: &str) -> String {
+    let (mut h, path) = comment_buffer(text, true);
+    run_reflow(&mut h, keys);
+    h.buffer_text_at(&path)
+}
+
+/// Each paragraph and list item of the block under the cursor joins onto one
+/// line. The lines markdown keeps apart stay, and so does a block of another
+/// comment token.
+#[test]
+fn reflow_joins_paragraphs_and_keeps_formatted_lines() {
+    for (text, keys, want) in [
+        ("// foo bar\n// bang boom\n", "", "// foo bar bang boom\n"),
+        ("// foo bar\n// bang boom\n", "j", "// foo bar bang boom\n"),
+        (
+            "//   - foo bar\n//   bang boom\n",
+            "",
+            "//   - foo bar bang boom\n",
+        ),
+        ("// a\n// b\n//\n// c\n// d\n", "", "// a b\n//\n// c d\n"),
+        ("// - a\n//   b\n// - c\n", "", "// - a b\n// - c\n"),
+        (
+            "// | a | b |\n// |---|---|\n// | 1 | 2 |\n",
+            "",
+            "// | a | b |\n// |---|---|\n// | 1 | 2 |\n",
+        ),
+        (
+            "// x\n// ```\n// let a = 1;\n// let b = 2;\n// ```\n// y\n// z\n",
+            "",
+            "// x\n// ```\n// let a = 1;\n// let b = 2;\n// ```\n// y z\n",
+        ),
+        (
+            "// x\n//\n//     code a\n//     code b\n",
+            "",
+            "// x\n//\n//     code a\n//     code b\n",
+        ),
+        (
+            "// # Head\n// body one\n// body two\n",
+            "",
+            "// # Head\n// body one body two\n",
+        ),
+        ("/// a\n/// b\n// c\n// d\n", "", "/// a b\n// c\n// d\n"),
+        (
+            "/// a\n/// b\n// c\n// d\n",
+            "j j",
+            "/// a\n/// b\n// c d\n",
+        ),
+        (
+            "    // a\n    // b\nfn f() {}\n",
+            "",
+            "    // a b\nfn f() {}\n",
+        ),
+        ("let x = 1; // a\n// b\n", "", "let x = 1; // a\n// b\n"),
+    ] {
+        assert_eq!(reflowed(text, keys), want, "{text:?} at {keys:?}");
+    }
+}
+
+/// The join goes to the formatter, whose edits then wrap the comment.
+#[test]
+fn reflow_formats_the_joined_text() {
+    let (mut h, path) = comment_buffer("// foo bar\n// bang boom\n", true);
+    h.fake_lsp().set_formatting(
+        path.to_str().unwrap(),
+        vec![format_text_edit(0, 0, 1, 0, "// foo bar bang\n// boom\n")],
+    );
+
+    run_reflow(&mut h, "");
+    assert_eq!(
+        (
+            h.buffer_text_at(&path),
+            h.fake_lsp().observed_formatting().len()
+        ),
+        ("// foo bar bang\n// boom\n".to_string(), 1),
+    );
+}
+
+/// With no formatter the comment stays as it is, and the status row says why.
+#[test]
+fn reflow_without_a_formatter_leaves_the_comment() {
+    let text = "// foo bar\n// bang boom\n";
+    let (mut h, path) = comment_buffer(text, false);
+
+    run_reflow(&mut h, "");
+    assert_eq!(
+        (h.buffer_text_at(&path), h.stoat.pending_message.as_deref()),
+        (
+            text.to_string(),
+            Some("lsp: server does not support format")
+        ),
+    );
+}
+
+/// A comment with nothing to join sends no format request.
+#[test]
+fn reflow_of_a_compact_comment_sends_no_format() {
+    let (mut h, _) = comment_buffer("// a\n", true);
+
+    run_reflow(&mut h, "");
+    assert_eq!(h.fake_lsp().observed_formatting().len(), 0);
+}
+
 fn enable_inlay_hints(h: &TestHarness) {
     use lsp_types::{OneOf, ServerCapabilities};
     h.fake_lsp().set_capabilities(ServerCapabilities {

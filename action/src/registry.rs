@@ -91,7 +91,7 @@ use crate::{
             CodeAction, Format, FormatSelections, GotoDeclaration, GotoDefinition,
             GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition, Hover,
             OpenDiagnosticsPicker, OpenSymbolPicker, OpenWorkspaceDiagnosticsPicker,
-            OpenWorkspaceSymbolPicker, RenameSymbol,
+            OpenWorkspaceSymbolPicker, ReflowComment, RenameSymbol,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -421,6 +421,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(FormatSelections::DEF, |_| Ok(Box::new(FormatSelections)));
     add(Format::DEF, |_| Ok(Box::new(Format)));
+    add(ReflowComment::DEF, |_| Ok(Box::new(ReflowComment)));
     add(ReviewNextCommit::DEF, |_| Ok(Box::new(ReviewNextCommit)));
     add(ReviewPrevCommit::DEF, |_| Ok(Box::new(ReviewPrevCommit)));
     add(ReviewDone::DEF, |_| Ok(Box::new(ReviewDone)));
@@ -1392,6 +1393,7 @@ mod tests {
         "OpenWorkspaceSymbolPicker",
         "FormatSelections",
         "Format",
+        "ReflowComment",
         "SetMark",
         "GotoMark",
         "GotoMarkExact",
@@ -2037,6 +2039,7 @@ mod tests {
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 1 Format.
+        // + 1 ReflowComment.
         // + 3 marks (SetMark, GotoMark, GotoMarkExact).
         // + 1 SurroundAdd.
         // + 2 SurroundReplace, SurroundDelete.
@@ -2164,7 +2167,7 @@ mod tests {
         // + 3 the git status panel actions.
         // + 7 the git status panel's row and banner keys.
         // + 1 GitStatusSkip.
-        assert_eq!(all().count(), 490);
+        assert_eq!(all().count(), 491);
     }
 
     #[test]

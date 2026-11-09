@@ -404,6 +404,7 @@ action_kinds! {
     OpenWorkspaceSymbolPicker,
     FormatSelections,
     Format,
+    ReflowComment,
     GitReview,
     Review,
     GitLs,

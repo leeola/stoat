@@ -1,6 +1,7 @@
 mod agent;
 mod amend;
 pub(crate) mod code_search;
+mod comment_reflow;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
@@ -1182,6 +1183,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenWorkspaceSymbolPicker => lsp::open_workspace_symbol_picker(stoat),
         ActionKind::FormatSelections => lsp::format_selections(stoat),
         ActionKind::Format => lsp::format_document(stoat),
+        ActionKind::ReflowComment => comment_reflow::reflow_comment(stoat),
         ActionKind::OpenReviewAgentEdits => {
             let a = action
                 .as_any()

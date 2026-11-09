@@ -207,3 +207,20 @@ define_action!(
      capability or returns no edits.",
     ActionPriority::Common
 );
+
+define_action!(
+    ReflowCommentDef,
+    ReflowComment,
+    "ReflowComment",
+    ActionKind::ReflowComment,
+    "reflow comment under cursor",
+    "Join each paragraph and list item of the line comment block under \
+     the cursor onto one line, then issue an LSP `textDocument/formatting` \
+     request, so the formatter wraps the comment again. Blank comment \
+     lines, tables, code fences, indented code, headings, rule lines, and \
+     link definitions stay as they are. No-op with a status message when \
+     no server advertises formatting. No-op when the cursor row is not a \
+     line comment or nothing joins.",
+    ActionPriority::Common,
+    command_name = "reflow-comment"
+);

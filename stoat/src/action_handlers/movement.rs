@@ -1443,7 +1443,7 @@ fn join_selections_impl(stoat: &mut Stoat, select_space: bool) -> UpdateEffect {
 
 /// Offset just past the content of buffer `row`, before its line ending (the
 /// rope end for the last line).
-fn line_content_end(rope: &Rope, row: u32) -> usize {
+pub(super) fn line_content_end(rope: &Rope, row: u32) -> usize {
     rope.point_to_offset(Point::new(row, rope.line_len(row)))
 }
 
