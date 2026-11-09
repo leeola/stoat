@@ -8,6 +8,7 @@
 //! the center pixel of every pool cell it names.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, PoolComposite, Renderer},
     render::cell_size,
@@ -156,10 +157,10 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         corner_radius: 0,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

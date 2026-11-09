@@ -653,7 +653,7 @@ fn apc_scene_emits_nothing_for_a_plain_editor_frame() {
 
 #[test]
 fn status_bar_emits_sub_cell_components_inside_stoatty() {
-    use stoatty_protocol::command::{BorderStyle, Command, PanelCommand, PanelShadow};
+    use stoatty_protocol::command::{BorderStyle, Command, Edge, PanelCommand, PanelShadow};
 
     let mut h = Stoat::test();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -689,10 +689,10 @@ fn status_bar_emits_sub_cell_components_inside_stoatty() {
         corner_radius: 1,
         fill: Some([127, 176, 255]),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 1,
+        edges: Edge::symmetric(0, 1),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -1660,7 +1660,7 @@ fn an_open_dock_clears_to_the_surface_over_a_chrome_ground() {
 #[test]
 fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
     use stoatty_protocol::{
-        command::{BorderStyle, Command, PanelCommand, PanelShadow},
+        command::{BorderStyle, Command, Edge, PanelCommand, PanelShadow},
         BACKDROP_PANEL_PROTOCOL,
     };
 
@@ -1727,10 +1727,10 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
         corner_radius: 2,
         fill: None,
         shadow: PanelShadow::Tucked,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: true,
@@ -1907,7 +1907,7 @@ fn read_only_paint(h: &mut crate::test_harness::TestHarness) -> (Vec<command::Co
 fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<command::Command> {
     use crate::theme::{PanelRole, TypeRole};
     use stoatty_protocol::command::{
-        BorderStyle, Command, PanelCommand, PanelShadow, TextRunCommand,
+        BorderStyle, Command, Edge, PanelCommand, PanelShadow, TextRunCommand,
     };
 
     let ring = Rect {
@@ -1927,10 +1927,10 @@ fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<c
             corner_radius: theme.panel(PanelRole::Island).corner_radius,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: true,
@@ -1946,10 +1946,10 @@ fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<c
             corner_radius: 0,
             fill: Some(READ_ONLY_BASE),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -4068,10 +4068,10 @@ fn a_panel_over_a_stack_pool_leaves_the_mask() {
             corner_radius: 6,
             fill: None,
             shadow: command::PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: command::Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

@@ -7,6 +7,7 @@
 //! border drawn beneath it.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     render::cell_size,
     test_support::{
@@ -131,10 +132,10 @@ fn a_panel_frame_draws_over_the_glyphs_it_surrounds() {
         corner_radius: 0,
         fill: Some(Rgb::new(0, 0, 60)),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -279,10 +280,10 @@ fn the_style_with_no_line_paints_nothing() {
             corner_radius: 6,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

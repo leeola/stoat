@@ -278,9 +278,12 @@ impl PanelRole {
 
 /// The frame a theme gives one [`PanelRole`].
 ///
-/// Each field means what the same-named field of a
-/// [`PanelCommand`](stoatty_protocol::command::PanelCommand) means. The radius
-/// and the inset are logical pixels, so they keep their size under font zoom.
+/// Each field but `inset_x` means what the same-named field of a
+/// [`PanelCommand`](stoatty_protocol::command::PanelCommand) means. `inset_x`
+/// stands the box inside its cells on each side, as
+/// [`Edge::symmetric`](stoatty_protocol::command::Edge::symmetric) states it
+/// for a role's panel. The radius and the inset are logical pixels, so they
+/// keep their size under font zoom.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PanelSpec {
     pub corner_radius: u8,

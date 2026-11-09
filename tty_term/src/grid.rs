@@ -19,7 +19,7 @@ use std::{
     },
 };
 use stoatty_protocol::command::{
-    BarCommand, IconCommand, PolylineCommand, SketchCommand, TextRunCommand,
+    BarCommand, Edge, IconCommand, PolylineCommand, SketchCommand, TextRunCommand,
 };
 
 pub(crate) mod from_command;
@@ -1834,13 +1834,10 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<Rgb>,
     pub shadow: PanelShadow,
-    /// Logical pixels shaved off each horizontal edge, so the box draws narrower
-    /// than its cell rect. Carried from the panel command and applied by the
-    /// renderer to the frame, fill, corners, and shadow.
-    pub inset_x: u8,
-    /// Logical pixels shaved off the top and bottom edges, as [`Self::inset_x`]
-    /// shaves the sides. Carried from the panel command.
-    pub inset_y: u8,
+    /// Where each side of the box stands against the cells, top, right, bottom,
+    /// and left. Carried from the panel command, and resolved by the renderer
+    /// against its cell size for the frame, fill, corners, and shadow.
+    pub edges: [Edge; 4],
     /// The corners the radius rounds, one bit each from top-left clockwise to
     /// bottom-left, with zero rounding all four. Carried from the panel command.
     pub corners: u8,
@@ -1848,6 +1845,9 @@ pub struct Panel {
     /// color, bit 0 bottom-left and bit 1 bottom-right. Carried from the panel
     /// command.
     pub fillets: u8,
+    /// The radius of each fillet in logical pixels. Carried from the panel
+    /// command.
+    pub fillet_radius: u8,
     /// The color of the hatch over the fill, or `None` for a plain fill. Carried
     /// from the panel command.
     pub hatch: Option<Rgb>,

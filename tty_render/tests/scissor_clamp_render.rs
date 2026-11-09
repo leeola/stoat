@@ -12,6 +12,7 @@
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
 use futures::executor;
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     gpu::Renderer,
     render::{cell_size, HostRide},
@@ -162,10 +163,10 @@ fn an_oversized_riding_scissor_is_clamped_not_validated() {
         corner_radius: 6,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

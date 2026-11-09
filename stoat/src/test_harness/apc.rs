@@ -256,7 +256,7 @@ mod tests {
     use super::composite_scene;
     use crate::{action_handlers::dispatch, Stoat};
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
-    use stoatty_protocol::command::{BorderStyle, Command, PanelCommand, PanelShadow};
+    use stoatty_protocol::command::{BorderStyle, Command, Edge, PanelCommand, PanelShadow};
 
     /// The compositor replays every component over the finished main pass, so
     /// without the occlusion rule an earlier frame's border lands on cells the
@@ -275,10 +275,10 @@ mod tests {
                 corner_radius: 0,
                 fill: None,
                 shadow: PanelShadow::None_,
-                inset_x: 0,
-                inset_y: 0,
+                edges: Edge::symmetric(0, 0),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -318,10 +318,10 @@ mod tests {
                 corner_radius: 1,
                 fill: Some([4, 5, 6]),
                 shadow: PanelShadow::None_,
-                inset_x: 0,
-                inset_y: 1,
+                edges: Edge::symmetric(0, 1),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,

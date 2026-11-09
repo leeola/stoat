@@ -718,6 +718,7 @@ mod tests {
         test_support::{read_back, require_headless_device},
     };
     use std::collections::HashMap;
+    use stoatty_protocol::command::Edge;
     use stoatty_term::grid::{
         BorderStyle, Grid, LineSummary, Minimap, MinimapRun, MinimapStrip, MinimapView, Panel,
         PanelShadow, Rgb, Rgba,
@@ -1507,10 +1508,10 @@ mod tests {
             corner_radius: 8,
             fill: None,
             shadow: PanelShadow::Drop,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

@@ -97,8 +97,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
                 o.size,
                 globals.cell_size,
                 o.corner_radius,
-                o.inset_x,
-                o.inset_y,
+                o.edge_px,
+                o.edge_modes,
                 o.corners
             );
             if sdf < -0.5 {

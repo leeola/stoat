@@ -36,7 +36,7 @@ use stoat_widgets::{
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
-use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Rows the header takes above the grid's rows.
 pub(super) const HEADER_ROWS: u16 = 1;
@@ -974,10 +974,10 @@ fn draw_chip(
             corner_radius: 1,
             fill: Some(tone.tint),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: true,

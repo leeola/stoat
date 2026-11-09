@@ -706,7 +706,8 @@ mod tests {
     use ratatui::style::Color;
     use std::path::PathBuf;
     use stoatty_protocol::command::{
-        decode_stream, encode_bar, BarCommand, BorderStyle, Command, PanelCommand, PanelShadow,
+        decode_stream, encode_bar, BarCommand, BorderStyle, Command, Edge, PanelCommand,
+        PanelShadow,
     };
 
     /// The header a finder-like modal paints, its chip at the row's end.
@@ -756,10 +757,10 @@ mod tests {
                     corner_radius: 1,
                     fill: Some([4, 5, 6]),
                     shadow: PanelShadow::None_,
-                    inset_x: 0,
-                    inset_y: 1,
+                    edges: Edge::symmetric(0, 1),
                     corners: 0,
                     fillets: 0,
+                    fillet_radius: 2,
                     hatch: None,
                     above_pools: false,
                     backdrop: false,

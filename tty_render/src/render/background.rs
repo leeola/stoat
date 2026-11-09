@@ -1033,6 +1033,7 @@ mod tests {
         test_support::{read_back, require_headless_device},
     };
     use std::ops::Range;
+    use stoatty_protocol::command::Edge;
     use stoatty_term::{
         grid::{BorderStyle, Flags, Grid, Panel, PanelShadow, Rgb},
         term::Damage,
@@ -1677,10 +1678,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

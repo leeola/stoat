@@ -9,6 +9,7 @@ use super::{
 };
 use crate::frame;
 use memchr::memmem;
+use std::array;
 
 /// The bit of a panel's flags byte that floats it above every pooled surface.
 const ABOVE_POOLS: u8 = 1;
@@ -34,7 +35,72 @@ pub const FILLET_BOTTOM_LEFT: u8 = 1;
 pub const FILLET_BOTTOM_RIGHT: u8 = 2;
 
 /// The length of a panel frame's fixed head, which the optional anchor follows.
-const HEAD_LEN: usize = 27;
+const HEAD_LEN: usize = 31;
+
+/// Where one side of a panel's box stands against the panel's cells.
+///
+/// A design states its spacing in pixels, but only the terminal knows how many
+/// pixels a cell holds. So an emitter states each edge in logical pixels with a
+/// mode, and the terminal resolves the edge against the cell beside it. This
+/// lets a box reach across a chrome column or a gap cell and stand a fixed
+/// distance from its neighbor at any font size.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Edge {
+    /// The box edge stands this many logical pixels inside the cell edge.
+    Inset(u8),
+    /// The box crosses the adjacent cell and stops this many logical pixels
+    /// short of that cell's far side.
+    Margin(u8),
+    /// The box crosses into the adjacent cell by half of what [`Edge::Margin`]
+    /// reaches.
+    ///
+    /// A top or left edge rounds its half down, and a bottom or right edge
+    /// rounds its half up. So two neighbors that both state `Gap(px)` leave `px`
+    /// between them in a cell of any size. A 9 pixel column splits as 3 and 2,
+    /// and an 18 pixel row splits as 7 and 7.
+    Gap(u8),
+}
+
+impl Edge {
+    /// The edges of a box that stands `x` logical pixels inside its cells on
+    /// each side and `y` inside them at the top and the bottom, in
+    /// [`PanelCommand::edges`] order.
+    pub fn symmetric(x: u8, y: u8) -> [Edge; 4] {
+        [
+            Edge::Inset(y),
+            Edge::Inset(x),
+            Edge::Inset(y),
+            Edge::Inset(x),
+        ]
+    }
+
+    /// The logical pixels the edge states, whatever its mode.
+    pub fn px(self) -> u8 {
+        match self {
+            Edge::Inset(px) | Edge::Margin(px) | Edge::Gap(px) => px,
+        }
+    }
+
+    fn mode(self) -> u8 {
+        match self {
+            Edge::Inset(_) => 0,
+            Edge::Margin(_) => 1,
+            Edge::Gap(_) => 2,
+        }
+    }
+}
+
+/// The modes of `edges` packed in one byte, two bits per edge from the low pair
+/// in [`PanelCommand::edges`] order: 0 inset, 1 margin, and 2 gap.
+///
+/// The wire carries this byte, and a renderer that resolves the edges on the
+/// GPU unpacks the same word.
+pub fn edge_modes(edges: [Edge; 4]) -> u8 {
+    edges
+        .iter()
+        .enumerate()
+        .fold(0, |modes, (side, edge)| modes | edge.mode() << (2 * side))
+}
 
 /// How a panel's shadow is drawn.
 ///
@@ -68,11 +134,12 @@ pub enum PanelShadow {
 /// `fill` is [`Some`] to paint the interior that color, or [`None`] to leave the
 /// cells' own SGR backgrounds showing through.
 ///
-/// [`Self::inset_x`] and [`Self::inset_y`] shrink the box inside its cells, and
-/// [`Self::corners`] picks the corners the radius rounds. [`Self::fillets`] join
-/// the bottom corners to the surface below, and [`Self::hatch`] stripes the
-/// fill. Together they draw a chip shorter than its row, a tab rounded at the
-/// top alone, and a hatched row.
+/// [`Self::edges`] place the box inside its cells or across the cells beside
+/// them, and [`Self::corners`] picks the corners the radius rounds.
+/// [`Self::fillets`] join the bottom corners to the surface below, and
+/// [`Self::hatch`] stripes the fill. Together they draw a chip shorter than its
+/// row, a tab rounded at the top alone, a pane's island that reaches into the
+/// gap beside it, and a hatched row.
 // `Eq` is absent because [`Self::anchor`] carries a fractional row offset and
 // `f32` is only `PartialEq`.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -86,14 +153,15 @@ pub struct PanelCommand {
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
     pub shadow: PanelShadow,
-    /// Logical pixels shaved off each horizontal edge, so the box draws narrower
-    /// than its cell rect. `0` is cell-exact. The border, fill, corner rounding,
-    /// and shadow all follow the inset rect, leaving the strip outside it showing
-    /// the cells behind.
-    pub inset_x: u8,
-    /// Logical pixels shaved off the top and bottom edges, as [`Self::inset_x`]
-    /// shaves the sides, so a chip draws shorter than the row it sits in.
-    pub inset_y: u8,
+    /// Where each side of the box stands against the cells, in the order top,
+    /// right, bottom, and left.
+    ///
+    /// `Edge::symmetric(0, 0)` is cell-exact. An inset draws the box inside its
+    /// cells, as a chip shorter than its row does, and a margin or a gap reaches
+    /// across the cell beside them. The border, fill, corner rounding, and
+    /// shadow all follow the resolved box. A strip between the box and the cell
+    /// edge shows what lies behind it.
+    pub edges: [Edge; 4],
     /// The corners [`Self::corner_radius`] rounds, one bit each, from
     /// [`CORNER_TOP_LEFT`] to [`CORNER_BOTTOM_LEFT`]. Zero rounds all four, so a
     /// panel that names no corner keeps every corner round. A tab sets the top
@@ -102,10 +170,12 @@ pub struct PanelCommand {
     /// The bottom corners joined to the surface below by a fillet,
     /// [`FILLET_BOTTOM_LEFT`] and [`FILLET_BOTTOM_RIGHT`].
     ///
-    /// A fillet is a 2 logical pixel concave curve in the fill color just
-    /// outside the corner, so a tab or a docked box flows into the surface it
-    /// stands on. A panel with no fill draws none.
+    /// A fillet is a concave curve in the fill color just outside the corner,
+    /// so a tab or a docked box flows into the surface it stands on. A panel
+    /// with no fill draws none.
     pub fillets: u8,
+    /// The radius of each fillet in logical pixels.
+    pub fillet_radius: u8,
     /// The color of a hatch over the fill, or `None` for a plain fill.
     ///
     /// The hatch is a 1 logical pixel line every 7 at 135 degrees, placed by the
@@ -124,6 +194,10 @@ pub struct PanelCommand {
     /// out of that list to keep its pane's glide visible. A terminal before
     /// [`BACKDROP_PANEL_PROTOCOL`](crate::BACKDROP_PANEL_PROTOCOL) reads the
     /// flag as `above_pools`.
+    ///
+    /// A backdrop paints its fill only outside its own cells, where its edges
+    /// reach across the cells beside them. Inside, the cells keep every tint
+    /// they draw, because a fill over them hides those tints.
     pub backdrop: bool,
     /// The host pool this panel rides and the document top row its layout
     /// assumed, or `None` for a panel fixed to the screen.
@@ -157,9 +231,10 @@ pub fn encode_panel_into(out: &mut Vec<u8>, command: &PanelCommand) {
         w.write_all(&[command.fill.is_some() as u8])?;
         w.write_all(&command.fill.unwrap_or([0, 0, 0]))?;
         w.write_all(&[shadow_code(command.shadow)])?;
-        w.write_all(&[command.inset_x])?;
+        w.write_all(&[edge_modes(command.edges)])?;
         w.write_all(&[flags(command)])?;
-        w.write_all(&[command.inset_y, command.corners, command.fillets])?;
+        w.write_all(&command.edges.map(Edge::px))?;
+        w.write_all(&[command.corners, command.fillets, command.fillet_radius])?;
         w.write_all(&[u8::from(command.hatch.is_some())])?;
         w.write_all(&command.hatch.unwrap_or([0, 0, 0]))?;
         // The anchor trails the fixed head, and a screen-fixed panel leaves it
@@ -208,15 +283,15 @@ pub(super) fn decode_panel(args: &[Vec<u8>]) -> Option<PanelCommand> {
         corner_radius: arg[12],
         fill: (arg[13] != 0).then_some([arg[14], arg[15], arg[16]]),
         shadow: decode_shadow(arg[17]),
-        inset_x: arg[18],
+        edges: decode_edges(arg[18], [arg[20], arg[21], arg[22], arg[23]]),
         // A bit this decoder does not know reads as above pools, the layer every
         // nonzero byte meant before the flags had more than one bit.
         above_pools: arg[19] & !BACKDROP != 0,
         backdrop: arg[19] & BACKDROP != 0,
-        inset_y: arg[20],
-        corners: arg[21],
-        fillets: arg[22],
-        hatch: (arg[23] != 0).then_some([arg[24], arg[25], arg[26]]),
+        corners: arg[24],
+        fillets: arg[25],
+        fillet_radius: arg[26],
+        hatch: (arg[27] != 0).then_some([arg[28], arg[29], arg[30]]),
         anchor: arg.get(HEAD_LEN..HEAD_LEN + 8).map(|tail| {
             (
                 u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]),
@@ -255,6 +330,18 @@ fn decode_shadow(code: u8) -> PanelShadow {
     }
 }
 
+/// The edges that an [`edge_modes`] byte and four px bytes state.
+///
+/// An unknown mode reads as an inset, so the box of a newer emitter's added mode
+/// stays inside its cells on an older reader.
+fn decode_edges(modes: u8, px: [u8; 4]) -> [Edge; 4] {
+    array::from_fn(|side| match (modes >> (2 * side)) & 0b11 {
+        1 => Edge::Margin(px[side]),
+        2 => Edge::Gap(px[side]),
+        _ => Edge::Inset(px[side]),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,10 +359,10 @@ mod tests {
             corner_radius: 6,
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -300,10 +387,10 @@ mod tests {
             corner_radius: 6,
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: true,
             backdrop: false,
@@ -329,10 +416,10 @@ mod tests {
             corner_radius: 2,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -359,10 +446,10 @@ mod tests {
             corner_radius: 2,
             fill: None,
             shadow: PanelShadow::Tucked,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: true,
@@ -387,10 +474,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -415,10 +502,10 @@ mod tests {
             corner_radius: 0,
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Tucked,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -443,10 +530,10 @@ mod tests {
             corner_radius: 0,
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Overhang,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -471,10 +558,10 @@ mod tests {
             corner_radius: 2,
             fill: Some([4, 5, 6]),
             shadow: PanelShadow::Halo,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: true,
             backdrop: false,
@@ -512,10 +599,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -533,7 +620,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_panel_payload() {
-        // The single arg here decodes to 3 bytes, not the 27 a panel head needs.
+        // The single arg here decodes to 3 bytes, not the 31 a panel head needs.
         assert!(decode(b"Gstoatty;panel;YWJj").is_none());
     }
 
@@ -552,10 +639,10 @@ mod tests {
             corner_radius: 2,
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 1,
+            edges: Edge::symmetric(0, 1),
             corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
             fillets: FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT,
+            fillet_radius: 2,
             hatch: Some([7, 8, 9]),
             above_pools: false,
             backdrop: false,
@@ -565,6 +652,63 @@ mod tests {
         assert_eq!(
             decode(&encode_panel(&command)),
             Some(Command::Panel(command))
+        );
+    }
+
+    /// Each edge keeps its mode and its pixels, and the fillet radius keeps its
+    /// own byte. The mode byte packs two bits per edge from the low pair, top
+    /// first, which is the word a renderer unpacks on the GPU.
+    #[test]
+    fn panel_edges_and_fillet_radius_round_trip() {
+        let edges = [
+            Edge::Gap(4),
+            Edge::Margin(4),
+            Edge::Inset(1),
+            Edge::Gap(250),
+        ];
+        let command = PanelCommand {
+            top: 3,
+            left: 12,
+            width: 40,
+            height: 10,
+            style: BorderStyle::None_,
+            border: [1, 2, 3],
+            corner_radius: 2,
+            fill: Some([20, 22, 30]),
+            shadow: PanelShadow::Tucked,
+            edges,
+            corners: CORNER_TOP_LEFT,
+            fillets: FILLET_BOTTOM_LEFT,
+            fillet_radius: 3,
+            hatch: None,
+            above_pools: false,
+            backdrop: true,
+            anchor: Some((7, 12.5)),
+        };
+
+        assert_eq!(
+            edge_modes(edges),
+            0b1000_0110,
+            "a top gap in bits 0-1, a right margin in bits 2-3, a left gap in bits 6-7",
+        );
+        assert_eq!(
+            decode(&encode_panel(&command)),
+            Some(Command::Panel(command))
+        );
+    }
+
+    /// A mode this decoder does not know reads as an inset, so the box stays
+    /// inside its cells.
+    #[test]
+    fn an_unknown_edge_mode_reads_as_an_inset() {
+        assert_eq!(
+            decode_edges(0b1111_1111, [5, 6, 7, 8]),
+            [
+                Edge::Inset(5),
+                Edge::Inset(6),
+                Edge::Inset(7),
+                Edge::Inset(8)
+            ]
         );
     }
 
@@ -580,10 +724,10 @@ mod tests {
             corner_radius: 6,
             fill: Some([20, 22, 30]),
             shadow: PanelShadow::Drop,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: true,
             backdrop: false,
@@ -596,13 +740,13 @@ mod tests {
         );
     }
 
-    /// A head shorter than the fixed 27 bytes decodes to nothing, whatever an
+    /// A head shorter than the fixed 31 bytes decodes to nothing, whatever an
     /// older emitter wrote into the bytes it has.
     #[test]
     fn a_short_panel_head_decodes_to_nothing() {
         let head = |len: usize| decode_panel(&[vec![1u8; len]]);
 
-        assert_eq!([19, 20, 22, 26].map(head), [None; 4]);
-        assert!(head(27).is_some(), "the full head decodes");
+        assert_eq!([19, 20, 22, 26, 27, 30].map(head), [None; 6]);
+        assert!(head(31).is_some(), "the full head decodes");
     }
 }

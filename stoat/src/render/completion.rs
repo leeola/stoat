@@ -524,7 +524,7 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, style::Color};
     use stoat_widgets::ApcScene;
     use stoatty_protocol::command::{
-        decode_stream, BorderStyle, Command, PanelCommand, PanelShadow,
+        decode_stream, BorderStyle, Command, Edge, PanelCommand, PanelShadow,
     };
 
     fn make_item(label: &str) -> CompletionItem {
@@ -755,10 +755,10 @@ mod tests {
             corner_radius: 1,
             fill: Some(bytes(hex)),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 1,
+            edges: Edge::symmetric(0, 1),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

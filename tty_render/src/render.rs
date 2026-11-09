@@ -2,7 +2,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use std::ops::Range;
-use stoatty_protocol::command::SketchShape;
+use stoatty_protocol::command::{self, SketchShape};
 use stoatty_term::{
     grid::{Bar, Grid, Panel, Rgb, Sketch},
     term::Damage,
@@ -288,14 +288,16 @@ impl RowAnchor {
 /// drawn fragment is discarded when it lies inside an occluder whose `seq`
 /// exceeds the drawn instance's own seq, so a box declared later (higher seq)
 /// hides the lower chrome beneath its body while a box's own runs and bars
-/// (seq above their panel) survive. Padded to 40 bytes so the storage-array
-/// stride matches the 8-byte-aligned `vec2` layout WGSL computes.
+/// (seq above their panel) survive. The edges sit at byte 16, where WGSL aligns
+/// a `vec4`, and the struct spans 48 bytes, a whole multiple of that alignment,
+/// so the storage-array stride matches the layout WGSL computes.
 ///
-/// The radius, the insets, and the corner mask ride along because a panel does
+/// The radius, the edges, and the corner mask ride along because a panel does
 /// not fill the rect it declares. Occluding by the bare rect notches a square
-/// hole out of the chrome beneath each rounded corner, and hides what shows in
-/// a chip's bare strips. The radius and insets are physical pixels, scaled as
-/// the panel pass scales the box it draws.
+/// hole out of the chrome beneath each rounded corner, hides what shows in a
+/// chip's bare strips, and misses the strips a box reaches across beside its
+/// cells. The radius and the edge pixels are physical pixels, scaled as the
+/// panel pass scales the box it draws.
 ///
 /// A box that reaches the last row holds fractional rows once
 /// [`place_occluder_rows`] has placed it, so the shader's plain scaling lands it
@@ -305,13 +307,14 @@ impl RowAnchor {
 pub(crate) struct Occluder {
     cell: [f32; 2],
     size: [f32; 2],
+    /// Each edge's pixels, top, right, bottom, and left.
+    edge_px: [f32; 4],
     seq: u32,
     corner_radius: f32,
-    inset_x: f32,
-    inset_y: f32,
+    /// The edge modes, packed as [`command::edge_modes`] packs them.
+    edge_modes: u32,
     /// The rounded corners, bits 0-3 from top-left clockwise.
     corners: u32,
-    _pad: u32,
 }
 
 /// An [`Occluder`]'s corner mask with every corner rounded.
@@ -848,7 +851,7 @@ pub(crate) fn row_len<T>(rows: &[Vec<T>]) -> usize {
 ///
 /// `cell_width` is the live cell width in physical pixels, which a sketch box's
 /// corner radius is stated against. `scale_factor` is the display scale, which
-/// a panel's radius and insets take as the panel pass draws them.
+/// a panel's radius and edges take as the panel pass draws them.
 pub(crate) fn build_occluders_into(
     panels: &[Panel],
     sketches: &[Sketch],
@@ -928,12 +931,11 @@ fn sketch_occluder(sketch: &Sketch, cell_width: f32) -> Option<Occluder> {
     Some(Occluder {
         cell: [left, top],
         size: [right.ceil() - left, bottom.ceil() - top],
+        edge_px: [0.0; 4],
         seq: sketch.seq,
         corner_radius: f32::from(radius) / SKETCH_CELL_FRACTION * cell_width,
-        inset_x: 0.0,
-        inset_y: 0.0,
+        edge_modes: 0,
         corners: ALL_CORNERS,
-        _pad: 0,
     })
 }
 
@@ -956,7 +958,7 @@ const SKETCH_CELL_FRACTION: f32 = 16.0;
 /// sits in the list changes nothing drawn, since the shader walks to that count
 /// and returns on the first box that covers the fragment.
 ///
-/// `scale_factor` is the display scale, which a panel's radius and insets take
+/// `scale_factor` is the display scale, which a panel's radius and edges take
 /// as the panel pass draws them.
 ///
 /// See also:
@@ -1009,12 +1011,11 @@ fn bar_occluder(bar: &Bar) -> Occluder {
     Occluder {
         cell: [f32::from(bar.x), f32::from(bar.y)].map(sixteenths),
         size: [f32::from(bar.width), f32::from(bar.height)].map(sixteenths),
+        edge_px: [-0.5; 4],
         seq: bar.seq,
         corner_radius: 0.0,
-        inset_x: -0.5,
-        inset_y: -0.5,
+        edge_modes: 0,
         corners: 0,
-        _pad: 0,
     }
 }
 
@@ -1072,19 +1073,18 @@ pub(crate) fn rides(panel: &Panel, riding: &[u32]) -> bool {
 
 /// The box `panel` draws at `scale_factor`, as an occluder.
 ///
-/// The radius and insets round to whole physical pixels as the panel pass rounds
-/// them, so the occluder's edge lands on the box's own.
+/// The radius and the edge pixels round to whole physical pixels as the panel
+/// pass rounds them, so the occluder's edge lands on the box's own.
 fn panel_occluder(panel: &Panel, scale_factor: f32) -> Occluder {
     let physical = |logical: u8| (f32::from(logical) * scale_factor).round();
     Occluder {
         cell: [panel.left as f32, panel.top as f32],
         size: [panel.width as f32, panel.height as f32],
+        edge_px: panel.edges.map(|edge| physical(edge.px())),
         seq: panel.seq,
         corner_radius: physical(panel.corner_radius),
-        inset_x: physical(panel.inset_x),
-        inset_y: physical(panel.inset_y),
+        edge_modes: u32::from(command::edge_modes(panel.edges)),
         corners: u32::from(panel::corner_mask(panel.corners)),
-        _pad: 0,
     }
 }
 
@@ -1330,12 +1330,11 @@ mod tests {
         let mut occluders = [(9.0, 1.0), (7.0, 2.0), (2.0, 3.0)].map(|(top, height)| Occluder {
             cell: [1.0, top],
             size: [4.0, height],
+            edge_px: [0.0; 4],
             seq: 0,
             corner_radius: 0.0,
-            inset_x: 0.0,
-            inset_y: 0.0,
+            edge_modes: 0,
             corners: ALL_CORNERS,
-            _pad: 0,
         });
 
         place_occluder_rows(&mut occluders, anchor, 20.0);
@@ -1380,7 +1379,7 @@ mod tests {
         }
     }
     use stoatty_protocol::command::{
-        SketchBounds, SketchCommand, SketchEasing, SketchFill, SketchFillStyle, SketchPhase,
+        Edge, SketchBounds, SketchCommand, SketchEasing, SketchFill, SketchFillStyle, SketchPhase,
         SketchShape, SketchStyle, SketchTiming,
     };
     use stoatty_term::grid::{Bar, BorderStyle, Panel, PanelShadow, Rgb, Sketch};
@@ -1665,10 +1664,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools,
             backdrop: false,
@@ -1765,6 +1764,39 @@ mod tests {
         );
     }
 
+    /// A panel's occluder carries the edges the panel pass draws: each edge's
+    /// pixels scaled to the display and rounded, with the modes packed as the
+    /// wire packs them.
+    #[test]
+    fn a_panel_occluder_takes_its_edges_at_the_display_scale() {
+        let edged = Panel {
+            edges: [
+                Edge::Margin(4),
+                Edge::Gap(3),
+                Edge::Inset(1),
+                Edge::Inset(0),
+            ],
+            ..panel(1, false)
+        };
+
+        let mut live = Vec::new();
+        build_occluders_into(&[edged], &[], &[], 8.0, 1.5, &mut live);
+
+        assert_eq!(
+            live,
+            [Occluder {
+                cell: [0.0, 0.0],
+                size: [1.0, 1.0],
+                edge_px: [6.0, 5.0, 2.0, 0.0],
+                seq: 1,
+                corner_radius: 0.0,
+                edge_modes: 0b1001,
+                corners: ALL_CORNERS,
+            }],
+            "a top margin in bits 0-1 and a right gap in bits 2-3, at 1.5 pixels a pixel",
+        );
+    }
+
     /// An occluding bar joins both lists behind the panels, past the prefix a
     /// box's content pool reads, so a pane pool and the live decorations take
     /// it as a panel that is not above pools. Its box is its rect in cells,
@@ -1795,12 +1827,11 @@ mod tests {
         let occluder = Occluder {
             cell: [1.0, 1.5],
             size: [59.5, 0.1875],
+            edge_px: [-0.5; 4],
             seq: 4,
             corner_radius: 0.0,
-            inset_x: -0.5,
-            inset_y: -0.5,
+            edge_modes: 0,
             corners: 0,
-            _pad: 0,
         };
         assert_eq!(
             (seqs(&pool), above, seqs(&live), pool.last(), live.last()),

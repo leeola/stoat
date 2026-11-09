@@ -59,7 +59,7 @@ use stoat_widgets::{
 };
 use stoatty_protocol::command::{
     panel::{CORNER_TOP_LEFT, CORNER_TOP_RIGHT, FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT},
-    BorderStyle, PanelShadow,
+    BorderStyle, Edge, PanelShadow,
 };
 
 /// Buffer lines the minimap strip draws per vertical cell.
@@ -446,10 +446,10 @@ pub(crate) fn render_island(content_area: Rect, frame: FrameCtx<'_>, scene: &mut
         corner_radius: role.corner_radius,
         fill: None,
         shadow: role.shadow,
-        inset_x: role.inset_x,
-        inset_y: 0,
+        edges: Edge::symmetric(role.inset_x, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: true,
@@ -507,10 +507,10 @@ fn render_read_only_frame(
         corner_radius: theme.panel(PanelRole::Island).corner_radius,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: true,
@@ -544,10 +544,10 @@ fn render_read_only_frame(
         corner_radius: 0,
         fill: Some(base_rgb),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -1773,10 +1773,10 @@ fn tab_panel(fill: [u8; 3]) -> Panel {
         corner_radius: 2,
         fill: Some(fill),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
         fillets: FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -1902,10 +1902,10 @@ fn draw_conflict_chip(
         corner_radius: 1,
         fill: style_rgb(chip.style.bg),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -6046,7 +6046,7 @@ mod tests {
             FILLET_BOTTOM_LEFT, FILLET_BOTTOM_RIGHT, TAG_DOT_PERCENT,
         };
         use ratatui::style::Color;
-        use stoatty_protocol::command::{Command, PanelCommand};
+        use stoatty_protocol::command::{Command, Edge, PanelCommand};
 
         let mut h = tagged_tabs_harness();
         h.render_composited();
@@ -6093,10 +6093,10 @@ mod tests {
                     corner_radius: 2,
                     fill: Some(base),
                     shadow: PanelShadow::None_,
-                    inset_x: 0,
-                    inset_y: 0,
+                    edges: Edge::symmetric(0, 0),
                     corners: CORNER_TOP_LEFT | CORNER_TOP_RIGHT,
                     fillets: FILLET_BOTTOM_LEFT | FILLET_BOTTOM_RIGHT,
+                    fillet_radius: 2,
                     hatch: None,
                     above_pools: false,
                     backdrop: false,

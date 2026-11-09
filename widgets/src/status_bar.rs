@@ -465,7 +465,7 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect};
     use std::ops::Range;
     use stoatty_protocol::command::{
-        encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, PanelCommand,
+        encode_bar, encode_panel, encode_text_run, BarCommand, BorderStyle, Edge, PanelCommand,
         PanelShadow, TextRunCommand,
     };
 
@@ -1160,10 +1160,10 @@ mod tests {
                 corner_radius: 1,
                 fill: Some([4, 5, 6]),
                 shadow: PanelShadow::None_,
-                inset_x: 0,
-                inset_y: 1,
+                edges: Edge::symmetric(0, 1),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -1278,10 +1278,10 @@ mod tests {
             corner_radius: 1,
             fill: Some([9, 9, 9]),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 1,
+            edges: Edge::symmetric(0, 1),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

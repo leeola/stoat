@@ -9,6 +9,7 @@
 //! discarded inside the box rect while still painting outside it.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, HostRide, PoolComposite, Renderer},
     render::cell_size,
@@ -78,10 +79,10 @@ fn a_box_occludes_the_bars_runs_and_icons_beneath_it() {
         corner_radius: 0,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -266,10 +267,10 @@ fn a_box_occludes_the_pool_composite_beneath_it() {
         corner_radius: 0,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -402,10 +403,10 @@ fn a_pool_prepared_in_the_same_frame_leaves_the_live_occluders_alone() {
         corner_radius: 0,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools,
         backdrop: false,
@@ -610,10 +611,10 @@ fn a_box_riding_a_pool_stops_occluding_it() {
         corner_radius: 0,
         fill: None,
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -729,10 +730,10 @@ fn a_chip_occludes_only_the_box_it_draws() {
             corner_radius: 8,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 6,
+            edges: Edge::symmetric(0, 6),
             corners: 0b0011,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -760,6 +761,93 @@ fn a_chip_occludes_only_the_box_it_draws() {
             [rgb(bar_color), rgb(ground), rgb(ground), rgb(bar_color)],
             "scale {scale}: the bar shows in the bare strip and at the rounded top corner, \
              and hides under the chip's middle and its square bottom corner",
+        );
+    }
+}
+
+/// A box whose edge reaches across the cell beside it occludes what lies under
+/// that reach and nothing past it, at scale 1 and at scale 2.
+///
+/// The box covers columns 2 to 5 of row 1, over a bar of lower seq across the
+/// row. Its left edge is a margin of 4 logical pixels, so the box crosses
+/// column 1 and stops 4 logical pixels short of that column's left side.
+#[test]
+fn a_box_occludes_across_the_cell_its_edge_reaches() {
+    let (device, queue) = require_headless_device();
+    let ground = Rgb::new(10, 20, 30);
+    let bar_color = Rgb::new(200, 50, 50);
+    let rgb = |c: Rgb| [c.r, c.g, c.b];
+
+    for scale in [1u32, 2] {
+        let font_size = 30;
+        let [cell_w, cell_h] = cell_size(font_size, scale as f32).map(|side| side.round() as u32);
+        let (width, height) = (cell_w * 7, cell_h * 3);
+        let (target, view) = offscreen_target(&device, width, height);
+        let mut renderer = renderer(&device, [width, height], font_size, scale as f32, ground);
+        let (rows, cols) = renderer.grid_size();
+
+        let mut grid = Grid::new(rows, cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                grid.get_mut(r, c).bg = ground;
+            }
+        }
+        grid.set_bars(vec![Bar {
+            x: 0,
+            y: 16,
+            width: cols as u16 * 16,
+            height: 16,
+            color: bar_color,
+            seq: 1,
+            occludes: false,
+            hatch: None,
+        }]);
+        grid.set_panels(vec![Panel {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 1,
+            style: BorderStyle::None_,
+            border: ground,
+            corner_radius: 0,
+            fill: None,
+            shadow: PanelShadow::None_,
+            edges: [
+                Edge::Inset(0),
+                Edge::Inset(0),
+                Edge::Inset(0),
+                Edge::Margin(4),
+            ],
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: false,
+            anchor: None,
+            seq: 100,
+        }]);
+        renderer.render_into(
+            &device,
+            &queue,
+            &view,
+            &grid,
+            still_frame(&Damage::Full, &Damage::Partial(Vec::new())),
+        );
+        let shot = read_back(&device, &queue, &target, width, height);
+        let at = |x: u32, y: u32| pixel(&shot, width, x, y);
+
+        let (box_left, middle) = (cell_w + 4 * scale, cell_h + cell_h / 2);
+        assert_eq!(
+            [
+                at(box_left - 1, middle),
+                at(box_left + 1, middle),
+                at(3 * cell_w, middle),
+                at(6 * cell_w + 1, middle),
+            ],
+            [rgb(bar_color), rgb(ground), rgb(ground), rgb(bar_color)],
+            "scale {scale}: the bar hides from the box's reach into column 1 to its \
+             right side, and shows on either side of that",
         );
     }
 }

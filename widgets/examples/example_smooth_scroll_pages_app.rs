@@ -48,7 +48,7 @@ use stoat_widgets::{
 };
 use stoatty_protocol::command::{
     encode_panel_into, encode_pool_anchor_into, encode_pool_cursor_into, encode_reset_into,
-    encode_text_run_into, BorderStyle, PanelCommand, PanelShadow, PoolAnchorCommand,
+    encode_text_run_into, BorderStyle, Edge, PanelCommand, PanelShadow, PoolAnchorCommand,
     PoolCursorCommand, PoolKind, PoolRegionCommand, TextRunCommand,
 };
 
@@ -509,10 +509,10 @@ fn write_overlay_chrome(out: &mut Vec<u8>, anchor: Option<(u32, f32)>) {
             corner_radius: 6,
             fill: None,
             shadow: PanelShadow::Drop,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: true,
             backdrop: false,

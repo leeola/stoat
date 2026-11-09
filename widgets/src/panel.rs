@@ -2,7 +2,7 @@ use crate::{cells, ApcScene};
 use ratatui::{
     buffer::Buffer, layout::Rect, style::Style, symbols::border, widgets::StatefulWidget,
 };
-use stoatty_protocol::command::{self, BorderStyle, PanelCommand, PanelShadow};
+use stoatty_protocol::command::{self, BorderStyle, Edge, PanelCommand, PanelShadow};
 
 /// Frame the render area with off-grid modal chrome.
 ///
@@ -20,13 +20,10 @@ pub struct Panel {
     pub corner_radius: u8,
     pub fill: Option<[u8; 3]>,
     pub shadow: PanelShadow,
-    /// Device pixels shaved off each horizontal edge in the APC frame, so the box
-    /// draws narrower than its cell rect. `0` is cell-exact. The fallback border
-    /// ignores it (cell borders are whole cells).
-    pub inset_x: u8,
-    /// Pixels shaved off the top and bottom edges in the APC frame, as
-    /// [`Self::inset_x`] shaves the sides. The fallback border ignores it.
-    pub inset_y: u8,
+    /// Where each side of the APC frame's box stands against the cells, as
+    /// [`PanelCommand::edges`] places them. The fallback border ignores it,
+    /// because cell borders are whole cells.
+    pub edges: [Edge; 4],
     /// The corners [`Self::corner_radius`] rounds in the APC frame, as
     /// [`PanelCommand::corners`] names them. Zero rounds all four. The fallback
     /// border ignores it.
@@ -35,6 +32,9 @@ pub struct Panel {
     /// fillet, as [`PanelCommand::fillets`] names them. The fallback border
     /// ignores it.
     pub fillets: u8,
+    /// The radius of each fillet in logical pixels. The fallback border ignores
+    /// it.
+    pub fillet_radius: u8,
     /// The color of the hatch over the APC frame's fill, or `None` for a plain
     /// fill. The fallback border ignores it.
     pub hatch: Option<[u8; 3]>,
@@ -82,10 +82,10 @@ impl Panel {
             corner_radius: 1,
             fill: Some(fill),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 1,
+            edges: Edge::symmetric(0, 1),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -111,10 +111,10 @@ impl Panel {
                 corner_radius: self.corner_radius,
                 fill: self.fill,
                 shadow: self.shadow,
-                inset_x: self.inset_x,
-                inset_y: self.inset_y,
+                edges: self.edges,
                 corners: self.corners,
                 fillets: self.fillets,
+                fillet_radius: self.fillet_radius,
                 hatch: self.hatch,
                 above_pools: self.above_pools,
                 backdrop: self.backdrop,
@@ -149,7 +149,7 @@ mod tests {
     use super::Panel;
     use crate::ApcScene;
     use ratatui::{buffer::Buffer, layout::Rect, widgets::StatefulWidget};
-    use stoatty_protocol::command::{encode_panel, BorderStyle, PanelCommand, PanelShadow};
+    use stoatty_protocol::command::{encode_panel, BorderStyle, Edge, PanelCommand, PanelShadow};
 
     fn symbol(buf: &Buffer, x: u16, y: u16) -> &str {
         buf.cell((x, y)).expect("cell in bounds").symbol()
@@ -167,10 +167,10 @@ mod tests {
             corner_radius: 6,
             fill: Some([40, 44, 52]),
             shadow: PanelShadow::Drop,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -188,10 +188,10 @@ mod tests {
             corner_radius: 6,
             fill: Some([40, 44, 52]),
             shadow: PanelShadow::Drop,
-            inset_x: 4,
-            inset_y: 0,
+            edges: Edge::symmetric(4, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -212,10 +212,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -243,10 +243,10 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -272,10 +272,10 @@ mod tests {
             corner_radius: 2,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -307,10 +307,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -333,10 +333,10 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

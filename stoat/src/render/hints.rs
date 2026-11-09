@@ -10,7 +10,7 @@ use ratatui::{
 };
 use std::collections::HashMap;
 use stoat_widgets::panel::Panel;
-use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Columns between a row's key and its action.
 const GAP: usize = 3;
@@ -441,10 +441,10 @@ fn docked_frame(
         corner_radius: 2,
         fill: Some(fill),
         shadow: PanelShadow::Halo,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: true,
         backdrop: false,

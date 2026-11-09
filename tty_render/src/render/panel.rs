@@ -15,6 +15,7 @@
 use crate::render::{rgb_f32, CellMetrics, HostRide, RowAnchor};
 use bytemuck::{Pod, Zeroable};
 use std::mem;
+use stoatty_protocol::command;
 use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
@@ -65,13 +66,18 @@ const SHADOW_MARGIN_HALO: f32 = 6.0;
 
 /// The per-panel instance data. Carries the anchor cell, the size in cells, the
 /// fill and stroke colors, the shadow displacement and blur radius, the corner
-/// radius, a flag selecting whether the fill is painted, the border style code,
-/// the shadow mode (0 drop, 1 tucked, 2 overhang, 3 halo), the vertical inset,
-/// the shape bits (the rounded corners in bits 0-3 and the fillets in bits 4-5),
-/// and the hatch color with a flag selecting whether it draws.
+/// radius, a flag selecting how the fill paints, the border style code, the
+/// shadow mode (0 drop, 1 tucked, 2 overhang, 3 halo), the shape bits (the
+/// rounded corners in bits 0-3 and the fillets in bits 4-5), the hatch color
+/// with a flag selecting whether it draws, each edge's pixels with the packed
+/// edge modes, and the fillet radius.
 ///
-/// The shader's occlusion test reads the radius and `inset_x` of every later
-/// panel by their place in this struct, so fields join at the end.
+/// The fill flag is 0 for no fill and 1 for a fill. A backdrop's fill takes 2,
+/// which paints the fill only outside the panel's own cells.
+///
+/// The shader's occlusion test reads the cell, the size, the radius, the shape,
+/// and the edges of every later panel by their place in this struct, so fields
+/// join at the end.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct PanelInstance {
@@ -84,12 +90,13 @@ struct PanelInstance {
     corner_radius: f32,
     fill_flag: f32,
     style: u32,
-    inset_x: f32,
     shadow_mode: f32,
-    inset_y: f32,
     shape: u32,
     hatch: [f32; 3],
     hatch_flag: f32,
+    edge_px: [f32; 4],
+    edge_modes: u32,
+    fillet_radius: f32,
 }
 
 /// The uniform shared by every instance. Carries the surface resolution, the
@@ -208,11 +215,12 @@ impl PanelPass {
                             7 => Float32,
                             8 => Uint32,
                             9 => Float32,
-                            10 => Float32,
-                            11 => Float32,
-                            12 => Uint32,
-                            13 => Float32x3,
-                            14 => Float32,
+                            10 => Uint32,
+                            11 => Float32x3,
+                            12 => Float32,
+                            13 => Float32x4,
+                            14 => Uint32,
+                            15 => Float32,
                         ],
                     })],
                 },
@@ -471,10 +479,10 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
 /// A panel with no fill leaves the interior transparent. A panel with no shadow
 /// zeroes the shadow, so the pass draws only the stroke.
 ///
-/// The shadow geometry, the corner radius, and the inset are all stated in
-/// logical pixels and multiplied by `scale_factor` here. Left physical, they
-/// hold their pixel count against a box that doubled, so the chrome reads half
-/// weight on a 2x display.
+/// The shadow geometry, the corner radius, the edges, and the fillet radius are
+/// all stated in logical pixels and multiplied by `scale_factor` here. Left
+/// physical, they hold their pixel count against a box that doubled, so the
+/// chrome reads half weight on a 2x display.
 ///
 /// Each product rounds, so the box edges land on the whole pixels the cell
 /// rectangle already uses. A 1.25 or a 1.5 display density otherwise puts a
@@ -484,6 +492,8 @@ fn build_panel_instances(panels: &[Panel]) -> Vec<PanelInstance> {
 /// `out` is cleared first, so a reused scratch buffer holds only this frame's
 /// panels.
 fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec<PanelInstance>) {
+    let physical = |logical: u8| (f32::from(logical) * scale_factor).round();
+
     out.clear();
     out.extend(panels.iter().map(|panel| {
         let (shadow_offset, shadow_margin, shadow_mode) = match panel.shadow {
@@ -503,15 +513,20 @@ fn build_panel_instances_into(panels: &[Panel], scale_factor: f32, out: &mut Vec
                 (shadow_offset[1] * scale_factor).round(),
             ],
             shadow_margin: (shadow_margin * scale_factor).round(),
-            corner_radius: (panel.corner_radius as f32 * scale_factor).round(),
-            fill_flag: if panel.fill.is_some() { 1.0 } else { 0.0 },
+            corner_radius: physical(panel.corner_radius),
+            fill_flag: match (panel.fill, panel.backdrop) {
+                (None, _) => 0.0,
+                (Some(_), false) => 1.0,
+                (Some(_), true) => 2.0,
+            },
             style: style_code(panel.style),
-            inset_x: (panel.inset_x as f32 * scale_factor).round(),
             shadow_mode,
-            inset_y: (panel.inset_y as f32 * scale_factor).round(),
             shape: u32::from(corner_mask(panel.corners)) | u32::from(panel.fillets & 0b11) << 4,
             hatch: panel.hatch.map(rgb_f32).unwrap_or([0.0, 0.0, 0.0]),
             hatch_flag: if panel.hatch.is_some() { 1.0 } else { 0.0 },
+            edge_px: panel.edges.map(|edge| physical(edge.px())),
+            edge_modes: u32::from(command::edge_modes(panel.edges)),
+            fillet_radius: physical(panel.fillet_radius),
         }
     }));
 }
@@ -545,6 +560,7 @@ mod tests {
         render::{CellMetrics, GridLayout, RowAnchor},
         test_support::{read_back, require_headless_device},
     };
+    use stoatty_protocol::command::Edge;
     use stoatty_term::grid::{BorderStyle, Grid, Panel, PanelShadow, Rgb};
     use wgpu::{
         naga::{
@@ -609,10 +625,10 @@ mod tests {
             corner_radius: 6,
             fill,
             shadow,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -783,10 +799,10 @@ mod tests {
             // between them.
             fill: None,
             shadow,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -851,10 +867,10 @@ mod tests {
             // A shadow pads the quad, so the pixel outside the box rasterizes
             // at all. Its color is black, which leaves the red channel alone.
             shadow: PanelShadow::Tucked,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -965,8 +981,9 @@ mod tests {
     /// beside a bottom corner, and a hatched fill each land on whole pixels.
     ///
     /// At scale 2 a two-cell box spans pixels 12 to 36. An inset of 3 shaves 6
-    /// pixels, a radius of 3 rounds 6, a fillet reaches 4 pixels past the box,
-    /// and the hatch lines run 14 pixels apart along x plus y.
+    /// pixels, and a radius of 3 rounds 6. A fillet of radius 2 reaches 4 pixels
+    /// past the box, and one of radius 5 reaches 10. The hatch lines run 14
+    /// pixels apart along x plus y.
     #[test]
     fn a_panel_takes_its_inset_corner_mask_fillets_and_hatch() {
         let (device, queue) = require_headless_device();
@@ -982,10 +999,10 @@ mod tests {
                 corner_radius: 0,
                 fill: Some(Rgb::new(0, 0, 255)),
                 shadow: PanelShadow::None_,
-                inset_x: 0,
-                inset_y: 0,
+                edges: Edge::symmetric(0, 0),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -996,7 +1013,7 @@ mod tests {
             render_pixel(&device, &queue, 2.0, panel, at)
         };
 
-        let chip = |panel: &mut Panel| panel.inset_y = 3;
+        let chip = |panel: &mut Panel| panel.edges = Edge::symmetric(0, 3);
         assert_eq!(
             [pixel(chip, (24, 15)), pixel(chip, (24, 20))],
             [GROUND, blue],
@@ -1027,6 +1044,16 @@ mod tests {
             ],
             [blue, GROUND, blue, GROUND],
             "a fillet fills beside each bottom corner and curves away above it",
+        );
+
+        let wide_fillet = |panel: &mut Panel| {
+            panel.fillets = 0b11;
+            panel.fillet_radius = 5;
+        };
+        assert_eq!(
+            [pixel(wide_fillet, (11, 31)), pixel(filleted, (11, 31))],
+            [blue, GROUND],
+            "a fillet takes its own radius, so the wider one reaches further up the side",
         );
 
         let hatched = |panel: &mut Panel| panel.hatch = Some(Rgb::new(255, 0, 0));
@@ -1065,10 +1092,10 @@ mod tests {
             corner_radius: 0,
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -1082,7 +1109,7 @@ mod tests {
             height: 2,
             corner_radius: 6,
             fill: None,
-            inset_y: 4,
+            edges: Edge::symmetric(0, 4),
             corners: 0b0011,
             seq: 1,
             ..beneath
@@ -1104,6 +1131,67 @@ mod tests {
             [255, 255, 0, 0],
             "the fill shows in the bare strip and at the rounded top corner, \
              and hides under the chip's middle and its square bottom corner",
+        );
+    }
+
+    /// A backdrop's edges reach across the cells beside it, and its fill paints
+    /// only there, so its own cells keep whatever they draw.
+    ///
+    /// The cells are 9 by 18 pixels, and the panel covers columns 2 and 3 of
+    /// row 1, which is pixels 18 to 36 across. Its left edge is a margin of 4,
+    /// so the box crosses column 1 and stops 4 pixels short of its far side, at
+    /// pixel 13. Its right edge is a gap of 4. That reaches half of the
+    /// margin's 5 pixels into column 4, rounded up to 3, so the box ends at
+    /// pixel 39.
+    #[test]
+    fn a_backdrop_fills_only_the_cells_its_edges_reach_across() {
+        let (device, queue) = require_headless_device();
+        let panel = Panel {
+            top: 1,
+            left: 2,
+            width: 2,
+            height: 1,
+            style: BorderStyle::None_,
+            border: Rgb::new(255, 0, 0),
+            corner_radius: 0,
+            fill: Some(Rgb::new(255, 0, 0)),
+            shadow: PanelShadow::None_,
+            edges: [
+                Edge::Inset(0),
+                Edge::Gap(4),
+                Edge::Inset(0),
+                Edge::Margin(4),
+            ],
+            corners: 0,
+            fillets: 0,
+            fillet_radius: 2,
+            hatch: None,
+            above_pools: false,
+            backdrop: true,
+            anchor: None,
+            seq: 0,
+        };
+        let mut grid = Grid::new(3, 7);
+        grid.set_panels(vec![panel]);
+
+        let metrics = CellMetrics {
+            font_size: 15.0,
+            width: 9.0,
+            height: 18.0,
+            scale_factor: 1.0,
+        };
+        let red = render_red(&device, &queue, &grid, metrics, Halves::Under);
+        let row = |y: u32| red[(y * TARGET) as usize..((y + 1) * TARGET) as usize].to_vec();
+
+        let reached = |x: u32| (13..18).contains(&x) || (36..39).contains(&x);
+        let expected = (0..TARGET)
+            .map(|x| if reached(x) { 255 } else { 0 })
+            .collect::<Vec<u8>>();
+        assert_eq!(
+            [row(18), row(27)],
+            [expected.clone(), expected],
+            "on the row's top pixel row and its middle, the fill covers pixels 13 to 17 \
+             and 36 to 38, and nothing in the panel's cells",
         );
     }
 
@@ -1138,10 +1226,10 @@ mod tests {
                 corner_radius: 0,
                 fill: None,
                 shadow,
-                inset_x: 0,
-                inset_y: 0,
+                edges: Edge::symmetric(0, 0),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -1190,10 +1278,10 @@ mod tests {
                 corner_radius: 0,
                 fill: None,
                 shadow: PanelShadow::None_,
-                inset_x: 0,
-                inset_y: 0,
+                edges: Edge::symmetric(0, 0),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -1257,10 +1345,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -1307,10 +1395,10 @@ mod tests {
             corner_radius: 6,
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: PanelShadow::Drop,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -1346,10 +1434,10 @@ mod tests {
             corner_radius: 6,
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: PanelShadow::Drop,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -1384,10 +1472,10 @@ mod tests {
             corner_radius: 6,
             fill: Some(Rgb::new(255, 0, 0)),
             shadow: PanelShadow::Drop,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -1422,10 +1510,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,
@@ -1456,10 +1544,10 @@ mod tests {
                 corner_radius: 0,
                 fill: Some(Rgb::new(4, 5, 6)),
                 shadow,
-                inset_x: 4,
-                inset_y: 0,
+                edges: Edge::symmetric(4, 0),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -1501,10 +1589,10 @@ mod tests {
             corner_radius: 0,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

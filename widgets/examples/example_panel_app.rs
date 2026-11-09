@@ -24,7 +24,7 @@ use ratatui::{
 };
 use std::{io, thread};
 use stoat_widgets::{panel::Panel, text_run::TextRun, ApcScene, ApcSession, SessionOptions};
-use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// Editor background (`#282c34`) and foreground (`#abb2bf`), the One Dark colors
 /// the default theme uses, set explicitly so the scene looks the same under any
@@ -123,13 +123,13 @@ fn draw_scene(frame: &mut Frame<'_>, scene: &mut ApcScene) {
                     },
                     fill: (row % 2 == 0).then_some(PANEL_FILL),
                     shadow,
-                    inset_x: match column == BORDERS.len() - 1 {
-                        true => 4,
-                        false => 0,
+                    edges: match column == BORDERS.len() - 1 {
+                        true => Edge::symmetric(4, 0),
+                        false => Edge::symmetric(0, 0),
                     },
-                    inset_y: 0,
                     corners: 0,
                     fillets: 0,
+                    fillet_radius: 2,
                     hatch: None,
                     above_pools: false,
                     backdrop: false,

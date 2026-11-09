@@ -18,7 +18,9 @@ use ratatui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat_action::{Action, Conflict, ConflictPickOurs};
 use stoat_widgets::ApcScene;
-use stoatty_protocol::command::{decode_stream, BorderStyle, Command, PanelCommand, PanelShadow};
+use stoatty_protocol::command::{
+    decode_stream, BorderStyle, Command, Edge, PanelCommand, PanelShadow,
+};
 
 const SUCCESS: [u8; 3] = [0x8f, 0xd1, 0x8a];
 const SPECIAL: [u8; 3] = [0xc5, 0x9a, 0xf0];
@@ -291,10 +293,10 @@ fn a_chip_panel_sits_under_the_pane_pool() {
             corner_radius: 1,
             fill: Some(CHIP_CONFLICT),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: true,

@@ -73,8 +73,8 @@ fn occluded(frag: vec2<f32>) -> bool {
                 o.size,
                 globals.occluder_cell,
                 o.corner_radius,
-                o.inset_x,
-                o.inset_y,
+                o.edge_px,
+                o.edge_modes,
                 o.corners
             );
             if sdf < -0.5 {

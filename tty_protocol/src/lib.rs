@@ -179,9 +179,16 @@
 /// batch, whose count it reads one byte early. This version drops a shorter
 /// head.
 ///
+/// Version 27 reads a fixed 31-byte `panel` head. A mode byte and four pixel
+/// bytes state each edge of the box as an inset, a margin, or a gap, in place
+/// of the two inset bytes, and a fillet radius byte follows the fillet mask. A
+/// backdrop panel paints its fill only outside its own cells. A terminal that
+/// predates it reads the edge bytes as insets and masks at its own head's
+/// offsets, so it misplaces every panel. This version drops a shorter head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.
@@ -203,6 +210,13 @@ pub const PAGE_ICONS_PROTOCOL: u32 = 19;
 /// takes the panel as one above every pool, and a pane's halo then hides the
 /// pane's own glide.
 pub const BACKDROP_PANEL_PROTOCOL: u32 = 20;
+
+/// The first [`PROTOCOL_VERSION`] whose terminal reads a `panel`'s four edges
+/// and its fillet radius.
+///
+/// An earlier terminal reads a `panel` head at its own byte offsets, so it
+/// misplaces every panel an emitter at this version sends it.
+pub const PANEL_EDGES_PROTOCOL: u32 = 27;
 
 pub mod command;
 pub mod detect;

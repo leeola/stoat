@@ -7,6 +7,7 @@
 //! `create_render_pipeline`. This test reaches that path and the draw path. It
 //! fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Frame, Renderer, Scroll},
     test_support::{offscreen_target, read_back, require_headless_device, still_frame},
@@ -104,10 +105,10 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         corner_radius: 6,
         fill: Some(Rgb::new(30, 30, 50)),
         shadow: PanelShadow::Drop,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

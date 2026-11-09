@@ -6,8 +6,8 @@ use crate::{
     test_support::{read_back, require_headless_device},
 };
 use stoatty_protocol::command::{
-    SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase, SketchPoint,
-    SketchSide, SketchStyle, SketchTiming,
+    Edge, SketchBounds, SketchCommand, SketchEasing, SketchEnd, SketchFill, SketchPhase,
+    SketchPoint, SketchSide, SketchStyle, SketchTiming,
 };
 use stoatty_term::grid::{BorderStyle, Panel, PanelShadow, Rgb};
 use wgpu::{
@@ -1347,10 +1347,10 @@ fn a_later_filled_box_hides_the_stroke_beneath_it() {
         corner_radius: 0,
         fill: Some(Rgb::new(0, 0, 255)),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

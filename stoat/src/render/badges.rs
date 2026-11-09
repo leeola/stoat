@@ -17,7 +17,7 @@ use ratatui::{
 };
 use std::borrow::Cow;
 use stoat_widgets::{panel::Panel, text_run::TextRun, ApcScene};
-use stoatty_protocol::command::{BorderStyle, PanelShadow};
+use stoatty_protocol::command::{BorderStyle, Edge, PanelShadow};
 
 /// The mark an active badge's text leads with.
 const ACTIVE_MARK: &str = "\u{25cf} ";
@@ -269,10 +269,10 @@ fn render_single_badge(
                 corner_radius: 1,
                 fill: tint,
                 shadow: PanelShadow::None_,
-                inset_x: 0,
-                inset_y: 0,
+                edges: Edge::symmetric(0, 0),
                 corners: 0,
                 fillets: 0,
+                fillet_radius: 2,
                 hatch: None,
                 above_pools: false,
                 backdrop: false,
@@ -601,10 +601,10 @@ mod tests {
                         corner_radius: 1,
                         fill: Some(TINT),
                         shadow: PanelShadow::None_,
-                        inset_x: 0,
-                        inset_y: 0,
+                        edges: Edge::symmetric(0, 0),
                         corners: 0,
                         fillets: 0,
+                        fillet_radius: 2,
                         hatch: None,
                         above_pools: false,
                         backdrop: false,

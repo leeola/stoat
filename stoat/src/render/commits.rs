@@ -1950,7 +1950,7 @@ mod tests {
         sync::Arc,
     };
     use stoat_language::{Language, LanguageRegistry};
-    use stoatty_protocol::command::{self, BorderStyle, Command, PanelCommand, PanelShadow};
+    use stoatty_protocol::command::{self, BorderStyle, Command, Edge, PanelCommand, PanelShadow};
 
     /// The same RGB theme the diff-view tests use, so the washes engage.
     fn rgb_theme() -> Theme {
@@ -3156,7 +3156,9 @@ mod tests {
             command::decode_stream(&h.stoat.apc_scene.all_bytes())
                 .into_iter()
                 .filter_map(|command| match command {
-                    Command::Panel(panel) if (panel.height, panel.inset_y) == (1, 1) => {
+                    Command::Panel(panel)
+                        if (panel.height, panel.edges) == (1, Edge::symmetric(0, 1)) =>
+                    {
                         Some((panel.top, panel.left, panel.fill))
                     },
                     _ => None,
@@ -3209,10 +3211,10 @@ mod tests {
             corner_radius: 1,
             fill: Some(fill),
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 1,
+            edges: Edge::symmetric(0, 1),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

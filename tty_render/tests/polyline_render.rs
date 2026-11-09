@@ -7,6 +7,7 @@
 //! pooled path moves with the composite's eased shift.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     gpu::{build_font_system, FontConfig, Renderer},
     render::cell_size,
@@ -116,10 +117,10 @@ fn a_later_panel_hides_the_line_beneath_it() {
         corner_radius: 0,
         fill: Some(Rgb::new(90, 90, 120)),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

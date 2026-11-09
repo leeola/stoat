@@ -693,7 +693,7 @@ mod tests {
     use super::{restore_bytes, ApcScene};
     use stoatty_protocol::command::{
         self, encode_border, encode_lane_begin, encode_lane_end, encode_line_layout, encode_reset,
-        encode_scroll_region, BorderCommand, BorderStyle, LineLayoutCommand, PanelCommand,
+        encode_scroll_region, BorderCommand, BorderStyle, Edge, LineLayoutCommand, PanelCommand,
         PanelShadow, ScrollRegionCommand,
     };
 
@@ -1137,10 +1137,10 @@ mod tests {
             corner_radius: 6,
             fill: None,
             shadow: PanelShadow::None_,
-            inset_x: 0,
-            inset_y: 0,
+            edges: Edge::symmetric(0, 0),
             corners: 0,
             fillets: 0,
+            fillet_radius: 2,
             hatch: None,
             above_pools: false,
             backdrop: false,

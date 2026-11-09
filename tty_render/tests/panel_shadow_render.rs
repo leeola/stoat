@@ -7,6 +7,7 @@
 //! bottom-right edge is darkened by the shadow.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     render::cell_size,
     test_support::{
@@ -104,10 +105,10 @@ fn unfilled_panel_shadow_stays_outside_the_box() {
         corner_radius: 6,
         fill: None,
         shadow: PanelShadow::Drop,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
@@ -173,10 +174,10 @@ fn a_horizontal_inset_leaves_the_cell_edge_strip_clear() {
         // Fill the box so the inset frame's interior is visibly not the clear.
         fill: Some(Rgb::new(20, 22, 30)),
         shadow: PanelShadow::None_,
-        inset_x: inset,
-        inset_y: 0,
+        edges: Edge::symmetric(inset, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

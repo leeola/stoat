@@ -13,6 +13,7 @@
 //! without a GPU still runs the rest of the suite.
 
 use std::{cell::Cell, fmt::Write};
+use stoatty_protocol::command::Edge;
 use stoatty_render::gpu::{
     build_font_system, headless_device, FontConfig, Frame, Renderer, Scroll,
 };
@@ -135,10 +136,10 @@ fn add_chrome(grid: &mut Grid) {
         corner_radius: 6,
         fill: Some(Rgb::new(30, 30, 50)),
         shadow: PanelShadow::Drop,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,

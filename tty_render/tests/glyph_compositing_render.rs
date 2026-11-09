@@ -10,6 +10,7 @@
 //! would leave only flat gray edges and pure magenta, never such a mix.
 //! Fails without a GPU adapter, since a test that draws nothing proves nothing.
 
+use stoatty_protocol::command::Edge;
 use stoatty_render::{
     render::cell_size,
     test_support::{
@@ -54,10 +55,10 @@ fn grid_glyph_blends_over_the_framebuffer_not_an_assumed_bg() {
         corner_radius: 6,
         fill: Some(fill),
         shadow: PanelShadow::None_,
-        inset_x: 0,
-        inset_y: 0,
+        edges: Edge::symmetric(0, 0),
         corners: 0,
         fillets: 0,
+        fillet_radius: 2,
         hatch: None,
         above_pools: false,
         backdrop: false,
