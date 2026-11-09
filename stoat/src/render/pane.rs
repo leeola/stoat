@@ -7,7 +7,7 @@ use crate::{
     diff_map::MarkKind,
     editor_state::{EditorId, EditorState},
     minimap::LANE_WIDTH,
-    pane::{Divider, DividerOrientation, FocusTarget, Pane, Placement, View},
+    pane::{Divider, DividerOrientation, FocusTarget, Pane, PaneTree, Placement, View},
     render::{
         chrome::{self, TypeTag},
         commits, content_lane, diff_changes,
@@ -29,6 +29,7 @@ use crate::{
         undercurl::UndercurlBatch,
         FrameCtx, MinimapChrome, PaneCtx,
     },
+    run::{RunId, RunState},
     term_session::{TermId, TermSession},
     theme::{PanelRole, TypeRole, FULL_CELL_SCALE},
     workspace::{
@@ -245,6 +246,7 @@ pub(crate) fn render_pane(
                     content_area,
                     is_focused,
                     buf,
+                    scene,
                 );
             }
         },
@@ -1284,6 +1286,25 @@ pub(crate) fn status_row(
     StatusRow { runs, badge }
 }
 
+/// The working directory of the run the focused split pane shows, or `None`
+/// when focus is off the split panes or the focused pane shows no run.
+///
+/// Takes the workspace's fields rather than the workspace, so a frame holds a
+/// borrow of the runs alone while the pane loop borrows the editors mutably.
+pub(crate) fn focused_run_cwd<'a>(
+    focus: FocusTarget,
+    panes: &PaneTree,
+    runs: &'a SlotMap<RunId, RunState>,
+) -> Option<&'a Path> {
+    let FocusTarget::SplitPane = focus else {
+        return None;
+    };
+    match panes.pane(panes.focus()).view {
+        View::Run(id) => runs.get(id).map(|run| run.cwd.as_path()),
+        _ => None,
+    }
+}
+
 /// The part of status row `row` that holds its segments, left of any badge
 /// box that paints over the row.
 ///
@@ -2222,6 +2243,19 @@ fn status_segments(
             right_anchor = start;
         }
     }
+    if let Some(cwd) = frame.run_cwd.filter(|_| is_focused) {
+        let text = format!(
+            " {} ",
+            crate::paths::display_relative_with_home(cwd, Path::new(""), frame.home)
+        );
+        let width = text.chars().count() as u16;
+        let start = right_anchor.saturating_sub(width);
+        if start >= cursor {
+            let muted = tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED);
+            right.push((text, muted));
+            right_anchor = start;
+        }
+    }
     if is_focused {
         let badge_right = right_anchor;
         let muted = tinted(trail_style, theme, crate::theme::scope::UI_TEXT_MUTED);
@@ -2324,7 +2358,10 @@ fn status_segments(
             .and_then(|id| buffers.path_for(id))
             .and_then(|path| frame.pair_sides.get(path))
             .map(|(from, _)| format!("diff vs {from}"));
+        // A run's commands run in the directory its row names, which need not
+        // be the repo, so the repo segment stays off a run pane's row.
         if sides.is_none()
+            && frame.run_cwd.is_none()
             && let Some(segments) = focused_staged_label(
                 status.mark_kind,
                 pair_lead.as_deref().or(frame.diff_base),
@@ -6326,5 +6363,41 @@ mod tests {
         dispatch(&mut h.stoat, &stoat_action::NewTab);
         let two_tabs = status_left(&mut h);
         assert_eq!([one_tab, two_tabs], [" NOR  ws scratch ", " NOR  scratch "]);
+    }
+
+    /// A focused run pane's row leads with the run chip in either mode of its
+    /// input and names the directory its commands run in at its right end,
+    /// where an editor's row shows the cursor. The repo segment stays off the
+    /// row, as the StartRun board draws the directory alone.
+    #[test]
+    fn a_focused_run_pane_s_row_reads_run_and_its_directory() {
+        let mut h = crate::test_harness::TestHarness::with_size(80, 12);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/repo");
+        h.fake_fs().insert_file(Path::new("/repo/f.txt"), b"a\n");
+        h.fake_git()
+            .add_repo("/repo")
+            .commit("a1000000", &[("f.txt", "a\n")])
+            .head_file("f.txt", "a\n")
+            .index_file("f.txt", "a\n")
+            .set_head_branch("main");
+        h.stoat.set_diff_warm_auto(true);
+        h.open_file(Path::new("/repo/f.txt"));
+        h.settle_diff_jobs();
+        let run = h.open_run();
+        h.stoat.home = Some(PathBuf::from("/home/u"));
+        h.stoat.active_workspace_mut().runs[run].cwd = PathBuf::from("/home/u/code/stoat");
+        let row = |h: &mut crate::test_harness::TestHarness| {
+            let row = bar_row(&h.render_composited()).replace('\u{2500}', " ");
+            row.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+
+        let insert = row(&mut h);
+        h.type_keys("escape");
+        let normal = row(&mut h);
+
+        assert_eq!(
+            [insert, normal],
+            ["RUN repo run ~/code/stoat"; 2].map(String::from),
+        );
     }
 }

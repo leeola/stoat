@@ -2575,6 +2575,35 @@ fn detached_pane_status_row_names_its_file_and_no_sides() {
     );
 }
 
+/// A detached run pane that holds focus reads the run chip and names its
+/// directory whole, as a run pane's row in the main window does. The prompt
+/// shortens the same directory to `/d/r/dir`.
+#[test]
+fn a_focused_detached_run_pane_s_row_reads_run_and_its_directory() {
+    let mut h = Stoat::test();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    h.stoat.set_apc_tx(tx);
+    h.stoat.window_ipc_connected = true;
+    h.type_action("SplitRight()");
+    h.settle();
+    let run = h.open_run();
+    h.stoat.active_workspace_mut().runs[run].cwd = PathBuf::from("/detach/run/dir");
+    action_handlers::dispatch(&mut h.stoat, &DetachPane);
+    while rx.try_recv().is_ok() {}
+
+    emit_smooth_scroll(&mut h.stoat);
+    let mut raw = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        raw.extend(batch);
+    }
+    let text = String::from_utf8_lossy(&raw);
+    assert_eq!(
+        (text.contains(" RUN "), text.contains("/detach/run/dir")),
+        (true, true),
+        "the row leads with the run chip and names the directory whole",
+    );
+}
+
 #[test]
 fn detached_terminal_ships_a_content_pool_that_repaints_then_goes_quiet() {
     use stoatty_protocol::command::Command;

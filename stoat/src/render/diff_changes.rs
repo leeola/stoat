@@ -1092,6 +1092,7 @@ mod tests {
             badge_cover: None,
             hover_cell: None,
             home: None,
+            run_cwd: None,
             #[cfg(feature = "perf")]
             perf: None,
         }

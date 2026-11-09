@@ -1,14 +1,20 @@
 use crate::{
-    render::text::write_str,
+    render::{paint::style_rgb, text::write_str},
     run::{GridSelection, OutputBlock, RunState, StyledCell, VtermGrid},
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
+    widgets::StatefulWidget,
 };
 use std::{ops::Range, path::Path};
+use stoat_widgets::bar::Bar;
 
+/// Paint a run pane's output blocks and its prompt row into `area`.
+///
+/// The prompt row takes the pane's last row. Inside stoatty a hairline in
+/// `ui.divider` runs along the row's top edge and rules it off the output.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_run_pane(
     run_state: &RunState,
@@ -19,6 +25,7 @@ pub(crate) fn render_run_pane(
     area: Rect,
     is_focused: bool,
     buf: &mut Buffer,
+    scene: &mut stoat_widgets::ApcScene,
 ) {
     if area.height < 2 || area.width < 4 {
         return;
@@ -105,6 +112,21 @@ pub(crate) fn render_run_pane(
         &std::collections::BTreeMap::new(),
         buf,
     );
+
+    // The plain terminal has no room for a rule between the output and the
+    // prompt, so the row stays flush there.
+    if let Some(color) =
+        style_rgb(theme.get(crate::theme::scope::UI_DIVIDER).fg).filter(|_| scene.live())
+    {
+        Bar {
+            x: 0,
+            y: 0,
+            width: area.width.saturating_mul(16),
+            height: 1,
+            color,
+        }
+        .render(Rect::new(area.x, input_row, area.width, 1), buf, scene);
+    }
 }
 
 /// Paint row `row_idx` of `grid` at `y`, from `area.x` across as much of the
@@ -340,7 +362,13 @@ mod tests {
         block_line, paint_grid_row, window_offsets, Buffer, GridSelection, Modifier, OutputBlock,
         OutputLine, Rect,
     };
+    use crate::{
+        render::{layout::split_pane_status, paint::style_rgb},
+        test_harness::TestHarness,
+        theme::scope,
+    };
     use std::path::PathBuf;
+    use stoatty_protocol::command::{self, Command};
 
     /// The `(block, offset)` pairs the pane draws, built the obvious way: lay
     /// every block's rows out flat, then take the window out of the middle.
@@ -465,6 +493,41 @@ mod tests {
             ],
             [0, 0, 3],
             "a block before or after the window is skipped, one straddling it is clipped"
+        );
+    }
+
+    /// Inside stoatty a hairline in the divider color rules the prompt row off
+    /// the output above it, along the row's top edge and across the pane.
+    #[test]
+    fn a_divider_hairline_tops_the_prompt_row() {
+        let mut h = TestHarness::with_size(60, 12);
+        h.open_run();
+        h.render_composited();
+
+        let content = {
+            let ws = h.stoat.active_workspace();
+            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        };
+        let divider =
+            style_rgb(h.stoat.theme.get(scope::UI_DIVIDER).fg).expect("an RGB divider color");
+        let hairlines: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|cmd| match cmd {
+                Command::Bar(bar) if bar.height == 1 && bar.color == divider => {
+                    Some((bar.x, bar.y, bar.width))
+                },
+                _ => None,
+            })
+            .collect();
+
+        let prompt_row = content.y + content.height - 1;
+        assert_eq!(
+            hairlines,
+            [(
+                (content.x * 16) as i16,
+                (prompt_row * 16) as i16,
+                content.width * 16
+            )],
         );
     }
 }

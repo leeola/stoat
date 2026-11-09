@@ -482,6 +482,13 @@ pub(crate) struct FrameCtx<'a> {
     /// Resolved through [`crate::host::EnvHost`] so tests control it instead of
     /// the paint reading the real environment. `None` when `$HOME` is unset.
     pub(crate) home: Option<&'a Path>,
+    /// The working directory of the run the focused pane shows, or `None` when
+    /// no run pane holds focus.
+    ///
+    /// A run pane has no cursor to place, so its status row names this
+    /// directory at its right end, and its mode chip reads `RUN` whatever mode
+    /// its input is in. See [`pane::focused_run_cwd`].
+    pub(crate) run_cwd: Option<&'a Path>,
     /// Latency readout for the status bar, or `None` before any frame has
     /// been painted. Present only under the `perf` feature.
     #[cfg(feature = "perf")]
@@ -1339,6 +1346,7 @@ pub(crate) fn frame(
     // conflict view.
     let hunk_position = diff::repo_hunk_position(ws);
     let conflict_position = conflict_session::conflict_position(ws);
+    let run_cwd = pane::focused_run_cwd(ws.focus, &ws.panes, &ws.runs);
 
     let frame = FrameCtx {
         workspace_name,
@@ -1381,9 +1389,10 @@ pub(crate) fn frame(
         status_message: stoat.pending_message.as_deref(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_label: pane::mode_segment(
-            match modal_label {
-                Some(_) => "prompt",
-                None => mode,
+            match (modal_label, run_cwd) {
+                (Some(_), _) => "prompt",
+                (None, Some(_)) => "run",
+                (None, None) => mode,
             },
             &stoat.theme,
             &stoat.settings.mode_badges,
@@ -1410,6 +1419,7 @@ pub(crate) fn frame(
         badge_cover,
         hover_cell: stoat.hover_cell,
         home: stoat.home.as_deref(),
+        run_cwd,
         #[cfg(feature = "perf")]
         perf: PerfSegment::capture(&stoat.perf),
     };
