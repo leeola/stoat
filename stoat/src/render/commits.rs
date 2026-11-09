@@ -8,7 +8,6 @@ use crate::{
     pane::Pane,
     render::{
         commit_picker::{graph_width, paint_commit_graph, tip_colors, GraphPaint},
-        layout::split_pane_status,
         paint::{blend, render_empty_num, render_side_num, render_side_text, style_rgb},
         pane::ScreenSubject,
         picker::line_strong,
@@ -45,7 +44,7 @@ pub(crate) fn render_commits(
 ) {
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
 
     let Some(left_area) = commits_list_rect(pane.area, frame.commits_split) else {
         return;
@@ -185,7 +184,7 @@ const LANE_BAR_WIDTH: u16 = 6;
 /// `split` is the dragged share of the body as a percentage, `None` until the
 /// reader drags the separator.
 pub(crate) fn commits_list_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
-    let (inner, _) = split_pane_status(pane_area);
+    let inner = pane_area;
     if inner.width < 10 || inner.height <= GRAPH_HEADER_ROWS {
         return None;
     }
@@ -216,7 +215,7 @@ fn commits_header_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
 /// The counterpart to [`commits_list_rect`], so the paint and the hit test
 /// read one geometry and a wheel lands on the pane the reader sees.
 pub(crate) fn commits_detail_rect(pane_area: Rect, split: Option<u16>) -> Option<Rect> {
-    let (inner, _) = split_pane_status(pane_area);
+    let inner = pane_area;
     let list = commits_list_rect(pane_area, split)?;
     let width = inner.width.saturating_sub(list.width + 1);
     (width > 0).then(|| Rect::new(list.x + list.width + 1, inner.y, width, inner.height))
@@ -228,7 +227,7 @@ pub(crate) fn commits_detail_rect(pane_area: Rect, split: Option<u16>) -> Option
 /// Built from the same inputs the renderer reads, so a hit-test lands on the
 /// line the reader sees.
 pub(crate) fn commits_separator(pane_area: Rect, split: Option<u16>) -> Option<SplitSeparator> {
-    let (inner, _) = split_pane_status(pane_area);
+    let inner = pane_area;
     let list = commits_list_rect(pane_area, split)?;
     Some(SplitSeparator {
         axis: SeparatorAxis::Columns,

@@ -1694,7 +1694,7 @@ fn split_panes_declare_island_halos_in_place_of_the_gap_hairline() {
             .active_workspace()
             .panes
             .split_panes()
-            .map(|(_, pane)| crate::render::pane::pane_areas(pane.area, None).0)
+            .map(|(_, pane)| pane.area)
             .collect();
         contents.sort_by_key(|area| area.x);
         let gap = (contents[0].x + contents[0].width) as i16 * 16 + 8;
@@ -1803,11 +1803,7 @@ fn a_rebase_screen_keeps_its_pane_island() {
         .split_panes()
         .next()
         .expect("the pane under the screen");
-    assert_eq!(
-        halos,
-        vec![crate::render::pane::pane_areas(pane.area, None).0],
-        "one halo, over the pane's content",
-    );
+    assert_eq!(halos, vec![pane.area], "one halo, over the pane's content",);
 }
 
 /// A harness at the protocol that turns islands on under the shipped theme,
@@ -2881,7 +2877,7 @@ fn a_terminal_pane_pools_as_a_terminal_kind_under_protocol_nine() {
     let (_, index) = terminal_in_focused_pane(&mut h, b"");
     let content = {
         let ws = h.stoat.active_workspace();
-        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        ws.panes.pane(ws.panes.focus()).area
     };
 
     h.stoat.stoatty_protocol = 8;
@@ -3698,7 +3694,7 @@ fn resident_stack(
 /// The content area of the focused pane.
 fn focused_content(h: &crate::test_harness::TestHarness) -> Rect {
     let ws = h.stoat.active_workspace();
-    crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+    ws.panes.pane(ws.panes.focus()).area
 }
 
 /// `rects` less the cell the ghost cursor outlines, cut as the mask cuts it.
@@ -6282,7 +6278,7 @@ fn a_conflict_pane_pools_the_rows_below_its_header() {
         .expect("the conflict pane declares a pool region");
     let content = {
         let ws = h.stoat.active_workspace();
-        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        ws.panes.pane(ws.panes.focus()).area
     };
 
     assert_eq!(

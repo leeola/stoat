@@ -3900,7 +3900,7 @@ fn layout_fits_agent_emulator_and_pty_to_pane() {
     h.stoat.active_workspace_mut().layout(size);
 
     let ws = h.stoat.active_workspace();
-    let (content, _) = crate::render::layout::split_pane_status(ws.panes.pane(focused).area);
+    let content = ws.panes.pane(focused).area;
     let term = &ws.terms[agent_id].term;
     assert_eq!(
         (term.rows(), term.cols()),
@@ -6173,7 +6173,7 @@ fn a_drag_over_a_pooled_terminal_selects_the_reported_pool_cells() {
     let (term_id, index, _) = pooled_terminal(&mut h);
     let content = {
         let ws = h.stoat.active_workspace();
-        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        ws.panes.pane(ws.panes.focus()).area
     };
     h.stoat
         .handle_window_ipc(pool_sized(index, content.width * 2, content.height * 2));
@@ -6802,7 +6802,7 @@ fn a_terminal_replay_paints_only_the_damaged_rows() {
     let restored = paint_restored(&mut h, buf, holds);
     let content = {
         let ws = h.stoat.active_workspace();
-        crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        ws.panes.pane(ws.panes.focus()).area
     };
     let painted: Vec<u16> = (0..content.height)
         .filter(|&row| restored[(content.x, content.y + row)].symbol() != "#")
@@ -17723,10 +17723,7 @@ fn image_pane_content(h: &crate::test_harness::TestHarness) -> Rect {
         .active_workspace()
         .panes
         .split_panes()
-        .find_map(|(_, pane)| {
-            matches!(pane.view, View::Image { .. })
-                .then(|| crate::render::layout::split_pane_status(pane.area).0)
-        })
+        .find_map(|(_, pane)| matches!(pane.view, View::Image { .. }).then(|| pane.area))
         .expect("an image pane")
 }
 

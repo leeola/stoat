@@ -51,7 +51,6 @@ use crate::{
     pane::{Pane, PaneId, Placement, View},
     render::{
         diff_changes::stack_composited,
-        pane::pane_areas,
         review::DiffDials,
         undercurl::{UndercurlBatch, UnderlineKind},
         FrameCtx, Hold,
@@ -568,7 +567,7 @@ fn terminal_cache_key(
         paint_version: PaintVersion::default(),
         wrap: (None, WrapMode::None, 0),
         scroll_row: 0,
-        area: pane_areas(pane.area, frame.minimap_band).0,
+        area: pane.area,
         pane_index: pane.index as usize,
         paint_generation,
         dim_bits: frame.pane_dim(is_focused).to_bits(),

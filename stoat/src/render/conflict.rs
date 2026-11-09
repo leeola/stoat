@@ -2,7 +2,6 @@ use crate::{
     pane::Pane,
     rebase::{ActiveRebase, RebasePause},
     render::{
-        layout::split_pane_status,
         paint::{render_empty_num, render_side_num, render_side_text},
         text::{truncate_to_cols, write_str},
         FrameCtx,
@@ -24,7 +23,7 @@ const MIN_DETAIL_COLUMNS: u16 = 20;
 /// Shared by the renderer and the pointer, so a clicked row is the row drawn
 /// under the pointer.
 pub(crate) fn conflict_list_rect(pane_area: Rect) -> Option<Rect> {
-    let (inner, _) = split_pane_status(pane_area);
+    let inner = pane_area;
     if inner.width < 20 || inner.height < 4 {
         return None;
     }
@@ -56,7 +55,7 @@ pub(crate) fn render_conflict(
 
     let theme = frame.theme;
     let workspace_root = frame.workspace_root;
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
     let Some(list_area) = conflict_list_rect(pane.area) else {
         return;
     };

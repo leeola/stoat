@@ -15,7 +15,6 @@ use crate::{
             editor_cursor_position, render_editor_with_overlay, split_minimap_strip,
             DIFF_OVERVIEW_COLS,
         },
-        layout::split_pane_status,
         paint::{blend, dim_rgb, style_rgb},
         popout::{
             paint_popout_card, popout_area, popout_card_bg, popout_inset, scaled_char_capacity,
@@ -120,7 +119,8 @@ pub(crate) fn render_pane(
 ) {
     let theme = frame.theme;
     let text_style = theme.get(crate::theme::scope::UI_TEXT);
-    let (content_area, status_area) = pane_areas(pane.area, frame.minimap_band);
+    let content_area = pane.area;
+    let anchor = card_anchor(pane.area, frame.minimap_band);
 
     let PaneCtx {
         editors,
@@ -265,7 +265,7 @@ pub(crate) fn render_pane(
             if let Some(state) = commit_lists.get_mut(*id) {
                 commits::render_commits(pane, state, frame, buf, &mut *scene);
             }
-            dim_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            dim_pane(pane.area, is_focused, frame, buf);
             return;
         },
         View::DiffChanges(id) => {
@@ -304,7 +304,7 @@ pub(crate) fn render_pane(
                     .render(strip, buf, scene);
                 }
             }
-            dim_pane(split_pane_status(pane.area).0, is_focused, frame, buf);
+            dim_pane(pane.area, is_focused, frame, buf);
             return;
         },
     }
@@ -334,7 +334,7 @@ pub(crate) fn render_pane(
         rows.truncate(6);
 
         if !rows.is_empty()
-            && let Some(area) = popout_area(status_area, content_area, rows.len() as u16, 0)
+            && let Some(area) = popout_area(anchor, content_area, rows.len() as u16, 0)
         {
             let bg = popout_card_bg(theme);
             let border = theme
@@ -375,16 +375,12 @@ pub(crate) fn render_pane(
         && typ == lsp_types::MessageType::ERROR
     {
         let inset = popout_inset();
-        let cell_width = status_area
-            .width
-            .saturating_sub(inset * 2)
-            .saturating_sub(2) as usize;
+        let cell_width = anchor.width.saturating_sub(inset * 2).saturating_sub(2) as usize;
         let scale = theme.type_scale(TypeRole::Ui);
         let width = scaled_char_capacity(cell_width, scale);
         let lines = wrap_popout_lines(msg, width, 4);
         if !lines.is_empty()
-            && let Some(area) =
-                popout_area(status_area, content_area, lines.len() as u16, status_rows)
+            && let Some(area) = popout_area(anchor, content_area, lines.len() as u16, status_rows)
         {
             let bg = popout_card_bg(theme);
             let border = theme
@@ -869,25 +865,25 @@ fn tint_color(from: Color, to: Color, amount: f32) -> Color {
     }
 }
 
-/// A pane's content and status rectangles, given where the single-minimap band
-/// sits.
+/// The empty rect along the bottom edge of `pane_area` that the pane's LSP
+/// cards stack up from, given where the single-minimap band sits.
 ///
-/// The status rect is empty, along the pane's bottom edge, where a card that
-/// anchors on the pane's status sits above the window's status row. A pane
-/// that meets the band's left edge there reaches across the band, as the
-/// window's status row does.
-///
-/// Shared with the render site, which captures the content rectangle for the
-/// replay cache.
-pub(crate) fn pane_areas(pane_area: Rect, minimap_band: Option<Rect>) -> (Rect, Rect) {
-    let (content_area, mut status_area) = split_pane_status(pane_area);
+/// A pane at the bottom of the window puts its cards just above the window's
+/// status row. A pane that meets the band's left edge there reaches across the
+/// band, as the status row below it does.
+fn card_anchor(pane_area: Rect, minimap_band: Option<Rect>) -> Rect {
+    let mut anchor = Rect {
+        y: pane_area.y + pane_area.height,
+        height: 0,
+        ..pane_area
+    };
     if let Some(band) = minimap_band
-        && status_area.y == band.y + band.height
-        && status_area.x + status_area.width == band.x
+        && anchor.y == band.y + band.height
+        && anchor.x + anchor.width == band.x
     {
-        status_area.width += band.width;
+        anchor.width += band.width;
     }
-    (content_area, status_area)
+    anchor
 }
 
 /// Blend every RGB cell in `area` toward `bg` by `amount`, dimming an unfocused
@@ -1261,7 +1257,7 @@ pub(crate) fn status_row(
         return StatusRow::default();
     }
 
-    let content = pane_areas(pane.area, frame.minimap_band).0;
+    let content = pane.area;
     let sides = sides_layout(&pane.view, content, frame, editors);
     let mut badge = None;
     let runs = status_segments(

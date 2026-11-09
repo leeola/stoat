@@ -21,7 +21,6 @@ use crate::{
             fit_diff_view, render_editor_with_overlay, screen_cell, split_minimap_strip,
             DIFF_OVERVIEW_COLS,
         },
-        layout::split_pane_status,
         paint::style_rgb,
         pane::diff_base_tint,
         review::{self, FrameEdges},
@@ -146,7 +145,7 @@ pub(crate) fn render_diff_changes(
     buf: &mut Buffer,
     scene: &mut ApcScene,
 ) {
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
     let (inner, strip) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
     state.minimap_rect = strip;
     if let Some(editor) = state
@@ -257,7 +256,7 @@ pub(crate) fn render_diff_changes(
 /// declares. A pool that the terminal does not hold yet, or holds at another
 /// rect, covers no part of the paint.
 pub(crate) fn stack_composited(pane: &Pane, frame: FrameCtx<'_>) -> bool {
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
     let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
     frame.composited_stacks.contains(&(pane.index, inner))
 }
@@ -582,7 +581,7 @@ pub(crate) fn replay_cursor(
     let Some(text) = editor.text_rect else {
         return;
     };
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
     let (inner, _) = split_minimap_strip(inner, frame.minimap_enabled, DIFF_OVERVIEW_COLS);
     let scroll_row = scroll.saturating_sub(top + 1);
     let text = Rect {
@@ -617,9 +616,7 @@ mod tests {
         pane::{DockPanel, DockSide, DockVisibility, FocusTarget, View},
         render::{
             commits::PreviewDials,
-            content_lane,
-            layout::split_pane_status,
-            paint,
+            content_lane, paint,
             review::{self, DiffColumns, DiffDials, DiffLayout},
             surface_blank, themed_bg,
             undercurl::UndercurlBatch,
@@ -771,7 +768,7 @@ mod tests {
         let buf = h.render_composited();
         let inner = {
             let ws = h.stoat.active_workspace();
-            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
         let cols = excerpt_columns(&h, inner, 2);
 
@@ -835,7 +832,7 @@ mod tests {
         h.render_composited();
         let inner = {
             let ws = h.stoat.active_workspace();
-            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
         // The wrap stops one cell short of the narrower text column.
         let cols = excerpt_columns(&h, inner, 4);
@@ -869,7 +866,7 @@ mod tests {
         let buf = h.render_composited();
         let inner = {
             let ws = h.stoat.active_workspace();
-            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
 
         assert_eq!(
@@ -1142,7 +1139,7 @@ mod tests {
         let live = h.stoat.render();
         let inner = {
             let ws = h.stoat.active_workspace();
-            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
         let run = paint_directly(&mut h, |state, editors, buffers, frame, scene| {
             let mut run = Buffer::empty(Rect::new(0, 0, inner.width, 4));
@@ -1342,7 +1339,7 @@ mod tests {
     fn excerpt_numbers(h: &mut TestHarness, buf: &Buffer) -> Vec<Vec<String>> {
         let inner = {
             let ws = h.stoat.active_workspace();
-            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
         let cols = excerpt_columns(h, inner, 2);
         let (state, editors) = stack(h);

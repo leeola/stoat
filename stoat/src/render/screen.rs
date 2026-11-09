@@ -86,7 +86,7 @@ mod tests {
     use crate::{
         action_handlers,
         editor_state::EditorState,
-        render::{layout::split_pane_status, review},
+        render::review,
         test_fixture::open_scratch_file,
         test_harness::{self, TestHarness},
     };
@@ -100,7 +100,7 @@ mod tests {
     /// The focused pane's content area, gutter included.
     fn content(h: &TestHarness) -> Rect {
         let ws = h.stoat.active_workspace();
-        split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+        ws.panes.pane(ws.panes.focus()).area
     }
 
     #[test]

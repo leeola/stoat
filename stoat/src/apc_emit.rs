@@ -2725,7 +2725,7 @@ pub(crate) fn editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegion
             };
             let editor = ws.editors.get(editor_id)?;
 
-            let (content, _) = crate::render::layout::split_pane_status(pane.area);
+            let content = pane.area;
             if content.width == 0 || content.height == 0 {
                 return None;
             }
@@ -2795,7 +2795,7 @@ pub(crate) fn diff_changes_pool_panes(
                 return None;
             }
 
-            let (content, _) = crate::render::layout::split_pane_status(pane.area);
+            let content = pane.area;
             let strip_cols = state.minimap_rect.map_or(0, |rect| rect.width);
             let width = content.width.saturating_sub(strip_cols);
             if width == 0 || content.height == 0 {
@@ -2944,7 +2944,7 @@ fn terminal_pool_panes(
             };
             ws.terms.get(term_id)?;
 
-            let (content, _) = crate::render::layout::split_pane_status(pane.area);
+            let content = pane.area;
             if content.width == 0 || content.height == 0 {
                 return None;
             }
@@ -3279,7 +3279,7 @@ fn windowed_editor_pool_panes(stoat: &Stoat) -> Vec<(u32, EditorId, PoolRegionCo
             };
             ws.editors.get(editor_id)?;
 
-            let (content, _) = crate::render::layout::split_pane_status(pane.area);
+            let content = pane.area;
             if content.width == 0 || content.height == 0 {
                 return None;
             }

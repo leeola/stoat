@@ -14,7 +14,7 @@
 use crate::{
     app::Stoat,
     pane::{FocusTarget, View},
-    render::{chrome, layout::split_pane_status, screen},
+    render::{chrome, screen},
     theme::{scope, Theme},
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
@@ -47,7 +47,7 @@ pub(crate) fn focused_editor_popup_ctx(
         View::DiffChanges(_) => ws.focused_editor()?.0,
         _ => return None,
     };
-    let (content_area, _) = split_pane_status(pane.area);
+    let content_area = pane.area;
 
     let editor = ws.editors.get_mut(editor_id)?;
     let cursor = screen::cell(editor, anchor_offset)?;

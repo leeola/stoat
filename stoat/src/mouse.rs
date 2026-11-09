@@ -206,7 +206,7 @@ pub(crate) fn screen_surfaces(stoat: &mut Stoat) -> Option<ScreenSurfaces> {
             Some(ScreenSurfaces {
                 kind: ScreenKind::DiffChanges,
                 pane,
-                list: crate::render::layout::split_pane_status(pane).0,
+                list: pane,
                 len,
                 selected: diff_changes::cursor_stack_row(state, editors).unwrap_or(0),
                 scroll_top: state.scroll,
@@ -2236,7 +2236,7 @@ pub(crate) fn editor_screen_to_offset(
     col: u16,
     row: u16,
 ) -> Option<usize> {
-    let content = crate::render::layout::split_pane_status(area).0;
+    let content = area;
     if col >= content.width || row >= content.height {
         return None;
     }
@@ -2581,10 +2581,7 @@ mod tests {
             .active_workspace_mut()
             .panes
             .resize(Rect::new(0, 0, 80, 24));
-        let left_content = crate::render::layout::split_pane_status(
-            h.stoat.active_workspace().panes.pane(left).area,
-        )
-        .0;
+        let left_content = h.stoat.active_workspace().panes.pane(left).area;
         focus_at(&mut h.stoat, left_content.x + 1, left_content.y + 1);
         h.stoat.render();
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
@@ -2680,10 +2677,7 @@ mod tests {
             .active_workspace_mut()
             .panes
             .resize(Rect::new(0, 0, 40, 24));
-        let top_content = crate::render::layout::split_pane_status(
-            h.stoat.active_workspace().panes.pane(top).area,
-        )
-        .0;
+        let top_content = h.stoat.active_workspace().panes.pane(top).area;
         focus_at(&mut h.stoat, top_content.x + 1, top_content.y + 1);
         h.stoat.render();
         let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
@@ -3135,7 +3129,7 @@ mod tests {
     fn diff_changes_columns(h: &mut crate::test_harness::TestHarness) -> (Rect, u16) {
         let list = {
             let ws = h.stoat.active_workspace();
-            crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
         let (state, editors) = diff_changes_stack(h);
         let text = editors[state.excerpts[0].editor_id]

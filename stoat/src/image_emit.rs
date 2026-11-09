@@ -13,7 +13,7 @@
 //! stdin is its keyboard, and a response arriving there would be typed into
 //! whatever buffer has focus.
 
-use crate::{app::Stoat, pane::View, render::layout::split_pane_status};
+use crate::{app::Stoat, pane::View};
 use ratatui::layout::Rect;
 use std::{
     collections::{HashMap, HashSet},
@@ -197,12 +197,7 @@ fn wanted_images(stoat: &Stoat) -> Vec<(PathBuf, (u32, u32), Rect, u32)> {
         .panes
         .split_panes()
         .filter_map(|(_, pane)| match &pane.view {
-            View::Image { path, px } => Some((
-                path.clone(),
-                *px,
-                split_pane_status(pane.area).0,
-                pane.index + 1,
-            )),
+            View::Image { path, px } => Some((path.clone(), *px, pane.area, pane.index + 1)),
             _ => None,
         })
         .collect()

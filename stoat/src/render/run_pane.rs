@@ -362,11 +362,7 @@ mod tests {
         block_line, paint_grid_row, window_offsets, Buffer, GridSelection, Modifier, OutputBlock,
         OutputLine, Rect,
     };
-    use crate::{
-        render::{layout::split_pane_status, paint::style_rgb},
-        test_harness::TestHarness,
-        theme::scope,
-    };
+    use crate::{render::paint::style_rgb, test_harness::TestHarness, theme::scope};
     use std::path::PathBuf;
     use stoatty_protocol::command::{self, Command};
 
@@ -506,7 +502,7 @@ mod tests {
 
         let content = {
             let ws = h.stoat.active_workspace();
-            split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
+            ws.panes.pane(ws.panes.focus()).area
         };
         let divider =
             style_rgb(h.stoat.theme.get(scope::UI_DIVIDER).fg).expect("an RGB divider color");

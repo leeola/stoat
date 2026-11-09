@@ -19,7 +19,6 @@ pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
 pub(crate) mod jumplist_picker;
-pub(crate) mod layout;
 pub(crate) mod location_picker;
 pub(crate) mod paint;
 pub(crate) mod pane;
@@ -1446,10 +1445,7 @@ pub(crate) fn frame(
         let placed = (hold.pane.0 == workspace)
             .then(|| ws.panes.split_panes().find(|(id, _)| *id == hold.pane.1))
             .flatten()
-            .is_some_and(|(id, pane)| {
-                Some(id) != overlay_pane
-                    && pane::pane_areas(pane.area, frame.minimap_band).0 == hold.rect
-            });
+            .is_some_and(|(id, pane)| Some(id) != overlay_pane && pane.area == hold.rect);
         let current = stoat
             .pane_cache
             .get(&hold.pane)
@@ -1525,7 +1521,7 @@ pub(crate) fn frame(
             if let (Some(agent), Some(Some(mut rows))) = (terminal, damaged)
                 && rows.contains(&true)
             {
-                let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
+                let content = pane.area;
                 term_pane::repaint_term_rows(agent, frame, content, is_focused, buf, &mut rows);
             }
             frame_holds.push(entry.hold((workspace, id)));
@@ -1562,7 +1558,7 @@ pub(crate) fn frame(
         stoat.pane_paints += 1;
 
         if let Some(key) = key {
-            let (content, _) = pane::pane_areas(pane.area, frame.minimap_band);
+            let content = pane.area;
             let generation = terminal.map_or(0, |agent| agent.term.generation());
             let entry = stoat.pane_cache.entry((workspace, id)).or_default();
             if entry.capture_into(key, content, buf, scene, undercurls, mark, tick, generation) {
@@ -1639,7 +1635,7 @@ pub(crate) fn frame(
         // The screen paints over its pane in place of the pane's view, so its
         // content clears to the editor surface and takes the pane's island, as
         // `render_pane` does for a view.
-        let content = pane::pane_areas(pane.area, frame.minimap_band).0;
+        let content = pane.area;
         clear_surface(content, buf, &stoat.theme);
         if frame.islands && scene.live() {
             pane::render_island(content, frame, scene);

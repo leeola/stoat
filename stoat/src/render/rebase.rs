@@ -3,7 +3,6 @@ use crate::{
     pane::Pane,
     rebase::RebaseState,
     render::{
-        layout::split_pane_status,
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -16,7 +15,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 /// The two help rows at the bottom sit outside it. Shared by the renderer and
 /// the pointer, so a clicked row is the row drawn under the pointer.
 pub(crate) fn rebase_list_rect(pane_area: Rect) -> Option<Rect> {
-    let (inner, _) = split_pane_status(pane_area);
+    let inner = pane_area;
     if inner.width < 10 || inner.height == 0 {
         return None;
     }
@@ -39,7 +38,7 @@ pub(crate) fn render_rebase(
     scene: &mut stoat_widgets::ApcScene,
 ) {
     let theme = frame.theme;
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
 
     let Some(list_area) = rebase_list_rect(pane.area) else {
         return;

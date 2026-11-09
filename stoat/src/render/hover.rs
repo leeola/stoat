@@ -731,7 +731,7 @@ fn host_anchor(stoat: &Stoat, popup_area: Rect) -> Option<(u32, f32)> {
     };
     let editor = ws.editors.get(editor_id)?;
 
-    let (content, _) = crate::render::layout::split_pane_status(pane.area);
+    let content = pane.area;
     let strip_cols = editor.minimap_rect.map_or(0, |rect| rect.width);
     let region = Rect {
         width: content.width.saturating_sub(strip_cols),

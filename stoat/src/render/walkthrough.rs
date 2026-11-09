@@ -21,7 +21,7 @@ use crate::{
     buffer_lifecycle,
     editor_state::EditorId,
     pane::View,
-    render::{layout, screen},
+    render::screen,
     theme::{scope, TypeRole},
     walkthrough::{
         run::{part, WalkthroughRun},
@@ -929,7 +929,7 @@ fn focused_content_area(stoat: &Stoat) -> Option<Rect> {
     let ws = stoat.active_workspace();
     let pane = ws.panes.pane(ws.panes.focus());
     match pane.view {
-        View::Editor(_) => Some(layout::split_pane_status(pane.area).0),
+        View::Editor(_) => Some(pane.area),
         _ => None,
     }
 }

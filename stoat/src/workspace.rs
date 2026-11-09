@@ -33,7 +33,6 @@ use crate::{
     rebase::{ActiveRebase, RebaseState},
     render::{
         chrome::{self, TypeTag},
-        layout::split_pane_status,
         text,
         walkthrough::SlideParts,
     },
@@ -2326,8 +2325,8 @@ impl Workspace {
     ///
     /// Runs on every [`Self::layout`], but [`TermSession::fit`] skips agents
     /// already at the right size, so a steady layout issues no PTY resizes. The
-    /// content area is the pane's whole area, through [`split_pane_status`],
-    /// matching the rectangle the renderer composites the emulator into.
+    /// content area is the pane's whole area, which is the rectangle the renderer
+    /// composites the emulator into.
     ///
     /// A term with a grid in [`Self::term_pool_grids`] takes that grid instead,
     /// since stoatty draws it at another font size than the content area's
@@ -2356,7 +2355,7 @@ impl Workspace {
             if pane.area.width == 0 || pane.area.height == 0 || fitted.contains(&id) {
                 continue;
             }
-            let (content, _) = split_pane_status(pane.area);
+            let content = pane.area;
             let (rows, cols) = term_pool_grids
                 .get(&id)
                 .copied()

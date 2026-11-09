@@ -3,7 +3,6 @@ use crate::{
     pane::Pane,
     render::{
         editor::render_editor,
-        layout::split_pane_status,
         text::{truncate_to_cols, write_str},
         FrameCtx,
     },
@@ -29,7 +28,7 @@ pub(crate) fn render_reword(
 ) {
     let current_mode = frame.mode;
     let theme = frame.theme;
-    let (inner, _) = split_pane_status(pane.area);
+    let inner = pane.area;
     if inner.width < 10 || inner.height < 4 {
         return;
     }
