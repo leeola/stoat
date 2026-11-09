@@ -6591,6 +6591,41 @@ mod tests {
         );
     }
 
+    /// A line selection keeps the receded `fn` of a refined row below its
+    /// changed `other`, with syntax colors off and the recede at its deepest.
+    ///
+    /// With syntax off the recede is the only mark of unchanged text. A wash
+    /// that lifts the faint `fn` past the floor makes it as bright as the
+    /// change, and the reader does not know which of the two is under it.
+    #[test]
+    fn a_selection_keeps_receded_text_dimmer_than_a_change() {
+        let mut h = diff_harness("fn main() {}\n", "fn other() {}\n");
+        h.stoat.stoatty = false;
+        h.stoat.diff_syntax = false;
+        h.stoat.diff_soften = DIFF_SOFTEN_MAX;
+        h.type_keys("x");
+        h.snapshot();
+
+        let wash = style_rgb(h.stoat.theme.get(UI_SELECTION_EDITOR).bg).expect("an rgb wash");
+        let cols = harness_columns(&h);
+        let buf = h.rendered_buffer();
+        let row = row_holding(buf, right_text(&cols), "fn other");
+        let lift = |x: u16| {
+            let fg = style_rgb(buf[(x, row)].style().fg).expect("an rgb foreground");
+            luma(fg) - luma(wash)
+        };
+        let (receded, changed) = (lift(cols.right_text_x), lift(cols.right_text_x + 3));
+
+        assert!(
+            (receded - FAINT_CONTRAST_FLOOR).abs() < 0.02,
+            "the receded `f` lifts to the floor above the wash and no further, not {receded}",
+        );
+        assert!(
+            changed > receded,
+            "the changed `o` reads brighter than the receded `f`: {changed} against {receded}",
+        );
+    }
+
     /// Two words take one-letter labels, `a` for `fn` and `b` for `other`. A
     /// label covers the first letter of its word, so the row is found by the
     /// base text beside it.

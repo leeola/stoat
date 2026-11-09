@@ -112,6 +112,30 @@ pub(crate) fn brighten_rgb(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
     dim_rgb(fg, pole, share)
 }
 
+/// Lift `fg` to [`FAINT_CONTRAST_FLOOR`] off `bg` when it sits closer than that.
+///
+/// A foreground at the floor or further comes back untouched. A closer one
+/// blends toward the pole [`brighten_rgb`] picks until it stands the floor off
+/// the background, so every faint color lands at the same brightness.
+///
+/// A wash over text takes this form and not [`brighten_rgb`], because a wash
+/// must not reorder the brightness of the text it covers. The proportional lift
+/// moves a fainter color further, so the text that receded most lands brightest.
+pub(crate) fn floor_rgb(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+    let (fg_luma, bg_luma) = (luma(fg), luma(bg));
+    if (fg_luma - bg_luma).abs() >= FAINT_CONTRAST_FLOOR {
+        return fg;
+    }
+
+    let (pole, target) = match bg_luma < 0.5 {
+        true => ([255, 255, 255], bg_luma + FAINT_CONTRAST_FLOOR),
+        false => ([0, 0, 0], bg_luma - FAINT_CONTRAST_FLOOR),
+    };
+    // Luma is linear in the blend, so this fraction of the way to the pole puts
+    // the result's luma on the target.
+    dim_rgb(fg, pole, (target - fg_luma) / (luma(pole) - fg_luma))
+}
+
 /// Lift `style`'s foreground away from `bg` when it sits too close to read, per
 /// [`brighten_rgb`].
 ///
@@ -122,6 +146,18 @@ pub(crate) fn brighten_style(style: Style, bg: [u8; 3]) -> Style {
         return style;
     };
     let [r, g, b] = brighten_rgb(fg, bg);
+    style.fg(Color::Rgb(r, g, b))
+}
+
+/// Lift `style`'s foreground to the floor off `bg` when it sits closer, per
+/// [`floor_rgb`].
+///
+/// A non-RGB foreground has no channels to measure, so it comes back unchanged.
+pub(crate) fn floor_style(style: Style, bg: [u8; 3]) -> Style {
+    let Some(fg) = style_rgb(style.fg) else {
+        return style;
+    };
+    let [r, g, b] = floor_rgb(fg, bg);
     style.fg(Color::Rgb(r, g, b))
 }
 
@@ -522,5 +558,42 @@ mod tests {
             brighten_style(faint, [0xe5, 0xe5, 0xe6]).fg,
             Some(Color::Rgb(0, 0, 0)),
         );
+    }
+
+    /// Every faint gray under a dark wash lands on the floor above it, so text
+    /// that receded further never reads brighter under the wash.
+    #[test]
+    fn a_dark_wash_lifts_every_faint_foreground_to_the_floor() {
+        let wash = [0x2a, 0x3c, 0x5a];
+        let gray = |distance: f32| [((luma(wash) + distance) * 255.0).round() as u8; 3];
+        let lift = |fg| hundredths(luma(floor_rgb(fg, wash)) - luma(wash));
+
+        assert_eq!(
+            [0.25, 0.10, 0.0].map(|distance| lift(gray(distance))),
+            [hundredths(FAINT_CONTRAST_FLOOR); 3],
+            "each faint gray lands on the floor above the wash",
+        );
+        assert_eq!(
+            floor_rgb(gray(0.35), wash),
+            gray(0.35),
+            "a gray past the floor keeps its color",
+        );
+    }
+
+    /// A light field sits nearer white, so a foreground in its own color drops
+    /// to the floor below it.
+    #[test]
+    fn a_light_wash_drops_a_faint_foreground_to_the_floor_below() {
+        let wash = [0xe5, 0xe5, 0xe6];
+        assert_eq!(
+            hundredths(luma(wash) - luma(floor_rgb(wash, wash))),
+            hundredths(FAINT_CONTRAST_FLOOR),
+        );
+    }
+
+    /// `x` in hundredths, so a luma check holds to 0.005 and prints the values
+    /// it compares.
+    fn hundredths(x: f32) -> i32 {
+        (x * 100.0).round() as i32
     }
 }

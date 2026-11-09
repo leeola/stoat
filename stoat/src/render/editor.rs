@@ -15,7 +15,7 @@ use crate::{
     minimap::color_to_rgb,
     render::{
         conflict_view::render_conflict_view,
-        paint::{brighten_style, dim_rgb, style_rgb},
+        paint::{dim_rgb, floor_style, style_rgb},
         review::{
             self, render_diff_view, BufferNumbering, DiffColumns, DiffDials, DiffLayout,
             DIFF_TWO_COLUMN_MIN,
@@ -719,8 +719,8 @@ pub(crate) fn split_minimap_strip(
 ///
 /// Each selection's range washes in `ui.selection.editor`, and each cursor draws
 /// as a block over the whole character it covers. A foreground too close to the
-/// wash to read lifts toward white or black per [`brighten_style`]. `visible` is
-/// the byte range of those rows, as [`visible_byte_range`] answers it.
+/// wash to read lifts to the floor per [`floor_style`]. `visible` is the byte
+/// range of those rows, as [`visible_byte_range`] answers it.
 ///
 /// With `delegates_cursor` the terminal draws the primary cursor, so its cell
 /// goes into [`EditorState::cursor_screen_cell`] and the pass paints no block
@@ -817,7 +817,7 @@ pub(crate) fn paint_selections(
                 &mut |_, _, cell| {
                     cell.set_style(selection_style);
                     if let Some(bg) = wash {
-                        cell.set_style(brighten_style(cell.style(), bg));
+                        cell.set_style(floor_style(cell.style(), bg));
                     }
                 },
                 editor.scroll_row,
@@ -4065,14 +4065,18 @@ mod tests {
         crate::theme::Theme::from_config(&config.expect("theme parses"), "t").expect("theme loads")
     }
 
-    /// Text in the wash's own color lifts the whole way to white, the pole a
-    /// dark wash is furthest from. The line-end extend leaves the cursor on the
-    /// `c`, so the wash covers the `a` and the `b`.
+    /// Text in the wash's own color lifts toward white, the pole a dark wash is
+    /// furthest from, and stops at the floor. `#b4b9c4` stands
+    /// [`FAINT_CONTRAST_FLOOR`] above the `#636d83` wash in luma. The line-end
+    /// extend leaves the cursor on the `c`, so the wash covers the `a` and the
+    /// `b`.
+    ///
+    /// [`FAINT_CONTRAST_FLOOR`]: crate::render::paint::FAINT_CONTRAST_FLOOR
     #[test]
-    fn a_selected_foreground_in_the_wash_color_lifts_to_the_far_pole() {
+    fn a_selected_foreground_in_the_wash_color_lifts_to_the_floor() {
         let mut h = Stoat::test();
         let row = selected_first_row(&mut h, "abc\nx", &wash_theme("#636d83"));
-        assert_eq!([row[0].fg, row[1].fg], [Color::Rgb(255, 255, 255); 2]);
+        assert_eq!([row[0].fg, row[1].fg], [Color::Rgb(0xb4, 0xb9, 0xc4); 2]);
     }
 
     #[test]
