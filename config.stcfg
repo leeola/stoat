@@ -1510,18 +1510,19 @@ on key {
         Cmd-0 -> DiffTintUp() "tint up";
     }
     # The focused excerpt is an editor, so a normal-mode key that this block
-    # leaves out acts on the excerpt's file. j, k, and the pages cross into the
-    # next file at an excerpt's edge. n, p, the Alt notches, and the side
-    # buttons walk the hunks across the excerpts, as the diff view's walk
-    # crosses into the next changed file. The shifted side buttons walk whole
-    # hunks of the line diff, as in the diff view. q closes the view. Escape
-    # is left to the normal block, as the per-file diff leaves it, so the key
-    # dismisses the hints and never closes the view.
+    # leaves out acts on the excerpt's file. n and p search and paste there, as
+    # in any buffer. j, k, and the pages cross into the next file at an
+    # excerpt's edge. `] g`, `[ g`, the review mode's n and p, the Alt notches,
+    # and the side buttons walk the hunks across the excerpts, as the diff
+    # view's walk crosses into the next changed file. `] h`, `[ h`, and the
+    # shifted side buttons walk whole hunks of the line diff, as in the diff
+    # view. q closes the view. Escape is left to the normal block, as the
+    # per-file diff leaves it, so the key dismisses the hints and never closes
+    # the view.
     #
     # A label is the key's short name in the docked hints box, which lists the
     # keys that share a label on one row. Two keys on one action carry the
-    # same label for that reason. n and the back button share `next change`,
-    # and p and the forward button share `prev change`.
+    # same label for that reason.
     view == diff_changes && mode == normal {
         q -> CloseDiffChanges() "close";
         Ctrl-t -> DiffFiles() "files / changes";
@@ -1530,8 +1531,6 @@ on key {
         Down -> DiffChangesNext() "next row";
         k -> DiffChangesPrev() "prev row";
         Up -> DiffChangesPrev() "prev row";
-        n -> GotoNextChange() "next change";
-        p -> GotoPrevChange() "prev change";
         Ctrl-f -> DiffChangesPageDown() "page down";
         PageDown -> DiffChangesPageDown() "page down";
         Ctrl-b -> DiffChangesPageUp() "page up";

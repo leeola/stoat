@@ -2281,7 +2281,7 @@ mod tests {
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n n");
+        h.type_keys("] g ] g");
         let stacked = screen_row(&mut h);
 
         h.type_keys("Ctrl-t");
@@ -2445,7 +2445,7 @@ mod tests {
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n n");
+        h.type_keys("] g ] g");
     }
 
     /// Give `long_files`' `b.txt` a HEAD with thirty more lines past its tenth,
@@ -2703,7 +2703,7 @@ mod tests {
         h.open_file(Path::new("/repo/a.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n n");
+        h.type_keys("] g ] g");
 
         dispatch(&mut h.stoat, &stoat_action::DiffFiles { rev: None });
         h.settle();
@@ -2717,15 +2717,15 @@ mod tests {
         );
     }
 
-    /// n and p run the editor's change walk, which goes on from an excerpt's
-    /// last hunk into the next excerpt, and a step past either end of the stack
-    /// stays and says so.
+    /// `] g` and `[ g` run the editor's change walk, which goes on from an
+    /// excerpt's last hunk into the next excerpt, and a step past either end of
+    /// the stack stays and says so.
     #[test]
-    fn n_and_p_walk_the_hunks_across_excerpts_and_stop_at_either_end() {
+    fn the_bracket_walk_crosses_the_excerpts_and_stops_at_either_end() {
         let mut h = deep_files();
         h.cover_with_diff_changes(false);
         h.settle();
-        let walk: Vec<(String, u32)> = ["n", "n", "n", "p", "p"]
+        let walk: Vec<(String, u32)> = ["] g", "] g", "] g", "[ g", "[ g"]
             .into_iter()
             .map(|key| {
                 h.type_keys(key);
@@ -2934,8 +2934,8 @@ mod tests {
         assert_eq!(offsets, [3, 3, 1]);
     }
 
-    /// The stack of `long_files` in a four-row view, walked `n`, then `n` into
-    /// `b.txt`, then `p` back, as `(scroll, cursor stack row, stack rows,
+    /// The stack of `long_files` in a four-row view, walked to the next change,
+    /// on into `b.txt`, then back, as `(scroll, cursor stack row, stack rows,
     /// followed)` at each landing. `followed` says whether the key epilogue's
     /// follow moved the stack again.
     fn walk_the_stack(jump_scrolloff: Option<u32>) -> Vec<(usize, usize, usize, bool)> {
@@ -3039,9 +3039,9 @@ mod tests {
         (state.scroll, row, total)
     }
 
-    /// The side buttons walk the hunks across the excerpts as n and p do. A
-    /// hop into the next excerpt records its landing, so a later press walks on
-    /// rather than retracing the jumplist out of the changes view.
+    /// The side buttons walk the hunks across the excerpts as `] g` and `[ g`
+    /// do. A hop into the next excerpt records its landing, so a later press
+    /// walks on rather than retracing the jumplist out of the changes view.
     #[test]
     fn the_side_buttons_walk_the_hunks_across_excerpts() {
         let mut h = deep_files();
@@ -3137,7 +3137,7 @@ mod tests {
         h.open_file(Path::new("/repo/b.txt"));
         dispatch(&mut h.stoat, &stoat_action::DiffChanges);
         h.settle();
-        h.type_keys("n");
+        h.type_keys("] g");
         let folded = |h: &TestHarness| {
             h.stoat
                 .active_workspace()

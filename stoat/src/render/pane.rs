@@ -4948,7 +4948,7 @@ mod tests {
             .set_worktree_base(WorktreeBase::Index);
         h.cover_with_diff_changes(false);
         h.settle_diff_jobs();
-        h.type_keys("n");
+        h.type_keys("] g");
 
         let row = bar_row(&h.render_composited()).replace('─', " ");
         let point = crate::test_harness::editor::focused_cursor_point(&mut h.stoat);

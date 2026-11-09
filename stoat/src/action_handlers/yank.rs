@@ -1630,15 +1630,15 @@ mod tests {
         assert_eq!(h.buffer_text_at(&path), "xyz\nfn g() {}\n");
     }
 
-    /// The selection-index register numbers the focused excerpt's selections.
-    /// The changes view walks hunks on `p`, so the paste goes before.
+    /// The selection-index register numbers the focused excerpt's selections,
+    /// and `p` pastes the number after the selection as in a plain editor.
     #[test]
     fn paste_selection_index_in_a_changes_view_numbers_the_excerpt_selection() {
         let mut h = TestHarness::with_size(100, 12);
         let path = changes_view_over(&mut h, CHANGED_BASE, CHANGED_WORK);
         set_selections(&mut h, &[(0, 9, false)]);
-        h.type_keys("\" # P");
-        assert_eq!(h.buffer_text_at(&path), "1// file 0\nfn g() {}\n");
+        h.type_keys("\" # p");
+        assert_eq!(h.buffer_text_at(&path), "// file 01\nfn g() {}\n");
     }
 
     /// Clipboard text arrives normalized, so a CRLF clipboard cannot put a

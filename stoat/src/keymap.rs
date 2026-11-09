@@ -3113,11 +3113,12 @@ mod tests {
         );
     }
 
-    /// The changes view walks the hunks on n, p, the Alt notches, and the side
-    /// buttons, as the diff view does, and leaves g and G to the editor of its
-    /// focused excerpt. The shifted side buttons walk whole hunks.
+    /// The changes view walks the hunks on the Alt notches and the side
+    /// buttons, as the diff view does, and leaves n, N, p, P, g, and G to the
+    /// editor of its focused excerpt. The shifted side buttons walk whole
+    /// hunks.
     #[test]
-    fn the_changes_view_walks_changes_and_leaves_g_to_the_editor() {
+    fn the_changes_view_walks_changes_and_leaves_n_p_and_g_to_the_editor() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let changes = TestState::new()
@@ -3135,14 +3136,19 @@ mod tests {
 
         assert_eq!(
             (
-                (key('n'), key('p')),
+                (key('n'), key('N'), key('p'), key('P')),
                 (notch(WheelDirection::Down), notch(WheelDirection::Up)),
                 (button(SideButton::Back), button(SideButton::Forward)),
                 (shifted(SideButton::Back), shifted(SideButton::Forward)),
                 (key('g'), key('G')),
             ),
             (
-                (only("GotoNextChange"), only("GotoPrevChange")),
+                (
+                    only("SearchNext"),
+                    only("SearchPrev"),
+                    only("PasteAfter"),
+                    only("PasteBefore"),
+                ),
                 (only("GotoNextChange"), only("GotoPrevChange")),
                 (only("DiffBack"), only("DiffForward")),
                 (only("GotoNextGitChange"), only("GotoPrevGitChange")),

@@ -4347,13 +4347,14 @@ mod lsp_filter_tests {
             ["C-9", "tint down"],
             ["C-0", "tint up"],
         ];
+        let walk = [["MBk", "next change"], ["MFw", "prev change"]];
         let hunks = [["S-MBk", "next hunk"], ["S-MFw", "prev hunk"]];
         assert_eq!(
             (split, changes),
             (
                 rows(&[
                     &dials[..],
-                    &[["MBk", "next change"], ["MFw", "prev change"]],
+                    &walk[..],
                     &hunks[..],
                     &[["C-t", "files / changes"]],
                 ]),
@@ -4365,13 +4366,12 @@ mod lsp_filter_tests {
                         ["Ret", "open"],
                         ["j, Dn", "next row"],
                         ["k, Up", "prev row"],
-                        ["n, MBk", "next change"],
-                        ["p, MFw", "prev change"],
                         ["C-f, PgDn", "page down"],
                         ["C-b, PgUp", "page up"],
                         ["C-d", "half page down"],
                         ["C-u", "half page up"],
                     ],
+                    &walk[..],
                     &hunks[..],
                     &[[":", "commands"]],
                 ]),
