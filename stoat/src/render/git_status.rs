@@ -536,6 +536,7 @@ impl Painter<'_> {
             color: rgb(style),
             bg,
             text,
+            bold: false,
             follow: 0,
             anchor: None,
         }

@@ -201,6 +201,7 @@ fn the_live_grid_boxes_occlude_a_pool_at_its_own_font_size() {
         scale: 256,
         color: Rgb::new(0, 0, 0),
         bg: Some(run_bg),
+        bold: false,
         follow: 0,
         anchor: None,
         text: " ".repeat(cols as usize).into(),

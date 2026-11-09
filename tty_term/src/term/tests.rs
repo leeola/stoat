@@ -1862,6 +1862,7 @@ fn decoration_seq_stamps_declaration_order_and_resets() {
         scale: 160,
         color: [1, 2, 3],
         bg: Some([0, 0, 0]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "x".to_owned(),
@@ -2261,6 +2262,7 @@ fn text_run_apc_frame_sets_a_grid_text_run() {
         scale: 192,
         color: [150, 160, 170],
         bg: Some([24, 26, 32]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "42".to_owned(),
@@ -2279,6 +2281,7 @@ fn text_run_apc_frame_sets_a_grid_text_run() {
             scale: 192,
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
+            bold: false,
             follow: 0,
             anchor: None,
             text: "42".into(),
@@ -2299,6 +2302,7 @@ fn runs_captured_through_one_buffer_keep_their_own_text() {
             scale: 256,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: text.to_owned(),
@@ -2330,6 +2334,7 @@ fn a_run_of_invalid_bytes_still_captures_lossily() {
         scale: 256,
         color: [1, 2, 3],
         bg: None,
+        bold: false,
         follow: 0,
         anchor: None,
         text: "ok".to_owned(),
@@ -2729,6 +2734,7 @@ fn line_layout_shifts_a_bound_component_past_an_expansion() {
         scale: 256,
         color: [150, 160, 170],
         bg: Some([0, 0, 0]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "4".to_owned(),
@@ -2841,6 +2847,7 @@ fn text_runs_reresolve_when_only_the_line_layout_changes() {
         scale: 256,
         color: [150, 160, 170],
         bg: Some([0, 0, 0]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "4".to_owned(),
@@ -2975,8 +2982,8 @@ fn advance_reports_no_redraw_while_buffering() {
     );
 }
 
-/// A `Gstoatty;text_run` frame carrying `text`, so a test can stamp a
-/// distinguishable run and read it back off the projected grid.
+/// A bold `Gstoatty;text_run` frame carrying `text`, a distinguishable run
+/// that a test reads back off the projected grid.
 fn text_run_frame(text: &str) -> Vec<u8> {
     encode_text_run(&TextRunCommand {
         col: 0,
@@ -2984,6 +2991,7 @@ fn text_run_frame(text: &str) -> Vec<u8> {
         scale: 160,
         color: [200, 200, 200],
         bg: Some([0, 0, 0]),
+        bold: true,
         follow: 0,
         anchor: None,
         text: text.to_owned(),
@@ -3119,6 +3127,7 @@ fn text_runs_frame(texts: &[&str]) -> Vec<u8> {
         scale: 160,
         color: [200, 200, 200],
         bg: Some([0, 0, 0]),
+        bold: true,
         follow: 0,
         anchor: None,
         runs: texts
@@ -4206,6 +4215,7 @@ fn page_run(text: &str) -> TextRunCommand {
         scale: 160,
         color: [1, 2, 3],
         bg: None,
+        bold: false,
         follow: 0,
         anchor: None,
         text: text.to_owned(),
@@ -4673,10 +4683,11 @@ fn an_identical_sketch_redeclaration_holds_the_epoch() {
     );
 }
 
-/// The two fields a run grew are what tie a label to the mark it belongs to
-/// and to the pane it glides with, so both have to survive the projection.
+/// The fields a run grew are its weight and what tie a label to the mark it
+/// belongs to and to the pane it glides with, so each has to survive the
+/// projection.
 #[test]
-fn a_text_run_carries_its_follow_and_anchor_to_the_grid() {
+fn a_text_run_carries_its_weight_follow_and_anchor_to_the_grid() {
     let mut terminal = Terminal::new(2, 8, Theme::default());
     let mut grid = Grid::new(2, 8);
 
@@ -4686,6 +4697,7 @@ fn a_text_run_carries_its_follow_and_anchor_to_the_grid() {
         scale: 256,
         color: [1, 2, 3],
         bg: None,
+        bold: true,
         follow: 7,
         anchor: Some((3, 1.5)),
         text: "label".to_string(),
@@ -4695,7 +4707,10 @@ fn a_text_run_carries_its_follow_and_anchor_to_the_grid() {
     let [run] = grid.text_runs() else {
         panic!("one run reaches the grid, got {:?}", grid.text_runs());
     };
-    assert_eq!((run.follow, run.anchor), (7, Some((3, 1.5))));
+    assert_eq!(
+        (run.bold, run.follow, run.anchor),
+        (true, 7, Some((3, 1.5)))
+    );
 }
 
 /// A mark with every field set, so a round trip that drops one shows up.
@@ -4801,6 +4816,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
         scale: 160,
         color: [150, 160, 170],
         bg: Some([24, 26, 32]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "42".to_owned(),
@@ -4820,6 +4836,7 @@ fn fill_captures_bar_and_text_run_onto_the_slot() {
             scale: 160,
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
+            bold: false,
             follow: 0,
             anchor: None,
             text: "42".into(),
@@ -4860,6 +4877,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
         scale: 160,
         color: [1, 2, 3],
         bg: Some([0, 0, 0]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "aa".to_owned(),
@@ -4871,6 +4889,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
         scale: 160,
         color: [4, 5, 6],
         bg: Some([0, 0, 0]),
+        bold: false,
         follow: 0,
         anchor: None,
         text: "bb".to_owned(),
@@ -4891,6 +4910,7 @@ fn project_pool_stamps_translated_decorations_and_culls_off_window() {
             scale: 160,
             color: Rgb::new(4, 5, 6),
             bg: Some(Rgb::new(0, 0, 0)),
+            bold: false,
             follow: 0,
             anchor: None,
             text: "bb".into(),

@@ -172,9 +172,16 @@
 /// every plain bar. A terminal that predates it ignores the color and draws the
 /// bar solid. This version drops a shorter argument.
 ///
+/// Version 26 reads a fixed 27-byte `text_run` head, which ends in a flags
+/// byte, and a fixed 25-byte `text_runs` head, which holds a flags byte before
+/// the run count. Bit 0 of the flags draws the glyphs in the bold face. A
+/// terminal that predates it draws every run at regular weight, and it drops a
+/// batch, whose count it reads one byte early. This version drops a shorter
+/// head.
+///
 /// Zero is reserved for a peer whose handshake carries no version at all, which
 /// is every build from before the field existed.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// The first [`PROTOCOL_VERSION`] whose terminal reads the `text_runs` and
 /// `bars` batches.

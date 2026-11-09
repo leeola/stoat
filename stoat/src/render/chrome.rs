@@ -295,6 +295,7 @@ fn modal_frame_inner(
                     color: border,
                     bg: None,
                     text: title,
+                    bold: false,
                     follow: 0,
                     anchor: None,
                 }
@@ -593,6 +594,7 @@ pub(crate) fn toggle_mark(
             color,
             bg: None,
             text: glyph,
+            bold: false,
             follow: 0,
             anchor: None,
         }
@@ -634,6 +636,7 @@ pub(crate) fn text(
                 color,
                 bg: Some(bg),
                 text: content,
+                bold: false,
                 follow: 0,
                 anchor: None,
             }
@@ -854,6 +857,7 @@ mod tests {
             scale: 256,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: " hi ".to_owned(),
@@ -1364,6 +1368,7 @@ mod tests {
                 scale: 160,
                 color: [1, 2, 3],
                 bg: None,
+                bold: false,
                 follow: 0,
                 anchor: None,
                 text: text.to_owned(),
@@ -1457,6 +1462,7 @@ mod tests {
                 scale: 218,
                 color: [1, 2, 3],
                 bg: Some([9, 9, 9]),
+                bold: false,
                 follow: 0,
                 anchor: None,
                 text: "hi".to_owned(),

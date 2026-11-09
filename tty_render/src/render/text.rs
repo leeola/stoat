@@ -2973,12 +2973,16 @@ impl TextPass {
         }
         let col = f32::from(run.col) / 16.0;
         let row = f32::from(run.row) / 16.0;
+        let style = font::FaceStyle {
+            bold: run.bold,
+            italic: false,
+        };
 
         for (index, ch) in run.text.chars().enumerate() {
             if ch == ' ' {
                 continue;
             }
-            let Some(key) = self.glyph_key(ch, scale, font::FaceStyle::REGULAR) else {
+            let Some(key) = self.glyph_key(ch, scale, style) else {
                 continue;
             };
             let Some(info) = self.atlas.get_or_insert(

@@ -286,6 +286,7 @@ fn render_single_badge(
                 color,
                 bg: None,
                 text: &text,
+                bold: false,
                 follow: 0,
                 anchor: None,
             }
@@ -616,6 +617,7 @@ mod tests {
                         color: BADGE_RGB,
                         bg: None,
                         text: "ab".to_string(),
+                        bold: false,
                         follow: 0,
                         anchor: None,
                     }),

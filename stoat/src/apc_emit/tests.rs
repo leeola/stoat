@@ -1961,6 +1961,7 @@ fn ring_and_label(text: Rect, label: &str, theme: &crate::theme::Theme) -> Vec<c
             scale: theme.type_scale(TypeRole::Small),
             color: READ_ONLY_LABEL,
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: label.to_string(),

@@ -91,6 +91,8 @@ pub struct StatusSegment<'a> {
     pub text: &'a str,
     pub fg: [u8; 3],
     pub bg: [u8; 3],
+    /// Whether the text draws in the bold face.
+    pub bold: bool,
 }
 
 /// A run of a [`StatusBar`]'s left segments that draws in one box of whole
@@ -195,6 +197,7 @@ impl StatusBar<'_> {
                         text,
                         fg: seg.fg,
                         bg: seg.bg,
+                        bold: seg.bold,
                     };
                     match self.dots.contains(&index) {
                         true => self.draw_dot(x, advance, seg.fg, area, buf, scene),
@@ -286,6 +289,7 @@ impl StatusBar<'_> {
             scale,
             color: seg.fg,
             bg: None,
+            bold: seg.bold,
             text: seg.text,
             follow: 0,
             anchor: None,
@@ -482,11 +486,13 @@ mod tests {
                 text: "ab",
                 fg: [1, 2, 3],
                 bg: [4, 5, 6],
+                bold: false,
             },
             StatusSegment {
                 text: "c",
                 fg: [7, 8, 9],
                 bg: [10, 11, 12],
+                bold: true,
             },
         ];
         let status = StatusBar {
@@ -521,6 +527,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "ab".to_owned(),
@@ -540,6 +547,7 @@ mod tests {
             scale: 160,
             color: [7, 8, 9],
             bg: None,
+            bold: true,
             follow: 0,
             anchor: None,
             text: "c".to_owned(),
@@ -558,7 +566,7 @@ mod tests {
         );
         assert!(
             contains(scene.buffer(), &second),
-            "second box-less run at the first's advance"
+            "second box-less run at the first's advance, in bold"
         );
     }
 
@@ -568,6 +576,7 @@ mod tests {
             text: "xy",
             fg: [1, 2, 3],
             bg: [4, 5, 6],
+            bold: false,
         }];
         let status = StatusBar {
             left: &[],
@@ -601,6 +610,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "xy".to_owned(),
@@ -623,6 +633,7 @@ mod tests {
             text: "xy",
             fg: [1, 2, 3],
             bg: [4, 5, 6],
+            bold: false,
         }];
         let status = StatusBar {
             left: &[],
@@ -657,6 +668,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "xy".to_owned(),
@@ -679,6 +691,7 @@ mod tests {
             text: "ABCDEFGHIJKLMN",
             fg: [1, 2, 3],
             bg: [4, 5, 6],
+            bold: false,
         }];
         let status = StatusBar {
             left: &left,
@@ -704,6 +717,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "ABCDEFGHIJKL".to_owned(),
@@ -724,11 +738,13 @@ mod tests {
                 text: "ab",
                 fg: [1, 2, 3],
                 bg: [4, 5, 6],
+                bold: false,
             },
             StatusSegment {
                 text: "LONGISH",
                 fg: [7, 8, 9],
                 bg: [10, 11, 12],
+                bold: false,
             },
         ];
         let status = StatusBar {
@@ -755,6 +771,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "ab".to_owned(),
@@ -765,6 +782,7 @@ mod tests {
             scale: 160,
             color: [7, 8, 9],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "LO".to_owned(),
@@ -784,6 +802,7 @@ mod tests {
             scale: 160,
             color: [7, 8, 9],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "LONGISH".to_owned(),
@@ -825,11 +844,13 @@ mod tests {
             text: "LEFT",
             fg: [1, 1, 1],
             bg: [2, 2, 2],
+            bold: false,
         }];
         let right = [StatusSegment {
             text: "R",
             fg: [3, 3, 3],
             bg: [4, 4, 4],
+            bold: false,
         }];
         let status = StatusBar {
             left: &left,
@@ -855,6 +876,7 @@ mod tests {
             scale: 160,
             color: [3, 3, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "R".to_owned(),
@@ -917,11 +939,13 @@ mod tests {
             text: " NOR ",
             fg: [1, 2, 3],
             bg: [4, 5, 6],
+            bold: false,
         }];
         let right = [StatusSegment {
             text: " 1:1 ",
             fg: [7, 8, 9],
             bg: [10, 11, 12],
+            bold: false,
         }];
         let status = StatusBar {
             left: &left,
@@ -993,11 +1017,13 @@ mod tests {
             text: "ab",
             fg: [1, 2, 3],
             bg: bar_bg,
+            bold: false,
         }];
         let right = [StatusSegment {
             text: "xy",
             fg: [7, 8, 9],
             bg: [10, 11, 12],
+            bold: false,
         }];
         let status = StatusBar {
             left: &left,
@@ -1031,6 +1057,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "ab".to_owned(),
@@ -1081,11 +1108,13 @@ mod tests {
                 text: " NOR ",
                 fg: [1, 2, 3],
                 bg: [4, 5, 6],
+                bold: false,
             },
             StatusSegment {
                 text: "ab",
                 fg: [7, 8, 9],
                 bg: [0, 0, 0],
+                bold: false,
             },
         ];
         let boxes = [SegmentBox {
@@ -1148,6 +1177,7 @@ mod tests {
                 scale: 232,
                 color,
                 bg: None,
+                bold: false,
                 follow: 0,
                 anchor: None,
                 text: text.to_owned(),
@@ -1179,7 +1209,12 @@ mod tests {
     /// place of its glyph.
     #[test]
     fn a_box_aligns_its_run_and_a_dot_draws_a_square() {
-        let segment = |text, fg, bg| StatusSegment { text, fg, bg };
+        let segment = |text, fg, bg| StatusSegment {
+            text,
+            fg,
+            bg,
+            bold: false,
+        };
         let left = [
             segment("a", [1, 1, 1], [0, 0, 0]),
             segment("bc", [2, 2, 2], [9, 9, 9]),
@@ -1212,6 +1247,7 @@ mod tests {
                 scale: 160,
                 color,
                 bg: None,
+                bold: false,
                 follow: 0,
                 anchor: None,
                 text: text.to_owned(),
@@ -1302,6 +1338,7 @@ mod tests {
             text,
             fg,
             bg: [0, 0, 0],
+            bold: false,
         };
         let left = [
             segment("ab", [1, 1, 1]),
@@ -1335,6 +1372,7 @@ mod tests {
                 scale,
                 color,
                 bg: None,
+                bold: false,
                 follow: 0,
                 anchor: None,
                 text: text.to_owned(),

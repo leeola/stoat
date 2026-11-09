@@ -7,6 +7,13 @@
 
 use crate::frame;
 
+/// The bit of a run's flags byte that draws its glyphs in the bold face.
+const BOLD: u8 = 1;
+
+/// Bytes a `text_run` head takes, which hold the position, the scale, the
+/// colors, the sketch the run follows, its anchor, and the flags byte.
+const TEXT_RUN_HEAD: usize = 27;
+
 /// Draw a run of text at a fractional scale, vertically centered on a cell row.
 ///
 /// A non-cell component primitive: the run is drawn off the cell grid, so it can
@@ -37,6 +44,10 @@ pub struct TextRunCommand<S = String> {
     pub scale: u16,
     pub color: [u8; 3],
     pub bg: Option<[u8; 3]>,
+    /// Whether the glyphs draw in the bold face, the face a cell's bold
+    /// attribute draws in. The run advances one scaled cell width per
+    /// character in either face.
+    pub bold: bool,
     /// Sketch whose reveal and opacity this run takes, so a label appears as
     /// the box it sits in draws itself and recedes with it as it dims. Zero
     /// fades the run in on its own and leaves it at full strength.
@@ -50,11 +61,9 @@ pub struct TextRunCommand<S = String> {
 /// Encode a [`TextRunCommand`] as a full `Gstoatty;text_run` frame for an
 /// emitter.
 ///
-/// The position, scale, color, and background ride in a fixed head on the open
-/// marker, followed by the sketch this run follows and its optional anchor. A
-/// 12-byte head is still decoded as the legacy form that always carries a
-/// background, and a 13-byte one as the form that leads and is screen-fixed.
-/// The run text streams between the markers.
+/// The position, scale, colors, the sketch this run follows, its optional
+/// anchor, and a flags byte ride in a fixed head on the open marker. The run
+/// text streams between the markers.
 pub fn encode_text_run<S: AsRef<str>>(command: &TextRunCommand<S>) -> Vec<u8> {
     let mut out = Vec::new();
     encode_text_run_into(&mut out, command);
@@ -111,18 +120,24 @@ pub fn encode_text_run_scope<S>(
         w.write_all(&command.color)?;
         w.write_all(&command.bg.unwrap_or([0, 0, 0]))?;
         w.write_all(&[command.bg.is_some() as u8])?;
-        // Appended after the head every earlier build reads, so one of those
-        // decodes the frame whole and treats the run as leading and
-        // screen-fixed.
         w.write_all(&command.follow.to_be_bytes())?;
         w.write_all(&[command.anchor.is_some() as u8])?;
         let (host, top_rows) = command.anchor.unwrap_or((0, 0.0));
         w.write_all(&host.to_be_bytes())?;
-        w.write_all(&top_rows.to_be_bytes())
+        w.write_all(&top_rows.to_be_bytes())?;
+        w.write_all(&[flags(command.bold)])
     });
     frame::end(out);
     text(out);
     encode_text_run_end_into(out);
+}
+
+/// The flags byte of a run, or of a batch's shared style, in `bold`.
+fn flags(bold: bool) -> u8 {
+    match bold {
+        true => BOLD,
+        false => 0,
+    }
 }
 
 /// Encode a [`Command::TextRunEnd`] as a full `Gstoatty;text_run_end`
@@ -142,39 +157,25 @@ pub fn encode_text_run_end_into(out: &mut Vec<u8>) {
     frame::end(out);
 }
 
-/// Decode a `Gstoatty;text_run` open marker's head. The `text` streams as the
-/// bytes after this frame and is captured by the terminal between the open
-/// marker and [`Command::TextRunEnd`], so it is empty here.
+/// Decode a `Gstoatty;text_run` open marker's head, or `None` for a head short
+/// of [`TEXT_RUN_HEAD`] bytes. The `text` streams as the bytes after this frame
+/// and is captured by the terminal between the open marker and
+/// [`Command::TextRunEnd`], so it is empty here.
 pub(super) fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
-    let arg = args.first()?;
-    if arg.len() < 12 {
-        return None;
-    }
-
-    // A 12-byte head predates the bg-presence byte and always carries a bg. A
-    // 13-byte head gates the bg on its trailing presence byte.
-    let bg = if arg.len() >= 13 {
-        (arg[12] != 0).then_some([arg[9], arg[10], arg[11]])
-    } else {
-        Some([arg[9], arg[10], arg[11]])
-    };
+    let arg: &[u8; TEXT_RUN_HEAD] = args.first()?.get(..TEXT_RUN_HEAD)?.try_into().ok()?;
 
     Some(TextRunCommand {
         col: i16::from_be_bytes([arg[0], arg[1]]),
         row: i16::from_be_bytes([arg[2], arg[3]]),
         scale: u16::from_be_bytes([arg[4], arg[5]]),
         color: [arg[6], arg[7], arg[8]],
-        bg,
-        // A head that stops at the bg flag predates both, so the run leads
-        // rather than follows and is screen-fixed.
-        follow: arg
-            .get(13..17)
-            .map(|f| u32::from_be_bytes([f[0], f[1], f[2], f[3]]))
-            .unwrap_or(0),
-        anchor: arg.get(17..26).filter(|tail| tail[0] != 0).map(|tail| {
+        bg: (arg[12] != 0).then_some([arg[9], arg[10], arg[11]]),
+        bold: arg[26] & BOLD != 0,
+        follow: u32::from_be_bytes([arg[13], arg[14], arg[15], arg[16]]),
+        anchor: (arg[17] != 0).then(|| {
             (
-                u32::from_be_bytes([tail[1], tail[2], tail[3], tail[4]]),
-                f32::from_be_bytes([tail[5], tail[6], tail[7], tail[8]]),
+                u32::from_be_bytes([arg[18], arg[19], arg[20], arg[21]]),
+                f32::from_be_bytes([arg[22], arg[23], arg[24], arg[25]]),
             )
         }),
         text: String::new(),
@@ -200,14 +201,17 @@ pub struct TextRunsCommand<S = String> {
     pub scale: u16,
     pub color: [u8; 3],
     pub bg: Option<[u8; 3]>,
+    /// Whether every run of the batch draws in the bold face, as
+    /// [`TextRunCommand::bold`] draws one.
+    pub bold: bool,
     pub follow: u32,
     pub anchor: Option<(u32, f32)>,
     pub runs: Vec<(i16, i16, S)>,
 }
 
-/// Bytes a `text_runs` argument spends ahead of its runs, the shared fields and
-/// the run count.
-const TEXT_RUNS_HEAD: usize = 24;
+/// Bytes a `text_runs` argument spends ahead of its runs, the shared fields, a
+/// flags byte, and the run count.
+const TEXT_RUNS_HEAD: usize = 25;
 
 /// Bytes a run spends ahead of its text, its column, row, and text length.
 const TEXT_RUNS_ENTRY: usize = 6;
@@ -247,6 +251,7 @@ pub fn encode_text_runs_into<S: AsRef<str>>(out: &mut Vec<u8>, command: &TextRun
             let (host, top_rows) = command.anchor.unwrap_or((0, 0.0));
             w.write_all(&host.to_be_bytes())?;
             w.write_all(&top_rows.to_be_bytes())?;
+            w.write_all(&[flags(command.bold)])?;
             w.write_all(&(runs.len() as u16).to_be_bytes())?;
             for (col, row, text) in runs {
                 let text = text.as_ref().as_bytes();
@@ -266,7 +271,7 @@ pub fn encode_text_runs_into<S: AsRef<str>>(out: &mut Vec<u8>, command: &TextRun
 pub(super) fn decode_text_runs(args: &[Vec<u8>]) -> Option<TextRunsCommand> {
     let arg = args.first()?;
     let head: &[u8; TEXT_RUNS_HEAD] = arg.get(..TEXT_RUNS_HEAD)?.try_into().ok()?;
-    let count = u16::from_be_bytes([head[22], head[23]]);
+    let count = u16::from_be_bytes([head[23], head[24]]);
 
     // Grown by push rather than pre-allocated, so an inflated count forces no
     // huge allocation before the run bytes prove short.
@@ -291,6 +296,7 @@ pub(super) fn decode_text_runs(args: &[Vec<u8>]) -> Option<TextRunsCommand> {
         scale: u16::from_be_bytes([head[0], head[1]]),
         color: [head[2], head[3], head[4]],
         bg: (head[8] != 0).then_some([head[5], head[6], head[7]]),
+        bold: head[22] & BOLD != 0,
         follow: u32::from_be_bytes([head[9], head[10], head[11], head[12]]),
         anchor: (head[13] != 0).then(|| {
             (
@@ -307,16 +313,18 @@ mod tests {
     use super::*;
     use crate::command::{decode, decode_stream, Command};
 
-    /// A run that follows a sketch and rides a pool has to survive the wire,
-    /// since both are what put a label on a mark that glides with its pane.
+    /// A bold run that follows a sketch and rides a pool has to survive the
+    /// wire, since those are what put a label on a mark that glides with its
+    /// pane.
     #[test]
-    fn a_following_anchored_run_round_trips() {
+    fn a_bold_following_anchored_run_round_trips() {
         let command = TextRunCommand {
             col: -3,
             row: 8,
             scale: 160,
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
+            bold: true,
             follow: 42,
             anchor: Some((7, 2.5)),
             text: "label".to_string(),
@@ -330,34 +338,14 @@ mod tests {
         );
     }
 
-    /// The two fields are appended, so a head that stops where an older build
-    /// stopped still decodes. It reads as a run that leads rather than follows
-    /// and is fixed to the screen.
+    /// The head is fixed, so a head that stops short of its flags byte decodes
+    /// to nothing, as the heads of older builds stop after the background, its
+    /// presence byte, the sketch, or the anchor.
     #[test]
-    fn a_head_predating_follow_and_anchor_still_decodes() {
-        // Thirteen bytes: the head through the bg-presence flag, and nothing
-        // after it.
-        let mut arg = Vec::new();
-        arg.extend_from_slice(&(-3i16).to_be_bytes());
-        arg.extend_from_slice(&8i16.to_be_bytes());
-        arg.extend_from_slice(&160u16.to_be_bytes());
-        arg.extend_from_slice(&[1, 2, 3]);
-        arg.extend_from_slice(&[4, 5, 6]);
-        arg.push(1);
-        assert_eq!(arg.len(), 13);
-
+    fn a_head_short_of_its_flags_byte_is_dropped() {
         assert_eq!(
-            decode_text_run(&[arg]),
-            Some(TextRunCommand {
-                col: -3,
-                row: 8,
-                scale: 160,
-                color: [1, 2, 3],
-                bg: Some([4, 5, 6]),
-                follow: 0,
-                anchor: None,
-                text: String::new(),
-            }),
+            [12, 13, 17, 26, 27].map(|len| decode_text_run(&[vec![0; len]]).is_some()),
+            [false, false, false, false, true],
         );
     }
 
@@ -372,6 +360,7 @@ mod tests {
             scale: 256,
             color: [0, 0, 0],
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: String::new(),
@@ -395,34 +384,8 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_text_run_payload() {
-        // The first arg here decodes to 3 bytes, short of the 12 a text run head needs.
+        // The first arg here decodes to 3 bytes, short of a text run's head.
         assert!(decode(b"Gstoatty;text_run;YWJj").is_none());
-    }
-
-    #[test]
-    fn text_run_decodes_legacy_arg_without_bg_presence() {
-        // A 12-byte head predates the bg-presence byte and decodes to an opaque bg.
-        let mut arg = Vec::new();
-        arg.extend_from_slice(&(-8i16).to_be_bytes());
-        arg.extend_from_slice(&48i16.to_be_bytes());
-        arg.extend_from_slice(&192u16.to_be_bytes());
-        arg.extend_from_slice(&[150, 160, 170]);
-        arg.extend_from_slice(&[24, 26, 32]);
-        assert_eq!(arg.len(), 12);
-
-        assert_eq!(
-            decode_text_run(&[arg]),
-            Some(TextRunCommand {
-                col: -8,
-                row: 48,
-                scale: 192,
-                color: [150, 160, 170],
-                bg: Some([24, 26, 32]),
-                follow: 0,
-                anchor: None,
-                text: String::new(),
-            })
-        );
     }
 
     fn batch(runs: Vec<(i16, i16, String)>) -> TextRunsCommand {
@@ -430,6 +393,7 @@ mod tests {
             scale: 160,
             color: [1, 2, 3],
             bg: Some([4, 5, 6]),
+            bold: true,
             follow: 9,
             anchor: Some((7, 2.5)),
             runs,

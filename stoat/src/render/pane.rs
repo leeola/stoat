@@ -561,6 +561,7 @@ fn render_read_only_frame(
         color: label_rgb,
         bg: None,
         text: label,
+        bold: false,
         follow: 0,
         anchor: None,
     }
@@ -1918,6 +1919,7 @@ fn draw_conflict_chip(
         color,
         bg: None,
         text: &chip.text,
+        bold: false,
         follow: 0,
         anchor: None,
     }
@@ -2667,6 +2669,7 @@ fn resolve_rich_segments(segments: &[StatusSeg], base: Style) -> Option<Vec<Stat
                 text: text.as_str(),
                 fg,
                 bg,
+                bold: false,
             })
         })
         .collect()

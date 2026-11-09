@@ -28,6 +28,9 @@ pub struct TextRun<'a> {
     /// Opaque background box the run composites over, or `None` to blend the
     /// glyphs directly over the surface behind the run with no backing box.
     pub bg: Option<[u8; 3]>,
+    /// Whether the glyphs draw in the bold face. The run advances as far in
+    /// either face.
+    pub bold: bool,
     pub text: &'a str,
     /// Hand-drawn mark whose reveal this run fades in with, by its id, so a
     /// label appears as the mark it names draws itself. Zero draws the run at
@@ -73,6 +76,7 @@ impl StatefulWidget for TextRun<'_> {
                 scale: self.scale,
                 color: self.color,
                 bg: self.bg,
+                bold: self.bold,
                 follow: self.follow,
                 anchor: self.anchor,
                 text: self.text,
@@ -86,8 +90,8 @@ impl StatefulWidget for TextRun<'_> {
 ///
 /// A gutter numbers every row with a run of its own, and a frame per number
 /// spends most of its bytes on the head. The batch groups the runs pushed into
-/// it by the fields they share, the scale, color, background, follow, and
-/// anchor, and [`Self::flush`] writes each group as one frame. The groups go
+/// it by the fields they share, the scale, color, background, weight, follow,
+/// and anchor, and [`Self::flush`] writes each group as one frame. The groups go
 /// out in the order their first runs arrived, so the draw order between styles
 /// changes. Batch only runs that do not overlap one another.
 ///
@@ -113,6 +117,7 @@ struct RunStyle {
     scale: u16,
     color: [u8; 3],
     bg: Option<[u8; 3]>,
+    bold: bool,
     follow: u32,
     anchor: Option<(u32, f32)>,
 }
@@ -124,6 +129,7 @@ impl TextRunBatch {
             scale: run.scale,
             color: run.color,
             bg: run.bg,
+            bold: run.bold,
             follow: run.follow,
             anchor: run.anchor,
         };
@@ -153,6 +159,7 @@ impl TextRunBatch {
                 scale,
                 color,
                 bg,
+                bold,
                 follow,
                 anchor,
             } = group.style;
@@ -168,6 +175,7 @@ impl TextRunBatch {
                         scale,
                         color,
                         bg,
+                        bold,
                         follow,
                         anchor,
                         runs,
@@ -185,6 +193,7 @@ impl TextRunBatch {
                         scale,
                         color,
                         bg,
+                        bold,
                         follow,
                         anchor,
                         text: &self.text[span],
@@ -217,6 +226,7 @@ mod tests {
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
             text: "42",
+            bold: false,
             follow: 0,
             anchor: None,
         }
@@ -228,6 +238,7 @@ mod tests {
             scale: 160,
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
+            bold: false,
             follow: 0,
             anchor: None,
             text: "42".to_owned(),
@@ -235,11 +246,11 @@ mod tests {
         assert_eq!(scene.buffer().as_slice(), expected.as_slice());
     }
 
-    /// A label names the mark it fades in with and the pool it rides. Both are
-    /// terminal-side ids rather than anything area-relative, so they reach the
-    /// wire as declared.
+    /// A label names its weight, the mark it fades in with, and the pool it
+    /// rides. None of them is area-relative, so they reach the wire as
+    /// declared.
     #[test]
-    fn a_follow_and_an_anchor_reach_the_wire_as_declared() {
+    fn a_weight_a_follow_and_an_anchor_reach_the_wire_as_declared() {
         let mut scene = ApcScene::new();
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 24));
 
@@ -250,6 +261,7 @@ mod tests {
             color: [99, 109, 131],
             bg: None,
             text: "42",
+            bold: true,
             follow: 7,
             anchor: Some((3, 12.5)),
         }
@@ -261,6 +273,7 @@ mod tests {
             scale: 256,
             color: [99, 109, 131],
             bg: None,
+            bold: true,
             follow: 7,
             anchor: Some((3, 12.5)),
             text: "42".to_owned(),
@@ -280,6 +293,7 @@ mod tests {
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
             text: "42",
+            bold: false,
             follow: 0,
             anchor: None,
         }
@@ -291,6 +305,7 @@ mod tests {
             scale: 160,
             color: [99, 109, 131],
             bg: Some([40, 44, 52]),
+            bold: false,
             follow: 0,
             anchor: None,
             text: "42".to_owned(),
@@ -327,7 +342,9 @@ mod tests {
 
     /// A batch sends one `text_runs` frame per style, in the order each style
     /// first arrived, and a host without the batch protocol one `text_run` per
-    /// run in that order. Each run sits where its own render puts it.
+    /// run in that order. Each run sits where its own render puts it. A weight
+    /// is part of the style, so a bold run in a color the batch holds goes out
+    /// in a group of its own.
     #[test]
     fn a_batch_groups_its_runs_by_style() {
         let (grey, gold) = ([1, 1, 1], [9, 9, 0]);
@@ -335,7 +352,12 @@ mod tests {
             let mut scene = ApcScene::new();
             scene.set_batch_protocol(batches);
             let mut batch = TextRunBatch::default();
-            for (row, color, text) in [(0, grey, "1"), (16, gold, "2"), (32, grey, "3")] {
+            for (row, color, bold, text) in [
+                (0, grey, false, "1"),
+                (16, gold, false, "2"),
+                (32, grey, false, "3"),
+                (48, grey, true, "4"),
+            ] {
                 let run = TextRun {
                     col: 0,
                     row,
@@ -343,19 +365,21 @@ mod tests {
                     color,
                     bg: None,
                     text,
+                    bold,
                     follow: 0,
                     anchor: None,
                 };
-                batch.push(Rect::new(2, 1, 4, 3), run);
+                batch.push(Rect::new(2, 1, 4, 4), run);
             }
             batch.flush(&mut scene);
             decode_stream(scene.buffer())
         };
-        let batch_of = |color, runs: &[(i16, &str)]| {
+        let batch_of = |color, bold, runs: &[(i16, &str)]| {
             Command::TextRuns(TextRunsCommand {
                 scale: 160,
                 color,
                 bg: None,
+                bold,
                 follow: 0,
                 anchor: None,
                 runs: runs
@@ -364,7 +388,7 @@ mod tests {
                     .collect(),
             })
         };
-        let single = |row, color, text: &str| {
+        let single = |row, color, bold, text: &str| {
             [
                 Command::TextRun(TextRunCommand {
                     col: 32,
@@ -372,6 +396,7 @@ mod tests {
                     scale: 160,
                     color,
                     bg: None,
+                    bold,
                     follow: 0,
                     anchor: None,
                     text: text.to_owned(),
@@ -383,16 +408,18 @@ mod tests {
         assert_eq!(
             flushed(true),
             [
-                batch_of(grey, &[(16, "1"), (48, "3")]),
-                batch_of(gold, &[(32, "2")])
+                batch_of(grey, false, &[(16, "1"), (48, "3")]),
+                batch_of(gold, false, &[(32, "2")]),
+                batch_of(grey, true, &[(64, "4")]),
             ],
         );
         assert_eq!(
             flushed(false),
             [
-                single(16, grey, "1"),
-                single(48, grey, "3"),
-                single(32, gold, "2")
+                single(16, grey, false, "1"),
+                single(48, grey, false, "3"),
+                single(32, gold, false, "2"),
+                single(64, grey, true, "4"),
             ]
             .concat(),
         );

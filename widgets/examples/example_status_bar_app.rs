@@ -198,6 +198,7 @@ fn render_frame(
             text: mode.label,
             fg: ON_COLOR,
             bg: mode.bg,
+            bold: false,
         },
         // On the bar's own background, so no box is painted and the hairline
         // reads through the segment.
@@ -205,11 +206,13 @@ fn render_frame(
             text: path,
             fg: BODY_FG,
             bg: EDITOR_BG,
+            bold: false,
         },
         StatusSegment {
             text: " +12 -3 ",
             fg: ON_COLOR,
             bg: DIFF_BG,
+            bold: false,
         },
     ];
     let right = [
@@ -217,16 +220,19 @@ fn render_frame(
             text: " Rust ",
             fg: ON_COLOR,
             bg: LANG_BG,
+            bold: false,
         },
         StatusSegment {
             text: " UTF-8 ",
             fg: BODY_FG,
             bg: EDITOR_BG,
+            bold: false,
         },
         StatusSegment {
             text: &uptime,
             fg: BODY_FG,
             bg: EDITOR_BG,
+            bold: false,
         },
     ];
 

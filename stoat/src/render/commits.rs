@@ -1327,6 +1327,7 @@ fn render_file_preview(
                         color,
                         bg: None,
                         text: &num_text,
+                        bold: false,
                         follow: 0,
                         anchor: None,
                     },

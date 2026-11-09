@@ -460,6 +460,7 @@ pub(crate) fn render_hover(stoat: &mut Stoat, buf: &mut Buffer, scene: &mut ApcS
                             color,
                             bg: Some(bg),
                             text: seg_text.to_string(),
+                            bold: false,
                             follow,
                             anchor,
                         };
@@ -557,6 +558,7 @@ fn paint_footer(
             color,
             bg: Some(fill),
             text,
+            bold: false,
             follow: 0,
             anchor,
         };
@@ -923,6 +925,7 @@ pub(crate) fn render_hover_page(
                 color,
                 bg: Some(run_bg),
                 text,
+                bold: false,
                 follow: 0,
                 anchor: None,
             }

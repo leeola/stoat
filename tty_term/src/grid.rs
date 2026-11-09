@@ -2078,6 +2078,9 @@ pub struct TextRun {
     /// Opaque background box painted behind the glyphs, or `None` to blend the
     /// glyphs directly over the surface behind the run with no backing box.
     pub bg: Option<Rgb>,
+    /// Whether the glyphs draw in the bold face, the face a cell's bold
+    /// attribute draws in.
+    pub bold: bool,
     pub text: Arc<str>,
     /// Sketch whose reveal this run fades in with, so a label appears as the
     /// box it sits in draws itself. Zero fades the run in on its own.
@@ -2870,6 +2873,7 @@ mod tests {
             scale: 192,
             color: Rgb::new(150, 160, 170),
             bg: Some(Rgb::new(24, 26, 32)),
+            bold: false,
             follow: 0,
             anchor: None,
             text: "42".into(),
@@ -2960,6 +2964,7 @@ mod tests {
             scale: 256,
             color: Rgb::new(1, 2, 3),
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "x".into(),
@@ -3459,6 +3464,7 @@ mod region_blit_tests {
             scale: 16,
             color: Rgb::new(1, 2, 3),
             bg: None,
+            bold: false,
             follow: 0,
             anchor: None,
             text: "x".into(),

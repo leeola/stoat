@@ -409,6 +409,7 @@ fn paint_marker(
             color,
             bg: None,
             text,
+            bold: false,
             follow: 0,
             anchor: None,
         }

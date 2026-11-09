@@ -492,6 +492,7 @@ impl RowPainter<'_> {
                 color,
                 bg: Some(bg),
                 text: &self.scratch,
+                bold: false,
                 follow: 0,
                 anchor: None,
             },
@@ -877,6 +878,7 @@ fn header_cell(cell: HeaderCell<'_>, buf: &mut Buffer, scene: &mut ApcScene) {
             color,
             bg: Some(bg),
             text,
+            bold: false,
             follow: 0,
             anchor: None,
         }
@@ -985,6 +987,7 @@ fn draw_chip(
         color: tone.fg,
         bg: Some(tone.tint),
         text,
+        bold: false,
         follow: 0,
         anchor: None,
     }
