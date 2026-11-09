@@ -7264,6 +7264,9 @@ fn relative_line_scroll_fills(
 /// [`rgb_diagnostic_theme`] resolves the page gutter colors alone, so a diff
 /// page under it numbers its rows in cells. [`rgb_relative_diff_theme`] adds
 /// the diff colors, so a diff page under it numbers its rows with runs.
+///
+/// The window is 120 columns wide, so a diff page lays out its base column
+/// beside the buffer column.
 fn buffered_relative_pool(
     protocol: u32,
     diff_view: bool,
@@ -7273,6 +7276,7 @@ fn buffered_relative_pool(
     tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     let mut h = Stoat::test();
+    h.resize(120, 24);
     h.stoat.theme = Arc::new(theme);
     h.stoat.stoatty_protocol = protocol;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
@@ -7465,6 +7469,10 @@ fn a_relative_step_sends_each_pages_numbers_in_one_frame() {
 /// cursor line, beside the base column's own numbers. Each row paints its
 /// buffer number first and then its base number, in a `text_runs` batch that
 /// keeps that order.
+///
+/// [`buffered_relative_pool`]'s window is wide enough for both columns. A
+/// narrower page unifies them, and its unchanged rows paint the buffer number
+/// alone.
 #[test]
 fn a_diff_page_decoration_carries_the_new_numbers() {
     use stoatty_protocol::command::{Command, FillCommand};

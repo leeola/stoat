@@ -214,6 +214,8 @@ impl DiffDials {
 /// style for its changed chars alone. Added and modified new lines leave it
 /// blank.
 /// Line numbers are base-file lines on the left and buffer lines on the right.
+/// The unified layout has one number column. There a row that shows a buffer
+/// line paints its buffer number, and a removed row paints its base line.
 /// Under [`BufferNumbering::Absolute`] each right row paints its buffer line.
 /// Under [`BufferNumbering::FromLine`] it paints its distance from the cursor
 /// line, and under [`BufferNumbering::FromSteps`] the steps that reach it from
@@ -1438,17 +1440,22 @@ pub(crate) fn paint_diff_rows(
                         },
                     };
                     if !continuation {
-                        draw_diff_num(
-                            &mut rich,
-                            buf,
-                            &mut num_text,
-                            inner,
-                            (left_x, left_num_x),
-                            y,
-                            line_base + 1,
-                            dim_style,
-                            digits,
-                        );
+                        // In the unified layout the live row's number holds the
+                        // one number column. The cursor walks by that number, so
+                        // the base line's number paints only in its own column.
+                        if sep_x.is_some() {
+                            draw_diff_num(
+                                &mut rich,
+                                buf,
+                                &mut num_text,
+                                inner,
+                                (left_x, left_num_x),
+                                y,
+                                line_base + 1,
+                                dim_style,
+                                digits,
+                            );
+                        }
                         if let Some(GutterMark { status, state }) = snapshot
                             .diff_map()
                             .and_then(|dm| dm.staged_mark_at_base_line(line_base))
@@ -3854,7 +3861,7 @@ mod tests {
                         == needle
                 })
                 .expect("a row shows the needle");
-            line_text(&unified, y, cols.left_num_x..cols.left_num_x + 2)
+            line_text(&unified, y, cols.right_num_x..cols.right_num_x + 2)
                 .trim()
                 .to_string()
         };
@@ -3865,11 +3872,11 @@ mod tests {
                     .map(String::from)
                     .to_vec(),
                 "5".to_string(),
-                "15".to_string(),
+                "17".to_string(),
             ),
             "the paired rows count their base lines, and in the unified layout \
-             the first run's block starts at b5 and the mirror row past the fold \
-             counts the lines hidden with the rows",
+             the first run's block starts at b5 and the mirror past the fold lands \
+             on its own line, so it counts the lines hidden with the rows",
         );
     }
 
@@ -3908,7 +3915,7 @@ mod tests {
             let y = (0..area.height)
                 .find(|&y| text_at(y) == needle)
                 .expect("a row shows the needle");
-            line_text(&buf, y, cols.left_num_x..cols.left_num_x + 2)
+            line_text(&buf, y, cols.right_num_x..cols.right_num_x + 2)
                 .trim()
                 .to_string()
         };
@@ -3926,7 +3933,7 @@ mod tests {
                 .map(String::from)
                 .to_vec(),
                 "13".to_string(),
-                "17".to_string(),
+                "15".to_string(),
             ),
             "the first run's lines above it, the fold, then the last run's lines \
              and the excess above it",
@@ -5676,6 +5683,64 @@ mod tests {
         };
         assert!(renders("old"), "the deleted base line renders inline");
         assert!(renders("new"), "the added buffer line renders inline");
+    }
+
+    /// Each row of the unified layout paints one number, in the cell gutter and
+    /// in the rich gutter's runs alike.
+    ///
+    /// An unchanged row reads its buffer line's number, as the cursor walks the
+    /// rows, and the number of the base line it mirrors takes no place beside
+    /// it. The removed line's row reads its base line.
+    #[test]
+    fn a_unified_diff_row_paints_one_number() {
+        let area = Rect::new(0, 0, 60, 8);
+        let paint = |scene: Option<&mut ApcScene>| {
+            let mut editor = diff_editor("a\nb\nc\nold\nd\ne\n", "a\nb\nc\nnew\nadded\nd\ne\n");
+            let mut buf = Buffer::empty(area);
+            render_diff_view(
+                &mut editor,
+                area,
+                Style::default(),
+                &rgb_diff_theme(),
+                &mut buf,
+                false,
+                None,
+                scene,
+                false,
+                DiffDials::shipped(),
+                BufferNumbering::FromLine(4),
+                &[],
+                false,
+            );
+            buf
+        };
+        let cells = paint(None);
+        let mut scene = ApcScene::new();
+        paint(Some(&mut scene));
+
+        let cols = two_digit_columns(area);
+        let cell_numbers: Vec<(u16, String)> = (0..area.height)
+            .map(|y| {
+                let number = line_text(&cells, y, cols.right_num_x..cols.right_num_x + 2);
+                (y, number.trim().to_string())
+            })
+            .collect();
+        let run_numbers: Vec<(u16, String)> = decode_stream(scene.buffer())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::TextRun(run) if run.text.chars().all(|c| c.is_ascii_digit()) => {
+                    Some(((run.row / 16) as u16, run.text))
+                },
+                _ => None,
+            })
+            .collect();
+
+        let numbers: Vec<(u16, String)> = ["3", "2", "1", "4", "4", "1", "2", "3"]
+            .into_iter()
+            .zip(0..)
+            .map(|(number, y)| (y, number.to_string()))
+            .collect();
+        assert_eq!((cell_numbers, run_numbers), (numbers.clone(), numbers));
     }
 
     #[test]
