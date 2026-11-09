@@ -3673,6 +3673,23 @@ fn focused_content(h: &crate::test_harness::TestHarness) -> Rect {
     crate::render::layout::split_pane_status(ws.panes.pane(ws.panes.focus()).area).0
 }
 
+/// `rects` less the cell the ghost cursor outlines, cut as the mask cuts it.
+///
+/// The ghost is a panel, and the terminal shows the live grid under every
+/// panel, so the mask leaves its cell out. The stack fixtures put the cursor
+/// on a paired row, whose base line takes the ghost.
+fn less_ghost(h: &crate::test_harness::TestHarness, rects: Vec<Rect>) -> Vec<Rect> {
+    let ws = h.stoat.active_workspace();
+    let (editor, _) = ws.focused_editor().expect("the focused excerpt");
+    let (x, y) = ws.editors[editor]
+        .ghost_cursor_cell
+        .expect("the cursor's row shows a base line");
+    rects
+        .into_iter()
+        .flat_map(|rect| subtract_rect(rect, Rect::new(x, y, 1, 1)))
+        .collect()
+}
+
 /// What `bytes` sends pool `pool`, by command, in wire order.
 fn pool_verbs(bytes: &[u8], pool: u32) -> Vec<&'static str> {
     use stoatty_protocol::command::Command;
@@ -3869,7 +3886,44 @@ fn resident_rects_name_a_held_stack_pool() {
 
     assert_eq!(
         (first, held, older, plain),
-        (vec![], vec![content], vec![], vec![])
+        (vec![], less_ghost(&h, vec![content]), vec![], vec![])
+    );
+}
+
+/// A composited stack's paint sends the rows' runs and bars to a scene it
+/// drops, but the ghost cursor still outlines the base cell beside the cursor
+/// in the pane's own scene, riding the stack's pool from its scroll.
+#[test]
+fn a_composited_stack_outlines_the_ghost_cursor_in_the_pane_s_scene() {
+    use stoatty_protocol::command::{BorderStyle, Command};
+
+    let (mut h, mut rx, pool) = resident_stack(TWO_FILES, MinimapMode::Off);
+    emit_raw(&mut h, &mut rx);
+    h.stoat.render();
+
+    let ghost = {
+        let ws = h.stoat.active_workspace();
+        let (editor, _) = ws.focused_editor().expect("the focused excerpt");
+        ws.editors[editor].ghost_cursor_cell
+    };
+    let outlines: Vec<_> = command::decode_stream(&h.stoat.apc_scene.all_bytes())
+        .into_iter()
+        .filter_map(|command| match command {
+            Command::Panel(panel) if panel.style == BorderStyle::Dashed => Some((
+                (panel.left, panel.top, panel.width, panel.height),
+                panel.anchor,
+            )),
+            _ => None,
+        })
+        .collect();
+    let composited = composited_stacks(&h.stoat)
+        .iter()
+        .any(|&(id, _)| id == pool);
+
+    let (x, y) = ghost.expect("the cursor's row shows a base line");
+    assert_eq!(
+        (composited, outlines),
+        (true, vec![((x, y, 1, 1), Some((pool, 0.0)))]),
     );
 }
 
@@ -3906,22 +3960,25 @@ fn a_panel_over_a_stack_pool_leaves_the_mask() {
 
     assert_eq!(
         resident_pool_rects(&h.stoat),
-        [
-            Rect::new(rect.x, rect.y, rect.width, 2),
-            Rect::new(
-                rect.x,
-                hole.bottom(),
-                rect.width,
-                rect.bottom() - hole.bottom()
-            ),
-            Rect::new(rect.x, hole.y, 10, hole.height),
-            Rect::new(
-                hole.right(),
-                hole.y,
-                rect.right() - hole.right(),
-                hole.height
-            ),
-        ]
+        less_ghost(
+            &h,
+            vec![
+                Rect::new(rect.x, rect.y, rect.width, 2),
+                Rect::new(
+                    rect.x,
+                    hole.bottom(),
+                    rect.width,
+                    rect.bottom() - hole.bottom()
+                ),
+                Rect::new(rect.x, hole.y, 10, hole.height),
+                Rect::new(
+                    hole.right(),
+                    hole.y,
+                    rect.right() - hole.right(),
+                    hole.height
+                ),
+            ]
+        ),
     );
 }
 
@@ -3987,7 +4044,7 @@ fn a_stack_a_resize_burst_moves_waits_for_the_settle() {
             vec![],
             vec![],
             vec![0, 1],
-            vec![focused_content(&h)]
+            less_ghost(&h, vec![focused_content(&h)])
         )
     );
 }
@@ -4018,7 +4075,7 @@ fn a_changes_view_over_a_held_editor_pool_leaves_the_mask() {
     emit_raw(&mut h, &mut rx);
     assert_eq!(
         (first, resident_pool_rects(&h.stoat)),
-        (vec![], vec![focused_content(&h)])
+        (vec![], less_ghost(&h, vec![focused_content(&h)]))
     );
 }
 

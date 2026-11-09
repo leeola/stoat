@@ -240,6 +240,13 @@ pub(crate) struct EditorState {
     /// input view or dock is, where the cursor is painted into the buffer
     /// instead. Transient render state, not persisted.
     pub(crate) cursor_screen_cell: Option<(u16, u16)>,
+    /// The base column's cell beside the primary cursor in a two-column diff
+    /// view, which the pane outlines as the ghost cursor.
+    ///
+    /// `None` when the paint was not focused, or when the cursor's row shows
+    /// no base line, as an added row does. Transient render state, not
+    /// persisted.
+    pub(crate) ghost_cursor_cell: Option<(u16, u16)>,
 }
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
@@ -301,6 +308,7 @@ impl EditorState {
             minimap_rect: None,
             text_rect: None,
             cursor_screen_cell: None,
+            ghost_cursor_cell: None,
         }
     }
 

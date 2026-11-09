@@ -31,9 +31,11 @@ use std::{
 use stoat_text::Point;
 use stoat_widgets::{
     bar::{Bar, BarBatch},
+    panel::Panel,
     text_run::{self, TextRun, TextRunBatch},
     ApcScene,
 };
+use stoatty_protocol::command::{BorderStyle, PanelShadow};
 
 /// Fraction an unchanged row's token foregrounds blend toward the editor
 /// background, leaving 60% of the syntax color.
@@ -312,6 +314,7 @@ pub(crate) fn render_diff_view(
         return;
     }
 
+    editor.ghost_cursor_cell = ghost_cursor_cell(editor, &snapshot, &cols, end_row);
     editor::paint_selections(
         editor,
         &snapshot,
@@ -333,6 +336,80 @@ pub(crate) fn render_diff_view(
             buf,
         );
     }
+}
+
+/// The base column's cell beside `editor`'s primary cursor, or `None` when the
+/// cursor's row shows no base line.
+///
+/// A base line shares the cursor's screen row in the two-column layout, so the
+/// cell takes that row and the cursor's column in the text. A row shows one
+/// when it is unchanged or pairs with a base row of its hunk. An added row, a
+/// fold row, the unified layout, and a column past the base text's width show
+/// none.
+fn ghost_cursor_cell(
+    editor: &mut EditorState,
+    snapshot: &DisplaySnapshot,
+    cols: &DiffColumns,
+    end_row: u32,
+) -> Option<(u16, u16)> {
+    cols.sep_x?;
+    let text = editor.text_rect?;
+    let display = {
+        let buffer = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let cursor = stoat_text::cursor_offset(
+            buffer.rope(),
+            buffer.resolve_anchor(&sel.tail()),
+            buffer.resolve_anchor(&sel.head()),
+        );
+        snapshot.buffer_to_display(buffer.rope().offset_to_point(cursor))
+    };
+    let (x, y) = editor::screen_cell(display, editor.scroll_row, end_row, text)?;
+
+    let scroll_row = editor.scroll_row;
+    let states = diff_row_states(snapshot, scroll_row..end_row, &mut editor.diff_row_cache);
+    let state = states.get((display.row - scroll_row) as usize)?;
+    let DiffRowKind::BufferRow { buffer_row } = state.kind else {
+        return None;
+    };
+    let fold = !state.continuation && snapshot.fold_snapshot().under_fold_row(buffer_row);
+    let based = state.status == DiffStatus::Unchanged || state.paired;
+    let column = x - text.x;
+    (based && !fold && usize::from(column) < cols.left_content_w)
+        .then_some((cols.left_text_x + column, y))
+}
+
+/// Outline `cell` as the ghost cursor, the dashed mark the base column takes
+/// beside the cursor, in `ui.text.dim`.
+///
+/// `anchor` names the pool the outline rides and the top row its layout
+/// assumed, so the mark travels with a gliding pool's text rather than holding
+/// its screen cell. A theme with no RGB dim text draws no outline.
+pub(crate) fn emit_ghost_cursor(
+    cell: (u16, u16),
+    anchor: (u32, f32),
+    theme: &crate::theme::Theme,
+    scene: &mut ApcScene,
+) {
+    let Some(border) = style_rgb(theme.get(s::UI_TEXT_DIM).fg) else {
+        return;
+    };
+    Panel {
+        style: BorderStyle::Dashed,
+        border,
+        corner_radius: 1,
+        fill: None,
+        shadow: PanelShadow::None_,
+        inset_x: 0,
+        inset_y: 1,
+        corners: 0,
+        fillets: 0,
+        hatch: None,
+        above_pools: false,
+        backdrop: false,
+        anchor: Some(anchor),
+    }
+    .draw_components(Rect::new(cell.0, cell.1, 1, 1), scene);
 }
 
 /// Minimum inner width for the two-column diff layout. Below this each text
@@ -7366,6 +7443,51 @@ mod tests {
                     (half(&base, added), fill, hatch)
                 ],
             ),
+        );
+    }
+
+    /// The dashed outlines in `h`'s last frame, each as its cell rect and the
+    /// pool anchor it rides.
+    fn ghost_outlines(h: &crate::test_harness::TestHarness) -> Vec<(Rect, Option<(u32, f32)>)> {
+        decode_stream(&h.stoat.apc_scene.all_bytes())
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::Panel(panel) if panel.style == BorderStyle::Dashed => Some((
+                    Rect::new(panel.left, panel.top, panel.width, panel.height),
+                    panel.anchor,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The base column outlines the cell beside the cursor, at the cursor's
+    /// column, on a row that shows a base line: an unchanged row and a paired
+    /// modified row. An added row shows none, so it takes no outline. The
+    /// outline rides the pane's pool from the scroll the paint assumed.
+    #[test]
+    fn the_base_column_outlines_the_cell_beside_the_cursor() {
+        let mut h = diff_harness("keep\nold\nstay\n", "keep\nnew line\nstay\nadded\n");
+        let cols = harness_columns(&h);
+        let pane = {
+            let ws = h.stoat.active_workspace();
+            ws.panes.pane(ws.panes.focus()).index
+        };
+        let row_of = |h: &crate::test_harness::TestHarness, needle: &str| {
+            row_holding(h.rendered_buffer(), right_text(&cols), needle)
+        };
+        let ghost = |y: u16| vec![(Rect::new(cols.left_text_x + 2, y, 1, 1), Some((pane, 0.0)))];
+
+        h.type_keys("l l");
+        let (context, context_row) = (ghost_outlines(&h), row_of(&h, "keep"));
+        h.type_keys("j");
+        let (paired, paired_row) = (ghost_outlines(&h), row_of(&h, "new line"));
+        h.type_keys("j j");
+        let added = ghost_outlines(&h);
+
+        assert_eq!(
+            (context, paired, added),
+            (ghost(context_row), ghost(paired_row), Vec::new()),
         );
     }
 

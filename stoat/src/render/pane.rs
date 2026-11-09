@@ -206,6 +206,14 @@ pub(crate) fn render_pane(
                 if editor.diff_view {
                     emit_pane_base_frame(content_area, FrameEdges::Top, frame, scene);
                 }
+                if let Some(cell) = editor.ghost_cursor_cell.filter(|_| scene.live()) {
+                    review::emit_ghost_cursor(
+                        cell,
+                        (pane.index, editor.scroll_row as f32),
+                        theme,
+                        scene,
+                    );
+                }
                 if !editor.diff_view
                     && editor.conflict_view.is_none()
                     && let Some(kind) = buffers.read_only(editor.buffer_id)

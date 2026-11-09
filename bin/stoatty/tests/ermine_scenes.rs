@@ -34,6 +34,7 @@ const HOVER: [u8; 3] = [0x2c, 0x30, 0x39];
 const OVERLAY: [u8; 3] = [0x25, 0x28, 0x30];
 const RAISED: [u8; 3] = [0x1e, 0x21, 0x27];
 const HATCH: [u8; 3] = [0x1b, 0x1d, 0x22];
+const TEXT_DIM: [u8; 3] = [0xa3, 0xa9, 0xb5];
 const HAIRLINE: [u8; 3] = [0x2e, 0x32, 0x3b];
 const SELECT: [u8; 3] = [0x23, 0x32, 0x4a];
 const DISABLED: [u8; 3] = [0x5b, 0x61, 0x6d];
@@ -123,12 +124,17 @@ fn the_gutter_draws_the_hunk_and_state_lanes_left_of_the_number() {
 }
 
 /// A modified row's git bar reads removed on the base side and added on the
-/// live side of the split diff.
+/// live side of the split diff, and the base side outlines the cell beside
+/// the cursor.
 ///
 /// The changed row is row 4, `4 four` on the left and `4 four changed` on the
 /// right. A bar is too narrow to lead its cell's colors, so the check finds the
 /// pixel columns the color fills over the row's whole height, which a glyph
 /// never does.
+///
+/// The cursor opens on the row's first column, so the ghost outlines the base
+/// text's first cell, column 6. Its dashed top edge lies one pixel below the
+/// cell's top, in the dim text color, and the next cell holds none of it.
 #[test]
 fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
     let mut home = support::scratch_home();
@@ -151,6 +157,20 @@ fn a_modified_row_reads_removed_on_the_base_side_and_added_on_the_live_side() {
         panic!(
             "the bars sit at {removed:?} removed, {added:?} added, and {modified:?} modified; the \
              frame is {}",
+            frame.display(),
+        );
+    }
+
+    let row_dims = |col: u16, dy: u32| {
+        let (x, _, width, _) = cell_rect(col, 4, 1, 1);
+        pixels_of(&shot, (x, y + dy, width, 1), TEXT_DIM)
+    };
+    let ghost = (row_dims(6, 0), row_dims(6, 1) > 0, row_dims(7, 1));
+    if ghost != (0, true, 0) {
+        let frame = keep_frame(&shot, &mut home, "diff_ghost_cursor");
+        panic!(
+            "the ghost's dim pixels read {ghost:?} on the cell top, its edge, and the next cell; \
+             the frame is {}",
             frame.display(),
         );
     }
@@ -1394,6 +1414,18 @@ fn bar_columns(shot: &Snapshot, (y, height): (u32, u32), color: [u8; 3]) -> Vec<
             })
         })
         .collect()
+}
+
+/// How many pixels of `rect` in `shot` are exactly `color`.
+fn pixels_of(shot: &Snapshot, (x, y, width, height): PixelRect, color: [u8; 3]) -> usize {
+    (y..y + height)
+        .flat_map(|row| {
+            let start = ((row * shot.width + x) * 4) as usize;
+            let end = start + (width * 4) as usize;
+            shot.rgba[start..end].chunks_exact(4)
+        })
+        .filter(|pixel| pixel[..3] == color)
+        .count()
 }
 
 /// The largest channel of any pixel in `rect` of `shot`.

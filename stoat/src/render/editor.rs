@@ -203,6 +203,7 @@ pub(crate) fn render_editor_with_overlay(
 ) {
     editor.viewport_rows = Some(inner.height as u32);
     editor.cursor_screen_cell = None;
+    editor.ghost_cursor_cell = None;
     editor.minimap_rect = None;
     editor.text_rect = None;
 

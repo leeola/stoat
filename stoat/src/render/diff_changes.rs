@@ -72,6 +72,7 @@ struct PaintLayout {
     scroll_row: u32,
     viewport_rows: Option<u32>,
     cursor_screen_cell: Option<(u16, u16)>,
+    ghost_cursor_cell: Option<(u16, u16)>,
     text_rect: Option<Rect>,
     minimap_rect: Option<Rect>,
 }
@@ -82,6 +83,7 @@ impl PaintLayout {
             scroll_row: editor.scroll_row,
             viewport_rows: editor.viewport_rows,
             cursor_screen_cell: editor.cursor_screen_cell,
+            ghost_cursor_cell: editor.ghost_cursor_cell,
             text_rect: editor.text_rect,
             minimap_rect: editor.minimap_rect,
         }
@@ -91,6 +93,7 @@ impl PaintLayout {
         editor.scroll_row = self.scroll_row;
         editor.viewport_rows = self.viewport_rows;
         editor.cursor_screen_cell = self.cursor_screen_cell;
+        editor.ghost_cursor_cell = self.ghost_cursor_cell;
         editor.text_rect = self.text_rect;
         editor.minimap_rect = self.minimap_rect;
     }
@@ -151,6 +154,7 @@ pub(crate) fn render_diff_changes(
         .and_then(|excerpt| editors.get_mut(excerpt.editor_id))
     {
         editor.cursor_screen_cell = None;
+        editor.ghost_cursor_cell = None;
     }
     if inner.width == 0 || inner.height == 0 {
         return;
@@ -217,7 +221,6 @@ pub(crate) fn render_diff_changes(
 
     let first_row = state.scroll;
     let mut covered = stack_composited(pane, frame).then(ApcScene::new);
-    let scene = covered.as_mut().unwrap_or(scene);
     paint_stack_rows(
         state,
         editors,
@@ -227,11 +230,23 @@ pub(crate) fn render_diff_changes(
         undercurls,
         frame,
         buf,
-        scene,
+        covered.as_mut().unwrap_or(&mut *scene),
         first_row,
         inner,
         PagePaint::Cells,
     );
+
+    // The pages carry no cursor, so the ghost beside it goes to the pane's own
+    // scene even while the composite covers the live rows. Its panel leaves the
+    // cell to the live grid at rest and rides the stack's glide.
+    let ghost = state
+        .focused_excerpt()
+        .and_then(|excerpt| editors.get(excerpt.editor_id))
+        .and_then(|editor| editor.ghost_cursor_cell)
+        .filter(|_| scene.live());
+    if let Some(cell) = ghost {
+        review::emit_ghost_cursor(cell, (pane.index, first_row as f32), frame.theme, scene);
+    }
 }
 
 /// Whether the terminal composites the resident pool of `pane`'s stack over
@@ -1346,9 +1361,10 @@ mod tests {
     }
 
     /// A page painted after the live frame leaves each excerpt's editor laid
-    /// out as the live paint left it, so the terminal cursor and pointer hits
-    /// stay on the live rows. The page starts at a.txt's second row, where the
-    /// paint lays a.txt out from another scroll row and cuts its cursor's row.
+    /// out as the live paint left it, so the terminal cursor, the ghost beside
+    /// it, and pointer hits stay on the live rows. The page starts at a.txt's
+    /// second row, where the paint lays a.txt out from another scroll row and
+    /// cuts its cursor's row.
     #[test]
     fn a_stack_page_leaves_the_live_layout() {
         let mut h = two_files(16);
@@ -1364,6 +1380,7 @@ mod tests {
                         editor.scroll_row,
                         editor.viewport_rows,
                         editor.cursor_screen_cell,
+                        editor.ghost_cursor_cell,
                         editor.text_rect,
                         editor.minimap_rect,
                     )
@@ -1393,9 +1410,14 @@ mod tests {
         });
 
         assert_eq!(
-            (live[0].2.is_some(), header.as_str(), layouts(&mut h)),
-            (true, "b.txt +1 \u{2212}1 \u{b7} 1 hunk", live.clone()),
-            "the live cursor cell, the page's header row, and every layout field",
+            (
+                live[0].2.is_some(),
+                live[0].3.is_some(),
+                header.as_str(),
+                layouts(&mut h)
+            ),
+            (true, true, "b.txt +1 \u{2212}1 \u{b7} 1 hunk", live.clone()),
+            "the live cursor and ghost cells, the page's header row, and every layout field",
         );
     }
 
